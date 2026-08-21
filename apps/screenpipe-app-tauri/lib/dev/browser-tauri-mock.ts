@@ -9,6 +9,7 @@ import type {
   BrainViewTemplateKit,
   ImportedSkill,
   PiExtensionPackage,
+  PiInfo,
   ProviderAutomation,
   RegistrySkill,
   SaveBrainViewCanvasRequest,
@@ -31,6 +32,11 @@ export interface BrowserIpcMockOptions {
   apiPort: number;
   apiKey?: string;
   onStoreChange?: (change: StoreChange) => void;
+  onAgentPrompt?: (prompt: {
+    sessionId: string;
+    message: string;
+    displayPreview: string | null;
+  }) => void;
   warn?: (message: string) => void;
 }
 
@@ -473,6 +479,7 @@ function handleWindowCommand(command: string): unknown {
 export function createBrowserIpcMock(options: BrowserIpcMockOptions) {
   const stores = new Map<number, Map<string, unknown>>();
   const storePaths = new Map<string, number>();
+  const piSessions = new Map<string, PiInfo>();
   const warned = new Set<string>();
   let nextResourceId = 1;
   let piExtensionPackages: PiExtensionPackage[] = [];
@@ -624,6 +631,15 @@ export function createBrowserIpcMock(options: BrowserIpcMockOptions) {
     exists: boolean,
     value: unknown,
   ) => options.onStoreChange?.({ resourceId, key, exists, value });
+
+  const piInfo = (sessionId: string | null, running = false): PiInfo => ({
+    running,
+    busy: false,
+    projectDir: running ? "/Users/screenpipe/browser-agent" : null,
+    pid: running ? 4242 : null,
+    sessionId,
+    startupError: null,
+  });
 
   return (command: string, args?: InvokeArgs): unknown => {
     const input = asRecord(args);
@@ -809,6 +825,60 @@ export function createBrowserIpcMock(options: BrowserIpcMockOptions) {
         piExtensionPackages = piExtensionPackages.filter((pkg) => pkg.source !== source);
         return piExtensionPackages.map((pkg) => ({ ...pkg }));
       }
+      case "pi_check":
+        return { available: true, path: "browser-dev-agent" };
+      case "pi_info": {
+        const sessionId =
+          typeof input.sessionId === "string" ? input.sessionId : null;
+        return sessionId
+          ? (piSessions.get(sessionId) ?? piInfo(sessionId))
+          : piInfo(null);
+      }
+      case "pi_start": {
+        const sessionId =
+          typeof input.sessionId === "string"
+            ? input.sessionId
+            : "browser-dev-chat";
+        const info = piInfo(sessionId, true);
+        piSessions.set(sessionId, info);
+        return info;
+      }
+      case "pi_prompt": {
+        const sessionId =
+          typeof input.sessionId === "string"
+            ? input.sessionId
+            : "browser-dev-chat";
+        const info = piSessions.get(sessionId);
+        if (!info?.running) {
+          throw new Error("Pi not initialized for browser-dev chat");
+        }
+        queueMicrotask(() =>
+          options.onAgentPrompt?.({
+            sessionId,
+            message: String(input.message ?? ""),
+            displayPreview:
+              typeof input.displayPreview === "string"
+                ? input.displayPreview
+                : null,
+          }),
+        );
+        return `browser-prompt-${Date.now()}`;
+      }
+      case "pi_stop": {
+        const sessionId =
+          typeof input.sessionId === "string" ? input.sessionId : null;
+        const info = piInfo(sessionId);
+        if (sessionId) piSessions.set(sessionId, info);
+        return info;
+      }
+      case "pi_get_thinking_level":
+        return "medium";
+      case "pi_abort":
+      case "pi_abort_active":
+      case "pi_new_session":
+      case "pi_request_state":
+      case "pi_set_thinking_level":
+        return null;
       case "list_brain_views":
         return liveViews;
       case "list_brain_view_template_kits":

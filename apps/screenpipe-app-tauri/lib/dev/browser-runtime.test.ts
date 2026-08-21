@@ -100,6 +100,40 @@ describe("browser development runtime", () => {
     );
   });
 
+  it("starts a stateful browser agent session and forwards its prompt", async () => {
+    const onAgentPrompt = vi.fn();
+    const invoke = createBrowserIpcMock({
+      mode: "mock",
+      apiPort: 3030,
+      onAgentPrompt,
+    });
+
+    expect(invoke("pi_info", { sessionId: "chat-1" })).toMatchObject({
+      running: false,
+      sessionId: "chat-1",
+    });
+    expect(
+      invoke("pi_start", {
+        sessionId: "chat-1",
+        projectDir: "/tmp/chat-1",
+      }),
+    ).toMatchObject({ running: true, sessionId: "chat-1" });
+    expect(
+      invoke("pi_prompt", {
+        sessionId: "chat-1",
+        message: "continue this task",
+        displayPreview: "Continue task",
+      }),
+    ).toMatch(/^browser-prompt-/);
+
+    await Promise.resolve();
+    expect(onAgentPrompt).toHaveBeenCalledWith({
+      sessionId: "chat-1",
+      message: "continue this task",
+      displayPreview: "Continue task",
+    });
+  });
+
   it("provides stateful Live View fixtures", () => {
     const invoke = createBrowserIpcMock({ mode: "mock", apiPort: 3030 });
     const [view] = invoke("list_brain_views") as BrainViewDefinition[];

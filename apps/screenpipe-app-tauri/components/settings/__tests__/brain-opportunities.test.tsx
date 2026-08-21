@@ -102,8 +102,7 @@ describe("BrainOpportunities", () => {
     ).toBeTruthy();
   });
 
-  it("requires a finalized goal before offering to start an unfinished task", () => {
-    vi.useFakeTimers();
+  it("requires a finalized goal before offering to start an agent chat", () => {
     render(<BrainOpportunities preview />);
 
     fireEvent.click(screen.getByTestId("opportunities-tab-unfinished"));
@@ -121,45 +120,57 @@ describe("BrainOpportunities", () => {
       },
     });
     expect(startButton).not.toBeDisabled();
+  });
 
-    fireEvent.click(startButton);
-    expect(screen.getByTestId("opportunity-agent-progress")).toBeTruthy();
-    expect(screen.getByText("preparing agent")).toBeTruthy();
-
-    fireEvent.click(screen.getByRole("button", { name: /^pause$/i }));
-    expect(screen.getByTestId("opportunity-agent-paused")).toBeTruthy();
-    expect(screen.getByRole("button", { name: /resume agent/i })).toBeTruthy();
-
-    fireEvent.click(
-      screen.getByRole("button", { name: /stop and edit brief/i }),
+  it("hands the finalized brief and included evidence to a fresh agent chat", () => {
+    const onStartAgentChat = vi.fn();
+    render(
+      <BrainOpportunities
+        preview
+        onStartAgentChat={onStartAgentChat}
+      />,
     );
-    expect(screen.getByTestId("unfinished-task-goal")).toHaveValue(
-      "The original reporter has a sent reply with the verified outcome.",
+
+    fireEvent.click(screen.getByTestId("opportunities-tab-unfinished"));
+    fireEvent.click(
+      screen.getByTestId("unfinished-opportunity-activity-review-flow"),
+    );
+
+    fireEvent.change(screen.getByTestId("unfinished-task-description"), {
+      target: { value: "Finish the Activity ledger and prepare the handoff." },
+    });
+    fireEvent.change(screen.getByTestId("unfinished-task-goal"), {
+      target: { value: "The focused review handoff is ready." },
+    });
+
+    const sourceEvidence = screen.getByTestId("task-source-evidence");
+    fireEvent.click(within(sourceEvidence).getByText("2 source activities"));
+    fireEvent.click(
+      within(sourceEvidence).getByRole("button", {
+        name: "exclude Inspect sample pull request",
+      }),
     );
 
     fireEvent.click(screen.getByTestId("start-opportunity-agent"));
-    act(() => vi.advanceTimersByTime(5000));
-    const completed = screen.getByTestId("opportunity-agent-completed");
-    expect(completed).toBeTruthy();
-    expect(within(completed).getByText("goal reached")).toBeTruthy();
-    expect(
-      within(completed).getByText(/original reporter has a sent reply/i),
-    ).toBeTruthy();
-    expect(
-      screen.getByTestId("opportunities-tab-unfinished"),
-    ).toHaveTextContent("1");
 
-    fireEvent.click(screen.getByRole("button", { name: /open result/i }));
-    expect(screen.getByTestId("opportunity-agent-result")).toBeTruthy();
-
-    fireEvent.click(screen.getByRole("button", { name: /archive result/i }));
-    expect(screen.getByText(/1 completed archived/i)).toBeTruthy();
-    expect(screen.queryByText(/marked not unfinished/i)).toBeNull();
-
-    fireEvent.click(screen.getByRole("button", { name: /undo archive/i }));
-    expect(
-      screen.getByTestId("unfinished-opportunity-onboarding-reply"),
-    ).toBeTruthy();
+    expect(onStartAgentChat).toHaveBeenCalledTimes(1);
+    const prefill = onStartAgentChat.mock.calls[0][0];
+    expect(prefill).toMatchObject({
+      autoSend: true,
+      displayLabel: "Continue “finish the Activity ledger review flow”",
+      source: "library-unfinished-work",
+      useHomeChat: true,
+    });
+    expect(prefill.context).toContain(
+      "Approved task: Finish the Activity ledger and prepare the handoff.",
+    );
+    expect(prefill.context).toContain(
+      "Stopping goal: The focused review handoff is ready.",
+    );
+    expect(prefill.context).toContain("Refine the activity ledger");
+    expect(prefill.context).not.toContain("Inspect sample pull request");
+    expect(prefill.prompt).toContain("Keep a concise live plan in this chat");
+    expect(screen.queryByTestId("opportunity-agent-progress")).toBeNull();
   });
 
   it("makes false unfinished inferences reversible", () => {
