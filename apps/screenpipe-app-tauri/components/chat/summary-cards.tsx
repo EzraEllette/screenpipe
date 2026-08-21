@@ -198,7 +198,7 @@ export function SummaryCards({
           type="button"
           data-testid={`summary-card-${featured[0].name}`}
           onClick={() => handleCardClick(featured[0])}
-          className="group relative mb-1.5 w-full max-w-lg cursor-pointer border border-foreground/25 border-l-2 border-l-signal bg-card px-4 py-3.5 text-left text-foreground transition-colors duration-150 hover:border-foreground hover:bg-foreground hover:text-background focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-foreground focus-visible:ring-offset-2 focus-visible:ring-offset-background motion-reduce:transition-none"
+          className="group relative mb-1.5 w-full max-w-lg cursor-pointer rounded-lg border border-foreground/25 border-l-2 border-l-signal bg-card px-4 py-3.5 text-left text-foreground transition-colors duration-150 hover:border-foreground hover:bg-foreground hover:text-background focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-foreground focus-visible:ring-offset-2 focus-visible:ring-offset-background motion-reduce:transition-none"
         >
           <div className="flex items-center gap-3">
             <HomeCardIcon
@@ -223,7 +223,7 @@ export function SummaryCards({
           type="button"
           data-testid={`summary-card-${featured[1].name}`}
           onClick={() => handleCardClick(featured[1])}
-          className="group mb-1.5 w-full max-w-lg cursor-pointer border border-foreground/20 bg-card px-4 py-3 text-left text-foreground transition-colors duration-150 hover:border-foreground hover:bg-foreground hover:text-background focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-foreground focus-visible:ring-offset-2 focus-visible:ring-offset-background motion-reduce:transition-none"
+          className="group mb-1.5 w-full max-w-lg cursor-pointer rounded-lg border border-foreground/20 bg-card px-4 py-3 text-left text-foreground transition-colors duration-150 hover:border-foreground hover:bg-foreground hover:text-background focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-foreground focus-visible:ring-offset-2 focus-visible:ring-offset-background motion-reduce:transition-none"
         >
           <div className="flex items-center gap-3">
             <HomeCardIcon
@@ -259,7 +259,7 @@ export function SummaryCards({
             key={pipe.name}
             data-testid={`summary-card-${pipe.name}`}
             onClick={() => handleCardClick(pipe)}
-            className="grow cursor-pointer border border-foreground/20 bg-card px-2 py-0.5 text-[11px] text-foreground/75 transition-colors duration-150 hover:border-foreground hover:bg-foreground hover:text-background focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-foreground focus-visible:ring-offset-1 focus-visible:ring-offset-background motion-reduce:transition-none"
+            className="grow cursor-pointer rounded-md border border-foreground/20 bg-card px-2 py-0.5 text-[11px] text-foreground/75 transition-colors duration-150 hover:border-foreground hover:bg-foreground hover:text-background focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-foreground focus-visible:ring-offset-1 focus-visible:ring-offset-background motion-reduce:transition-none"
           >
             {pipe.title}
           </button>
@@ -284,7 +284,7 @@ export function SummaryCards({
                 "other_builtin",
               );
             }}
-            className="grow cursor-pointer border border-foreground/20 bg-card px-2 py-0.5 text-[11px] text-foreground/75 transition-colors duration-150 hover:border-foreground hover:bg-foreground hover:text-background focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-foreground focus-visible:ring-offset-1 focus-visible:ring-offset-background motion-reduce:transition-none"
+            className="grow cursor-pointer rounded-md border border-foreground/20 bg-card px-2 py-0.5 text-[11px] text-foreground/75 transition-colors duration-150 hover:border-foreground hover:bg-foreground hover:text-background focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-foreground focus-visible:ring-offset-1 focus-visible:ring-offset-background motion-reduce:transition-none"
           >
             {qt.label}
           </button>
@@ -298,7 +298,7 @@ export function SummaryCards({
             key={ct.id}
             onClick={() => handleCustomTemplateClick(ct)}
             title={ct.description || ct.timeRange}
-            className="inline-flex max-w-[140px] grow cursor-pointer items-center justify-center gap-1 border border-foreground/20 bg-card px-2 py-0.5 text-[11px] text-foreground/70 transition-colors duration-150 hover:border-foreground hover:bg-foreground hover:text-background focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-foreground focus-visible:ring-offset-1 focus-visible:ring-offset-background motion-reduce:transition-none"
+            className="inline-flex max-w-[140px] grow cursor-pointer items-center justify-center gap-1 rounded-md border border-foreground/20 bg-card px-2 py-0.5 text-[11px] text-foreground/70 transition-colors duration-150 hover:border-foreground hover:bg-foreground hover:text-background focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-foreground focus-visible:ring-offset-1 focus-visible:ring-offset-background motion-reduce:transition-none"
           >
             <Pin className="w-3 h-3 shrink-0" strokeWidth={1.5} />
             <span className="truncate">{ct.title}</span>
@@ -310,7 +310,7 @@ export function SummaryCards({
             posthog.capture("home_card_clicked", { kind: "custom_summary_open" });
             setShowBuilder(true);
           }}
-          className="cursor-pointer border border-dashed border-foreground/25 px-2 py-0.5 text-[11px] text-muted-foreground transition-colors duration-150 hover:border-foreground hover:bg-foreground hover:text-background focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-foreground focus-visible:ring-offset-1 focus-visible:ring-offset-background motion-reduce:transition-none"
+          className="cursor-pointer rounded-md border border-dashed border-foreground/25 px-2 py-0.5 text-[11px] text-muted-foreground transition-colors duration-150 hover:border-foreground hover:bg-foreground hover:text-background focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-foreground focus-visible:ring-offset-1 focus-visible:ring-offset-background motion-reduce:transition-none"
         >
           + custom
         </button>
@@ -328,7 +328,7 @@ export function SummaryCards({
             <button
               key={pipe.name}
               onClick={() => handleCardClick(pipe)}
-              className="group text-left p-2 border border-border/30 bg-muted/10 hover:bg-foreground hover:text-background hover:border-foreground transition-all duration-150 cursor-pointer"
+              className="group cursor-pointer rounded-lg border border-border/30 bg-muted/10 p-2 text-left transition-all duration-150 hover:border-foreground hover:bg-foreground hover:text-background"
             >
               <div className="text-sm mb-0.5">{pipe.icon}</div>
               <div className="text-xs font-medium group-hover:text-background mb-0.5 leading-tight">

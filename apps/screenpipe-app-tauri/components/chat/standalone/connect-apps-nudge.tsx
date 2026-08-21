@@ -16,7 +16,7 @@ export function ConnectAppsNudge({
 
   return (
     <div
-      className="mt-2 flex min-h-9 items-stretch border border-border/60 bg-muted/20"
+      className="mt-2 flex min-h-9 items-stretch overflow-hidden rounded-lg border border-border/60 bg-muted/20"
       data-testid="connect-apps-nudge"
     >
       <button

@@ -51,4 +51,40 @@ describe("calm app design token contract", () => {
     expect(dark["--card"]).toBe("0 0% 8%");
     expect(dark["--border"]).toBe("0 0% 20%");
   });
+
+  it("uses soft work surfaces while keeping structural geometry sharp", () => {
+    const light = tokensFor(":root");
+    const button = readFileSync(
+      resolve(process.cwd(), "components/ui/button.tsx"),
+      "utf8",
+    );
+    const card = readFileSync(
+      resolve(process.cwd(), "components/ui/card.tsx"),
+      "utf8",
+    );
+    const composer = readFileSync(
+      resolve(process.cwd(), "components/chat/standalone/composer-input-box.tsx"),
+      "utf8",
+    );
+    const sidebar = readFileSync(
+      resolve(process.cwd(), "components/sidebar-nav-list.tsx"),
+      "utf8",
+    );
+
+    expect(light["--radius"]).toBe("0.5rem");
+    expect(button).toContain("rounded-md");
+    expect(card).toContain("rounded-lg");
+    expect(composer).toContain("rounded-lg");
+    expect(sidebar).toContain("rounded-md");
+    expect(sidebar).toContain("before:w-0.5");
+
+    const structuralGeometry = readFileSync(
+      resolve(process.cwd(), "app/globals.css"),
+      "utf8",
+    );
+    expect(structuralGeometry).toContain(
+      ".live-view-process-canvas .react-flow__node",
+    );
+    expect(structuralGeometry).toContain("border-radius: 0");
+  });
 });

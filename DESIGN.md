@@ -17,8 +17,9 @@ work created it.
 Black and warm bone are the substrate. Trace grey carries evidence, selection,
 and ready states. Neutral contrast carries ordinary hierarchy. Bright phosphor
 appears only while captured work is actively becoming model context or an agent
-is executing an explicit action. Sharp corners, clean typography, and
-Escher-inspired mathematical abstractions remain the core identity.
+is executing an explicit action. Soft work surfaces around sharp structural
+geometry, clean typography, and Escher-inspired mathematical abstractions form
+the core identity.
 
 ---
 
@@ -139,10 +140,20 @@ ordinary focus states return to neutral ink or trace.
 ### Border Radius
 
 ```
---radius: 0
+--radius: 0.5rem
 ```
 
-**All corners are sharp.** No rounded corners anywhere.
+Use a restrained, tiered radius system:
+
+- **8px (`rounded-lg`)** for cards, dialogs, media, and primary work surfaces
+- **6px (`rounded-md`)** for buttons, inputs, selects, and ordinary controls
+- **4px (`rounded-sm`)** for compact menu items and dense control labels
+- **Pills/circles** only for short statuses, avatars, toggles, and true circular controls
+- **0px** for app/window edges, split panes, rails, crop or measurement marks,
+  timelines, charts, canvases, and Escher-inspired structural geometry
+
+Radius should make a surface easier to parse, not turn every region into a
+card. Nested surfaces should step down in radius or stay flat.
 
 ### Borders
 
@@ -156,7 +167,8 @@ ordinary focus states return to neutral ink or trace.
 **Flat by default. Use 1px borders for ordinary separation.** Subtle shadows may
 lift floating surfaces such as the chat input, overlays, popovers, and dialogs.
 Keep them soft, low-opacity, mostly vertical, and within roughly 1 to 8px offset
-and 24px blur. Never round corners to sell the lift.
+and 24px blur. Radius follows the surface tier and does not increase merely to
+sell elevation.
 
 ---
 
@@ -167,7 +179,7 @@ and 24px blur. Never round corners to sell the lift.
 ```
 - Font: UPPERCASE, tracking-wide
 - Border: 1px solid
-- Corners: Sharp (0px radius)
+- Corners: Compact (6px radius)
 - Transition: 150ms
 - Hover: Color inversion
 - Neutral fill: primary ready action
@@ -179,8 +191,8 @@ and 24px blur. Never round corners to sell the lift.
 ```
 - Border: 1px solid
 - Shadow: None
-- Corners: Sharp
-- Padding: 24px (p-6)
+- Corners: Surface (8px radius)
+- Padding: 16px by default; expand only when the content needs it
 ```
 
 ### Inputs
@@ -189,6 +201,7 @@ and 24px blur. Never round corners to sell the lift.
 - Style: Command-line aesthetic
 - Font: Monospace (IBM Plex Mono)
 - Border: 1px solid
+- Corners: Compact (6px radius)
 - Height: 40px (h-10)
 - Focus: Border color change
 ```
@@ -198,6 +211,7 @@ and 24px blur. Never round corners to sell the lift.
 ```
 - Border: 1px solid
 - Shadow: Subtle lift allowed (elevated surface)
+- Corners: Surface (8px radius)
 - Animation: 150ms fade
 - Title: lowercase
 ```
@@ -260,7 +274,8 @@ When creating new UI components:
 - [ ] Using Crimson Text for body (or IBM Plex Mono for technical)
 - [ ] 1px solid border
 - [ ] Flat by default; subtle shadows OK only to lift floating/elevated surfaces
-- [ ] 0px border radius (sharp corners) — always, even on shadowed surfaces
+- [ ] Radius follows the 8px surface / 6px control / 4px compact hierarchy
+- [ ] Structural rails, canvases, charts, timelines, and measurement geometry remain sharp
 - [ ] Composition remains mostly ink, bone, and trace grey
 - [ ] Every phosphor use marks transformation or execution happening now
 - [ ] Bright phosphor uses ink foreground
