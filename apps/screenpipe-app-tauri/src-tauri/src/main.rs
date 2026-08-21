@@ -51,6 +51,7 @@ mod auth_token;
 mod brain_views;
 mod calendar;
 mod capture_session;
+mod chat_control;
 mod chatgpt_oauth;
 #[allow(deprecated)]
 mod commands;

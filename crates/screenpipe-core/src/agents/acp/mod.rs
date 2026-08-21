@@ -13,6 +13,7 @@ mod executor;
 mod extensions;
 mod runtime;
 pub mod schedule_extension;
+mod steering_extension;
 
 pub use executor::{AcpAgentConfig, AcpExecutor};
 pub use extensions::{

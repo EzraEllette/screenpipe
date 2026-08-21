@@ -781,6 +781,10 @@ impl PiExecutor {
                 include_str!("../../assets/skills/screenpipe-cli/SKILL.md"),
             ),
             (
+                "screenpipe-chats",
+                include_str!("../../assets/skills/screenpipe-chats/SKILL.md"),
+            ),
+            (
                 "render-html-report",
                 include_str!("../../assets/skills/render-html-report/SKILL.md"),
             ),
@@ -849,9 +853,10 @@ impl PiExecutor {
     /// [`Self::USER_SKILL_MARKER`], be deleted by a later sync. The desktop
     /// importer already rejects these names; this guards any folder that reaches
     /// the store another way.
-    const BASELINE_SKILL_NAMES: [&'static str; 4] = [
+    const BASELINE_SKILL_NAMES: [&'static str; 5] = [
         "screenpipe-api",
         "screenpipe-cli",
+        "screenpipe-chats",
         "screenpipe-team",
         "render-html-report",
     ];
@@ -991,6 +996,11 @@ impl PiExecutor {
                 Box::new(|_| true), // always installed — pipe & connection management
             ),
             (
+                "screenpipe-chats",
+                include_str!("../../assets/skills/screenpipe-chats/SKILL.md"),
+                Box::new(|_| true), // search is read-only; unattended delivery is tool-gated
+            ),
+            (
                 "render-html-report",
                 include_str!("../../assets/skills/render-html-report/SKILL.md"),
                 // Output-formatting skill, not endpoint-gated — always staged,
@@ -1071,6 +1081,19 @@ impl PiExecutor {
         let ext_path = ext_dir.join("self-improvement.ts");
         std::fs::write(&ext_path, ext_content)?;
         debug!("self-improvement extension installed at {:?}", ext_path);
+        Ok(())
+    }
+
+    /// Install inter-chat discovery and delivery for an interactive chat.
+    /// Pipe executors do not call this: cross-chat sends are intentionally a
+    /// user-facing chat capability, not ambient automation authority.
+    pub fn ensure_chat_control_extension(project_dir: &Path) -> Result<()> {
+        let ext_dir = project_dir.join(".pi").join("extensions");
+        std::fs::create_dir_all(&ext_dir)?;
+        let ext_content = include_str!("../../assets/extensions/chat-control.ts");
+        let ext_path = ext_dir.join("chat-control.ts");
+        std::fs::write(&ext_path, ext_content)?;
+        debug!("chat-control extension installed at {:?}", ext_path);
         Ok(())
     }
 
@@ -4201,6 +4224,38 @@ mod tests {
         assert!(content.contains("name: \"user_profile\""));
         assert!(content.contains("name: \"skill_manage\""));
         assert!(content.contains("/agent/skills/manage"));
+    }
+
+    #[test]
+    fn chat_control_extension_installs_guarded_search_and_send_tools() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        PiExecutor::ensure_chat_control_extension(dir.path())
+            .expect("install chat-control extension");
+        PiExecutor::ensure_screenpipe_skill(dir.path()).expect("install screenpipe skills");
+
+        let content = std::fs::read_to_string(
+            dir.path()
+                .join(".pi")
+                .join("extensions")
+                .join("chat-control.ts"),
+        )
+        .expect("read chat-control extension");
+        assert!(content.contains("name: \"search_chats\""));
+        assert!(content.contains("name: \"send_to_chat\""));
+        assert!(content.contains("confirmed=true"));
+        assert!(content.contains("SCREENPIPE_CHAT_CONTROL_ADDR"));
+        assert!(!content.contains("/agent/chats/"));
+
+        let skill = std::fs::read_to_string(
+            dir.path()
+                .join(".pi")
+                .join("skills")
+                .join("screenpipe-chats")
+                .join("SKILL.md"),
+        )
+        .expect("read screenpipe-chats skill");
+        assert!(skill.contains("Call `search_chats`"));
+        assert!(skill.contains("explicit user authorization"));
     }
 
     #[cfg(windows)]

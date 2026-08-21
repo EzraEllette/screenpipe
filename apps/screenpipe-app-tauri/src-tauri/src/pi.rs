@@ -679,6 +679,17 @@ fn sync_queue_state_from_event(
             }
             queue_state.signal_done_if_idle();
         }
+        Some("acp_native_steer_resolved") => {
+            // ACP-native steering injects into the already-open assistant
+            // message, so there is no second message_start to clear the
+            // immediate-command guard. This private runtime acknowledgement
+            // closes that gap without changing raw Pi's steer lifecycle.
+            if event.get("accepted").and_then(Value::as_bool) == Some(true) {
+                queue_state.mark_agent_active();
+            }
+            queue_state.clear_steer_in_flight();
+            queue_state.signal_done_if_idle();
+        }
         Some("response") => {
             // Correlate lifecycle replies by request id, not a shared wakeup.
             if let Some(id) = event.get("id").and_then(|id| id.as_str()) {
@@ -1622,6 +1633,15 @@ fn ensure_self_improvement_extension(project_dir: &str) -> Result<(), String> {
     use screenpipe_core::agents::pi::PiExecutor;
     PiExecutor::ensure_self_improvement_extension(std::path::Path::new(project_dir))
         .map_err(|e| format!("Failed to install self-improvement extension: {}", e))
+}
+
+/// Install exact-target chat search/send tools for interactive Pi chats.
+/// Kept separate from self-improvement so background Pipe agents never gain
+/// cross-chat delivery authority.
+fn ensure_chat_control_extension(project_dir: &str) -> Result<(), String> {
+    use screenpipe_core::agents::pi::PiExecutor;
+    PiExecutor::ensure_chat_control_extension(std::path::Path::new(project_dir))
+        .map_err(|e| format!("Failed to install chat-control extension: {}", e))
 }
 
 /// Emit privacy-safe context-usage counts from native Pi's exact model payload.
@@ -2639,6 +2659,7 @@ pub async fn pi_start_inner(
     // pi-acp, which is pi and can't consume the MCP servers.
     if !use_acp {
         ensure_self_improvement_extension(&project_dir)?;
+        ensure_chat_control_extension(&project_dir)?;
         ensure_context_usage_extension(&project_dir)?;
 
         // Install web-search extension only for screenpipe-cloud presets
@@ -2664,6 +2685,7 @@ pub async fn pi_start_inner(
         }
     } else if is_pi_acp {
         ensure_self_improvement_extension(&project_dir)?;
+        ensure_chat_control_extension(&project_dir)?;
 
         // Same pi as native — seed the project-local extensions so its tools
         // reach the model. web-search uses the LOCAL-proxy variant: the cloud
@@ -3228,6 +3250,23 @@ pub async fn pi_start_inner(
     // Chat session ID for per-session artifact isolation
     cmd.env("SCREENPIPE_CHAT_SESSION_ID", &sid);
 
+    // Chat-to-chat control uses a core-owned, ephemeral authenticated broker.
+    // Pass its capability only to this agent process; there is no fixed app
+    // route or public control-server surface.
+    match crate::chat_control::ensure_broker(&app).await {
+        Ok(endpoint) => {
+            cmd.env(
+                screenpipe_core::agents::chat_control::CHAT_CONTROL_ADDR_ENV,
+                endpoint.addr,
+            );
+            cmd.env(
+                screenpipe_core::agents::chat_control::CHAT_CONTROL_TOKEN_ENV,
+                endpoint.token,
+            );
+        }
+        Err(error) => warn!("chat-control broker unavailable: {error}"),
+    }
+
     // Auto-auth the agent's `curl localhost:3030/...` calls via a bash
     // shim sourced from $BASH_ENV on every subshell. See bash_env.rs in
     // screenpipe-core.
@@ -3512,7 +3551,11 @@ pub async fn pi_start_inner(
 
                     if matches!(
                         event_type.as_deref(),
-                        Some("acp_process_started" | "acp_process_stopped")
+                        Some(
+                            "acp_process_started"
+                                | "acp_process_stopped"
+                                | "acp_native_steer_resolved"
+                        )
                     ) {
                         // Internal process-supervision events are consumed by
                         // this reader and are not part of the webview contract.
@@ -4049,13 +4092,27 @@ pub async fn pi_queue_prompt(
     display_preview: Option<String>,
 ) -> Result<String, String> {
     let sid = session_id.unwrap_or_else(|| "chat".to_string());
-    let mut conversation = acquire_pi_conversation_lease(state.inner(), &sid).await?;
+    pi_queue_prompt_inner(&app, state.inner(), &sid, message, images, display_preview).await
+}
+
+/// Queue a follow-up from a non-Tauri caller such as the core chat-control
+/// broker. This keeps agent-to-agent sends on the same synchronized queue as
+/// the visible composer.
+pub(crate) async fn pi_queue_prompt_inner(
+    app: &AppHandle,
+    state: &PiState,
+    sid: &str,
+    message: String,
+    images: Option<Vec<PiImageContent>>,
+    display_preview: Option<String>,
+) -> Result<String, String> {
+    let mut conversation = acquire_pi_conversation_lease(state, sid).await?;
     let message = conversation.prepare_prompt(message);
 
     let preview = display_preview.unwrap_or_else(|| message.clone());
-    let message = attach_foreground_connections_context(&app, &sid, message).await;
+    let message = attach_foreground_connections_context(app, sid, message).await;
     #[cfg(feature = "e2e")]
-    emit_e2e_pi_wire_prompt(&app, &sid, "queue", &message);
+    emit_e2e_pi_wire_prompt(app, sid, "queue", &message);
     let cmd = build_prompt_command(message, images, &preview)?;
     let (queue_id, rx) = conversation
         .queue
@@ -4066,8 +4123,8 @@ pub async fn pi_queue_prompt(
             true,
         )
         .await?;
-    let state_for_watchdog = state.inner().clone();
-    let sid_for_watchdog = sid.clone();
+    let state_for_watchdog = state.clone();
+    let sid_for_watchdog = sid.to_string();
     if conversation.is_synced() {
         // Warm process: the history-wrapper decision is already settled, so
         // holding the lease until this prompt starts would only serialize
@@ -4116,9 +4173,19 @@ pub async fn pi_steer(
     images: Option<Vec<PiImageContent>>,
 ) -> Result<(), String> {
     let sid = session_id.unwrap_or_else(|| "chat".to_string());
+    pi_steer_inner(&app, state.inner(), &sid, message, images).await
+}
+
+pub(crate) async fn pi_steer_inner(
+    app: &AppHandle,
+    state: &PiState,
+    sid: &str,
+    message: String,
+    images: Option<Vec<PiImageContent>>,
+) -> Result<(), String> {
     let queue = {
         let mut pool = state.0.lock().await;
-        let m = pool.sessions.get_mut(&sid).ok_or("Pi not initialized")?;
+        let m = pool.sessions.get_mut(sid).ok_or("Pi not initialized")?;
         if !m.is_running() {
             return Err("Pi is not running".to_string());
         }
@@ -4128,7 +4195,7 @@ pub async fn pi_steer(
             .ok_or("Pi command queue not initialized")?
     };
 
-    let message = attach_foreground_connections_context(&app, &sid, message).await;
+    let message = attach_foreground_connections_context(app, sid, message).await;
     let mut cmd = json!({
         "type": "steer",
         "message": message,
@@ -5880,6 +5947,31 @@ mod tests {
             &json!({ "type": "auto_retry_end", "success": false }),
         );
         assert!(!state.is_agent_active());
+    }
+
+    #[test]
+    fn native_acp_steer_resolution_clears_only_its_immediate_guard() {
+        let accepted = crate::pi_command_queue::PiQueueState::new();
+        accepted.set_steer_in_flight();
+        super::sync_queue_state_from_event(
+            &accepted,
+            &json!({ "type": "acp_native_steer_resolved", "accepted": true }),
+        );
+        assert!(!accepted.is_steer_in_flight());
+        assert!(accepted.is_agent_active());
+
+        let rejected = crate::pi_command_queue::PiQueueState::new();
+        rejected.mark_agent_active();
+        rejected.set_steer_in_flight();
+        super::sync_queue_state_from_event(
+            &rejected,
+            &json!({ "type": "acp_native_steer_resolved", "accepted": false }),
+        );
+        assert!(!rejected.is_steer_in_flight());
+        assert!(
+            rejected.is_agent_active(),
+            "a failed steer must not make the original turn look idle"
+        );
     }
 
     #[test]
