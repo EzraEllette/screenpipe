@@ -290,9 +290,8 @@ export function ComposioCard({
     }
   };
 
-  // Option B (design round 3): the third-party fact lives in the header as a
-  // neutral "via composio" chip (rendered by connections-section); the body
-  // sells the feature and keeps the honest data-path detail one click away.
+  // Lead with the user outcome. The third-party sign-in and data path remain
+  // available one click away in the privacy disclosure below.
   const valueLine = (
     <p className="text-xs text-foreground/90">{TOOLKIT_META[toolkit].value}</p>
   );

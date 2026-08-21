@@ -8,6 +8,7 @@ import type {
   BrainViewDefinition,
   BrainViewTemplateKit,
   ImportedSkill,
+  PiExtensionPackage,
   ProviderAutomation,
   SaveBrainViewCanvasRequest,
   SaveBrainViewRequest,
@@ -431,6 +432,7 @@ export function createBrowserIpcMock(options: BrowserIpcMockOptions) {
   const storePaths = new Map<string, number>();
   const warned = new Set<string>();
   let nextResourceId = 1;
+  let piExtensionPackages: PiExtensionPackage[] = [];
   const initialTimestamp = new Date().toISOString();
   let liveViews =
     options.scenario === "empty"
@@ -659,6 +661,31 @@ export function createBrowserIpcMock(options: BrowserIpcMockOptions) {
       case "get_missing_permissions":
       case "pi_pending":
         return [];
+      case "pi_list_extension_packages":
+        return piExtensionPackages.map((pkg) => ({ ...pkg }));
+      case "pi_install_extension_package": {
+        const source = String(input.source ?? "");
+        if (!source) return piExtensionPackages.map((pkg) => ({ ...pkg }));
+        const existing = piExtensionPackages.find((pkg) => pkg.source === source);
+        if (existing) {
+          existing.filtered = false;
+          existing.installed = true;
+        } else {
+          piExtensionPackages.push({
+            source,
+            scope: "user",
+            filtered: false,
+            installed: true,
+            acpCompatible: false,
+          });
+        }
+        return piExtensionPackages.map((pkg) => ({ ...pkg }));
+      }
+      case "pi_remove_extension_package": {
+        const source = String(input.source ?? "");
+        piExtensionPackages = piExtensionPackages.filter((pkg) => pkg.source !== source);
+        return piExtensionPackages.map((pkg) => ({ ...pkg }));
+      }
       case "list_brain_views":
         return liveViews;
       case "list_brain_view_template_kits":

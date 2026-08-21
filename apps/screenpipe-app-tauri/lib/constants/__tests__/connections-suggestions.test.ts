@@ -8,6 +8,7 @@ import {
   isSuggestedForThisDevice,
   compareConnectionTiles,
   connectionMatchesSearch,
+  CONNECTION_HARDCODED_DESCRIPTIONS,
   type ConnectionSuggestionTile,
 } from "../connections";
 
@@ -109,4 +110,13 @@ describe("connection search", () => {
       expect(connectionMatchesSearch(tile("claude", { name: "Claude" }), query)).toBe(true);
     },
   );
+});
+
+describe("connection copy", () => {
+  it("keeps implementation details out of the default descriptions", () => {
+    const copy = Object.values(CONNECTION_HARDCODED_DESCRIPTIONS).join(" ");
+
+    expect(copy).not.toMatch(/\b(MCP|VPS|CLI|Composio)\b/i);
+    expect(copy).not.toMatch(/managed auth|config/i);
+  });
 });

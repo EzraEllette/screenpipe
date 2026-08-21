@@ -12,7 +12,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogClose, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { Download, ExternalLink, Check, Loader2, Copy, Terminal, LogIn, LogOut, RotateCw, Send, X, HelpCircle, Search, Calendar as CalendarIcon, Eye, EyeOff, FolderOpen, Plus, AlertCircle, MessageSquare, Inbox } from "lucide-react";
+import { Download, ExternalLink, Check, Loader2, Copy, Terminal, LogIn, LogOut, RotateCw, Send, X, HelpCircle, Search, Calendar as CalendarIcon, Eye, EyeOff, FolderOpen, Plus, AlertCircle, MessageSquare, Inbox, ChevronDown } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { commands } from "@/lib/utils/tauri";
 import { useSettings } from "@/lib/hooks/use-settings";
@@ -762,6 +762,7 @@ type ConnectionTile = ConnectionSuggestionTile & { icon: string };
 type ConnectionSort = "suggested" | "alphabetical";
 
 const ALL_CONNECTION_CATEGORIES = "All";
+const SETTINGS_CONNECTION_IDS = new Set(["custom-mcp", "skills", "pi-extensions"]);
 
 
 // Per-connection quickstart prompts shown when "Try in Chat" is clicked.
@@ -888,8 +889,8 @@ function McpSpotlight({
   onClick: () => void;
 }) {
   const summary = totalCount === 0
-    ? "No servers yet"
-    : `${enabledCount}/${totalCount} enabled`;
+    ? "None added"
+    : `${enabledCount} active`;
 
   return (
     <div
@@ -910,7 +911,7 @@ function McpSpotlight({
           />
           <div className="min-w-0">
             <div className="flex items-center gap-2">
-              <h3 className="text-sm font-medium text-foreground">MCP servers</h3>
+              <h3 className="text-sm font-medium text-foreground">Advanced connections</h3>
               {enabledCount > 0 && (
                 <span className="h-2 w-2 rounded-full bg-foreground" />
               )}
@@ -927,6 +928,49 @@ function McpSpotlight({
         >
           <Plus className="h-3.5 w-3.5" />
           {totalCount === 0 ? "Add" : "Manage"}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function AiToolsSpotlight({
+  selected,
+  onClick,
+}: {
+  selected: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <div
+      className={`
+        rounded-xl border bg-card p-3 transition-colors
+        ${selected ? "border-foreground bg-accent" : "border-border"}
+      `}
+    >
+      <div className="flex items-center gap-3">
+        <button
+          type="button"
+          onClick={onClick}
+          className="flex min-w-0 flex-1 items-center gap-3 text-left"
+        >
+          <IntegrationIcon
+            icon="pi-extensions"
+            className="flex h-10 w-10 items-center justify-center rounded-lg bg-muted"
+          />
+          <div className="min-w-0">
+            <h3 className="text-sm font-medium text-foreground">AI tools</h3>
+            <p className="text-xs text-muted-foreground">Choose what your AI can use</p>
+          </div>
+        </button>
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          onClick={onClick}
+          className="h-8 text-xs normal-case font-sans tracking-normal"
+        >
+          Manage
         </Button>
       </div>
     </div>
@@ -980,57 +1024,6 @@ function SkillsSpotlight({
         >
           <Plus className="h-3.5 w-3.5" />
           {count === 0 ? "Connect skills" : "Manage"}
-        </Button>
-      </div>
-    </div>
-  );
-}
-
-function PiExtensionsSpotlight({
-  count,
-  selected,
-  onClick,
-}: {
-  count: number;
-  selected: boolean;
-  onClick: () => void;
-}) {
-  const summary = `5 work with every agent · ${count} Pi package${count === 1 ? "" : "s"}`;
-
-  return (
-    <div
-      className={`
-        border bg-card p-3 transition-colors
-        ${selected ? "border-foreground bg-accent" : "border-border"}
-      `}
-    >
-      <div className="flex items-center gap-3">
-        <button
-          type="button"
-          onClick={onClick}
-          className="flex min-w-0 flex-1 items-center gap-3 text-left"
-        >
-          <IntegrationIcon
-            icon="pi-extensions"
-            className="flex h-10 w-10 items-center justify-center border border-border bg-muted"
-          />
-          <div className="min-w-0">
-            <div className="flex items-center gap-2">
-              <h3 className="text-sm font-medium text-foreground">Agent extensions</h3>
-              <span className="h-2 w-2 rounded-full bg-foreground" />
-            </div>
-            <p className="text-xs text-muted-foreground">{summary}</p>
-          </div>
-        </button>
-        <Button
-          type="button"
-          size="sm"
-          variant="outline"
-          onClick={onClick}
-          className="h-8 gap-1.5 text-xs normal-case font-sans tracking-normal"
-        >
-          <Plus className="h-3.5 w-3.5" />
-          Manage
         </Button>
       </div>
     </div>
@@ -1194,7 +1187,7 @@ function ClaudePanel({
   return (
     <div className="space-y-3">
       <p className="text-xs text-muted-foreground">
-        Install screenpipe MCP and skills for every Claude app detected on this device.
+        Let Claude search your screen and audio history.
       </p>
       <div className="flex flex-wrap gap-2">
         {state === "connected" ? (
@@ -1219,7 +1212,7 @@ function ClaudePanel({
       {connectError && <PanelConfigError err={connectError} />}
       {state === "connected" && (
         <p className="text-xs text-muted-foreground">
-          <strong>connected!</strong> MCP + both skills installed. Restart Claude and ask: &quot;what did I do in the last 5 minutes?&quot;
+          <strong>Connected.</strong> Restart Claude and ask: &quot;what did I do in the last 5 minutes?&quot;
         </p>
       )}
       {targets.includes("claude-code") && (
@@ -1297,7 +1290,7 @@ function CursorPanel({ onConnected, onDisconnected }: { onConnected?: () => void
 
   return (
     <div className="space-y-3">
-      <p className="text-xs text-muted-foreground">Give Cursor access to your screen &amp; audio history via MCP.</p>
+      <p className="text-xs text-muted-foreground">Let Cursor search your screen and audio history.</p>
       <div className="flex flex-wrap gap-2">
         {state === "installed" ? (
           <Button onClick={handleDisconnect} variant="outline" size="sm" className="gap-1.5 h-7 text-xs normal-case font-sans tracking-normal">
@@ -1375,7 +1368,7 @@ function CodexPanel({ onConnected, onDisconnected }: { onConnected?: () => void;
 
   return (
     <div className="space-y-3">
-      <p className="text-xs text-muted-foreground">Install the screenpipe MCP plus API and CLI skills for Codex in one click.</p>
+      <p className="text-xs text-muted-foreground">Let Codex search your screen and audio history.</p>
       <div className="flex flex-wrap gap-2">
         {state === "installed" ? (
           <Button onClick={handleDisconnect} variant="outline" size="sm" className="gap-1.5 h-7 text-xs normal-case font-sans tracking-normal">
@@ -1393,7 +1386,7 @@ function CodexPanel({ onConnected, onDisconnected }: { onConnected?: () => void;
       {connectError && <PanelConfigError err={connectError} />}
       {state === "installed" && (
         <p className="text-xs text-muted-foreground">
-          <strong>connected!</strong> MCP + both skills installed. Open a new Codex session and ask: &quot;what did I do in the last 5 minutes?&quot;
+          <strong>Connected.</strong> Open a new Codex session and ask: &quot;what did I do in the last 5 minutes?&quot;
         </p>
       )}
       <details className="text-xs text-muted-foreground">
@@ -1441,7 +1434,7 @@ function GrokPanel({ onConnected, onDisconnected }: { onConnected?: () => void; 
 
   return (
     <div className="space-y-3">
-      <p className="text-xs text-muted-foreground">Give Grok CLI access to your screen &amp; audio history via MCP.</p>
+      <p className="text-xs text-muted-foreground">Let Grok search your screen and audio history.</p>
       <div className="flex flex-wrap gap-2">
         {state === "installed" ? (
           <Button onClick={handleDisconnect} variant="outline" size="sm" className="gap-1.5 h-7 text-xs normal-case font-sans tracking-normal">
@@ -1459,7 +1452,7 @@ function GrokPanel({ onConnected, onDisconnected }: { onConnected?: () => void; 
       {connectError && <PanelConfigError err={connectError} />}
       {state === "installed" && (
         <p className="text-xs text-muted-foreground">
-          <strong>connected!</strong> start a new <code>grok</code> session and ask: &quot;what did I do in the last 5 minutes?&quot;
+          <strong>Connected.</strong> Start a new <code>grok</code> session and ask: &quot;what did I do in the last 5 minutes?&quot;
         </p>
       )}
       <details className="text-xs text-muted-foreground">
@@ -1868,7 +1861,7 @@ function AnythingLLMPanel() {
   return (
     <div className="space-y-3">
       <p className="text-xs text-muted-foreground">
-        Give AnythingLLM access to your screen &amp; audio history via MCP.
+        Let AnythingLLM search your screen and audio history.
       </p>
       <p className="text-xs text-muted-foreground">
         1. In AnythingLLM, go to <strong>Agent Skills</strong> &gt; <strong>MCP Servers</strong>
@@ -1906,7 +1899,7 @@ function MstyPanel() {
   return (
     <div className="space-y-3">
       <p className="text-xs text-muted-foreground">
-        Give Msty access to your screen &amp; audio history via MCP.
+        Let Msty search your screen and audio history.
       </p>
       <p className="text-xs text-muted-foreground">
         1. Open Msty and go to <strong>Settings</strong> &gt; <strong>Toolbox</strong>
@@ -1952,7 +1945,7 @@ function WarpPanel() {
   return (
     <div className="space-y-3">
       <p className="text-xs text-muted-foreground">
-        Give Warp&apos;s Agent Mode access to your screen &amp; audio history via MCP.
+        Let Warp search your screen and audio history.
       </p>
       <p className="text-xs text-muted-foreground">
         1. In Warp, open <strong>Settings</strong> &gt; <strong>AI</strong> &gt; <strong>Manage MCP servers</strong> &gt; <strong>+ Add</strong> (or run <code className="bg-muted px-1 rounded">Open MCP Servers</code> from the Command Palette)
@@ -3794,7 +3787,6 @@ export function ConnectionsSection({
   const [mcpProviderConnected, setMcpProviderConnected] = useState<Record<string, boolean>>({});
   const [excalidrawConnected, setExcalidrawConnected] = useState(false);
   const [importedSkillsCount, setImportedSkillsCount] = useState(0);
-  const [piExtensionCount, setPiExtensionCount] = useState(0);
   // Composio-backed connections (managed auth through screenpipe.com; see
   // composio-card.tsx): gmail, zoom, google drive/docs/sheets.
   const { settings: composioSettings } = useSettings();
@@ -3827,17 +3819,9 @@ export function ConnectionsSection({
       .catch(() => setImportedSkillsCount(0));
   }, []);
 
-  const loadPiExtensionCount = useCallback(() => {
-    commands
-      .piListExtensionPackages()
-      .then((res) => setPiExtensionCount(res.status === "ok" ? res.data.length : 0))
-      .catch(() => setPiExtensionCount(0));
-  }, []);
-
   useEffect(() => {
     loadSkillsCount();
-    loadPiExtensionCount();
-  }, [loadSkillsCount, loadPiExtensionCount]);
+  }, [loadSkillsCount]);
 
   const refreshStatus = useCallback(() => {
     detectInstalledConnectionIds()
@@ -3997,11 +3981,11 @@ export function ConnectionsSection({
       { id: "claude", name: "Claude", icon: "claude", connected: claudeInstalled, detected: detectedConnectionIds.has("claude") || detectedConnectionIds.has("claude-code") },
       { id: "cursor", name: "Cursor", icon: "cursor", connected: cursorInstalled, detected: detectedConnectionIds.has("cursor") },
       { id: "codex", name: "Codex", icon: "codex", connected: codexInstalled, detected: detectedConnectionIds.has("codex") },
-      { id: "grok", name: "Grok CLI", icon: "grok", connected: grokInstalled, detected: detectedConnectionIds.has("grok") },
+      { id: "grok", name: "Grok", icon: "grok", connected: grokInstalled, detected: detectedConnectionIds.has("grok") },
       { id: "warp", name: "Warp", icon: "warp", connected: false, detected: detectedConnectionIds.has("warp") },
       { id: "chatgpt", name: "ChatGPT", icon: "chatgpt", connected: chatgptConnected, detected: detectedConnectionIds.has("chatgpt") },
       ...(os === "macos" ? [
-        { id: "browser-url", name: "Browser URL Capture", icon: "browser-url", connected: browserUrlConnected, detected: browserUrlDetected },
+        { id: "browser-url", name: "Browser activity", icon: "browser-url", connected: browserUrlConnected, detected: browserUrlDetected },
         { id: "voice-memos", name: "Voice Memos", icon: "voice-memos", connected: false },
       ] : []),
       ...(os === "macos" ? [{ id: "apple-calendar", name: "Apple Calendar", icon: "apple-calendar", connected: appleCalendarConnected }] : []),
@@ -4010,8 +3994,8 @@ export function ConnectionsSection({
       { id: "gmail", name: "Gmail", icon: "gmail", connected: composioConnected.gmail },
       { id: "google-drive", name: "Google Drive", icon: "google-drive", connected: composioConnected.googledrive },
       { id: "google-sheets", name: "Google Sheets", icon: "google-sheets", connected: composioConnected.googlesheets },
-      { id: "ics-calendar", name: "ICS Calendar", icon: "ics-calendar", connected: false },
-      { id: "remote-agent", name: "Remote agent", icon: "remote-agent", connected: false },
+      { id: "ics-calendar", name: "Other calendars", icon: "ics-calendar", connected: false },
+      { id: "remote-agent", name: "Always-on AI", icon: "remote-agent", connected: false },
       { id: "whatsapp", name: "WhatsApp", icon: "whatsapp", connected: false, detected: detectedConnectionIds.has("whatsapp") },
       { id: "anythingllm", name: "AnythingLLM", icon: "anythingllm", connected: false, detected: detectedConnectionIds.has("anythingllm") },
       { id: "ollama", name: "Ollama", icon: "ollama", connected: false, detected: detectedConnectionIds.has("ollama") },
@@ -4024,9 +4008,9 @@ export function ConnectionsSection({
       { id: "krisp", name: "Krisp", icon: "krisp", connected: krispConnected, detected: detectedConnectionIds.has("krisp") },
       { id: "plaud", name: "Plaud", icon: "plaud", connected: plaudConnected },
       { id: "excalidraw", name: "Excalidraw", icon: "excalidraw", connected: excalidrawConnected },
-      { id: "custom-mcp", name: "Custom MCP", icon: "custom-mcp", connected: false, detected: customMcpServerCount > 0 },
+      { id: "custom-mcp", name: "Advanced connections", icon: "custom-mcp", connected: false, detected: customMcpServerCount > 0 },
       { id: "skills", name: "Skills", icon: "skills", connected: importedSkillsCount > 0, category: "Agent" },
-      { id: "pi-extensions", name: "Agent extensions", icon: "pi-extensions", connected: true, category: "Agent" },
+      { id: "pi-extensions", name: "AI tools", icon: "pi-extensions", connected: true, category: "Agent" },
     ];
     // Merge API tiles, skipping duplicates already in hardcoded.
     // owned-default is hidden from settings — the agent drives it via the
@@ -4089,13 +4073,20 @@ export function ConnectionsSection({
       category: CONNECTION_CATEGORY_BY_ID[tile.id] ?? tile.category ?? "Other",
       description: tile.description ?? CONNECTION_HARDCODED_DESCRIPTIONS[tile.id],
     }));
-  }, [os, claudeInstalled, cursorInstalled, codexInstalled, grokInstalled, chatgptConnected, browserUrlConnected, browserUrlDetected, integrations, appleCalendarConnected, googleCalendarConnected, googleDocsConnected, customMcpConnected, customMcpServerCount, krispConnected, plaudConnected, mcpProviderConnected, excalidrawConnected, importedSkillsCount, piExtensionCount, detectedConnectionIds, composioConnected]);
+  }, [os, claudeInstalled, cursorInstalled, codexInstalled, grokInstalled, chatgptConnected, browserUrlConnected, browserUrlDetected, integrations, appleCalendarConnected, googleCalendarConnected, googleDocsConnected, customMcpConnected, customMcpServerCount, krispConnected, plaudConnected, mcpProviderConnected, excalidrawConnected, importedSkillsCount, detectedConnectionIds, composioConnected]);
 
   const isDefaultView = !search.trim() && categoryFilter === ALL_CONNECTION_CATEGORIES;
 
   const suggested = useMemo(() => {
     if (!isDefaultView) return [];
-    return getSuggestedConnectionsForDevice(allTiles, 8);
+    return getSuggestedConnectionsForDevice(allTiles, 6);
+  }, [allTiles, isDefaultView]);
+
+  const connectedTiles = useMemo(() => {
+    if (!isDefaultView) return [];
+    return allTiles
+      .filter((tile) => tile.connected && !SETTINGS_CONNECTION_IDS.has(tile.id))
+      .sort(compareConnectionTiles);
   }, [allTiles, isDefaultView]);
 
   // Flat search results (used when search is active or category is programmatically focused)
@@ -4116,11 +4107,18 @@ export function ConnectionsSection({
   // categories sort after these, alphabetically.
   const CATEGORY_ORDER = ["Desktop", "AI", "Agent", "Automation", "Meetings", "Calendar", "Communication", "Notes", "Documents", "Project Management", "CRM", "Support", "Finance", "Developer", "Wearables", "Notifications", "System", "Other"];
 
-  // Grouped tiles by category (default view — excludes suggested items)
+  // Grouped tiles by category for the collapsed catalog. Connected, suggested,
+  // and advanced AI setup each have a clearer home above or below this list.
   const groupedTiles = useMemo(() => {
     if (!isDefaultView) return null;
     const suggestedIds = new Set(suggested.map(t => t.id));
-    const remaining = allTiles.filter(t => !suggestedIds.has(t.id));
+    const connectedIds = new Set(connectedTiles.map(t => t.id));
+    const remaining = allTiles.filter(
+      (tile) =>
+        !suggestedIds.has(tile.id) &&
+        !connectedIds.has(tile.id) &&
+        !SETTINGS_CONNECTION_IDS.has(tile.id),
+    );
     const groups = new Map<string, ConnectionTile[]>();
     for (const tile of remaining) {
       const cat = normalizeConnectionCategory(tile.category);
@@ -4138,7 +4136,9 @@ export function ConnectionsSection({
       if (bi === -1) return -1;
       return ai - bi;
     });
-  }, [allTiles, isDefaultView, suggested]);
+  }, [allTiles, connectedTiles, isDefaultView, suggested]);
+
+  const catalogTileCount = groupedTiles?.reduce((sum, [, tiles]) => sum + tiles.length, 0) ?? 0;
 
   const selectedIntegration = integrations.find(i => i.id === selected);
   const selectedScopeVariant =
@@ -4278,7 +4278,7 @@ export function ConnectionsSection({
       case "anythingllm": return <AnythingLLMPanel />;
       case "custom-mcp": return <CustomMcpCard />;
       case "skills": return <SkillsCard onChanged={loadSkillsCount} />;
-      case "pi-extensions": return <PiExtensionsCard onChanged={loadPiExtensionCount} />;
+      case "pi-extensions": return <PiExtensionsCard />;
       case "krisp": return <OAuthMcpPanel
         name="Krisp"
         mcpUrl={KRISP_MCP_URL}
@@ -4417,89 +4417,124 @@ export function ConnectionsSection({
     <div className="space-y-5">
       {/* Header: title + inline search */}
       <div className="flex items-center gap-3">
-        <p className="flex-1 text-sm text-muted-foreground">Connect to the apps you use every day</p>
+        <p className="flex-1 text-sm text-muted-foreground">Connect your apps</p>
         <div className="relative w-52 shrink-0">
           <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
           <Input
             {...searchInputBehaviorProps}
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search..."
+            placeholder="Find an app"
             className="pl-8 h-8 text-xs"
           />
         </div>
       </div>
 
-      <McpSpotlight
-        enabledCount={customMcpEnabledCount}
-        totalCount={customMcpServerCount}
-        selected={selected === "custom-mcp"}
-        onClick={() => setSelected(selected === "custom-mcp" ? null : "custom-mcp")}
-      />
-
-      <PiExtensionsSpotlight
-        count={piExtensionCount}
-        selected={selected === "pi-extensions"}
-        onClick={() => setSelected(selected === "pi-extensions" ? null : "pi-extensions")}
-      />
-
-      <SkillsSpotlight
-        count={importedSkillsCount}
-        selected={selected === "skills"}
-        onClick={() => setSelected(selected === "skills" ? null : "skills")}
-      />
-
-      {/* AI tools block — 4th sibling to MCP servers / Agent extensions / Skills.
-          Connect-all when nothing is on, per-tool manage + disconnect-all once
-          connected (Louis's "easy way to uninstall" ask). Default view only. */}
-      {isDefaultView && (
-        <AiToolsCard
-          onChanged={() => {
-            refreshStatus();
-            notifyConnectionsUpdated();
-          }}
-        />
-      )}
-
-      {/* Suggested — device-aware high-activation connections, default view only. */}
-      {!search.trim() && suggested.length > 0 && (
-        <div className="space-y-2">
-          <h3 className="text-xs font-medium text-muted-foreground">Suggested for this device</h3>
-          <div className="grid grid-cols-2 gap-2">
-            {suggested.map((tile) => (
-              <ListRow
-                key={tile.id}
-                tile={tile}
-                selected={selected === tile.id}
-                onClick={() => setSelected(selected === tile.id ? null : tile.id)}
-                onTryInChat={tile.connected ? () => tryInChat(tile) : undefined}
-              />
-            ))}
+      {isDefaultView ? (
+        <>
+          <div className="space-y-3">
+            <AiToolsSpotlight
+              selected={selected === "pi-extensions"}
+              onClick={() => setSelected(selected === "pi-extensions" ? null : "pi-extensions")}
+            />
+            <AiToolsCard
+              onChanged={() => {
+                refreshStatus();
+                notifyConnectionsUpdated();
+              }}
+            />
+            <SkillsSpotlight
+              count={importedSkillsCount}
+              selected={selected === "skills"}
+              onClick={() => setSelected(selected === "skills" ? null : "skills")}
+            />
+            <McpSpotlight
+              enabledCount={customMcpEnabledCount}
+              totalCount={customMcpServerCount}
+              selected={selected === "custom-mcp"}
+              onClick={() => setSelected(selected === "custom-mcp" ? null : "custom-mcp")}
+            />
           </div>
-        </div>
-      )}
 
-      {/* Connections — categorized sections or flat search results */}
-      {!integrationsLoaded ? (
-        <div className="space-y-6">
-          {Array.from({ length: 3 }).map((_, gi) => (
-            <div key={gi} className="space-y-2">
-              <div className="h-4 bg-muted rounded w-24 animate-pulse" />
+          {connectedTiles.length > 0 && (
+            <div className="space-y-2">
+              <h3 className="text-xs font-medium text-muted-foreground">Connected</h3>
               <div className="grid grid-cols-2 gap-2">
-                {Array.from({ length: 4 }).map((_, i) => (
-                  <div key={i} className="flex items-center gap-3 px-3 py-2.5 rounded-xl border border-border bg-card animate-pulse">
-                    <div className="w-10 h-10 rounded-xl bg-muted shrink-0" />
-                    <div className="flex-1 space-y-1.5">
-                      <div className="h-3 bg-muted rounded w-20" />
-                      <div className="h-2.5 bg-muted rounded w-32" />
-                    </div>
-                  </div>
+                {connectedTiles.map((tile) => (
+                  <ListRow
+                    key={tile.id}
+                    tile={tile}
+                    selected={selected === tile.id}
+                    onClick={() => setSelected(selected === tile.id ? null : tile.id)}
+                    onTryInChat={() => tryInChat(tile)}
+                  />
                 ))}
               </div>
             </div>
-          ))}
+          )}
+
+          {suggested.length > 0 && (
+            <div className="space-y-2">
+              <h3 className="text-xs font-medium text-muted-foreground">Suggested</h3>
+              <div className="grid grid-cols-2 gap-2">
+                {suggested.map((tile) => (
+                  <ListRow
+                    key={tile.id}
+                    tile={tile}
+                    selected={selected === tile.id}
+                    onClick={() => setSelected(selected === tile.id ? null : tile.id)}
+                  />
+                ))}
+              </div>
+            </div>
+          )}
+
+          <details className="group border-t border-border pt-4">
+            <summary className="flex cursor-pointer list-none items-center gap-3 select-none">
+              <div className="min-w-0 flex-1">
+                <h3 className="text-sm font-medium text-foreground">Browse all apps</h3>
+                <p className="text-xs text-muted-foreground">
+                  {integrationsLoaded ? `${catalogTileCount} more` : "Loading apps"}
+                </p>
+              </div>
+              <ChevronDown className="h-4 w-4 text-muted-foreground transition-transform group-open:rotate-180" />
+            </summary>
+            <div className="mt-5 space-y-8">
+              {!integrationsLoaded ? (
+                <div className="grid grid-cols-2 gap-2">
+                  {Array.from({ length: 4 }).map((_, i) => (
+                    <div key={i} className="h-16 border border-border bg-muted animate-pulse" />
+                  ))}
+                </div>
+              ) : (
+                groupedTiles?.map(([category, tiles]) => (
+                  <div key={category} className="space-y-3">
+                    <div className="border-b border-border pb-2">
+                      <h3 className="text-sm font-semibold text-foreground">{category}</h3>
+                    </div>
+                    <div className="grid grid-cols-2 gap-1">
+                      {tiles.map((tile) => (
+                        <ListRow
+                          key={tile.id}
+                          tile={tile}
+                          selected={selected === tile.id}
+                          onClick={() => setSelected(selected === tile.id ? null : tile.id)}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </details>
+
+        </>
+      ) : !integrationsLoaded ? (
+        <div className="flex items-center gap-2 text-xs text-muted-foreground">
+          <Loader2 className="h-3 w-3 animate-spin" />
+          Loading connections
         </div>
-      ) : search.trim() || categoryFilter !== ALL_CONNECTION_CATEGORIES ? (
+      ) : filtered.length > 0 ? (
         <div className="grid grid-cols-2 gap-2">
           {filtered.map((tile) => (
             <ListRow
@@ -4512,26 +4547,7 @@ export function ConnectionsSection({
           ))}
         </div>
       ) : (
-        <div className="space-y-8">
-          {groupedTiles?.map(([category, tiles]) => (
-            <div key={category} className="space-y-3">
-              <div className="border-b border-border pb-2">
-                <h3 className="text-sm font-semibold text-foreground">{category}</h3>
-              </div>
-              <div className="grid grid-cols-2 gap-1">
-                {tiles.map((tile) => (
-                  <ListRow
-                    key={tile.id}
-                    tile={tile}
-                    selected={selected === tile.id}
-                    onClick={() => setSelected(selected === tile.id ? null : tile.id)}
-                    onTryInChat={tile.connected ? () => tryInChat(tile) : undefined}
-                  />
-                ))}
-              </div>
-            </div>
-          ))}
-        </div>
+        <p className="py-8 text-center text-sm text-muted-foreground">No matching apps</p>
       )}
 
       <Dialog
@@ -4564,14 +4580,11 @@ export function ConnectionsSection({
                         macOS
                       </span>
                     )}
-                    {["gmail", "zoom", "google-drive", "google-docs", "google-sheets"].includes(selectedTile.id) && (
-                      <span className="px-2 py-0.5 text-[10px] font-mono border border-border text-muted-foreground inline-flex items-center">
-                        via composio
-                      </span>
-                    )}
                   </div>
                   {selectedTile.connected && (
-                    <span className="text-xs text-foreground">connected</span>
+                    <span className="text-xs text-foreground">
+                      {selectedTile.id === "pi-extensions" ? "ready" : "connected"}
+                    </span>
                   )}
                 </div>
                 <DialogClose asChild>
