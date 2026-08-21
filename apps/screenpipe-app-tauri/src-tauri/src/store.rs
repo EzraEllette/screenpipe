@@ -1008,6 +1008,10 @@ pub struct SettingsStore {
     /// When disabled, users must click "update now" in the tray menu.
     #[serde(rename = "autoUpdate", default = "default_true")]
     pub auto_update: bool,
+    /// Consumer updater channel selected on this device. Older stores omit it
+    /// and therefore remain on the stable channel.
+    #[serde(rename = "updateChannel", default = "default_update_channel")]
+    pub update_channel: String,
     /// Auto-update store-installed pipes that haven't been locally modified.
     #[serde(rename = "autoUpdatePipes", default = "default_true")]
     pub auto_update_pipes: bool,
@@ -1101,6 +1105,10 @@ fn generate_device_id() -> String {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_update_channel() -> String {
+    "stable".to_string()
 }
 
 fn default_overlay_size() -> String {
@@ -1613,6 +1621,7 @@ Rules:
             allow_hiding_shortcut_overlay: false,
             device_id: uuid::Uuid::new_v4().to_string(),
             auto_update: true,
+            update_channel: default_update_channel(),
             auto_update_pipes: true,
             enhanced_ai: false,
             remote_log_collection_enabled: false,
@@ -2645,6 +2654,17 @@ mod tests {
     #[test]
     fn auto_update_defaults_to_enabled() {
         assert!(SettingsStore::default().auto_update);
+    }
+
+    #[test]
+    fn update_channel_defaults_to_stable_for_old_stores() {
+        assert_eq!(SettingsStore::default().update_channel, "stable");
+
+        let missing: SettingsStore = serde_json::from_value(json!({
+            "aiPresets": []
+        }))
+        .unwrap();
+        assert_eq!(missing.update_channel, "stable");
     }
 
     #[test]

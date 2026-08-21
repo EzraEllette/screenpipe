@@ -4020,6 +4020,11 @@ deviceId?: string;
  */
 autoUpdate?: boolean;
 /**
+ * Consumer updater channel selected on this device. Older stores omit it
+ * and therefore remain on the stable channel.
+ */
+updateChannel?: string;
+/**
  * Auto-update store-installed pipes that haven't been locally modified.
  */
 autoUpdatePipes?: boolean;
