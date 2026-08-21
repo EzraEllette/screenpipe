@@ -506,7 +506,15 @@ describe('/v1/chat/completions free-plan route policy', () => {
 				}), { status: 200 });
 			}
 			if (url.startsWith('https://api.deepgram.com/v1/speak')) {
-				return new Response(new Uint8Array([82, 73, 70, 70]), { status: 200 });
+				const upstream = new URL(url);
+				expect(upstream.searchParams.get('model')).toBe('aura-asteria-en');
+				expect(upstream.searchParams.get('encoding')).toBe('linear16');
+				expect(upstream.searchParams.get('container')).toBe('wav');
+				return new Response(new Uint8Array([
+					0x52, 0x49, 0x46, 0x46,
+					0x04, 0x00, 0x00, 0x00,
+					0x57, 0x41, 0x56, 0x45,
+				]), { status: 200 });
 			}
 			throw new Error(`unexpected fetch: ${url}`);
 		}) as typeof fetch;
@@ -522,7 +530,45 @@ describe('/v1/chat/completions free-plan route policy', () => {
 
 		expect(response.status).toBe(200);
 		expect(response.headers.get('content-type')).toBe('audio/wav');
+		const audio = new Uint8Array(await response.arrayBuffer());
+		expect(new TextDecoder().decode(audio.slice(0, 4))).toBe('RIFF');
+		expect(new TextDecoder().decode(audio.slice(8, 12))).toBe('WAVE');
 		expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+	});
+
+	it('rejects non-WAV bytes instead of returning a false audio/wav response', async () => {
+		globalThis.fetch = mock(async (input: RequestInfo | URL) => {
+			const url = String(input);
+			if (url === 'https://screenpipe.com/api/user') {
+				return new Response(JSON.stringify({
+					success: true,
+					user: {
+						clerk_id: 'user_tts_non_wav',
+						cloud_subscribed: false,
+						app_entitled: true,
+						subscription_plan: 'standard',
+						entitlement: { active: true, plan: 'standard', features: { app: true } },
+					},
+				}), { status: 200 });
+			}
+			if (url.startsWith('https://api.deepgram.com/v1/speak')) {
+				return new Response(new Uint8Array([0xff, 0xf3, 0x60, 0xc4]), { status: 200 });
+			}
+			throw new Error(`unexpected fetch: ${url}`);
+		}) as typeof fetch;
+
+		const response = await handleRequest(new Request('https://gateway.test/v1/text-to-speech', {
+			method: 'POST',
+			headers: {
+				Authorization: 'Bearer eyJ.standard.tts.non-wav',
+				'content-type': 'application/json',
+			},
+			body: JSON.stringify({ text: 'hello' }),
+		}), env, ctx);
+
+		expect(response.status).toBe(500);
+		expect(response.headers.get('content-type')).toBe('application/json');
+		expect(await response.text()).toContain('Failed to convert text to speech');
 	});
 
 	it.each([
