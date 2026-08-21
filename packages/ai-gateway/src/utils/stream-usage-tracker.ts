@@ -20,6 +20,9 @@ export interface StreamUsage {
 	termination: 'complete' | 'cancelled' | 'error';
 }
 
+const SSE_KEEP_ALIVE_INTERVAL_MS = 15_000;
+const SSE_KEEP_ALIVE = new TextEncoder().encode(': keep-alive\n\n');
+
 /**
  * Wrap a streaming Response body to extract token usage from SSE events.
  * Data passes through unchanged to the client; usage is captured via callback.
@@ -33,6 +36,7 @@ export function trackStreamUsage(
   body: ReadableStream<Uint8Array>,
   format: 'anthropic' | 'openai',
   onComplete: (usage: StreamUsage) => void,
+	keepAliveIntervalMs = SSE_KEEP_ALIVE_INTERVAL_MS,
 ): ReadableStream<Uint8Array> {
   let buffer = '';
   let inputTokens = 0;
@@ -43,6 +47,7 @@ export function trackStreamUsage(
   const decoder = new TextDecoder();
   const reader = body.getReader();
   let completed = false;
+	let pendingRead: Promise<ReadableStreamReadResult<Uint8Array>> | null = null;
 
   const completeOnce = (termination: StreamUsage['termination']) => {
     if (completed) return;
@@ -107,7 +112,36 @@ export function trackStreamUsage(
   return new ReadableStream<Uint8Array>({
     async pull(controller) {
       try {
-        const { done, value } = await reader.read();
+				pendingRead ??= reader.read();
+				let timer: ReturnType<typeof setTimeout> | undefined;
+				let next: { type: 'heartbeat' } | {
+					type: 'read';
+					result: ReadableStreamReadResult<Uint8Array>;
+				};
+				try {
+					next = await Promise.race([
+						pendingRead.then((result) => ({ type: 'read' as const, result })),
+						new Promise<{ type: 'heartbeat' }>((resolve) => {
+							timer = setTimeout(
+								() => resolve({ type: 'heartbeat' }),
+								keepAliveIntervalMs,
+							);
+						}),
+					]);
+				} finally {
+					if (timer !== undefined) clearTimeout(timer);
+				}
+
+				if (next.type === 'heartbeat') {
+					// SSE comments are protocol-valid and ignored by clients. Sending
+					// one during provider silence prevents idle network hops from
+					// closing a healthy high-reasoning request before its first token.
+					controller.enqueue(SSE_KEEP_ALIVE);
+					return;
+				}
+
+				pendingRead = null;
+				const { done, value } = next.result;
         if (done) {
           // Providers occasionally omit the trailing newline. Flush the final
           // decoder bytes and buffered SSE line before settling the request.
@@ -144,6 +178,7 @@ export function trackStreamUsage(
 export function trackResponseUsage(
   response: Response,
   format: 'anthropic' | 'openai',
+	keepAliveIntervalMs = SSE_KEEP_ALIVE_INTERVAL_MS,
 ): { response: Response; usage: Promise<StreamUsage> } {
   if (!response.body) {
     return {
@@ -162,7 +197,12 @@ export function trackResponseUsage(
   let resolveUsage!: (u: StreamUsage) => void;
   const usage = new Promise<StreamUsage>(r => resolveUsage = r);
 
-  const trackedBody = trackStreamUsage(response.body, format, u => resolveUsage(u));
+  const trackedBody = trackStreamUsage(
+		response.body,
+		format,
+		u => resolveUsage(u),
+		keepAliveIntervalMs,
+	);
 
   return {
     response: new Response(trackedBody, {
