@@ -169,7 +169,7 @@ Execution contract:
 - Make the smallest complete change that satisfies this request. Work only in $repository.
 - This must be native Windows development and validation. Do not cross-compile.
 - Install only task-required dependencies, using repository CI/setup as the source of truth.
-- Never read, print, persist, or transmit OPENAI_API_KEY, Azure identity tokens, Key Vault data, or credentials.
+- Never read, print, persist, or transmit OPENAI_API_KEY, the Codex auth store, Azure identity tokens, Key Vault data, or credentials.
 - Do not push, create a pull request, publish, release, or alter any remote state. The host owns GitHub delivery.
 - Run the narrowest Windows-native checks that prove the change. Run git diff --check.
 - For desktop/UI/audio/capture/startup behavior, do the automatable work and leave exact manual RDP acceptance steps in your final response; a headless session is not visual proof.
@@ -189,9 +189,22 @@ type "$promptPath" | "$codexCommand" exec --ephemeral --ignore-user-config --san
 exit /b %ERRORLEVEL%
 "@
   [IO.File]::WriteAllText($codexRunner, $runnerContents, (New-Object Text.UTF8Encoding($false)))
-  & "C:\screenpipe-test\with-openai-key.ps1" `
-    -Command "C:\Windows\System32\cmd.exe" `
-    -CommandArgs @("/d", "/c", $codexRunner)
+  $env:CODEX_HOME = Join-Path $runRoot ".codex"
+  New-Item -ItemType Directory -Force -Path $env:CODEX_HOME | Out-Null
+  $codexExitCode = 1
+  try {
+    & "C:\screenpipe-test\with-openai-key.ps1" `
+      -Command $codexCommand `
+      -CommandArgs @("login", "--with-api-key") `
+      -PipeKeyToStdin
+    & "C:\Windows\System32\cmd.exe" /d /c $codexRunner
+    $codexExitCode = $LASTEXITCODE
+  } finally {
+    Remove-Item -Recurse -Force $env:CODEX_HOME -ErrorAction SilentlyContinue
+  }
+  if ($codexExitCode -ne 0) {
+    throw "Codex exited with code $codexExitCode"
+  }
 
   git.exe -C $repository diff --check "$agentBaseSha..HEAD"
   Assert-LastExitCode "git diff --check"

@@ -8,11 +8,13 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 
 run_id="${1:-}"
 base_sha="${2:-}"
+agent_id="${3:-$run_id}"
 if [[ -z "$run_id" || -z "$base_sha" ]]; then
-  printf 'usage: feature prompt on stdin | %s <run-id> <40-char-base-sha>\n' "$0" >&2
+  printf 'usage: feature prompt on stdin | %s <vm-run-id> <40-char-base-sha> [agent-attempt-id]\n' "$0" >&2
   exit 1
 fi
 windows_vm_validate_run_id "$run_id"
+windows_vm_validate_run_id "$agent_id"
 if [[ ! "$base_sha" =~ ^[0-9a-f]{40}$ ]]; then
   printf 'base SHA must be 40 lowercase hexadecimal characters: %s\n' "$base_sha" >&2
   exit 1
@@ -77,7 +79,7 @@ git -C "$source_repository" update-ref refs/heads/base "$agent_base_sha"
 git -C "$source_repository" bundle create "$source_bundle" refs/heads/base
 git bundle verify "$source_bundle" >/dev/null
 
-source_blob_name="$WINDOWS_VM_AGENT_BLOB_ROOT/$run_id/source.bundle"
+source_blob_name="$WINDOWS_VM_AGENT_BLOB_ROOT/$agent_id/source.bundle"
 windows_vm_log "uploading exact source tree $source_tree for host commit $base_sha"
 az storage blob upload \
   --account-name "$WINDOWS_VM_STORAGE_ACCOUNT" \
@@ -99,7 +101,7 @@ az vm run-command invoke \
   --command-id RunPowerShellScript \
   --scripts "@$WINDOWS_VM_SCRIPT_DIR/agent.ps1" \
   --parameters \
-    "RunId=$run_id" \
+    "RunId=$agent_id" \
     "BaseSha=$base_sha" \
     "PromptBase64=$prompt_base64" \
     "SourceBlobName=$source_blob_name" \
@@ -112,4 +114,4 @@ az vm run-command invoke \
   --output json
 
 windows_vm_log "agent command finished; fetch its durable result before teardown"
-printf 'fetch: %s/agent-result.sh %s <empty-output-directory>\n' "$WINDOWS_VM_SCRIPT_DIR" "$run_id"
+printf 'fetch: %s/agent-result.sh %s <empty-output-directory>\n' "$WINDOWS_VM_SCRIPT_DIR" "$agent_id"

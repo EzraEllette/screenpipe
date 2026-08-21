@@ -85,6 +85,11 @@ that secret.
 printf '%s' 'implement the requested Windows feature' | \
   ./scripts/windows-vm/agent-run.sh audio-follow-01 "$(git rev-parse HEAD)"
 
+# A distinct third argument retries on the same VM without reusing guest or
+# blob state from the prior attempt.
+printf '%s' 'retry after fixing the task input' | \
+  ./scripts/windows-vm/agent-run.sh audio-follow-01 "$(git rev-parse HEAD)" audio-follow-02
+
 # Download the durable status, final report, log, and binary-safe patch.
 ./scripts/windows-vm/agent-result.sh audio-follow-01 /tmp/audio-follow-result
 
