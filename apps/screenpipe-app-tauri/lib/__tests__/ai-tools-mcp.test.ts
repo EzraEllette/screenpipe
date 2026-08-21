@@ -19,6 +19,10 @@ const skillsMock = vi.hoisted(() => ({
   removeExternalAgentSkills: vi.fn(async () => ["a", "b"]),
 }));
 
+const tauriMock = vi.hoisted(() => ({
+  setAiToolAutoConnectOptOut: vi.fn(async () => ({ status: "ok", data: null })),
+}));
+
 vi.mock("@tauri-apps/api/path", () => ({
   homeDir: vi.fn(async () => "/Users/test"),
   join: vi.fn(async (...parts: string[]) => parts.join("/")),
@@ -65,6 +69,7 @@ vi.mock("@/lib/utils/tauri", () => ({
       status: "ok",
       data: { available: true, path: "/app/bun" },
     })),
+    setAiToolAutoConnectOptOut: tauriMock.setAiToolAutoConnectOptOut,
   },
 }));
 
@@ -87,11 +92,15 @@ import {
   uninstallGeminiMcp,
   detectAiTools,
   connectAiTool,
+  connectAiToolTargets,
   disconnectAiTool,
+  disconnectAiToolTargets,
   friendlyToolError,
 } from "@/lib/ai-tools-mcp";
 
 const CURSOR = "/Users/test/.cursor/mcp.json";
+const CLAUDE_DESKTOP = "/Users/test/Library/Application Support/Claude/claude_desktop_config.json";
+const CLAUDE_CODE = "/Users/test/.claude.json";
 const HERMES = "/Users/test/.hermes/config.yaml";
 const RUNNER = "/Users/test/.runner/mcp.json";
 const GEMINI = "/Users/test/.gemini/settings.json";
@@ -107,6 +116,7 @@ beforeEach(() => {
   fsMock.unreadable.clear();
   skillsMock.installExternalAgentSkills.mockClear();
   skillsMock.removeExternalAgentSkills.mockClear();
+  tauriMock.setAiToolAutoConnectOptOut.mockClear();
 });
 
 describe("safe config IO", () => {
@@ -125,6 +135,25 @@ describe("safe config IO", () => {
     expect(backupsOf(CURSOR)).toHaveLength(1);
     expect(fsMock.files.get(backupsOf(CURSOR)[0])).toBe(seeded);
     expect(tmpsOf(CURSOR)).toHaveLength(0);
+  });
+
+  it("canonicalizes a differently-cased screenpipe entry instead of duplicating it", async () => {
+    fsMock.files.set(
+      CURSOR,
+      JSON.stringify({
+        mcpServers: {
+          Screenpipe: { command: "old" },
+          other: { command: "x" },
+        },
+      }),
+    );
+
+    await installCursorMcp();
+
+    const servers = JSON.parse(fsMock.files.get(CURSOR)!).mcpServers;
+    expect(Object.keys(servers).sort()).toEqual(["other", "screenpipe"]);
+    await uninstallCursorMcp();
+    expect(Object.keys(JSON.parse(fsMock.files.get(CURSOR)!).mcpServers)).toEqual(["other"]);
   });
 
   it("refuses to overwrite invalid JSON and leaves the file untouched", async () => {
@@ -232,6 +261,49 @@ describe("runner desktop MCP", () => {
   });
 });
 
+describe("Claude Code MCP", () => {
+  it("detects and connects Claude Code without Claude Desktop", async () => {
+    fsMock.files.set(CLAUDE_CODE, "{}\n");
+
+    await expect(detectAiTools()).resolves.toContain("claude-code");
+    await connectAiTool("claude-code");
+
+    const entry = JSON.parse(fsMock.files.get(CLAUDE_CODE)!).mcpServers.screenpipe;
+    expect(entry.command).toBe("/app/bun");
+    expect(entry.env.SCREENPIPE_MCP_CLIENT).toBe("claude-code");
+    expect(skillsMock.installExternalAgentSkills).toHaveBeenCalledWith("claude");
+  });
+
+  it("keeps the shared skill when only one Claude config can connect", async () => {
+    fsMock.files.set(CLAUDE_DESKTOP, "{}\n");
+    fsMock.files.set(CLAUDE_CODE, "broken{");
+
+    const result = await connectAiToolTargets(["claude", "claude-code"]);
+
+    expect(result.succeeded).toEqual(["claude"]);
+    expect(result.failed.map(({ id }) => id)).toEqual(["claude-code"]);
+    expect(JSON.parse(fsMock.files.get(CLAUDE_DESKTOP)!).mcpServers.screenpipe).toBeTruthy();
+    expect(fsMock.files.get(CLAUDE_CODE)).toBe("broken{");
+    expect(skillsMock.removeExternalAgentSkills).toHaveBeenCalledTimes(1);
+    expect(skillsMock.installExternalAgentSkills).toHaveBeenLastCalledWith("claude");
+  });
+
+  it("opts out both Claude targets even when one config cannot be removed", async () => {
+    fsMock.files.set(CLAUDE_DESKTOP, JSON.stringify({
+      mcpServers: { screenpipe: { command: "/app/bun" } },
+    }));
+    fsMock.files.set(CLAUDE_CODE, "broken{");
+
+    const result = await disconnectAiToolTargets(["claude", "claude-code"]);
+
+    expect(result.succeeded).toEqual(["claude"]);
+    expect(result.failed.map(({ id }) => id)).toEqual(["claude-code"]);
+    expect(JSON.parse(fsMock.files.get(CLAUDE_DESKTOP)!).mcpServers.screenpipe).toBeUndefined();
+    expect(tauriMock.setAiToolAutoConnectOptOut).toHaveBeenCalledWith("claude", true);
+    expect(tauriMock.setAiToolAutoConnectOptOut).toHaveBeenCalledWith("claude-code", true);
+  });
+});
+
 describe("gemini CLI MCP", () => {
   it("detects Gemini CLI from its user config directory", async () => {
     fsMock.files.set("/Users/test/.gemini", "directory marker");
@@ -304,6 +376,7 @@ describe("transactional connect / disconnect", () => {
     expect(skillsMock.installExternalAgentSkills).toHaveBeenCalledWith("cursor");
     expect(skillsMock.removeExternalAgentSkills).not.toHaveBeenCalled();
     expect(JSON.parse(fsMock.files.get(CURSOR)!).mcpServers.screenpipe).toBeTruthy();
+    expect(tauriMock.setAiToolAutoConnectOptOut).toHaveBeenCalledWith("cursor", false);
   });
 
   it("installs and removes Gemini's user-scoped skills with its MCP entry", async () => {
@@ -313,6 +386,7 @@ describe("transactional connect / disconnect", () => {
 
     await disconnectAiTool("gemini");
     expect(skillsMock.removeExternalAgentSkills).toHaveBeenCalledWith("gemini");
+    expect(tauriMock.setAiToolAutoConnectOptOut).toHaveBeenCalledWith("gemini", true);
   });
 
   it("disconnect removes skills even when the MCP step fails, then rethrows", async () => {

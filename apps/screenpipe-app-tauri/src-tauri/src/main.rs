@@ -1618,12 +1618,11 @@ async fn main() {
 
             let app_ui_hidden = crate::enterprise_policy::is_app_ui_hidden();
 
-            // The old connection slide blocked onboarding on work that can be
-            // done safely and idempotently by Rust. During first-run setup,
-            // wire detected local AI tools in the background; after onboarding
-            // completes this no longer runs, so an explicit Settings removal
-            // remains removed on future launches.
-            if !onboarding_store.is_completed && !app_ui_hidden {
+            // Keep every detected local AI tool connected to screenpipe. The
+            // setup is backgrounded and idempotent: it installs missing MCP +
+            // skill entries, refreshes stale screenpipe launchers, and leaves
+            // unrelated tool settings alone.
+            if !app_ui_hidden {
                 let local_api = recording::local_api_context_from_app(&app.handle());
                 skills::connect_detected_ai_tools_in_background(
                     store.recording.api_auth,

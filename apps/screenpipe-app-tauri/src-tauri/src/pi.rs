@@ -5367,8 +5367,8 @@ pub(crate) fn find_bun_executable() -> Option<String> {
 /// so we fully control the dependency tree and avoid version conflicts.
 /// Runs on a dedicated thread, never panics, never blocks the caller.
 /// Sets `PI_INSTALL_DONE` when finished so `pi_start` can wait for it.
-/// Warm bun's default package cache with the pinned screenpipe-mcp so the first
-/// ACP session finds the core tools (activity-summary, search-content,
+/// Warm Bun's shared package cache with the latest published screenpipe-mcp so
+/// the first ACP session finds the core tools (activity-summary, search-content,
 /// update-memory) ready instead of cold-fetching them. A slow or failed
 /// `bun x screenpipe-mcp` fetch is why those tools sometimes never registered
 /// and the agent fell back to raw SQL. Best-effort and idempotent: once cached,
@@ -5389,19 +5389,30 @@ fn prewarm_screenpipe_mcp(bun: &str) {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
             loop {
                 match child.try_wait() {
-                    Ok(Some(_)) => break,
+                    Ok(Some(status)) if status.success() => {
+                        info!(
+                            "screenpipe-mcp prewarm complete ({})",
+                            screenpipe_core::agents::acp::SCREENPIPE_MCP_PKG
+                        );
+                        break;
+                    }
+                    Ok(Some(status)) => {
+                        warn!("screenpipe-mcp prewarm exited with {status}");
+                        break;
+                    }
                     Ok(None) if std::time::Instant::now() >= deadline => {
                         let _ = child.kill();
+                        let _ = child.wait();
+                        warn!("screenpipe-mcp prewarm timed out after 120s");
                         break;
                     }
                     Ok(None) => std::thread::sleep(std::time::Duration::from_millis(200)),
-                    Err(_) => break,
+                    Err(error) => {
+                        warn!("screenpipe-mcp prewarm status check failed: {error}");
+                        break;
+                    }
                 }
             }
-            info!(
-                "screenpipe-mcp prewarm complete ({})",
-                screenpipe_core::agents::acp::SCREENPIPE_MCP_PKG
-            );
         }
         Err(e) => warn!("screenpipe-mcp prewarm could not spawn bun: {}", e),
     }

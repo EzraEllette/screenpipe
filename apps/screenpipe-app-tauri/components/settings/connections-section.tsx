@@ -66,9 +66,14 @@ import {
   buildMcpConfig,
   buildCodexMcpToml,
   connectAiTool,
+  connectAiToolTargets,
   disconnectAiTool,
+  disconnectAiToolTargets,
+  detectAiTools,
   installClaudeMcp,
+  isClaudeCodeMcpInstalled,
   friendlyToolError,
+  type ConnectAllToolId,
   type FriendlyToolError,
 } from "@/lib/ai-tools-mcp";
 import { AiToolsCard } from "./ai-tools-card";
@@ -239,7 +244,9 @@ async function detectInstalledConnectionIds(): Promise<Set<string>> {
     }
   };
 
-  const hasClaudeCode = dotfileExists(".claude", ".claude.json");
+  // ~/.claude is also where Claude Desktop receives shared skills, so it does
+  // not prove Claude Code exists. Claude Code itself owns ~/.claude.json.
+  const hasClaudeCode = dotfileExists(".claude.json");
 
   if (os === "macos") {
     await Promise.all([
@@ -1070,31 +1077,58 @@ function PanelConfigError({ err }: { err: FriendlyToolError }) {
   );
 }
 
-function ClaudePanel({ onConnected, onDisconnected }: { onConnected?: () => void; onDisconnected?: () => void }) {
+async function isClaudeTargetConnected(id: ConnectAllToolId): Promise<boolean> {
+  if (id === "claude") return !!(await getInstalledClaudeScreenpipeEntry());
+  if (id === "claude-code") return isClaudeCodeMcpInstalled();
+  return false;
+}
+
+function ClaudePanel({
+  targets,
+  onConnected,
+  onDisconnected,
+}: {
+  targets: ConnectAllToolId[];
+  onConnected?: () => void;
+  onDisconnected?: () => void;
+}) {
   const [state, setState] = useState<"idle" | "connecting" | "connected">("idle");
   const [connectError, setConnectError] = useState<FriendlyToolError | null>(null);
   const [claudeAppInstalled, setClaudeAppInstalled] = useState<boolean | null>(null);
 
   useEffect(() => {
-    getInstalledClaudeScreenpipeEntry().then(async (entry) => {
-      if (!entry) return;
-      if (!(await areExternalAgentSkillsInstalled("claude"))) return;
-      setState("connected");
-      onConnected?.();
-      // Auto-repair legacy managed configs so they use the fast env-key path
-      // and carry the fixed Claude category used by privacy-safe value metrics.
-      // Hand-customized configs are always left untouched.
-      if (isStaleClaudeScreenpipeEntry(entry)) {
-        try {
-          const next = await buildMcpConfig({ client: "claude" });
-          if (next.env?.SCREENPIPE_LOCAL_API_KEY) {
-            await installClaudeMcp();
-          }
-        } catch (e) {
-          console.warn("claude mcp auto-repair skipped:", e);
+    Promise.all([
+      areExternalAgentSkillsInstalled("claude"),
+      Promise.all(targets.map(isClaudeTargetConnected)),
+    ])
+      .then(([hasSkills, targetStatus]) => {
+        if (hasSkills && targetStatus.every(Boolean)) {
+          setState("connected");
+          onConnected?.();
+        } else {
+          setState((current) => current === "connecting" ? current : "idle");
         }
-      }
-    }).catch(() => {});
+      })
+      .catch(() => {});
+
+    if (targets.includes("claude")) {
+      getInstalledClaudeScreenpipeEntry().then(async (entry) => {
+        if (!entry) return;
+        // Auto-repair legacy managed configs so they use the fast env-key path
+        // and carry the fixed Claude category used by privacy-safe value metrics.
+        // Hand-customized configs are always left untouched.
+        if (isStaleClaudeScreenpipeEntry(entry)) {
+          try {
+            const next = await buildMcpConfig({ client: "claude" });
+            if (next.env?.SCREENPIPE_LOCAL_API_KEY) {
+              await installClaudeMcp();
+            }
+          } catch (e) {
+            console.warn("claude mcp auto-repair skipped:", e);
+          }
+        }
+      }).catch(() => {});
+    }
     const os = platform();
     if (os === "windows") {
       // Check for MSIX package folder first, then fall back to traditional exe search
@@ -1112,33 +1146,29 @@ function ClaudePanel({ onConnected, onDisconnected }: { onConnected?: () => void
     } else {
       setClaudeAppInstalled(false);
     }
-  }, []);
+  }, [targets]);
 
   const handleConnect = async () => {
     try {
       setState("connecting");
       setConnectError(null);
-      const mcp = await connectAiTool("claude");
+      const result = await connectAiToolTargets(targets);
+      if (result.failed.length > 0) throw result.failed[0].error;
       setState("connected");
       onConnected?.();
-      // The desktop app ships a bundled `bun`, so an npx fallback here means bun
-      // couldn't be resolved — that config needs Node, which many users lack.
-      // Warn instead of leaving the user with a silently-broken setup.
-      if (mcp.command === "npx") {
-        await message(
-          "connected, but screenpipe couldn't find its bundled runtime, so it wrote a config that needs Node.js installed.\n\nif Claude can't start screenpipe, install Node (https://nodejs.org) or reinstall the screenpipe app, then reconnect.",
-          { title: "claude mcp setup", kind: "warning" }
-        );
-      }
     } catch (error) {
-      console.error("failed to install claude mcp:", error instanceof Error ? error.message : String(error));
+      console.error("failed to install Claude connection:", error instanceof Error ? error.message : String(error));
       setConnectError(friendlyToolError(error));
       setState("idle");
     }
   };
 
   const handleDisconnect = async () => {
-    try { await disconnectAiTool("claude"); } catch (e) { console.warn("claude disconnect failed:", e); }
+    const result = await disconnectAiToolTargets(targets);
+    if (result.failed.length > 0) {
+      console.warn("Claude disconnect incomplete:", result.failed[0].error);
+      setConnectError(friendlyToolError(result.failed[0].error));
+    }
     setState("idle");
     onDisconnected?.();
   };
@@ -1164,7 +1194,7 @@ function ClaudePanel({ onConnected, onDisconnected }: { onConnected?: () => void
   return (
     <div className="space-y-3">
       <p className="text-xs text-muted-foreground">
-        Install the screenpipe MCP plus API and CLI skills for Claude in one click.
+        Install screenpipe MCP and skills for every Claude app detected on this device.
       </p>
       <div className="flex flex-wrap gap-2">
         {state === "connected" ? (
@@ -1176,21 +1206,28 @@ function ClaudePanel({ onConnected, onDisconnected }: { onConnected?: () => void
             {state === "connecting" ? (<><Loader2 className="h-3 w-3 animate-spin" />connecting...</>) : connectError ? (<><RotateCw className="h-3 w-3" />retry</>) : (<><Download className="h-3 w-3" />connect</>)}
           </Button>
         )}
-        {claudeAppInstalled === false ? (
+        {targets.includes("claude") && claudeAppInstalled === false ? (
           <Button variant="outline" onClick={() => openUrl("https://claude.ai/download")} size="sm" className="gap-1.5 h-7 text-xs normal-case font-sans tracking-normal">
             <ExternalLink className="h-3 w-3" />get claude desktop
           </Button>
-        ) : (
+        ) : targets.includes("claude") ? (
           <Button variant="outline" onClick={openClaude} size="sm" className="gap-1.5 h-7 text-xs normal-case font-sans tracking-normal">
             <ExternalLink className="h-3 w-3" />open claude
           </Button>
-        )}
+        ) : null}
       </div>
       {connectError && <PanelConfigError err={connectError} />}
       {state === "connected" && (
         <p className="text-xs text-muted-foreground">
           <strong>connected!</strong> MCP + both skills installed. Restart Claude and ask: &quot;what did I do in the last 5 minutes?&quot;
         </p>
+      )}
+      {targets.includes("claude-code") && (
+        <MemorySyncSubsection
+          integrationId="claude-code"
+          defaultPath="~/.claude"
+          targetFilename="CLAUDE.md"
+        />
       )}
     </div>
   );
@@ -1433,35 +1470,6 @@ function GrokPanel({ onConnected, onDisconnected }: { onConnected?: () => void; 
   );
 }
 
-function ClaudeCodePanel() {
-  const [copied, setCopied] = useState(false);
-  const cmd = "claude mcp add screenpipe -- npx -y screenpipe-mcp@latest";
-  const handleCopy = useCallback(async () => {
-    try {
-      await commands.copyTextToClipboard(cmd);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    } catch {}
-  }, []);
-
-  return (
-    <div className="space-y-3">
-      <p className="text-xs text-muted-foreground">Give Claude Code access to your screen &amp; audio history. Run in your terminal:</p>
-      <div className="relative group">
-        <pre className="bg-muted border border-border rounded-lg p-3 pr-10 text-xs font-mono text-foreground overflow-x-auto">{cmd}</pre>
-        <Button variant="ghost" size="sm" onClick={handleCopy} className="absolute top-2 right-2 h-6 w-6 p-0 opacity-0 group-hover:opacity-100 transition-opacity">
-          {copied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3 text-muted-foreground" />}
-        </Button>
-      </div>
-      <MemorySyncSubsection
-        integrationId="claude-code"
-        defaultPath="~/.claude"
-        targetFilename="CLAUDE.md"
-      />
-    </div>
-  );
-}
-
 // Render one `/memories/sync-external` per-destination outcome to a short
 // human string. Shared by every memory-sync subsection (claude code, codex,
 // obsidian) so the snake_case SyncOutcome parsing stays in exactly one place.
@@ -1482,10 +1490,10 @@ function describeSyncOutcome(result: any): string {
   return "synced";
 }
 
-// Shared subsection used by ClaudeCodePanel + CodexPanel. Surfaces the
+// Shared subsection used by the merged Claude panel + CodexPanel. Surfaces the
 // memory-sync feature backed by the screenpipe-connect Integrations of
 // the same id ("claude-code", "codex"). Lives next to the MCP install
-// flow so the user finds both surfaces in one card per tool.
+// flow so the user finds both surfaces in one card per product.
 //
 // State machine: idle → connecting → connected ⇆ syncing ⇆ idle. The
 // "connected" signal is whether GET /connections/:id returns a non-empty
@@ -3734,17 +3742,24 @@ export function ConnectionsSection({
   const [detectedConnectionIds, setDetectedConnectionIds] = useState<Set<string>>(() => new Set());
 
   const os = typeof window !== "undefined" ? platform() : "";
+  const claudeTargets = useMemo<ConnectAllToolId[]>(() => {
+    const targets: ConnectAllToolId[] = [];
+    if (detectedConnectionIds.has("claude")) targets.push("claude");
+    if (detectedConnectionIds.has("claude-code")) targets.push("claude-code");
+    if (targets.length === 0) targets.push(os === "linux" ? "claude-code" : "claude");
+    return targets;
+  }, [detectedConnectionIds, os]);
 
   useEffect(() => {
     const pending = sessionStorage.getItem("openConnection");
     if (!pending) return;
     sessionStorage.removeItem("openConnection");
-    setSelected(pending);
+    setSelected(pending === "claude-code" ? "claude" : pending);
   }, []);
 
   useEffect(() => {
     if (!focusRequestId) return;
-    setSelected(focusConnectionId || null);
+    setSelected(focusConnectionId === "claude-code" ? "claude" : focusConnectionId || null);
     setRequestedScopeVariant(
       focusConnectionId && focusScopeVariant
         ? { connectionId: focusConnectionId, scopeVariant: focusScopeVariant }
@@ -3831,8 +3846,19 @@ export function ConnectionsSection({
     // Connected = MCP entry AND both built-in skills, matching the panels
     // (ClaudePanel/CodexPanel) — an MCP-only setup shows as not connected so
     // one click can repair it.
-    Promise.all([getInstalledMcpVersion(), areExternalAgentSkillsInstalled("claude")])
-      .then(([v, skills]) => setClaudeInstalled(!!v && skills))
+    Promise.all([
+      detectAiTools(),
+      getInstalledMcpVersion(),
+      isClaudeCodeMcpInstalled(),
+      areExternalAgentSkillsInstalled("claude"),
+    ])
+      .then(([tools, desktopMcp, codeMcp, skills]) => {
+        const targets = tools.filter((id) => id === "claude" || id === "claude-code");
+        const connected = targets.length > 0 && targets.every((id) =>
+          id === "claude" ? !!desktopMcp : codeMcp
+        );
+        setClaudeInstalled(connected && skills);
+      })
       .catch(() => setClaudeInstalled(false));
     Promise.all([isCursorMcpInstalled(), areExternalAgentSkillsInstalled("cursor")])
       .then(([mcp, skills]) => setCursorInstalled(mcp && skills))
@@ -3968,11 +3994,10 @@ export function ConnectionsSection({
   // Build unified tile list
   const allTiles: ConnectionTile[] = useMemo(() => {
     const hardcoded: ConnectionTile[] = [
-      { id: "claude", name: "Claude Desktop", icon: "claude", connected: claudeInstalled, detected: detectedConnectionIds.has("claude") },
+      { id: "claude", name: "Claude", icon: "claude", connected: claudeInstalled, detected: detectedConnectionIds.has("claude") || detectedConnectionIds.has("claude-code") },
       { id: "cursor", name: "Cursor", icon: "cursor", connected: cursorInstalled, detected: detectedConnectionIds.has("cursor") },
       { id: "codex", name: "Codex", icon: "codex", connected: codexInstalled, detected: detectedConnectionIds.has("codex") },
       { id: "grok", name: "Grok CLI", icon: "grok", connected: grokInstalled, detected: detectedConnectionIds.has("grok") },
-      { id: "claude-code", name: "Claude Code", icon: "claude-code", connected: false, detected: detectedConnectionIds.has("claude-code") },
       { id: "warp", name: "Warp", icon: "warp", connected: false, detected: detectedConnectionIds.has("warp") },
       { id: "chatgpt", name: "ChatGPT", icon: "chatgpt", connected: chatgptConnected, detected: detectedConnectionIds.has("chatgpt") },
       ...(os === "macos" ? [
@@ -4015,7 +4040,9 @@ export function ConnectionsSection({
     // confused users. The backend integrations stay registered so pipes calling
     // /connections/{openclaw,hermes} keep working.
     const REMOTE_AGENT_TILE_IDS = new Set(["openclaw", "hermes"]);
-    const hardcodedIds = new Set(hardcoded.map(h => h.id));
+    // Claude Code's backend integration powers memory sync inside the merged
+    // Claude panel; it is not a second user-facing connection tile.
+    const hardcodedIds = new Set([...hardcoded.map(h => h.id), "claude-code"]);
     const apiTiles: ConnectionTile[] = integrations
       .filter(i => !hardcodedIds.has(i.id) && i.id !== "owned-default" && i.id !== "obsidian-memories" && !REMOTE_AGENT_TILE_IDS.has(i.id))
       .map(i => ({
@@ -4171,7 +4198,9 @@ export function ConnectionsSection({
       );
     }
     switch (selected) {
-      case "claude": return <ClaudePanel
+      case "claude":
+      case "claude-code": return <ClaudePanel
+        targets={claudeTargets}
         onConnected={() => setClaudeInstalled(true)}
         onDisconnected={() => setClaudeInstalled(false)}
       />;
@@ -4187,7 +4216,6 @@ export function ConnectionsSection({
         onConnected={() => setGrokInstalled(true)}
         onDisconnected={() => setGrokInstalled(false)}
       />;
-      case "claude-code": return <ClaudeCodePanel />;
       case "chatgpt": return <ChatGptPanel />;
       case "user-browser": return <UserBrowserCard />;
       case "browser-url": return <BrowserUrlCard onStatusChange={setBrowserUrlConnected} />;

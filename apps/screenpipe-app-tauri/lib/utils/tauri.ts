@@ -885,8 +885,8 @@ async installBrainViewTemplateKit(request: InstallBrainViewTemplateKitRequest) :
 },
 /**
  * Install the two built-in screenpipe skills into a supported external agent.
- * Explicit Settings actions still call this narrow command; first-run native
- * background setup shares the same engine skill installer directly.
+ * Explicit Settings actions still call this narrow command; native launch
+ * reconciliation shares the same engine skill installer directly.
  */
 async installExternalAgentSkills(target: string) : Promise<Result<string[], string>> {
     try {
@@ -2239,6 +2239,18 @@ async scanDeviceSkills() : Promise<Result<DeviceSkill[], string>> {
 async searchNavigateToTimeline(timestamp: string, frameId: number | null, searchTerms: string[] | null, searchResultsJson: string | null, searchQuery: string | null, timelineOrigin: string | null) : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("search_navigate_to_timeline", { timestamp, frameId, searchTerms, searchResultsJson, searchQuery, timelineOrigin }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Persist the user's explicit Settings choice. Automatic launch reconciliation
+ * skips opted-out targets until the user explicitly connects them again.
+ */
+async setAiToolAutoConnectOptOut(target: string, optOut: boolean) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_ai_tool_auto_connect_opt_out", { target, optOut }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };

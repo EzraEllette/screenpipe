@@ -154,6 +154,7 @@ export interface ConnectionSuggestionTile {
 
 const CONNECTION_SEARCH_ALIASES_BY_ID: Record<string, readonly string[]> = {
   gmail: ["google", "google mail", "email", "mail"],
+  claude: ["anthropic", "claude desktop", "claude code"],
 };
 
 export function connectionMatchesSearch(
@@ -172,7 +173,7 @@ export function connectionMatchesSearch(
 }
 
 export const CONNECTION_HARDCODED_DESCRIPTIONS: Record<string, string> = {
-  "claude": "Search your screen & audio from Claude Desktop via MCP",
+  "claude": "Give Claude Desktop and Code access to your screen & audio",
   "cursor": "Give Cursor AI access to your screen history via MCP",
   "codex": "Give Codex access to your screen & audio via MCP",
   "grok": "Give Grok CLI access to your screen & audio via MCP",
@@ -225,7 +226,7 @@ export const FEATURED_CONNECTION_IDS = [
   "obsidian",
   "notion",
   "github",
-  "claude-code",
+  "claude",
   "linear",
 ];
 
@@ -250,9 +251,8 @@ export const DEVICE_CONNECTION_ORDER = [
   "whatsapp",
   "granola",
   // Desktop AI clients & local runtimes.
-  "claude-code",
-  "codex",
   "claude",
+  "codex",
   "cursor",
   "grok",
   "chatgpt",

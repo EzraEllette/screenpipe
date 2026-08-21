@@ -150,12 +150,27 @@ async function callActivitySummaryThroughMcp(
       await waitForAppReady();
     });
 
-    it("connects detected Codex, Cursor, Gemini, and Runner configs in the Rust background task", async () => {
+    it("connects detected Claude Code, Codex, Cursor, Gemini, and Runner configs in the Rust background task", async () => {
+      const claudeCodeConfig = resolve(E2E_AI_TOOLS_HOME, ".claude.json");
       const codexConfig = resolve(E2E_AI_TOOLS_HOME, ".codex", "config.toml");
       const cursorConfig = resolve(E2E_AI_TOOLS_HOME, ".cursor", "mcp.json");
       const geminiConfig = resolve(E2E_AI_TOOLS_HOME, ".gemini", "settings.json");
       const runnerConfig = resolve(E2E_AI_TOOLS_HOME, ".runner", "mcp.json");
       const requiredSkills = [
+        resolve(
+          E2E_AI_TOOLS_HOME,
+          ".claude",
+          "skills",
+          "screenpipe-api",
+          "SKILL.md",
+        ),
+        resolve(
+          E2E_AI_TOOLS_HOME,
+          ".claude",
+          "skills",
+          "screenpipe-cli",
+          "SKILL.md",
+        ),
         resolve(
           E2E_AI_TOOLS_HOME,
           ".codex",
@@ -203,6 +218,10 @@ async function callActivitySummaryThroughMcp(
       await browser.waitUntil(
         () =>
           requiredSkills.every(existsSync) &&
+          Boolean(
+            JSON.parse(readFileSync(claudeCodeConfig, "utf8")).mcpServers
+              ?.screenpipe,
+          ) &&
           readFileSync(codexConfig, "utf8").includes(
             "[mcp_servers.screenpipe]",
           ) &&
@@ -232,6 +251,11 @@ async function callActivitySummaryThroughMcp(
         `SCREENPIPE_API_URL = "http://localhost:${api.port}"`,
       );
       expect(codex).toContain('SCREENPIPE_MCP_CLIENT = "codex"');
+
+      const claudeCode = JSON.parse(readFileSync(claudeCodeConfig, "utf8"));
+      expect(claudeCode.mcpServers.screenpipe.env.SCREENPIPE_MCP_CLIENT).toBe(
+        "claude-code",
+      );
 
       const cursor = JSON.parse(readFileSync(cursorConfig, "utf8"));
       expect(cursor.theme).toBe("dark");

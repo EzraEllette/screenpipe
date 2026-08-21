@@ -19,10 +19,94 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use specta::Type;
 use tracing::{info, warn};
+
+const AI_TOOL_AUTO_CONNECT_TARGETS: [&str; 9] = [
+    "claude",
+    "claude-code",
+    "codex",
+    "cursor",
+    "gemini",
+    "openclaw",
+    "hermes",
+    "runner",
+    "windsurf",
+];
+
+/// Orders the launch reconciler and Settings opt-out writes. Disconnect sets
+/// its marker while holding this lock before removing MCP/skills, so an
+/// already-running launch repair cannot finish after the user's explicit
+/// choice and reconnect that target.
+static AI_TOOL_AUTO_CONNECT_LOCK: Lazy<tokio::sync::Mutex<()>> =
+    Lazy::new(|| tokio::sync::Mutex::new(()));
+
+fn ai_tool_auto_connect_opt_out_dir() -> PathBuf {
+    screenpipe_core::paths::default_screenpipe_data_dir().join("ai-tool-auto-connect-opt-outs-v1")
+}
+
+fn ai_tool_auto_connect_opt_outs_in(dir: &Path) -> BTreeSet<String> {
+    AI_TOOL_AUTO_CONNECT_TARGETS
+        .iter()
+        .filter(|target| dir.join(target).is_file())
+        .map(|target| (*target).to_string())
+        .collect()
+}
+
+fn set_ai_tool_auto_connect_opt_out_in(
+    dir: &Path,
+    target: &str,
+    opt_out: bool,
+) -> Result<(), String> {
+    if !AI_TOOL_AUTO_CONNECT_TARGETS.contains(&target) {
+        return Err(format!("unsupported AI tool: {target}"));
+    }
+    let marker = dir.join(target);
+    if opt_out {
+        std::fs::create_dir_all(dir)
+            .map_err(|error| format!("failed to create {}: {error}", dir.display()))?;
+        std::fs::write(&marker, b"explicitly disconnected\n")
+            .map_err(|error| format!("failed to write {}: {error}", marker.display()))?;
+    } else if let Err(error) = std::fs::remove_file(&marker) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            return Err(format!("failed to remove {}: {error}", marker.display()));
+        }
+    }
+    Ok(())
+}
+
+/// Serialize a marker write with any in-flight launch reconciliation.
+async fn set_ai_tool_auto_connect_opt_out_serialized_in(
+    dir: PathBuf,
+    target: String,
+    opt_out: bool,
+) -> Result<(), String> {
+    let _guard = AI_TOOL_AUTO_CONNECT_LOCK.lock().await;
+    tokio::task::spawn_blocking(move || {
+        set_ai_tool_auto_connect_opt_out_in(&dir, &target, opt_out)
+    })
+    .await
+    .map_err(|error| format!("failed to save AI tool connection choice: {error}"))?
+}
+
+/// Persist the user's explicit Settings choice. Automatic launch reconciliation
+/// skips opted-out targets until the user explicitly connects them again.
+#[tauri::command]
+#[specta::specta]
+pub async fn set_ai_tool_auto_connect_opt_out(
+    target: String,
+    opt_out: bool,
+) -> Result<(), String> {
+    set_ai_tool_auto_connect_opt_out_serialized_in(
+        ai_tool_auto_connect_opt_out_dir(),
+        target,
+        opt_out,
+    )
+    .await
+}
 
 fn background_ai_tools_home() -> Option<PathBuf> {
     #[cfg(feature = "e2e")]
@@ -76,10 +160,10 @@ async fn wait_for_background_api_key(api_auth_enabled: bool) -> Option<String> {
     }
 }
 
-/// During an incomplete onboarding, connect detected local AI tools once in a
-/// native background task. The task is non-blocking, retries naturally across
-/// permission-triggered app restarts, and stops running after onboarding is
-/// complete so a later explicit disconnect in Settings stays disconnected.
+/// On every app launch, connect detected local AI tools in a native background
+/// task. The task is non-blocking, retries naturally across
+/// permission-triggered app restarts, and is safe to run on every launch: it
+/// changes only missing or stale screenpipe-managed MCP and skill entries.
 pub fn connect_detected_ai_tools_in_background(api_auth_enabled: bool, api_port: u16) {
     let Some(home) = background_ai_tools_home() else {
         info!("AI tool background setup skipped: no home directory");
@@ -89,7 +173,6 @@ pub fn connect_detected_ai_tools_in_background(api_auth_enabled: bool, api_port:
         warn!("AI tool background setup skipped: bundled Bun was not found");
         return;
     };
-
     tauri::async_runtime::spawn(async move {
         let api_key = wait_for_background_api_key(api_auth_enabled).await;
 
@@ -99,21 +182,31 @@ pub fn connect_detected_ai_tools_in_background(api_auth_enabled: bool, api_port:
             let bun_path = bun_path.clone();
             let api_key = api_key.clone();
             let api_url = api_url.clone();
-            match tokio::task::spawn_blocking(move || {
-                screenpipe_engine::cli::agent::setup_all_detected_desktop_in(
-                    &home,
-                    &bun_path,
-                    api_key.as_deref(),
-                    &api_url,
-                )
-            })
-            .await
-            {
+            // Read intent immediately before every attempt. The shared lock
+            // makes the marker write an ordering barrier: after Disconnect
+            // returns, no older launch repair can still reconnect that target.
+            let result = {
+                let _guard = AI_TOOL_AUTO_CONNECT_LOCK.lock().await;
+                let opted_out =
+                    ai_tool_auto_connect_opt_outs_in(&ai_tool_auto_connect_opt_out_dir());
+                tokio::task::spawn_blocking(move || {
+                    screenpipe_engine::cli::agent::reconcile_detected_desktop_in(
+                        &home,
+                        &bun_path,
+                        api_key.as_deref(),
+                        &api_url,
+                        &opted_out,
+                    )
+                })
+                .await
+            };
+            match result {
                 Ok(report) if report.failures.is_empty() => {
                     info!(
                         detected = report.detected,
                         connected = report.connected,
                         already_connected = report.already_connected,
+                        opted_out = report.opted_out,
                         "AI tool background setup finished"
                     );
                     return;
@@ -132,6 +225,7 @@ pub fn connect_detected_ai_tools_in_background(api_auth_enabled: bool, api_port:
                         detected = report.detected,
                         connected = report.connected,
                         already_connected = report.already_connected,
+                        opted_out = report.opted_out,
                         failures = report.failures.len(),
                         "AI tool background setup finished"
                     );
@@ -675,8 +769,8 @@ fn write_managed_team_skill_package(
 }
 
 /// Install the two built-in screenpipe skills into a supported external agent.
-/// Explicit Settings actions still call this narrow command; first-run native
-/// background setup shares the same engine skill installer directly.
+/// Explicit Settings actions still call this narrow command; native launch
+/// reconciliation shares the same engine skill installer directly.
 #[tauri::command]
 #[specta::specta]
 pub fn install_external_agent_skills(target: String) -> Result<Vec<String>, String> {
@@ -1598,6 +1692,60 @@ pub async fn install_registry_skill(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ai_tool_auto_connect_opt_out_is_per_target_and_reversible() {
+        let root = std::env::temp_dir().join(format!(
+            "screenpipe-ai-tool-opt-out-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+
+        set_ai_tool_auto_connect_opt_out_in(&root, "codex", true).unwrap();
+        set_ai_tool_auto_connect_opt_out_in(&root, "claude-code", true).unwrap();
+        assert_eq!(
+            ai_tool_auto_connect_opt_outs_in(&root),
+            BTreeSet::from(["claude-code".to_string(), "codex".to_string()])
+        );
+
+        set_ai_tool_auto_connect_opt_out_in(&root, "codex", false).unwrap();
+        assert_eq!(
+            ai_tool_auto_connect_opt_outs_in(&root),
+            BTreeSet::from(["claude-code".to_string()])
+        );
+        assert!(set_ai_tool_auto_connect_opt_out_in(&root, "../escape", true).is_err());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn explicit_opt_out_waits_for_in_flight_reconciliation() {
+        let root = std::env::temp_dir().join(format!(
+            "screenpipe-ai-tool-opt-out-ordering-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let marker = root.join("codex");
+        let guard = AI_TOOL_AUTO_CONNECT_LOCK.lock().await;
+        let pending = tokio::spawn(set_ai_tool_auto_connect_opt_out_serialized_in(
+            root.clone(),
+            "codex".to_string(),
+            true,
+        ));
+
+        tokio::task::yield_now().await;
+        assert!(!marker.exists());
+        drop(guard);
+        pending.await.unwrap().unwrap();
+        assert!(marker.is_file());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     #[test]
     fn skill_key_normalizes() {

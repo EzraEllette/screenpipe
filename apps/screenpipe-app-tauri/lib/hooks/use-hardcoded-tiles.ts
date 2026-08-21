@@ -43,7 +43,13 @@ export async function getInstalledMcpVersion(): Promise<string | null> {
     const configPath = await getClaudeConfigPath();
     if (!configPath) return null;
     const config = JSON.parse(await readTextFile(configPath));
-    return config?.mcpServers?.screenpipe ? "installed" : null;
+    const servers = config?.mcpServers;
+    const key =
+      servers &&
+      Object.keys(servers).find(
+        (name) => name.toLowerCase() === "screenpipe",
+      );
+    return key ? "installed" : null;
   } catch { return null; }
 }
 
@@ -114,7 +120,13 @@ export async function getInstalledClaudeScreenpipeEntry(): Promise<unknown | nul
     const configPath = await getClaudeConfigPath();
     if (!configPath) return null;
     const config = JSON.parse(await readTextFile(configPath));
-    return config?.mcpServers?.screenpipe ?? null;
+    const servers = config?.mcpServers;
+    const key =
+      servers &&
+      Object.keys(servers).find(
+        (name) => name.toLowerCase() === "screenpipe",
+      );
+    return key ? servers[key] : null;
   } catch { return null; }
 }
 
@@ -126,7 +138,13 @@ export async function getCursorMcpConfigPath(): Promise<string> {
 export async function isCursorMcpInstalled(): Promise<boolean> {
   try {
     const content = await readTextFile(await getCursorMcpConfigPath());
-    return !!JSON.parse(content)?.mcpServers?.screenpipe;
+    const servers = JSON.parse(content)?.mcpServers;
+    return (
+      !!servers &&
+      Object.keys(servers).some(
+        (name) => name.toLowerCase() === "screenpipe",
+      )
+    );
   } catch { return false; }
 }
 
@@ -135,7 +153,7 @@ export async function getCodexConfigPath(): Promise<string> {
   return join(home, ".codex", "config.toml");
 }
 
-const CODEX_SCREENPIPE_TABLE = /(?:^|\n)\[mcp_servers\.screenpipe\][\s\S]*?(?=\n\[(?!mcp_servers\.screenpipe(?:\.|\]))[^\]]+\]|\s*$)/;
+const CODEX_SCREENPIPE_TABLE = /(?:^|\n)\[mcp_servers\.(?:screenpipe|"screenpipe")\][\s\S]*?(?=\n\[(?!mcp_servers\.(?:screenpipe|"screenpipe")(?:\.|\]))[^\]]+\]|\s*$)/i;
 
 export function hasEnabledCodexMcp(content: string): boolean {
   const table = content.match(CODEX_SCREENPIPE_TABLE)?.[0] ?? "";

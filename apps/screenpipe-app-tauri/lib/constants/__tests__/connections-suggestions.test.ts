@@ -102,4 +102,11 @@ describe("connection search", () => {
   it("does not match unrelated searches", () => {
     expect(connectionMatchesSearch(gmail, "calendar")).toBe(false);
   });
+
+  it.each(["claude", "claude desktop", "claude code", "anthropic"])(
+    "finds the merged Claude tile with %s",
+    (query) => {
+      expect(connectionMatchesSearch(tile("claude", { name: "Claude" }), query)).toBe(true);
+    },
+  );
 });

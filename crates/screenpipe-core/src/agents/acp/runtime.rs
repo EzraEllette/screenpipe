@@ -44,13 +44,10 @@ pub const RUNTIME_ARG: &str = "--screenpipe-acp-runtime";
 const PROCESS_GUARD_ARG: &str = "--screenpipe-acp-process-guard";
 pub const CLOUD_API_KEY_ENV: &str = "SCREENPIPE_API_KEY";
 
-/// The core screenpipe MCP server (activity-summary, search-content,
-/// update-memory). Pinned rather than `@latest` so `bun x` resolves it from
-/// cache instead of re-fetching every session; a cold/slow `@latest` fetch is
-/// why these tools sometimes never registered and the agent fell back to raw
-/// SQL. `pi::prewarm_screenpipe_mcp` seeds the cache at install. Bump alongside
-/// packages/screenpipe-mcp.
-pub const SCREENPIPE_MCP_PKG: &str = "screenpipe-mcp@0.19.2";
+/// The latest published core screenpipe MCP server (activity-summary,
+/// search-content, update-memory). `pi::prewarm_screenpipe_mcp` seeds Bun's
+/// shared cache so normal launches do not pay the cold-install cost.
+pub const SCREENPIPE_MCP_PKG: &str = "screenpipe-mcp@latest";
 
 /// Environment carried into the runtime process by `pi.rs` that belongs to the
 /// runtime alone and must never be inherited by any child it spawns — neither
@@ -4720,15 +4717,8 @@ mod tests {
     }
 
     #[test]
-    fn screenpipe_mcp_pin_matches_workspace_package_version() {
-        let package: Value = serde_json::from_str(include_str!(
-            "../../../../../packages/screenpipe-mcp/package.json"
-        ))
-        .expect("parse screenpipe-mcp package.json");
-        let version = package["version"]
-            .as_str()
-            .expect("screenpipe-mcp package version");
-        assert_eq!(SCREENPIPE_MCP_PKG, format!("screenpipe-mcp@{version}"));
+    fn screenpipe_mcp_uses_latest_published_package() {
+        assert_eq!(SCREENPIPE_MCP_PKG, "screenpipe-mcp@latest");
     }
 
     #[test]
