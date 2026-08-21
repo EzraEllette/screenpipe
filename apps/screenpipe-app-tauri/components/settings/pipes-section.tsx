@@ -53,6 +53,7 @@ import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { PipeTriggerPicker } from "./pipe-trigger-picker";
+import { PipePresetChain } from "./pipe-preset-chain";
 import { ProviderAutomationsPanel } from "./provider-automations-panel";
 import {
   CloudAgentRunner,
@@ -122,7 +123,6 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { useSettings } from "@/lib/hooks/use-settings";
-import { AIPresetsSelector } from "@/components/rewind/ai-presets-selector";
 import { useToast } from "@/components/ui/use-toast";
 import { useQueryState } from "nuqs";
 import { parseEnterpriseManagedVersion } from "@/lib/hooks/use-enterprise-pipes";
@@ -1041,7 +1041,7 @@ function errorTypeBadge(errorType: string | null) {
   );
 }
 
-/** Primary + backup model selector for a locally-run pipe. */
+/** Ordered model fallback selector for a locally-run pipe. */
 function PipePresetSelector({
   pipe,
   setPipes,
@@ -1055,22 +1055,8 @@ function PipePresetSelector({
   pendingConfigSaves: React.MutableRefObject<Record<string, Promise<void>>>;
   apiBase: string;
 }) {
-  const presetList: string[] = Array.isArray(pipe.config.preset)
-    ? pipe.config.preset
-    : pipe.config.preset
-      ? [pipe.config.preset]
-      : [];
-
-  // "auto" is a legacy/special value meaning "use default" — treat as no selection
-  const primaryPreset = presetList[0] && presetList[0] !== "auto" ? presetList[0] : null;
-  const fallbackPreset = presetList[1] && presetList[1] !== "auto" ? presetList[1] : null;
-  const [showFallback, setShowFallback] = useState(!!fallbackPreset);
-
-  const savePresets = (primary: string | null, fallback: string | null) => {
+  const savePresets = (presetValue: string | string[] | null) => {
     const pipeName = pipe.config.name;
-    const newList = [primary, fallback].filter(Boolean) as string[];
-    const presetValue: string | string[] | null =
-      newList.length === 0 ? null : newList.length === 1 ? newList[0] : newList;
 
     setPipes((prev: any[]) =>
       prev.map((p: any) =>
@@ -1099,68 +1085,7 @@ function PipePresetSelector({
   };
 
   return (
-    <div className="space-y-3 p-4">
-      <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_15rem] sm:items-center">
-        <div>
-          <Label className="text-xs font-medium">AI model</Label>
-          <p className="mt-0.5 text-[11px] text-muted-foreground">
-            used when screenpipe handles the run.
-          </p>
-        </div>
-        <AIPresetsSelector
-          compact
-          allowNone
-          noneLabel="use task default"
-          controlledPresetId={primaryPreset}
-          triggerAriaLabel="AI model"
-          onControlledSelect={(preset) =>
-            savePresets(preset?.id ?? null, fallbackPreset)
-          }
-        />
-      </div>
-
-      {showFallback ? (
-        <div className="grid gap-3 border-t border-border pt-3 sm:grid-cols-[minmax(0,1fr)_15rem] sm:items-start">
-          <div className="flex items-center justify-between">
-            <div>
-              <Label className="text-xs font-medium">backup model</Label>
-              <p className="mt-0.5 text-[11px] text-muted-foreground">
-                used if the first model is unavailable.
-              </p>
-            </div>
-            <button
-              className="text-[10px] text-muted-foreground hover:text-foreground"
-              onClick={() => {
-                setShowFallback(false);
-                savePresets(primaryPreset, null);
-              }}
-            >
-              remove
-            </button>
-          </div>
-          <AIPresetsSelector
-            compact
-            allowNone
-            noneLabel="no backup"
-            controlledPresetId={fallbackPreset}
-            triggerAriaLabel="Backup model"
-            onControlledSelect={(preset) =>
-              savePresets(primaryPreset, preset?.id ?? null)
-            }
-          />
-        </div>
-      ) : (
-        <button
-          className="text-[11px] text-muted-foreground hover:text-foreground transition-colors"
-          onClick={() => setShowFallback(true)}
-        >
-          + add a backup model
-        </button>
-      )}
-      <p className="text-[10px] text-muted-foreground">
-        coding-agent presets run unattended and use this scheduled task&apos;s permissions
-      </p>
-    </div>
+    <PipePresetChain preset={pipe.config.preset} onChange={savePresets} />
   );
 }
 
