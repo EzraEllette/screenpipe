@@ -333,12 +333,14 @@ export interface ChatSessionActivityPayload {
   unreadHint?: boolean;
 }
 
-/** Merge a `chat-session-activity` event into the sidebar store.
+/** Patch a canonical session with a `chat-session-activity` event.
  *
- * Extracted verbatim from the home page's listener so the upsert-vs-patch,
- * staleness (`existing.updatedAt > updatedAt`), title/preview/status merge,
- * and unread-hint branches are unit-testable in isolation. `now` is injected
- * so the `lastContentAt` write is deterministic under test.
+ * Activity is a lightweight, status-only mirror and cannot prove a
+ * conversation exists. Unknown ids are therefore ignored until disk hydration
+ * or `chat-conversation-saved` supplies canonical content. This prevents a
+ * stale or foreign process pulse from creating an empty "untitled" sidebar
+ * row. `now` is injected so the `lastContentAt` write is deterministic under
+ * test.
  */
 export function applyChatSessionActivity(
   store: Pick<ChatStore, "sessions" | "currentId" | "panelSessionId" | "actions">,
@@ -349,46 +351,31 @@ export function applyChatSessionActivity(
     payload ?? ({} as Partial<ChatSessionActivityPayload>);
   if (!id || !updatedAt) return;
   const existing = store.sessions[id];
-  if (!existing) {
-    store.actions.upsert({
-      id,
-      title: title?.trim() || "untitled",
-      preview: preview ?? "",
-      status: status ?? "idle",
-      lastError,
-      messageCount: 0,
-      createdAt: updatedAt,
-      updatedAt,
-      pinned: false,
-      hidden: false,
-      unread: false,
-    });
-  } else {
-    if (existing.updatedAt > updatedAt) return;
-    const nextTitle = title?.trim() || existing.title;
-    const nextPreview = preview ?? existing.preview;
-    const nextStatus = status ?? existing.status;
-    const nextLastError =
-      lastError !== undefined
-        ? lastError || undefined
-        : nextStatus === "error"
-          ? existing.lastError
-          : undefined;
-    if (
-      existing.title === nextTitle &&
-      existing.preview === nextPreview &&
-      existing.status === nextStatus &&
-      existing.lastError === nextLastError &&
-      existing.updatedAt === updatedAt
-    ) return;
-    store.actions.patch(id, {
-      title: nextTitle,
-      preview: nextPreview,
-      status: nextStatus,
-      lastError: nextLastError,
-      updatedAt,
-    });
-  }
+  if (!existing) return;
+  if (existing.updatedAt > updatedAt) return;
+  const nextTitle = title?.trim() || existing.title;
+  const nextPreview = preview ?? existing.preview;
+  const nextStatus = status ?? existing.status;
+  const nextLastError =
+    lastError !== undefined
+      ? lastError || undefined
+      : nextStatus === "error"
+        ? existing.lastError
+        : undefined;
+  if (
+    existing.title === nextTitle &&
+    existing.preview === nextPreview &&
+    existing.status === nextStatus &&
+    existing.lastError === nextLastError &&
+    existing.updatedAt === updatedAt
+  ) return;
+  store.actions.patch(id, {
+    title: nextTitle,
+    preview: nextPreview,
+    status: nextStatus,
+    lastError: nextLastError,
+    updatedAt,
+  });
   if (unreadHint && !isSessionForeground(store, id)) {
     store.actions.patch(id, { lastContentAt: now });
   }
@@ -841,6 +828,39 @@ export function isReusableBlankChatSession(s: SessionRecord): boolean {
   if (s.messageCount > 0) return false;
   const msgs = (s.messages as Array<{ role?: string }> | undefined) ?? [];
   return !msgs.some((m) => m?.role === "user");
+}
+
+/** Ensure a panel-owned session id has a real, sidebar-hidden draft record.
+ *
+ * The standalone panel mints its initial id before any conversation has been
+ * saved. Keeping that id only in `currentId` leaves activity listeners unable
+ * to distinguish the real blank panel from an unrelated status-only pulse.
+ * This idempotent seed makes the ownership explicit without persisting an
+ * empty conversation to disk.
+ */
+export function ensureBlankChatSession(
+  store: Pick<ChatStore, "sessions" | "actions">,
+  id: string,
+  now: number = Date.now(),
+): SessionRecord {
+  const existing = store.sessions[id];
+  if (existing) return existing;
+
+  const draft: SessionRecord = {
+    id,
+    title: "untitled",
+    preview: "",
+    status: "idle",
+    messageCount: 0,
+    createdAt: now,
+    updatedAt: now,
+    pinned: false,
+    unread: false,
+    draft: true,
+    messages: [],
+  };
+  store.actions.upsert(draft);
+  return draft;
 }
 
 export function getOrCreateEmptyChatId(): { id: string; isNew: boolean } {

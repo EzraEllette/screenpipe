@@ -671,12 +671,13 @@
       ],
       "features": [
         "chat",
-        "chat-sidebar-dedupe"
+        "chat-sidebar-dedupe",
+        "chat-session-activity"
       ],
       "criticality": "medium",
       "confidence": "partial",
       "ux": "real-user-flow",
-      "notes": "Home automation card clicks must create exactly one persisted conversation per card, guarding the #4719 duplicate-row path."
+      "notes": "The Day Recap automation card must create exactly one persisted conversation and one sidebar row; status-only activity for an unknown session must not create an empty untitled sibling."
     },
     {
       "spec": "chat-composer-isolation.spec.ts",

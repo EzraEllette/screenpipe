@@ -19,9 +19,9 @@ can execute more runtime cases than this number shows.
 
 | Platform | Specs | Declared tests | Weighted points | Layers | Features | Critical score |
 | --- | --- | --- | --- | --- | --- | --- |
-| windows | 91 | 298 | 244.0 | 15 | 96 | 92% |
-| macos | 115 | 306 | 239.7 | 17 | 102 | 90% |
-| linux | 80 | 256 | 213.2 | 14 | 92 | 88% |
+| windows | 91 | 298 | 244.0 | 15 | 97 | 92% |
+| macos | 115 | 306 | 239.7 | 17 | 103 | 90% |
+| linux | 80 | 256 | 213.2 | 14 | 93 | 88% |
 
 ## Runtime Results
 
@@ -116,7 +116,7 @@ pass/fail/skip counts.
 | capture-stall-recovery.spec.ts | macos | capture-ocr, local-api, os-integration, real-ui-e2e | app-launch, capture-ocr, health, recording-health-alerts | high | conditional | mixed | 3 | Opt-in macOS full-stack lane proves all selected user-paused monitors remain an intentional disabled/normal state and resume cleanly, bounds a wedged SCK frame worker, proves the privacy-gated CoreGraphics fallback, reproduces a status-Running capture loop going silent, verifies stale and the failure pill, independent per-monitor stall detection with a VisionManager restart and resumed terminal capture progress, same-process UI recovery, and bounded id-based SCK lookup retry. |
 | capture-stall-stage-marker.spec.ts | macos | capture-ocr, local-api, os-integration | app-launch, capture-ocr | high | conditional | api | 1 | Opt-in macOS fault injection parks the capture loop; asserts /health names the frozen CaptureLoopStage with an advancing age while frame_status is stale, and that the stage age collapses once the watchdog recovers capture. |
 | chat-ask-user-tool-card.spec.ts | windows, macos, linux | chat-ai, real-ui-e2e | chat, chat-tools, pi-ask-user | medium | partial | mixed | 1 | Synthetic assistant tool block renders the Pi ask_user dropdown and sends the selected answer through the normal chat reply path. |
-| chat-automation-card-duplicate.spec.ts | windows, macos, linux | chat-ai, real-ui-e2e | chat, chat-sidebar-dedupe | medium | partial | real-user-flow | 1 | Home automation card clicks must create exactly one persisted conversation per card, guarding the #4719 duplicate-row path. |
+| chat-automation-card-duplicate.spec.ts | windows, macos, linux | chat-ai, real-ui-e2e | chat, chat-sidebar-dedupe, chat-session-activity | medium | partial | real-user-flow | 1 | The Day Recap automation card must create exactly one persisted conversation and one sidebar row; status-only activity for an unknown session must not create an empty untitled sibling. |
 | chat-composer-isolation.spec.ts | windows, macos, linux | chat-ai, real-ui-e2e | chat, chat-drafts | medium | partial | mixed | 1 | Composer draft isolation across conversations. |
 | chat-connections-context-duplicate.spec.ts | windows, macos | chat-ai | chat, chat-sidebar-dedupe | medium | partial | synthetic | 1 | QUARANTINED (#4689): connections-context wrapper stripping regression. The synthetic background-router event path never persists deterministically on Linux/macOS CI; re-enable once it drives a deterministic persisted session. |
 | chat-cost-limit-upgrade.spec.ts | macos | chat-ai, real-ui-e2e, tauri-command | chat | high | strong | real-user-flow | 1 | A local provider returns the gateway's structured daily-limit rejection across the four self-serve upgrade targets; each request crosses the real Pi and foreground-event path, then the UI asserts the phosphor primary CTA, captures a screenshot, and opens the exact billing URL. |

@@ -110,7 +110,10 @@ import {
   parseAgentActionRequest,
   stripAgentActionBlocks,
 } from "@/lib/chat/agent-action-card";
-import { useChatStore } from "@/lib/stores/chat-store";
+import {
+  ensureBlankChatSession,
+  useChatStore,
+} from "@/lib/stores/chat-store";
 import { AGENT_TOPICS, type AgentEventEnvelope } from "@/lib/events/types";
 import { listenTyped, TAURI_EVENTS } from "@/lib/events/tauri-events";
 import { localFetch } from "@/lib/api";
@@ -697,6 +700,7 @@ export function StandaloneChat({
   useEffect(() => {
     const store = useChatStore.getState();
     if (!store.currentId) {
+      ensureBlankChatSession(store, initialSessionIdRef.current);
       store.actions.setCurrent(initialSessionIdRef.current);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
