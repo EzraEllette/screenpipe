@@ -176,7 +176,7 @@ Resources:
             set -euo pipefail
             eval "$(/opt/homebrew/bin/brew shellenv)"
             brew update
-            brew install aria2 bun ffmpeg gh git-lfs jq node sccache wget
+            brew install aria2 bun cmake ffmpeg gh git-lfs jq node sccache wget
             brew install xcodesorg/made/xcodes
 
             if [[ ! -x "$HOME/.cargo/bin/rustup" ]]; then
