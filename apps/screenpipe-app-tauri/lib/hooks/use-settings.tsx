@@ -139,7 +139,7 @@ export type AIPreset = {
 	  }
 );
 
-export type UpdateChannel = "stable" | "beta";
+export type UpdateChannel = "stable" | "pre-release";
 
 // Chat history types
 export interface ChatMessage {

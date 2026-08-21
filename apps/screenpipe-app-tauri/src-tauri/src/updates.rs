@@ -25,6 +25,19 @@ use tokio::sync::oneshot;
 use tokio::sync::Mutex;
 use tokio::time::interval;
 
+fn consumer_update_channel(settings: Option<&SettingsStore>) -> &'static str {
+    match settings.map(|settings| settings.update_channel.as_str()) {
+        Some("pre-release") => "pre-release",
+        _ => "stable",
+    }
+}
+
+fn consumer_update_endpoint(channel: &str) -> String {
+    format!(
+        "https://screenpipe.com/api/app-update/{channel}/{{{{target}}}}-{{{{arch}}}}/{{{{current_version}}}}"
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Rollback: download a specific older version from R2 via the website API
 // ---------------------------------------------------------------------------
@@ -892,6 +905,12 @@ impl UpdatesManager {
         );
         // Build updater with auth header so paid users can download from R2
         let mut builder = self.app.updater_builder();
+        let settings = SettingsStore::get(&self.app).ok().flatten();
+        let is_beta_build = self.app.config().identifier.contains("beta");
+        if !is_enterprise_build(&self.app) && !is_beta_build {
+            let channel = consumer_update_channel(settings.as_ref());
+            builder = builder.endpoints(vec![consumer_update_endpoint(channel).parse()?])?;
+        }
         if is_enterprise_build(&self.app) {
             if let Some(license_key) = crate::commands::get_enterprise_license_key() {
                 builder = builder.header("X-License-Key", license_key)?;
@@ -899,7 +918,7 @@ impl UpdatesManager {
             if let Some(token) = crate::commands::get_cloud_token() {
                 builder = builder.header("Authorization", format!("Bearer {token}"))?;
             }
-        } else if let Ok(Some(settings)) = SettingsStore::get(&self.app) {
+        } else if let Some(settings) = settings {
             if let Some(token) = settings
                 .user
                 .token
@@ -1860,6 +1879,25 @@ mod tests {
         settings.auto_update = false;
 
         assert!(!auto_update_enabled_from_settings(Ok(Some(settings))));
+    }
+
+    #[test]
+    fn old_settings_use_stable_update_channel() {
+        assert_eq!(consumer_update_channel(None), "stable");
+        assert!(consumer_update_endpoint(consumer_update_channel(None))
+            .contains("/app-update/stable/"));
+    }
+
+    #[test]
+    fn selected_pre_release_changes_only_the_channel_path() {
+        let mut settings = SettingsStore::default();
+        settings.update_channel = "pre-release".to_string();
+
+        assert_eq!(consumer_update_channel(Some(&settings)), "pre-release");
+        assert_eq!(
+            consumer_update_endpoint("pre-release"),
+            "https://screenpipe.com/api/app-update/pre-release/{{target}}-{{arch}}/{{current_version}}"
+        );
     }
 
     #[test]
