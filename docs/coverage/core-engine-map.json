@@ -445,6 +445,7 @@
         "src/cli/profile.rs",
         "src/cli/search.rs",
         "src/cli/service.rs",
+        "src/cli/status.rs",
         "src/cli/store_file.rs",
         "src/cli/team.rs",
         "src/cli/team_pipes.rs",
