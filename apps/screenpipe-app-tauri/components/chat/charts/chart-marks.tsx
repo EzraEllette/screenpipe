@@ -71,16 +71,19 @@ export function StatChart({ spec, palette }: MarkProps<StatChartSpec>) {
         />
       }
     >
-      <dl className="flex flex-wrap">
+      <dl
+        className="grid gap-x-3 gap-y-3"
+        style={{ gridTemplateColumns: "repeat(auto-fit, minmax(7rem, 1fr))" }}
+      >
         {spec.items.map((item, index) => (
           <div
             key={`${item.label}-${index}`}
-            className="min-w-[7rem] flex-1 border-border pr-4 [&:not(:first-child)]:border-l [&:not(:first-child)]:pl-4"
+            className="min-w-0 border-l border-border pl-3"
           >
             <dt className="truncate text-xs lowercase text-muted-foreground">
               {item.label}
             </dt>
-            <dd className="mt-0.5 text-xl leading-tight text-foreground">
+            <dd className="mt-0.5 truncate whitespace-nowrap text-lg leading-tight text-foreground">
               {formatChartValue(item.value, item.unit)}
             </dd>
             {item.note && (
@@ -99,12 +102,29 @@ export function StatChart({ spec, palette }: MarkProps<StatChartSpec>) {
 // bar — horizontal, because app and activity names are long
 // ---------------------------------------------------------------------------
 
+function divergingGeometry(values: number[]) {
+  const minimum = Math.min(0, ...values);
+  const maximum = Math.max(0, ...values);
+  const spread = maximum - minimum;
+  const zero = spread > 0 ? ((0 - minimum) / spread) * 100 : 50;
+  return {
+    minimum,
+    maximum,
+    zero,
+    mark(value: number) {
+      const end = spread > 0 ? ((value - minimum) / spread) * 100 : zero;
+      return {
+        left: Math.min(zero, end),
+        width: Math.abs(end - zero),
+      };
+    },
+  };
+}
+
 export function BarChart({ spec, palette }: MarkProps<BarChartSpec>) {
   const { tooltip, activeKey, show, hide } = useChartHover();
-  const maximum = Math.max(
-    ...spec.items.map((item) => Math.abs(item.value)),
-    0,
-  );
+  const geometry = divergingGeometry(spec.items.map((item) => item.value));
+  const hasSignedDomain = geometry.minimum < 0 && geometry.maximum > 0;
 
   return (
     <ChartFrame
@@ -122,16 +142,15 @@ export function BarChart({ spec, palette }: MarkProps<BarChartSpec>) {
       }
     >
       <ChartTooltip state={tooltip} />
-      <div className="space-y-2">
+      <div className="space-y-2.5">
         {spec.items.map((item, index) => {
           const key = String(index);
-          const width =
-            maximum > 0 ? (Math.abs(item.value) / maximum) * 100 : 0;
+          const mark = geometry.mark(item.value);
           return (
             <div
               key={`${item.label}-${index}`}
-              className={`grid grid-cols-[${LABEL_COL}_1fr_auto] items-center gap-2.5`}
-              style={{ gridTemplateColumns: `${LABEL_COL} 1fr auto` }}
+              data-chart-bar-row
+              className="min-w-0"
               onPointerMove={(event) =>
                 show(
                   event,
@@ -141,25 +160,40 @@ export function BarChart({ spec, palette }: MarkProps<BarChartSpec>) {
               }
               onPointerLeave={hide}
             >
-              <span className="truncate text-xs text-muted-foreground">
-                {item.label}
+              <span className="mb-1 flex min-w-0 items-baseline justify-between gap-3 text-xs">
+                <span className="truncate text-muted-foreground">
+                  {item.label}
+                </span>
+                <span className="shrink-0 tabular-nums text-foreground">
+                  {formatChartValue(item.value, spec.unit)}
+                </span>
               </span>
               <span
-                className="block h-2 w-full"
+                data-chart-bar-track
+                className="relative block h-2 w-full overflow-hidden"
                 style={{ backgroundColor: palette.track }}
               >
                 <span
-                  className="block h-full transition-colors duration-150"
+                  data-chart-bar-fill
+                  className="absolute inset-y-0 transition-colors duration-150"
                   style={{
-                    width: `${width}%`,
+                    left: `${mark.left}%`,
+                    width: `${mark.width}%`,
                     backgroundColor:
                       activeKey === key ? palette.focus : palette.single,
-                    minWidth: width > 0 ? 2 : 0,
+                    minWidth: mark.width > 0 ? 2 : 0,
                   }}
                 />
-              </span>
-              <span className="shrink-0 text-xs tabular-nums text-foreground">
-                {formatChartValue(item.value, spec.unit)}
+                {hasSignedDomain ? (
+                  <span
+                    data-chart-zero-line
+                    className="absolute inset-y-0 w-px"
+                    style={{
+                      left: `${geometry.zero}%`,
+                      backgroundColor: palette.grid,
+                    }}
+                  />
+                ) : null}
               </span>
             </div>
           );
@@ -182,13 +216,13 @@ export function LineChart({ spec, palette }: MarkProps<LineChartSpec>) {
     const values = spec.items.map((item) => item.value);
     const minimum = Math.min(...values);
     const maximum = Math.max(...values);
-    const spread = maximum > minimum ? maximum - minimum : 1;
+    const spread = maximum - minimum;
     const coordinates = spec.items.map((item, index) => ({
       x:
         spec.items.length <= 1
           ? VIEWBOX.width / 2
           : (index / (spec.items.length - 1)) * VIEWBOX.width,
-      y: 92 - ((item.value - minimum) / spread) * 84,
+      y: spread > 0 ? 92 - ((item.value - minimum) / spread) * 84 : 50,
     }));
     return {
       minimum,
@@ -203,6 +237,9 @@ export function LineChart({ spec, palette }: MarkProps<LineChartSpec>) {
   const activePoint = activeIndex === null ? null : spec.items[activeIndex];
   const activeCoordinate =
     activeIndex === null ? null : geometry.coordinates[activeIndex];
+  const visibleCoordinate =
+    activeCoordinate ??
+    (spec.items.length === 1 ? geometry.coordinates[0] : null);
 
   // Resting state names the span the line covers, so the x axis is readable
   // before the reader hovers anything.
@@ -297,14 +334,16 @@ export function LineChart({ spec, palette }: MarkProps<LineChartSpec>) {
             />
           ) : null}
         </svg>
-        {activeCoordinate ? (
+        {visibleCoordinate ? (
           <span
+            data-chart-line-point
             aria-hidden="true"
             className="pointer-events-none absolute h-2 w-2 -translate-x-1/2 -translate-y-1/2 border"
             style={{
-              left: `${activeCoordinate.x}%`,
-              top: `${activeCoordinate.y}%`,
-              backgroundColor: palette.focus,
+              left: `${visibleCoordinate.x}%`,
+              top: `${visibleCoordinate.y}%`,
+              backgroundColor:
+                activeCoordinate === null ? palette.single : palette.focus,
               borderColor: palette.surface,
             }}
           />
@@ -323,10 +362,10 @@ export function GroupedBarChart({
   palette,
 }: MarkProps<GroupedBarChartSpec>) {
   const { tooltip, activeKey, show, hide } = useChartHover();
-  const maximum = Math.max(
-    ...spec.series.flatMap((series) => series.values.map(Math.abs)),
-    0,
+  const geometry = divergingGeometry(
+    spec.series.flatMap((series) => series.values),
   );
+  const hasSignedDomain = geometry.minimum < 0 && geometry.maximum > 0;
 
   return (
     <ChartFrame
@@ -361,12 +400,11 @@ export function GroupedBarChart({
               {spec.series.map((series, seriesIndex) => {
                 const value = series.values[categoryIndex];
                 const key = `${categoryIndex}-${seriesIndex}`;
-                const width =
-                  maximum > 0 ? (Math.abs(value) / maximum) * 100 : 0;
+                const mark = geometry.mark(value);
                 return (
                   <span
                     key={key}
-                    className="block h-1.5 w-full"
+                    className="relative block h-1.5 w-full overflow-hidden"
                     style={{ backgroundColor: palette.track }}
                     onPointerMove={(event) =>
                       show(
@@ -381,9 +419,11 @@ export function GroupedBarChart({
                     onPointerLeave={hide}
                   >
                     <span
-                      className="block h-full transition-colors duration-150"
+                      data-chart-grouped-fill
+                      className="absolute inset-y-0 transition-colors duration-150"
                       style={{
-                        width: `${width}%`,
+                        left: `${mark.left}%`,
+                        width: `${mark.width}%`,
                         backgroundColor:
                           activeKey === key
                             ? palette.focus
@@ -392,9 +432,19 @@ export function GroupedBarChart({
                                 seriesIndex,
                                 spec.series.length,
                               ),
-                        minWidth: width > 0 ? 2 : 0,
+                        minWidth: mark.width > 0 ? 2 : 0,
                       }}
                     />
+                    {hasSignedDomain ? (
+                      <span
+                        data-chart-zero-line
+                        className="absolute inset-y-0 w-px"
+                        style={{
+                          left: `${geometry.zero}%`,
+                          backgroundColor: palette.grid,
+                        }}
+                      />
+                    ) : null}
                   </span>
                 );
               })}
@@ -965,8 +1015,8 @@ export function FunnelChart({ spec, palette }: MarkProps<FunnelChartSpec>) {
           return (
             <div
               key={`${item.label}-${index}`}
-              className="grid items-center gap-x-2.5"
-              style={{ gridTemplateColumns: `1.5rem ${LABEL_COL} 1fr auto` }}
+              className="grid min-w-0 gap-x-2.5"
+              style={{ gridTemplateColumns: "1.5rem minmax(0, 1fr)" }}
               onPointerMove={(event) =>
                 show(
                   event,
@@ -979,31 +1029,38 @@ export function FunnelChart({ spec, palette }: MarkProps<FunnelChartSpec>) {
               <span className="text-[10px] tabular-nums text-muted-foreground">
                 {String(index + 1).padStart(2, "0")}
               </span>
-              <span className="truncate text-xs text-muted-foreground">
-                {item.label}
-              </span>
-              <span
-                className="block h-1.5 w-full"
-                style={{ backgroundColor: palette.track }}
-              >
-                <span
-                  className="block h-full transition-colors duration-150"
-                  style={{
-                    width: `${percent}%`,
-                    minWidth: item.value > 0 ? 2 : 0,
-                    backgroundColor:
-                      activeKey === key
-                        ? palette.focus
-                        : seriesColor(palette, index, spec.items.length),
-                  }}
-                />
-              </span>
-              <span className="flex min-w-[7.5rem] items-baseline justify-end gap-2 text-right tabular-nums">
-                <span className="text-xs text-foreground">
-                  {formatChartValue(item.value, spec.unit)}
+              <span className="min-w-0">
+                <span className="mb-1 flex min-w-0 items-baseline justify-between gap-2">
+                  <span className="truncate text-xs text-muted-foreground">
+                    {item.label}
+                  </span>
+                  <span className="flex shrink-0 items-baseline gap-2 text-right tabular-nums">
+                    <span className="text-xs text-foreground">
+                      {formatChartValue(item.value, spec.unit)}
+                    </span>
+                    <span className="w-14 text-[10px] text-muted-foreground">
+                      {index === 0
+                        ? "start"
+                        : `${Math.round(priorPercent)}% prior`}
+                    </span>
+                  </span>
                 </span>
-                <span className="w-14 text-[10px] text-muted-foreground">
-                  {index === 0 ? "start" : `${Math.round(priorPercent)}% prior`}
+                <span
+                  data-chart-funnel-track
+                  className="block h-1.5 w-full"
+                  style={{ backgroundColor: palette.track }}
+                >
+                  <span
+                    className="block h-full transition-colors duration-150"
+                    style={{
+                      width: `${percent}%`,
+                      minWidth: item.value > 0 ? 2 : 0,
+                      backgroundColor:
+                        activeKey === key
+                          ? palette.focus
+                          : seriesColor(palette, index, spec.items.length),
+                    }}
+                  />
                 </span>
               </span>
             </div>
@@ -1202,8 +1259,9 @@ export function RangeChart({ spec, palette }: MarkProps<RangeChartSpec>) {
   const { tooltip, activeKey, show, hide } = useChartHover();
   const minimum = Math.min(...spec.items.map((item) => item.min));
   const maximum = Math.max(...spec.items.map((item) => item.max));
-  const spread = maximum > minimum ? maximum - minimum : 1;
-  const position = (value: number) => ((value - minimum) / spread) * 100;
+  const spread = maximum - minimum;
+  const position = (value: number) =>
+    spread > 0 ? ((value - minimum) / spread) * 100 : 50;
 
   return (
     <ChartFrame
@@ -1234,15 +1292,24 @@ export function RangeChart({ spec, palette }: MarkProps<RangeChartSpec>) {
           return (
             <div
               key={`${item.label}-${index}`}
-              className="grid items-center gap-2.5"
-              style={{ gridTemplateColumns: `${LABEL_COL} 1fr 6rem` }}
+              className="min-w-0"
               onPointerMove={(event) => show(event, text, key)}
               onPointerLeave={hide}
             >
-              <span className="truncate text-xs text-muted-foreground">
-                {item.label}
+              <span className="mb-1 flex min-w-0 items-baseline justify-between gap-3">
+                <span className="truncate text-xs text-muted-foreground">
+                  {item.label}
+                </span>
+                <span className="shrink-0 text-xs tabular-nums text-foreground">
+                  {item.mid === null
+                    ? formatChartValue(item.max, spec.unit)
+                    : formatChartValue(item.mid, spec.unit)}
+                </span>
               </span>
-              <span className="relative block h-3">
+              <span
+                data-chart-range-track
+                className="relative block h-3 w-full"
+              >
                 <span className="absolute left-0 right-0 top-1/2 border-t border-border" />
                 <span
                   className="absolute top-1/2 h-0.5 -translate-y-1/2 transition-colors duration-150"
@@ -1254,10 +1321,12 @@ export function RangeChart({ spec, palette }: MarkProps<RangeChartSpec>) {
                   }}
                 />
                 <span
+                  data-chart-range-start
                   className="absolute top-1/2 h-2 w-0.5 -translate-x-1/2 -translate-y-1/2"
                   style={{ left: `${left}%`, backgroundColor: palette.single }}
                 />
                 <span
+                  data-chart-range-end
                   className="absolute top-1/2 h-2 w-0.5 -translate-x-1/2 -translate-y-1/2"
                   style={{
                     left: `${left + width}%`,
@@ -1266,6 +1335,7 @@ export function RangeChart({ spec, palette }: MarkProps<RangeChartSpec>) {
                 />
                 {item.mid !== null ? (
                   <span
+                    data-chart-range-mid
                     className="absolute top-1/2 h-2.5 w-2.5 -translate-x-1/2 -translate-y-1/2 border"
                     style={{
                       left: `${position(item.mid)}%`,
@@ -1278,16 +1348,9 @@ export function RangeChart({ spec, palette }: MarkProps<RangeChartSpec>) {
                   />
                 ) : null}
               </span>
-              <span className="flex min-w-[7rem] flex-col text-right tabular-nums">
-                <span className="text-xs text-foreground">
-                  {item.mid === null
-                    ? formatChartValue(item.max, spec.unit)
-                    : formatChartValue(item.mid, spec.unit)}
-                </span>
-                <span className="text-[10px] text-muted-foreground">
-                  {formatChartValue(item.min, spec.unit)}–
-                  {formatChartValue(item.max, spec.unit)}
-                </span>
+              <span className="flex justify-between text-[10px] tabular-nums text-muted-foreground">
+                <span>{formatChartValue(item.min, spec.unit)}</span>
+                <span>{formatChartValue(item.max, spec.unit)}</span>
               </span>
             </div>
           );
@@ -1310,12 +1373,31 @@ export function ScatterChart({ spec, palette }: MarkProps<ScatterChartSpec>) {
     const maxX = Math.max(...xs);
     const minY = Math.min(...ys);
     const maxY = Math.max(...ys);
-    const spreadX = maxX > minX ? maxX - minX : 1;
-    const spreadY = maxY > minY ? maxY - minY : 1;
-    const coordinates = spec.items.map((item) => ({
-      x: 6 + ((item.x - minX) / spreadX) * 88,
-      y: 94 - ((item.y - minY) / spreadY) * 88,
+    const spreadX = maxX - minX;
+    const spreadY = maxY - minY;
+    const baseCoordinates = spec.items.map((item) => ({
+      x: spreadX > 0 ? 6 + ((item.x - minX) / spreadX) * 88 : 50,
+      y: spreadY > 0 ? 94 - ((item.y - minY) / spreadY) * 88 : 50,
     }));
+    const coincident = new Map<string, number[]>();
+    spec.items.forEach((item, index) => {
+      const key = `${item.x}\u0000${item.y}`;
+      const group = coincident.get(key) ?? [];
+      group.push(index);
+      coincident.set(key, group);
+    });
+    // Exact duplicate measurements remain truthful in the table, while a tiny
+    // deterministic ring keeps every marker inspectable in the plot.
+    const coordinates = baseCoordinates.map((point, index) => {
+      const item = spec.items[index];
+      const group = coincident.get(`${item.x}\u0000${item.y}`) ?? [index];
+      if (group.length === 1) return point;
+      const angle = (group.indexOf(index) / group.length) * Math.PI * 2;
+      return {
+        x: Math.min(94, Math.max(6, point.x + Math.cos(angle) * 4)),
+        y: Math.min(94, Math.max(6, point.y + Math.sin(angle) * 4)),
+      };
+    });
     return { minX, maxX, minY, maxY, spreadX, spreadY, coordinates };
   }, [spec.items]);
   const active = activeIndex === null ? null : spec.items[activeIndex];
@@ -1446,6 +1528,7 @@ export function ScatterChart({ spec, palette }: MarkProps<ScatterChartSpec>) {
         {geometry.coordinates.map((point, index) => (
           <span
             key={`${spec.items[index].label}-${index}`}
+            data-chart-scatter-point
             aria-hidden="true"
             className="pointer-events-none absolute flex h-3 w-3 -translate-x-1/2 -translate-y-1/2 items-center justify-center border text-[8px] tabular-nums transition-colors duration-150"
             style={{

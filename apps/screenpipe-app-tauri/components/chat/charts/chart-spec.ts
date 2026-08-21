@@ -394,6 +394,10 @@ function parseCalendar(
     out.push({ date, value });
   }
   out.sort((a, b) => a.date.localeCompare(b.date));
+  const firstDay = Date.parse(`${out[0].date}T00:00:00Z`);
+  const lastDay = Date.parse(`${out[out.length - 1].date}T00:00:00Z`);
+  const inclusiveDays = (lastDay - firstDay) / 86_400_000 + 1;
+  if (inclusiveDays > CHART_LIMITS.calendarItems) return null;
   return {
     ...base,
     type: "calendar",
@@ -516,6 +520,9 @@ function parseCategorySeries(
     if (entry.values.length !== (raw.categories as unknown[]).length) return null;
     const values = readNumberArray(entry.values, categories.length);
     if (values === null || values.length !== categories.length) return null;
+    if (type === "stacked_bar" && values.some((value) => value < 0)) {
+      return null;
+    }
     series.push({ name, values });
   }
 
