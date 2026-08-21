@@ -55,7 +55,7 @@ export function ChatComposer({
   return (
     <div
       ref={input.sectionRef}
-      className="relative bg-gradient-to-t from-background via-background/80 to-transparent"
+      className="relative border-t border-border/60 bg-background"
     >
       <div className={CHAT_RAIL_CLASS}>
         <PrefillContextBanner prefill={prefill} />

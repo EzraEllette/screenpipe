@@ -19,7 +19,7 @@
 //     affects instead of inside an unrelated row's menu.
 //
 // When the rollout gate is off this renders plain, non-draggable rows with no
-// menu and no disclosure, so the sidebar is byte-for-byte what it was.
+// menu and no disclosure, so customization behavior remains unchanged.
 
 import React from "react";
 import {
@@ -94,11 +94,13 @@ const ITEM_CLS =
 
 function rowClassName(isActive: boolean, isTranslucent: boolean) {
   return cn(
-    "relative w-full flex items-center gap-2.5 px-2.5 py-1.5 rounded-lg border border-transparent transition-all duration-150 text-left group/navrow",
+    "group/navrow relative flex min-h-8 w-full items-center gap-2.5 rounded-none border border-transparent px-2.5 py-1.5 text-left transition-colors duration-150 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-signal motion-reduce:transition-none",
+    isActive &&
+      "before:absolute before:inset-y-1 before:left-0 before:w-0.5 before:bg-signal before:content-['']",
     isActive
       ? isTranslucent
-        ? "vibrant-nav-active"
-        : "bg-card shadow-sm border-border text-foreground"
+        ? "vibrant-nav-active border-foreground/10 bg-foreground/[0.06]"
+        : "border-border bg-card text-foreground"
       : isTranslucent
         ? "vibrant-nav-item vibrant-nav-hover"
         : "hover:bg-card/50 text-muted-foreground hover:text-foreground",
@@ -240,7 +242,7 @@ function SortableRow({
                 isActive
                   ? isTranslucent
                     ? "vibrant-sidebar-fg"
-                    : "text-primary"
+                    : "text-signal"
                   : isTranslucent
                     ? "vibrant-sidebar-fg-muted"
                     : "text-muted-foreground group-hover/navrow:text-foreground",
@@ -283,7 +285,7 @@ function SortableRow({
                 data-testid={`nav-${item.id}-options`}
                 onClick={(event) => event.stopPropagation()}
                 className={cn(
-                  "absolute right-1.5 top-1/2 -translate-y-1/2 rounded p-0.5 text-muted-foreground opacity-0 transition-opacity duration-150",
+                  "absolute right-1.5 top-1/2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-none text-muted-foreground opacity-0 transition-opacity duration-150 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-signal motion-reduce:transition-none",
                   "hover:text-foreground focus-visible:opacity-100 group-hover/navrow:opacity-100 data-[state=open]:opacity-100",
                 )}
               >
@@ -331,7 +333,7 @@ function HiddenStrip({
           onClick={() => onShow(hidden.id)}
           title={`Show ${hidden.label} in the sidebar`}
           className={cn(
-            "w-full flex items-center gap-2.5 px-2.5 py-1 rounded-lg transition-colors duration-150 text-left",
+            "flex w-full items-center gap-2.5 rounded-none px-2.5 py-1 text-left transition-colors duration-150 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-signal motion-reduce:transition-none",
             isTranslucent
               ? "vibrant-nav-item vibrant-nav-hover"
               : "text-muted-foreground/70 hover:bg-card/50 hover:text-foreground",
@@ -386,7 +388,7 @@ export function SidebarNavList({
                 activeId === item.id
                   ? isTranslucent
                     ? "vibrant-sidebar-fg"
-                    : "text-primary"
+                    : "text-signal"
                   : isTranslucent
                     ? "vibrant-sidebar-fg-muted"
                     : "text-muted-foreground group-hover/navrow:text-foreground",

@@ -64,6 +64,18 @@ describe("SidebarNavList", () => {
     expect(screen.getByTestId("nav-pipes")).toBeInTheDocument();
   });
 
+  it("marks the active row with the neutral signal rail", () => {
+    renderList();
+    expect(screen.getByTestId("nav-home")).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
+    expect(screen.getByTestId("nav-home")).toHaveClass("before:bg-signal");
+    expect(screen.getByTestId("nav-brain")).not.toHaveClass(
+      "before:bg-signal",
+    );
+  });
+
   it("selects a section on click", () => {
     const handlers = renderList();
     fireEvent.click(screen.getByTestId("nav-brain"));
