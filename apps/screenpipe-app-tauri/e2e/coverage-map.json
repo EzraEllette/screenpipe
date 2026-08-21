@@ -1045,7 +1045,7 @@
       "criticality": "high",
       "confidence": "strong",
       "ux": "mixed",
-      "notes": "A collapsed Pipes section loads nothing; expanding it lists a compact execution-backed activity page, expanding a pipe lazily loads its newest 10 executions, and older runs paginate on demand."
+      "notes": "The long chat inventory scrolls independently; a collapsed Pipes section loads nothing, expanding it lists a compact execution-backed activity page, expanding a pipe lazily loads its newest 10 executions, and older runs paginate on demand."
     },
     {
       "spec": "chat-sidebar-repeated-prompt.spec.ts",
@@ -1199,7 +1199,7 @@
       "notes": "Switching conversations during streaming must not corrupt state."
     },
     {
-      "spec": "chat-tabs.spec.ts",
+      "spec": "chat-sidebar-navigation.spec.ts",
       "platforms": [
         "windows",
         "macos",
@@ -1211,13 +1211,13 @@
       ],
       "features": [
         "chat",
-        "chat-tabs",
+        "chat-navigation",
         "chat-sidebar"
       ],
       "criticality": "high",
       "confidence": "strong",
       "ux": "real-user-flow",
-      "notes": "Native Home WebView coverage for ordered chat tabs, roving keyboard focus, scoped adjacent/direct tab shortcuts, shortcut-guide and tooltip discovery, inactive and active close fallback, non-destructive sidebar reopen, close-other-tabs, and last-tab recovery."
+      "notes": "Native Home WebView coverage for one active conversation, atomic sidebar-to-panel navigation, clean new-chat drafts, semantic unread state, removal of the duplicate tab strip, and a title-scoped Pin/Rename/Archive menu."
     },
     {
       "spec": "chat-tool-activity.spec.ts",

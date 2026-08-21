@@ -353,6 +353,36 @@ describe("chat sidebar pipe inventory", function () {
         timeoutMsg: "pipe group did not lazily render exactly 10 executions",
       },
     );
+
+    // The conversation inventory must own its vertical scroll once Scheduled
+    // is expanded at the minimum supported window height. It must never
+    // stretch the app or push the fixed Settings footer out of reach.
+    const devicePixelRatio = (await browser.execute(
+      () => window.devicePixelRatio || 1,
+    )) as number;
+    await browser.setWindowSize(
+      Math.round(800 * devicePixelRatio),
+      Math.round(600 * devicePixelRatio),
+    );
+    await browser.pause(250);
+    const scrollMetrics = await browser.execute(() => {
+      const element = document.querySelector<HTMLElement>(
+        '[data-testid="chat-sidebar"]',
+      );
+      if (!element) return null;
+      element.scrollTop = element.scrollHeight;
+      const result = {
+        clientHeight: element.clientHeight,
+        scrollHeight: element.scrollHeight,
+        scrollTop: element.scrollTop,
+      };
+      element.scrollTop = 0;
+      return result;
+    });
+    expect(scrollMetrics).not.toBeNull();
+    expect(scrollMetrics!.scrollHeight).toBeGreaterThan(scrollMetrics!.clientHeight);
+    expect(scrollMetrics!.scrollTop).toBeGreaterThan(0);
+
     const runningRowExists = await browser.execute((id: string) =>
       Boolean(document.querySelector(`[data-testid="chat-row-${id}"]`)),
     `pipe:${PIPE_NAME}:13`);

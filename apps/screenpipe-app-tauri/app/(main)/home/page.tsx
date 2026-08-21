@@ -305,6 +305,7 @@ function HomeContent() {
         pinned: false,
         unread: false,
         draft: true,
+        messages: [],
       });
     }
     store.actions.setCurrent(id);
@@ -1227,19 +1228,6 @@ function HomeContent() {
             const dispatch = () =>
               dispatchChatShortcutAction(
                 direction === 1 ? "next_recent_chat" : "previous_recent_chat",
-              );
-            if (activeSection === "home") {
-              dispatch();
-              return;
-            }
-            void setActiveSection("home").then(() =>
-              window.requestAnimationFrame(dispatch),
-            );
-          },
-          moveOpenChat: (direction) => {
-            const dispatch = () =>
-              dispatchChatShortcutAction(
-                direction === 1 ? "next_open_chat" : "previous_open_chat",
               );
             if (activeSection === "home") {
               dispatch();

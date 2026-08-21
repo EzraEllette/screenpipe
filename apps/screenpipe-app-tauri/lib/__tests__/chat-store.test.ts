@@ -17,6 +17,7 @@ import {
   isReusableBlankChatSession,
   dedupeSessionRecords,
   sessionRecordFromMeta,
+  selectDisplayedChatId,
   applyChatSessionActivity,
   type SessionRecord,
   type ChatSessionActivityPayload,
@@ -26,7 +27,6 @@ import { conversationDedupIdentity } from "../chat-dedup";
 function reset() {
   useChatStore.setState({
     sessions: {},
-    openChatIds: [],
     currentId: null,
     panelSessionId: null,
   });
@@ -222,7 +222,9 @@ describe("chat-store: getOrCreateEmptyChatId (no spam on +new)", () => {
 
   it("reuses the panel's current chat if it has no user message", () => {
     useChatStore.setState({
-      sessions: { panelChat: baseRecord({ id: "panelChat", messages: [] }) },
+      sessions: {
+        panelChat: baseRecord({ id: "panelChat", messages: [], draft: true }),
+      },
       currentId: null,
       panelSessionId: "panelChat",
     });
@@ -276,8 +278,8 @@ describe("chat-store: getOrCreateEmptyChatId (no spam on +new)", () => {
           createdAt: 100,
           messages: [{ id: "u", role: "user", content: "x", timestamp: 1 }],
         }),
-        oldEmpty: baseRecord({ id: "oldEmpty", createdAt: 200, messages: [] }),
-        newEmpty: baseRecord({ id: "newEmpty", createdAt: 300, messages: [] }),
+        oldEmpty: baseRecord({ id: "oldEmpty", createdAt: 200, messages: [], draft: true }),
+        newEmpty: baseRecord({ id: "newEmpty", createdAt: 300, messages: [], draft: true }),
       },
       currentId: null,
       panelSessionId: "full",
@@ -306,6 +308,27 @@ describe("chat-store: getOrCreateEmptyChatId (no spam on +new)", () => {
     const { id, isNew } = getOrCreateEmptyChatId();
     expect(isNew).toBe(true);
     expect(id).not.toBe("diskChat");
+  });
+
+  it("does NOT reuse a persisted zero-message row that is not an active draft", () => {
+    useChatStore.setState({
+      sessions: {
+        abandoned: baseRecord({
+          id: "abandoned",
+          kind: "chat",
+          messageCount: 0,
+          messages: [],
+          draft: false,
+        }),
+      },
+      currentId: null,
+      panelSessionId: null,
+    });
+
+    const { id, isNew } = getOrCreateEmptyChatId();
+
+    expect(isNew).toBe(true);
+    expect(id).not.toBe("abandoned");
   });
 
   it("does NOT reuse pipe-run / pipe-watch sessions (#4719 regression)", () => {
@@ -350,95 +373,29 @@ describe("chat-store: getOrCreateEmptyChatId (no spam on +new)", () => {
   });
 });
 
-describe("chat-store: setCurrent clears unread atomically", () => {
+describe("chat-store: visible selection follows the rendered panel", () => {
   beforeEach(reset);
 
-  it("flips currentId AND clears unread on the new current in one set", () => {
+  it("clears unread immediately without claiming the panel switched", () => {
     useChatStore.getState().actions.upsert(baseRecord({ id: "A", lastContentAt: 100 }));
     useChatStore.getState().actions.setCurrent("A");
     const state = useChatStore.getState();
     expect(state.currentId).toBe("A");
-    expect(state.panelSessionId).toBe("A");
+    expect(state.panelSessionId).toBeNull();
     expect(state.sessions.A.unread).toBe(false);
     expect(typeof state.sessions.A.lastViewedAt).toBe("number");
     expect(state.sessions.A.lastViewedAt).toBeGreaterThanOrEqual(100);
   });
-});
 
-describe("chat-store: open chat working set", () => {
-  beforeEach(reset);
+  it("keeps the rendered panel selected until its React commit lands", () => {
+    useChatStore.setState({ currentId: "incoming", panelSessionId: "outgoing" });
+    expect(selectDisplayedChatId(useChatStore.getState())).toBe("outgoing");
 
-  it("opens focused chats once and preserves their order", () => {
-    const actions = useChatStore.getState().actions;
-    actions.setCurrent("A");
-    actions.setCurrent("B");
-    actions.setCurrent("A");
+    useChatStore.getState().actions.setPanelSession("incoming");
+    expect(selectDisplayedChatId(useChatStore.getState())).toBe("incoming");
 
-    expect(useChatStore.getState().openChatIds).toEqual(["A", "B"]);
-  });
-
-  it("closing a tab never removes or stops its conversation state", () => {
-    const actions = useChatStore.getState().actions;
-    const messages = [{ id: "u1", role: "user", content: "draft proof" }];
-    actions.upsert(baseRecord({
-      id: "A",
-      status: "streaming",
-      messages,
-      composerDraft: {
-        input: "keep this",
-        pastedImages: [],
-        attachedDocs: [],
-        pendingDocs: [],
-      },
-    }));
-    actions.setCurrent("A");
-    actions.closeChat("A");
-
-    expect(useChatStore.getState().openChatIds).toEqual([]);
-    expect(useChatStore.getState().sessions.A.status).toBe("streaming");
-    expect(useChatStore.getState().sessions.A.messages).toEqual(messages);
-    expect(useChatStore.getState().sessions.A.composerDraft?.input).toBe("keep this");
-  });
-
-  it("can stage an unknown deep-link id and reveal it after hydration", () => {
-    const actions = useChatStore.getState().actions;
-    actions.setCurrent("late-chat");
-    expect(useChatStore.getState().openChatIds).toEqual(["late-chat"]);
-
-    actions.upsert(baseRecord({ id: "late-chat", title: "hydrated later" }));
-    expect(useChatStore.getState().openChatIds).toEqual(["late-chat"]);
-    expect(useChatStore.getState().sessions["late-chat"].title).toBe("hydrated later");
-  });
-
-  it("ignores close-set commands when their anchor is not open", () => {
-    const actions = useChatStore.getState().actions;
-    for (const id of ["A", "B", "C"]) actions.openChat(id);
-
-    actions.closeOtherChats("missing");
-    actions.closeChatsToRight("missing");
-
-    expect(useChatStore.getState().openChatIds).toEqual(["A", "B", "C"]);
-  });
-
-  it("supports closing other tabs and tabs to the right", () => {
-    const actions = useChatStore.getState().actions;
-    for (const id of ["A", "B", "C", "D"]) actions.openChat(id);
-
-    actions.closeChatsToRight("B");
-    expect(useChatStore.getState().openChatIds).toEqual(["A", "B"]);
-
-    actions.openChat("C");
-    actions.closeOtherChats("B");
-    expect(useChatStore.getState().openChatIds).toEqual(["B"]);
-  });
-
-  it("drops deleted conversations from the working set", () => {
-    const actions = useChatStore.getState().actions;
-    actions.upsert(baseRecord({ id: "A" }));
-    actions.setCurrent("A");
-    actions.drop("A");
-
-    expect(useChatStore.getState().openChatIds).toEqual([]);
+    useChatStore.setState({ currentId: null });
+    expect(selectDisplayedChatId(useChatStore.getState())).toBeNull();
   });
 });
 
@@ -660,6 +617,39 @@ describe("chat-store: unread is computed from timestamps", () => {
     const session = useChatStore.getState().sessions.A;
     expect(session.lastViewedAt).toBe(0);
     expect(session.unread).toBe(true);
+  });
+});
+
+describe("chat-store: persisted empty chat cleanup", () => {
+  it("hydrates a zero-message chat as a hidden draft, not a Recents row", () => {
+    const record = sessionRecordFromMeta({
+      id: "abandoned-empty-chat",
+      title: "untitled",
+      createdAt: 100,
+      updatedAt: 200,
+      messageCount: 0,
+      pinned: false,
+      hidden: false,
+      kind: "chat",
+    });
+
+    expect(record.draft).toBe(true);
+    expect(isReusableBlankChatSession(record)).toBe(false);
+  });
+
+  it("does not hide an empty scheduled run as a chat draft", () => {
+    const record = sessionRecordFromMeta({
+      id: "pipe-run-1",
+      title: "daily sync",
+      createdAt: 100,
+      updatedAt: 200,
+      messageCount: 0,
+      pinned: false,
+      hidden: false,
+      kind: "pipe-run",
+    });
+
+    expect(record.draft).toBeUndefined();
   });
 });
 

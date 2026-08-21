@@ -8,8 +8,6 @@ import type { LucideIcon } from "lucide-react";
 import {
   Brain,
   CalendarClock,
-  ChevronLeft,
-  ChevronRight,
   History,
   Keyboard,
   ListTree,
@@ -70,7 +68,6 @@ export interface CommandPaletteDeps {
   pauseRecording: () => void;
   resumeRecording: () => void;
   switchRecentChat: (direction: 1 | -1) => void;
-  moveOpenChat: (direction: 1 | -1) => void;
   goToSection: (id: SidebarNavId) => void;
   toggleSidebar: () => void;
   openShortcutGuide: () => void;
@@ -184,24 +181,6 @@ export function buildPaletteEntries(
       hint: inAppShortcutLabel("previous_recent_chat", isMac),
       icon: History,
       run: () => deps.switchRecentChat(-1),
-    },
-    {
-      id: "previous_open_chat",
-      label: "previous open chat tab",
-      keywords: "tab left visible working set",
-      group: "navigation",
-      hint: inAppShortcutLabel("previous_open_chat", isMac),
-      icon: ChevronLeft,
-      run: () => deps.moveOpenChat(-1),
-    },
-    {
-      id: "next_open_chat",
-      label: "next open chat tab",
-      keywords: "tab right visible working set",
-      group: "navigation",
-      hint: inAppShortcutLabel("next_open_chat", isMac),
-      icon: ChevronRight,
-      run: () => deps.moveOpenChat(1),
     },
     ...deps.sections.map((section) => ({
       id: SECTION_ACTION_IDS[section.id],

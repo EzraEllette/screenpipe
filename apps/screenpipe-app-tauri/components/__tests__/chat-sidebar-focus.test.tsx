@@ -22,11 +22,15 @@ const baseSession: SessionRecord = {
 
 const noop = vi.fn();
 
-function renderRow(isCurrent: boolean, status: SessionRecord["status"] = "idle") {
+function renderRow(
+  isCurrent: boolean,
+  status: SessionRecord["status"] = "idle",
+  overrides: Partial<SessionRecord> = {},
+) {
   return render(
     <TooltipProvider>
       <SidebarChatRow
-        session={{ ...baseSession, status }}
+        session={{ ...baseSession, status, ...overrides }}
         isCurrent={isCurrent}
         queuedCount={0}
         onSelect={noop}
@@ -81,5 +85,14 @@ describe("SidebarChatRow current conversation", () => {
 
     expect(screen.queryByText("current")).toBeNull();
     expect(screen.getByLabelText("streaming")).toBeVisible();
+  });
+
+  it("renders unread as a semantic dot instead of a text block glyph", () => {
+    renderRow(false, "idle", { unread: true, lastContentAt: Date.now() });
+
+    const unread = screen.getByLabelText("unread");
+    expect(unread).toHaveClass("h-1.5", "w-1.5", "rounded-full", "bg-foreground");
+    expect(unread).toHaveTextContent("");
+    expect(screen.queryByText("█")).toBeNull();
   });
 });

@@ -69,7 +69,6 @@ function makeDeps(overrides: Partial<CommandPaletteDeps> = {}): CommandPaletteDe
     pauseRecording: vi.fn(),
     resumeRecording: vi.fn(),
     switchRecentChat: vi.fn(),
-    moveOpenChat: vi.fn(),
     goToSection: vi.fn(),
     toggleSidebar: vi.fn(),
     openShortcutGuide: vi.fn(),
@@ -150,28 +149,21 @@ describe("buildPaletteEntries", () => {
     const entries = buildPaletteEntries(makeDeps(), mocks.settings, false);
     expect(entries.find((e) => e.id === "new_chat")?.hint).toBe("Ctrl+N");
     expect(entries.find((e) => e.id === "toggle_sidebar")?.hint).toBe("Ctrl+B");
-    expect(entries.find((e) => e.id === "next_open_chat")?.hint).toBe(
-      "Ctrl+PageDown",
-    );
   });
 
-  it("exposes working-set, recent-chat, and shortcut-guide commands", () => {
+  it("exposes recent-chat and shortcut-guide commands without tab actions", () => {
     const deps = makeDeps();
     const entries = buildPaletteEntries(deps, mocks.settings, true);
 
     entries.find((entry) => entry.id === "next_recent_chat")?.run();
-    entries.find((entry) => entry.id === "previous_open_chat")?.run();
     entries.find((entry) => entry.id === "open_shortcut_guide")?.run();
 
     expect(deps.switchRecentChat).toHaveBeenCalledWith(1);
-    expect(deps.moveOpenChat).toHaveBeenCalledWith(-1);
     expect(deps.openShortcutGuide).toHaveBeenCalledTimes(1);
     expect(entries.find((e) => e.id === "next_recent_chat")?.hint).toBe(
       "⌃Tab",
     );
-    expect(entries.find((e) => e.id === "next_open_chat")?.hint).toBe(
-      "⌘⇧]",
-    );
+    expect(entries.some((entry) => entry.id.includes("open_chat"))).toBe(false);
   });
 });
 

@@ -55,6 +55,7 @@ import {
   useChatStore,
   useChatActions,
   useOrderedSessions,
+  selectDisplayedChatId,
   sessionRecordFromMeta,
   type SessionRecord,
 } from "@/lib/stores/chat-store";
@@ -294,13 +295,14 @@ function useQueueDepths(): Map<string, number> {
  * background — those belong to the parent.
  */
 export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
-  const currentId = useChatStore((s) => s.currentId);
+  const currentId = useChatStore(selectDisplayedChatId);
   // Reactive group key for the current session — re-evaluates when the
   // session appears in the store (handles the race where currentId is set
   // before the session record lands).
   const currentSessionGroupKey = useChatStore((s) => {
-    if (!s.currentId) return null;
-    const session = s.sessions[s.currentId];
+    const displayedId = selectDisplayedChatId(s);
+    if (!displayedId) return null;
+    const session = s.sessions[displayedId];
     if (!session || (session.kind === "pipe-watch" && session.isLoading)) return null;
     return sessionGroupKey(session);
   });
@@ -1072,6 +1074,7 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
         pinned: false,
         unread: false,
         draft: true,
+        messages: [],
       });
       actions.setCurrent(fresh);
       emit("chat-load-conversation", { conversationId: fresh });
@@ -1142,6 +1145,7 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
         pinned: false,
         unread: false,
         draft: true,
+        messages: [],
       });
       actions.setCurrent(fresh);
       emit("chat-load-conversation", { conversationId: fresh });
@@ -1235,7 +1239,7 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
     // (Timeline / Memories / ...) and look misaligned.
     <div
       className={cn(
-        "flex flex-col min-h-0 text-sm px-2 overflow-y-auto overflow-x-hidden",
+        "flex flex-1 flex-col min-h-0 text-sm px-2 overflow-y-auto overflow-x-hidden",
         isMac ? "scrollbar-minimal" : "scrollbar-hide",
         className
       )}
@@ -2636,11 +2640,9 @@ function RowRightSignal({
       return {
         content: (
           <span
-            className="font-mono text-[10px] leading-none text-foreground inline-flex items-center justify-center w-2.5 h-2.5"
+            className="inline-block h-1.5 w-1.5 rounded-full bg-foreground"
             aria-label="unread"
-          >
-            █
-          </span>
+          />
         ),
         label: "new",
       };

@@ -28,7 +28,7 @@ import {
   getCachedBrowserStateEntry,
   resolveNewestBrowserState,
 } from "@/lib/browser-state-cache";
-import { type AIPreset } from "@/lib/utils/tauri";
+import { commands, type AIPreset } from "@/lib/utils/tauri";
 import {
   saveConversationFile,
   loadConversationFile,
@@ -1767,9 +1767,8 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
     const newSid = nextSession.id;
     // The Home-level new-chat shortcut already creates this draft record,
     // but the inline chat header (including last-tab recovery) calls this hook
-    // directly. Without an immediate record, currentId/openChatIds contain the
-    // new id while selectors have nothing to render, leaving the tab strip
-    // visually empty until the first message is sent.
+    // directly. Without an immediate record, currentId can point at an id
+    // that selectors cannot resolve until the first message is sent.
     if (nextSession.isNew) {
       const now = Date.now();
       store.actions.upsert({
@@ -1783,6 +1782,7 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
         pinned: false,
         unread: false,
         draft: true,
+        messages: [],
       });
     }
     piSessionIdRef.current = newSid;
@@ -1797,6 +1797,31 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
     // ("analyzing…" stuck). Setting conversationId here keeps the
     // foreground key in sync with piSessionIdRef from message 0.
     setConversationId(newSid);
+  };
+
+  // ---- archiveConversation ----
+  // The chat-title menu uses Archive as its safe primary history action.
+  // Permanent deletion remains available from the sidebar row menu, where
+  // the conversation being acted on is explicit and a confirmation follows.
+  const archiveConversation = async (convId: string) => {
+    await updateConversationFlags(convId, { hidden: true });
+    commands.piAbort(convId).catch(() => {});
+
+    const { useChatStore } = await import("@/lib/stores/chat-store");
+    const store = useChatStore.getState();
+    store.actions.patch(convId, { hidden: true, unread: false });
+    await refreshFileConversations();
+
+    try {
+      await emit("chat-visibility-changed", { id: convId, hidden: true });
+    } catch {
+      // The local store and file are already updated; another window can
+      // repair itself on its next disk hydration.
+    }
+
+    if (conversationId === convId || piSessionIdRef.current === convId) {
+      await startNewConversation();
+    }
   };
 
   // ---- filteredConversations ----
@@ -1846,6 +1871,7 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
     saveConversation,
     loadConversation,
     deleteConversation,
+    archiveConversation,
     renameConversation,
     startNewConversation,
     branchConversation,

@@ -11,10 +11,7 @@ export type InAppShortcutId =
   | "shortcut_guide"
   | "toggle_sidebar"
   | "next_recent_chat"
-  | "previous_recent_chat"
-  | "next_open_chat"
-  | "previous_open_chat"
-  | "open_chat_slot";
+  | "previous_recent_chat";
 
 export type InAppShortcutSection = "chat" | "navigation" | "app";
 
@@ -43,24 +40,6 @@ export const IN_APP_SHORTCUTS: readonly InAppShortcutDefinition[] = [
     section: "chat",
     label: "switch recent chat backward",
     description: "reverse the recent-chat switcher",
-  },
-  {
-    id: "previous_open_chat",
-    section: "navigation",
-    label: "previous open tab",
-    description: "move within the visible working set",
-  },
-  {
-    id: "next_open_chat",
-    section: "navigation",
-    label: "next open tab",
-    description: "move within the visible working set",
-  },
-  {
-    id: "open_chat_slot",
-    section: "navigation",
-    label: "open tab by position",
-    description: "jump to one of the first nine tabs",
   },
   {
     id: "toggle_sidebar",
@@ -137,12 +116,6 @@ export function inAppShortcutLabel(
       return isMac ? "⌃Tab" : "Ctrl+Tab";
     case "previous_recent_chat":
       return isMac ? "⌃⇧Tab" : "Ctrl+Shift+Tab";
-    case "next_open_chat":
-      return isMac ? "⌘⇧]" : "Ctrl+PageDown";
-    case "previous_open_chat":
-      return isMac ? "⌘⇧[" : "Ctrl+PageUp";
-    case "open_chat_slot":
-      return isMac ? "⌘1–9" : "Ctrl+1–9";
   }
 }
 
@@ -155,7 +128,7 @@ interface ShortcutSpec {
   alt: boolean;
 }
 
-function specFor(id: Exclude<InAppShortcutId, "open_chat_slot">, isMac: boolean): ShortcutSpec {
+function specFor(id: InAppShortcutId, isMac: boolean): ShortcutSpec {
   const primary = {
     meta: isMac,
     ctrl: !isMac,
@@ -175,14 +148,6 @@ function specFor(id: Exclude<InAppShortcutId, "open_chat_slot">, isMac: boolean)
       return { key: "Tab", meta: false, ctrl: true, shift: false, alt: false };
     case "previous_recent_chat":
       return { key: "Tab", meta: false, ctrl: true, shift: true, alt: false };
-    case "next_open_chat":
-      return isMac
-        ? { key: "]", code: "BracketRight", meta: true, ctrl: false, shift: true, alt: false }
-        : { key: "PageDown", meta: false, ctrl: true, shift: false, alt: false };
-    case "previous_open_chat":
-      return isMac
-        ? { key: "[", code: "BracketLeft", meta: true, ctrl: false, shift: true, alt: false }
-        : { key: "PageUp", meta: false, ctrl: true, shift: false, alt: false };
   }
 }
 
@@ -199,7 +164,7 @@ function keyMatches(event: KeyboardEvent, spec: ShortcutSpec): boolean {
 
 export function matchesInAppShortcut(
   event: KeyboardEvent,
-  id: Exclude<InAppShortcutId, "open_chat_slot">,
+  id: InAppShortcutId,
   isMac: boolean,
 ): boolean {
   const spec = specFor(id, isMac);
@@ -212,20 +177,6 @@ export function matchesInAppShortcut(
   );
 }
 
-export function openChatSlotFromShortcut(
-  event: KeyboardEvent,
-  isMac: boolean,
-): number | null {
-  const hasPrimary = isMac
-    ? event.metaKey && !event.ctrlKey
-    : event.ctrlKey && !event.metaKey;
-  if (!hasPrimary || event.shiftKey || event.altKey) return null;
-  const physicalDigit = /^Digit([1-9])$/.exec(event.code);
-  const match = physicalDigit ?? /^([1-9])$/.exec(event.key);
-  if (!match) return null;
-  return Number(match[1]) - 1;
-}
-
 export function hasOpenShortcutBlockingLayer(): boolean {
   if (typeof document === "undefined") return false;
   return Boolean(
@@ -236,8 +187,6 @@ export function hasOpenShortcutBlockingLayer(): boolean {
 }
 
 export type ChatShortcutAction =
-  | "next_open_chat"
-  | "previous_open_chat"
   | "next_recent_chat"
   | "previous_recent_chat";
 

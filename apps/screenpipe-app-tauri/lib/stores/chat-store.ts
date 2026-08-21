@@ -5,7 +5,7 @@
 /**
  * Global chat store — keyed by Pi session id.
  *
- * This is the foundation for multi-tab chat with background streaming. It
+ * This is the foundation for parallel chat sessions with background streaming. It
  * lives outside the React tree so chat state survives component unmounts
  * (the chat dies when you navigate to Timeline; the bun + Pi subprocess in
  * Tauri does not — events keep flowing and need somewhere to land).
@@ -188,10 +188,6 @@ export interface SessionRecord {
 interface ChatStoreState {
   /** All known sessions, keyed by id. Includes both alive and on-disk-only. */
   sessions: Record<string, SessionRecord>;
-  /** Small, in-memory working set rendered as chat tabs. The sidebar remains
-   *  the durable index of every conversation; closing a tab only removes its
-   *  id from this list and never archives, deletes, or stops the session. */
-  openChatIds: string[];
   /** True once the initial `~/.screenpipe/chats` scan has finished. */
   diskHydrated: boolean;
   /** Currently FOCUSED session — i.e. the chat the user is actively
@@ -218,23 +214,14 @@ interface ChatStoreActions {
   /** Remove a session from the store (does not stop the Pi process or
    *  delete from disk — caller does that). */
   drop: (id: string) => void;
-  /** Mark a session as currently in front. Implicitly clears its unread
-   *  flag — viewing the chat counts as reading it. */
+  /** Mark a session as the current navigation target and give the event router
+   *  foreground ownership. `panelSessionId` separately tracks the rendered
+   *  React commit. Implicitly clears unread because the switch was requested. */
   setCurrent: (id: string | null) => void;
   /** Mirror of the panel's piSessionIdRef.current. Survives section
    *  switches; used to re-highlight the sidebar row when the user
    *  navigates back to home. */
   setPanelSession: (id: string | null) => void;
-  /** Add a conversation to the visible tab working set. Existing tabs keep
-   *  their position. */
-  openChat: (id: string) => void;
-  /** Remove one conversation from the tab working set. This deliberately
-   *  does not mutate the conversation or its Pi process. */
-  closeChat: (id: string) => void;
-  /** Keep only the named tab in the working set. */
-  closeOtherChats: (id: string) => void;
-  /** Close every tab after the named tab. */
-  closeChatsToRight: (id: string) => void;
   /** Toggle the pinned state. */
   togglePinned: (id: string) => void;
 
@@ -316,6 +303,21 @@ export function isSessionForeground(
   id: string,
 ): boolean {
   return state.currentId === id || state.panelSessionId === id;
+}
+
+/** Conversation the user can actually see in the Home chat panel.
+ *
+ * `currentId` changes at navigation intent time so the event router can hand
+ * foreground ownership to the incoming session. React commits the rendered
+ * panel a moment later and `panelSessionId` follows that commit. Keeping the
+ * sidebar highlight on the panel id during that gap prevents a selected row
+ * from disagreeing with the title and transcript on screen. A null currentId
+ * means Home is covered by another section, so no row should look selected. */
+export function selectDisplayedChatId(
+  state: Pick<ChatStoreState, "currentId" | "panelSessionId">,
+): string | null {
+  if (state.currentId === null) return null;
+  return state.panelSessionId ?? state.currentId;
 }
 
 /** Payload of the backend `chat-session-activity` event — a lightweight
@@ -420,7 +422,6 @@ export function getPersistedViewedAt(
 
 export const useChatStore = create<ChatStore>((set) => ({
   sessions: {},
-  openChatIds: [],
   diskHydrated: false,
   currentId: null,
   panelSessionId: null,
@@ -509,12 +510,11 @@ export const useChatStore = create<ChatStore>((set) => ({
 
     drop: (id) =>
       set((s) => {
-        if (!(id in s.sessions) && !s.openChatIds.includes(id)) return {};
+        if (!(id in s.sessions)) return {};
         const next = { ...s.sessions };
         delete next[id];
         return {
           sessions: next,
-          openChatIds: s.openChatIds.filter((openId) => openId !== id),
           currentId: s.currentId === id ? null : s.currentId,
         };
       }),
@@ -522,53 +522,22 @@ export const useChatStore = create<ChatStore>((set) => ({
     setCurrent: (id) =>
       set((s) => {
         const viewedAt = Date.now();
-        const openChatIds =
-          id && !s.openChatIds.includes(id)
-            ? [...s.openChatIds, id]
-            : s.openChatIds;
         // Viewing a session counts as reading it — lastViewedAt >= any
         // lastContentAt means isUnread() returns false. Same atomic update
         // so the row's unread state can't transiently flicker.
         if (id && s.sessions[id]) {
           return {
             currentId: id,
-            panelSessionId: id,
-            openChatIds,
             sessions: {
               ...s.sessions,
               [id]: { ...s.sessions[id], unread: false, lastViewedAt: viewedAt },
             },
           };
         }
-        return { currentId: id, openChatIds };
+        return { currentId: id };
       }),
 
     setPanelSession: (id) => set({ panelSessionId: id }),
-
-    openChat: (id) =>
-      set((s) =>
-        s.openChatIds.includes(id)
-          ? {}
-          : { openChatIds: [...s.openChatIds, id] }
-      ),
-
-    closeChat: (id) =>
-      set((s) => ({
-        openChatIds: s.openChatIds.filter((openId) => openId !== id),
-      })),
-
-    closeOtherChats: (id) =>
-      set((s) => ({
-        openChatIds: s.openChatIds.includes(id) ? [id] : s.openChatIds,
-      })),
-
-    closeChatsToRight: (id) =>
-      set((s) => {
-        const index = s.openChatIds.indexOf(id);
-        return index === -1
-          ? {}
-          : { openChatIds: s.openChatIds.slice(0, index + 1) };
-      }),
 
     togglePinned: (id) =>
       set((s) => {
@@ -820,6 +789,9 @@ export function sessionRecordFromMeta(m: ConversationMeta): SessionRecord {
     updatedAt: m.updatedAt,
     pinned: m.pinned,
     unread: false,
+    // Empty persisted chat files are abandoned drafts, not durable history.
+    // Mark them here so a restart cannot resurrect stray "untitled" rows.
+    ...(m.messageCount === 0 && m.kind === "chat" ? { draft: true } : {}),
     lastUserMessageAt: m.lastUserMessageAt,
     lastContentAt: m.lastContentAt,
     lastViewedAt: m.lastViewedAt,
@@ -859,6 +831,11 @@ export function sessionRecordFromMeta(m: ConversationMeta): SessionRecord {
  * Returns `{ id, isNew }` so callers can decide whether to upsert.
  */
 export function isReusableBlankChatSession(s: SessionRecord): boolean {
+  if (!s.draft) return false;
+  // A live draft owns an in-memory message buffer. Hydrated zero-message files
+  // are marked draft to keep them out of Recents, but intentionally carry no
+  // buffer so New chat does not jump back into an abandoned persisted row.
+  if (!Array.isArray(s.messages)) return false;
   if (s.kind && s.kind !== "chat") return false;
   if (s.isLoading || s.isStreaming) return false;
   if (s.messageCount > 0) return false;
