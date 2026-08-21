@@ -9,12 +9,12 @@
  * out of every `style` attribute, and it lets the palette stay a deliberate,
  * validated system instead of whatever hex a model happened to emit.
  *
- * DESIGN.md: the composition stays ink, bone and trace grey; phosphor marks
- * transformation, execution or focus and nothing else. So:
+ * DESIGN.md: the composition stays ink, bone and trace grey; neutral signal
+ * handles ordinary focus and phosphor is reserved for live execution. So:
  *
  *   - data marks are trace grey (captured evidence)
  *   - multiple series separate by LIGHTNESS on a monochrome ramp, not by hue
- *   - phosphor is only ever the focused/hovered mark — never a series color
+ *   - neutral signal is used for the focused/hovered mark
  *
  * Separating series by lightness rather than hue is also the stronger
  * accessibility choice: a lightness ramp is legible under every form of colour
@@ -80,8 +80,7 @@ export type ChartPalette = {
   /** Low → high magnitude ramp. */
   sequential: readonly string[];
   /**
-   * Phosphor, for the hovered or focused mark only. Light mode uses phosphor
-   * strong, because bright phosphor on bone fails contrast at mark size.
+   * Neutral signal for an ordinary hovered or focused mark.
    */
   focus: string;
   /** Recessive gridline and baseline. */
@@ -97,7 +96,7 @@ const LIGHT_PALETTE: ChartPalette = {
   series: SERIES_LIGHT,
   single: "#78786f",
   sequential: SEQUENTIAL_LIGHT,
-  focus: "#4a6b00",
+  focus: "#333333",
   grid: "#dedad8",
   track: "#efefeb",
   surface: "#ffffff",
@@ -108,7 +107,7 @@ const DARK_PALETTE: ChartPalette = {
   series: SERIES_DARK,
   single: "#78786f",
   sequential: SEQUENTIAL_DARK,
-  focus: "#c7ff3e",
+  focus: "#b8b8b8",
   grid: "#2c2c2a",
   track: "#242422",
   surface: "#171717",

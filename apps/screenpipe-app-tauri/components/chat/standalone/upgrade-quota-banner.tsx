@@ -191,7 +191,7 @@ export function UpgradeQuotaBanner() {
                 type="button"
                 size="sm"
                 variant="default"
-                className="h-7 border-[#4A6B00] bg-[#C7FF3E] text-[12px] text-black hover:border-black hover:bg-black hover:text-[#C7FF3E]"
+                className="h-7 border-foreground bg-foreground text-[12px] text-background hover:bg-background hover:text-foreground"
                 onClick={onUpgrade}
                 disabled={busy}
               >

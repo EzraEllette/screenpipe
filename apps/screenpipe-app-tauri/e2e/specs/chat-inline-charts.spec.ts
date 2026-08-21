@@ -14,7 +14,7 @@
  *   1. charts land INLINE, between the paragraphs that surround them, not
  *      collected at the end of the message
  *   2. bars have real painted width proportional to their values
- *   3. hovering a mark shows a tooltip and recolours that mark (phosphor)
+ *   3. hovering a mark shows a tooltip and recolours that mark (neutral signal)
  *   4. a malformed fence falls back to a code block instead of vanishing
  *   5. no chart uses a rounded corner (DESIGN.md: sharp corners always)
  *   6. every chat chart exposes the Live View prompt handoff menu
@@ -244,7 +244,7 @@ describe("Inline charts in chat", function () {
       },
     );
 
-    // The hovered fill switches to the phosphor focus colour.
+    // The hovered fill switches to the neutral focus signal.
     const focused = await browser.execute(() => {
       const fills = Array.from(
         document.querySelectorAll<HTMLElement>(

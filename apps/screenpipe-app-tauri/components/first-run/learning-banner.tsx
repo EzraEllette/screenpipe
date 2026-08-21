@@ -67,8 +67,8 @@ export function FirstRunReadyPanel({
     <div>
       <div className="p-5">
         <div className="flex items-center gap-2">
-          <span className="h-2 w-2 bg-phosphor-strong" aria-hidden="true" />
-          <span className="font-mono text-[9px] uppercase tracking-[0.2em] text-phosphor-strong">
+          <span className="h-2 w-2 bg-signal" aria-hidden="true" />
+          <span className="font-mono text-[9px] uppercase tracking-[0.2em] text-signal">
             first result · ready
           </span>
         </div>
@@ -82,7 +82,7 @@ export function FirstRunReadyPanel({
         <div className="mt-4 flex flex-wrap items-center gap-2">
           <Button
             size="sm"
-            className="h-8 border-phosphor-strong bg-phosphor px-3 text-[10px] text-phosphor-ink hover:border-foreground hover:bg-foreground hover:text-background"
+            className="h-8 border-foreground bg-foreground px-3 text-[10px] text-background hover:bg-background hover:text-foreground"
             data-testid="first-run-open-summary"
             onClick={onOpenSummary}
           >
@@ -132,8 +132,8 @@ export function FirstRunSetupReadyPanel({
     <div data-testid="first-run-setup-ready">
       <div className="p-5">
         <div className="flex items-center gap-2">
-          <span className="h-2 w-2 bg-phosphor-strong" aria-hidden="true" />
-          <span className="font-mono text-[9px] uppercase tracking-[0.2em] text-phosphor-strong">
+          <span className="h-2 w-2 bg-signal" aria-hidden="true" />
+          <span className="font-mono text-[9px] uppercase tracking-[0.2em] text-signal">
             setup · ready
           </span>
         </div>
@@ -179,11 +179,11 @@ export function FirstRunSetupDock({
   return (
     <div data-testid="first-run-setup-dock">
       <div className="flex flex-col gap-3 px-4 py-3 sm:flex-row sm:items-center">
-        <span className="flex h-8 w-8 shrink-0 items-center justify-center border border-phosphor-strong text-phosphor-strong">
+        <span className="flex h-8 w-8 shrink-0 items-center justify-center border border-signal text-signal">
           <ListChecks className="h-4 w-4" aria-hidden="true" />
         </span>
         <div className="min-w-0 flex-1">
-          <p className="font-mono text-[9px] uppercase tracking-[0.2em] text-phosphor-strong">
+          <p className="font-mono text-[9px] uppercase tracking-[0.2em] text-signal">
             getting started
           </p>
           <p className="mt-0.5 text-[11px] leading-relaxed text-muted-foreground">

@@ -58,14 +58,13 @@ vi.mock("@/lib/upgrade-flow", () => ({
   openBusinessUpgradeSurface: mocks.openBusinessUpgradeSurface,
 }));
 
-function expectPhosphorPrimary(button: HTMLElement) {
+function expectNeutralPrimary(button: HTMLElement) {
   expect(button).toHaveClass(
-    "border-[#4A6B00]",
-    "bg-[#C7FF3E]",
-    "text-black",
-    "hover:border-black",
-    "hover:bg-black",
-    "hover:text-[#C7FF3E]",
+    "border-foreground",
+    "bg-foreground",
+    "text-background",
+    "hover:bg-background",
+    "hover:text-foreground",
   );
 }
 
@@ -118,7 +117,7 @@ describe("UpgradeQuotaBanner", () => {
     render(<UpgradeQuotaBanner />);
 
     const upgrade = screen.getByRole("button", { name: "View Business" });
-    expectPhosphorPrimary(upgrade);
+    expectNeutralPrimary(upgrade);
     fireEvent.click(upgrade);
     await waitFor(() =>
       expect(mocks.openBusinessUpgradeSurface).toHaveBeenCalledWith(
@@ -318,7 +317,7 @@ describe("UpgradeQuotaBanner", () => {
       const polledUpgrade = screen.getByRole("button", {
         name: `Upgrade to ${planLabel}`,
       });
-      expectPhosphorPrimary(polledUpgrade);
+      expectNeutralPrimary(polledUpgrade);
       fireEvent.click(polledUpgrade);
       await waitFor(() =>
         expect(mocks.openExternalUrl).toHaveBeenCalledWith(upgradeUrl),
@@ -337,7 +336,7 @@ describe("UpgradeQuotaBanner", () => {
       const immediateUpgrade = screen.getByRole("button", {
         name: `Upgrade to ${planLabel}`,
       });
-      expectPhosphorPrimary(immediateUpgrade);
+      expectNeutralPrimary(immediateUpgrade);
       fireEvent.click(immediateUpgrade);
       await waitFor(() =>
         expect(mocks.openExternalUrl).toHaveBeenCalledWith(upgradeUrl),

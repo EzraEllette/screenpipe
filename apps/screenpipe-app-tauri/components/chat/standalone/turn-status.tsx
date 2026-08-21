@@ -76,7 +76,7 @@ function ScanGlyph({ live, phase }: { live: boolean; phase: TurnPhase }) {
           key={i}
           className={cn(
             "block transition-colors duration-150",
-            on ? "bg-phosphor-strong" : "bg-border/40",
+            on ? "bg-phosphor" : "bg-border/40",
           )}
           style={{ width: 3, height: 3 }}
         />
@@ -233,7 +233,7 @@ export function TurnStatus({
                   className={cn(
                     "absolute -left-[calc(0.75rem+2px)] block h-[5px] w-[5px]",
                     node.state === "current"
-                      ? "bg-phosphor-strong"
+                      ? "bg-phosphor"
                       : node.state === "ended"
                         ? "bg-foreground/50"
                         : "bg-trace",

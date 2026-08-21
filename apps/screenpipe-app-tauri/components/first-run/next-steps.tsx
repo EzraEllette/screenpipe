@@ -167,7 +167,7 @@ function StatusLabel({
     <span
       className={
         ready
-          ? "inline-flex items-center gap-1 font-mono text-[9px] uppercase tracking-[0.14em] text-phosphor-strong"
+          ? "inline-flex items-center gap-1 font-mono text-[9px] uppercase tracking-[0.14em] text-signal"
           : "font-mono text-[9px] uppercase tracking-[0.14em] text-muted-foreground"
       }
     >
@@ -343,7 +343,7 @@ export function FirstRunNextStepsPanel({
           className="mx-4 mb-4 flex items-center gap-3 border border-border bg-background px-4 py-3"
           data-testid="first-run-next-steps-complete"
         >
-          <span className="flex h-8 w-8 shrink-0 items-center justify-center border border-phosphor-strong text-phosphor-strong">
+          <span className="flex h-8 w-8 shrink-0 items-center justify-center border border-signal text-signal">
             <Check className="h-4 w-4" aria-hidden="true" />
           </span>
           <div>
