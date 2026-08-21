@@ -14,7 +14,7 @@ on:
         description: "Commit hash to build from (optional)"
         required: false
       version:
-        description: "Version to set in Cargo.toml (required if commit_hash is provided)"
+        description: "Version expected at commit_hash"
         required: false
       needs_testing:
         description: "Whether this release needs community testing"
@@ -22,6 +22,10 @@ on:
         default: false
       force_github_runners:
         description: "Force GitHub-hosted runners (skip self-hosted even if online)"
+        type: boolean
+        default: false
+      dry_run:
+        description: "Build/sign/notarize without uploading release artifacts or debug symbols"
         type: boolean
         default: false
 concurrency:
@@ -41,14 +45,56 @@ jobs:
       should_release: ${{ steps.check.outputs.should_release }}
       should_test: ${{ steps.check.outputs.should_test }}
       macos_arm_runner: ${{ steps.check-runner.outputs.macos_arm_runner }}
+      macos_x64_runner: ${{ steps.check-runner.outputs.macos_x64_runner }}
       windows_runner: ${{ steps.check-runner.outputs.windows_runner }}
+      release_sha: ${{ steps.resolve-release.outputs.sha }}
+      release_version: ${{ steps.resolve-release.outputs.version }}
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 2
-      - id: check
+          fetch-depth: 0
+      - name: Resolve and validate release revision
+        id: resolve-release
+        shell: bash
+        env:
+          REQUESTED_SHA: ${{ github.event.inputs.commit_hash || github.sha }}
+          REQUESTED_VERSION: ${{ github.event.inputs.version }}
         run: |
-          COMMIT_MSG=$(git log -1 --pretty=%B)
+          set -euo pipefail
+
+          if [[ ! "$REQUESTED_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "release commit must be a full 40-character SHA" >&2
+            exit 1
+          fi
+
+          git fetch --no-tags origin main
+          RELEASE_SHA=$(git rev-parse "$REQUESTED_SHA^{commit}")
+          git merge-base --is-ancestor "$RELEASE_SHA" origin/main || {
+            echo "$RELEASE_SHA is not contained in origin/main" >&2
+            exit 1
+          }
+
+          MANIFEST_VERSION=$(git show "${RELEASE_SHA}:apps/screenpipe-app-tauri/src-tauri/Cargo.toml" |
+            sed -n 's/^version = "\([^"]*\)"/\1/p' | head -1)
+          LOCK_VERSION=$(git show "${RELEASE_SHA}:apps/screenpipe-app-tauri/src-tauri/Cargo.lock" |
+            awk '/^name = "screenpipe-app"$/ { found=1; next } found && /^version = / { gsub(/"/, "", $3); print $3; exit }')
+
+          if [[ -z "$MANIFEST_VERSION" || "$MANIFEST_VERSION" != "$LOCK_VERSION" ]]; then
+            echo "Cargo.toml version '$MANIFEST_VERSION' does not match Cargo.lock '$LOCK_VERSION'" >&2
+            exit 1
+          fi
+          if [[ -n "$REQUESTED_VERSION" && "$REQUESTED_VERSION" != "$MANIFEST_VERSION" ]]; then
+            echo "requested version '$REQUESTED_VERSION' does not match $RELEASE_SHA ($MANIFEST_VERSION)" >&2
+            exit 1
+          fi
+
+          echo "sha=$RELEASE_SHA" >> "$GITHUB_OUTPUT"
+          echo "version=$MANIFEST_VERSION" >> "$GITHUB_OUTPUT"
+      - id: check
+        env:
+          RELEASE_SHA: ${{ steps.resolve-release.outputs.sha }}
+        run: |
+          COMMIT_MSG=$(git show -s --format=%B "$RELEASE_SHA")
           # Match only when commit message STARTS with these keywords (not mentioned in prose)
           if echo "$COMMIT_MSG" | head -1 | grep -qE "^(Bump app|release-app)"; then
             echo "should_release=true" >> $GITHUB_OUTPUT
@@ -78,11 +124,17 @@ jobs:
         id: check-runner
         run: |
           if [ "${{ github.event.inputs.force_github_runners }}" = "true" ]; then
-            echo "macos_arm_runner=macos-latest" >> $GITHUB_OUTPUT
-            echo "windows_runner=windows-2022" >> $GITHUB_OUTPUT
+            {
+              echo "macos_arm_runner=macos-latest"
+              echo "macos_x64_runner=macos-26"
+              echo "windows_runner=windows-2022"
+            } >> "$GITHUB_OUTPUT"
           else
-            echo "macos_arm_runner=macos-26" >> $GITHUB_OUTPUT
-            echo "windows_runner=windows-2022" >> $GITHUB_OUTPUT
+            {
+              echo "macos_arm_runner=screenpipe-release-macos"
+              echo "macos_x64_runner=screenpipe-release-macos"
+              echo "windows_runner=windows-2022"
+            } >> "$GITHUB_OUTPUT"
           fi
 
   draft:
@@ -96,16 +148,7 @@ jobs:
           # keeps moving while builds queue/run, so a branch ref lets platforms
           # check out different code (and re-runs pick up commits that were
           # never in the release). The published tag points at the bump commit.
-          ref: ${{ github.event.inputs.commit_hash || github.sha }}
-
-      - name: Update version in Cargo.toml
-        if: github.event.inputs.commit_hash && github.event.inputs.version
-        run: |
-          if [[ "$OSTYPE" == "darwin"* ]]; then
-            sed -i '' 's/^version = ".*"/version = "${{ github.event.inputs.version }}"/' apps/screenpipe-app-tauri/src-tauri/Cargo.toml
-          else
-            sed -i 's/^version = ".*"/version = "${{ github.event.inputs.version }}"/' apps/screenpipe-app-tauri/src-tauri/Cargo.toml
-          fi
+          ref: ${{ needs.check_commit.outputs.release_sha }}
 
       - name: draft placeholder
         run: echo "R2-based releases - no CN draft needed"
@@ -119,13 +162,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # GitHub-hosted macOS 26 runner for Apple Silicon
+          # Persistent EC2 Mac runner by default; manual input retains the
+          # GitHub-hosted escape hatch.
           - platform: ${{ needs.check_commit.outputs.macos_arm_runner || 'macos-latest' }}
             args: "--target aarch64-apple-darwin --features metal,parakeet-mlx,rfdetr-mlx,redact-onnx-coreml"
             target: aarch64-apple-darwin
             tauri-args: "--target aarch64-apple-darwin --features metal,parakeet-mlx,rfdetr-mlx,redact-onnx-coreml,official-build"
             os_type: "macos"
-          - platform: "macos-26"
+          - platform: ${{ needs.check_commit.outputs.macos_x64_runner || 'macos-26' }}
             args: "--target x86_64-apple-darwin --features metal,redact-onnx-coreml"
             target: x86_64-apple-darwin
             tauri-args: "--target x86_64-apple-darwin --features metal,redact-onnx-coreml,official-build"
@@ -171,7 +215,13 @@ jobs:
           # keeps moving while builds queue/run, so a branch ref lets platforms
           # check out different code (and re-runs pick up commits that were
           # never in the release). The published tag points at the bump commit.
-          ref: ${{ github.event.inputs.commit_hash || github.sha }}
+          ref: ${{ needs.check_commit.outputs.release_sha }}
+
+      - name: Attach persistent EC2 Mac cache
+        if: runner.environment == 'self-hosted' && matrix.os_type == 'macos'
+        uses: ./.github/actions/setup-persistent-macos-cache
+        with:
+          target: ${{ matrix.target }}
 
       - name: Shorten target dir to avoid MAX_PATH (Windows)
         if: matrix.os_type == 'windows'
@@ -189,20 +239,6 @@ jobs:
           if (Test-Path $targetDir) { Remove-Item -Recurse -Force $targetDir }
           cmd /c mklink /J $targetDir $shortDir
           Write-Host "Created junction: $targetDir -> $shortDir"
-
-      - name: Update version in Cargo.toml
-        if: github.event.inputs.commit_hash && github.event.inputs.version && matrix.platform != 'macos-latest'
-        shell: pwsh
-        run: |
-          $content = Get-Content apps/screenpipe-app-tauri/src-tauri/Cargo.toml
-          $content = $content -replace '^version = ".*"', ('version = "' + '${{ github.event.inputs.version }}' + '"')
-          $content | Set-Content apps/screenpipe-app-tauri/src-tauri/Cargo.toml -Force
-
-      - name: Update version in Cargo.toml
-        if: github.event.inputs.commit_hash && github.event.inputs.version && matrix.platform == 'macos-latest'
-        shell: bash
-        run: |
-          sed -i '' 's/^version = ".*"/version = "${{ github.event.inputs.version }}"/' apps/screenpipe-app-tauri/src-tauri/Cargo.toml
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -244,6 +280,7 @@ jobs:
           rustc --version # verify rust is available
 
       - name: Rust Cache
+        if: runner.environment == 'github-hosted'
         uses: Swatinem/rust-cache@v2
         with:
           # Specify custom cache key
@@ -268,6 +305,7 @@ jobs:
       # disabled during a GitHub Actions cache outage and never came back).
       # After rust-cache on purpose — see the action's ordering note.
       - name: Setup sccache (shared R2 compile cache)
+        if: runner.environment == 'github-hosted'
         uses: ./.github/actions/setup-sccache
         with:
           r2-account-id: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -277,6 +315,7 @@ jobs:
           write-secret-access-key: ${{ secrets.SCCACHE_R2_WRITE_SECRET_ACCESS_KEY }}
 
       - name: Cache Build Artifacts
+        if: runner.environment == 'github-hosted'
         uses: actions/cache@v4
         with:
           path: |
@@ -294,7 +333,7 @@ jobs:
           cargo --version
 
       - name: Cache Homebrew packages
-        if: matrix.platform == 'macos-latest'
+        if: runner.environment == 'github-hosted' && matrix.os_type == 'macos'
         uses: actions/cache@v4
         with:
           path: |
@@ -308,6 +347,7 @@ jobs:
       # Cache binary dependencies (ffmpeg, tesseract, ollama, vcredist, WixTools)
       # These rarely change - keyed on workflow file hash, not lockfiles
       - name: Cache Binary Dependencies
+        if: runner.environment == 'github-hosted'
         uses: actions/cache@v4
         with:
           path: |
@@ -325,6 +365,7 @@ jobs:
 
       # Cache node_modules and tauri CLI - changes with bun.lockb
       - name: Cache Node Modules
+        if: runner.environment == 'github-hosted'
         id: cache-pre-build
         uses: actions/cache@v4
         with:
@@ -1558,7 +1599,7 @@ jobs:
           done
 
       - name: Upload to Cloudflare R2 (macOS)
-        if: matrix.os_type == 'macos'
+        if: matrix.os_type == 'macos' && github.event.inputs.dry_run != 'true'
         shell: bash
         env:
           RELEASE_UPLOAD_URL: ${{ vars.RELEASE_UPLOAD_URL }}
@@ -1573,7 +1614,7 @@ jobs:
             "${BUNDLE_DIR}"/macos/*.sig
 
       - name: Upload to Cloudflare R2 (Windows)
-        if: matrix.os_type == 'windows'
+        if: matrix.os_type == 'windows' && github.event.inputs.dry_run != 'true'
         shell: bash
         env:
           RELEASE_UPLOAD_URL: ${{ vars.RELEASE_UPLOAD_URL }}
@@ -1588,7 +1629,7 @@ jobs:
             "${BUNDLE_DIR}"/nsis/*.sig
 
       - name: Upload to Cloudflare R2 (Linux)
-        if: matrix.os_type == 'linux'
+        if: matrix.os_type == 'linux' && github.event.inputs.dry_run != 'true'
         shell: bash
         env:
           RELEASE_UPLOAD_URL: ${{ vars.RELEASE_UPLOAD_URL }}
@@ -1605,7 +1646,7 @@ jobs:
 
       # Sentry uploads run AFTER R2 so they don't delay release artifacts
       - name: Upload debug symbols to Sentry (Windows)
-        if: matrix.os_type == 'windows'
+        if: matrix.os_type == 'windows' && github.event.inputs.dry_run != 'true'
         continue-on-error: true
         shell: pwsh
         env:
@@ -1618,7 +1659,7 @@ jobs:
           .\sentry-cli.exe debug-files upload --org $env:SENTRY_ORG --project screenpipe-app apps/screenpipe-app-tauri/src-tauri/target/${{ matrix.target }}/release/
 
       - name: Upload debug symbols to Sentry (macOS)
-        if: matrix.os_type == 'macos'
+        if: matrix.os_type == 'macos' && github.event.inputs.dry_run != 'true'
         continue-on-error: true
         shell: bash
         env:
