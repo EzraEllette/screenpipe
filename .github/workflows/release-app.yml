@@ -1626,6 +1626,18 @@ jobs:
             echo "✅ ${APP_NAME} stapled, tarball rebuilt and re-signed"
           done
 
+      - name: Upload macOS dry-run artifacts
+        if: matrix.os_type == 'macos' && github.event.inputs.dry_run == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: consumer-macos-${{ matrix.target }}
+          path: |
+            apps/screenpipe-app-tauri/src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
+            apps/screenpipe-app-tauri/src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app.tar.gz
+            apps/screenpipe-app-tauri/src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app.tar.gz.sig
+          if-no-files-found: error
+          compression-level: 0
+
       - name: Upload to Cloudflare R2 (macOS)
         if: matrix.os_type == 'macos' && github.event.inputs.dry_run != 'true'
         shell: bash
