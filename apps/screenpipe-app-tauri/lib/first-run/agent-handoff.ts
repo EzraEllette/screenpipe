@@ -35,12 +35,27 @@ export type AgentHandoffTarget = {
   /** Shown on the button. */
   label: string;
   /**
-   * Verified URL that opens the app with the prompt prefilled. Optional so a
+   * Documented URL that opens the app with the prompt prefilled. Optional so a
    * future target can explicitly degrade to clipboard-only.
    */
   deeplink?: string;
+  /**
+   * Replay the URL after this delay. Cursor can consume a prompt deeplink once
+   * its UI is ready but lose the same event while cold-starting.
+   */
+  replayAfterMs?: number;
   /** What the user should do after the handoff. */
   hint: string;
+};
+
+export type AgentHandoffOpenResult = {
+  /** The protocol handler accepted the initial open request. */
+  launched: boolean;
+  /** Every required open, including a cold-start replay, completed. */
+  prefilled: boolean;
+  /** A target-specific cold-start replay completed. */
+  replayed: boolean;
+  failedStage?: "open" | "replay";
 };
 
 /**
@@ -53,6 +68,14 @@ export const HANDOFF_PROMPT =
   "Using screenpipe, summarize what I worked on in the last 5 minutes.";
 
 const ENCODED_HANDOFF_PROMPT = encodeURIComponent(HANDOFF_PROMPT);
+
+/**
+ * Measured on the desktop app, not a generic network retry: Cursor's window
+ * was ready to consume the prompt three seconds after its protocol handler
+ * started the process. Replaying sooner risks landing during its splash
+ * screen; waiting longer makes the first-run click feel broken.
+ */
+export const CURSOR_DEEPLINK_REPLAY_DELAY_MS = 3_000;
 
 /**
  * Preference order, not an alphabetical list. Every shipped target has a
@@ -72,9 +95,11 @@ const HANDOFF_TARGETS: AgentHandoffTarget[] = [
     id: "cursor",
     label: "Cursor",
     // Cursor's documented prompt deeplink opens Chat with the text prefilled
-    // and explicitly never executes it automatically.
+    // and explicitly never executes it automatically. Its macOS cold start can
+    // drop the first event, so replay once after the UI has initialized.
     deeplink: `cursor://anysphere.cursor-deeplink/prompt?text=${ENCODED_HANDOFF_PROMPT}`,
-    hint: "Question ready in Cursor. Review and send it.",
+    replayAfterMs: CURSOR_DEEPLINK_REPLAY_DELAY_MS,
+    hint: "Cursor opened. Review and send the question.",
   },
   {
     id: "codex",
@@ -85,6 +110,57 @@ const HANDOFF_TARGETS: AgentHandoffTarget[] = [
     hint: "Question ready in ChatGPT. Review and send it.",
   },
 ];
+
+const wait = (ms: number) =>
+  new Promise<void>((resolve) => globalThis.setTimeout(resolve, ms));
+
+/**
+ * Open a target's prompt route and finish any target-specific cold-start
+ * recovery before claiming the prompt is ready.
+ *
+ * `openUrl()` only proves the OS accepted the URL. It does not prove the app's
+ * composer consumed it. Cursor needs one replay after startup; keeping that
+ * rule in the registry avoids retrying Claude and Codex unnecessarily.
+ */
+export async function openAgentHandoffDeeplink(
+  target: AgentHandoffTarget,
+  openUrl: (url: string) => Promise<void>,
+  delay: (ms: number) => Promise<void> = wait,
+): Promise<AgentHandoffOpenResult> {
+  if (!target.deeplink) {
+    return { launched: false, prefilled: false, replayed: false };
+  }
+
+  try {
+    await openUrl(target.deeplink);
+  } catch {
+    return {
+      launched: false,
+      prefilled: false,
+      replayed: false,
+      failedStage: "open",
+    };
+  }
+
+  if (!target.replayAfterMs) {
+    return { launched: true, prefilled: true, replayed: false };
+  }
+
+  try {
+    await delay(target.replayAfterMs);
+    await openUrl(target.deeplink);
+    return { launched: true, prefilled: true, replayed: true };
+  } catch {
+    // The first open may still have worked on a warm app, but we cannot claim
+    // that a cold-start prompt arrived. The caller keeps the copied fallback.
+    return {
+      launched: true,
+      prefilled: false,
+      replayed: false,
+      failedStage: "replay",
+    };
+  }
+}
 
 /**
  * Every connected target, in preference order.

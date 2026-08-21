@@ -17,6 +17,7 @@ import {
 import {
   HANDOFF_PROMPT,
   handoffTargets,
+  openAgentHandoffDeeplink,
   pickHandoffTargets,
   type AgentHandoffTarget,
 } from "@/lib/first-run/agent-handoff";
@@ -135,22 +136,32 @@ export function useAgentHandoff(enabled: boolean): AgentHandoffView {
     }
 
     let opened = false;
+    let prefilled = false;
+    let replayed = false;
+    let failedStage: "open" | "replay" | undefined;
     if (target.deeplink) {
       try {
         const { openUrl } = await import("@tauri-apps/plugin-opener");
-        await openUrl(target.deeplink);
-        opened = true;
+        const result = await openAgentHandoffDeeplink(target, openUrl);
+        opened = result.launched;
+        prefilled = result.prefilled;
+        replayed = result.replayed;
+        failedStage = result.failedStage;
       } catch {
-        // When the clipboard succeeded this degrades to copy-only. When both
-        // paths fail, the in-app summary remains the recovery action.
-        posthog.capture("first_run_agent_handoff_failed", {
-          agent: target.id,
-          stage: "open",
-        });
+        failedStage = "open";
       }
     }
 
-    if (opened) {
+    if (failedStage) {
+      // When the clipboard succeeded this degrades to copy-only. When both
+      // paths fail, the in-app summary remains the recovery action.
+      posthog.capture("first_run_agent_handoff_failed", {
+        agent: target.id,
+        stage: failedStage,
+      });
+    }
+
+    if (prefilled) {
       setHint(target.hint);
     } else if (copied) {
       setHint(`Question copied. Open ${target.label} and paste it.`);
@@ -167,8 +178,9 @@ export function useAgentHandoff(enabled: boolean): AgentHandoffView {
     posthog.capture("first_run_agent_handoff_clicked", {
       agent: target.id,
       opened,
-      prefilled: opened,
-      copy_only: !opened,
+      prefilled,
+      replayed,
+      copy_only: !prefilled,
       clipboard_copied: copied,
     });
   }, []);

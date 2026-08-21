@@ -223,6 +223,43 @@ describe("useAgentHandoff — performing the handoff", () => {
     expect(clicked()).toHaveLength(0);
   });
 
+  it("replays Cursor's deeplink after startup before claiming it is prefilled", async () => {
+    detectAiTools.mockResolvedValue(["cursor"]);
+    isCursorMcpInstalled.mockResolvedValue(true);
+    getInstalledMcpVersion.mockResolvedValue(null);
+    const { result } = renderHook(() => useAgentHandoff(true));
+    await waitFor(() => expect(result.current.targets[0]?.id).toBe("cursor"));
+
+    vi.useFakeTimers();
+    try {
+      await act(async () => {
+        const handoff = result.current.askAgent(result.current.targets[0]);
+        await vi.runAllTimersAsync();
+        await handoff;
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(openUrl).toHaveBeenCalledTimes(2);
+    expect(openUrl).toHaveBeenNthCalledWith(
+      1,
+      `cursor://anysphere.cursor-deeplink/prompt?text=${encodeURIComponent(HANDOFF_PROMPT)}`,
+    );
+    expect(openUrl).toHaveBeenNthCalledWith(
+      2,
+      `cursor://anysphere.cursor-deeplink/prompt?text=${encodeURIComponent(HANDOFF_PROMPT)}`,
+    );
+    expect(result.current.hint).toMatch(/review and send/i);
+    expect(clicked()[0]?.[1]).toMatchObject({
+      agent: "cursor",
+      opened: true,
+      prefilled: true,
+      replayed: true,
+      copy_only: false,
+    });
+  });
+
   it("opens the ChatGPT/Codex desktop app with the prompt prefilled", async () => {
     detectAiTools.mockResolvedValue(["codex"]);
     isCodexMcpInstalled.mockResolvedValue(true);
