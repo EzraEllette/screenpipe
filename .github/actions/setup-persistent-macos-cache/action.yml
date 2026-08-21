@@ -22,6 +22,7 @@ runs:
 
         CACHE_ROOT="$HOME/screenpipe-cache"
         WORKSPACE_TARGET="$GITHUB_WORKSPACE/apps/screenpipe-app-tauri/src-tauri/target"
+        WORKSPACE_NODE_MODULES="$GITHUB_WORKSPACE/apps/screenpipe-app-tauri/node_modules"
         PERSISTENT_TARGET="$CACHE_ROOT/targets/$SCREENPIPE_RELEASE_TARGET"
 
         mkdir -p \
@@ -30,7 +31,6 @@ runs:
           "$CACHE_ROOT/bun" \
           "$CACHE_ROOT/native-deps" \
           "$PERSISTENT_TARGET" \
-          "$CACHE_ROOT/node_modules/$SCREENPIPE_RELEASE_TARGET" \
           "$CACHE_ROOT/tauri/$SCREENPIPE_RELEASE_TARGET"
 
         replace_with_symlink() {
@@ -49,9 +49,11 @@ runs:
         }
 
         replace_with_symlink "$WORKSPACE_TARGET" "$PERSISTENT_TARGET"
-        replace_with_symlink \
-          "$GITHUB_WORKSPACE/apps/screenpipe-app-tauri/node_modules" \
-          "$CACHE_ROOT/node_modules/$SCREENPIPE_RELEASE_TARGET"
+        # Bun can omit platform-specific optional packages when node_modules is
+        # installed through a persistent symlink. Keep its download cache, but
+        # materialize dependencies fresh for each job so native bindings match
+        # the EC2 Mac host.
+        rm -rf "$WORKSPACE_NODE_MODULES"
         replace_with_symlink \
           "$GITHUB_WORKSPACE/apps/screenpipe-app-tauri/.tauri" \
           "$CACHE_ROOT/tauri/$SCREENPIPE_RELEASE_TARGET"
