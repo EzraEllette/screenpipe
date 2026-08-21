@@ -102,6 +102,15 @@ vi.mock("@/lib/http/tauri-fetch", () => ({
 vi.mock("@/lib/utils/tauri", () => ({
   commands: {
     piCheck: vi.fn(async () => ({ status: "ok", data: { available: false } })),
+    piAcpAgentInstallStatus: vi.fn(async () => ({
+      requiresInstall: false,
+      installed: true,
+    })),
+    piAcpAgentDownloadPending: vi.fn(async () => false),
+    piAcpProbeAgent: vi.fn(async () => ({
+      status: "error",
+      error: "model and mode choices unavailable",
+    })),
     chatgptOauthStatus: vi.fn(async () => ({ status: "ok", data: { logged_in: false } })),
     chatgptOauthGetToken: vi.fn(async () => ({ status: "error" })),
   },
@@ -215,6 +224,9 @@ describe("AIPresetsSelector controlled preset creation", () => {
       "GitHub Copilot",
       "Pi",
     ]);
+
+    fireEvent.click(screen.getByRole("button", { name: "Pi" }));
+    expect(screen.queryByText("how this works")).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "screenpipe" }));
     const nameInput = screen.getByLabelText("name");

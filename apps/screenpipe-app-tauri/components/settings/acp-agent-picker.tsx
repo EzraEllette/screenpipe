@@ -231,22 +231,9 @@ export function AcpAgentPicker({
         </div>
       )}
 
-      {/* Keep the quick dialog calm; the full settings editor still shows the
-          ownership split because that is where people troubleshoot setup. */}
-      {compact ? (
-        <details className="border border-border/60 bg-muted/20 p-2 text-[10px]">
-          <summary className="cursor-pointer text-muted-foreground hover:text-foreground">
-            how this works
-          </summary>
-          <AcpBoundaries
-            agentName={info.name}
-            compact
-            className="mt-2 border-0 bg-transparent p-0"
-          />
-        </details>
-      ) : (
-        <AcpBoundaries agentName={info.name} />
-      )}
+      {/* Keep the quick dialog focused on setup; the full settings editor shows
+          the ownership split where people troubleshoot configuration. */}
+      {!compact && <AcpBoundaries agentName={info.name} />}
 
       <AcpInstallGate
         compact={compact}
