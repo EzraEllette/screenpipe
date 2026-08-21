@@ -5,8 +5,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   isNotificationFeedbackEligible,
+  submitChatResponseFeedback,
   submitNotificationFeedback,
 } from "./ai-feedback";
+import type { Message } from "./chat/types";
 
 const { localFetchMock } = vi.hoisted(() => ({ localFetchMock: vi.fn() }));
 
@@ -20,6 +22,31 @@ const notification = {
   pipe_name: "day-recap",
   source_session_id: "pipe:day-recap:42",
   source_message_id: "notification-1",
+};
+
+const assistantMessage: Message = {
+  id: "assistant-message-1",
+  role: "assistant",
+  content: "private local answer",
+  timestamp: 1,
+  contentBlocks: [
+    {
+      type: "tool",
+      toolCall: {
+        id: "private-tool-call",
+        toolName: "search",
+        args: { query: "private query" },
+        isRunning: false,
+      },
+    },
+  ],
+  steeredResponse: true,
+};
+
+const chatTelemetryContext = {
+  entry_source: "normal_chat" as const,
+  entry_card: "none" as const,
+  response_position: "followup" as const,
 };
 
 describe("submitNotificationFeedback", () => {
@@ -69,5 +96,64 @@ describe("submitNotificationFeedback", () => {
         body: "open this Live View",
       }),
     ).toBe(true);
+  });
+});
+
+describe("submitChatResponseFeedback", () => {
+  beforeEach(() => {
+    localFetchMock.mockReset();
+    localFetchMock.mockResolvedValue({ ok: true, status: 200 });
+  });
+
+  it("stores the rated response and reason in the unified local feedback layer", async () => {
+    await submitChatResponseFeedback(
+      assistantMessage,
+      "negative",
+      chatTelemetryContext,
+      "missed_context",
+    );
+
+    expect(localFetchMock).toHaveBeenCalledWith(
+      "/feedback",
+      expect.objectContaining({ method: "POST" }),
+    );
+    const request = localFetchMock.mock.calls[0][1];
+    expect(JSON.parse(request.body)).toEqual({
+      target: { kind: "chat", id: "assistant-message-1" },
+      producer_ref: "agent:screenpipe-chat",
+      rating: "down",
+      comment: "missed my context",
+      snapshot: {
+        response: "private local answer",
+        truncated: false,
+      },
+      context: {
+        entry_source: "normal_chat",
+        entry_card: "none",
+        response_position: "followup",
+        reason: "missed_context",
+        has_tool_use: true,
+        has_sources: false,
+        was_steered: true,
+        was_stopped: false,
+      },
+    });
+  });
+
+  it("keeps up ratings free of comments and bounds large response snapshots", async () => {
+    await submitChatResponseFeedback(
+      { ...assistantMessage, content: "x".repeat(13_000) },
+      "positive",
+      chatTelemetryContext,
+      "incorrect",
+    );
+
+    const request = localFetchMock.mock.calls[0][1];
+    const payload = JSON.parse(request.body);
+    expect(payload).not.toHaveProperty("comment");
+    expect(payload.rating).toBe("up");
+    expect(payload.snapshot.response).toHaveLength(12_000);
+    expect(payload.snapshot.truncated).toBe(true);
+    expect(payload.context).not.toHaveProperty("reason");
   });
 });
