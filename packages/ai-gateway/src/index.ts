@@ -1142,6 +1142,8 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 		}
 
 		if (path === '/v1/text-to-speech' && request.method === 'POST') {
+			const gate = paidHostedAiRouteError(authResult);
+			if (gate) return gate;
 			return await handleTextToSpeech(request, env);
 		}
 

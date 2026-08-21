@@ -415,6 +415,7 @@ describe('/v1/chat/completions free-plan route policy', () => {
 		'/v1/tinfoil/chat/completions',
 		'/v1/tinfoil/responses',
 		'/v1/voice/query',
+		'/v1/text-to-speech',
 		'/v1/voice/chat',
 		'/v1/web-search',
 		'/v1/messages',
@@ -439,7 +440,7 @@ describe('/v1/chat/completions free-plan route policy', () => {
 		expect(await errorCode(response)).toBe('free_plan_alternate_hosted_ai_disabled');
 	});
 
-	it('keeps speech routes on their existing policy, outside the two-message chat preview', async () => {
+	it('keeps transcription routes on their existing policy, outside the two-message chat preview', async () => {
 		globalThis.fetch = mock(async (input: RequestInfo | URL) => {
 			const url = String(input);
 			if (url === 'https://screenpipe.com/api/user') {
@@ -469,14 +470,59 @@ describe('/v1/chat/completions free-plan route policy', () => {
 			headers: auth,
 		}), env, ctx);
 		const transcribe = await handleRequest(request(auth, '/v1/voice/transcribe'), env, ctx);
-		const textToSpeech = await handleRequest(request(auth, '/v1/text-to-speech'), env, ctx);
 
-		// These are speech features with their own quotas/input validation. They
+		// These are transcription features with their own quotas/input validation. They
 		// deliberately do not consume or bypass hosted-chat daily turns.
 		expect(listen.status).toBe(200);
 		expect(realtime.status).toBe(426);
 		expect(transcribe.status).toBe(400);
-		expect(textToSpeech.status).toBe(400);
+	});
+
+	it('rejects anonymous text-to-speech before parsing the request or reaching Deepgram', async () => {
+		const response = await handleRequest(
+			request({}, '/v1/text-to-speech'),
+			env,
+			ctx,
+		);
+
+		expect(response.status).toBe(401);
+		expect(await errorCode(response)).toBe('authentication_required');
+		expect(globalThis.fetch).not.toHaveBeenCalled();
+	});
+
+	it('lets verified Basic text-to-speech reach Deepgram', async () => {
+		globalThis.fetch = mock(async (input: RequestInfo | URL) => {
+			const url = String(input);
+			if (url === 'https://screenpipe.com/api/user') {
+				return new Response(JSON.stringify({
+					success: true,
+					user: {
+						clerk_id: 'user_tts_basic',
+						cloud_subscribed: false,
+						app_entitled: true,
+						subscription_plan: 'standard',
+						entitlement: { active: true, plan: 'standard', features: { app: true } },
+					},
+				}), { status: 200 });
+			}
+			if (url.startsWith('https://api.deepgram.com/v1/speak')) {
+				return new Response(new Uint8Array([82, 73, 70, 70]), { status: 200 });
+			}
+			throw new Error(`unexpected fetch: ${url}`);
+		}) as typeof fetch;
+
+		const response = await handleRequest(new Request('https://gateway.test/v1/text-to-speech', {
+			method: 'POST',
+			headers: {
+				Authorization: 'Bearer eyJ.standard.tts',
+				'content-type': 'application/json',
+			},
+			body: JSON.stringify({ text: 'hello' }),
+		}), env, ctx);
+
+		expect(response.status).toBe(200);
+		expect(response.headers.get('content-type')).toBe('audio/wav');
+		expect(globalThis.fetch).toHaveBeenCalledTimes(2);
 	});
 
 	it.each([
