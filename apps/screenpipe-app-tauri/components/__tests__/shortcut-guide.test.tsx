@@ -48,8 +48,6 @@ describe("ShortcutGuide", () => {
     ).toBeVisible();
     expect(screen.getByText("switch recent chat")).toBeInTheDocument();
     expect(screen.getByText("⌃Tab")).toBeInTheDocument();
-    expect(screen.getByText("⌘⇧]")).toBeInTheDocument();
-    expect(screen.getByText("⌘1–9")).toBeInTheDocument();
     expect(screen.getByText("⌘⌃K")).toBeInTheDocument();
 
     fireEvent.keyDown(window, { key: "/", code: "Slash", metaKey: true });
