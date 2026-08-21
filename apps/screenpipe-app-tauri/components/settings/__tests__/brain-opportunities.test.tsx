@@ -5,6 +5,7 @@
 import React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -13,10 +14,14 @@ import {
 } from "@testing-library/react";
 import { BrainOpportunities } from "../brain-opportunities";
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+});
 
 describe("BrainOpportunities", () => {
   it("keeps a skill draft editable and lets the user exclude or restore evidence", () => {
+    vi.useFakeTimers();
     render(<BrainOpportunities preview />);
 
     expect(screen.getByTestId("opportunities-tab-skills")).toHaveAttribute(
@@ -58,38 +63,78 @@ describe("BrainOpportunities", () => {
     ).toBeTruthy();
 
     fireEvent.click(screen.getByTestId("create-skill-draft"));
-    expect(
-      screen.getByText(/skill creation is not connected yet/i),
-    ).toBeTruthy();
+    expect(screen.getByTestId("skill-creation-progress")).toBeTruthy();
+    expect(screen.getByText("creating skill")).toBeTruthy();
+
+    act(() => vi.advanceTimersByTime(3000));
+    expect(screen.getByTestId("skill-created-state")).toBeTruthy();
+    expect(screen.getByText("skill ready")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: /open skill/i }));
+    expect(screen.getByTestId("skill-file-preview")).toBeTruthy();
+    expect(screen.getByText("SKILL.md")).toBeTruthy();
+    expect(screen.getByTestId("opportunities-tab-skills")).toHaveTextContent(
+      "2",
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /edit skill/i }));
+    expect(screen.getByText("edit created skill")).toBeTruthy();
+    expect(screen.getByRole("button", { name: /save changes/i })).toBeTruthy();
+    expect(screen.getByTestId("opportunities-tab-skills")).toHaveTextContent(
+      "2",
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /save changes/i }));
+    expect(screen.getByTestId("skill-file-preview")).toBeTruthy();
   });
 
   it("requires a finalized goal before offering to start an unfinished task", () => {
+    vi.useFakeTimers();
     render(<BrainOpportunities preview />);
 
     fireEvent.click(screen.getByTestId("opportunities-tab-unfinished"));
-    fireEvent.click(screen.getByTestId("unfinished-opportunity-onboarding-reply"));
+    fireEvent.click(
+      screen.getByTestId("unfinished-opportunity-onboarding-reply"),
+    );
 
     const startButton = screen.getByTestId("start-opportunity-agent");
     expect(startButton).toBeDisabled();
 
     fireEvent.change(screen.getByTestId("unfinished-task-goal"), {
       target: {
-        value: "The original reporter has a sent reply with the verified outcome.",
+        value:
+          "The original reporter has a sent reply with the verified outcome.",
       },
     });
     expect(startButton).not.toBeDisabled();
 
     fireEvent.click(startButton);
-    expect(screen.getByText(/agent start is not connected yet/i)).toBeTruthy();
+    expect(screen.getByTestId("opportunity-agent-progress")).toBeTruthy();
+    expect(screen.getByText("preparing agent")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: /^stop$/i }));
+    expect(screen.getByTestId("unfinished-task-goal")).toHaveValue(
+      "The original reporter has a sent reply with the verified outcome.",
+    );
+
+    fireEvent.click(screen.getByTestId("start-opportunity-agent"));
+    act(() => vi.advanceTimersByTime(5000));
+    const completed = screen.getByTestId("opportunity-agent-completed");
+    expect(completed).toBeTruthy();
+    expect(within(completed).getByText("goal reached")).toBeTruthy();
+    expect(
+      screen.getByTestId("opportunities-tab-unfinished"),
+    ).toHaveTextContent("1");
+
+    fireEvent.click(screen.getByRole("button", { name: /open result/i }));
+    expect(screen.getByTestId("opportunity-agent-result")).toBeTruthy();
   });
 
   it("makes false unfinished inferences reversible", () => {
     render(<BrainOpportunities preview />);
 
     fireEvent.click(screen.getByTestId("opportunities-tab-unfinished"));
-    fireEvent.click(
-      screen.getByRole("button", { name: /not unfinished/i }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: /not unfinished/i }));
 
     expect(
       screen.getByText("1 marked not unfinished", { exact: false }),
@@ -102,12 +147,12 @@ describe("BrainOpportunities", () => {
 
   it("shows an honest empty state when no analyzer data exists", () => {
     const onCountChange = vi.fn();
-    render(
-      <BrainOpportunities onOpportunityCountChange={onCountChange} />,
-    );
+    render(<BrainOpportunities onOpportunityCountChange={onCountChange} />);
 
     expect(screen.getByText("no repeatable work found yet")).toBeTruthy();
-    expect(screen.getByText(/no opportunity analysis is ready yet/i)).toBeTruthy();
+    expect(
+      screen.getByText(/no opportunity analysis is ready yet/i),
+    ).toBeTruthy();
     expect(onCountChange).toHaveBeenLastCalledWith(0);
   });
 });
