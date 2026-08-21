@@ -75,9 +75,9 @@ jobs:
           }
 
           MANIFEST_VERSION=$(git show "${RELEASE_SHA}:apps/screenpipe-app-tauri/src-tauri/Cargo.toml" |
-            sed -n 's/^version = "\([^"]*\)"/\1/p' | head -1)
+            sed -n 's/^version = "\([^"]*\)"/\1/p')
           LOCK_VERSION=$(git show "${RELEASE_SHA}:apps/screenpipe-app-tauri/src-tauri/Cargo.lock" |
-            awk '/^name = "screenpipe-app"$/ { found=1; next } found && /^version = / { gsub(/"/, "", $3); print $3; exit }')
+            awk '/^name = "screenpipe-app"$/ { found=1; next } found && /^version = / && !printed { gsub(/"/, "", $3); print $3; printed=1 }')
 
           if [[ -z "$MANIFEST_VERSION" || "$MANIFEST_VERSION" != "$LOCK_VERSION" ]]; then
             echo "Cargo.toml version '$MANIFEST_VERSION' does not match Cargo.lock '$LOCK_VERSION'" >&2
