@@ -28,6 +28,7 @@ describe("BrainOpportunities", () => {
       "aria-selected",
       "true",
     );
+    fireEvent.click(screen.getByTestId("skill-opportunity-feedback-to-fix"));
     expect(screen.getByTestId("skill-draft-name")).toHaveValue(
       "turn product feedback into a focused fix",
     );
@@ -39,6 +40,8 @@ describe("BrainOpportunities", () => {
       "Keep the final customer reply short.",
     );
 
+    const sourceEvidence = screen.getByTestId("skill-source-evidence");
+    fireEvent.click(within(sourceEvidence).getByText("4 source activities"));
     const evidence = screen.getByTestId("opportunity-evidence-feedback-slack");
     fireEvent.click(
       within(evidence).getByRole("button", {
@@ -161,6 +164,9 @@ describe("BrainOpportunities", () => {
     render(<BrainOpportunities preview />);
 
     fireEvent.click(screen.getByTestId("opportunities-tab-unfinished"));
+    fireEvent.click(
+      screen.getByTestId("unfinished-opportunity-activity-review-flow"),
+    );
     fireEvent.click(screen.getByRole("button", { name: /not unfinished/i }));
 
     expect(
