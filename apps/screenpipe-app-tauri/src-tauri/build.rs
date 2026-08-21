@@ -515,6 +515,7 @@ fn generate_and_validate_tauri_commands() {
 const E2E_COMMANDS: &[&str] = &[
     "main_overlay_visible",
     "history_swipe_navigation_enabled",
+    "preview_history_swipe",
     "mark_capture_intended",
     "emit_disk_space_low",
     "emit_disk_space_recovered",

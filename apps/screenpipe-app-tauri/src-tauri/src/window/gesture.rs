@@ -43,15 +43,6 @@ pub(crate) fn history_swipe_navigation_enabled_for_window(window_label: &str) ->
     )
 }
 
-/// `NSScrollElasticityNone` blocks the WebKit edge interaction even when
-/// `allowsBackForwardNavigationGestures` reads back as true. Automatic and
-/// allowed elasticity both leave the native animation path available.
-#[cfg(any(target_os = "macos", test))]
-fn horizontal_elasticity_allows_history_swipe(elasticity: i64) -> bool {
-    const NS_SCROLL_ELASTICITY_NONE: i64 = 1;
-    elasticity != NS_SCROLL_ELASTICITY_NONE
-}
-
 #[cfg(target_os = "macos")]
 unsafe fn macos_history_swipe_navigation_enabled(
     window: &tauri::WebviewWindow,
@@ -68,13 +59,9 @@ unsafe fn macos_history_swipe_navigation_enabled(
         return Err("WKWebView not found".to_string());
     }
 
-    let enabled: bool = msg_send![wk_webview, allowsBackForwardNavigationGestures];
-    let scroll_view: id = msg_send![wk_webview, enclosingScrollView];
-    if scroll_view == nil {
-        return Err("WKWebView enclosing NSScrollView not found".to_string());
-    }
-    let horizontal_elasticity: i64 = msg_send![scroll_view, horizontalScrollElasticity];
-    Ok(enabled && horizontal_elasticity_allows_history_swipe(horizontal_elasticity))
+    // WKWebView has no public macOS scroll-view property to validate here;
+    // its navigation-gesture property is the supported configuration contract.
+    Ok(msg_send![wk_webview, allowsBackForwardNavigationGestures])
 }
 
 #[cfg(target_os = "macos")]
@@ -95,12 +82,6 @@ unsafe fn set_macos_history_swipe_navigation(
     }
 
     let _: () = msg_send![wk_webview, setAllowsBackForwardNavigationGestures: enabled];
-    let scroll_view: id = msg_send![wk_webview, enclosingScrollView];
-    if scroll_view == nil {
-        return Err("WKWebView enclosing NSScrollView not found".to_string());
-    }
-    let horizontal_elasticity = if enabled { 0i64 } else { 1i64 };
-    let _: () = msg_send![scroll_view, setHorizontalScrollElasticity: horizontal_elasticity];
 
     let actual = macos_history_swipe_navigation_enabled(window)?;
     if actual != enabled {
@@ -402,6 +383,8 @@ pub fn init_magnify_handler(app: tauri::AppHandle) {
                     if let Some(app) = MAGNIFY_APP_HANDLE.get() {
                         let delta_y: f64 = msg_send![event, scrollingDeltaY];
                         let delta_x: f64 = msg_send![event, scrollingDeltaX];
+                        let phase: u64 = msg_send![event, phase];
+                        let momentum_phase: u64 = msg_send![event, momentumPhase];
                         let modifier_flags: u64 = msg_send![event, modifierFlags];
                         let ctrl_key = (modifier_flags & (1 << 18)) != 0;
                         let meta_key = (modifier_flags & (1 << 20)) != 0;
@@ -411,6 +394,8 @@ pub fn init_magnify_handler(app: tauri::AppHandle) {
                             serde_json::json!({
                                 "deltaX": delta_x,
                                 "deltaY": delta_y,
+                                "phase": phase,
+                                "momentumPhase": momentum_phase,
                                 "ctrlKey": ctrl_key,
                                 "metaKey": meta_key,
                             }),
@@ -524,9 +509,7 @@ pub(crate) unsafe fn attach_magnify_gesture_to_view(view: tauri_nspanel::cocoa::
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        horizontal_elasticity_allows_history_swipe, resolve_history_swipe_navigation_enabled,
-    };
+    use super::resolve_history_swipe_navigation_enabled;
 
     #[test]
     fn enables_history_swipes_only_for_flagged_home() {
@@ -539,12 +522,5 @@ mod tests {
         ));
         assert!(!resolve_history_swipe_navigation_enabled("search", true));
         assert!(!resolve_history_swipe_navigation_enabled("chat", true));
-    }
-
-    #[test]
-    fn requires_horizontal_elasticity_for_native_history_animation() {
-        assert!(horizontal_elasticity_allows_history_swipe(0));
-        assert!(!horizontal_elasticity_allows_history_swipe(1));
-        assert!(horizontal_elasticity_allows_history_swipe(2));
     }
 }

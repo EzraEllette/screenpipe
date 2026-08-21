@@ -53,6 +53,44 @@ async fn history_swipe_navigation_enabled(
     crate::window::history_swipe_navigation_enabled(&window).await
 }
 
+/// E2E helper: emit the same native-scroll payload shape as a physical
+/// horizontal trackpad gesture. The production indicator owns the rendering;
+/// this only holds or dismisses the transient state for a screenshot.
+#[command]
+fn preview_history_swipe(
+    app_handle: tauri::AppHandle,
+    label: String,
+    direction: String,
+) -> Result<(), String> {
+    let window = app_handle
+        .get_webview_window(&label)
+        .ok_or_else(|| format!("webview window not found: {label}"))?;
+    let (delta_x, dismiss) = match direction.as_str() {
+        "back" => (84.0, false),
+        "forward" => (-84.0, false),
+        "dismiss" => (0.0, true),
+        _ => return Err(format!("unsupported history swipe direction: {direction}")),
+    };
+
+    window
+        .emit(
+            "native-scroll",
+            serde_json::json!({
+                "deltaX": delta_x,
+                "deltaY": 0.0,
+                "phase": 1,
+                "momentumPhase": 0,
+                "ctrlKey": false,
+                "metaKey": false,
+                "e2ePreview": true,
+                "e2ePreviewDismiss": dismiss,
+            }),
+        )
+        .map_err(|error| error.to_string())?;
+
+    Ok(())
+}
+
 /// E2E helper: backdate the recorded setup completion.
 ///
 /// The first-run window keys off how long ago setup finished, and the two
@@ -726,6 +764,7 @@ pub(super) fn plugin() -> TauriPlugin<Wry> {
         .invoke_handler(tauri::generate_handler![
             main_overlay_visible,
             history_swipe_navigation_enabled,
+            preview_history_swipe,
             mark_capture_intended,
             emit_disk_space_low,
             emit_disk_space_recovered,

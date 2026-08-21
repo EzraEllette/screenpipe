@@ -127,6 +127,11 @@ export function AppSidebarLayout({ children }: { children: React.ReactNode }) {
   return (
     <SidebarShellContext.Provider value={{ container, setSlot }}>
       <div
+        style={
+          {
+            "--app-sidebar-width": slot ? `${width}px` : "0px",
+          } as React.CSSProperties
+        }
         className={cn(
           "flex h-screen min-h-0 overflow-hidden",
           isTranslucent ? "bg-transparent" : "bg-background",

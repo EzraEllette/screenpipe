@@ -155,6 +155,10 @@ function HomeContent() {
   const reserveTrafficLights = isMac && !isFullscreen;
   const [activeSection, setActiveSection] = useQueryState("section", {
     defaultValue: "home",
+    // Sidebar sections are navigation, not disposable filter state. Keeping
+    // each user-visible section in browser history lets the native trackpad
+    // gesture preview and restore the UI the user actually came from.
+    history: "push",
     parse: (value) => {
       if (value === "feedback") return "help"; // backwards compat
       if (value === "memories") return "brain"; // backwards compat — renamed to brain
@@ -325,14 +329,14 @@ function HomeContent() {
   useEffect(() => {
     if (!isSectionHidden(activeSection)) return;
     const fallback = ["home", "timeline", "pipes"].find((s) => !isSectionHidden(s));
-    setActiveSection(fallback ?? "home");
+    setActiveSection(fallback ?? "home", { history: "replace" });
   }, [activeSection, isSectionHidden, setActiveSection]);
 
   // Timeline can be turned off in Display settings. When it is, the nav item is
   // gone, so bounce out of the (now unreachable) timeline section to chat.
   useEffect(() => {
     if ((settings.disableTimeline ?? false) && activeSection === "timeline") {
-      setActiveSection("home");
+      setActiveSection("home", { history: "replace" });
     }
   }, [settings.disableTimeline, activeSection, setActiveSection]);
 
@@ -1164,7 +1168,7 @@ function HomeContent() {
     if (!section) return;
     const settingsSection = resolveSettingsSection(section);
     if (settingsSection) {
-      router.push(`/settings?section=${settingsSection}`);
+      openSettings(settingsSection);
     } else {
       const mapped = section === "feedback" ? "help" : section;
       if (ALL_SECTIONS.includes(mapped)) {
@@ -1385,7 +1389,7 @@ function HomeContent() {
               isTranslucent={isTranslucent}
               floatingOverMedia={sidebarCollapsed && activeSection === "timeline"}
               allCaptureDisabled={!!(settings.disableAudio && settings.disableVision)}
-              onOpenRecordingSettings={() => router.push("/settings?section=recording")}
+              onOpenRecordingSettings={() => openSettings("recording")}
             />
           </div>
 

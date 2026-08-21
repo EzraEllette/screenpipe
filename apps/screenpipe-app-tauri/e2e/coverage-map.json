@@ -1490,7 +1490,8 @@
       "criticality": "medium",
       "confidence": "partial",
       "ux": "real-user-flow",
-      "notes": "Reads back the real WKWebView/WebView2 history-swipe setting, then verifies Home to Settings browser history in both directions. Physical OS trackpad input remains manual."
+      "tests": 2,
+      "notes": "Reads back the real WKWebView/WebView2 history-swipe setting, verifies top-level UI sections are browser-history entries, proves Back to app consumes Settings so the next back action restores the prior Home state, and captures every destination plus the production back/forward gesture-arrow design. Physical OS trackpad input remains manual."
     },
     {
       "spec": "home-window.spec.ts",

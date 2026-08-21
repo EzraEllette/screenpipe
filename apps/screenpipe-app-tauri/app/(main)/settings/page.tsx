@@ -395,7 +395,15 @@ function SettingsContent() {
               if (chatId) {
                 localStorage.setItem("pending-chat-conversation", chatId);
               }
-              router.push(section ? `/home?section=${section}` : "/home");
+              // Settings is pushed from the Home shell. Consume that entry so
+              // the next native back gesture continues through the user's UI
+              // history instead of bouncing straight back into Settings.
+              if (fromSection) {
+                router.back();
+              } else {
+                // Direct settings deep links have no known in-app predecessor.
+                router.replace(section ? `/home?section=${section}` : "/home");
+              }
             }}
             className={cn(
               "flex items-center space-x-1.5 text-sm transition-colors w-full",
