@@ -1341,7 +1341,6 @@ export function ActivityLedger({
   const [customDateRange, setCustomDateRange] = useState<DateRange | undefined>(
     () => selectedDateRange(customStart, customEnd),
   );
-  const [customCalendarOpen, setCustomCalendarOpen] = useState(false);
   const [summary, setSummary] = useState<ActivitySummaryResponse | null>(null);
   const [meetings, setMeetings] = useState<ActivityReviewMeeting[]>([]);
   const [ledgerIntervals, setLedgerIntervals] = useState<
@@ -1822,7 +1821,6 @@ Re-query Screenpipe only inside the cited time range and use the cited frames an
                 value={preset}
                 onValueChange={(value) => {
                   const nextPreset = value as RangePreset;
-                  setCustomCalendarOpen(false);
                   setPreset(nextPreset);
                   posthog.capture("activity_range_changed", {
                     range: nextPreset,
@@ -1903,10 +1901,7 @@ Re-query Screenpipe only inside the cited time range and use the cited frames an
 
           {preset === "custom" ? (
             <div className="mt-4 flex justify-end">
-              <Popover
-                open={customCalendarOpen}
-                onOpenChange={setCustomCalendarOpen}
-              >
+              <Popover>
                 <PopoverTrigger asChild>
                   <Button
                     variant="outline"
@@ -1934,7 +1929,6 @@ Re-query Screenpipe only inside the cited time range and use the cited frames an
                       setCustomEnd(
                         toLocalInputValue(endOfSelectedDay(nextRange.to, now)),
                       );
-                      setCustomCalendarOpen(false);
                     }}
                     defaultMonth={customDateRange?.from}
                     disabled={{ after: new Date() }}

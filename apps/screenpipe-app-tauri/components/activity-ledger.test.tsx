@@ -1477,20 +1477,6 @@ describe("ActivityLedger", () => {
       await screen.findByRole("option", { name: "Custom range" }),
     );
     fireEvent.click(
-      screen.getByRole("button", { name: "Choose custom date range" }),
-    );
-
-    expect(
-      screen.getByRole("button", { name: "Choose custom date range" }),
-    ).toHaveAttribute("aria-expanded", "true");
-    fireEvent.click(screen.getByRole("gridcell", { name: "16", exact: true }));
-    await waitFor(() =>
-      expect(
-        screen.getByRole("button", { name: "Choose custom date range" }),
-      ).toHaveAttribute("aria-expanded", "false"),
-    );
-
-    fireEvent.click(
       screen.getByRole("combobox", { name: "Time range: Custom range" }),
     );
     fireEvent.click(await screen.findByRole("option", { name: "Today" }));
