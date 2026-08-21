@@ -839,6 +839,12 @@ jobs:
 
           # Compiler wrapper is only needed for ARM64 MLX Metal kernels.
           if [[ "$TARGET" == "aarch64-apple-darwin" ]]; then
+            TOOLCHAINS=$(xcodebuild -showComponent MetalToolchain | sed -n 's/^Toolchain Identifier: //p')
+            if [[ -z "$TOOLCHAINS" ]]; then
+              echo "Metal Toolchain is installed but its identifier could not be resolved" >&2
+              exit 1
+            fi
+            export TOOLCHAINS
             xcrun metal --version
             WRAPPER_DIR="$(pwd)/.compiler-wrapper"
             mkdir -p "$WRAPPER_DIR"

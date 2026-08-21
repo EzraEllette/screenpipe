@@ -1289,6 +1289,12 @@ jobs:
           # 10.13 to the Metal compiler. This breaks both MSL 3.0+ and std::filesystem.
           # Fix: wrap cc/c++/xcrun to replace all -mmacosx-version-min flags with 14.0.
           if [[ "${{ matrix.target }}" == "aarch64-apple-darwin" ]]; then
+            TOOLCHAINS=$(xcodebuild -showComponent MetalToolchain | sed -n 's/^Toolchain Identifier: //p')
+            if [[ -z "$TOOLCHAINS" ]]; then
+              echo "Metal Toolchain is installed but its identifier could not be resolved" >&2
+              exit 1
+            fi
+            export TOOLCHAINS
             xcrun metal --version
             WRAPPER_DIR="$(pwd)/.compiler-wrapper"
             mkdir -p "$WRAPPER_DIR"
