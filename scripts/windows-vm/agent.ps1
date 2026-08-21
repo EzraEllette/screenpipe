@@ -85,7 +85,17 @@ function Send-ResultBlob {
     "Content-Type" = $ContentType
   }
   $uri = "https://$StorageAccount.blob.core.windows.net/$StorageContainer/$BlobRoot/$RunId/$BlobName"
-  Invoke-WebRequest -UseBasicParsing -Method Put -Uri $uri -Headers $headers -InFile $FilePath | Out-Null
+  foreach ($attempt in 1..10) {
+    try {
+      Invoke-WebRequest -UseBasicParsing -Method Put -Uri $uri -Headers $headers -InFile $FilePath | Out-Null
+      return
+    } catch {
+      if ($attempt -ge 10) {
+        throw
+      }
+      Start-Sleep -Seconds 1
+    }
+  }
 }
 
 function Receive-SourceBundle {
