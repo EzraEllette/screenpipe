@@ -28,6 +28,7 @@ const PI_INSTALL_ARGS: [&str; 5] = [
     "@anthropic-ai/sdk",
 ];
 const CUSTOM_PROVIDER_USER_AGENT: &str = "screenpipe";
+const GEMINI_OPENAI_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta/openai";
 const DEFAULT_CLOUD_MAX_OUTPUT_TOKENS: u64 = 32_000;
 
 /// Apply compatibility settings required by OpenAI-compatible custom endpoints.
@@ -42,9 +43,18 @@ const DEFAULT_CLOUD_MAX_OUTPUT_TOKENS: u64 = 32_000;
 /// origin both serve non-API routes at `/`. Older presets commonly saved one of
 /// those bare origins; repair only those proven aliases instead of guessing that
 /// every custom provider uses `/v1`.
+///
+/// Google's Gemini OpenAI-compatible endpoint rejects the optional `store`
+/// request field. Pi otherwise sends `store: false` for standard-compatible
+/// providers, so disable that capability on each Gemini model while preserving
+/// any other explicit compatibility overrides.
 pub fn apply_custom_provider_compat(provider: &mut serde_json::Value) {
-    if let Some(base_url) = provider.get_mut("baseUrl").and_then(|value| value.as_str()) {
-        let trimmed = base_url.trim().trim_end_matches('/');
+    let normalized_base_url = provider
+        .get("baseUrl")
+        .and_then(serde_json::Value::as_str)
+        .map(|base_url| base_url.trim().trim_end_matches('/').to_string());
+
+    if let Some(trimmed) = normalized_base_url.as_deref() {
         if trimmed.eq_ignore_ascii_case("https://ai.ai-genesis.app")
             || trimmed.eq_ignore_ascii_case("https://api.ai-genesis.app")
         {
@@ -69,6 +79,35 @@ pub fn apply_custom_provider_compat(provider: &mut serde_json::Value) {
         .any(|header| header.eq_ignore_ascii_case("user-agent"))
     {
         headers.insert("User-Agent".to_string(), json!(CUSTOM_PROVIDER_USER_AGENT));
+    }
+
+    let is_gemini_openai = normalized_base_url
+        .as_deref()
+        .is_some_and(|base_url| base_url.eq_ignore_ascii_case(GEMINI_OPENAI_BASE_URL));
+    if !is_gemini_openai {
+        return;
+    }
+
+    let Some(models) = provider_object
+        .get_mut("models")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return;
+    };
+    for model in models {
+        let Some(model_object) = model.as_object_mut() else {
+            continue;
+        };
+        let compat = model_object
+            .entry("compat".to_string())
+            .or_insert_with(|| json!({}));
+        if !compat.is_object() {
+            *compat = json!({});
+        }
+        compat
+            .as_object_mut()
+            .expect("custom provider model compat was initialized as an object")
+            .insert("supportsStore".to_string(), json!(false));
     }
 }
 
@@ -5215,10 +5254,34 @@ mod tests {
     }
 
     #[test]
+    fn custom_provider_compat_disables_store_for_gemini_openai_endpoint() {
+        let mut provider = json!({
+            "baseUrl": "https://generativelanguage.googleapis.com/v1beta/openai/",
+            "models": [
+                {
+                    "id": "gemini-3.1-flash-lite",
+                    "compat": {"maxTokensField": "max_tokens"}
+                },
+                {"id": "gemini-3.6-flash"}
+            ]
+        });
+        apply_custom_provider_compat(&mut provider);
+
+        assert_eq!(provider["models"][0]["compat"]["supportsStore"], false);
+        assert_eq!(
+            provider["models"][0]["compat"]["maxTokensField"],
+            "max_tokens"
+        );
+        assert_eq!(provider["models"][1]["compat"]["supportsStore"], false);
+        assert_eq!(provider["headers"]["User-Agent"], "screenpipe");
+    }
+
+    #[test]
     fn custom_provider_compat_preserves_generic_urls_and_explicit_user_agents() {
         let mut provider = json!({
             "baseUrl": "https://proxy.example.com/openai/",
-            "headers": {"user-agent": "my-client", "x-tenant": "tenant-1"}
+            "headers": {"user-agent": "my-client", "x-tenant": "tenant-1"},
+            "models": [{"id": "my-model"}]
         });
         apply_custom_provider_compat(&mut provider);
 
@@ -5226,6 +5289,7 @@ mod tests {
         assert_eq!(provider["headers"]["user-agent"], "my-client");
         assert_eq!(provider["headers"]["x-tenant"], "tenant-1");
         assert_eq!(provider["headers"].as_object().unwrap().len(), 2);
+        assert!(provider["models"][0].get("compat").is_none());
     }
 
     #[tokio::test]

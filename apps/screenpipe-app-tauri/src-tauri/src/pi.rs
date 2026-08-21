@@ -7320,6 +7320,18 @@ error: InstallFailed extracting tarball"#;
     }
 
     #[tokio::test]
+    async fn test_build_models_json_gemini_disables_store() {
+        let mut pc = make_provider_config("custom", "gemini-3.6-flash");
+        pc.url = "https://generativelanguage.googleapis.com/v1beta/openai/".to_string();
+        let config = build_models_json(None, Some(&pc)).await;
+        let custom = &config["providers"]["custom"];
+        let model = &custom["models"][0];
+
+        assert_eq!(custom["baseUrl"], pc.url);
+        assert_eq!(model["compat"]["supportsStore"], false);
+    }
+
+    #[tokio::test]
     async fn test_build_models_json_repairs_ai_genesis_custom_url() {
         for base_url in ["https://ai.ai-genesis.app", "https://api.ai-genesis.app/"] {
             let mut pc = make_provider_config("custom", "glm-5.2");
