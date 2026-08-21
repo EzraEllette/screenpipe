@@ -46,6 +46,7 @@ import {
   LayoutDashboard,
   MessageSquare,
   MoreVertical,
+  Route,
 } from "lucide-react";
 import {
   DropdownMenu,
@@ -59,6 +60,7 @@ import { SafArtifactBody } from "@/components/settings/saf-sop-view";
 import { ArtifactHtmlBody } from "@/components/settings/artifact-html-body";
 import { ConfirmDeleteDialog } from "@/components/settings/confirm-delete-dialog";
 import { BrainOverview } from "@/components/settings/brain-overview";
+import { BrainOpportunities } from "@/components/settings/brain-opportunities";
 import { isHtmlFileName } from "@/lib/utils/html-sandbox";
 import { usePlatform } from "@/lib/hooks/use-platform";
 import { localFetch } from "@/lib/api";
@@ -186,9 +188,10 @@ type UnifiedItem =
   | { kind: "memory"; data: MemoryRecord; sortDate: number }
   | { kind: "artifact"; data: UnifiedArtifact; sortDate: number };
 
-type TypeFilter = "overview" | "memories" | "artifacts";
+type TypeFilter = "opportunities" | "overview" | "memories" | "artifacts";
 
 const BRAIN_TAB_DESCRIPTIONS: Record<TypeFilter, string> = {
+  opportunities: "repeatable work and unfinished goals found in your activity",
   overview: "live dashboards the AI builds from your activity, updated as you work",
   memories: "what the AI has learned about you from your activity",
   artifacts: "documents, pages and files the AI has generated for you",
@@ -233,6 +236,7 @@ function unifiedItemTestId(item: UnifiedItem): string {
 
 type BrainViewState = {
   typeFilter: TypeFilter;
+  opportunitiesAutoOpened: boolean;
   searchQuery: string;
   activeTags: string[];
   visibleCountByType: Record<TypeFilter, number>;
@@ -241,14 +245,17 @@ type BrainViewState = {
 
 const brainViewState: BrainViewState = {
   typeFilter: "overview",
+  opportunitiesAutoOpened: false,
   searchQuery: "",
   activeTags: [],
   visibleCountByType: {
+    opportunities: 0,
     overview: 0,
     memories: RENDER_WINDOW,
     artifacts: RENDER_WINDOW,
   },
   scrollTopByType: {
+    opportunities: 0,
     overview: 0,
     memories: 0,
     artifacts: 0,
@@ -257,13 +264,16 @@ const brainViewState: BrainViewState = {
 
 export function resetBrainViewStateForTests() {
   brainViewState.typeFilter = "memories";
+  brainViewState.opportunitiesAutoOpened = false;
   brainViewState.searchQuery = "";
   brainViewState.activeTags = [];
   brainViewState.visibleCountByType.memories = RENDER_WINDOW;
   brainViewState.visibleCountByType.artifacts = RENDER_WINDOW;
+  brainViewState.visibleCountByType.opportunities = 0;
   brainViewState.visibleCountByType.overview = 0;
   brainViewState.scrollTopByType.memories = 0;
   brainViewState.scrollTopByType.artifacts = 0;
+  brainViewState.scrollTopByType.opportunities = 0;
   brainViewState.scrollTopByType.overview = 0;
 }
 
@@ -392,7 +402,15 @@ function emptyStateMessage(
 type SortField = "created_at" | "importance";
 type SortDir = "desc" | "asc";
 
-export function BrainSection() {
+type BrainSectionProps = {
+  activitiesEnabled?: boolean;
+  isSettingsLoaded?: boolean;
+};
+
+export function BrainSection({
+  activitiesEnabled = false,
+  isSettingsLoaded = true,
+}: BrainSectionProps = {}) {
   const { toast } = useToast();
   const { isMac } = usePlatform();
   // App-wide convention (chat sidebar, chat history, recent-chat switcher):
@@ -403,6 +421,9 @@ export function BrainSection() {
   const initialTypeFilterRef = useRef<TypeFilter>(brainViewState.typeFilter);
   const [memories, setMemories] = useState<MemoryRecord[]>([]);
   const [total, setTotal] = useState(0);
+  const [opportunitiesTabCount, setOpportunitiesTabCount] = useState<
+    number | null
+  >(null);
   const [liveViewsTabCount, setLiveViewsTabCount] = useState<number | null>(null);
   const [memoriesTabCount, setMemoriesTabCount] = useState<number | null>(null);
   const [artifactsTabCount, setArtifactsTabCount] = useState<number | null>(null);
@@ -428,11 +449,24 @@ export function BrainSection() {
   const loadingMoreRef = useRef(false);
   const didMountRenderResetRef = useRef(false);
   const memoryDisplayCacheRef = useRef<Map<string, MemoryCardDisplay>>(new Map());
+  const suppressOpportunityAutoOpenRef = useRef(false);
 
   const [typeFilter, setTypeFilter] = useState<TypeFilter>(() => {
-    const initial = consumeOnboardingBrainHandoff()
-      ? "overview"
-      : brainViewState.typeFilter;
+    const onboardingHandoff = Boolean(consumeOnboardingBrainHandoff());
+    suppressOpportunityAutoOpenRef.current = onboardingHandoff;
+    let initial = onboardingHandoff ? "overview" : brainViewState.typeFilter;
+    if (
+      !onboardingHandoff &&
+      isSettingsLoaded &&
+      activitiesEnabled &&
+      !brainViewState.opportunitiesAutoOpened
+    ) {
+      initial = "opportunities";
+      brainViewState.opportunitiesAutoOpened = true;
+    }
+    if (isSettingsLoaded && !activitiesEnabled && initial === "opportunities") {
+      initial = "overview";
+    }
     initialTypeFilterRef.current = initial;
     brainViewState.typeFilter = initial;
     return initial;
@@ -674,6 +708,26 @@ export function BrainSection() {
     },
     [saveCurrentListPosition, typeFilter],
   );
+
+  useEffect(() => {
+    if (!isSettingsLoaded) return;
+    if (suppressOpportunityAutoOpenRef.current) return;
+    let nextTypeFilter: TypeFilter | null = null;
+    if (!activitiesEnabled && typeFilter === "opportunities") {
+      nextTypeFilter = "overview";
+    } else if (activitiesEnabled && !brainViewState.opportunitiesAutoOpened) {
+      nextTypeFilter = "opportunities";
+    }
+    if (!nextTypeFilter) return;
+    const targetTypeFilter = nextTypeFilter;
+    const frame = window.requestAnimationFrame(() => {
+      if (targetTypeFilter === "opportunities") {
+        brainViewState.opportunitiesAutoOpened = true;
+      }
+      switchTypeFilter(targetTypeFilter);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [activitiesEnabled, isSettingsLoaded, switchTypeFilter, typeFilter]);
 
   useEffect(() => {
     const openOverview = () => {
@@ -1560,6 +1614,16 @@ export function BrainSection() {
       : 0;
   const isStale = staleDays >= 1;
   const brainViewOptions = [
+    ...(isSettingsLoaded && activitiesEnabled
+      ? [
+          {
+            value: "opportunities" as const,
+            label: "Opportunities",
+            count: opportunitiesTabCount,
+            Icon: Route,
+          },
+        ]
+      : []),
     {
       value: "overview" as const,
       label: "Live Views",
@@ -1627,14 +1691,16 @@ export function BrainSection() {
     <div
       data-testid="brain-content"
       className={`mx-auto flex h-full flex-col px-3 pb-6 pt-10 sm:px-6 ${
-        typeFilter === "overview"
+        typeFilter === "overview" || typeFilter === "opportunities"
           ? "max-w-none space-y-2"
           : "max-w-6xl space-y-4"
       }`}
     >
-      <p className="mb-4 text-sm text-muted-foreground">
-        {BRAIN_TAB_DESCRIPTIONS[typeFilter]}
-      </p>
+      {typeFilter !== "opportunities" && (
+        <p className="mb-4 text-sm text-muted-foreground">
+          {BRAIN_TAB_DESCRIPTIONS[typeFilter]}
+        </p>
+      )}
 
       {/* stale memories warning */}
       {typeFilter === "memories" && isStale && (
@@ -1657,12 +1723,14 @@ export function BrainSection() {
 
       <div
         className={
-          typeFilter === "overview"
+          typeFilter === "overview" || typeFilter === "opportunities"
             ? "hidden"
             : "flex items-center justify-between gap-3"
         }
       >
-        {typeFilter !== "overview" && brainViewSwitcher}
+        {typeFilter !== "overview" &&
+          typeFilter !== "opportunities" &&
+          brainViewSwitcher}
         {showFilterButton && (
           <Popover
             open={filterOpen}
@@ -1758,7 +1826,13 @@ export function BrainSection() {
         )}
       </div>
 
-      {typeFilter === "overview" ? (
+      {typeFilter === "opportunities" ? (
+        <BrainOpportunities
+          navigation={brainViewSwitcher}
+          preview={process.env.NEXT_PUBLIC_SCREENPIPE_WEB_DEV === "mock"}
+          onOpportunityCountChange={setOpportunitiesTabCount}
+        />
+      ) : typeFilter === "overview" ? (
         <BrainOverview
           navigation={brainViewSwitcher}
           onViewCountChange={setLiveViewsTabCount}

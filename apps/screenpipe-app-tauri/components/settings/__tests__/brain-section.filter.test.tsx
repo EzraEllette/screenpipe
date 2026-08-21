@@ -266,7 +266,9 @@ const openBrainViewMenu = () =>
     pointerType: "mouse",
   });
 
-const selectBrainView = (view: "overview" | "memories" | "artifacts") => {
+const selectBrainView = (
+  view: "opportunities" | "overview" | "memories" | "artifacts",
+) => {
   openBrainViewMenu();
   fireEvent.click(screen.getByTestId(`brain-filter-${view}`));
 };
@@ -299,6 +301,32 @@ describe("BrainSection type filter", () => {
     expect(analyticsMocks.capture).toHaveBeenCalledWith("brain_viewed", {
       tab: "memories",
     });
+  });
+
+  it("opens the activities-gated Opportunities view on the first eligible visit", async () => {
+    const view = render(
+      <BrainSection activitiesEnabled isSettingsLoaded />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("brain-opportunities")).toBeTruthy();
+      expect(screen.getByTestId("brain-view-switcher")).toHaveAttribute(
+        "aria-label",
+        "switch Brain view, current: Opportunities",
+      );
+    });
+
+    openBrainViewMenu();
+    expect(screen.getByTestId("brain-filter-opportunities")).toBeTruthy();
+
+    view.rerender(
+      <BrainSection activitiesEnabled={false} isSettingsLoaded />,
+    );
+    await waitFor(() => {
+      expect(screen.getByTestId("brain-overview-stub")).toBeTruthy();
+    });
+    openBrainViewMenu();
+    expect(screen.queryByTestId("brain-filter-opportunities")).toBeNull();
   });
 
   it("keeps the same dropdown switcher in every Brain view", async () => {

@@ -1067,7 +1067,12 @@ function HomeContent() {
           />
         );
       case "brain":
-        return <BrainSection />;
+        return (
+          <BrainSection
+            activitiesEnabled={settings.activitiesEnabled ?? false}
+            isSettingsLoaded={isSettingsLoaded}
+          />
+        );
       case "pipes":
         return <PipeStoreView />;
       case "connections":
