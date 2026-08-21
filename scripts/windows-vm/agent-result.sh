@@ -38,7 +38,8 @@ while IFS= read -r blob_name; do
   [[ -z "$blob_name" ]] && continue
   file_name="${blob_name#"$prefix"}"
   case "$file_name" in
-    status.json|agent.jsonl|final.md|result.patch|patch.stderr) ;;
+    source.bundle) continue ;;
+    status.json|agent.jsonl|agent.stderr|final.md|result.patch|patch.stderr) ;;
     *)
       printf 'refusing unexpected result blob: %s\n' "$blob_name" >&2
       exit 1
