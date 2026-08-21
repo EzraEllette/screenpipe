@@ -7,8 +7,8 @@ and layer declared in the manifest, weighted by confidence and criticality.
 - Manifest: `e2e/coverage-map.json`
 - Specs directory: `e2e/specs`
 - Mapped specs: 119
-- Declared test blocks: 345
-- Weighted coverage points: 270.6
+- Declared test blocks: 346
+- Weighted coverage points: 271.3
 
 Confidence weights: strong=1.0, partial=0.7, conditional=0.4, smoke=0.3.
 Criticality weights: high=1.0, medium=0.7, low=0.4.
@@ -20,8 +20,8 @@ can execute more runtime cases than this number shows.
 | Platform | Specs | Declared tests | Weighted points | Layers | Features | Critical score |
 | --- | --- | --- | --- | --- | --- | --- |
 | windows | 91 | 299 | 244.7 | 15 | 97 | 92% |
-| macos | 115 | 307 | 240.4 | 17 | 103 | 90% |
-| linux | 80 | 257 | 213.9 | 14 | 93 | 88% |
+| macos | 115 | 308 | 241.1 | 17 | 104 | 90% |
+| linux | 80 | 258 | 214.6 | 14 | 94 | 88% |
 
 ## Runtime Results
 
@@ -45,10 +45,10 @@ pass/fail/skip counts.
 | os-integration | 7 specs / 30 tests / 25.5 pts | 14 specs / 27 tests / 16.0 pts | 2 specs / 13 tests / 9.4 pts |
 | performance | 2 specs / 44 tests / 44.0 pts | 4 specs / 34 tests / 30.5 pts | 1 specs / 29 tests / 29.0 pts |
 | pipes | 6 specs / 19 tests / 19.0 pts | 8 specs / 25 tests / 25.0 pts | 6 specs / 19 tests / 19.0 pts |
-| real-ui-e2e | 65 specs / 200 tests / 165.4 pts | 78 specs / 204 tests / 167.6 pts | 60 specs / 176 tests / 151.2 pts |
+| real-ui-e2e | 65 specs / 200 tests / 165.4 pts | 78 specs / 205 tests / 168.3 pts | 60 specs / 177 tests / 151.9 pts |
 | settings | 14 specs / 40 tests / 37.0 pts | 16 specs / 34 tests / 29.7 pts | 13 specs / 31 tests / 28.0 pts |
 | storage-privacy | 9 specs / 42 tests / 33.3 pts | 9 specs / 27 tests / 26.1 pts | 6 specs / 20 tests / 19.1 pts |
-| tauri-command | 19 specs / 51 tests / 39.6 pts | 27 specs / 62 tests / 47.1 pts | 18 specs / 52 tests / 40.2 pts |
+| tauri-command | 19 specs / 51 tests / 39.6 pts | 27 specs / 63 tests / 47.8 pts | 18 specs / 53 tests / 40.9 pts |
 | window-lifecycle | 19 specs / 65 tests / 54.5 pts | 19 specs / 45 tests / 31.9 pts | 13 specs / 39 tests / 29.9 pts |
 
 ## Critical Feature Matrix
@@ -162,7 +162,7 @@ pass/fail/skip counts.
 | home-window.spec.ts | windows, macos, linux | real-ui-e2e, window-lifecycle | app-launch, home-navigation, timeline, settings-recording, pipes | high | strong | real-user-flow | 1 | Clicks through Home, Pipes, Timeline, Help, and Settings. |
 | html-artifact-render.spec.ts | windows, macos, linux | real-ui-e2e | brain, artifacts, html-sandbox | high | strong | real-user-flow | 1 | Registers an HTML artifact, opens it in Brain, and asserts it renders inside a sandboxed allow-scripts iframe (CSP default-src 'none') whose global <style> never leaks into the host app DOM (regression: rehype-raw repainting the whole window). |
 | live-view-item-actions.spec.ts | windows, macos, linux | real-ui-e2e, local-api, pipes | brain-overview, live-view-item-actions, artifacts, pipes | high | strong | real-user-flow | 1 | Installs the generic Commitments and Accounting Live View kits, shows Done, Later, and Not right without hover, persists snooze, correction, resolve, dismiss, and reopen decisions through the local API, verifies receipts survive reload, and captures real product screenshots. |
-| live-view-pinch-zoom.spec.ts | macos, linux | real-ui-e2e, tauri-command | brain-overview, live-view-canvas-pinch-zoom | medium | strong | real-user-flow | 3 | Drives the Live View canvas with the same native-magnify payload the macOS magnification gesture recognizer emits. Asserts the recognizer takes ownership so WebKit's duplicate ctrl+wheel stops zooming while plain scroll still pans, that an app-wide pinch is ignored by an unfocused canvas, and that canvas zoom stays anchored, clamped at 25%, and persisted through load_brain_view_canvas. The focused per-frame zoom arithmetic is asserted in the component tests because WKWebView under WebDriver does not reliably receive OS-level focus. |
+| live-view-pinch-zoom.spec.ts | macos, linux | real-ui-e2e, tauri-command | brain-overview, live-view-canvas-pinch-zoom, live-view-canvas-click-stability | medium | strong | real-user-flow | 4 | Drives the Live View canvas with the same window-scoped native-magnify payload the macOS magnification gesture recognizer emits. Asserts pinch works even when WKWebView lacks DOM focus, the recognizer takes ownership so WebKit's duplicate ctrl+wheel stops zooming while plain scroll still pans, ordinary pane, Block, and double clicks do not change the viewport, and canvas zoom stays anchored, clamped at 25%, and persisted through load_brain_view_canvas. |
 | macos-ui-performance.spec.ts | macos | performance, real-ui-e2e | timeline, audio-device-health | medium | conditional | performance | 2 | macOS-only timeline/audio UI performance guards. |
 | main-overlay-visibility.spec.ts | windows, macos, linux | window-lifecycle, tauri-command | window-lifecycle, main-overlay | medium | partial | command | 1 | Main overlay show/hide without duplicate handles. |
 | main-window-close-reopen.spec.ts | windows, macos, linux | window-lifecycle, tauri-command | window-lifecycle, main-window | medium | partial | command | 1 | Main close/reopen without handle leaks. |
