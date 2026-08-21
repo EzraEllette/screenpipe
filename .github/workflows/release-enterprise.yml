@@ -839,6 +839,7 @@ jobs:
 
           # Compiler wrapper is only needed for ARM64 MLX Metal kernels.
           if [[ "$TARGET" == "aarch64-apple-darwin" ]]; then
+            xcrun metal --version
             WRAPPER_DIR="$(pwd)/.compiler-wrapper"
             mkdir -p "$WRAPPER_DIR"
             for tool in cc c++ xcrun; do
@@ -870,7 +871,11 @@ jobs:
             fi
 
             cd apps/screenpipe-app-tauri
-            if bunx tauri build -v --target "$TARGET" --features "${{ matrix.features }}" 2>&1 | tee /tmp/tauri-build-$attempt.log; then
+            BUNDLE_ARGS=()
+            if [[ "${{ runner.environment }}" == "self-hosted" ]]; then
+              BUNDLE_ARGS=(--bundles app)
+            fi
+            if bunx tauri build -v --target "$TARGET" --features "${{ matrix.features }}" "${BUNDLE_ARGS[@]}" 2>&1 | tee /tmp/tauri-build-$attempt.log; then
               echo "Build succeeded on attempt $attempt"
               cd ../..
               break
@@ -911,6 +916,18 @@ jobs:
             codesign --verify --deep --strict --verbose=2 "$app"
           done
           echo "All enterprise .app bundles pass strict codesign verification"
+
+      - name: Create headless DMG
+        if: runner.environment == 'self-hosted'
+        shell: bash
+        run: |
+          set -euo pipefail
+          TARGET="${{ matrix.target }}"
+          BUNDLE_DIR="apps/screenpipe-app-tauri/src-tauri/target/${TARGET}/release/bundle"
+          VERSION=$(sed -n 's/^version = "\([^"]*\)"/\1/p' apps/screenpipe-app-tauri/src-tauri/Cargo.toml | head -1)
+          APP_PATH="${BUNDLE_DIR}/macos/screenpipe enterprise.app"
+          DMG_PATH="${BUNDLE_DIR}/dmg/screenpipe enterprise_${VERSION}_${{ matrix.package_arch }}.dmg"
+          .github/scripts/create-headless-dmg.sh "$APP_PATH" "$DMG_PATH" "screenpipe enterprise"
 
       - name: Notarize and staple DMG
         env:
