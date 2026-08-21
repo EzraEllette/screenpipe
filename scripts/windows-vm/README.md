@@ -29,6 +29,13 @@ C:\screenpipe-test\with-openai-key.ps1 `
   -PipeKeyToStdin
 ```
 
+The same identity can run a headless Codex coding agent without giving the VM a
+GitHub credential. The host sends an exact committed Git tree through the
+private evidence container, so the base does not need to be pushed or public.
+The agent develops and tests on Windows, commits locally, then uploads a
+binary-safe patch and its test report. Review and apply that patch on the
+trusted host; only the host may push it or open a pull request.
+
 ## One-time setup
 
 ```bash
@@ -73,6 +80,17 @@ that secret.
 # Run non-interactive PowerShell as SYSTEM through the Azure VM agent.
 ./scripts/windows-vm/run-command.sh audio-follow-01 ./path/to/check.ps1
 
+# Run the credential-isolated coding agent. The feature prompt is stdin so it
+# is not stored in a host-side task file.
+printf '%s' 'implement the requested Windows feature' | \
+  ./scripts/windows-vm/agent-run.sh audio-follow-01 "$(git rev-parse HEAD)"
+
+# Download the durable status, final report, log, and binary-safe patch.
+./scripts/windows-vm/agent-result.sh audio-follow-01 /tmp/audio-follow-result
+
+# After the local result is verified, remove its remote blob copies.
+./scripts/windows-vm/agent-clear.sh audio-follow-01
+
 # Delete only this run's deployment stack and RDP secret.
 ./scripts/windows-vm/teardown.sh audio-follow-01
 ```
@@ -95,4 +113,6 @@ still cost money, so teardown remains required.
 Azure Run Command is useful for provisioning and diagnostics, but it runs as
 SYSTEM in a non-interactive session. It cannot prove desktop behavior. Use the
 RDP session for onboarding, capture, audio, overlays, startup behavior, and any
-other user-visible acceptance check.
+other user-visible acceptance check. A guest agent result is an untrusted input:
+inspect `status.json`, `final.md`, and `result.patch`, run `git apply --check`,
+and review the exact diff before applying it to a host branch.
