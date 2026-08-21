@@ -1855,7 +1855,7 @@ Re-query Screenpipe only inside the cited time range and use the cited frames an
                   includeAgentPresets={false}
                   triggerAriaLabel="AI preset"
                   containerClassName="w-[190px] max-w-[36vw] min-w-[132px] shrink-0 gap-0"
-                  triggerClassName="h-9 rounded-none text-xs"
+                  triggerClassName="h-9 rounded-none border-border text-xs"
                   controlledPresetId={reviewPreset.id}
                   onControlledSelect={(nextPreset) => {
                     if (!nextPreset) return;
