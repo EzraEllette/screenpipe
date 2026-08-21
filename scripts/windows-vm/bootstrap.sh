@@ -6,7 +6,6 @@
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 
-windows_vm_require gh
 windows_vm_select_subscription
 
 for provider in Microsoft.Compute Microsoft.Network Microsoft.KeyVault Microsoft.ManagedIdentity Microsoft.DevTestLab; do
@@ -37,10 +36,6 @@ if ! az keyvault show --name "$WINDOWS_VM_RDP_VAULT" --output none 2>/dev/null; 
     --output none
 fi
 
-orchestrator_client_id="$(az identity show \
-  --resource-group "$WINDOWS_VM_FOUNDATION_GROUP" \
-  --name "$WINDOWS_VM_ORCHESTRATOR_IDENTITY" \
-  --query clientId --output tsv)"
 orchestrator_principal_id="$(az identity show \
   --resource-group "$WINDOWS_VM_FOUNDATION_GROUP" \
   --name "$WINDOWS_VM_ORCHESTRATOR_IDENTITY" \
@@ -93,39 +88,4 @@ if [[ "$user_role_count" == "0" ]]; then
     --output none
 fi
 
-if [[ "$WINDOWS_VM_GITHUB_REPOSITORY" == "screenpipe/screenpipe" ]]; then
-  credential_name="github-screenpipe-environment"
-else
-  credential_name="$(printf 'github-%s-environment' "$WINDOWS_VM_GITHUB_REPOSITORY" | tr '[:upper:]/' '[:lower:]-')"
-fi
-credential_count="$(az identity federated-credential list \
-  --resource-group "$WINDOWS_VM_FOUNDATION_GROUP" \
-  --identity-name "$WINDOWS_VM_ORCHESTRATOR_IDENTITY" \
-  --query "[?name=='$credential_name'] | length(@)" \
-  --output tsv)"
-if [[ "$credential_count" == "0" ]]; then
-  windows_vm_log "adding GitHub Actions OIDC federation"
-  az identity federated-credential create \
-    --resource-group "$WINDOWS_VM_FOUNDATION_GROUP" \
-    --identity-name "$WINDOWS_VM_ORCHESTRATOR_IDENTITY" \
-    --name "$credential_name" \
-    --issuer https://token.actions.githubusercontent.com \
-    --subject "repo:${WINDOWS_VM_GITHUB_REPOSITORY}:environment:azure-windows-vm" \
-    --audiences api://AzureADTokenExchange \
-    --output none
-fi
-
-windows_vm_log "configuring the GitHub environment and non-secret identity variables"
-if ! gh api --method PUT "repos/${WINDOWS_VM_GITHUB_REPOSITORY}/environments/azure-windows-vm" >/dev/null; then
-  printf 'GitHub environment setup requires repository admin access: %s\n' "$WINDOWS_VM_GITHUB_REPOSITORY" >&2
-  exit 1
-fi
-gh variable set AZURE_CLIENT_ID --env azure-windows-vm --repo "$WINDOWS_VM_GITHUB_REPOSITORY" --body "$orchestrator_client_id"
-gh variable set AZURE_TENANT_ID --env azure-windows-vm --repo "$WINDOWS_VM_GITHUB_REPOSITORY" --body "$(az account show --query tenantId --output tsv)"
-gh variable set AZURE_SUBSCRIPTION_ID --env azure-windows-vm --repo "$WINDOWS_VM_GITHUB_REPOSITORY" --body "$WINDOWS_VM_SUBSCRIPTION_ID"
-gh variable set AZURE_WINDOWS_VM_RESOURCE_GROUP --env azure-windows-vm --repo "$WINDOWS_VM_GITHUB_REPOSITORY" --body "$WINDOWS_VM_RESOURCE_GROUP"
-gh variable set AZURE_WINDOWS_VM_LOCATION --env azure-windows-vm --repo "$WINDOWS_VM_GITHUB_REPOSITORY" --body "$WINDOWS_VM_LOCATION"
-gh variable set AZURE_WINDOWS_WORKER_IDENTITY_ID --env azure-windows-vm --repo "$WINDOWS_VM_GITHUB_REPOSITORY" --body "$worker_id"
-gh variable set AZURE_WINDOWS_RDP_VAULT --env azure-windows-vm --repo "$WINDOWS_VM_GITHUB_REPOSITORY" --body "$WINDOWS_VM_RDP_VAULT"
-
-windows_vm_log "bootstrap complete; authentication uses GitHub OIDC with no client secret"
+windows_vm_log "bootstrap complete; no GitHub Actions configuration was created"

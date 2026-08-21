@@ -44,13 +44,9 @@ trusted host; only the host may push it or open a pull request.
 ./scripts/windows-vm/bootstrap.sh
 ```
 
-The GitHub repository defaults to `screenpipe/screenpipe`. A repository admin
-must create its environment. To exercise the workflow from a fork first:
-
-```bash
-AZURE_WINDOWS_GITHUB_REPOSITORY=EzraEllette/screenpipe \
-  ./scripts/windows-vm/bootstrap.sh
-```
+This is an internal operator workflow. Run it from a trusted host with an
+existing authenticated Azure CLI session; it does not install a GitHub Actions
+workflow, repository environment, repository variables, or OIDC federation.
 
 The bootstrap command:
 
@@ -58,9 +54,7 @@ The bootstrap command:
 - creates the isolated `rg-screenpipe-win-vms` resource group;
 - creates a dedicated Key Vault for disposable RDP passwords;
 - gives the orchestrator access only to the ephemeral VM group, the RDP vault,
-  and permission to attach the test-worker identity;
-- configures GitHub Actions OIDC for the `azure-windows-vm` environment, with no
-  client secret.
+  and permission to attach the test-worker identity.
 
 It does not alter the existing OpenAI secret or grant the orchestrator access to
 that secret.
