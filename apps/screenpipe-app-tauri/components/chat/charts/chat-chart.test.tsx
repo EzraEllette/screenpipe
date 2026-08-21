@@ -64,6 +64,22 @@ describe("ChatChart actions", () => {
     ).toBeInTheDocument();
   });
 
+  it("keeps the action wrapper stretched to the full message width", () => {
+    const spec = specFrom({
+      type: "bar",
+      items: [{ label: "Chrome", value: 92 }],
+    });
+    render(<ChatChart spec={spec} onSendPrompt={vi.fn()} />);
+
+    const frame = screen.getByTestId("chat-chart");
+    expect(frame.parentElement).toHaveClass(
+      "w-full",
+      "min-w-0",
+      "max-w-full",
+      "self-stretch",
+    );
+  });
+
   it("sends the validated chart spec back through chat for Live View conversion", () => {
     const onSendPrompt = vi.fn();
     const spec = specFrom({

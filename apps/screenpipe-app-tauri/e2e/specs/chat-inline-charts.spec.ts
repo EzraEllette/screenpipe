@@ -18,6 +18,7 @@
  *   4. a malformed fence falls back to a code block instead of vanishing
  *   5. no chart uses a rounded corner (DESIGN.md: sharp corners always)
  *   6. every chat chart exposes the Live View prompt handoff menu
+ *   7. the action-menu wrapper preserves the chart's full message width
  *
  * No model run and no network: the assistant message is seeded directly.
  *
@@ -216,6 +217,28 @@ describe("Inline charts in chat", function () {
     expect(second).toBeGreaterThan(third);
     expect(Math.abs(second / first - 0.5)).toBeLessThan(0.08);
     expect(Math.abs(third / second - 0.5)).toBeLessThan(0.08);
+  });
+
+  it("keeps charts full-width after adding the Live View action menu", async () => {
+    const layout = await browser.execute(() => {
+      const chart = document.querySelector<HTMLElement>(
+        '[data-chart-type="bar"]',
+      );
+      const message = chart?.closest<HTMLElement>(".prose");
+      if (!chart || !message) return null;
+      const chartRect = chart.getBoundingClientRect();
+      const messageRect = message.getBoundingClientRect();
+      return {
+        chartLeft: chartRect.left,
+        chartRight: chartRect.right,
+        messageLeft: messageRect.left,
+        messageRight: messageRect.right,
+      };
+    });
+
+    expect(layout).not.toBe(null);
+    expect(Math.abs(layout!.chartLeft - layout!.messageLeft)).toBeLessThan(2);
+    expect(Math.abs(layout!.chartRight - layout!.messageRight)).toBeLessThan(2);
   });
 
   it("shows a tooltip and highlights the mark on hover", async () => {

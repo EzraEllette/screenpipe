@@ -155,7 +155,7 @@ export function ChatChart({
     <div
       className={
         onSendPrompt
-          ? "relative my-3 [&>figure]:my-0 [&>figure]:pr-11"
+          ? "relative my-3 w-full min-w-0 max-w-full self-stretch [&>figure]:my-0 [&>figure]:pr-11"
           : "contents"
       }
     >
