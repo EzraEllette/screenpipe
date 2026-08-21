@@ -359,4 +359,22 @@ describe("AIPresetsSelector controlled preset creation", () => {
       "effort control",
     );
   });
+
+  it("keeps recommendation copy out of the native model trigger", () => {
+    mocks.settings.current = {
+      aiPresets: [
+        {
+          ...originalPreset,
+          model: "screenpipe/Auto (recommended)",
+        },
+      ],
+      user: { token: "test-token" },
+    };
+
+    render(<AIPresetsSelector compact showModelOnly />);
+
+    const trigger = screen.getByRole("combobox");
+    expect(trigger).toHaveTextContent("screenpipe/Auto");
+    expect(trigger).not.toHaveTextContent("recommended");
+  });
 });

@@ -25,6 +25,7 @@ import {
   useAcpSessionConfig,
   type AcpConfigOption,
 } from "@/lib/stores/acp-session-config";
+import { acpAdapterInfo } from "@/lib/utils/preset-appearance";
 import { cn } from "@/lib/utils";
 import { compactModelLabel } from "@/lib/utils/model-label";
 
@@ -210,12 +211,18 @@ export function AcpConfigSelector({
   const visibleModeValue = visibleModeOption
     ? selectedValue(visibleModeOption)
     : "";
+  // A fresh device has no prior localStorage advertisement cache. Keep the
+  // same text-first composer shape by using the saved preset value, then the
+  // adapter name, until the live adapter advertises its full model list.
+  const fallbackLabel =
+    compactModelLabel(presetConfig.model ?? "") ||
+    (agentId ? acpAdapterInfo(agentId).name : "config");
   const triggerLabel =
     (modelOption && acpConfigValueLabel(modelOption, modelValue)) ||
     visibleModeOption?.values.find((value) => value.value === visibleModeValue)
       ?.name ||
     modes?.availableModes.find((mode) => mode.value === selectedModeId)?.name ||
-    "config";
+    fallbackLabel;
   const resolvedAliasHint =
     modelOption &&
     advertisedModelValue &&
