@@ -205,7 +205,7 @@ pub enum Command {
     /// Start recording screen, audio, and serve the API
     Record(RecordArgs),
 
-    /// Show screenpipe status (running state, data stats)
+    /// Show recorder health, capture freshness, history, and storage
     Status {
         /// Output format
         #[arg(long, default_value_t = false)]
