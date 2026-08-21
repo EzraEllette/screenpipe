@@ -326,11 +326,6 @@ private struct NativeNotificationFeedbackView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
-                Text("useful?")
-                    .font(Brand.swiftUIMonoFont(size: 9))
-                    .foregroundColor(.primary.opacity(0.34))
-                    .padding(.trailing, 2)
-
                 feedbackButton(systemName: "hand.thumbsup", rating: .up) {
                     model.rating = .up
                     model.correction = ""
@@ -404,8 +399,8 @@ private struct NativeNotificationFeedbackView: View {
         let selected = model.rating == rating
         return Button(action: action) {
             Image(systemName: systemName)
-                .font(.system(size: 11, weight: .regular))
-                .frame(width: 24, height: 24)
+                .font(.system(size: 9, weight: .regular))
+                .frame(width: 20, height: 20)
                 .foregroundColor(selected ? Color(nsColor: .windowBackgroundColor) : .primary.opacity(0.42))
                 .background(Rectangle().fill(selected ? Color.primary.opacity(0.82) : Color.clear))
                 .overlay(Rectangle().stroke(Color.primary.opacity(0.12), lineWidth: 1))
@@ -557,7 +552,7 @@ struct NotificationContentView: View {
                 .zIndex(1)
             }
 
-            if payload.type == "pipe" || payload.pipe_name != nil || payload.source_session_id != nil {
+            if isHovered && (payload.type == "pipe" || payload.pipe_name != nil || payload.source_session_id != nil) {
                 NativeNotificationFeedbackView(
                     model: feedback,
                     onSubmit: submitFeedback,
