@@ -66,7 +66,7 @@ export function ComposerControlsRow({
             size="icon"
             variant="ghost"
             className={cn(
-              "relative h-8 w-8 shrink-0 rounded-none text-muted-foreground transition-colors duration-150 hover:bg-muted/50 hover:text-foreground focus-visible:ring-1 focus-visible:ring-signal focus-visible:ring-offset-1 motion-reduce:transition-none",
+              "relative h-8 w-8 shrink-0 rounded-md text-muted-foreground transition-colors duration-150 hover:bg-muted/50 hover:text-foreground focus-visible:ring-1 focus-visible:ring-signal focus-visible:ring-offset-1 motion-reduce:transition-none",
               filters.hasActiveFilters && "text-foreground bg-muted/50",
             )}
             title="Add attachments and filters"
@@ -141,7 +141,7 @@ export function ComposerControlsRow({
           isAcp ? "w-8" : "w-[180px] max-w-[42vw] min-w-[120px]",
         )}
         triggerClassName={cn(
-          "h-8 rounded-none border border-transparent bg-transparent text-xs text-muted-foreground shadow-none transition-colors duration-150 hover:border-border hover:bg-muted/50 hover:text-foreground focus-visible:ring-1 focus-visible:ring-signal focus-visible:ring-offset-1 motion-reduce:transition-none",
+          "h-8 rounded-md border border-transparent bg-transparent text-xs text-muted-foreground shadow-none transition-colors duration-150 hover:border-border hover:bg-muted/50 hover:text-foreground focus-visible:ring-1 focus-visible:ring-signal focus-visible:ring-offset-1 motion-reduce:transition-none",
           isAcp ? "w-8 justify-center p-0" : "px-2",
         )}
         onPresetSaved={modelControls.onPresetSaved}
@@ -194,7 +194,7 @@ export function ComposerControlsRow({
         onClick={sendButton.isStopMode ? sendButton.onStop : undefined}
         data-firstrun-target="send"
         className={cn(
-          "relative h-8 w-8 rounded-none transition-colors duration-150 focus-visible:ring-1 focus-visible:ring-signal focus-visible:ring-offset-1 motion-reduce:transition-none",
+          "relative h-8 w-8 rounded-md transition-colors duration-150 focus-visible:ring-1 focus-visible:ring-signal focus-visible:ring-offset-1 motion-reduce:transition-none",
           "bg-foreground text-background hover:bg-foreground/80",
         )}
         title={
@@ -232,14 +232,14 @@ function ActiveFilterLabels({ filters }: { filters: ComposerFiltersProps }) {
           {filters.activeFilterLabels.slice(0, 2).map((label, index) => (
             <span
               key={`${label}-${index}`}
-              className="inline-flex h-6 max-w-[140px] items-center truncate rounded-none border border-border/50 px-2 text-[10px] font-medium text-muted-foreground"
+              className="inline-flex h-6 max-w-[140px] items-center truncate rounded-sm border border-border/50 px-2 text-[10px] font-medium text-muted-foreground"
               title={label}
             >
               {label}
             </span>
           ))}
           {filters.activeFilterLabels.length > 2 && (
-            <span className="inline-flex h-6 shrink-0 items-center rounded-none border border-border/50 px-2 text-[10px] font-medium text-muted-foreground">
+            <span className="inline-flex h-6 shrink-0 items-center rounded-sm border border-border/50 px-2 text-[10px] font-medium text-muted-foreground">
               +{filters.activeFilterLabels.length - 2}
             </span>
           )}

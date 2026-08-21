@@ -15,8 +15,8 @@
 //
 // The fix: attach an NSMagnificationGestureRecognizer to the panel's content
 // view. Gesture recognizers fire at the view level, continuously, for every
-// pinch gesture. The handler emits "native-magnify" Tauri events that the
-// JS timeline code listens for.
+// pinch gesture. The handler emits a window-scoped "native-magnify" Tauri
+// event that the JS surface under the gesture listens for.
 // ---------------------------------------------------------------------------
 
 #[cfg(target_os = "macos")]
@@ -303,12 +303,45 @@ pub(crate) async fn history_swipe_navigation_enabled(
 pub(crate) static MAGNIFY_APP_HANDLE: std::sync::OnceLock<tauri::AppHandle> =
     std::sync::OnceLock::new();
 
+#[cfg(target_os = "macos")]
+unsafe fn emit_native_magnify_from_recognizer(
+    app: &tauri::AppHandle,
+    recognizer: *mut objc::runtime::Object,
+    magnification: f64,
+) {
+    use objc::{msg_send, sel, sel_impl};
+    use tauri::{Emitter, Manager};
+    use tauri_nspanel::cocoa::base::{id, nil};
+
+    let source_view: id = msg_send![recognizer, view];
+    let source_window: id = if source_view == nil {
+        nil
+    } else {
+        msg_send![source_view, window]
+    };
+
+    if source_window != nil {
+        for window in app.webview_windows().values() {
+            if window
+                .ns_window()
+                .is_ok_and(|native_window| native_window as id == source_window)
+            {
+                let _ = window.emit("native-magnify", magnification);
+                return;
+            }
+        }
+    }
+
+    // Preserve pinch support for an unexpected window shape. The canvas also
+    // requires the pointer to be inside it, so the fallback remains bounded.
+    let _ = app.emit("native-magnify", magnification);
+}
+
 /// Call once during app setup to store the AppHandle for the magnify handler.
 #[cfg(target_os = "macos")]
 pub fn init_magnify_handler(app: tauri::AppHandle) {
     use objc::declare::ClassDecl;
     use objc::runtime::{Class, Object, Sel};
-    use tauri::Emitter;
 
     let _ = MAGNIFY_APP_HANDLE.set(app);
 
@@ -328,7 +361,7 @@ pub fn init_magnify_handler(app: tauri::AppHandle) {
                     // Reset so next callback gives delta, not cumulative
                     let _: () = msg_send![recognizer, setMagnification: 0.0f64];
                     if let Some(app) = MAGNIFY_APP_HANDLE.get() {
-                        let _ = app.emit("native-magnify", magnification);
+                        emit_native_magnify_from_recognizer(app, recognizer, magnification);
                     }
                 });
             }));

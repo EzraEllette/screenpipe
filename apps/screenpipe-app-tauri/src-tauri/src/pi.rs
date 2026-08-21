@@ -2304,6 +2304,40 @@ pub async fn pi_stop(
     }
 }
 
+/// Stop and forget an idle Pi session without interrupting in-flight work.
+///
+/// Chat panels call this when they give up foreground ownership. Keeping every
+/// completed ACP conversation resident leaves a full Bun/Node/agent process
+/// tree behind for each chat. The busy check and removal happen under the pool
+/// lock, so a prompt cannot race between the check and teardown.
+#[tauri::command]
+#[specta::specta]
+pub async fn pi_stop_if_idle(
+    state: State<'_, PiState>,
+    session_id: Option<String>,
+) -> Result<PiInfo, String> {
+    let sid = session_id.unwrap_or_else(|| "chat".to_string());
+
+    let manager = {
+        let mut pool = state.0.lock().await;
+        let Some(manager) = pool.sessions.get_mut(&sid) else {
+            return Ok(PiInfo::default());
+        };
+        if manager.has_in_flight_work() {
+            debug!("Keeping busy Pi session '{}' alive in background", sid);
+            return Ok(manager.snapshot(&sid));
+        }
+        pool.sessions.remove(&sid)
+    };
+
+    let Some(mut manager) = manager else {
+        return Ok(PiInfo::default());
+    };
+    info!("Stopping idle Pi sidecar for released session: {}", sid);
+    manager.stop().await;
+    Ok(manager.snapshot(&sid))
+}
+
 /// Start the Pi sidecar in RPC mode (Tauri command wrapper)
 #[tauri::command]
 #[specta::specta]

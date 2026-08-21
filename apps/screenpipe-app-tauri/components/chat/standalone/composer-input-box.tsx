@@ -22,7 +22,7 @@ export function ComposerInputBox({
   return (
     <div
       className={cn(
-        "flex flex-col rounded-none border bg-input ring-offset-background transition-colors duration-150 focus-within:border-signal focus-within:ring-signal/15 focus-within:ring-1 motion-reduce:transition-none",
+        "flex flex-col rounded-lg border bg-input ring-offset-background transition-colors duration-150 focus-within:border-signal focus-within:ring-signal/15 focus-within:ring-1 motion-reduce:transition-none",
         "border-border bg-surface shadow-[0_4px_18px_rgba(0,0,0,0.08)] dark:shadow-[0_4px_18px_rgba(0,0,0,0.28)]",
         input.disabledReason && "border-muted-foreground/30",
       )}

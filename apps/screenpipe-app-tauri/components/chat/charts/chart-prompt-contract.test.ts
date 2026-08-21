@@ -94,6 +94,13 @@ describe("chart system prompt contract", () => {
     expect(section.toLowerCase()).toContain("never send colors");
   });
 
+  it("documents renderer safety constraints", () => {
+    expect(section).toContain("Funnel/stacked values: non-negative");
+    expect(section).toContain(
+      `calendar: unique dates within ${CHART_LIMITS.calendarItems} days`,
+    );
+  });
+
   it("stays small enough to earn a permanent seat in context", () => {
     // Guard against the section growing back into a per-type example dump.
     expect(section.length).toBeLessThan(2900);

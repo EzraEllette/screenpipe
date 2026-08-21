@@ -94,7 +94,7 @@ const ITEM_CLS =
 
 function rowClassName(isActive: boolean, isTranslucent: boolean) {
   return cn(
-    "group/navrow relative flex min-h-8 w-full items-center gap-2.5 rounded-none border border-transparent px-2.5 py-1.5 text-left transition-colors duration-150 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-signal motion-reduce:transition-none",
+    "group/navrow relative flex min-h-8 w-full items-center gap-2.5 rounded-md border border-transparent px-2.5 py-1.5 text-left transition-colors duration-150 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-signal motion-reduce:transition-none",
     isActive &&
       "before:absolute before:inset-y-1 before:left-0 before:w-0.5 before:bg-signal before:content-['']",
     isActive
@@ -285,7 +285,7 @@ function SortableRow({
                 data-testid={`nav-${item.id}-options`}
                 onClick={(event) => event.stopPropagation()}
                 className={cn(
-                  "absolute right-1.5 top-1/2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-none text-muted-foreground opacity-0 transition-opacity duration-150 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-signal motion-reduce:transition-none",
+                  "absolute right-1.5 top-1/2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-sm text-muted-foreground opacity-0 transition-opacity duration-150 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-signal motion-reduce:transition-none",
                   "hover:text-foreground focus-visible:opacity-100 group-hover/navrow:opacity-100 data-[state=open]:opacity-100",
                 )}
               >
@@ -333,7 +333,7 @@ function HiddenStrip({
           onClick={() => onShow(hidden.id)}
           title={`Show ${hidden.label} in the sidebar`}
           className={cn(
-            "flex w-full items-center gap-2.5 rounded-none px-2.5 py-1 text-left transition-colors duration-150 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-signal motion-reduce:transition-none",
+            "flex w-full items-center gap-2.5 rounded-md px-2.5 py-1 text-left transition-colors duration-150 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-signal motion-reduce:transition-none",
             isTranslucent
               ? "vibrant-nav-item vibrant-nav-hover"
               : "text-muted-foreground/70 hover:bg-card/50 hover:text-foreground",

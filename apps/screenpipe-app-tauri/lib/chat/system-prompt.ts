@@ -130,7 +130,7 @@ Reach for one when the answer is a comparison, trend, split, sequence, range, re
 | bar | one amount per label, sorted high first | items[{label, value}] (20) |
 | line | one measure over time — "is X trending?" | items[{label, value}] (60) |
 | grouped_bar | series side by side | categories (12) + series[{name, values}] (5) |
-| stacked_bar | part-to-whole per category | same as grouped_bar |
+| stacked_bar | non-negative parts per category | same as grouped_bar |
 | proportion | how one total splits up, non-negative | items[{label, value}] (5) |
 | heatmap | two dimensions at once, e.g. daypart × weekday — prefer this over bar whenever the data has a row AND a column axis | x (24) + y (14) + values, one row per y |
 | timeline | when things happened across a day | items[{label, start, end}] hours 0–24 (24) |
@@ -146,7 +146,7 @@ RULES:
 - Values are real numbers, never strings or null
 - \`title\` and \`unit\` are optional; unit is a short suffix like "min", "h", "%"
 - Never send colors
-- Funnel values must be non-negative and never increase; calendar dates must be unique; range \`mid\` must sit between \`min\` and \`max\`
+- Funnel/stacked values: non-negative; funnel: never increase; calendar: unique dates within 84 days; range \`mid\`: between \`min\` and \`max\`
 - Waterfall = start + signed changes; scatter = x and y per label. Don't use bar for either
 - Each \`values\` array must be exactly as long as \`categories\`; each heatmap row as long as \`x\`
 - A single number is a \`stat\`, never a one-bar bar chart

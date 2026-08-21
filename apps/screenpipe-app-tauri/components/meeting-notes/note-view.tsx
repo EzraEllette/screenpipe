@@ -24,6 +24,7 @@ import {
   Info,
   Languages,
   Loader2,
+  MessageSquareText,
   Mic2,
   Play,
   RefreshCw,
@@ -87,7 +88,9 @@ import type {
 } from "@/lib/utils/live-capture-state";
 import { isLiveCaptureDegraded } from "@/lib/utils/live-capture-state";
 import {
+  fetchMeetingAudio,
   fetchMeetingContext,
+  renderMeetingTranscript,
   type MeetingContext,
 } from "@/lib/utils/meeting-context";
 import {
@@ -181,8 +184,30 @@ import {
   startMeetingSummaryRun,
   updateMeetingSummaryPrimaryPreset,
 } from "./meeting-summary-run";
+import { MeetingChatPanel } from "./meeting-chat-panel";
+import { useMeetingChat } from "./use-meeting-chat";
+import type { MeetingChatConditions } from "./meeting-chat-state";
+import {
+  readStoredChatWidth,
+  writeStoredChatWidth,
+} from "./meeting-chat-width";
+import {
+  findTranscriptRowForTime,
+  readTranscriptRowBounds,
+} from "./transcript-focus";
+import {
+  readActiveAiPresetId,
+  resolveActiveAiPreset,
+} from "@/lib/active-ai-preset";
+import {
+  hostedAiAllowanceForModel,
+  useUsageStatus,
+} from "@/lib/hooks/use-usage-status";
 
 const AUTOSAVE_DEBOUNCE_MS = 800;
+// Transcript window handed to a chat turn. Long meetings are windowed to the
+// most recent span rather than silently truncated mid-prompt (case 76).
+const CHAT_TRANSCRIPT_MAX_CHARS = 24_000;
 // How long a successful save stays on screen before the footer goes quiet.
 const SAVE_RECEIPT_DWELL_MS = 4000;
 
@@ -325,9 +350,28 @@ export function NoteView({
   const { settings, updateSettings } = useSettings();
   const { isManagedDeployment, policy: enterprisePolicy } =
     useManagedPolicy();
+  const chatUsage = useUsageStatus();
   const noteEditorRef = useRef<NoteEditorHandle>(null);
   const rootRef = useRef<HTMLDivElement>(null);
+  const mainRef = useRef<HTMLDivElement>(null);
   const [isDraggingImage, setIsDraggingImage] = useState(false);
+  // Chat rail state. The transcript itself lives in TranscriptPanel; the rail
+  // only needs a count to know whether there is anything to ask about, and a
+  // rendered window when a turn is actually sent.
+  const [chatDraft, setChatDraft] = useState("");
+  const [chatTranscript, setChatTranscript] = useState<{
+    text: string;
+    turnCount: number;
+    truncated: boolean;
+  }>({ text: "", turnCount: 0, truncated: false });
+  const [chatOpen, setChatOpen] = useState(false);
+  const [paneWidth, setPaneWidth] = useState(0);
+  const [storedPanelWidth, setStoredPanelWidth] = useState<number | null>(
+    () => readStoredChatWidth(),
+  );
+  const [pendingCitationMs, setPendingCitationMs] = useState<number | null>(
+    null,
+  );
   const canSummarizeMeeting =
     !isLive &&
     !resuming &&
@@ -1705,6 +1749,169 @@ export function NoteView({
     : visibleSummaryLifecycle.kind === "failed"
       ? "attention"
       : null;
+
+  // ── chat rail ──────────────────────────────────────────────────────────
+  // The rail asks once the meeting settles and reports while it is working.
+  // Everything decidable without React lives in meeting-chat-state.ts.
+  const chatPreset = useMemo(
+    () =>
+      resolveActiveAiPreset(
+        (settings.aiPresets ?? []) as AIPreset[],
+        readActiveAiPresetId(),
+      ),
+    [settings.aiPresets],
+  );
+  const chatCloudflareAllowance = hostedAiAllowanceForModel(
+    chatUsage,
+    chatPreset?.model,
+  );
+  const chatQuotaExhausted = Boolean(
+    chatPreset?.provider === "screenpipe-cloud" &&
+      chatUsage &&
+      (chatUsage.hosted_ai?.allowance_managed_by === "cloudflare"
+        ? chatCloudflareAllowance?.remaining_percent === 0
+        : chatUsage.remaining <= 0),
+  );
+
+  const meetingChat = useMeetingChat({
+    context: {
+      meetingId: meeting.id,
+      title,
+      startIso: meeting.meeting_start,
+      endIso: meeting.meeting_end,
+      transcript: chatTranscript.text,
+      note,
+      transcriptTruncated: chatTranscript.truncated,
+      transcriptSettling:
+        isLive ||
+        stopping ||
+        savingBeforeStop ||
+        summaryLifecycle.kind === "finalizing",
+    },
+    preset: chatPreset,
+    userToken: settings.user?.token ?? null,
+  });
+
+  const chatConditions: MeetingChatConditions = {
+    isLive,
+    isStopping: stopping || savingBeforeStop,
+    captureDegraded: Boolean(captureState && isLiveCaptureDegraded(captureState)),
+    summaryLifecycle,
+    refreshingAfterRetranscription: retranscriptionSummaryRefreshWorking,
+    transcriptTurnCount: chatTranscript.turnCount,
+    hasWrittenContext: Boolean(note.trim()),
+    hasPreset: Boolean(chatPreset),
+    quotaExhausted: chatQuotaExhausted,
+    turnInFlight: meetingChat.inFlight,
+  };
+
+  // The transcript panel owns its own copy for rendering; the rail needs a
+  // plain-text window for the prompt and a count to know whether the meeting is
+  // askable at all (case 11). Refetched when a retranscribe replaces it.
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const chunks = await fetchMeetingAudio(
+          meeting.meeting_start,
+          meeting.meeting_end ?? new Date().toISOString(),
+          1_000,
+          typeof meeting.id === "number" ? meeting.id : undefined,
+        );
+        if (cancelled) return;
+        const rendered = renderMeetingTranscript(chunks);
+        // Case 76: window rather than silently truncate, and say which.
+        const truncated = rendered.length > CHAT_TRANSCRIPT_MAX_CHARS;
+        setChatTranscript({
+          text: truncated
+            ? rendered.slice(rendered.length - CHAT_TRANSCRIPT_MAX_CHARS)
+            : rendered,
+          turnCount: chunks?.length ?? 0,
+          truncated,
+        });
+      } catch {
+        // A transcript we cannot read means "nothing to ask about", which the
+        // rail already renders as a disabled composer.
+        if (!cancelled) {
+          setChatTranscript({ text: "", turnCount: 0, truncated: false });
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // Keyed on the fields the fetch actually uses. Depending on the whole
+    // `meeting` object refetched the entire transcript every time an autosave
+    // returned a new record with the same transcript.
+  }, [
+    meeting.id,
+    meeting.meeting_start,
+    meeting.meeting_end,
+    transcriptRefreshKey,
+  ]);
+
+  // Case 50/51: widths re-clamp against the live shell, not a stored guess,
+  // and the same measurement decides overlay versus dock.
+  useEffect(() => {
+    const node = mainRef.current;
+    if (!node || typeof ResizeObserver === "undefined") return;
+    setPaneWidth(node.clientWidth);
+    const observer = new ResizeObserver((entries) => {
+      const width = entries[0]?.contentRect.width;
+      if (typeof width === "number") setPaneWidth(width);
+    });
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, []);
+
+  // Case 81/82: a citation switches tabs, then scrolls once the rows exist.
+  useEffect(() => {
+    if (pendingCitationMs === null) return;
+    if (activeTab !== "transcript") return;
+    let frame = 0;
+    let attempts = 0;
+    const tryScroll = () => {
+      const container = mainRef.current;
+      if (!container) return;
+      const rows = readTranscriptRowBounds(container);
+      if (rows.length === 0) {
+        // Case 82: the transcript may not have loaded yet. Keep the intent.
+        if (attempts++ < 40) {
+          frame = requestAnimationFrame(tryScroll);
+          return;
+        }
+        setPendingCitationMs(null);
+        return;
+      }
+      const hit = findTranscriptRowForTime(rows, pendingCitationMs);
+      setPendingCitationMs(null);
+      if (!hit) return;
+      const target = rows[hit.index].element;
+      target.scrollIntoView({ block: "center", behavior: "smooth" });
+      // A brief ring rather than a persistent selection: the point is to show
+      // where the answer came from, not to leave the row selected.
+      target.setAttribute("data-cited", "true");
+      window.setTimeout(() => target.removeAttribute("data-cited"), 2_000);
+    };
+    frame = requestAnimationFrame(tryScroll);
+    return () => cancelAnimationFrame(frame);
+  }, [pendingCitationMs, activeTab]);
+
+  const handleCitationClick = useCallback((atMs: number) => {
+    setActiveTab("transcript");
+    setPendingCitationMs(atMs);
+  }, []);
+
+  const citationWindow = useMemo(() => {
+    const startMs = new Date(meeting.meeting_start).getTime();
+    if (!Number.isFinite(startMs)) return null;
+    // A live meeting stays open-ended: the citation parser resolves "now" when
+    // it runs, so an answer streaming during the call can still cite a moment
+    // that happened after this memo was computed.
+    if (!meeting.meeting_end) return { startMs, endMs: null };
+    const endMs = new Date(meeting.meeting_end).getTime();
+    return { startMs, endMs: Number.isFinite(endMs) ? endMs : null };
+  }, [meeting.meeting_start, meeting.meeting_end]);
   const summarySurfaceState = summaryWorking
     ? "working"
     : visibleSummaryLifecycle.kind === "completed"
@@ -1948,6 +2155,36 @@ export function NoteView({
             // and one menu holding everything else — destinations and meeting
             // lifecycle both, which is what let the second dropdown go away.
             trailing={
+              <>
+              {/* The one entry point. Chat is a lens over whichever tab is
+                  open, so it belongs on the rule that spans all of them,
+                  beside the other whole-meeting actions. Nothing is rendered
+                  until this is pressed. */}
+              <button
+                type="button"
+                data-testid="meeting-chat-toggle"
+                aria-label="ask about this meeting"
+                aria-pressed={chatOpen}
+                title="ask about this meeting"
+                onClick={() => {
+                  setChatOpen((open) => {
+                    if (!open) {
+                      posthog.capture("meeting_chat_opened", {
+                        tab: activeTab,
+                        has_summary: canShareSummary,
+                      });
+                    }
+                    return !open;
+                  });
+                }}
+                className={cn(
+                  MEETING_RULE_ACTION_CLASS,
+                  "px-4",
+                  chatOpen && "bg-foreground text-background",
+                )}
+              >
+                <MessageSquareText className="h-3.5 w-3.5" />
+              </button>
               <MeetingShareMenu
                 canShareSummary={canShareSummary}
                 canSend={shareArtifact.sections.length > 0}
@@ -1986,6 +2223,7 @@ export function NoteView({
                   else void handleCopy();
                 }}
               />
+              </>
             }
           />
         </div>
@@ -1994,7 +2232,10 @@ export function NoteView({
       {/* Each tab owns exactly one scroll viewport. The notes editor remains
           mounted while hidden so switching tabs never drops draft/selection
           state. The footer is a flex sibling, so no tab can render beneath it. */}
-      <main className="relative min-h-0 min-w-0 flex-1 overflow-hidden bg-background">
+      <div ref={mainRef} className="relative flex min-h-0 min-w-0 flex-1">
+      <main
+        className="relative min-h-0 min-w-0 flex-1 overflow-hidden bg-background"
+      >
         <section
           id="meeting-panel-notes"
           role="tabpanel"
@@ -2093,6 +2334,32 @@ export function NoteView({
           />
         )}
       </main>
+
+      {/* Beside the document, not beneath it. Nothing renders until the ask
+          control is used, so notes and summary keep the footer-free shell they
+          have today. */}
+      {chatOpen && (
+        <MeetingChatPanel
+          conditions={chatConditions}
+          turns={meetingChat.turns}
+          draft={chatDraft}
+          onDraftChange={setChatDraft}
+          onSubmit={meetingChat.send}
+          onStop={meetingChat.stop}
+          onRetry={meetingChat.retry}
+          onClose={() => setChatOpen(false)}
+          onRunSummary={handleSummaryAction}
+          citationWindow={citationWindow}
+          onCitationClick={handleCitationClick}
+          viewportWidth={paneWidth}
+          storedWidth={storedPanelWidth}
+          onWidthChange={(next) => {
+            setStoredPanelWidth(next);
+            writeStoredChatWidth(next);
+          }}
+        />
+      )}
+      </div>
 
       {footerVisible && (
       <footer className="z-30 min-w-0 shrink-0 border-t border-border bg-background">
