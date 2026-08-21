@@ -185,8 +185,12 @@ import {
   updateMeetingSummaryPrimaryPreset,
 } from "./meeting-summary-run";
 import { MeetingChatPanel } from "./meeting-chat-panel";
-import { useMeetingChat } from "./use-meeting-chat";
+import {
+  useMeetingChat,
+  type MeetingChatContext,
+} from "./use-meeting-chat";
 import type { MeetingChatConditions } from "./meeting-chat-state";
+import type { AcpConfigDefaultChange } from "@/components/chat/standalone/acp-config-selector";
 import {
   readStoredChatWidth,
   writeStoredChatWidth,
@@ -198,6 +202,7 @@ import {
 import {
   readActiveAiPresetId,
   resolveActiveAiPreset,
+  writeActiveAiPresetId,
 } from "@/lib/active-ai-preset";
 import {
   hostedAiAllowanceForModel,
@@ -208,6 +213,7 @@ const AUTOSAVE_DEBOUNCE_MS = 800;
 // Transcript window handed to a chat turn. Long meetings are windowed to the
 // most recent span rather than silently truncated mid-prompt (case 76).
 const CHAT_TRANSCRIPT_MAX_CHARS = 24_000;
+const MEETING_CHAT_LIVE_REFRESH_MS = 30_000;
 // How long a successful save stays on screen before the footer goes quiet.
 const SAVE_RECEIPT_DWELL_MS = 4000;
 
@@ -228,6 +234,12 @@ interface NoteViewProps {
   transcriptOpenIntent?: TranscriptOpenIntent;
   transcriptOpenRequestKey?: number;
   initialWorkspaceTab?: MeetingWorkspaceTab;
+}
+
+interface MeetingChatTranscriptSnapshot {
+  text: string;
+  turnCount: number;
+  truncated: boolean;
 }
 
 type SaveState =
@@ -359,11 +371,17 @@ export function NoteView({
   // only needs a count to know whether there is anything to ask about, and a
   // rendered window when a turn is actually sent.
   const [chatDraft, setChatDraft] = useState("");
-  const [chatTranscript, setChatTranscript] = useState<{
-    text: string;
-    turnCount: number;
-    truncated: boolean;
-  }>({ text: "", turnCount: 0, truncated: false });
+  const [chatTranscript, setChatTranscript] =
+    useState<MeetingChatTranscriptSnapshot>({
+      text: "",
+      turnCount: 0,
+      truncated: false,
+    });
+  const [chatPresetId, setChatPresetId] = useState<string | null>(() =>
+    readActiveAiPresetId(),
+  );
+  const [chatPresetOverride, setChatPresetOverride] =
+    useState<AIPreset | null>(null);
   const [chatOpen, setChatOpen] = useState(false);
   const [paneWidth, setPaneWidth] = useState(0);
   const [storedPanelWidth, setStoredPanelWidth] = useState<number | null>(
@@ -1751,15 +1769,67 @@ export function NoteView({
       : null;
 
   // ── chat rail ──────────────────────────────────────────────────────────
-  // The rail asks once the meeting settles and reports while it is working.
+  // The rail can ask during or after a meeting and reports while it is working.
   // Everything decidable without React lives in meeting-chat-state.ts.
-  const chatPreset = useMemo(
-    () =>
-      resolveActiveAiPreset(
-        (settings.aiPresets ?? []) as AIPreset[],
-        readActiveAiPresetId(),
-      ),
-    [settings.aiPresets],
+  const chatPresets = useMemo(() => {
+    const presets = (settings.aiPresets ?? []) as AIPreset[];
+    if (!isManagedDeployment) return presets;
+    return filterPresetsForEnterprisePolicy(
+      presets,
+      enterprisePolicy.aiPresetPolicy ?? DEFAULT_ENTERPRISE_AI_PRESET_POLICY,
+    );
+  }, [
+    enterprisePolicy.aiPresetPolicy,
+    isManagedDeployment,
+    settings.aiPresets,
+  ]);
+  const resolvedChatPreset = useMemo(
+    () => resolveActiveAiPreset(chatPresets, chatPresetId),
+    [chatPresetId, chatPresets],
+  );
+  // ACP configuration can be chosen before the private turn session exists.
+  // Keep that choice local immediately while the settings context persists it.
+  const chatPreset =
+    chatPresetOverride?.id === resolvedChatPreset?.id
+      ? chatPresetOverride
+      : resolvedChatPreset;
+  const handleChatPresetSelect = useCallback((preset: AIPreset) => {
+    setChatPresetId(preset.id);
+    setChatPresetOverride(null);
+    // This is the same shared choice as the main Chat composer, so moving
+    // between Chat and a meeting never silently changes the running model.
+    writeActiveAiPresetId(preset.id);
+  }, []);
+  const handleChatAcpConfigDefault = useCallback(
+    (change: AcpConfigDefaultChange) => {
+      const agent = chatPreset?.acpAgent;
+      if (!chatPreset || !agent) return;
+      const nextAgent = { ...agent };
+      if ("modeId" in change && change.modeId !== undefined) {
+        nextAgent.modeId = change.modeId;
+      }
+      if (change.approvalMode !== undefined) {
+        nextAgent.approvalMode = change.approvalMode;
+      }
+      if (
+        "optionId" in change &&
+        change.optionId !== undefined &&
+        change.value !== undefined
+      ) {
+        nextAgent.config = {
+          ...(agent.config ?? {}),
+          [change.optionId]: change.value,
+        };
+      }
+      const nextPreset = { ...chatPreset, acpAgent: nextAgent };
+      setChatPresetOverride(nextPreset);
+      void updateSettings({
+        aiPresets: settings.aiPresets.map((preset) =>
+          preset.id === chatPreset.id ? nextPreset : preset,
+        ),
+      });
+    },
+    [chatPreset, settings.aiPresets, updateSettings],
   );
   const chatCloudflareAllowance = hostedAiAllowanceForModel(
     chatUsage,
@@ -1773,21 +1843,66 @@ export function NoteView({
         : chatUsage.remaining <= 0),
   );
 
-  const meetingChat = useMeetingChat({
-    context: {
+  const readChatTranscript = useCallback(
+    async (): Promise<MeetingChatTranscriptSnapshot> => {
+      const chunks = await fetchMeetingAudio(
+        meeting.meeting_start,
+        meeting.meeting_end ?? new Date().toISOString(),
+        1_000,
+        typeof meeting.id === "number" ? meeting.id : undefined,
+      );
+      const rendered = renderMeetingTranscript(chunks);
+      const truncated = rendered.length > CHAT_TRANSCRIPT_MAX_CHARS;
+      return {
+        text: truncated
+          ? rendered.slice(rendered.length - CHAT_TRANSCRIPT_MAX_CHARS)
+          : rendered,
+        turnCount: chunks?.length ?? 0,
+        truncated,
+      };
+    },
+    [meeting.id, meeting.meeting_start, meeting.meeting_end],
+  );
+  const buildChatContext = useCallback(
+    (snapshot: MeetingChatTranscriptSnapshot): MeetingChatContext => ({
       meetingId: meeting.id,
       title,
       startIso: meeting.meeting_start,
       endIso: meeting.meeting_end,
-      transcript: chatTranscript.text,
+      transcript: snapshot.text,
       note,
-      transcriptTruncated: chatTranscript.truncated,
+      transcriptTruncated: snapshot.truncated,
       transcriptSettling:
         isLive ||
         stopping ||
         savingBeforeStop ||
         summaryLifecycle.kind === "finalizing",
-    },
+    }),
+    [
+      isLive,
+      meeting.id,
+      meeting.meeting_end,
+      meeting.meeting_start,
+      note,
+      savingBeforeStop,
+      stopping,
+      summaryLifecycle.kind,
+      title,
+    ],
+  );
+  const meetingChatContext = useMemo(
+    () => buildChatContext(chatTranscript),
+    [buildChatContext, chatTranscript],
+  );
+  const refreshMeetingChatContext = useCallback(async () => {
+    const latest = await readChatTranscript();
+    setChatTranscript(latest);
+    return buildChatContext(latest);
+  }, [buildChatContext, readChatTranscript]);
+
+  const meetingChat = useMeetingChat({
+    context: meetingChatContext,
+    refreshContext: refreshMeetingChatContext,
     preset: chatPreset,
     userToken: settings.user?.token ?? null,
   });
@@ -1805,30 +1920,17 @@ export function NoteView({
     turnInFlight: meetingChat.inFlight,
   };
 
-  // The transcript panel owns its own copy for rendering; the rail needs a
-  // plain-text window for the prompt and a count to know whether the meeting is
-  // askable at all (case 11). Refetched when a retranscribe replaces it.
+  // The transcript panel owns its own copy for rendering; chat keeps a bounded
+  // plain-text window. Opening a live panel refreshes immediately and then at
+  // the same cadence as TranscriptPanel. The send path above refreshes once
+  // more, so a question never relies on the mount-time snapshot (case 16).
   useEffect(() => {
     let cancelled = false;
-    void (async () => {
+    const load = async () => {
       try {
-        const chunks = await fetchMeetingAudio(
-          meeting.meeting_start,
-          meeting.meeting_end ?? new Date().toISOString(),
-          1_000,
-          typeof meeting.id === "number" ? meeting.id : undefined,
-        );
+        const latest = await readChatTranscript();
         if (cancelled) return;
-        const rendered = renderMeetingTranscript(chunks);
-        // Case 76: window rather than silently truncate, and say which.
-        const truncated = rendered.length > CHAT_TRANSCRIPT_MAX_CHARS;
-        setChatTranscript({
-          text: truncated
-            ? rendered.slice(rendered.length - CHAT_TRANSCRIPT_MAX_CHARS)
-            : rendered,
-          turnCount: chunks?.length ?? 0,
-          truncated,
-        });
+        setChatTranscript(latest);
       } catch {
         // A transcript we cannot read means "nothing to ask about", which the
         // rail already renders as a disabled composer.
@@ -1836,19 +1938,17 @@ export function NoteView({
           setChatTranscript({ text: "", turnCount: 0, truncated: false });
         }
       }
-    })();
+    };
+    void load();
+    const interval =
+      isLive && chatOpen
+        ? window.setInterval(() => void load(), MEETING_CHAT_LIVE_REFRESH_MS)
+        : null;
     return () => {
       cancelled = true;
+      if (interval !== null) window.clearInterval(interval);
     };
-    // Keyed on the fields the fetch actually uses. Depending on the whole
-    // `meeting` object refetched the entire transcript every time an autosave
-    // returned a new record with the same transcript.
-  }, [
-    meeting.id,
-    meeting.meeting_start,
-    meeting.meeting_end,
-    transcriptRefreshKey,
-  ]);
+  }, [chatOpen, isLive, readChatTranscript, transcriptRefreshKey]);
 
   // Case 50/51: widths re-clamp against the live shell, not a stored guess,
   // and the same measurement decides overlay versus dock.
@@ -2348,6 +2448,9 @@ export function NoteView({
           onStop={meetingChat.stop}
           onRetry={meetingChat.retry}
           onClose={() => setChatOpen(false)}
+          activePreset={chatPreset}
+          onPresetSelect={handleChatPresetSelect}
+          onAcpConfigDefault={handleChatAcpConfigDefault}
           onRunSummary={handleSummaryAction}
           citationWindow={citationWindow}
           onCitationClick={handleCitationClick}

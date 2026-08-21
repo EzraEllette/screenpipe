@@ -36,6 +36,12 @@ import React, {
 import { ArrowUp, Loader2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
+import { AIPresetsSelector } from "@/components/rewind/ai-presets-selector";
+import {
+  AcpConfigSelector,
+  type AcpConfigDefaultChange,
+} from "@/components/chat/standalone/acp-config-selector";
+import type { AIPreset } from "@/lib/utils/tauri";
 import { cn } from "@/lib/utils";
 import { splitCitations, type CitationWindow } from "./meeting-chat-citations";
 import {
@@ -67,6 +73,9 @@ export interface MeetingChatPanelProps {
   onStop: () => void;
   onRetry: () => void;
   onClose: () => void;
+  activePreset: AIPreset | null;
+  onPresetSelect: (preset: AIPreset) => void;
+  onAcpConfigDefault: (change: AcpConfigDefaultChange) => void;
   /** `summarize this` runs the existing summary path, not a chat turn. */
   onRunSummary: () => void;
   /** Meeting window, for resolving clock citations. */
@@ -88,6 +97,9 @@ export function MeetingChatPanel({
   onStop,
   onRetry,
   onClose,
+  activePreset,
+  onPresetSelect,
+  onAcpConfigDefault,
   onRunSummary,
   citationWindow,
   onCitationClick,
@@ -107,6 +119,7 @@ export function MeetingChatPanel({
     () => resolveMeetingChatSuggestions(conditions, hasThread),
     [conditions, hasThread],
   );
+  const isAcp = activePreset?.provider === "acp";
 
   // Case 30: opening the panel puts the cursor where the user is going.
   useEffect(() => {
@@ -324,26 +337,56 @@ export function MeetingChatPanel({
 
       <div className="shrink-0 border-t border-border px-3 pb-2">
         {/* Case 5 in the spec's layout section: scope is stated, not selectable. */}
-        <p className="pt-2 font-mono text-[9.5px] uppercase tracking-[0.14em] text-muted-foreground/70">
-          reading transcript · notes · screen
-        </p>
-        <div className="flex items-end gap-2">
-          <Textarea
-            ref={inputRef}
-            data-testid="meeting-chat-input"
-            value={draft}
-            rows={1}
-            disabled={!availability.enabled}
-            aria-label="ask about this meeting"
-            placeholder={availability.placeholder}
-            onChange={(event) => onDraftChange(event.target.value)}
-            onKeyDown={handleKeyDown}
-            className={cn(
-              "min-h-10 max-h-40 resize-none rounded-none border-0 bg-transparent px-0 py-2.5 text-[13px] shadow-none",
-              "placeholder:font-mono placeholder:text-[11px] placeholder:uppercase placeholder:tracking-[0.06em]",
-              "focus-visible:ring-0 disabled:cursor-default disabled:opacity-100",
+        <Textarea
+          ref={inputRef}
+          data-testid="meeting-chat-input"
+          value={draft}
+          rows={1}
+          disabled={!availability.enabled}
+          aria-label="ask about this meeting"
+          placeholder={availability.placeholder}
+          onChange={(event) => onDraftChange(event.target.value)}
+          onKeyDown={handleKeyDown}
+          className={cn(
+            "min-h-10 max-h-40 resize-none rounded-none border-0 bg-transparent px-0 py-2.5 text-[13px] shadow-none",
+            "placeholder:font-mono placeholder:text-[11px] placeholder:uppercase placeholder:tracking-[0.06em]",
+            "focus-visible:ring-0 disabled:cursor-default disabled:opacity-100",
+          )}
+        />
+        {/* Match the main Chat composer: the selected model stays visible in
+            the compact control row, while its detail remains in the popover. */}
+        <div className="flex items-center justify-between gap-2">
+          <div
+            data-testid="meeting-chat-model-controls"
+            className="flex min-w-0 items-center gap-1"
+          >
+            <AIPresetsSelector
+              compact
+              showModelOnly
+              providerIconOnly={isAcp}
+              triggerAriaLabel="model for this meeting chat"
+              controlledPresetId={activePreset?.id ?? null}
+              onControlledSelect={(preset) => {
+                if (preset) onPresetSelect(preset);
+              }}
+              containerClassName={cn(
+                "shrink-0 gap-0",
+                isAcp ? "w-7" : "w-[160px] max-w-[50vw] min-w-[112px]",
+              )}
+              triggerClassName={cn(
+                "h-7 rounded-md border border-transparent bg-transparent text-[11px] text-muted-foreground shadow-none transition-colors duration-150 hover:border-border hover:bg-muted/50 hover:text-foreground focus-visible:ring-1 focus-visible:ring-foreground focus-visible:ring-offset-1 motion-reduce:transition-none",
+                isAcp ? "w-7 justify-center p-0" : "px-2",
+              )}
+            />
+            {isAcp && (
+              <AcpConfigSelector
+                sessionId={null}
+                agentId={activePreset.acpAgent?.id}
+                activePreset={activePreset}
+                onPersistDefault={onAcpConfigDefault}
+              />
             )}
-          />
+          </div>
           <Button
             type="button"
             size="icon"
@@ -355,7 +398,7 @@ export function MeetingChatPanel({
               conditions.turnInFlight ? false : !canSubmitTurn(draft, conditions)
             }
             onClick={() => (conditions.turnInFlight ? onStop() : submit(draft))}
-            className="mb-2 h-7 w-7 shrink-0 rounded-none border border-border"
+            className="h-7 w-7 shrink-0 rounded-md border border-border"
           >
             {conditions.turnInFlight ? (
               <Loader2 className="h-3 w-3 animate-spin motion-reduce:animate-none" />

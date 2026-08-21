@@ -146,11 +146,18 @@ export interface UseMeetingChatResult {
 
 export function useMeetingChat(options: {
   context: MeetingChatContext | null;
+  /**
+   * Read the latest meeting evidence immediately before a turn starts. Live
+   * transcripts keep changing while the panel is open, so the render-time
+   * snapshot is only a fallback, never the send-time source of truth.
+   */
+  refreshContext?: () => Promise<MeetingChatContext | null>;
   preset: AIPreset | null;
   userToken: string | null;
 }): UseMeetingChatResult {
   const [turns, setTurns] = useState<MeetingChatTurn[]>([]);
   const [inFlight, setInFlight] = useState(false);
+  const inFlightRef = useRef(false);
 
   const sessionRef = useRef<string | null>(null);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -173,6 +180,7 @@ export function useMeetingChat(options: {
     unregisterRef.current = null;
     const session = sessionRef.current;
     sessionRef.current = null;
+    inFlightRef.current = false;
     // Case 74: no orphan process when the view unmounts mid-turn.
     if (session) void commands.piStop(session);
   }, []);
@@ -191,6 +199,7 @@ export function useMeetingChat(options: {
       ),
     );
     if (state.done) {
+      inFlightRef.current = false;
       setInFlight(false);
       cleanup();
     }
@@ -198,8 +207,13 @@ export function useMeetingChat(options: {
 
   const run = useCallback(
     async (question: string, historyOverride?: MeetingChatTurn[]) => {
-      const { context, preset, userToken } = optionsRef.current;
-      if (!context || !preset) return;
+      const {
+        context: initialContext,
+        refreshContext,
+        preset,
+        userToken,
+      } = optionsRef.current;
+      if (!initialContext || !preset || inFlightRef.current) return;
 
       lastQuestionRef.current = question;
       streamRef.current = emptyStreamState();
@@ -226,15 +240,26 @@ export function useMeetingChat(options: {
           { id: answerId, role: "assistant" as const, text: "", done: false },
         ].slice(-MAX_TURNS),
       );
+      inFlightRef.current = true;
       setInFlight(true);
 
       // Case 70: two windows on two meetings must not collide.
-      const sessionId = `${INTERNAL_TITLE_PREFIX}meeting-chat-${context.meetingId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const sessionId = `${INTERNAL_TITLE_PREFIX}meeting-chat-${initialContext.meetingId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       sessionRef.current = sessionId;
+      const turnStillActive = () =>
+        sessionRef.current === sessionId && inFlightRef.current;
 
       try {
+        // Case 16: a live turn must see the transcript at send time, not the
+        // snapshot from when the note or panel first mounted.
+        const context = refreshContext
+          ? (await refreshContext()) ?? initialContext
+          : initialContext;
+        if (!turnStillActive()) return;
         await mountAgentEventBus();
+        if (!turnStillActive()) return;
         const projectDir = await meetingChatProjectDir();
+        if (!turnStillActive()) return;
 
         const handler = (envelope: AgentEventEnvelope) => {
           const next = advanceMeetingChatStream(streamRef.current, envelope);
@@ -254,6 +279,12 @@ export function useMeetingChat(options: {
           userToken,
           providerConfig(preset),
         );
+        if (!turnStillActive()) {
+          if (started.status === "ok" && started.data.running) {
+            void commands.piStop(sessionId);
+          }
+          return;
+        }
         if (started.status !== "ok" || !started.data.running) {
           throw new Error(
             started.status === "error" ? started.error : "ai did not start",
@@ -262,6 +293,10 @@ export function useMeetingChat(options: {
 
         const prompt = buildMeetingChatPrompt(context, question, history);
         const prompted = await commands.piPrompt(sessionId, prompt, null, null);
+        if (!turnStillActive()) {
+          void commands.piStop(sessionId);
+          return;
+        }
         if (prompted.status === "error") throw new Error(prompted.error);
 
         timeoutRef.current = setTimeout(() => {
@@ -283,10 +318,10 @@ export function useMeetingChat(options: {
 
   const send = useCallback(
     (question: string) => {
-      if (inFlight) return; // case 38
+      if (inFlightRef.current) return; // case 38
       void run(question);
     },
-    [inFlight, run],
+    [run],
   );
 
   const stop = useCallback(() => {
@@ -296,18 +331,19 @@ export function useMeetingChat(options: {
 
   const retry = useCallback(() => {
     const question = lastQuestionRef.current;
-    if (!question || inFlight) return;
+    if (!question || inFlightRef.current) return;
     // Drop the failed pair so a retry does not stack duplicates, and hand the
     // trimmed history to the run rather than letting it read the not-yet
     // flushed state.
     const trimmed = turnsRef.current.slice(0, -2);
     setTurns(trimmed);
     void run(question, trimmed);
-  }, [inFlight, run]);
+  }, [run]);
 
   const reset = useCallback(() => {
     cleanup();
     setTurns([]);
+    inFlightRef.current = false;
     setInFlight(false);
     streamRef.current = emptyStreamState();
   }, [cleanup]);

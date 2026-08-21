@@ -175,6 +175,39 @@ describe("ACP config trigger", () => {
     expect(screen.getByTestId("acp-config-trigger")).toHaveTextContent("Opus 4.1");
   });
 
+  it("persists a model choice before a private session exists", () => {
+    const onPersistDefault = vi.fn();
+    useAcpSessionConfig.setState({
+      sessions: {},
+      byAgent: {
+        "claude-acp": {
+          options: [modelOption("sonnet")],
+          modes: null,
+        } as never,
+      },
+    });
+
+    render(
+      <AcpConfigSelector
+        sessionId={null}
+        agentId="claude-acp"
+        activePreset={presetWith({ model: "sonnet" })}
+        onPersistDefault={onPersistDefault}
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId("acp-config-trigger"));
+    fireEvent.change(screen.getByLabelText("Model"), {
+      target: { value: "opus" },
+    });
+
+    expect(onPersistDefault).toHaveBeenCalledWith({
+      optionId: "model",
+      value: "opus",
+    });
+    expect(mocks.setConfigOption).not.toHaveBeenCalled();
+  });
+
   it("falls back to the mode when the adapter advertises no selects", () => {
     seedSession([], {
       currentModeId: "plan",

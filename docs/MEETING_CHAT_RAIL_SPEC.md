@@ -98,7 +98,7 @@ Each is `case → decided behavior`. Numbers are stable; tests reference them.
 ## B · Live meeting (15–24)
 
 15. Meeting is live → status row and ask line both render. The ask line is **enabled**; `what did i miss?` is the highest-value live question.
-16. Live and the user asks → the agent sees the transcript up to now. The answer is stamped with the turn count it saw, so a later reader knows it was partial.
+16. Live and the user asks → the send path refreshes the bounded transcript immediately before starting the private session, so the agent sees the durable transcript up to now rather than the snapshot from when the panel opened. The settling caveat still says the last in-progress words may not be durable yet.
 17. New transcript turns arrive while an answer streams → they do not invalidate the answer. No re-run, no banner.
 18. Live capture is degraded (`isLiveCaptureDegraded`) → the capture banner stays above; the ask line remains enabled but the chip switches to nothing. A degraded capture means an incomplete transcript, so do not propose questions about it.
 19. Audio device paused mid-meeting → same as 18.
@@ -166,7 +166,7 @@ Each is `case → decided behavior`. Numbers are stable; tests reference them.
 69. The session is evicted by the bus → the thread marks the turn failed and does not silently hang.
 70. Two meetings are open in two windows and both chat → each mints its own private session id; they must not collide. Session id embeds the meeting id.
 71. Hosted AI quota is exhausted → composer disabled, placeholder `ai limit reached`, upgrade action if eligible. Same predicate as `LiveViewAiComposer`.
-72. No AI preset is configured → composer disabled with `set up ai in settings` and a link. Do not send to nothing.
+72. No AI preset is configured → composer disabled with `set up ai in settings`; the compact model control remains available to choose or create one. Do not send to nothing.
 73. The selected preset is a local model that is not running → the transport error surfaces verbatim.
 74. The user closes the meeting while a turn streams → cleanup runs `piStop`; no orphan process.
 75. The app quits mid-turn → the session is not resumed on next launch. Threads persist, in-flight turns do not.
@@ -213,7 +213,6 @@ Deliberately cut, with reasons:
 
 - **A fourth tab.** Chat is a lens over notes/transcript/summary, not a peer of them; a tab would hide the thing being asked about.
 - **Thread switcher, new chat.** One thread per meeting, like the note and the summary. Meetings are bounded.
-- **Model picker at rest.** Behind the overflow menu if anywhere.
 - **Attachments and `@`-mentions.** The scope is the meeting; that is the point.
 - **"Insert into note".** Neither reference app shipped it. A later PR gives the agent one write tool plus a receipt and an undo.
 - **Rounded pills and shadows.** The meeting view is `rounded-none` and flat.

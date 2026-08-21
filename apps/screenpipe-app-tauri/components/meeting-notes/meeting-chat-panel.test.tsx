@@ -7,8 +7,46 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { MeetingChatPanel, type MeetingChatTurn } from "./meeting-chat-panel";
 import { type MeetingChatConditions } from "./meeting-chat-state";
 import type { MeetingSummaryExecution } from "./meeting-summary-lifecycle";
+import type { AIPreset } from "@/lib/utils/tauri";
+
+const secondPreset = {
+  id: "fast meeting model",
+  provider: "screenpipe-cloud",
+  model: "screenpipe/Luna",
+} as AIPreset;
+
+vi.mock("@/components/rewind/ai-presets-selector", () => ({
+  AIPresetsSelector: ({
+    controlledPresetId,
+    onControlledSelect,
+    providerIconOnly,
+  }: {
+    controlledPresetId: string | null;
+    onControlledSelect: (preset: AIPreset) => void;
+    providerIconOnly: boolean;
+  }) => (
+    <button
+      type="button"
+      data-testid="meeting-chat-preset-selector"
+      data-provider-icon-only={String(providerIconOnly)}
+      onClick={() => onControlledSelect(secondPreset)}
+    >
+      {controlledPresetId ?? "select model"}
+    </button>
+  ),
+}));
+
+vi.mock("@/components/chat/standalone/acp-config-selector", () => ({
+  AcpConfigSelector: () => <button type="button">agent model</button>,
+}));
 
 const execution: MeetingSummaryExecution = { id: 1, status: "running" };
+
+const activePreset = {
+  id: "meeting model",
+  provider: "screenpipe-cloud",
+  model: "screenpipe/Auto",
+} as AIPreset;
 
 const conditions = (
   overrides: Partial<MeetingChatConditions> = {},
@@ -36,6 +74,9 @@ function setup(overrides: Partial<React.ComponentProps<typeof MeetingChatPanel>>
     onStop: vi.fn(),
     onRetry: vi.fn(),
     onClose: vi.fn(),
+    activePreset,
+    onPresetSelect: vi.fn(),
+    onAcpConfigDefault: vi.fn(),
     onRunSummary: vi.fn(),
     citationWindow: {
       startMs: new Date(2026, 7, 14, 15, 29).getTime(),
@@ -171,6 +212,9 @@ describe("meeting chat panel", () => {
           onStop={vi.fn()}
           onRetry={vi.fn()}
           onClose={vi.fn()}
+          activePreset={activePreset}
+          onPresetSelect={vi.fn()}
+          onAcpConfigDefault={vi.fn()}
           onRunSummary={vi.fn()}
           citationWindow={null}
           onCitationClick={vi.fn()}
@@ -304,7 +348,31 @@ describe("meeting chat panel", () => {
   it("case 5 (layout): states its scope without making it selectable", () => {
     setup();
     expect(
-      screen.getByText("reading transcript · notes · screen"),
-    ).toBeInTheDocument();
+      screen.queryByText("reading transcript · notes · screen"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("keeps the selected model visible and lets this chat change it", () => {
+    const { props } = setup();
+    expect(screen.getByTestId("meeting-chat-preset-selector")).toHaveTextContent(
+      "meeting model",
+    );
+    fireEvent.click(screen.getByTestId("meeting-chat-preset-selector"));
+    expect(props.onPresetSelect).toHaveBeenCalledWith(secondPreset);
+  });
+
+  it("shows the adapter's concrete model control for ACP presets", () => {
+    setup({
+      activePreset: {
+        ...activePreset,
+        provider: "acp",
+        acpAgent: { id: "claude-acp" },
+      },
+    });
+    expect(screen.getByText("agent model")).toBeInTheDocument();
+    expect(screen.getByTestId("meeting-chat-preset-selector")).toHaveAttribute(
+      "data-provider-icon-only",
+      "true",
+    );
   });
 });
