@@ -2902,7 +2902,7 @@ fn wait_port_ready(port: u16, timeout: std::time::Duration) {
 /// the runtime's process group, so desktop teardown kills them too). Best
 /// effort: a server that can't spawn is simply omitted.
 fn spawn_http_mcp_servers(config: &RuntimeConfig) -> Vec<std::process::Child> {
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
     let mut children = Vec::new();
     let mut urls: Vec<(String, String)> = Vec::new();
     let engine_url = engine_api_url();
@@ -2912,7 +2912,7 @@ fn spawn_http_mcp_servers(config: &RuntimeConfig) -> Vec<std::process::Child> {
     // below so it is listening before session/new.
     if let (Some(tools_path), Some(port)) = (ensure_tools_mcp_server(config), free_loopback_port())
     {
-        let mut cmd = Command::new(&config.bun_path);
+        let mut cmd = crate::no_window_command(&config.bun_path);
         cmd.arg(&tools_path)
             .env("SCREENPIPE_TOOLS_HTTP_PORT", port.to_string())
             .stdin(Stdio::null())
@@ -2945,7 +2945,7 @@ fn spawn_http_mcp_servers(config: &RuntimeConfig) -> Vec<std::process::Child> {
     // only that mode). Best-effort: `bun x` may fetch it on first run, so it can
     // lag; we still advertise it (the agent retries) rather than block on it.
     if let Some(port) = free_loopback_port() {
-        let mut cmd = Command::new(&config.bun_path);
+        let mut cmd = crate::no_window_command(&config.bun_path);
         cmd.arg("x")
             .arg(SCREENPIPE_MCP_PKG)
             .arg("--http")

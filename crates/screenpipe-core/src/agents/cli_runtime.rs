@@ -368,7 +368,7 @@ pub fn refresh_blocking(screenpipe_dir: &Path, bun: &Path) -> std::io::Result<Pa
         b"{\"name\":\"sp-cli-resolve\"}\n",
     )?;
 
-    let spawn = std::process::Command::new(bun)
+    let spawn = crate::no_window_command(bun)
         .arg("install")
         .arg("screenpipe@latest")
         .current_dir(&work)
