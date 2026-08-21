@@ -18,6 +18,7 @@ import {
 } from "@/components/ui/dialog";
 import { toast } from "@/components/ui/use-toast";
 import {
+  EXTERNAL_CHAT_LOOKBACK_DAYS,
   importExternalChatHistory,
   scanExternalChatHistory,
   type ExternalChatImportResult,
@@ -120,7 +121,7 @@ export function ImportChatsDialog({
         <DialogHeader>
           <DialogTitle className="lowercase">import chats</DialogTitle>
           <DialogDescription>
-            Copy local conversations into screenpipe. Source files stay unchanged and nothing is uploaded.
+            Copy local conversations from the past {EXTERNAL_CHAT_LOOKBACK_DAYS} days into screenpipe. Source files stay unchanged and nothing is uploaded.
           </DialogDescription>
         </DialogHeader>
 
@@ -128,7 +129,7 @@ export function ImportChatsDialog({
           {loading ? (
             <div className="flex items-center gap-2 px-3 py-5 text-sm text-muted-foreground">
               <Loader2 className="h-4 w-4 animate-spin" />
-              checking local history
+              checking the past {EXTERNAL_CHAT_LOOKBACK_DAYS} days
             </div>
           ) : scanError ? (
             <div className="px-3 py-4 text-sm text-destructive">
@@ -139,8 +140,8 @@ export function ImportChatsDialog({
             const checked = selected.has(source.source);
             const details = [
               source.omittedByLimit > 0
-                ? `showing the ${count} most recent of ${source.availableCount}`
-                : `${count} conversation${count === 1 ? "" : "s"}`,
+                ? `showing the ${count} most recent from the past ${scan.lookbackDays} days`
+                : `${count} conversation${count === 1 ? "" : "s"} from the past ${scan.lookbackDays} days`,
               source.skippedTooLarge > 0
                 ? `${source.skippedTooLarge} oversized file${source.skippedTooLarge === 1 ? "" : "s"} skipped`
                 : "",

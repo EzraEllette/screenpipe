@@ -17,6 +17,9 @@ import {
 
 export const MAX_EXTERNAL_CHATS_PER_SOURCE = 100;
 export const MAX_EXTERNAL_CHAT_FILE_BYTES = 32 * 1024 * 1024;
+export const EXTERNAL_CHAT_LOOKBACK_DAYS = 7;
+
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
 export interface ExternalChatCandidate {
   source: ExternalChatSource;
@@ -38,6 +41,7 @@ export interface ExternalChatSourceScan {
 export interface ExternalChatScanResult {
   sources: ExternalChatSourceScan[];
   totalCandidates: number;
+  lookbackDays: number;
 }
 
 export interface ExternalChatImportResult {
@@ -91,9 +95,20 @@ async function candidateForPath(
   }
 }
 
-async function listClaudeCandidates(home: string): Promise<ExternalChatCandidate[]> {
+interface ExternalChatDiscovery {
+  candidates: ExternalChatCandidate[];
+  availableCount: number;
+  omittedByLimit: number;
+}
+
+async function listClaudeCandidates(
+  home: string,
+  cutoffMs: number,
+): Promise<ExternalChatDiscovery> {
   const root = await join(home, ".claude", "projects");
-  if (!(await exists(root))) return [];
+  if (!(await exists(root))) {
+    return { candidates: [], availableCount: 0, omittedByLimit: 0 };
+  }
   const candidates: ExternalChatCandidate[] = [];
   for (const project of await readDir(root)) {
     if (!project.isDirectory) continue;
@@ -105,50 +120,93 @@ async function listClaudeCandidates(home: string): Promise<ExternalChatCandidate
         if (entry.isDirectory || !entry.name.toLowerCase().endsWith(".jsonl")) continue;
         const path = await join(projectPath, entry.name);
         const candidate = await candidateForPath("claude-code", path);
-        if (candidate) candidates.push(candidate);
+        if (candidate && candidate.modifiedAt >= cutoffMs) candidates.push(candidate);
       }
     } catch {
       // A single unreadable project must not hide other Claude workspaces.
     }
   }
-  return candidates;
+  return {
+    candidates,
+    availableCount: candidates.length,
+    omittedByLimit: 0,
+  };
 }
 
-async function listCodexCandidates(home: string): Promise<ExternalChatCandidate[]> {
-  const root = await join(home, ".codex", "sessions");
-  if (!(await exists(root))) return [];
-  const candidates: ExternalChatCandidate[] = [];
-  const queue: Array<{ path: string; depth: number }> = [{ path: root, depth: 0 }];
+function calendarDatesInWindow(nowMs: number, cutoffMs: number): Date[] {
+  const cursor = new Date(nowMs);
+  cursor.setHours(0, 0, 0, 0);
+  const first = new Date(cutoffMs);
+  first.setHours(0, 0, 0, 0);
+  const dates: Date[] = [];
+  while (cursor.getTime() >= first.getTime()) {
+    dates.push(new Date(cursor));
+    cursor.setDate(cursor.getDate() - 1);
+  }
+  return dates;
+}
 
-  while (queue.length > 0) {
-    const current = queue.shift()!;
-    let entries;
+function datePart(value: number): string {
+  return String(value).padStart(2, "0");
+}
+
+async function listCodexCandidates(
+  home: string,
+  cutoffMs: number,
+  nowMs: number,
+): Promise<ExternalChatDiscovery> {
+  const root = await join(home, ".codex", "sessions");
+  if (!(await exists(root))) {
+    return { candidates: [], availableCount: 0, omittedByLimit: 0 };
+  }
+
+  const entries: Array<{ directory: string; name: string; sortKey: string }> = [];
+  for (const date of calendarDatesInWindow(nowMs, cutoffMs)) {
+    const year = String(date.getFullYear());
+    const month = datePart(date.getMonth() + 1);
+    const day = datePart(date.getDate());
+    const directory = await join(root, year, month, day);
     try {
-      entries = await readDir(current.path);
-    } catch {
-      continue;
-    }
-    for (const entry of entries) {
-      const path = await join(current.path, entry.name);
-      if (entry.isDirectory) {
-        // Current Codex layout is sessions/YYYY/MM/DD/*.jsonl. Leave one
-        // extra level for compatible future partitioning without walking an
-        // unbounded tree.
-        if (current.depth < 5) queue.push({ path, depth: current.depth + 1 });
-        continue;
+      for (const entry of await readDir(directory)) {
+        if (entry.isDirectory || !entry.name.toLowerCase().endsWith(".jsonl")) continue;
+        entries.push({
+          directory,
+          name: entry.name,
+          sortKey: `${year}/${month}/${day}/${entry.name}`,
+        });
       }
-      if (!entry.name.toLowerCase().endsWith(".jsonl")) continue;
-      const candidate = await candidateForPath("codex", path);
-      if (candidate) candidates.push(candidate);
+    } catch {
+      // Missing or unreadable dates are expected when there were no sessions.
     }
   }
-  return candidates;
+
+  entries.sort((a, b) => b.sortKey.localeCompare(a.sortKey));
+  const candidates: ExternalChatCandidate[] = [];
+  let eligibleCount = 0;
+  let inspectedCount = 0;
+  for (const entry of entries) {
+    const path = await join(entry.directory, entry.name);
+    const candidate = await candidateForPath("codex", path);
+    inspectedCount += 1;
+    if (!candidate || candidate.modifiedAt < cutoffMs) continue;
+    candidates.push(candidate);
+    if (candidate.size <= MAX_EXTERNAL_CHAT_FILE_BYTES) eligibleCount += 1;
+    if (eligibleCount >= MAX_EXTERNAL_CHATS_PER_SOURCE) break;
+  }
+
+  const omittedByLimit = Math.max(0, entries.length - inspectedCount);
+  return {
+    candidates,
+    availableCount: omittedByLimit > 0 ? entries.length : candidates.length,
+    omittedByLimit,
+  };
 }
 
 function summarizeSource(
   source: ExternalChatSource,
-  allCandidates: ExternalChatCandidate[],
+  discovery: ExternalChatDiscovery,
 ): ExternalChatSourceScan {
+  const allCandidates = discovery.candidates;
   const sorted = [...allCandidates].sort(
     (a, b) => b.modifiedAt - a.modifiedAt || b.path.localeCompare(a.path),
   );
@@ -158,17 +216,24 @@ function summarizeSource(
     source,
     label: sourceLabel(source),
     candidates,
-    availableCount: sorted.length,
+    availableCount: discovery.availableCount,
     skippedTooLarge: sorted.length - eligible.length,
-    omittedByLimit: Math.max(0, eligible.length - candidates.length),
+    omittedByLimit: Math.max(
+      discovery.omittedByLimit,
+      eligible.length - candidates.length,
+    ),
   };
 }
 
-export async function scanExternalChatHistory(): Promise<ExternalChatScanResult> {
+export async function scanExternalChatHistory(
+  options: { nowMs?: number } = {},
+): Promise<ExternalChatScanResult> {
   const home = await homeDir();
+  const nowMs = options.nowMs ?? Date.now();
+  const cutoffMs = nowMs - EXTERNAL_CHAT_LOOKBACK_DAYS * MS_PER_DAY;
   const [claude, codex] = await Promise.all([
-    listClaudeCandidates(home),
-    listCodexCandidates(home),
+    listClaudeCandidates(home, cutoffMs),
+    listCodexCandidates(home, cutoffMs, nowMs),
   ]);
   const sources = [
     summarizeSource("claude-code", claude),
@@ -177,6 +242,7 @@ export async function scanExternalChatHistory(): Promise<ExternalChatScanResult>
   return {
     sources,
     totalCandidates: sources.reduce((total, source) => total + source.candidates.length, 0),
+    lookbackDays: EXTERNAL_CHAT_LOOKBACK_DAYS,
   };
 }
 
