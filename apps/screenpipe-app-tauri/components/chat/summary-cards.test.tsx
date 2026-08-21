@@ -89,6 +89,32 @@ describe("SummaryCards", () => {
     expect(screen.queryByTestId("summary-cards-more")).not.toBeInTheDocument();
   });
 
+  it("makes available home actions visibly interactive and keyboard focusable", () => {
+    render(
+      <SummaryCards
+        onSendMessage={vi.fn()}
+        customTemplates={[]}
+        onSaveCustomTemplate={vi.fn()}
+        onUpdateCustomTemplate={vi.fn()}
+        onDeleteCustomTemplate={vi.fn()}
+        userGoalCategory="work_memory"
+      />,
+    );
+
+    for (const slug of ["day-recap", "missed-todos"]) {
+      const card = screen.getByTestId(`summary-card-${slug}`);
+      expect(card).toHaveClass("bg-card", "cursor-pointer");
+      expect(card.className).toContain("border-foreground/");
+      expect(card.className).toContain("focus-visible:ring-1");
+      expect(card.className).toContain("motion-reduce:transition-none");
+      expect(screen.getByTestId(`home-card-arrow-${slug}`)).toBeInTheDocument();
+    }
+
+    const quickAction = screen.getByRole("button", { name: "Time Breakdown" });
+    expect(quickAction).toHaveClass("bg-card", "text-foreground/75");
+    expect(quickAction.className).toContain("focus-visible:ring-1");
+  });
+
   it("keeps the user's saved templates alongside the built-in actions", () => {
     render(
       <SummaryCards
