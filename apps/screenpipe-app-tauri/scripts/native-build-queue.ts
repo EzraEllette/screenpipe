@@ -28,7 +28,7 @@ const SCCACHE_DEFAULT_PORT = "4226";
 const LEGACY_SCCACHE_PORT = "4227";
 const WAIT_UPDATE_MS = 10_000;
 
-type BuildMode = "build" | "e2e" | "signed" | "warmup" | "test-hold";
+type BuildMode = "build" | "e2e" | "signed" | "test" | "warmup" | "test-hold";
 
 type QueueOwner = {
   requestId: string;
@@ -59,6 +59,15 @@ export function sccacheHasBaseDirectories(output: string, worktrees: string[]): 
     .find((candidate) => candidate.startsWith("Base directories"));
   if (!line) return false;
   return worktrees.every((worktree) => line.includes(`${worktree}/`));
+}
+
+export function nativeTestCommand(args: string[]): string[] {
+  return [
+    "cargo", "test", "-p", "screenpipe-app",
+    "--manifest-path", "src-tauri/Cargo.toml",
+    "--profile", "debug-dev",
+    ...args,
+  ];
 }
 
 function decode(value: Uint8Array): string {
@@ -110,7 +119,12 @@ function localSccacheEnvironment(): Record<string, string> {
   const env = { ...process.env } as Record<string, string>;
   const sccache = findExecutable("sccache");
   if (!sccache) {
-    console.warn("[native-build-queue] sccache not found; continuing without the shared compile cache");
+    if (process.platform === "darwin") {
+      throw new Error(
+        "[native-build-queue] machine-wide sccache is required on macOS; refusing local compilation",
+      );
+    }
+    console.warn("[native-build-queue] sccache not found; continuing without a compile cache");
     env.RUSTC_WRAPPER = "";
     return env;
   }
@@ -185,14 +199,17 @@ function localSccacheEnvironment(): Record<string, string> {
       || verify.exitCode !== 0
       || !sccacheHasBaseDirectories(decode(verify.stdout), worktrees)
     ) {
-      console.warn(
-        "[native-build-queue] machine-wide sccache did not start with all worktree bases; compile-cache reuse may be reduced",
-      );
+      const message =
+        "[native-build-queue] machine-wide sccache did not start with all worktree bases";
+      if (process.platform === "darwin") {
+        throw new Error(`${message}; refusing local compilation`);
+      }
+      console.warn(`${message}; compile-cache reuse may be reduced`);
     }
   }
 
   // Starting through the configured wrapper preserves the machine-wide
-  // backend, cache size, and fallback policy.
+  // backend and cache size.
   return env;
 }
 
@@ -230,6 +247,7 @@ function modeLabel(mode: BuildMode): string {
     case "build": return "one-shot debug-dev build";
     case "e2e": return "debug-dev E2E build";
     case "signed": return "signed debug-dev app build";
+    case "test": return "queued native app tests";
     case "warmup": return "Tauri dev compile warm-up";
     case "test-hold": return "queue self-test";
   }
@@ -253,6 +271,11 @@ async function perform(mode: BuildMode, args: string[]): Promise<number> {
       ], env);
     case "signed":
       return run(["bash", "scripts/build_macos.sh", "--queue-held"], env);
+    case "test": {
+      const exitCode = await run(["bun", "scripts/pre_build.js"], env);
+      if (exitCode !== 0) return exitCode;
+      return run(nativeTestCommand(args), env);
+    }
     case "warmup": {
       let exitCode = await run(["bun", "scripts/pre_build.js"], env);
       if (exitCode !== 0) return exitCode;
@@ -363,11 +386,11 @@ async function main(): Promise<number> {
     env.SCREENPIPE_NATIVE_PREBUILD_COMPLETE = "1";
     return run(["bun", "tauri", "dev", "--", "--profile", "debug-dev"], env);
   }
-  if (["build", "e2e", "signed", "test-hold"].includes(mode)) {
+  if (["build", "e2e", "signed", "test", "test-hold"].includes(mode)) {
     return queue(mode as BuildMode, args);
   }
 
-  console.error("usage: bun scripts/native-build-queue.ts <dev|build|e2e|signed|status>");
+  console.error("usage: bun scripts/native-build-queue.ts <dev|build|e2e|signed|test|status>");
   return 2;
 }
 

@@ -2,7 +2,7 @@
 
 <!-- doc-covers: none -->
 
-There are exactly three normal native-development commands. Run them from
+There are exactly four normal native-development commands. Run them from
 `apps/screenpipe-app-tauri`:
 
 ```bash
@@ -14,10 +14,14 @@ bun run build:tauri:dev
 
 # E2E-capable one-shot test binary.
 bun run build:tauri:e2e
+
+# Native app tests; append ordinary cargo-test filters and flags.
+bun run test:tauri activity_history::tests
 ```
 
-All package scripts pass the named profile as Cargo runner arguments:
-`-- --profile debug-dev`. The space-separated form matters. It makes Tauri
+The Tauri build scripts pass the named profile as Cargo runner arguments:
+`-- --profile debug-dev`; the native-test command passes the same profile
+directly to Cargo. The space-separated Tauri form matters. It makes Tauri
 2.11.2 select `src-tauri/target/debug-dev`; `--debug` instead selects Cargo's
 built-in `dev` profile.
 
@@ -28,7 +32,7 @@ high parallel codegen, and no per-worktree incremental state.
 
 ## System-wide build queue and cache
 
-The three commands above and the signed build script all use one per-user build
+The four commands above and the signed build script all use one per-user build
 slot on macOS. A second worktree waits instead of starting another cold native
 compile on the same CPU. Queue output names the current build, PID, worktree,
 and wait time; inspect it directly with:
@@ -44,6 +48,11 @@ directory. Eligible dependency objects can therefore be reused across
 worktrees without sharing target directories. The worktree list is refreshed
 before every queued native build. Do not point a second sccache server at the
 same local cache directory; sccache local storage supports only one server.
+
+Never run raw `cargo` or Tauri commands against `src-tauri`. They bypass the
+system lock; a later queued build may legitimately restart sccache while
+refreshing its worktree bases, causing the unqueued build to compile locally.
+If the queue or cache is unavailable, stop instead of accepting that fallback.
 
 `bun run dev:tauri` queues only its initial Cargo warm-up. It releases the build
 slot before starting the long-running Tauri dev process, so an open app does not
