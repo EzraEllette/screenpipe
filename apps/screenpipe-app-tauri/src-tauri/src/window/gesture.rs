@@ -21,15 +21,26 @@
 
 #[cfg(target_os = "macos")]
 use super::util::with_autorelease_pool;
+use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(target_os = "macos")]
 use tracing::info;
+
+static HOME_HISTORY_SWIPE_NAVIGATION_ENABLED: AtomicBool = AtomicBool::new(false);
 
 /// Only the Home window owns browser-style application navigation. The rewind
 /// overlay intentionally stays out of this list because horizontal trackpad
 /// gestures scrub its timeline.
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
-fn should_enable_history_swipe_navigation(window_label: &str) -> bool {
-    window_label == "home"
+fn resolve_history_swipe_navigation_enabled(window_label: &str, rollout_enabled: bool) -> bool {
+    rollout_enabled && window_label == "home"
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
+pub(crate) fn history_swipe_navigation_enabled_for_window(window_label: &str) -> bool {
+    resolve_history_swipe_navigation_enabled(
+        window_label,
+        HOME_HISTORY_SWIPE_NAVIGATION_ENABLED.load(Ordering::SeqCst),
+    )
 }
 
 /// `NSScrollElasticityNone` blocks the WebKit edge interaction even when
@@ -66,59 +77,57 @@ unsafe fn macos_history_swipe_navigation_enabled(
     Ok(enabled && horizontal_elasticity_allows_history_swipe(horizontal_elasticity))
 }
 
+#[cfg(target_os = "macos")]
+unsafe fn set_macos_history_swipe_navigation(
+    window: &tauri::WebviewWindow,
+    enabled: bool,
+) -> Result<(), String> {
+    use objc::{msg_send, sel, sel_impl};
+    use tauri_nspanel::cocoa::base::{id, nil};
+
+    let ns_window = window
+        .ns_window()
+        .map_err(|error| format!("NSWindow unavailable: {error}"))? as id;
+    let content_view: id = msg_send![ns_window, contentView];
+    let wk_webview = super::first_responder::find_wkwebview(content_view);
+    if wk_webview == nil {
+        return Err("WKWebView not found".to_string());
+    }
+
+    let _: () = msg_send![wk_webview, setAllowsBackForwardNavigationGestures: enabled];
+    let scroll_view: id = msg_send![wk_webview, enclosingScrollView];
+    if scroll_view == nil {
+        return Err("WKWebView enclosing NSScrollView not found".to_string());
+    }
+    let horizontal_elasticity = if enabled { 0i64 } else { 1i64 };
+    let _: () = msg_send![scroll_view, setHorizontalScrollElasticity: horizontal_elasticity];
+
+    let actual = macos_history_swipe_navigation_enabled(window)?;
+    if actual != enabled {
+        return Err(format!(
+            "WKWebView swipe navigation read back as {actual} after setting {enabled}"
+        ));
+    }
+    Ok(())
+}
+
 /// Configure WebKit's native, interactive two-finger back/forward gesture.
 /// WKWebView supplies the edge animation and only commits the navigation after
 /// the gesture crosses its threshold.
 #[cfg(target_os = "macos")]
 pub(crate) fn configure_history_swipe_navigation(window: &tauri::WebviewWindow) {
-    use objc::{msg_send, sel, sel_impl};
-    use tauri_nspanel::cocoa::base::{id, nil};
-
-    if !should_enable_history_swipe_navigation(window.label()) {
-        return;
-    }
-
-    let ns_window_ptr = match window.ns_window() {
-        Ok(ns_window_ptr) => ns_window_ptr,
-        Err(error) => {
-            tracing::warn!(
-                window = window.label(),
-                %error,
-                "history swipe navigation: NSWindow unavailable"
-            );
-            return;
-        }
-    };
-
-    unsafe {
-        let ns_window = ns_window_ptr as id;
-        let content_view: id = msg_send![ns_window, contentView];
-        let wk_webview = super::first_responder::find_wkwebview(content_view);
-
-        if wk_webview == nil {
-            tracing::warn!(
-                window = window.label(),
-                "history swipe navigation: WKWebView not found"
-            );
-            return;
-        }
-
-        let _: () = msg_send![wk_webview, setAllowsBackForwardNavigationGestures: true];
-        match macos_history_swipe_navigation_enabled(window) {
-            Ok(true) => info!(
-                window = window.label(),
-                "enabled native back/forward swipe navigation"
-            ),
-            Ok(false) => tracing::warn!(
-                window = window.label(),
-                "history swipe navigation remained disabled"
-            ),
-            Err(error) => tracing::warn!(
-                window = window.label(),
-                %error,
-                "history swipe navigation readback failed"
-            ),
-        }
+    let enabled = history_swipe_navigation_enabled_for_window(window.label());
+    match unsafe { set_macos_history_swipe_navigation(window, enabled) } {
+        Ok(()) => info!(
+            window = window.label(),
+            enabled, "configured native back/forward swipe navigation"
+        ),
+        Err(error) => tracing::warn!(
+            window = window.label(),
+            enabled,
+            %error,
+            "history swipe navigation configuration failed"
+        ),
     }
 }
 
@@ -163,7 +172,7 @@ fn set_webview2_history_swipe_navigation(
 /// rewind and other horizontal interactions.
 #[cfg(target_os = "windows")]
 pub(crate) fn configure_history_swipe_navigation(window: &tauri::WebviewWindow) {
-    let enabled = should_enable_history_swipe_navigation(window.label());
+    let enabled = history_swipe_navigation_enabled_for_window(window.label());
     let label = window.label().to_string();
     let label_for_callback = label.clone();
     if let Err(error) = window.with_webview(move |platform| {
@@ -190,6 +199,59 @@ pub(crate) fn configure_history_swipe_navigation(window: &tauri::WebviewWindow) 
             %error,
             "history swipe navigation callback failed"
         );
+    }
+}
+
+/// Apply the frontend's fail-closed PostHog rollout decision to the invoking
+/// webview. Only Home can ever be enabled; every other window is forced off.
+pub(crate) async fn set_history_swipe_navigation_enabled(
+    window: tauri::WebviewWindow,
+    enabled: bool,
+) -> Result<(), String> {
+    let window_label = window.label().to_string();
+    if window_label == "home" {
+        HOME_HISTORY_SWIPE_NAVIGATION_ENABLED.store(enabled, Ordering::SeqCst);
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        use tauri::Manager;
+
+        let app = window.app_handle().clone();
+        let target = window.clone();
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        app.run_on_main_thread(move || {
+            let effective = history_swipe_navigation_enabled_for_window(target.label());
+            let result = unsafe { set_macos_history_swipe_navigation(&target, effective) };
+            let _ = sender.send(result);
+        })
+        .map_err(|error| error.to_string())?;
+        return receiver
+            .await
+            .map_err(|_| "macOS history swipe update was cancelled".to_string())?;
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        window
+            .with_webview(move |platform| {
+                let effective = history_swipe_navigation_enabled_for_window(&window_label);
+                let result = unsafe { platform.controller().CoreWebView2() }
+                    .map_err(|error| error.to_string())
+                    .and_then(|webview| set_webview2_history_swipe_navigation(&webview, effective));
+                let _ = sender.send(result);
+            })
+            .map_err(|error| error.to_string())?;
+        return receiver
+            .await
+            .map_err(|_| "Windows history swipe update was cancelled".to_string())?;
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let _ = window;
+        Ok(())
     }
 }
 
@@ -430,16 +492,20 @@ pub(crate) unsafe fn attach_magnify_gesture_to_view(view: tauri_nspanel::cocoa::
 #[cfg(test)]
 mod tests {
     use super::{
-        horizontal_elasticity_allows_history_swipe, should_enable_history_swipe_navigation,
+        horizontal_elasticity_allows_history_swipe, resolve_history_swipe_navigation_enabled,
     };
 
     #[test]
-    fn enables_history_swipes_only_for_home() {
-        assert!(should_enable_history_swipe_navigation("home"));
-        assert!(!should_enable_history_swipe_navigation("main"));
-        assert!(!should_enable_history_swipe_navigation("main-window"));
-        assert!(!should_enable_history_swipe_navigation("search"));
-        assert!(!should_enable_history_swipe_navigation("chat"));
+    fn enables_history_swipes_only_for_flagged_home() {
+        assert!(resolve_history_swipe_navigation_enabled("home", true));
+        assert!(!resolve_history_swipe_navigation_enabled("home", false));
+        assert!(!resolve_history_swipe_navigation_enabled("main", true));
+        assert!(!resolve_history_swipe_navigation_enabled(
+            "main-window",
+            true
+        ));
+        assert!(!resolve_history_swipe_navigation_enabled("search", true));
+        assert!(!resolve_history_swipe_navigation_enabled("chat", true));
     }
 
     #[test]

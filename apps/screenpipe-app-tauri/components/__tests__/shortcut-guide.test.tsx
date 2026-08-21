@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   isMac: true,
+  experimentalEnabled: true,
   settings: {
     disabledShortcuts: [] as string[],
     showScreenpipeShortcut: "Control+Super+S",
@@ -26,8 +27,14 @@ vi.mock("@/lib/hooks/use-platform", () => ({
 vi.mock("@/lib/hooks/use-settings", () => ({
   useSettings: () => ({ settings: mocks.settings }),
 }));
+vi.mock("posthog-js/react", () => ({
+  useFeatureFlagEnabled: () => mocks.experimentalEnabled,
+}));
 
-import { ShortcutGuide } from "@/components/shortcut-guide";
+import {
+  ExperimentalShortcutGuide,
+  ShortcutGuide,
+} from "@/components/shortcut-guide";
 import { OPEN_SHORTCUT_GUIDE_EVENT } from "@/lib/shortcuts";
 import { useShortcutGuideStore } from "@/lib/stores/shortcut-guide-store";
 
@@ -35,10 +42,19 @@ afterEach(() => {
   cleanup();
   useShortcutGuideStore.getState().setOpen(false);
   mocks.isMac = true;
+  mocks.experimentalEnabled = true;
   mocks.settings.disabledShortcuts = [];
 });
 
 describe("ShortcutGuide", () => {
+  it("stays unmounted without the experimental flag", () => {
+    mocks.experimentalEnabled = false;
+    render(<ExperimentalShortcutGuide />);
+
+    fireEvent.keyDown(window, { key: "/", code: "Slash", metaKey: true });
+    expect(screen.queryByTestId("shortcut-guide")).toBeNull();
+  });
+
   it("opens and closes with Cmd+/ and shows in-app plus live global bindings", async () => {
     render(<ShortcutGuide />);
 

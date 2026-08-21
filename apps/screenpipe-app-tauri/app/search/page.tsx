@@ -18,8 +18,10 @@ import {
 	RECENT_CHAT_SEARCH_HANDOFF_EVENT,
 	readSearchOpenedFromChatSurface,
 } from "@/lib/chat-utils";
+import { useExperimentalFeaturesEnabled } from "@/lib/experimental-features";
 
 export default function SearchPage() {
+	const experimentalFeaturesEnabled = useExperimentalFeaturesEnabled();
 	// The search webview is prewarmed after app startup so the first real open
 	// does not have to cold-boot Next.js. That webview is still hidden, though:
 	// treating it as open keeps its focus watchdog, search effects, and IPC work
@@ -138,6 +140,8 @@ export default function SearchPage() {
 	});
 
 	useEffect(() => {
+		if (!experimentalFeaturesEnabled) return;
+
 		const handleRecentChatSwitcherHandoff = async (event: KeyboardEvent) => {
 			if (event.key !== "Tab") return;
 			if (!event.ctrlKey || event.metaKey || event.altKey) return;
@@ -158,7 +162,7 @@ export default function SearchPage() {
 		return () => {
 			window.removeEventListener("keydown", handleRecentChatSwitcherHandoff, true);
 		};
-	}, []);
+	}, [experimentalFeaturesEnabled]);
 
 	return (
 		<div className="w-screen h-screen bg-transparent">

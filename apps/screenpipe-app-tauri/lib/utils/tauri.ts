@@ -2418,6 +2418,18 @@ async setEnterpriseRecordingAuthorized(authorized: boolean, credentialType: stri
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * Apply the frontend's experimental rollout decision to native history swipes.
+ * The platform implementation keeps every non-Home webview forced off.
+ */
+async setHistorySwipeNavigationEnabled(enabled: boolean) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_history_swipe_navigation_enabled", { enabled }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async setKeepAwake(enabled: boolean) : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("set_keep_awake", { enabled }) };

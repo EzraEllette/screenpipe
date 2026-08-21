@@ -19,7 +19,17 @@ const supportsNativeHistorySwipe = ["darwin", "win32"].includes(
       await openHomeWindow();
     });
 
-    it("enables the platform gesture on Home and preserves real UI history", async () => {
+    it("keeps the gesture off by default, then enables it for an opted-in Home", async () => {
+      expect(
+        await invokeOrThrow<boolean>(
+          "plugin:e2e|history_swipe_navigation_enabled",
+          { label: "home" },
+        ),
+      ).toBe(false);
+
+      await invokeOrThrow("set_history_swipe_navigation_enabled", {
+        enabled: true,
+      });
       expect(
         await invokeOrThrow<boolean>(
           "plugin:e2e|history_swipe_navigation_enabled",

@@ -112,8 +112,9 @@ import type { AppUser } from "@/lib/app-entitlement";
 import { ONBOARDING_BRAIN_HANDOFF_EVENT } from "@/lib/live-views/onboarding-activation";
 import { ActivityLedger } from "@/components/activity-ledger";
 import { ShortcutKeycap } from "@/components/shortcut-keycap";
-import { ShortcutGuide } from "@/components/shortcut-guide";
+import { ExperimentalShortcutGuide } from "@/components/shortcut-guide";
 import { commandPalette as commandPaletteAnalytics } from "@/lib/analytics/command-palette";
+import { useExperimentalFeaturesEnabled } from "@/lib/experimental-features";
 import {
   dispatchChatShortcutAction,
   inAppShortcutLabel,
@@ -146,6 +147,7 @@ const isSettingsRoute = (value: string) => resolveSettingsSection(value) !== nul
 function HomeContent() {
   const router = useRouter();
   const { isMac } = usePlatform();
+  const experimentalFeaturesEnabled = useExperimentalFeaturesEnabled();
   const [shortcutGuideOpen, setShortcutGuideOpen] = useState(false);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   // In fullscreen, macOS hides the traffic lights — collapse the
@@ -553,14 +555,17 @@ function HomeContent() {
         setCommandPaletteOpen(!commandPaletteOpen);
         return;
       }
-      if (matchesInAppShortcut(event, "shortcut_guide", isMac)) {
+      if (
+        experimentalFeaturesEnabled &&
+        matchesInAppShortcut(event, "shortcut_guide", isMac)
+      ) {
         event.preventDefault();
         setShortcutGuideOpen((open) => !open);
       }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [commandPaletteOpen, isMac]);
+  }, [commandPaletteOpen, experimentalFeaturesEnabled, isMac]);
   // Fetch actual recording devices. Audio comes from /audio/device/status so
   // user-paused devices stay visible and can be resumed from the same control.
   interface AudioDeviceStatus {
@@ -1186,7 +1191,7 @@ function HomeContent() {
   // content (portaled into the shell by AppSidebar) and the content column.
   return (
     <>
-      <ShortcutGuide
+      <ExperimentalShortcutGuide
         open={shortcutGuideOpen}
         onOpenChange={setShortcutGuideOpen}
       />
@@ -1206,6 +1211,7 @@ function HomeContent() {
       <CommandPalette
         open={commandPaletteOpen}
         onOpenChange={setCommandPaletteOpen}
+        experimentalFeaturesEnabled={experimentalFeaturesEnabled}
         deps={{
           openSearch: () => {
             void commands.showWindow({ Search: { query: null } });
@@ -1301,7 +1307,7 @@ function HomeContent() {
               </TooltipContent>
             </Tooltip>
 
-            {!sidebarCollapsed && (
+            {!sidebarCollapsed && experimentalFeaturesEnabled && (
               <Tooltip>
                 <TooltipTrigger asChild>
                   <button

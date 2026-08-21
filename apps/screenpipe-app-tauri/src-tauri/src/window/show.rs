@@ -678,7 +678,12 @@ impl ShowRewindWindow {
                                 // Set WKWebView as first responder so keyboard input works.
                                 // Without this, re-showing an existing Settings window may
                                 // leave the content_view as first responder (tao#208).
-                                make_nswindow_webview_first_responder(ns_win as cocoa_id, true);
+                                make_nswindow_webview_first_responder(
+                                    ns_win as cocoa_id,
+                                    super::gesture::history_swipe_navigation_enabled_for_window(
+                                        window_clone.label(),
+                                    ),
+                                );
 
                                 // Remove MoveToActiveSpace so the window stays pinned to this space
                                 let _: () =
@@ -1603,7 +1608,9 @@ impl ShowRewindWindow {
                         unsafe {
                             make_nswindow_webview_first_responder(
                                 ns_win as tauri_nspanel::cocoa::base::id,
-                                true,
+                                super::gesture::history_swipe_navigation_enabled_for_window(
+                                    window.label(),
+                                ),
                             );
                         }
                     }

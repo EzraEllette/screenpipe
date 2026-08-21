@@ -392,6 +392,17 @@ pub fn finalize_webview_window(window: tauri::WebviewWindow) -> tauri::WebviewWi
     window
 }
 
+/// Apply the frontend's experimental rollout decision to native history swipes.
+/// The platform implementation keeps every non-Home webview forced off.
+#[tauri::command]
+#[specta::specta]
+pub async fn set_history_swipe_navigation_enabled(
+    window: tauri::WebviewWindow,
+    enabled: bool,
+) -> Result<(), String> {
+    gesture::set_history_swipe_navigation_enabled(window, enabled).await
+}
+
 /// Make the live app match the enterprise hidden-UI policy.
 ///
 /// The startup window gate (`main.rs`) already honors `is_app_ui_hidden()` —
