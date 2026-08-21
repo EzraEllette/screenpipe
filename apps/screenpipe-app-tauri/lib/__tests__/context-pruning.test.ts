@@ -122,6 +122,31 @@ describe("clampMessageText", () => {
     expect(out.endsWith("END")).toBe(true);
     expect(out).toContain("trimmed");
   });
+
+  it("never splits supplementary code points at history-tail or generic trim boundaries", () => {
+    const historyBefore = "<conversation_history>";
+    const historyAfter = "</conversation_history>\n\nquestion";
+    const historyMarker = "\n…[older history trimmed]\n";
+    const cases = [
+      {
+        text: `${historyBefore}${"old".repeat(30)}😀TAIL${historyAfter}`,
+        maxChars: historyBefore.length + historyMarker.length + 5 + historyAfter.length,
+      },
+      {
+        text: `abc😀${"MIDDLE".repeat(10)}😀xyz`,
+        maxChars: "\n…[trimmed]\n".length + 8,
+      },
+    ];
+
+    for (const { text, maxChars } of cases) {
+      const out = clampMessageText(text, maxChars);
+      expect(out.length).toBeLessThanOrEqual(maxChars);
+      expect([...out].some((char) => {
+        const codePoint = char.codePointAt(0)!;
+        return codePoint >= 0xD800 && codePoint <= 0xDFFF;
+      })).toBe(false);
+    }
+  });
 });
 
 // ── pure: boundOversizedMessages ─────────────────────────────────────────
