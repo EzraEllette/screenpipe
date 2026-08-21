@@ -34,8 +34,11 @@ type TaskFlow =
   | "restore"
   | "verify"
   | "handoff"
+  | "paused"
   | "completed"
   | "result";
+
+type ActiveTaskFlow = "restore" | "verify" | "handoff";
 
 type OpportunityEvidence = {
   id: string;
@@ -449,10 +452,12 @@ function EvidenceRow({
   evidence,
   excluded,
   onToggle,
+  sequence,
 }: {
   evidence: OpportunityEvidence;
   excluded: boolean;
   onToggle: () => void;
+  sequence: number;
 }) {
   return (
     <div
@@ -462,25 +467,33 @@ function EvidenceRow({
         excluded && "bg-muted/25 text-muted-foreground",
       )}
     >
-      <div className="min-w-0">
-        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 font-mono text-[10px] uppercase tracking-wide text-muted-foreground">
-          <span>{evidence.occurredAt}</span>
-          <span aria-hidden="true">/</span>
-          <span>{evidence.app}</span>
-          <span aria-hidden="true">/</span>
-          <span>{evidence.duration}</span>
-        </div>
-        <p
-          className={cn(
-            "mt-1 text-sm font-medium text-foreground",
-            excluded && "line-through text-muted-foreground",
-          )}
+      <div className="flex min-w-0 gap-3">
+        <div
+          aria-hidden="true"
+          className="flex h-7 w-7 shrink-0 items-center justify-center border border-border font-mono text-[9px] text-muted-foreground"
         >
-          {evidence.activityTitle}
-        </p>
-        <p className="mt-1 max-w-2xl text-xs leading-relaxed text-muted-foreground">
-          {evidence.summary}
-        </p>
+          {String(sequence).padStart(2, "0")}
+        </div>
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1 font-mono text-[10px] uppercase tracking-wide text-muted-foreground">
+            <span>{evidence.occurredAt}</span>
+            <span aria-hidden="true">/</span>
+            <span>{evidence.app}</span>
+            <span aria-hidden="true">/</span>
+            <span>{evidence.duration}</span>
+          </div>
+          <p
+            className={cn(
+              "mt-1 text-sm font-medium text-foreground",
+              excluded && "line-through text-muted-foreground",
+            )}
+          >
+            {evidence.activityTitle}
+          </p>
+          <p className="mt-1 max-w-2xl text-xs leading-relaxed text-muted-foreground">
+            {evidence.summary}
+          </p>
+        </div>
       </div>
       <div className="flex items-start gap-1 sm:justify-end">
         <a
@@ -570,10 +583,15 @@ export function BrainOpportunities({
   const [group, setGroup] = useState<OpportunityGroup>("skills");
   const [selectedSkillId, setSelectedSkillId] = useState(skills[0]?.id ?? "");
   const [selectedTaskId, setSelectedTaskId] = useState(tasks[0]?.id ?? "");
+  const [compactSkillDetailOpen, setCompactSkillDetailOpen] = useState(false);
+  const [compactTaskDetailOpen, setCompactTaskDetailOpen] = useState(false);
   const [excludedEvidence, setExcludedEvidence] = useState<Set<string>>(
     () => new Set(),
   );
   const [dismissedTasks, setDismissedTasks] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [archivedTasks, setArchivedTasks] = useState<Set<string>>(
     () => new Set(),
   );
   const [skillDrafts, setSkillDrafts] = useState<Record<string, SkillDraft>>(
@@ -598,11 +616,19 @@ export function BrainOpportunities({
   const [createdSkillIds, setCreatedSkillIds] = useState<Set<string>>(
     () => new Set(),
   );
+  const [analysisState, setAnalysisState] = useState<"ready" | "analyzing">(
+    "ready",
+  );
+  const [taskPausedFrom, setTaskPausedFrom] = useState<
+    Record<string, ActiveTaskFlow>
+  >({});
   const flowTimers = useRef<
     Record<string, Array<ReturnType<typeof setTimeout>>>
   >({});
 
-  const visibleTasks = tasks.filter((task) => !dismissedTasks.has(task.id));
+  const visibleTasks = tasks.filter(
+    (task) => !dismissedTasks.has(task.id) && !archivedTasks.has(task.id),
+  );
   const selectedSkill =
     skills.find((skill) => skill.id === selectedSkillId) ?? skills[0];
   const selectedTask =
@@ -621,7 +647,10 @@ export function BrainOpportunities({
         [
           ...skills.flatMap((skill) => skill.evidence),
           ...tasks.flatMap((task) => task.evidence),
-        ].map((evidence) => evidence.id),
+        ].map(
+          (evidence) =>
+            `${evidence.occurredAt}:${evidence.app}:${evidence.activityTitle}`,
+        ),
       ).size,
     [skills, tasks],
   );
@@ -672,24 +701,68 @@ export function BrainOpportunities({
     setSkillFlow(id, "review");
   };
 
-  const startTaskAgent = (id: string) => {
+  const runTaskAgent = (id: string, initial: "preparing" | ActiveTaskFlow) => {
     const key = `task:${id}`;
     clearFlowTimers(key);
-    setTaskFlow(id, "preparing");
-    flowTimers.current[key] = [
-      setTimeout(() => setTaskFlow(id, "restore"), 700),
-      setTimeout(() => setTaskFlow(id, "verify"), 2100),
-      setTimeout(() => setTaskFlow(id, "handoff"), 3500),
+    setTaskFlow(id, initial);
+    const timeline: Array<[ActiveTaskFlow | "completed", number]> =
+      initial === "preparing"
+        ? [
+            ["restore", 700],
+            ["verify", 2100],
+            ["handoff", 3500],
+            ["completed", 5000],
+          ]
+        : initial === "restore"
+          ? [
+              ["verify", 1400],
+              ["handoff", 2800],
+              ["completed", 4300],
+            ]
+          : initial === "verify"
+            ? [
+                ["handoff", 1400],
+                ["completed", 2900],
+              ]
+            : [["completed", 1500]];
+    flowTimers.current[key] = timeline.map(([next, delay]) =>
       setTimeout(() => {
-        setTaskFlow(id, "completed");
-        delete flowTimers.current[key];
-      }, 5000),
-    ];
+        setTaskFlow(id, next);
+        if (next === "completed") delete flowTimers.current[key];
+      }, delay),
+    );
+  };
+
+  const startTaskAgent = (id: string) => {
+    runTaskAgent(id, "preparing");
+  };
+
+  const pauseTaskAgent = (id: string, flow: "preparing" | ActiveTaskFlow) => {
+    const pausedFrom = flow === "preparing" ? "restore" : flow;
+    clearFlowTimers(`task:${id}`);
+    setTaskPausedFrom((current) => ({ ...current, [id]: pausedFrom }));
+    setTaskFlow(id, "paused");
+  };
+
+  const resumeTaskAgent = (id: string) => {
+    runTaskAgent(id, taskPausedFrom[id] ?? "restore");
   };
 
   const stopTaskAgent = (id: string) => {
     clearFlowTimers(`task:${id}`);
     setTaskFlow(id, "review");
+  };
+
+  const reanalyze = () => {
+    const key = "analysis";
+    clearFlowTimers(key);
+    setAnalysisState("analyzing");
+    flowTimers.current[key] = [
+      setTimeout(() => {
+        setAnalysisState("ready");
+        delete flowTimers.current[key];
+      }, 1800),
+    ];
   };
 
   const toggleEvidence = (ownerId: string, evidenceId: string) => {
@@ -704,6 +777,8 @@ export function BrainOpportunities({
 
   const selectGroup = (next: OpportunityGroup) => {
     setGroup(next);
+    if (next === "skills") setCompactSkillDetailOpen(false);
+    else setCompactTaskDetailOpen(false);
   };
 
   const updateSkillDraft = (id: string, patch: Partial<SkillDraft>) => {
@@ -730,6 +805,38 @@ export function BrainOpportunities({
     setSelectedTaskId(tasks[0]?.id ?? "");
   };
 
+  const archiveTask = (id: string) => {
+    clearFlowTimers(`task:${id}`);
+    setArchivedTasks((current) => new Set(current).add(id));
+  };
+
+  const restoreArchivedTasks = () => {
+    setArchivedTasks(new Set());
+    setSelectedTaskId(tasks[0]?.id ?? "");
+  };
+
+  const handleGroupKeyDown = (
+    event: React.KeyboardEvent<HTMLButtonElement>,
+    current: OpportunityGroup,
+  ) => {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
+      return;
+    }
+    event.preventDefault();
+    const next =
+      event.key === "Home"
+        ? "skills"
+        : event.key === "End"
+          ? "unfinished"
+          : current === "skills"
+            ? "unfinished"
+            : "skills";
+    selectGroup(next);
+    requestAnimationFrame(() => {
+      document.getElementById(`opportunities-tab-${next}`)?.focus();
+    });
+  };
+
   return (
     <section
       data-testid="brain-opportunities"
@@ -748,15 +855,39 @@ export function BrainOpportunities({
             </p>
           </div>
         </div>
-        <div className="border-l border-foreground pl-3 text-right">
-          <p className="font-mono text-[9px] uppercase tracking-[0.18em] text-muted-foreground">
-            activity analysis
-          </p>
-          <p className="mt-1 text-xs font-medium text-foreground">
-            {hasAnyData
-              ? `${uniqueActivityCount} source activities · last 14 days`
-              : "waiting for the first review"}
-          </p>
+        <div className="flex items-center gap-3 border-l border-foreground pl-3">
+          <div className="text-right">
+            <p className="font-mono text-[9px] uppercase tracking-[0.18em] text-muted-foreground">
+              activity analysis · last 14 days
+            </p>
+            <p
+              role="status"
+              aria-live="polite"
+              className="mt-1 flex items-center justify-end gap-2 text-xs font-medium text-foreground"
+            >
+              {analysisState === "analyzing" && (
+                <span
+                  className="h-2 w-2 border border-foreground"
+                  aria-hidden="true"
+                />
+              )}
+              {analysisState === "analyzing"
+                ? `reviewing ${uniqueActivityCount} source activities`
+                : hasAnyData
+                  ? `${uniqueActivityCount} sources · reviewed just now`
+                  : "waiting for the first review"}
+            </p>
+          </div>
+          <button
+            type="button"
+            aria-label="reanalyze recent activity"
+            title="reanalyze recent activity"
+            disabled={analysisState === "analyzing"}
+            onClick={reanalyze}
+            className="inline-flex h-8 w-8 items-center justify-center border border-border text-muted-foreground transition-colors hover:border-foreground hover:bg-foreground hover:text-background disabled:cursor-wait disabled:opacity-50"
+          >
+            <RotateCcw className="h-3.5 w-3.5" />
+          </button>
         </div>
       </div>
 
@@ -768,9 +899,15 @@ export function BrainOpportunities({
         <button
           type="button"
           role="tab"
+          id="opportunities-tab-skills"
+          aria-controls={
+            group === "skills" ? "opportunities-panel-skills" : undefined
+          }
           aria-selected={group === "skills"}
+          tabIndex={group === "skills" ? 0 : -1}
           data-testid="opportunities-tab-skills"
           onClick={() => selectGroup("skills")}
+          onKeyDown={(event) => handleGroupKeyDown(event, "skills")}
           className={cn(
             "relative flex min-h-11 items-center gap-2 px-4 font-mono text-[10px] uppercase tracking-wide text-muted-foreground transition-colors duration-150 hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-foreground focus-visible:ring-offset-2",
             group === "skills" && "text-foreground",
@@ -779,7 +916,7 @@ export function BrainOpportunities({
           <FilePlus2 className="h-3.5 w-3.5" />
           skill ideas
           <span className="tabular-nums text-muted-foreground">
-            {pendingSkillCount}
+            {pendingSkillCount} pending
           </span>
           {group === "skills" && (
             <span className="absolute inset-x-0 -bottom-px h-px bg-foreground" />
@@ -788,9 +925,17 @@ export function BrainOpportunities({
         <button
           type="button"
           role="tab"
+          id="opportunities-tab-unfinished"
+          aria-controls={
+            group === "unfinished"
+              ? "opportunities-panel-unfinished"
+              : undefined
+          }
           aria-selected={group === "unfinished"}
+          tabIndex={group === "unfinished" ? 0 : -1}
           data-testid="opportunities-tab-unfinished"
           onClick={() => selectGroup("unfinished")}
+          onKeyDown={(event) => handleGroupKeyDown(event, "unfinished")}
           className={cn(
             "relative flex min-h-11 items-center gap-2 px-4 font-mono text-[10px] uppercase tracking-wide text-muted-foreground transition-colors duration-150 hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-foreground focus-visible:ring-offset-2",
             group === "unfinished" && "text-foreground",
@@ -799,7 +944,7 @@ export function BrainOpportunities({
           <ListTodo className="h-3.5 w-3.5" />
           unfinished work
           <span className="tabular-nums text-muted-foreground">
-            {pendingTaskCount}
+            {pendingTaskCount} pending
           </span>
           {group === "unfinished" && (
             <span className="absolute inset-x-0 -bottom-px h-px bg-foreground" />
@@ -809,21 +954,34 @@ export function BrainOpportunities({
 
       {group === "skills" ? (
         skills.length === 0 || !selectedSkill ? (
-          <div role="tabpanel" className="mt-4 flex min-h-0 flex-1">
+          <div
+            role="tabpanel"
+            id="opportunities-panel-skills"
+            aria-labelledby="opportunities-tab-skills"
+            className="mt-4 flex min-h-0 flex-1"
+          >
             <EmptyGroup group="skills" hasAnyData={hasAnyData} />
           </div>
         ) : (
           <div
             role="tabpanel"
+            id="opportunities-panel-skills"
+            aria-labelledby="opportunities-tab-skills"
             data-testid="skill-opportunities-panel"
-            className="mt-4 grid min-h-0 flex-1 overflow-y-auto border border-border bg-background lg:grid-cols-[minmax(240px,0.36fr)_minmax(0,1fr)] lg:overflow-hidden"
+            className="mt-4 grid min-h-0 flex-1 grid-rows-[minmax(0,1fr)] overflow-hidden border border-border bg-background lg:grid-cols-[minmax(240px,0.36fr)_minmax(0,1fr)] lg:grid-rows-none"
           >
-            <aside className="border-b border-border lg:min-h-0 lg:overflow-y-auto lg:border-b-0 lg:border-r">
+            <aside
+              className={cn(
+                "min-h-0 overflow-y-auto border-b border-border lg:block lg:border-b-0 lg:border-r",
+                compactSkillDetailOpen ? "hidden" : "block",
+              )}
+            >
               <div className="border-b border-border px-3 py-2 font-mono text-[9px] uppercase tracking-[0.18em] text-muted-foreground">
                 suggested from repeated activity
               </div>
               {skills.map((skill, index) => {
                 const selected = skill.id === selectedSkill.id;
+                const railDraft = skillDrafts[skill.id] ?? skill;
                 const flow = skillFlows[skill.id] ?? "review";
                 const buildingStep =
                   flow === "reading" ? 1 : flow === "structuring" ? 2 : 3;
@@ -836,7 +994,10 @@ export function BrainOpportunities({
                     type="button"
                     key={skill.id}
                     data-testid={`skill-opportunity-${skill.id}`}
-                    onClick={() => setSelectedSkillId(skill.id)}
+                    onClick={() => {
+                      setSelectedSkillId(skill.id);
+                      setCompactSkillDetailOpen(true);
+                    }}
                     className={cn(
                       "block w-full border-b border-border px-4 py-4 text-left transition-colors duration-150 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-foreground",
                       selected
@@ -859,7 +1020,7 @@ export function BrainOpportunities({
                       {building && (
                         <span
                           className={cn(
-                            "h-2 w-2 shrink-0 bg-phosphor",
+                            "h-2 w-2 shrink-0 border border-current",
                             selected &&
                               "ring-1 ring-signal-foreground/30 ring-offset-1 ring-offset-signal",
                           )}
@@ -868,7 +1029,7 @@ export function BrainOpportunities({
                       )}
                     </div>
                     <h3 className="mt-2 text-sm font-medium lowercase leading-snug">
-                      {skill.name}
+                      {railDraft.name}
                     </h3>
                     <p
                       className={cn(
@@ -878,13 +1039,13 @@ export function BrainOpportunities({
                           : "text-muted-foreground",
                       )}
                     >
-                      {skill.description}
+                      {railDraft.description}
                     </p>
                     <div
                       className={cn(
                         "mt-3 flex items-center justify-between font-mono text-[9px] uppercase tracking-wide",
                         selected
-                          ? "text-signal-foreground/60"
+                          ? "text-signal-foreground/75"
                           : "text-muted-foreground",
                       )}
                     >
@@ -902,7 +1063,19 @@ export function BrainOpportunities({
               })}
             </aside>
 
-            <div className="flex min-h-0 flex-col">
+            <div
+              className={cn(
+                "min-h-0 flex-col lg:flex",
+                compactSkillDetailOpen ? "flex" : "hidden",
+              )}
+            >
+              <button
+                type="button"
+                onClick={() => setCompactSkillDetailOpen(false)}
+                className="flex h-10 shrink-0 items-center gap-2 border-b border-border px-3 font-mono text-[9px] uppercase tracking-[0.16em] text-muted-foreground transition-colors hover:bg-muted/30 hover:text-foreground lg:hidden"
+              >
+                <ChevronRight className="h-3 w-3 rotate-180" /> all skill ideas
+              </button>
               {(() => {
                 const draft = skillDrafts[selectedSkill.id];
                 const includedCount = selectedSkill.evidence.filter(
@@ -927,9 +1100,13 @@ export function BrainOpportunities({
                       <div className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-6">
                         <div className="flex items-start justify-between gap-4">
                           <div>
-                            <div className="flex items-center gap-2 font-mono text-[9px] uppercase tracking-[0.18em] text-foreground">
-                              <span className="h-2 w-2 bg-phosphor" /> creating
-                              skill
+                            <div
+                              role="status"
+                              aria-live="polite"
+                              className="flex items-center gap-2 font-mono text-[9px] uppercase tracking-[0.18em] text-foreground"
+                            >
+                              <span className="h-2 w-2 border border-foreground" />{" "}
+                              creating skill
                             </div>
                             <h3 className="mt-2 text-xl font-medium lowercase text-foreground">
                               {draft.name}
@@ -1001,9 +1178,10 @@ export function BrainOpportunities({
                           </div>
                         </div>
                       </div>
-                      <div className="flex items-center justify-between gap-3 border-t border-border bg-background px-4 py-3 sm:px-6">
+                      <div className="sticky bottom-0 z-10 flex items-center justify-between gap-3 border-t border-border bg-background px-4 py-3 sm:px-6">
                         <p className="text-xs text-muted-foreground">
-                          Creation continues while you review another opportunity.
+                          Creation continues while you review another
+                          opportunity.
                         </p>
                         <Button
                           variant="outline"
@@ -1031,7 +1209,11 @@ export function BrainOpportunities({
                       <div className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-6">
                         <div className="flex flex-wrap items-start justify-between gap-3">
                           <div>
-                            <div className="inline-flex border border-foreground px-2 py-1 font-mono text-[9px] uppercase tracking-[0.18em] text-foreground">
+                            <div
+                              role="status"
+                              aria-live="polite"
+                              className="inline-flex border border-foreground px-2 py-1 font-mono text-[9px] uppercase tracking-[0.18em] text-foreground"
+                            >
                               created
                             </div>
                             <h3 className="mt-3 text-2xl font-medium lowercase text-foreground">
@@ -1123,7 +1305,7 @@ export function BrainOpportunities({
                           personal skills / {selectedSkill.id} / SKILL.md
                         </p>
                       </div>
-                      <div className="flex flex-wrap items-center justify-end gap-2 border-t border-border bg-background px-4 py-3 sm:px-6">
+                      <div className="sticky bottom-0 z-10 flex flex-wrap items-center justify-end gap-2 border-t border-border bg-background px-4 py-3 sm:px-6">
                         {nextSkill && (
                           <Button
                             variant="outline"
@@ -1210,7 +1392,7 @@ export function BrainOpportunities({
                           />
                         </div>
                       </div>
-                      <div className="flex flex-wrap items-center justify-end gap-2 border-t border-border bg-background px-4 py-3 sm:px-6">
+                      <div className="sticky bottom-0 z-10 flex flex-wrap items-center justify-end gap-2 border-t border-border bg-background px-4 py-3 sm:px-6">
                         <Button
                           variant="outline"
                           size="sm"
@@ -1237,7 +1419,9 @@ export function BrainOpportunities({
                       <div className="flex flex-wrap items-start justify-between gap-3">
                         <div>
                           <p className="font-mono text-[9px] uppercase tracking-[0.18em] text-muted-foreground">
-                            {alreadyCreated ? "edit created skill" : "review skill draft"}
+                            {alreadyCreated
+                              ? "edit created skill"
+                              : "review skill draft"}
                           </p>
                           <h3 className="mt-1 text-lg font-medium lowercase text-foreground">
                             {alreadyCreated
@@ -1293,6 +1477,33 @@ export function BrainOpportunities({
                         </label>
                       </div>
 
+                      <div className="mt-5 grid border border-border sm:grid-cols-[minmax(0,1fr)_120px_minmax(0,1fr)]">
+                        <div className="border-b border-border px-3 py-3 sm:border-b-0 sm:border-r">
+                          <p className="font-mono text-[9px] uppercase tracking-wide text-muted-foreground">
+                            trigger
+                          </p>
+                          <p className="mt-1 line-clamp-2 text-xs leading-relaxed text-foreground">
+                            {selectedSkill.blueprint.trigger}
+                          </p>
+                        </div>
+                        <div className="border-b border-border px-3 py-3 sm:border-b-0 sm:border-r">
+                          <p className="font-mono text-[9px] uppercase tracking-wide text-muted-foreground">
+                            workflow
+                          </p>
+                          <p className="mt-1 text-sm text-foreground">
+                            {selectedSkill.blueprint.steps.length} steps
+                          </p>
+                        </div>
+                        <div className="px-3 py-3">
+                          <p className="font-mono text-[9px] uppercase tracking-wide text-muted-foreground">
+                            verification
+                          </p>
+                          <p className="mt-1 line-clamp-2 text-xs leading-relaxed text-foreground">
+                            {selectedSkill.blueprint.verification}
+                          </p>
+                        </div>
+                      </div>
+
                       <div className="mt-5 border border-border">
                         <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2">
                           <div>
@@ -1308,7 +1519,7 @@ export function BrainOpportunities({
                             auditable evidence
                           </span>
                         </div>
-                        {selectedSkill.evidence.map((evidence) => {
+                        {selectedSkill.evidence.map((evidence, index) => {
                           const excluded = excludedEvidence.has(
                             `${selectedSkill.id}:${evidence.id}`,
                           );
@@ -1317,6 +1528,7 @@ export function BrainOpportunities({
                               key={evidence.id}
                               evidence={evidence}
                               excluded={excluded}
+                              sequence={index + 1}
                               onToggle={() =>
                                 toggleEvidence(selectedSkill.id, evidence.id)
                               }
@@ -1342,7 +1554,7 @@ export function BrainOpportunities({
                         />
                       </label>
                     </div>
-                    <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border bg-background px-4 py-3 sm:px-6">
+                    <div className="sticky bottom-0 z-10 flex flex-wrap items-center justify-between gap-3 border-t border-border bg-background px-4 py-3 sm:px-6">
                       <p className="max-w-lg text-xs leading-relaxed text-muted-foreground">
                         {alreadyCreated
                           ? `Updates this skill while preserving ${includedCount} source activities.`
@@ -1369,7 +1581,12 @@ export function BrainOpportunities({
           </div>
         )
       ) : visibleTasks.length === 0 || !selectedTask ? (
-        <div role="tabpanel" className="mt-4 flex min-h-0 flex-1 flex-col">
+        <div
+          role="tabpanel"
+          id="opportunities-panel-unfinished"
+          aria-labelledby="opportunities-tab-unfinished"
+          className="mt-4 flex min-h-0 flex-1 flex-col"
+        >
           {dismissedTasks.size > 0 && (
             <div className="mb-3 flex items-center justify-between border border-border px-3 py-2 text-xs text-muted-foreground">
               <span>
@@ -1385,15 +1602,37 @@ export function BrainOpportunities({
               </button>
             </div>
           )}
+          {archivedTasks.size > 0 && (
+            <div className="mb-3 flex items-center justify-between border border-border px-3 py-2 text-xs text-muted-foreground">
+              <span>
+                {archivedTasks.size} completed item
+                {archivedTasks.size === 1 ? "" : "s"} archived
+              </span>
+              <button
+                type="button"
+                onClick={restoreArchivedTasks}
+                className="font-mono text-[10px] uppercase tracking-wide text-foreground hover:underline"
+              >
+                undo archive
+              </button>
+            </div>
+          )}
           <EmptyGroup group="unfinished" hasAnyData={hasAnyData} />
         </div>
       ) : (
         <div
           role="tabpanel"
+          id="opportunities-panel-unfinished"
+          aria-labelledby="opportunities-tab-unfinished"
           data-testid="unfinished-opportunities-panel"
-          className="mt-4 grid min-h-0 flex-1 overflow-y-auto border border-border bg-background lg:grid-cols-[minmax(240px,0.36fr)_minmax(0,1fr)] lg:overflow-hidden"
+          className="mt-4 grid min-h-0 flex-1 grid-rows-[minmax(0,1fr)] overflow-hidden border border-border bg-background lg:grid-cols-[minmax(240px,0.36fr)_minmax(0,1fr)] lg:grid-rows-none"
         >
-          <aside className="border-b border-border lg:min-h-0 lg:overflow-y-auto lg:border-b-0 lg:border-r">
+          <aside
+            className={cn(
+              "min-h-0 overflow-y-auto border-b border-border lg:block lg:border-b-0 lg:border-r",
+              compactTaskDetailOpen ? "hidden" : "block",
+            )}
+          >
             <div className="border-b border-border px-3 py-2 font-mono text-[9px] uppercase tracking-[0.18em] text-muted-foreground">
               may be unfinished
             </div>
@@ -1406,9 +1645,16 @@ export function BrainOpportunities({
                 "verify",
                 "handoff",
               ].includes(flow);
+              const paused = flow === "paused";
               const completed = flow === "completed" || flow === "result";
-              const step =
-                flow === "preparing" || flow === "restore"
+              const pausedFrom = taskPausedFrom[task.id] ?? "restore";
+              const step = paused
+                ? pausedFrom === "restore"
+                  ? 1
+                  : pausedFrom === "verify"
+                    ? 2
+                    : 3
+                : flow === "preparing" || flow === "restore"
                   ? 1
                   : flow === "verify"
                     ? 2
@@ -1418,7 +1664,10 @@ export function BrainOpportunities({
                   type="button"
                   key={task.id}
                   data-testid={`unfinished-opportunity-${task.id}`}
-                  onClick={() => setSelectedTaskId(task.id)}
+                  onClick={() => {
+                    setSelectedTaskId(task.id);
+                    setCompactTaskDetailOpen(true);
+                  }}
                   className={cn(
                     "block w-full border-b border-border px-4 py-4 text-left transition-colors duration-150 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-foreground",
                     selected
@@ -1438,12 +1687,14 @@ export function BrainOpportunities({
                       thread {String(index + 1).padStart(2, "0")} ·{" "}
                       {completed
                         ? "completed just now"
-                        : `last seen ${task.lastSeen}`}
+                        : paused
+                          ? "paused just now"
+                          : `last seen ${task.lastSeen}`}
                     </span>
                     {working && (
                       <span
                         className={cn(
-                          "h-2 w-2 shrink-0 bg-phosphor",
+                          "h-2 w-2 shrink-0 border border-current",
                           selected &&
                             "ring-1 ring-signal-foreground/30 ring-offset-1 ring-offset-signal",
                         )}
@@ -1468,15 +1719,17 @@ export function BrainOpportunities({
                     className={cn(
                       "mt-3 font-mono text-[9px] uppercase tracking-wide",
                       selected
-                        ? "text-signal-foreground/60"
+                        ? "text-signal-foreground/75"
                         : "text-muted-foreground",
                     )}
                   >
                     {working
                       ? `working · step ${step} of 3`
-                      : completed
-                        ? "goal reached"
-                        : `${task.evidence.length} source activit${task.evidence.length === 1 ? "y" : "ies"}`}
+                      : paused
+                        ? `paused · step ${step} of 3`
+                        : completed
+                          ? "goal reached"
+                          : `${task.evidence.length} source activit${task.evidence.length === 1 ? "y" : "ies"}`}
                   </div>
                 </button>
               );
@@ -1493,9 +1746,34 @@ export function BrainOpportunities({
                 </span>
               </button>
             )}
+            {archivedTasks.size > 0 && (
+              <button
+                type="button"
+                onClick={restoreArchivedTasks}
+                className="flex w-full items-center justify-between border-b border-border px-4 py-3 text-left font-mono text-[9px] uppercase tracking-wide text-muted-foreground transition-colors hover:bg-muted/40 hover:text-foreground"
+              >
+                <span>{archivedTasks.size} completed archived</span>
+                <span className="flex items-center gap-1">
+                  <RotateCcw className="h-3 w-3" /> undo archive
+                </span>
+              </button>
+            )}
           </aside>
 
-          <div className="flex min-h-0 flex-col">
+          <div
+            className={cn(
+              "min-h-0 flex-col lg:flex",
+              compactTaskDetailOpen ? "flex" : "hidden",
+            )}
+          >
+            <button
+              type="button"
+              onClick={() => setCompactTaskDetailOpen(false)}
+              className="flex h-10 shrink-0 items-center gap-2 border-b border-border px-3 font-mono text-[9px] uppercase tracking-[0.16em] text-muted-foreground transition-colors hover:bg-muted/30 hover:text-foreground lg:hidden"
+            >
+              <ChevronRight className="h-3 w-3 rotate-180" /> all unfinished
+              work
+            </button>
             {(() => {
               const draft = taskDrafts[selectedTask.id];
               const includedCount = selectedTask.evidence.filter(
@@ -1507,7 +1785,30 @@ export function BrainOpportunities({
                 draft.goal.trim().length > 0 &&
                 includedCount > 0;
               const flow = taskFlows[selectedTask.id] ?? "review";
-              const taskSteps = selectedTask.agentSteps;
+              const briefChanged =
+                draft.description.trim() !== selectedTask.description.trim() ||
+                draft.goal.trim() !== selectedTask.goal.trim();
+              const taskSteps = briefChanged
+                ? [
+                    "restore the included source context",
+                    `complete the approved task: ${draft.description.trim()}`,
+                    "verify the user-defined stopping goal",
+                  ]
+                : selectedTask.agentSteps;
+              const taskResult = briefChanged
+                ? {
+                    title: `${selectedTask.title} completed`,
+                    summary: `Completed the finalized brief and verified the stopping condition: ${draft.goal.trim()}`,
+                    checks: [
+                      "included source context restored",
+                      "finalized task brief completed",
+                      "user-defined stopping goal verified",
+                    ],
+                    body: `${draft.description.trim()} The agent used ${includedCount} included source activit${includedCount === 1 ? "y" : "ies"} and stopped after verifying: ${draft.goal.trim()}`,
+                    nextStep:
+                      "Review the attached result and continue only if the goal needs a new stopping condition.",
+                  }
+                : selectedTask.result;
 
               if (
                 ["preparing", "restore", "verify", "handoff"].includes(flow)
@@ -1518,6 +1819,14 @@ export function BrainOpportunities({
                     : flow === "verify"
                       ? 1
                       : 2;
+                const elapsed =
+                  flow === "preparing"
+                    ? "00:01"
+                    : flow === "restore"
+                      ? "00:04"
+                      : flow === "verify"
+                        ? "00:11"
+                        : "00:18";
                 return (
                   <div
                     data-testid="opportunity-agent-progress"
@@ -1526,11 +1835,15 @@ export function BrainOpportunities({
                     <div className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-6">
                       <div className="flex flex-wrap items-start justify-between gap-3">
                         <div>
-                          <div className="flex items-center gap-2 font-mono text-[9px] uppercase tracking-[0.18em] text-foreground">
-                            <span className="h-2 w-2 bg-phosphor" />
+                          <div
+                            role="status"
+                            aria-live="polite"
+                            className="flex items-center gap-2 font-mono text-[9px] uppercase tracking-[0.18em] text-foreground"
+                          >
+                            <span className="h-2 w-2 border border-foreground" />
                             {flow === "preparing"
                               ? "preparing agent"
-                              : "agent working · 00:04"}
+                              : `agent working · ${elapsed}`}
                           </div>
                           <h3 className="mt-2 text-xl font-medium lowercase text-foreground">
                             {selectedTask.title}
@@ -1591,22 +1904,111 @@ export function BrainOpportunities({
                               {includedCount} activities
                             </p>
                             <p className="mt-1 text-xs text-muted-foreground">
-                              last position restored
+                              {flow === "preparing"
+                                ? "restoring last position"
+                                : "last position restored"}
                             </p>
                           </div>
                         </div>
                       </div>
                     </div>
-                    <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border bg-background px-4 py-3 sm:px-6">
+                    <div className="sticky bottom-0 z-10 flex flex-wrap items-center justify-between gap-3 border-t border-border bg-background px-4 py-3 sm:px-6">
                       <p className="text-xs text-muted-foreground">
                         The agent is continuing against the goal you approved.
                       </p>
                       <Button
                         variant="outline"
                         size="sm"
+                        onClick={() =>
+                          pauseTaskAgent(
+                            selectedTask.id,
+                            flow as "preparing" | ActiveTaskFlow,
+                          )
+                        }
+                      >
+                        <Square className="mr-2 h-3 w-3" /> pause
+                      </Button>
+                    </div>
+                  </div>
+                );
+              }
+
+              if (flow === "paused") {
+                const pausedFrom = taskPausedFrom[selectedTask.id] ?? "restore";
+                const pausedStep =
+                  pausedFrom === "restore"
+                    ? 0
+                    : pausedFrom === "verify"
+                      ? 1
+                      : 2;
+                return (
+                  <div
+                    data-testid="opportunity-agent-paused"
+                    className="flex min-h-0 flex-1 flex-col"
+                  >
+                    <div className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-6">
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div>
+                          <div
+                            role="status"
+                            aria-live="polite"
+                            className="font-mono text-[9px] uppercase tracking-[0.18em] text-muted-foreground"
+                          >
+                            agent paused
+                          </div>
+                          <h3 className="mt-2 text-xl font-medium lowercase text-foreground">
+                            {selectedTask.title}
+                          </h3>
+                          <p className="mt-1 max-w-xl text-sm leading-relaxed text-muted-foreground">
+                            Progress and attached context are preserved at step{" "}
+                            {pausedStep + 1}.
+                          </p>
+                        </div>
+                        <span className="border border-border px-2 py-1 font-mono text-[9px] uppercase tracking-wide text-muted-foreground">
+                          paused · {pausedStep + 1} of 3
+                        </span>
+                      </div>
+
+                      <div className="mt-7 border border-border">
+                        <div className="flex items-center justify-between px-3 py-2">
+                          <span className="font-mono text-[9px] uppercase tracking-[0.18em] text-muted-foreground">
+                            work log
+                          </span>
+                          <span className="font-mono text-[9px] uppercase tracking-wide text-muted-foreground">
+                            context retained
+                          </span>
+                        </div>
+                        {taskSteps.map((step, index) => (
+                          <ProcessStep
+                            key={step}
+                            label={step}
+                            state={index < pausedStep ? "complete" : "queued"}
+                          />
+                        ))}
+                      </div>
+
+                      <div className="mt-5 border-l border-foreground pl-3">
+                        <p className="font-mono text-[9px] uppercase tracking-[0.16em] text-muted-foreground">
+                          stopping goal
+                        </p>
+                        <p className="mt-1 text-sm leading-relaxed text-foreground">
+                          {draft.goal}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="sticky bottom-0 z-10 flex flex-wrap items-center justify-between gap-3 border-t border-border bg-background px-4 py-3 sm:px-6">
+                      <Button
+                        variant="ghost"
+                        size="sm"
                         onClick={() => stopTaskAgent(selectedTask.id)}
                       >
-                        <Square className="mr-2 h-3 w-3" /> stop
+                        stop and edit brief
+                      </Button>
+                      <Button
+                        size="sm"
+                        onClick={() => resumeTaskAgent(selectedTask.id)}
+                      >
+                        resume agent <ArrowRight className="ml-2 h-3.5 w-3.5" />
                       </Button>
                     </div>
                   </div>
@@ -1622,14 +2024,18 @@ export function BrainOpportunities({
                     <div className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-6">
                       <div className="flex flex-wrap items-start justify-between gap-3">
                         <div>
-                          <div className="inline-flex border border-foreground px-2 py-1 font-mono text-[9px] uppercase tracking-[0.18em] text-foreground">
+                          <div
+                            role="status"
+                            aria-live="polite"
+                            className="inline-flex border border-foreground px-2 py-1 font-mono text-[9px] uppercase tracking-[0.18em] text-foreground"
+                          >
                             goal reached
                           </div>
                           <h3 className="mt-3 text-2xl font-medium lowercase text-foreground">
-                            {selectedTask.result.title}
+                            {taskResult.title}
                           </h3>
                           <p className="mt-2 max-w-2xl text-sm leading-relaxed text-muted-foreground">
-                            {selectedTask.result.summary}
+                            {taskResult.summary}
                           </p>
                         </div>
                         <Check className="h-5 w-5 text-foreground" />
@@ -1644,7 +2050,7 @@ export function BrainOpportunities({
                             finished just now
                           </span>
                         </div>
-                        {selectedTask.result.checks.map((check) => (
+                        {taskResult.checks.map((check) => (
                           <div
                             key={check}
                             className="flex items-center gap-3 border-b border-border px-3 py-3 last:border-b-0"
@@ -1682,11 +2088,11 @@ export function BrainOpportunities({
                         </div>
                       </div>
                     </div>
-                    <div className="flex flex-wrap items-center justify-end gap-2 border-t border-border bg-background px-4 py-3 sm:px-6">
+                    <div className="sticky bottom-0 z-10 flex flex-wrap items-center justify-end gap-2 border-t border-border bg-background px-4 py-3 sm:px-6">
                       <Button
                         variant="ghost"
                         size="sm"
-                        onClick={() => dismissTask(selectedTask.id)}
+                        onClick={() => archiveTask(selectedTask.id)}
                       >
                         archive
                       </Button>
@@ -1721,7 +2127,7 @@ export function BrainOpportunities({
                             agent result · finished just now
                           </p>
                           <h3 className="mt-2 text-xl font-medium lowercase text-foreground">
-                            {selectedTask.result.title}
+                            {taskResult.title}
                           </h3>
                         </div>
                         <span className="border border-border px-2 py-1 font-mono text-[9px] uppercase tracking-wide text-muted-foreground">
@@ -1729,12 +2135,12 @@ export function BrainOpportunities({
                         </span>
                       </div>
                       <article className="mt-5 max-w-3xl font-serif text-sm leading-7 text-foreground">
-                        <p>{selectedTask.result.body}</p>
+                        <p>{taskResult.body}</p>
                         <h4 className="mt-6 font-mono text-[10px] uppercase tracking-[0.16em]">
                           verified
                         </h4>
                         <ul className="mt-2 grid gap-2">
-                          {selectedTask.result.checks.map((check) => (
+                          {taskResult.checks.map((check) => (
                             <li key={check}>— {check}.</li>
                           ))}
                         </ul>
@@ -1742,7 +2148,7 @@ export function BrainOpportunities({
                           recommended next step
                         </h4>
                         <p className="mt-2 text-muted-foreground">
-                          {selectedTask.result.nextStep}
+                          {taskResult.nextStep}
                         </p>
                       </article>
                       <div className="mt-7">
@@ -1753,7 +2159,7 @@ export function BrainOpportunities({
                         />
                       </div>
                     </div>
-                    <div className="flex flex-wrap items-center justify-end gap-2 border-t border-border bg-background px-4 py-3 sm:px-6">
+                    <div className="sticky bottom-0 z-10 flex flex-wrap items-center justify-end gap-2 border-t border-border bg-background px-4 py-3 sm:px-6">
                       <Button
                         variant="outline"
                         size="sm"
@@ -1763,7 +2169,7 @@ export function BrainOpportunities({
                       </Button>
                       <Button
                         size="sm"
-                        onClick={() => dismissTask(selectedTask.id)}
+                        onClick={() => archiveTask(selectedTask.id)}
                       >
                         archive result
                       </Button>
@@ -1848,6 +2254,30 @@ export function BrainOpportunities({
                       </p>
                     </div>
 
+                    <div className="mt-5 border border-border">
+                      <div className="flex items-center justify-between border-b border-border px-3 py-2">
+                        <p className="font-mono text-[9px] uppercase tracking-[0.18em] text-muted-foreground">
+                          proposed agent plan
+                        </p>
+                        <span className="font-mono text-[9px] uppercase tracking-wide text-muted-foreground">
+                          stops at approved goal
+                        </span>
+                      </div>
+                      {taskSteps.map((step, index) => (
+                        <div
+                          key={step}
+                          className="grid grid-cols-[24px_minmax(0,1fr)] gap-3 border-b border-border px-3 py-2.5 last:border-b-0"
+                        >
+                          <span className="font-mono text-[9px] text-muted-foreground">
+                            {String(index + 1).padStart(2, "0")}
+                          </span>
+                          <span className="text-xs text-foreground">
+                            {step}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+
                     <div className="mt-7 border border-border">
                       <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2">
                         <div>
@@ -1863,7 +2293,7 @@ export function BrainOpportunities({
                           included
                         </span>
                       </div>
-                      {selectedTask.evidence.map((evidence) => {
+                      {selectedTask.evidence.map((evidence, index) => {
                         const excluded = excludedEvidence.has(
                           `${selectedTask.id}:${evidence.id}`,
                         );
@@ -1872,6 +2302,7 @@ export function BrainOpportunities({
                             key={evidence.id}
                             evidence={evidence}
                             excluded={excluded}
+                            sequence={index + 1}
                             onToggle={() =>
                               toggleEvidence(selectedTask.id, evidence.id)
                             }
@@ -1880,7 +2311,7 @@ export function BrainOpportunities({
                       })}
                     </div>
                   </div>
-                  <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border bg-background px-4 py-3 sm:px-6">
+                  <div className="sticky bottom-0 z-10 flex flex-wrap items-center justify-between gap-3 border-t border-border bg-background px-4 py-3 sm:px-6">
                     <p className="max-w-lg text-xs leading-relaxed text-muted-foreground">
                       Starts a new agent with this goal and {includedCount}{" "}
                       included activities. You can stop it at any time.

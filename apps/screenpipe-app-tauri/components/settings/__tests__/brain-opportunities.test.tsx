@@ -84,8 +84,17 @@ describe("BrainOpportunities", () => {
       "2",
     );
 
+    fireEvent.change(screen.getByTestId("skill-draft-name"), {
+      target: { value: "turn feedback into a verified fix" },
+    });
+
     fireEvent.click(screen.getByRole("button", { name: /save changes/i }));
     expect(screen.getByTestId("skill-file-preview")).toBeTruthy();
+    expect(
+      within(screen.getByTestId("skill-opportunity-feedback-to-fix")).getByText(
+        "turn feedback into a verified fix",
+      ),
+    ).toBeTruthy();
   });
 
   it("requires a finalized goal before offering to start an unfinished task", () => {
@@ -112,7 +121,13 @@ describe("BrainOpportunities", () => {
     expect(screen.getByTestId("opportunity-agent-progress")).toBeTruthy();
     expect(screen.getByText("preparing agent")).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("button", { name: /^stop$/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^pause$/i }));
+    expect(screen.getByTestId("opportunity-agent-paused")).toBeTruthy();
+    expect(screen.getByRole("button", { name: /resume agent/i })).toBeTruthy();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /stop and edit brief/i }),
+    );
     expect(screen.getByTestId("unfinished-task-goal")).toHaveValue(
       "The original reporter has a sent reply with the verified outcome.",
     );
@@ -123,11 +138,23 @@ describe("BrainOpportunities", () => {
     expect(completed).toBeTruthy();
     expect(within(completed).getByText("goal reached")).toBeTruthy();
     expect(
+      within(completed).getByText(/original reporter has a sent reply/i),
+    ).toBeTruthy();
+    expect(
       screen.getByTestId("opportunities-tab-unfinished"),
     ).toHaveTextContent("1");
 
     fireEvent.click(screen.getByRole("button", { name: /open result/i }));
     expect(screen.getByTestId("opportunity-agent-result")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: /archive result/i }));
+    expect(screen.getByText(/1 completed archived/i)).toBeTruthy();
+    expect(screen.queryByText(/marked not unfinished/i)).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: /undo archive/i }));
+    expect(
+      screen.getByTestId("unfinished-opportunity-onboarding-reply"),
+    ).toBeTruthy();
   });
 
   it("makes false unfinished inferences reversible", () => {
@@ -143,6 +170,34 @@ describe("BrainOpportunities", () => {
     expect(
       screen.getByTestId("unfinished-opportunity-activity-review-flow"),
     ).toBeTruthy();
+  });
+
+  it("supports keyboard tab navigation and a visible analysis refresh", () => {
+    vi.useFakeTimers();
+    render(<BrainOpportunities preview />);
+
+    fireEvent.keyDown(screen.getByTestId("opportunities-tab-skills"), {
+      key: "ArrowRight",
+    });
+    expect(screen.getByTestId("opportunities-tab-unfinished")).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(screen.getByTestId("opportunities-tab-skills")).not.toHaveAttribute(
+      "aria-controls",
+    );
+    expect(screen.getByTestId("opportunities-tab-unfinished")).toHaveAttribute(
+      "aria-controls",
+      "opportunities-panel-unfinished",
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /reanalyze recent activity/i }),
+    );
+    expect(screen.getByText(/reviewing 10 source activities/i)).toBeTruthy();
+
+    act(() => vi.advanceTimersByTime(1800));
+    expect(screen.getByText(/10 sources · reviewed just now/i)).toBeTruthy();
   });
 
   it("shows an honest empty state when no analyzer data exists", () => {
