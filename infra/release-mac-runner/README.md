@@ -34,6 +34,8 @@ Session Manager as `ec2-user` and install the latest stable Xcode:
 ```bash
 xcodes install --latest --experimental-unxip
 sudo xcodebuild -license accept
+xcodebuild -runFirstLaunch
+xcodebuild -downloadComponent MetalToolchain
 xcodebuild -version
 ```
 
