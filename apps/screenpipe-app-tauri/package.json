@@ -59,8 +59,8 @@
     "test:e2e:recording-health-return-race": "SCREENPIPE_E2E_SEED=onboarding,no-recording,recording-health-return-race SCREENPIPE_PORT=3044 bun run wdio run e2e/wdio.conf.ts --spec e2e/specs/recording-health-return-race.spec.ts",
     "test:e2e:search-bugs": "SCREENPIPE_E2E_SEED=onboarding,no-recording,search-fixture SCREENPIPE_E2E_TIMELINE_FRAME_LIMIT=2 SCREENPIPE_PORT=3041 bun run wdio run e2e/wdio.conf.ts --spec e2e/specs/search/search-bugs-4645.spec.ts",
     "typecheck": "bun x tsc --noEmit",
-    "bindings:check": "cargo test -p screenpipe-app tauri_bindings_are_current --manifest-path src-tauri/Cargo.toml -- --nocapture",
-    "bindings:generate": "UPDATE_TAURI_BINDINGS=1 cargo test -p screenpipe-app export_typescript_bindings --manifest-path src-tauri/Cargo.toml -- --nocapture",
+    "bindings:check": "bun scripts/native-build-queue.ts test tauri_bindings_are_current -- --nocapture",
+    "bindings:generate": "UPDATE_TAURI_BINDINGS=1 bun scripts/native-build-queue.ts test export_typescript_bindings -- --nocapture",
     "skills:generate": "bun scripts/gen-skill-content.js",
     "build": "bun scripts/build-frontend.js",
     "predev": "bun scripts/gen-skill-content.js && bun scripts/pre_build.js",
@@ -69,6 +69,7 @@
     "build:tauri:dev": "bun scripts/native-build-queue.ts build",
     "build:tauri:e2e": "bun scripts/native-build-queue.ts e2e",
     "build:tauri:status": "bun scripts/native-build-queue.ts status",
+    "test:tauri": "bun scripts/native-build-queue.ts test",
     "tauri:build": "bun scripts/native-build-queue.ts signed",
     "clean": "rm -rf out && cargo clean --manifest-path src-tauri/Cargo.toml && rm -rf src-tauri/{screenpipe-*,tesseract-*,ffmpeg*,openblas*,bun*,ollama*,ui_monitor*} node_modules"
   },

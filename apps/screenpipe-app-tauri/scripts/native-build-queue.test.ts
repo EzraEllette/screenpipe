@@ -5,6 +5,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   formatDuration,
+  nativeTestCommand,
   parseWorktreeList,
   sccacheHasBaseDirectories,
 } from "./native-build-queue";
@@ -36,5 +37,14 @@ describe("native build queue helpers", () => {
     expect(sccacheHasBaseDirectories(stats, ["/code/a", "/code/b"])).toBe(true);
     expect(sccacheHasBaseDirectories(stats, ["/code/a", "/code/c"])).toBe(false);
     expect(sccacheHasBaseDirectories("Base directories                (none)\n", ["/code/a"])).toBe(false);
+  });
+
+  test("routes native tests through the debug-dev app manifest", () => {
+    expect(nativeTestCommand(["--features", "e2e", "staged_update::"])).toEqual([
+      "cargo", "test", "-p", "screenpipe-app",
+      "--manifest-path", "src-tauri/Cargo.toml",
+      "--profile", "debug-dev",
+      "--features", "e2e", "staged_update::",
+    ]);
   });
 });
