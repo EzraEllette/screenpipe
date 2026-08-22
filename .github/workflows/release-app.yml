@@ -642,7 +642,7 @@ jobs:
 
       - name: Use production config for release
         shell: bash
-        run: cp apps/screenpipe-app-tauri/src-tauri/tauri.prod.conf.json apps/screenpipe-app-tauri/src-tauri/tauri.conf.json
+        run: cp -p apps/screenpipe-app-tauri/src-tauri/tauri.prod.conf.json apps/screenpipe-app-tauri/src-tauri/tauri.conf.json
 
       - name: Set macOS deployment target
         if: matrix.os_type == 'macos'

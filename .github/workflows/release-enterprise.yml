@@ -303,7 +303,7 @@ jobs:
 
       - name: Use enterprise config
         shell: bash
-        run: cp apps/screenpipe-app-tauri/src-tauri/tauri.enterprise.conf.json apps/screenpipe-app-tauri/src-tauri/tauri.conf.json
+        run: cp -p apps/screenpipe-app-tauri/src-tauri/tauri.enterprise.conf.json apps/screenpipe-app-tauri/src-tauri/tauri.conf.json
 
       - name: Install CodeSignTool for binary signing
         shell: pwsh
@@ -554,7 +554,7 @@ jobs:
 
       - name: Use enterprise config
         shell: bash
-        run: cp apps/screenpipe-app-tauri/src-tauri/tauri.enterprise.conf.json apps/screenpipe-app-tauri/src-tauri/tauri.conf.json
+        run: cp -p apps/screenpipe-app-tauri/src-tauri/tauri.enterprise.conf.json apps/screenpipe-app-tauri/src-tauri/tauri.conf.json
 
       - name: Build (enterprise, Linux x64)
         working-directory: apps/screenpipe-app-tauri
@@ -752,7 +752,7 @@ jobs:
         run: bun ./scripts/pre_build.js
 
       - name: Use enterprise config
-        run: cp apps/screenpipe-app-tauri/src-tauri/tauri.enterprise.conf.json apps/screenpipe-app-tauri/src-tauri/tauri.conf.json
+        run: cp -p apps/screenpipe-app-tauri/src-tauri/tauri.enterprise.conf.json apps/screenpipe-app-tauri/src-tauri/tauri.conf.json
 
       - name: Configure macOS sidecar bundle entries
         shell: bash
