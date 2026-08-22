@@ -35,7 +35,13 @@ if (-not (Get-Command choco.exe -ErrorAction SilentlyContinue)) {
 }
 
 choco feature enable -n allowGlobalConfirmation | Out-Null
-choco install git git-lfs 7zip jq cmake ninja powershell-core --no-progress
+choco install git git-lfs 7zip jq cmake ninja llvm powershell-core --no-progress
+
+$llvmBin = 'C:\Program Files\LLVM\bin'
+$libclang = Join-Path $llvmBin 'libclang.dll'
+if (-not (Test-Path $libclang)) { throw "libclang is unavailable at $libclang" }
+[Environment]::SetEnvironmentVariable('LIBCLANG_PATH', $llvmBin, 'Machine')
+$env:LIBCLANG_PATH = $llvmBin
 
 $nodeVersion = '20.19.5'
 $nodeMsi = Join-Path $env:TEMP "node-v$nodeVersion-x64.msi"
@@ -113,6 +119,7 @@ $requiredPaths = @(
   'C:\Program Files\Git\cmd',
   'C:\Program Files\Git\bin',
   'C:\Program Files\nodejs',
+  $llvmBin,
   $bunRoot,
   "$cacheRoot\cargo\bin",
   $sccacheRoot
@@ -167,6 +174,7 @@ $commands = @(
   'bun --version',
   'bunx --version',
   'cmake --version',
+  'clang --version',
   'ninja --version',
   'rustc --version',
   'cargo --version',
