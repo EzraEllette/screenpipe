@@ -110,6 +110,7 @@ jobs:
         uses: ./.release-workflow/.github/actions/setup-persistent-windows-cache
         with:
           target: x86_64-pc-windows-msvc
+          flavor: enterprise
 
       - name: Enable Git long paths on Windows
         shell: pwsh

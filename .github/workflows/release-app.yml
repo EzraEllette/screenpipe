@@ -239,6 +239,7 @@ jobs:
         uses: ./.release-workflow/.github/actions/setup-persistent-windows-cache
         with:
           target: ${{ matrix.target }}
+          flavor: consumer
 
       - name: Shorten target dir to avoid MAX_PATH (Windows)
         if: runner.environment == 'github-hosted' && matrix.os_type == 'windows'
