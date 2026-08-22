@@ -72,6 +72,7 @@ import Timeline from "@/components/rewind/timeline";
 import {
   NativeTimeline,
   NativeTimelineBridge,
+  shouldClearActivityReturn,
 } from "@/components/rewind/native-timeline";
 import { useQueryState } from "nuqs";
 import { listen } from "@tauri-apps/api/event";
@@ -170,32 +171,21 @@ function HomeContent() {
     serialize: (value) => value,
   });
   const [activityReturnVisible, setActivityReturnVisible] = useState(false);
-  const activityReturnButtonRef = useRef<HTMLButtonElement | null>(null);
+  const previousSectionRef = useRef(activeSection);
   const returnToActivity = useCallback(() => {
     setActivityReturnVisible(false);
     router.push("/home?section=activity");
   }, [router]);
-  const dismissActivityReturn = useCallback(() => {
-    setActivityReturnVisible(false);
-  }, []);
 
   useEffect(() => {
+    const previousSection = previousSectionRef.current;
+    previousSectionRef.current = activeSection;
     if (
-      !activityReturnVisible ||
-      (activeSection !== "meetings" && activeSection !== "timeline")
+      activityReturnVisible &&
+      shouldClearActivityReturn(previousSection, activeSection)
     ) {
-      return;
-    }
-    const dismiss = (event: PointerEvent) => {
-      if (
-        activityReturnButtonRef.current?.contains(event.target as Node)
-      ) {
-        return;
-      }
       setActivityReturnVisible(false);
-    };
-    document.addEventListener("pointerdown", dismiss, true);
-    return () => document.removeEventListener("pointerdown", dismiss, true);
+    }
   }, [activeSection, activityReturnVisible]);
   const [connectionFocusRequest, setConnectionFocusRequest] = useState<ConnectionFocusRequest | null>(null);
 
@@ -1206,10 +1196,7 @@ function HomeContent() {
           palette use teaches the direct key. Home window only: the settings
           page binds its own ⌘K for search focus while mounted. */}
       {/* Routes actions the native timeline window cannot perform itself. */}
-      <NativeTimelineBridge
-        onReturnToActivity={returnToActivity}
-        onDismissActivityReturn={dismissActivityReturn}
-      />
+      <NativeTimelineBridge onReturnToActivity={returnToActivity} />
 
       <CommandPalette
         open={commandPaletteOpen}
@@ -1595,7 +1582,6 @@ function HomeContent() {
             {activityReturnVisible &&
               (activeSection === "meetings" || activeSection === "timeline") && (
                 <button
-                  ref={activityReturnButtonRef}
                   type="button"
                   onClick={returnToActivity}
                   aria-label="back to activity"

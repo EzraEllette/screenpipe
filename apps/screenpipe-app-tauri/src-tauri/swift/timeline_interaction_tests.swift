@@ -719,14 +719,6 @@ private func testActivityReturnChrome() {
         TimelineActionBridge.shared.drainEmitted().contains("return_to_activity"),
         "the Activity return must emit its routed navigation action"
     )
-
-    chrome.setActivityReturnVisible(true)
-    chrome.dismissActivityReturn()
-    expect(!chrome.showsActivityReturn, "an unrelated Timeline click must dismiss the return")
-    expect(
-        TimelineActionBridge.shared.drainEmitted().contains("dismiss_activity_return"),
-        "dismissal must clear the webview's Activity-origin state"
-    )
 }
 
 /// Deep links must drive the per-host controller used by the embedded app,

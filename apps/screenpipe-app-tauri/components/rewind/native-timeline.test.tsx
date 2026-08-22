@@ -10,6 +10,7 @@ import {
   nativeTimelineOcclusionMode,
   parseTimelineDailySummaryRequest,
   parseTimelineDay,
+  shouldClearActivityReturn,
 } from "./native-timeline";
 
 describe("native timeline bridge payloads", () => {
@@ -38,6 +39,12 @@ describe("native timeline bridge payloads", () => {
     expect(
       parseTimelineDailySummaryRequest("2026-08-16", "main")
     ).not.toBeNull();
+  });
+
+  it("keeps the Activity return for the Timeline visit and clears it on exit", () => {
+    expect(shouldClearActivityReturn("activity", "timeline")).toBe(false);
+    expect(shouldClearActivityReturn("timeline", "timeline")).toBe(false);
+    expect(shouldClearActivityReturn("timeline", "home")).toBe(true);
   });
 
   it("turns native selection context into the existing chat prefill shape", () => {
