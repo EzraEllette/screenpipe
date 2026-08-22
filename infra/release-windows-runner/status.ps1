@@ -22,6 +22,7 @@ $bootstrapTools = [ordered]@{
   rustc = (rustc --version)
   cargo = (cargo --version)
   sccache = (sccache --version)
+  pwsh = (pwsh --version)
 }
 [ordered]@{
   computer = $env:COMPUTERNAME

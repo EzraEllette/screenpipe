@@ -34,7 +34,7 @@ if (-not (Get-Command choco.exe -ErrorAction SilentlyContinue)) {
 }
 
 choco feature enable -n allowGlobalConfirmation | Out-Null
-choco install git git-lfs 7zip jq cmake ninja --no-progress
+choco install git git-lfs 7zip jq cmake ninja powershell-core --no-progress
 
 $nodeVersion = '20.19.5'
 $nodeMsi = Join-Path $env:TEMP "node-v$nodeVersion-x64.msi"
@@ -161,6 +161,7 @@ $commands = @(
   'rustc --version',
   'cargo --version',
   'sccache --version'
+  'pwsh --version'
 )
 foreach ($command in $commands) {
   Write-Host "> $command"
