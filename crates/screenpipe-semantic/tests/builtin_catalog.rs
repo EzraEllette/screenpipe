@@ -25,11 +25,13 @@ const EXPECTED_TARGETS: &[&str] = &[
     "codex",
     "cursor",
     "discord",
+    "fastmail",
     "fantastical",
     "gemini_desktop",
     "geminiweb",
     "ghostty",
     "gmail",
+    "hey",
     "iterm2",
     "mail",
     "messages",
@@ -45,12 +47,14 @@ const EXPECTED_TARGETS: &[&str] = &[
     "obsidian",
     "omnifocus",
     "pages",
+    "protonmail",
     "slack",
     "sparkdesktop",
     "sparkmailclassic",
     "superhuman",
     "terminal",
     "textedit",
+    "thunderbird",
     "todoist",
     "toggl",
     "vscode",
@@ -84,14 +88,14 @@ fn identity_for(profile: &screenpipe_semantic::parsers::BuiltinAppProfile) -> Ap
 }
 
 #[test]
-fn catalog_exactly_matches_all_52_targets() {
+fn catalog_exactly_matches_all_56_targets() {
     let actual: BTreeSet<_> = builtin_app_profiles()
         .iter()
         .map(|profile| profile.id)
         .collect();
     let expected: BTreeSet<_> = EXPECTED_TARGETS.iter().copied().collect();
-    assert_eq!(builtin_app_profiles().len(), 52);
-    assert_eq!(actual.len(), 52, "profile ids must be unique");
+    assert_eq!(builtin_app_profiles().len(), 56);
+    assert_eq!(actual.len(), 56, "profile ids must be unique");
     assert_eq!(actual, expected);
 }
 

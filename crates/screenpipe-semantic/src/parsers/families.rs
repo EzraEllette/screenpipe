@@ -92,7 +92,7 @@ impl FamilyParser {
         if family == AppFamily::Conversation {
             manifest.parser_version = "4".into();
         } else if family == AppFamily::Mail {
-            manifest.parser_version = "2".into();
+            manifest.parser_version = "3".into();
         }
         Self { family, manifest }
     }
@@ -527,6 +527,9 @@ fn parse_mail(profile: &BuiltinAppProfile, tree: &SemanticTree) -> Vec<SemanticI
         if profile.id == "gmail" {
             return parse_persisted_gmail(profile, tree);
         }
+        if profile.id == "protonmail" {
+            return parse_proton_mail(profile, tree);
+        }
         return Vec::new();
     }
 
@@ -544,6 +547,97 @@ fn parse_mail(profile: &BuiltinAppProfile, tree: &SemanticTree) -> Vec<SemanticI
 
     let mut items = Vec::with_capacity(messages.len() + 1);
     items.push(conversation);
+    for (index, (node, sender, body)) in messages.into_iter().enumerate() {
+        let mut message = SemanticItem::new(
+            format!("mail-{index}"),
+            SemanticKind::Message,
+            format!("{}:mail-message:{index}", profile.id),
+            IdentityQuality::Ephemeral,
+        );
+        message.parent_local_id = Some("thread".into());
+        message.actor = Some(sender);
+        message.body = Some(body);
+        message.source_nodes.push(node);
+        items.push(message);
+    }
+    items
+}
+
+/// Proton Mail exposes each expanded message through stable structural classes:
+/// a `message-header` containing `message-header-recipient-labels`, paired with
+/// a `message-content` body below their nearest shared ancestor. Require that
+/// full trio so mailbox chrome or an empty composer cannot become a message.
+fn parse_proton_mail(profile: &BuiltinAppProfile, tree: &SemanticTree) -> Vec<SemanticItem> {
+    let mut messages = Vec::new();
+    let mut message_roots = HashSet::new();
+    'roots: for root in tree.roots() {
+        for header in tree
+            .descendants(root)
+            .filter(|node| tree.has_class(*node, "message-header"))
+        {
+            let Some(sender_root) = tree
+                .descendants(header)
+                .find(|node| tree.has_class(*node, "message-header-recipient-labels"))
+            else {
+                continue;
+            };
+            let Some(sender) = tree
+                .descendants(sender_root)
+                .find_map(|node| node_content(tree, node))
+                .filter(|sender| sender.len() <= 240)
+            else {
+                continue;
+            };
+
+            let mut ancestor = Some(header);
+            let mut message = None;
+            for _ in 0..=4 {
+                let Some(candidate) = ancestor else {
+                    break;
+                };
+                if let Some(body) = first_marked_subtree_text(tree, candidate, &["message-content"])
+                {
+                    message = Some((candidate, body));
+                    break;
+                }
+                ancestor = tree.parent(candidate);
+            }
+            let Some((message_root, body)) = message else {
+                continue;
+            };
+            if !message_roots.insert(message_root) || body.trim().is_empty() {
+                continue;
+            }
+            messages.push((message_root, sender.to_owned(), body));
+            if messages.len() == MAX_STRUCTURAL_CANDIDATES {
+                break 'roots;
+            }
+        }
+    }
+    if messages.is_empty() {
+        return Vec::new();
+    }
+
+    let subject = first_heading(tree)
+        .unwrap_or(profile.display_name)
+        .to_owned();
+    let mut thread = SemanticItem::new(
+        "thread",
+        SemanticKind::Conversation,
+        format!("{}:mail:{}", profile.id, key_component(&subject)),
+        IdentityQuality::Derived,
+    );
+    thread.title = Some(subject);
+    thread
+        .metadata
+        .insert("app".into(), profile.display_name.into());
+    thread.metadata.insert("family".into(), "mail".into());
+    thread
+        .metadata
+        .insert("surface".into(), "proton_message".into());
+
+    let mut items = Vec::with_capacity(messages.len() + 1);
+    items.push(thread);
     for (index, (node, sender, body)) in messages.into_iter().enumerate() {
         let mut message = SemanticItem::new(
             format!("mail-{index}"),
