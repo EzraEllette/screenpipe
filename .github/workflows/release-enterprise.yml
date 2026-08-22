@@ -122,14 +122,27 @@ jobs:
           Write-Host "Created junction: $targetDir -> $shortDir"
 
       - name: Setup Bun
+        if: runner.environment == 'github-hosted'
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: "1.3.10"
 
+      - name: Verify preinstalled Bun
+        if: runner.environment == 'self-hosted'
+        shell: pwsh
+        run: |
+          if ((bun --version) -ne '1.3.10') { throw 'Expected Bun 1.3.10 on persistent runner' }
+
       - name: Setup Node
+        if: runner.environment == 'github-hosted'
         uses: actions/setup-node@v4
         with:
           node-version: "20"
+
+      - name: Verify preinstalled Node
+        if: runner.environment == 'self-hosted'
+        shell: pwsh
+        run: node --version
 
       # Install pinned stable toolchain first (1.95+) — cpal fork's wasapi
       # module uses windows-core 0.62 traits that don't resolve under the
