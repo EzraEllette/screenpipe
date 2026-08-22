@@ -90,7 +90,7 @@ impl FamilyParser {
             priority,
         );
         if family == AppFamily::Conversation {
-            manifest.parser_version = "3".into();
+            manifest.parser_version = "4".into();
         } else if family == AppFamily::Mail {
             manifest.parser_version = "2".into();
         }
@@ -180,6 +180,9 @@ fn parse_conversation(
         messages = action_anchored_turns(tree, &["Reply", "Add reaction"]);
     }
     if messages.is_empty() {
+        if let Some(codex_surface) = macos_codex_surface(profile, tree) {
+            return codex_surface;
+        }
         return chromium_chat_list(profile, tree).unwrap_or_default();
     }
 
@@ -258,6 +261,200 @@ fn parse_conversation(
         items.push(message);
     }
     items
+}
+
+/// ChatGPT Desktop's macOS Codex mode retains the central task/composer as
+/// depth-gapped AX nodes without DOM classes or message containers. Sidebar
+/// rows have similar roles, so require the explicit Codex mode control plus a
+/// central-only anchor: either `Chat actions` for an open task or the composer
+/// text area for a new task. This intentionally does not turn the sidebar or
+/// settings screens into conversations.
+fn macos_codex_surface(
+    profile: &BuiltinAppProfile,
+    tree: &SemanticTree,
+) -> Option<Vec<SemanticItem>> {
+    if !matches!(profile.id, "chatgpt" | "chatgptlegacy") {
+        return None;
+    }
+
+    let mut codex_mode = false;
+    let mut codex_scaffold = false;
+    let mut title: Option<(NodeId, String)> = None;
+    let mut previous_content: Option<(NodeId, String)> = None;
+    let composer = macos_codex_composer(tree);
+    let mut project: Option<String> = None;
+    let mut run_location: Option<String> = None;
+    let mut environment: Option<String> = None;
+    let mut branch: Option<String> = None;
+    let mut permissions: Option<String> = None;
+    let model = composer.as_ref().and_then(|(_, _, model)| model.clone());
+    let mut awaiting: Option<&'static str> = None;
+    let mut has_chat_actions = false;
+    let mut working = false;
+
+    for index in 0..tree.len() {
+        let node = NodeId(index as u32);
+        let role = tree.role(node).unwrap_or("");
+        let Some(content) = node_content(tree, node) else {
+            continue;
+        };
+
+        codex_mode |= content.eq_ignore_ascii_case("Switch mode, current mode: Codex");
+        codex_scaffold |= content.starts_with("What should we build")
+            || content.starts_with("Change project: ")
+            || content.eq_ignore_ascii_case("Select where to run the chat");
+        working |= content.eq_ignore_ascii_case("Stop")
+            || content.eq_ignore_ascii_case("Steer")
+            || content.starts_with("Working for ");
+
+        if content.eq_ignore_ascii_case("Chat actions") {
+            has_chat_actions = true;
+            title = previous_content.take().filter(|(_, candidate)| {
+                !candidate.is_empty() && candidate.len() <= 240 && !candidate.contains(['\n', '\r'])
+            });
+        }
+
+        if let Some(value) = content.strip_prefix("Change project: ") {
+            project = nonempty_owned(value);
+        } else if content.eq_ignore_ascii_case("Select where to run the chat") {
+            awaiting = Some("run_location");
+        } else if content.eq_ignore_ascii_case("Select a local environment") {
+            awaiting = Some("environment");
+        } else if content.eq_ignore_ascii_case("What branch should this chat start from?") {
+            awaiting = Some("branch");
+        } else if content.eq_ignore_ascii_case("Change permissions") {
+            awaiting = Some("permissions");
+        } else if let Some(field) = awaiting.take() {
+            if is_static_text_role(role) {
+                match field {
+                    "run_location" => run_location = Some(content.to_owned()),
+                    "environment" => environment = Some(content.to_owned()),
+                    "branch" => branch = Some(content.to_owned()),
+                    "permissions" => permissions = Some(content.to_owned()),
+                    _ => {}
+                }
+            }
+        }
+
+        previous_content = Some((node, content.to_owned()));
+    }
+
+    if !(codex_mode || codex_scaffold || has_chat_actions)
+        || (!has_chat_actions && composer.is_none())
+    {
+        return None;
+    }
+
+    let (title_node, title) = title.unwrap_or_else(|| {
+        composer
+            .as_ref()
+            .map(|(node, _, _)| (*node, "New chat".to_owned()))
+            .unwrap_or((NodeId(0), "ChatGPT".to_owned()))
+    });
+    let mut conversation = SemanticItem::new(
+        "conversation",
+        SemanticKind::Conversation,
+        format!("{}:conversation:{}", profile.id, key_component(&title)),
+        IdentityQuality::Derived,
+    );
+    conversation.title = Some(title);
+    conversation.status = Some(if working { "working" } else { "ready" }.into());
+    conversation
+        .metadata
+        .insert("app".into(), profile.display_name.into());
+    conversation
+        .metadata
+        .insert("family".into(), "conversation".into());
+    conversation
+        .metadata
+        .insert("surface".into(), "macos_codex".into());
+    for (key, value) in [
+        ("project", project),
+        ("run_location", run_location),
+        ("environment", environment),
+        ("branch", branch),
+        ("permissions", permissions),
+        ("model", model),
+    ] {
+        if let Some(value) = value {
+            conversation.metadata.insert(key.into(), value);
+        }
+    }
+    conversation.source_nodes.push(title_node);
+
+    let Some((draft_node, draft_body, _)) = composer else {
+        return Some(vec![conversation]);
+    };
+    if draft_body.eq_ignore_ascii_case("Do anything") {
+        return Some(vec![conversation]);
+    }
+    let mut draft_message = SemanticItem::new(
+        "message-0",
+        SemanticKind::Message,
+        format!("{}:draft", profile.id),
+        IdentityQuality::Ephemeral,
+    );
+    draft_message.parent_local_id = Some("conversation".into());
+    draft_message.actor = Some("[user]".into());
+    draft_message.body = Some(draft_body);
+    draft_message.status = Some("draft".into());
+    draft_message
+        .metadata
+        .insert("actor_evidence".into(), "composer".into());
+    draft_message.source_nodes.push(draft_node);
+    Some(vec![conversation, draft_message])
+}
+
+/// Identify the central Codex composer by its local control sequence rather
+/// than accepting every text area. Artifact viewers and side panels can expose
+/// their own editors later in the same flat capture.
+fn macos_codex_composer(tree: &SemanticTree) -> Option<(NodeId, String, Option<String>)> {
+    for index in 0..tree.len() {
+        let node = NodeId(index as u32);
+        if !tree
+            .role(node)
+            .is_some_and(|role| role.eq_ignore_ascii_case("AXTextArea"))
+        {
+            continue;
+        }
+        let Some(body) = node_content(tree, node) else {
+            continue;
+        };
+        let mut model = None;
+        let mut send_control = false;
+        for following in (index + 1)..tree.len().min(index + 7) {
+            let candidate = NodeId(following as u32);
+            let role = tree.role(candidate).unwrap_or("");
+            let Some(content) = node_content(tree, candidate) else {
+                continue;
+            };
+            if ["Send", "Stop"]
+                .iter()
+                .any(|label| content.eq_ignore_ascii_case(label))
+            {
+                send_control = true;
+            } else if model.is_none()
+                && matches!(role, "AXPopUpButton" | "PopUpButton" | "ComboBox")
+            {
+                model = Some(content.to_owned());
+            }
+        }
+        if send_control {
+            return Some((node, body.to_owned(), model));
+        }
+    }
+    None
+}
+
+fn nonempty_owned(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_owned())
+}
+
+fn is_static_text_role(role: &str) -> bool {
+    ["AXStaticText", "Text", "Static"]
+        .iter()
+        .any(|candidate| candidate.eq_ignore_ascii_case(role))
 }
 
 fn conversation_actor(
