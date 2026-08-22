@@ -10,6 +10,7 @@ $cacheRoot = "${cacheDrive}:\screenpipe-cache"
 $runnerRoot = 'C:\actions-runner'
 $toolsRoot = 'C:\Tools'
 $runnerVersion = '2.336.0'
+$env:Path = 'C:\ProgramData\chocolatey\bin;' + [Environment]::GetEnvironmentVariable('Path', 'Machine')
 
 $dataDisk = Get-Disk | Where-Object PartitionStyle -eq 'RAW' | Sort-Object Number | Select-Object -First 1
 if ($dataDisk) {
