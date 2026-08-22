@@ -12,6 +12,8 @@ param(
     [string]$FilePath
 )
 
+$ErrorActionPreference = 'Stop'
+
 # Skip if credentials aren't set (local dev builds)
 if (-not $env:ESIGNER_USERNAME -or -not $env:ESIGNER_PASSWORD) {
     Write-Host "Skipping code signing (no credentials): $FilePath"
@@ -111,7 +113,14 @@ $originalFilePath = $FilePath
 $signatureCacheFile = $null
 if ($env:SCREENPIPE_SIGNED_BINARY_CACHE_DIR -and $env:ESIGNER_CREDENTIAL_ID) {
     New-Item -ItemType Directory -Force -Path $env:SCREENPIPE_SIGNED_BINARY_CACHE_DIR | Out-Null
-    $unsignedHash = (Get-FileHash -LiteralPath $originalFilePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $fileHashAlgorithm = [System.Security.Cryptography.SHA256]::Create()
+    $fileStream = [System.IO.File]::OpenRead($originalFilePath)
+    try {
+        $unsignedHash = ([BitConverter]::ToString($fileHashAlgorithm.ComputeHash($fileStream))).Replace('-', '').ToLowerInvariant()
+    } finally {
+        $fileStream.Dispose()
+        $fileHashAlgorithm.Dispose()
+    }
     $cacheIdentity = "v1|$env:ESIGNER_CREDENTIAL_ID|$unsignedHash"
     $sha256 = [System.Security.Cryptography.SHA256]::Create()
     try {

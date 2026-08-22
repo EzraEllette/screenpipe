@@ -43,7 +43,7 @@ runs:
           "$cacheRoot\native-deps",
           $persistentTarget,
           "$cacheRoot\tauri-v2\$env:SCREENPIPE_RELEASE_FLAVOR\$env:SCREENPIPE_RELEASE_TARGET",
-          "$cacheRoot\signed-binaries-v1"
+          "$cacheRoot\signed-binaries-v2"
         ) | ForEach-Object { New-Item -ItemType Directory -Force -Path $_ | Out-Null }
 
         # Bundle output is release-specific. Compiler outputs and downloads stay warm.
@@ -76,7 +76,7 @@ runs:
           'RUSTC_WRAPPER=sccache',
           "BUN_INSTALL_CACHE_DIR=$cacheRoot\bun",
           "SCREENPIPE_NATIVE_CACHE_DIR=$cacheRoot\native-deps",
-          "SCREENPIPE_SIGNED_BINARY_CACHE_DIR=$cacheRoot\signed-binaries-v1"
+          "SCREENPIPE_SIGNED_BINARY_CACHE_DIR=$cacheRoot\signed-binaries-v2"
         ) | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
         "$cacheRoot\cargo\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
