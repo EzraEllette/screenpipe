@@ -56,6 +56,9 @@ if (-not (Test-Path (Join-Path $bunRoot 'bun.exe'))) {
   Copy-Item "$bunExtract\bun-windows-x64\*" $bunRoot -Recurse -Force
   Remove-Item $bunZip, $bunExtract -Recurse -Force
 }
+if (-not (Test-Path (Join-Path $bunRoot 'bunx.exe'))) {
+  Copy-Item (Join-Path $bunRoot 'bun.exe') (Join-Path $bunRoot 'bunx.exe') -Force
+}
 
 $vswhere = 'C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe'
 if (-not (Test-Path $vswhere) -or -not (& $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath)) {
@@ -162,6 +165,7 @@ $commands = @(
   'git lfs version',
   'node --version',
   'bun --version',
+  'bunx --version',
   'cmake --version',
   'ninja --version',
   'rustc --version',
