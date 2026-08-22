@@ -108,6 +108,7 @@ if (-not (Test-Path (Join-Path $sccacheRoot 'sccache.exe'))) {
 $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
 $requiredPaths = @(
   'C:\Program Files\Git\cmd',
+  'C:\Program Files\Git\bin',
   'C:\Program Files\nodejs',
   $bunRoot,
   "$cacheRoot\cargo\bin",
@@ -167,6 +168,7 @@ $commands = @(
   'cargo --version',
   'sccache --version'
   'pwsh --version'
+  'bash --version'
 )
 foreach ($command in $commands) {
   Write-Host "> $command"
