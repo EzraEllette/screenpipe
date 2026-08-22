@@ -21,7 +21,7 @@ runs:
         $ErrorActionPreference = 'Stop'
 
         $cacheRoot = 'S:\screenpipe-cache'
-        $persistentTarget = "$cacheRoot\targets\$env:SCREENPIPE_RELEASE_TARGET"
+        $persistentTarget = "$cacheRoot\targets-v2\$env:SCREENPIPE_RELEASE_TARGET"
         $workspaceTarget = "$env:GITHUB_WORKSPACE\apps\screenpipe-app-tauri\src-tauri\target"
         $workspaceNodeModules = "$env:GITHUB_WORKSPACE\apps\screenpipe-app-tauri\node_modules"
         $workspaceTauri = "$env:GITHUB_WORKSPACE\apps\screenpipe-app-tauri\.tauri"
