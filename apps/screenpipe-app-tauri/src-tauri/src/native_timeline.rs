@@ -169,7 +169,6 @@ pub struct TimelineExportSelection {
 pub enum TimelineAction {
     CloseWindow,
     ReturnToActivity,
-    DismissActivityReturn,
     OpenSearch,
     OpenDailySummary { date: String },
     OpenChat,
@@ -228,7 +227,6 @@ impl TimelineAction {
         match (name, argument) {
             ("close_window", _) => Self::CloseWindow,
             ("return_to_activity", _) => Self::ReturnToActivity,
-            ("dismiss_activity_return", _) => Self::DismissActivityReturn,
             ("open_search", _) => Self::OpenSearch,
             ("open_daily_summary", Some(date)) => Self::OpenDailySummary {
                 date: date.to_string(),
@@ -504,10 +502,6 @@ mod tests {
         assert_eq!(
             TimelineAction::parse("return_to_activity"),
             TimelineAction::ReturnToActivity
-        );
-        assert_eq!(
-            TimelineAction::parse("dismiss_activity_return"),
-            TimelineAction::DismissActivityReturn
         );
         assert_eq!(TimelineAction::parse("open_search"), TimelineAction::OpenSearch);
         assert_eq!(TimelineAction::parse("open_chat"), TimelineAction::OpenChat);

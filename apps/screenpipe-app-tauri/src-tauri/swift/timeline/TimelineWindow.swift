@@ -332,12 +332,6 @@ final class TimelineOriginChrome: ObservableObject {
         showsActivityReturn = false
         TimelineActionBridge.shared.emit("return_to_activity")
     }
-
-    func dismissActivityReturn() {
-        guard showsActivityReturn else { return }
-        showsActivityReturn = false
-        TimelineActionBridge.shared.emit("dismiss_activity_return")
-    }
 }
 
 @MainActor
@@ -385,13 +379,6 @@ struct TimelineHostView: View {
                     .padding(16)
                 }
             }
-            .simultaneousGesture(
-                TapGesture().onEnded {
-                    DispatchQueue.main.async {
-                        originChrome.dismissActivityReturn()
-                    }
-                }
-            )
     }
 }
 
