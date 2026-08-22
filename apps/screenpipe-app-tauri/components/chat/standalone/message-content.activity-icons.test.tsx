@@ -83,9 +83,36 @@ describe("MessageContent — semantic activity widget", () => {
       '[data-activity-kind="test"][data-activity-state="running"]',
     );
     expect(errorIcon).toHaveClass("bg-destructive");
-    expect(runningIcon).toHaveClass("bg-phosphor");
+    expect(runningIcon).toHaveClass("bg-foreground", "text-background");
+    expect(runningIcon).not.toHaveClass("bg-phosphor");
     expect(screen.getByText("Loaded PDF skill")).toBeTruthy();
     expect(screen.getByText("failed")).toBeTruthy();
+  });
+
+  it("keeps a running git commit activity monochrome", () => {
+    render(
+      <MessageContent
+        message={messageWithTools([
+          tool("commit", "bash", {
+            args: { command: "git commit -m 'fix tool activity color'" },
+            isRunning: true,
+          }),
+        ])}
+        isGenerating
+      />,
+    );
+
+    const summaryIcon = screen.getByTestId("tool-activity-running-indicator");
+    expect(summaryIcon).toHaveAttribute("data-activity-kind", "edit");
+    expect(summaryIcon).toHaveClass("bg-foreground", "text-background");
+    expect(summaryIcon).not.toHaveClass("bg-phosphor");
+
+    fireEvent.click(screen.getByTestId("tool-activity-summary"));
+    const rowIcon = screen
+      .getByTestId("tool-activity-list")
+      .querySelector('[data-activity-kind="edit"][data-activity-state="running"]');
+    expect(rowIcon).toHaveClass("bg-foreground", "text-background");
+    expect(rowIcon).not.toHaveClass("bg-phosphor");
   });
 
   it("marks an unrecovered completed failure on both the widget and row", () => {
