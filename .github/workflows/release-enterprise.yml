@@ -97,9 +97,17 @@ jobs:
         with:
           ref: ${{ needs.resolve-release.outputs.release_sha }}
 
+      - name: Checkout persistent Windows cache action
+        if: runner.environment == 'self-hosted'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .release-workflow
+          sparse-checkout: .github/actions/setup-persistent-windows-cache
+
       - name: Attach persistent Azure Windows cache
         if: runner.environment == 'self-hosted'
-        uses: ./.github/actions/setup-persistent-windows-cache
+        uses: ./.release-workflow/.github/actions/setup-persistent-windows-cache
         with:
           target: x86_64-pc-windows-msvc
 
