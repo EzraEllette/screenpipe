@@ -360,45 +360,20 @@ jobs:
           tauriScript: bunx tauri -v
           retryAttempts: 3
 
-      - name: Sign installer with SSL.com EV certificate
-        # Final NSIS installer is built after Tauri's signCommand runs,
-        # so we sign it here. Reuses sign-ssl.ps1 to inherit its retry-with-
-        # backoff logic against transient SSL.com / CSC API failures
-        # (the "Unexpected character (<) at position 0" HTML-instead-of-JSON
-        # symptom that took out enterprise build 25196389570 on 2026-05-01).
+      - name: Verify enterprise installer signatures
         shell: pwsh
-        env:
-          ESIGNER_USERNAME: ${{ secrets.ESIGNER_USERNAME }}
-          ESIGNER_PASSWORD: ${{ secrets.ESIGNER_PASSWORD }}
-          ESIGNER_TOTP_SECRET: ${{ secrets.ESIGNER_TOTP_SECRET }}
-          ESIGNER_CREDENTIAL_ID: ${{ secrets.ESIGNER_CREDENTIAL_ID }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
         run: |
           $nsisDir = "apps/screenpipe-app-tauri/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis"
           $exe = Get-ChildItem "$nsisDir/*.exe" | Select-Object -First 1
           if (-not $exe) { throw "No installer exe found in $nsisDir" }
 
-          & apps/screenpipe-app-tauri/src-tauri/sign-ssl.ps1 $exe.FullName
-          if ($LASTEXITCODE -ne 0) { throw "Code signing failed with exit code $LASTEXITCODE" }
-
-          $sigFile = "$($exe.FullName).sig"
-          if (Test-Path $sigFile) {
-            Remove-Item $sigFile
-            Push-Location apps/screenpipe-app-tauri
-            # Tauri v2 CLI reads TAURI_SIGNING_PRIVATE_KEY +
-            # TAURI_SIGNING_PRIVATE_KEY_PASSWORD from env when --private-key
-            # is not passed. We intentionally DO NOT pass --private-key here:
-            # its "path vs contents" auto-detect treats Windows absolute
-            # paths (e.g. D:\...) as base64 because `:` at offset 1 fails
-            # decoding with "Invalid symbol 58, offset 1". Relying on env
-            # vars bypasses that code path entirely. See release v2.4.30
-            # failure (run 24790392363) — same fix already in release-app.yml
-            # but was missed here, surfaced on enterprise run 26301444082.
-            bunx tauri signer sign $exe.FullName
-            if ($LASTEXITCODE -ne 0) { throw "tauri signer sign failed (exit $LASTEXITCODE) - auto-updater would be broken" }
-            Pop-Location
-            Write-Host "Tauri signature regenerated"
+          $authenticode = Get-AuthenticodeSignature $exe.FullName
+          if ($authenticode.Status -ne 'Valid') {
+            throw "Installer Authenticode signature is $($authenticode.Status): $($exe.FullName)"
+          }
+          $updaterSignature = Get-Item "$($exe.FullName).sig" -ErrorAction Stop
+          if ($updaterSignature.Length -eq 0) {
+            throw "Tauri updater signature is empty: $($updaterSignature.FullName)"
           }
 
       - name: Create .intunewin
