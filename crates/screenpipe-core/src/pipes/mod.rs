@@ -35,7 +35,7 @@ use chrono::{
 use cron::Schedule as CronSchedule;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
@@ -49,6 +49,34 @@ const PIPE_LOG_ARCHIVE_DIR: &str = "archive";
 const PIPE_EXECUTION_KEEP_PER_PIPE: i32 = 500;
 /// Stable prefix returned when an install would exceed the configured pipe cap.
 pub const PIPE_LIMIT_ERROR_CODE: &str = "free_pipe_limit_reached";
+
+fn validate_pipe_identifier(name: &str) -> Result<()> {
+    let path = Path::new(name);
+    let mut components = path.components();
+    let is_single_normal_component = matches!(
+        components.next(),
+        Some(Component::Normal(component)) if component == std::ffi::OsStr::new(name)
+    ) && components.next().is_none();
+    let has_windows_drive_prefix = name
+        .as_bytes()
+        .get(..2)
+        .is_some_and(|prefix| prefix[0].is_ascii_alphabetic() && prefix[1] == b':');
+
+    if name.trim().is_empty()
+        || name.contains(['/', '\\'])
+        || path.is_absolute()
+        || has_windows_drive_prefix
+        || !is_single_normal_component
+    {
+        return Err(anyhow!(
+            "invalid pipe identifier '{}': expected one portable path component",
+            name
+        ));
+    }
+
+    Ok(())
+}
+
 const AUTOMATE_MY_WORK_LEGACY_PROMPT_HASHES: &[&str] = &[
     // v2.5.52: always created and enabled exactly three hourly pipes.
     "2d4dde284dafc774",
@@ -3452,6 +3480,7 @@ impl PipeManager {
         run_context: Option<&str>,
         event_context: Option<BackgroundEventContext>,
     ) -> Result<Option<i64>> {
+        validate_pipe_identifier(name)?;
         let (config, body, _raw) = {
             let pipes = self.pipes.lock().await;
             match pipes.get(name).cloned() {
@@ -4043,6 +4072,7 @@ impl PipeManager {
         retry_depth: usize,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<PipeRunLog>> + Send + 'a>> {
         Box::pin(async move {
+            validate_pipe_identifier(name)?;
             let (config, body, _raw) = {
                 let pipes = self.pipes.lock().await;
                 match pipes.get(name).cloned() {
@@ -4623,6 +4653,7 @@ impl PipeManager {
 
     /// Enable or disable a pipe (writes back to pipe.md front-matter).
     pub async fn enable_pipe(&self, name: &str, enabled: bool) -> Result<()> {
+        validate_pipe_identifier(name)?;
         let pipe_md = self.pipes_dir.join(name).join("pipe.md");
         if !pipe_md.exists() {
             return Err(self.pipe_not_found_error(name));
@@ -4676,6 +4707,7 @@ impl PipeManager {
         name: &str,
         updates: HashMap<String, serde_json::Value>,
     ) -> Result<()> {
+        validate_pipe_identifier(name)?;
         let pipe_md = self.pipes_dir.join(name).join("pipe.md");
         if !pipe_md.exists() {
             return Err(anyhow!("pipe '{}' not found", name));
@@ -4931,6 +4963,8 @@ impl PipeManager {
                     name
                 };
 
+                validate_pipe_identifier(&name)?;
+
                 let dest_dir = self.pipes_dir.join(&name);
                 let dest_file = dest_dir.join("pipe.md");
                 let dest_canonical = dest_file
@@ -4957,6 +4991,7 @@ impl PipeManager {
                     .unwrap_or_default()
                     .to_string_lossy()
                     .to_string();
+                validate_pipe_identifier(&name)?;
                 let dest_dir = self.pipes_dir.join(&name);
                 let dest_canonical = dest_dir.canonicalize().unwrap_or_else(|_| dest_dir.clone());
                 let candidate_content = std::fs::read_to_string(source_path.join("pipe.md")).ok();
@@ -4982,6 +5017,7 @@ impl PipeManager {
         }
         if source.starts_with("https://") {
             let name = url_to_pipe_name(source);
+            validate_pipe_identifier(&name)?;
             let response = reqwest::get(source).await?;
             if !response.status().is_success() {
                 return Err(anyhow!(
@@ -5014,6 +5050,7 @@ impl PipeManager {
         slug: &str,
         version: i64,
     ) -> Result<String> {
+        validate_pipe_identifier(slug)?;
         // Parse the source_md to get config + body
         let (mut config, body) = parse_frontmatter(source_md)?;
 
@@ -5047,6 +5084,7 @@ impl PipeManager {
         slug: &str,
         version: i64,
     ) -> Result<()> {
+        validate_pipe_identifier(name)?;
         let dest_dir = self.pipes_dir.join(name);
         if !dest_dir.exists() {
             return Err(anyhow!("pipe '{}' not found", name));
@@ -5090,6 +5128,7 @@ impl PipeManager {
     /// Writes a tombstone so the pipe is not restored by builtin installation
     /// or cloud sync.
     pub async fn delete_pipe(&self, name: &str) -> Result<()> {
+        validate_pipe_identifier(name)?;
         let dir = self.pipes_dir.join(name);
         if !dir.exists() {
             return Err(self.pipe_not_found_error(name));
@@ -5151,6 +5190,7 @@ impl PipeManager {
 
     /// Clear a pipe's chat history by deleting its Pi session files.
     pub async fn clear_pipe_history(&self, name: &str) -> Result<()> {
+        validate_pipe_identifier(name)?;
         let pipe_dir = self.pipes_dir.join(name);
         if !pipe_dir.exists() {
             return Err(anyhow!("pipe '{}' not found", name));
@@ -8411,6 +8451,234 @@ mod tests {
             "---\nschedule: manual\nenabled: true\ntemplate: {}\n---\n\n{}\n",
             template, body
         )
+    }
+
+    #[test]
+    fn portable_pipe_identifier_is_exactly_one_safe_component() {
+        for invalid in [
+            "",
+            "   ",
+            ".",
+            "..",
+            "../victim",
+            "nested/pipe",
+            "nested\\pipe",
+            "C:relative",
+        ] {
+            assert!(
+                validate_pipe_identifier(invalid).is_err(),
+                "{invalid:?} should be rejected"
+            );
+        }
+
+        for valid in ["daily-recap", "release..notes", "pipe.v2"] {
+            assert!(
+                validate_pipe_identifier(valid).is_ok(),
+                "{valid:?} should be accepted"
+            );
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum PipeMutation {
+        Delete,
+        StoreInstall,
+        StoreUpdate,
+        ClearHistory,
+        Enable,
+        UpdateConfig,
+        Run,
+        StartBackground,
+    }
+
+    async fn invoke_pipe_mutation(
+        manager: &PipeManager,
+        mutation: PipeMutation,
+        identifier: &str,
+    ) -> Result<()> {
+        let source = pipe_source(false, "updated prompt");
+        match mutation {
+            PipeMutation::Delete => manager.delete_pipe(identifier).await,
+            PipeMutation::StoreInstall => manager
+                .install_pipe_from_store(&source, identifier, 1)
+                .await
+                .map(|_| ()),
+            PipeMutation::StoreUpdate => {
+                manager
+                    .update_pipe_from_store(identifier, &source, "store-slug", 2)
+                    .await
+            }
+            PipeMutation::ClearHistory => manager.clear_pipe_history(identifier).await,
+            PipeMutation::Enable => manager.enable_pipe(identifier, false).await,
+            PipeMutation::UpdateConfig => {
+                manager
+                    .update_config(
+                        identifier,
+                        HashMap::from([("prompt_body".to_string(), serde_json::json!("changed"))]),
+                    )
+                    .await
+            }
+            PipeMutation::Run => manager.run_pipe(identifier).await.map(|_| ()),
+            PipeMutation::StartBackground => manager.start_pipe_background(identifier).await,
+        }
+    }
+
+    #[tokio::test]
+    async fn pipe_mutations_reject_non_component_identifiers_before_touching_disk() {
+        let mutations = [
+            PipeMutation::Delete,
+            PipeMutation::StoreInstall,
+            PipeMutation::StoreUpdate,
+            PipeMutation::ClearHistory,
+            PipeMutation::Enable,
+            PipeMutation::UpdateConfig,
+            PipeMutation::Run,
+            PipeMutation::StartBackground,
+        ];
+
+        for mutation in mutations {
+            for identifier_kind in [
+                "empty",
+                "whitespace",
+                "dot",
+                "dotdot",
+                "traversal",
+                "forward-separator",
+                "back-separator",
+                "drive-prefix",
+                "absolute",
+            ] {
+                let root = tempfile::tempdir().unwrap();
+                let pipes_dir = root.path().join("pipes");
+                let victim_dir = root.path().join("victim");
+                std::fs::create_dir_all(&pipes_dir).unwrap();
+                std::fs::create_dir_all(&victim_dir).unwrap();
+                std::fs::write(victim_dir.join("pipe.md"), pipe_source(false, "sentinel")).unwrap();
+                std::fs::write(
+                    victim_dir.join(".screenpipe-acp-sessions.json"),
+                    "history sentinel",
+                )
+                .unwrap();
+
+                let identifier = match identifier_kind {
+                    "empty" => String::new(),
+                    "whitespace" => "   ".to_string(),
+                    "dot" => ".".to_string(),
+                    "dotdot" => "..".to_string(),
+                    "traversal" => "../victim".to_string(),
+                    "forward-separator" => "nested/pipe".to_string(),
+                    "back-separator" => "nested\\pipe".to_string(),
+                    "drive-prefix" => "C:relative".to_string(),
+                    "absolute" => victim_dir.to_string_lossy().into_owned(),
+                    _ => unreachable!(),
+                };
+                let manager = PipeManager::new(pipes_dir, HashMap::new(), None, 0);
+
+                let error = invoke_pipe_mutation(&manager, mutation, &identifier)
+                    .await
+                    .expect_err("non-component pipe identifier must be rejected")
+                    .to_string();
+                assert!(
+                    error.contains("invalid pipe identifier"),
+                    "{mutation:?} returned an untruthful error for {identifier_kind}: {error}"
+                );
+                assert_eq!(
+                    std::fs::read_to_string(victim_dir.join("pipe.md")).unwrap(),
+                    pipe_source(false, "sentinel"),
+                    "{mutation:?} changed the outside pipe for {identifier_kind}"
+                );
+                assert_eq!(
+                    std::fs::read_to_string(victim_dir.join(".screenpipe-acp-sessions.json"))
+                        .unwrap(),
+                    "history sentinel",
+                    "{mutation:?} changed outside history for {identifier_kind}"
+                );
+            }
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let pipes_dir = root.path().join("pipes");
+        std::fs::create_dir_all(&pipes_dir).unwrap();
+        let manager = PipeManager::new(pipes_dir.clone(), HashMap::new(), None, 0);
+        let name = "release..notes";
+
+        manager
+            .install_pipe_from_store(&pipe_source(false, "installed"), name, 1)
+            .await
+            .unwrap();
+        manager
+            .update_pipe_from_store(name, &pipe_source(false, "updated"), "store-slug", 2)
+            .await
+            .unwrap();
+        manager.enable_pipe(name, false).await.unwrap();
+        manager
+            .update_config(
+                name,
+                HashMap::from([("prompt_body".to_string(), serde_json::json!("configured"))]),
+            )
+            .await
+            .unwrap();
+        std::fs::write(
+            pipes_dir.join(name).join(".screenpipe-acp-sessions.json"),
+            "history",
+        )
+        .unwrap();
+        manager.clear_pipe_history(name).await.unwrap();
+        assert!(!pipes_dir
+            .join(name)
+            .join(".screenpipe-acp-sessions.json")
+            .exists());
+        assert!(
+            std::fs::read_to_string(pipes_dir.join(name).join("pipe.md"))
+                .unwrap()
+                .contains("configured")
+        );
+        manager.delete_pipe(name).await.unwrap();
+        assert!(!pipes_dir.join(name).exists());
+
+        let error = manager
+            .delete_pipe("missing-pipe")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("not found"));
+        assert!(!error.contains("invalid pipe identifier"));
+    }
+
+    #[tokio::test]
+    async fn install_pipe_rejects_unportable_derived_identifiers_before_io() {
+        let root = tempfile::tempdir().unwrap();
+        let pipes_dir = root.path().join("pipes");
+        std::fs::create_dir_all(&pipes_dir).unwrap();
+        let manager = PipeManager::new(pipes_dir.clone(), HashMap::new(), None, 0);
+
+        for source in [
+            "https://example.invalid/",
+            "https://example.invalid/C:relative.md",
+        ] {
+            let error = manager.install_pipe(source).await.unwrap_err().to_string();
+            assert!(
+                error.contains("invalid pipe identifier"),
+                "{source} returned an untruthful error: {error}"
+            );
+        }
+
+        #[cfg(unix)]
+        for filename in ["C:relative.md", "nested\\pipe.md"] {
+            let source = root.path().join(filename);
+            std::fs::write(&source, pipe_source(false, "source")).unwrap();
+            let error = manager
+                .install_pipe(source.to_str().unwrap())
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("invalid pipe identifier"),
+                "{filename} returned an untruthful error: {error}"
+            );
+        }
+
+        assert!(std::fs::read_dir(pipes_dir).unwrap().next().is_none());
     }
 
     #[test]
