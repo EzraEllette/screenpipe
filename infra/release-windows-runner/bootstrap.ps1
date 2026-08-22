@@ -118,6 +118,7 @@ $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
 $requiredPaths = @(
   'C:\Program Files\Git\cmd',
   'C:\Program Files\Git\bin',
+  'C:\Program Files\Git\usr\bin',
   'C:\Program Files\nodejs',
   $llvmBin,
   $bunRoot,
@@ -181,6 +182,7 @@ $commands = @(
   'sccache --version'
   'pwsh --version'
   'bash --version'
+  'unzip -v'
 )
 foreach ($command in $commands) {
   Write-Host "> $command"
