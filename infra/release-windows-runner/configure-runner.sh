@@ -7,7 +7,18 @@ set -euo pipefail
 
 REPOSITORY="${GITHUB_REPOSITORY:-screenpipe/screenpipe}"
 RESOURCE_GROUP="${AZURE_RESOURCE_GROUP:-rg-screenpipe-release-windows}"
-VM_NAME="${AZURE_VM_NAME:-screenpipe-release-win-vm}"
+RUNNER_ARCHITECTURE="${RUNNER_ARCHITECTURE:-x64}"
+if [[ "$RUNNER_ARCHITECTURE" != "x64" && "$RUNNER_ARCHITECTURE" != "arm64" ]]; then
+  echo "RUNNER_ARCHITECTURE must be x64 or arm64" >&2
+  exit 1
+fi
+DEFAULT_VM_NAME="screenpipe-release-win-vm"
+RUNNER_NAME="screenpipe-release-windows"
+if [[ "$RUNNER_ARCHITECTURE" == "arm64" ]]; then
+  DEFAULT_VM_NAME="screenpipe-release-win-arm64-vm"
+  RUNNER_NAME="screenpipe-release-windows-arm64"
+fi
+VM_NAME="${AZURE_VM_NAME:-$DEFAULT_VM_NAME}"
 EXTRA_ALLOWED_WORKFLOW_REF="${EXTRA_ALLOWED_WORKFLOW_REF:-}"
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 
@@ -23,6 +34,7 @@ RUN_RESULT=$(az vm run-command invoke \
     "RegistrationToken=$REGISTRATION_TOKEN" \
     "RemovalToken=$REMOVAL_TOKEN" \
     "Repository=$REPOSITORY" \
+    "RunnerArchitecture=$RUNNER_ARCHITECTURE" \
     "ExtraAllowedWorkflowRef=$EXTRA_ALLOWED_WORKFLOW_REF" \
   --output json)
 
@@ -35,4 +47,4 @@ fi
 unset REGISTRATION_TOKEN REMOVAL_TOKEN
 
 gh api "repos/$REPOSITORY/actions/runners" \
-  --jq '.runners[] | select(.name == "screenpipe-release-windows") | {name,status,busy,labels:[.labels[].name]}'
+  --jq ".runners[] | select(.name == \"$RUNNER_NAME\") | {name,status,busy,labels:[.labels[].name]}"

@@ -47,6 +47,7 @@ jobs:
       macos_arm_runner: ${{ steps.check-runner.outputs.macos_arm_runner }}
       macos_x64_runner: ${{ steps.check-runner.outputs.macos_x64_runner }}
       windows_runner: ${{ steps.check-runner.outputs.windows_runner }}
+      windows_arm_runner: ${{ steps.check-runner.outputs.windows_arm_runner }}
       release_sha: ${{ steps.resolve-release.outputs.sha }}
       release_version: ${{ steps.resolve-release.outputs.version }}
     steps:
@@ -128,12 +129,14 @@ jobs:
               echo "macos_arm_runner=macos-latest"
               echo "macos_x64_runner=macos-26"
               echo "windows_runner=windows-2022"
+              echo "windows_arm_runner=windows-11-arm"
             } >> "$GITHUB_OUTPUT"
           else
             {
               echo "macos_arm_runner=screenpipe-release-macos"
               echo "macos_x64_runner=screenpipe-release-macos"
               echo "windows_runner=screenpipe-release-windows"
+              echo "windows_arm_runner=screenpipe-release-windows-arm64"
             } >> "$GITHUB_OUTPUT"
           fi
 
@@ -180,7 +183,7 @@ jobs:
             tauri-args: "--target x86_64-pc-windows-msvc --features official-build,directml,redact-onnx-directml"
             target: x86_64-pc-windows-msvc
             os_type: "windows"
-          - platform: windows-11-arm
+          - platform: ${{ needs.check_commit.outputs.windows_arm_runner || 'windows-11-arm' }}
             args: "--target aarch64-pc-windows-msvc"
             pre-build-args: ""
             tauri-args: "--target aarch64-pc-windows-msvc --features official-build,directml,redact-onnx-directml"
@@ -292,11 +295,19 @@ jobs:
           cargo --version
 
       - name: Install Rust (Windows ARM64 native)
-        if: matrix.os_type == 'windows' && matrix.target == 'aarch64-pc-windows-msvc'
+        if: runner.environment == 'github-hosted' && matrix.os_type == 'windows' && matrix.target == 'aarch64-pc-windows-msvc'
         shell: pwsh
         run: |
           Invoke-WebRequest https://static.rust-lang.org/rustup/dist/aarch64-pc-windows-msvc/rustup-init.exe -OutFile rustup-init.exe
           .\rustup-init.exe -y
+
+      - name: Verify preinstalled Rust (persistent Windows ARM64)
+        if: runner.environment == 'self-hosted' && matrix.os_type == 'windows' && matrix.target == 'aarch64-pc-windows-msvc'
+        shell: pwsh
+        run: |
+          rustup target add aarch64-pc-windows-msvc
+          rustc --version
+          cargo --version
 
       - name: setup rust path
         if: matrix.os_type == 'windows'

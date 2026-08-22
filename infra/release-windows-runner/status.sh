@@ -7,7 +7,18 @@ set -euo pipefail
 
 REPOSITORY="${GITHUB_REPOSITORY:-screenpipe/screenpipe}"
 RESOURCE_GROUP="${AZURE_RESOURCE_GROUP:-rg-screenpipe-release-windows}"
-VM_NAME="${AZURE_VM_NAME:-screenpipe-release-win-vm}"
+RUNNER_ARCHITECTURE="${RUNNER_ARCHITECTURE:-x64}"
+if [[ "$RUNNER_ARCHITECTURE" != "x64" && "$RUNNER_ARCHITECTURE" != "arm64" ]]; then
+  echo "RUNNER_ARCHITECTURE must be x64 or arm64" >&2
+  exit 1
+fi
+DEFAULT_VM_NAME="screenpipe-release-win-vm"
+RUNNER_NAME="screenpipe-release-windows"
+if [[ "$RUNNER_ARCHITECTURE" == "arm64" ]]; then
+  DEFAULT_VM_NAME="screenpipe-release-win-arm64-vm"
+  RUNNER_NAME="screenpipe-release-windows-arm64"
+fi
+VM_NAME="${AZURE_VM_NAME:-$DEFAULT_VM_NAME}"
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 
 az vm get-instance-view \
@@ -21,6 +32,7 @@ RUN_RESULT=$(az vm run-command invoke \
   --name "$VM_NAME" \
   --command-id RunPowerShellScript \
   --scripts @"$SCRIPT_DIR/status.ps1" \
+  --parameters "RunnerArchitecture=$RUNNER_ARCHITECTURE" \
   --output json)
 
 printf '%s\n' "$RUN_RESULT" | jq -r '.value[].message | select(length > 0)'
@@ -30,4 +42,4 @@ if ! printf '%s\n' "$RUN_RESULT" | jq -e '[.value[].message] | any(contains("__S
 fi
 
 gh api "repos/$REPOSITORY/actions/runners" \
-  --jq '.runners[] | select(.name == "screenpipe-release-windows") | {name,status,busy,labels:[.labels[].name]}'
+  --jq ".runners[] | select(.name == \"$RUNNER_NAME\") | {name,status,busy,labels:[.labels[].name]}"

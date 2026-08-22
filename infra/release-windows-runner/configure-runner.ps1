@@ -6,6 +6,7 @@ param(
   [Parameter(Mandatory = $true)] [string] $RegistrationToken,
   [Parameter(Mandatory = $true)] [string] $RemovalToken,
   [string] $Repository = 'screenpipe/screenpipe',
+  [ValidateSet('x64', 'arm64')] [string] $RunnerArchitecture = 'x64',
   [string] $ExtraAllowedWorkflowRef = ''
 )
 
@@ -13,15 +14,15 @@ $ErrorActionPreference = 'Stop'
 $runnerRoot = 'C:\actions-runner'
 $hookRoot = 'C:\screenpipe-release-runner\hooks'
 $cacheRoot = 'S:\screenpipe-cache'
-$runnerName = 'screenpipe-release-windows'
-$runnerLabel = 'screenpipe-release-windows'
+$runnerName = if ($RunnerArchitecture -eq 'arm64') { 'screenpipe-release-windows-arm64' } else { 'screenpipe-release-windows' }
+$runnerLabel = $runnerName
 
 New-Item -ItemType Directory -Force -Path $hookRoot, "$cacheRoot\work" | Out-Null
 
-$allowedRefs = @(
-  "$Repository/.github/workflows/release-app.yml@refs/heads/main",
-  "$Repository/.github/workflows/release-enterprise.yml@refs/heads/main"
-)
+$allowedRefs = @("$Repository/.github/workflows/release-app.yml@refs/heads/main")
+if ($RunnerArchitecture -eq 'x64') {
+  $allowedRefs += "$Repository/.github/workflows/release-enterprise.yml@refs/heads/main"
+}
 if ($ExtraAllowedWorkflowRef) { $allowedRefs += $ExtraAllowedWorkflowRef }
 Set-Content -Path "$hookRoot\allowed-workflow-refs.txt" -Value $allowedRefs -Encoding UTF8
 

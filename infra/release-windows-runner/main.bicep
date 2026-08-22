@@ -12,16 +12,25 @@ param adminUsername string = 'screenpipeadmin'
 @description('Generated deployment-only administrator password. RDP is not exposed.')
 param adminPassword string
 
-@description('Release runner VM size.')
-param vmSize string = 'Standard_D16s_v5'
+@allowed([
+  'x64'
+  'arm64'
+])
+@description('Native CPU architecture for this release runner.')
+param runnerArchitecture string = 'x64'
+
+@description('Release runner VM size. Empty selects the architecture default.')
+param vmSize string = ''
 
 @minValue(1024)
 @description('Persistent Premium SSD cache disk size in GiB.')
 param cacheDiskSizeGiB int = 2048
 
-var prefix = 'screenpipe-release-win'
+var isArm64 = runnerArchitecture == 'arm64'
+var prefix = isArm64 ? 'screenpipe-release-win-arm64' : 'screenpipe-release-win'
 var vmName = '${prefix}-vm'
 var workspaceName = '${prefix}-logs'
+var resolvedVmSize = empty(vmSize) ? (isArm64 ? 'Standard_D16ps_v5' : 'Standard_D16s_v5') : vmSize
 
 resource publicIp 'Microsoft.Network/publicIPAddresses@2024-05-01' = {
   name: '${prefix}-nat-ip'
@@ -128,40 +137,54 @@ resource vm 'Microsoft.Compute/virtualMachines@2024-07-01' = {
   }
   properties: {
     hardwareProfile: {
-      vmSize: vmSize
+      vmSize: resolvedVmSize
     }
-    securityProfile: {
-      securityType: 'TrustedLaunch'
-      uefiSettings: {
-        secureBootEnabled: true
-        vTpmEnabled: true
-      }
-    }
+    securityProfile: isArm64
+      ? {
+          securityType: 'Standard'
+        }
+      : {
+          securityType: 'TrustedLaunch'
+          uefiSettings: {
+            secureBootEnabled: true
+            vTpmEnabled: true
+          }
+        }
+    licenseType: isArm64 ? 'Windows_Client' : null
     osProfile: {
-      computerName: 'sp-release-win'
+      computerName: isArm64 ? 'sp-rel-win-arm' : 'sp-release-win'
       adminUsername: adminUsername
       adminPassword: adminPassword
       allowExtensionOperations: true
       windowsConfiguration: {
         enableAutomaticUpdates: true
         provisionVMAgent: true
-        patchSettings: {
-          assessmentMode: 'AutomaticByPlatform'
-          patchMode: 'AutomaticByPlatform'
-          automaticByPlatformSettings: {
-            bypassPlatformSafetyChecksOnUserSchedule: false
-            rebootSetting: 'IfRequired'
-          }
-        }
+        patchSettings: isArm64
+          ? null
+          : {
+              assessmentMode: 'AutomaticByPlatform'
+              patchMode: 'AutomaticByPlatform'
+              automaticByPlatformSettings: {
+                bypassPlatformSafetyChecksOnUserSchedule: false
+                rebootSetting: 'IfRequired'
+              }
+            }
       }
     }
     storageProfile: {
-      imageReference: {
-        publisher: 'MicrosoftWindowsServer'
-        offer: 'WindowsServer'
-        sku: '2022-datacenter-azure-edition'
-        version: 'latest'
-      }
+      imageReference: isArm64
+        ? {
+            publisher: 'MicrosoftWindowsDesktop'
+            offer: 'windows11preview-arm64'
+            sku: 'win11-25h2-pro'
+            version: 'latest'
+          }
+        : {
+            publisher: 'MicrosoftWindowsServer'
+            offer: 'WindowsServer'
+            sku: '2022-datacenter-azure-edition'
+            version: 'latest'
+          }
       osDisk: {
         createOption: 'FromImage'
         deleteOption: 'Delete'

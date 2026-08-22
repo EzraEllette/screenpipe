@@ -7,8 +7,19 @@ set -euo pipefail
 
 RESOURCE_GROUP="${AZURE_RESOURCE_GROUP:-rg-screenpipe-release-windows}"
 LOCATION="${AZURE_LOCATION:-westus2}"
-VM_NAME="${AZURE_VM_NAME:-screenpipe-release-win-vm}"
-VM_SIZE="${AZURE_VM_SIZE:-Standard_D16s_v5}"
+RUNNER_ARCHITECTURE="${RUNNER_ARCHITECTURE:-x64}"
+if [[ "$RUNNER_ARCHITECTURE" != "x64" && "$RUNNER_ARCHITECTURE" != "arm64" ]]; then
+  echo "RUNNER_ARCHITECTURE must be x64 or arm64" >&2
+  exit 1
+fi
+DEFAULT_VM_NAME="screenpipe-release-win-vm"
+DEFAULT_VM_SIZE="Standard_D16s_v5"
+if [[ "$RUNNER_ARCHITECTURE" == "arm64" ]]; then
+  DEFAULT_VM_NAME="screenpipe-release-win-arm64-vm"
+  DEFAULT_VM_SIZE="Standard_D16ps_v5"
+fi
+VM_NAME="${AZURE_VM_NAME:-$DEFAULT_VM_NAME}"
+VM_SIZE="${AZURE_VM_SIZE:-$DEFAULT_VM_SIZE}"
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 
 if az vm show --resource-group "$RESOURCE_GROUP" --name "$VM_NAME" >/dev/null 2>&1; then
@@ -22,9 +33,9 @@ else
   ADMIN_PASSWORD=$(openssl rand -base64 36 | tr -d '/+=')Aa1!
   az deployment group create \
     --resource-group "$RESOURCE_GROUP" \
-    --name screenpipe-release-windows \
+    --name "screenpipe-release-windows-$RUNNER_ARCHITECTURE" \
     --template-file "$SCRIPT_DIR/main.bicep" \
-    --parameters location="$LOCATION" adminPassword="$ADMIN_PASSWORD" vmSize="$VM_SIZE" \
+    --parameters location="$LOCATION" adminPassword="$ADMIN_PASSWORD" vmSize="$VM_SIZE" runnerArchitecture="$RUNNER_ARCHITECTURE" \
     --query 'properties.outputs' \
     --output table
   unset ADMIN_PASSWORD
@@ -36,6 +47,7 @@ RUN_RESULT=$(az vm run-command invoke \
   --name "$VM_NAME" \
   --command-id RunPowerShellScript \
   --scripts @"$SCRIPT_DIR/bootstrap.ps1" \
+  --parameters "RunnerArchitecture=$RUNNER_ARCHITECTURE" \
   --output json)
 printf '%s\n' "$RUN_RESULT" | jq -r '.value[].message | select(length > 0)'
 if ! printf '%s\n' "$RUN_RESULT" | jq -e '[.value[].message] | any(contains("__SCREENPIPE_BOOTSTRAP_OK__"))' >/dev/null; then
