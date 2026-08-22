@@ -1098,8 +1098,9 @@ jobs:
           ESIGNER_PASSWORD: ${{ secrets.ESIGNER_PASSWORD }}
           ESIGNER_TOTP_SECRET: ${{ secrets.ESIGNER_TOTP_SECRET }}
           ESIGNER_CREDENTIAL_ID: ${{ secrets.ESIGNER_CREDENTIAL_ID }}
-          # Optimize for build speed on Windows
-          CARGO_PROFILE_RELEASE_LTO: thin
+          # Final Windows links are a release bottleneck; ThinLTO added minutes
+          # while runtime dependencies already ship optimized code.
+          CARGO_PROFILE_RELEASE_LTO: "false"
           CARGO_PROFILE_RELEASE_OPT_LEVEL: "2"
           CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
           # Enable incremental compilation for Windows

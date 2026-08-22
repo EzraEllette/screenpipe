@@ -12,8 +12,6 @@ param(
     [string]$FilePath
 )
 
-$ErrorActionPreference = 'Stop'
-
 # Skip if credentials aren't set (local dev builds)
 if (-not $env:ESIGNER_USERNAME -or -not $env:ESIGNER_PASSWORD) {
     Write-Host "Skipping code signing (no credentials): $FilePath"
@@ -70,78 +68,6 @@ if (-not ($signableExts -contains $ext)) {
     $requiresExeAlias = $true
 }
 
-function Test-ScreenpipeAuthenticodeSignature {
-    param(
-        [Parameter(Mandatory=$true)]
-        [string]$Path
-    )
-
-    try {
-        $signature = Get-AuthenticodeSignature $Path -ErrorAction Stop
-        if ($signature.Status -eq 'Valid') {
-            return $true
-        }
-        Write-Host "WARN: Authenticode status is $($signature.Status): $Path"
-    } catch {
-        # Windows ARM64 hosted runners can find Get-AuthenticodeSignature while
-        # failing to autoload Microsoft.PowerShell.Security. The workflow already
-        # locates signtool.exe for Tauri, so use the SDK verifier as a fallback.
-        Write-Host "WARN: Get-AuthenticodeSignature unavailable: $($_.Exception.Message)"
-        $signtoolPath = $env:TAURI_WINDOWS_SIGNTOOL_PATH
-        if (-not $signtoolPath) {
-            $signtoolCommand = Get-Command signtool.exe -ErrorAction SilentlyContinue
-            if ($signtoolCommand) {
-                $signtoolPath = $signtoolCommand.Source
-            }
-        }
-
-        if ($signtoolPath -and (Test-Path $signtoolPath)) {
-            & $signtoolPath verify /pa /all $Path | Out-Host
-            if ($LASTEXITCODE -eq 0) {
-                return $true
-            }
-            Write-Host "WARN: signtool verification failed with exit $LASTEXITCODE`: $Path"
-        } else {
-            Write-Host "WARN: PowerShell verifier unavailable and signtool.exe not found"
-        }
-    }
-
-    return $false
-}
-
-$originalFilePath = $FilePath
-$signatureCacheFile = $null
-if ($env:SCREENPIPE_SIGNED_BINARY_CACHE_DIR -and $env:ESIGNER_CREDENTIAL_ID) {
-    New-Item -ItemType Directory -Force -Path $env:SCREENPIPE_SIGNED_BINARY_CACHE_DIR | Out-Null
-    $fileHashAlgorithm = [System.Security.Cryptography.SHA256]::Create()
-    $fileStream = [System.IO.File]::OpenRead($originalFilePath)
-    try {
-        $unsignedHash = ([BitConverter]::ToString($fileHashAlgorithm.ComputeHash($fileStream))).Replace('-', '').ToLowerInvariant()
-    } finally {
-        $fileStream.Dispose()
-        $fileHashAlgorithm.Dispose()
-    }
-    $cacheIdentity = "v1|$env:ESIGNER_CREDENTIAL_ID|$unsignedHash"
-    $sha256 = [System.Security.Cryptography.SHA256]::Create()
-    try {
-        $cacheKeyBytes = [System.Text.Encoding]::UTF8.GetBytes($cacheIdentity)
-        $signatureCacheKey = ([BitConverter]::ToString($sha256.ComputeHash($cacheKeyBytes))).Replace('-', '').ToLowerInvariant()
-    } finally {
-        $sha256.Dispose()
-    }
-    $signatureCacheFile = Join-Path $env:SCREENPIPE_SIGNED_BINARY_CACHE_DIR "$signatureCacheKey.exe"
-
-    if (Test-Path -LiteralPath $signatureCacheFile) {
-        if (Test-ScreenpipeAuthenticodeSignature -Path $signatureCacheFile) {
-            Copy-Item -LiteralPath $signatureCacheFile -Destination $originalFilePath -Force
-            Write-Host "Reused verified signed binary: $originalFilePath"
-            exit 0
-        }
-        Write-Host "WARN: removing invalid signed binary cache entry: $signatureCacheFile"
-        Remove-Item -LiteralPath $signatureCacheFile -Force
-    }
-}
-
 $jarFile = Get-ChildItem $env:CODESIGNTOOL_PATH -Recurse -Filter "code_sign_tool*.jar" | Select-Object -First 1
 $javaFile = Get-ChildItem $env:CODESIGNTOOL_PATH -Recurse -Filter "java.exe" | Select-Object -First 1
 
@@ -150,6 +76,7 @@ if (-not $jarFile -or -not $javaFile) {
     exit 1
 }
 
+$originalFilePath = $FilePath
 $temporarySigningCopy = $null
 if ($requiresExeAlias) {
     $temporarySigningCopy = "$FilePath.signing.exe"
@@ -265,8 +192,40 @@ if (-not $signed) {
     exit 1
 }
 
-if (-not (Test-ScreenpipeAuthenticodeSignature -Path $signedFile)) {
-    Write-Host "ERROR: signed output failed Authenticode verification: $signedFile"
+$signatureValid = $false
+$signatureStatus = "unknown"
+try {
+    $signature = Get-AuthenticodeSignature $signedFile -ErrorAction Stop
+    $signatureStatus = $signature.Status
+    $signatureValid = ($signature.Status -eq 'Valid')
+} catch {
+    # Windows ARM64 hosted runners can find Get-AuthenticodeSignature while
+    # failing to autoload Microsoft.PowerShell.Security. The workflow already
+    # locates signtool.exe for Tauri, so use the SDK verifier as a fallback.
+    Write-Host "WARN: Get-AuthenticodeSignature unavailable: $($_.Exception.Message)"
+    $signtoolPath = $env:TAURI_WINDOWS_SIGNTOOL_PATH
+    if (-not $signtoolPath) {
+        $signtoolCommand = Get-Command signtool.exe -ErrorAction SilentlyContinue
+        if ($signtoolCommand) {
+            $signtoolPath = $signtoolCommand.Source
+        }
+    }
+
+    if ($signtoolPath -and (Test-Path $signtoolPath)) {
+        & $signtoolPath verify /pa /all $signedFile
+        if ($LASTEXITCODE -eq 0) {
+            $signatureValid = $true
+            $signatureStatus = "Valid (signtool fallback)"
+        } else {
+            $signatureStatus = "signtool exit $LASTEXITCODE"
+        }
+    } else {
+        $signatureStatus = "PowerShell verifier unavailable and signtool.exe not found"
+    }
+}
+
+if (-not $signatureValid) {
+    Write-Host "ERROR: signed output failed Authenticode verification (status=$signatureStatus): $signedFile"
     if (Test-Path $signedDir) {
         Remove-Item $signedDir -Recurse -Force
     }
@@ -277,17 +236,6 @@ if (-not (Test-ScreenpipeAuthenticodeSignature -Path $signedFile)) {
 }
 
 Copy-Item $signedFile $originalFilePath -Force
-if ($signatureCacheFile) {
-    $temporaryCacheFile = "$signatureCacheFile.$([Guid]::NewGuid().ToString('N')).tmp"
-    try {
-        Copy-Item $signedFile $temporaryCacheFile -Force
-        Move-Item $temporaryCacheFile $signatureCacheFile -Force
-    } finally {
-        if (Test-Path -LiteralPath $temporaryCacheFile) {
-            Remove-Item -LiteralPath $temporaryCacheFile -Force
-        }
-    }
-}
 Remove-Item $signedDir -Recurse -Force
 if ($temporarySigningCopy -and (Test-Path $temporarySigningCopy)) {
     Remove-Item $temporarySigningCopy -Force

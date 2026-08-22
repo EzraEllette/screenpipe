@@ -30,6 +30,7 @@ runs:
 
         $cacheRoot = 'S:\screenpipe-cache'
         $persistentTarget = "$cacheRoot\targets-v3\$env:SCREENPIPE_RELEASE_FLAVOR\$env:SCREENPIPE_RELEASE_TARGET"
+        $persistentNodeModules = "$cacheRoot\node-modules-v1\$env:SCREENPIPE_RELEASE_FLAVOR\$env:SCREENPIPE_RELEASE_TARGET"
         $workspaceTarget = "$env:GITHUB_WORKSPACE\apps\screenpipe-app-tauri\src-tauri\target"
         $workspaceNodeModules = "$env:GITHUB_WORKSPACE\apps\screenpipe-app-tauri\node_modules"
         $workspaceTauri = "$env:GITHUB_WORKSPACE\apps\screenpipe-app-tauri\.tauri"
@@ -42,15 +43,14 @@ runs:
           "$cacheRoot\bun",
           "$cacheRoot\native-deps",
           $persistentTarget,
-          "$cacheRoot\tauri-v2\$env:SCREENPIPE_RELEASE_FLAVOR\$env:SCREENPIPE_RELEASE_TARGET",
-          "$cacheRoot\signed-binaries-v2"
+          $persistentNodeModules,
+          "$cacheRoot\tauri-v2\$env:SCREENPIPE_RELEASE_FLAVOR\$env:SCREENPIPE_RELEASE_TARGET"
         ) | ForEach-Object { New-Item -ItemType Directory -Force -Path $_ | Out-Null }
 
         # Bundle output is release-specific. Compiler outputs and downloads stay warm.
         Remove-Item "$persistentTarget\$env:SCREENPIPE_RELEASE_TARGET\release\bundle" -Recurse -Force -ErrorAction SilentlyContinue
-        Remove-Item $workspaceNodeModules -Recurse -Force -ErrorAction SilentlyContinue
 
-        foreach ($path in @($workspaceTarget, $workspaceTauri, $shortTarget)) {
+        foreach ($path in @($workspaceTarget, $workspaceNodeModules, $workspaceTauri, $shortTarget)) {
           if (-not (Test-Path $path)) { continue }
           $item = Get-Item $path -Force
           if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
@@ -65,6 +65,8 @@ runs:
         if ($LASTEXITCODE -ne 0) { throw 'failed to create persistent short target junction' }
         cmd /c mklink /J $workspaceTarget $shortTarget
         if ($LASTEXITCODE -ne 0) { throw 'failed to attach workspace target junction' }
+        cmd /c mklink /J $workspaceNodeModules $persistentNodeModules
+        if ($LASTEXITCODE -ne 0) { throw 'failed to attach persistent node_modules junction' }
         cmd /c mklink /J $workspaceTauri "$cacheRoot\tauri-v2\$env:SCREENPIPE_RELEASE_FLAVOR\$env:SCREENPIPE_RELEASE_TARGET"
         if ($LASTEXITCODE -ne 0) { throw 'failed to attach persistent Tauri cache' }
 
@@ -75,8 +77,7 @@ runs:
           "SCCACHE_DIR=$cacheRoot\sccache",
           'RUSTC_WRAPPER=sccache',
           "BUN_INSTALL_CACHE_DIR=$cacheRoot\bun",
-          "SCREENPIPE_NATIVE_CACHE_DIR=$cacheRoot\native-deps",
-          "SCREENPIPE_SIGNED_BINARY_CACHE_DIR=$cacheRoot\signed-binaries-v2"
+          "SCREENPIPE_NATIVE_CACHE_DIR=$cacheRoot\native-deps"
         ) | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
         "$cacheRoot\cargo\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
