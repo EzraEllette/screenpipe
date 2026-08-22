@@ -52,6 +52,149 @@ fn chatgpt_drifted_open_conversation_does_not_masquerade_as_empty() {
 }
 
 #[test]
+fn chatgpt_macos_depth_gaps_keep_explicit_actor_turns() {
+    let source = r#"{
+        "app": {
+            "platform": "macos",
+            "app_id": "com.openai.codex",
+            "executable": "ChatGPT",
+            "display_name": "ChatGPT",
+            "version": null,
+            "browser_url": null
+        },
+        "nodes": [
+            { "role": "AXButton", "text": "unrelated retained control", "depth": 7 },
+            { "role": "AXHeading", "text": "You said:", "depth": 17 },
+            { "role": "AXStaticText", "text": "You said:", "depth": 18 },
+            { "role": "AXPopUpButton", "text": "User attachment", "depth": 17 },
+            { "role": "AXPopUpButton", "text": "User attachment", "depth": 17 },
+            { "role": "AXStaticText", "text": "Measure the real parser baseline.", "depth": 19 },
+            { "role": "AXStaticText", "text": "2:24 PM", "depth": 17 },
+            { "role": "AXHeading", "text": "ChatGPT said:", "depth": 17 },
+            { "role": "AXStaticText", "text": "ChatGPT said:", "depth": 18 },
+            { "role": "AXStaticText", "text": "The baseline misses every retained turn.", "depth": 18 },
+            { "role": "AXStaticText", "text": "queued user correction", "depth": 19 },
+            { "role": "AXButton", "text": "Steer", "depth": 18 },
+            { "role": "AXStaticText", "text": "HEAD", "depth": 13 }
+        ]
+    }"#;
+    let (parser, outcome) = parse_fixture(source);
+    assert_eq!(parser.as_deref(), Some("app.chatgpt.turn_markers"));
+    let ValidatedParseOutcome::Handled(projection) = outcome else {
+        panic!("expected depth-gapped ChatGPT conversation");
+    };
+    assert_eq!(projection.items().len(), 3);
+    assert_eq!(
+        projection.items()[1].body.as_deref(),
+        Some("Measure the real parser baseline.")
+    );
+    assert_eq!(
+        projection.items()[2].body.as_deref(),
+        Some("The baseline misses every retained turn.")
+    );
+}
+
+#[test]
+fn chatgpt_macos_codex_composer_retains_execution_context_and_draft() {
+    let source = r#"{
+        "app": {
+            "platform": "macos",
+            "app_id": "com.openai.codex",
+            "executable": "ChatGPT",
+            "display_name": "ChatGPT",
+            "version": null,
+            "browser_url": null
+        },
+        "nodes": [
+            { "role": "AXButton", "text": "Unrelated sidebar conversation", "depth": 11 },
+            { "role": "AXStaticText", "text": "What should we build in", "depth": 13 },
+            { "role": "AXPopUpButton", "text": "screenpipe?", "depth": 13 },
+            { "role": "AXPopUpButton", "text": "Change project: screenpipe", "depth": 18 },
+            { "role": "AXPopUpButton", "text": "Select where to run the chat", "depth": 17 },
+            { "role": "AXStaticText", "text": "New local worktree", "depth": 19 },
+            { "role": "AXPopUpButton", "text": "Select a local environment", "depth": 17 },
+            { "role": "AXStaticText", "text": "No environment", "depth": 19 },
+            { "role": "AXButton", "text": "What branch should this chat start from?", "depth": 18 },
+            { "role": "AXStaticText", "text": "main", "depth": 20 },
+            { "role": "AXPopUpButton", "text": "Change permissions", "depth": 16 },
+            { "role": "AXStaticText", "text": "Full access", "depth": 18 },
+            { "role": "AXTextArea", "text": "Improve the semantic parser with measured evidence.", "value": "Improve the semantic parser with measured evidence.", "depth": 16 },
+            { "role": "AXPopUpButton", "text": "5.6 Sol Medium", "depth": 17 },
+            { "role": "AXButton", "text": "Send", "depth": 16 }
+        ]
+    }"#;
+    let (parser, outcome) = parse_fixture(source);
+    assert_eq!(parser.as_deref(), Some("family.conversation"));
+    let ValidatedParseOutcome::Handled(projection) = outcome else {
+        panic!("expected macOS Codex composer context");
+    };
+    let items = projection.items();
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0].title.as_deref(), Some("New chat"));
+    assert_eq!(
+        items[0].metadata.get("project").map(String::as_str),
+        Some("screenpipe")
+    );
+    assert_eq!(
+        items[0].metadata.get("run_location").map(String::as_str),
+        Some("New local worktree")
+    );
+    assert_eq!(
+        items[0].metadata.get("environment").map(String::as_str),
+        Some("No environment")
+    );
+    assert_eq!(
+        items[0].metadata.get("branch").map(String::as_str),
+        Some("main")
+    );
+    assert_eq!(
+        items[0].metadata.get("permissions").map(String::as_str),
+        Some("Full access")
+    );
+    assert_eq!(
+        items[0].metadata.get("model").map(String::as_str),
+        Some("5.6 Sol Medium")
+    );
+    assert_eq!(items[1].actor.as_deref(), Some("[user]"));
+    assert_eq!(items[1].status.as_deref(), Some("draft"));
+    assert_eq!(
+        items[1].body.as_deref(),
+        Some("Improve the semantic parser with measured evidence.")
+    );
+}
+
+#[test]
+fn chatgpt_macos_codex_open_task_keeps_title_without_sidebar_noise() {
+    let source = r#"{
+        "app": {
+            "platform": "macos",
+            "app_id": "com.openai.codex",
+            "executable": "ChatGPT",
+            "display_name": "ChatGPT",
+            "version": null,
+            "browser_url": null
+        },
+        "nodes": [
+            { "role": "AXPopUpButton", "text": "Switch mode, current mode: Codex", "depth": 8 },
+            { "role": "AXButton", "text": "Misleading sidebar title", "depth": 15 },
+            { "role": "AXButton", "text": "Improve family conversation parsing", "depth": 8 },
+            { "role": "AXPopUpButton", "text": "Chat actions", "depth": 7 },
+            { "role": "AXButton", "text": "Share", "depth": 7 }
+        ]
+    }"#;
+    let (parser, outcome) = parse_fixture(source);
+    assert_eq!(parser.as_deref(), Some("family.conversation"));
+    let ValidatedParseOutcome::Handled(projection) = outcome else {
+        panic!("expected macOS Codex task context");
+    };
+    assert_eq!(projection.items().len(), 1);
+    assert_eq!(
+        projection.items()[0].title.as_deref(),
+        Some("Improve family conversation parsing")
+    );
+}
+
+#[test]
 fn mail_empty_compose_is_a_valid_empty_surface() {
     let (parser, outcome) = parse_fixture(include_str!(
         "fixtures/persisted/mail_macos_empty_compose.json"
