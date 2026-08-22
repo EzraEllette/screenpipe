@@ -133,7 +133,7 @@ jobs:
             {
               echo "macos_arm_runner=screenpipe-release-macos"
               echo "macos_x64_runner=screenpipe-release-macos"
-              echo "windows_runner=windows-2022"
+              echo "windows_runner=screenpipe-release-windows"
             } >> "$GITHUB_OUTPUT"
           fi
 
@@ -162,8 +162,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Persistent EC2 Mac runner by default; manual input retains the
-          # GitHub-hosted escape hatch.
+          # Persistent release runners by default; the manual input retains
+          # the GitHub-hosted escape hatch.
           - platform: ${{ needs.check_commit.outputs.macos_arm_runner || 'macos-latest' }}
             args: "--target aarch64-apple-darwin --features metal,parakeet-mlx,rfdetr-mlx,redact-onnx-coreml"
             target: aarch64-apple-darwin
@@ -223,8 +223,14 @@ jobs:
         with:
           target: ${{ matrix.target }}
 
+      - name: Attach persistent Azure Windows cache
+        if: runner.environment == 'self-hosted' && matrix.os_type == 'windows'
+        uses: ./.github/actions/setup-persistent-windows-cache
+        with:
+          target: ${{ matrix.target }}
+
       - name: Shorten target dir to avoid MAX_PATH (Windows)
-        if: matrix.os_type == 'windows'
+        if: runner.environment == 'github-hosted' && matrix.os_type == 'windows'
         shell: pwsh
         run: |
           # vulkan-shaders-gen ExternalProject creates deeply nested paths
@@ -258,11 +264,19 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Install Rust (Windows x64)
-        if: matrix.os_type == 'windows' && matrix.target == 'x86_64-pc-windows-msvc'
+        if: runner.environment == 'github-hosted' && matrix.os_type == 'windows' && matrix.target == 'x86_64-pc-windows-msvc'
         shell: pwsh
         run: |
           Invoke-WebRequest https://static.rust-lang.org/rustup/dist/x86_64-pc-windows-gnu/rustup-init.exe -OutFile rustup-init.exe
           .\rustup-init.exe -y
+
+      - name: Verify preinstalled Rust (persistent Windows x64)
+        if: runner.environment == 'self-hosted' && matrix.os_type == 'windows' && matrix.target == 'x86_64-pc-windows-msvc'
+        shell: pwsh
+        run: |
+          rustup target add x86_64-pc-windows-msvc
+          rustc --version
+          cargo --version
 
       - name: Install Rust (Windows ARM64 native)
         if: matrix.os_type == 'windows' && matrix.target == 'aarch64-pc-windows-msvc'
@@ -1635,6 +1649,17 @@ jobs:
             apps/screenpipe-app-tauri/src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
             apps/screenpipe-app-tauri/src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app.tar.gz
             apps/screenpipe-app-tauri/src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app.tar.gz.sig
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Upload Windows dry-run artifacts
+        if: matrix.os_type == 'windows' && github.event.inputs.dry_run == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: consumer-windows-${{ matrix.target }}
+          path: |
+            apps/screenpipe-app-tauri/src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*.exe
+            apps/screenpipe-app-tauri/src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*.sig
           if-no-files-found: error
           compression-level: 0
 

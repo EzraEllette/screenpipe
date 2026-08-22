@@ -21,7 +21,7 @@ on:
         description: "Version expected at commit_hash"
         required: false
       force_github_runners:
-        description: "Force GitHub-hosted macOS runners"
+        description: "Force GitHub-hosted release runners"
         type: boolean
         default: false
       dry_run:
@@ -90,12 +90,18 @@ jobs:
   # ─── Windows x64 ──────────────────────────────────────────────────────────
   release-enterprise-windows:
     needs: resolve-release
-    runs-on: windows-2022
+    runs-on: ${{ github.event.inputs.force_github_runners == 'true' && 'windows-2022' || 'screenpipe-release-windows' }}
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.resolve-release.outputs.release_sha }}
+
+      - name: Attach persistent Azure Windows cache
+        if: runner.environment == 'self-hosted'
+        uses: ./.github/actions/setup-persistent-windows-cache
+        with:
+          target: x86_64-pc-windows-msvc
 
       - name: Enable Git long paths on Windows
         shell: pwsh
@@ -104,6 +110,7 @@ jobs:
           if ((git config --global --get core.longpaths) -ne "true") { throw "Failed to enable git long paths" }
 
       - name: Shorten target dir to avoid MAX_PATH
+        if: runner.environment == 'github-hosted'
         shell: pwsh
         run: |
           $targetDir = "apps\screenpipe-app-tauri\src-tauri\target"
@@ -129,12 +136,15 @@ jobs:
       # default 1.93.1 that rustup-init.exe currently ships. Matches the
       # consumer release-app.yml setup which builds Windows x64 successfully.
       - name: Install Rust toolchain (stable)
+        if: runner.environment == 'github-hosted'
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
           targets: x86_64-pc-windows-msvc
 
       - name: Install Rust (Windows)
+        if: runner.environment == 'github-hosted'
+        shell: pwsh
         run: |
           Invoke-WebRequest https://static.rust-lang.org/rustup/dist/x86_64-pc-windows-gnu/rustup-init.exe -OutFile rustup-init.exe
           .\rustup-init.exe -y
@@ -148,6 +158,7 @@ jobs:
           rustc --version
 
       - name: Rust Cache
+        if: runner.environment == 'github-hosted'
         uses: Swatinem/rust-cache@v2
         with:
           key: windows-enterprise-rust-x86_64-pc-windows-msvc-${{ hashFiles('**/Cargo.lock') }}
@@ -164,6 +175,7 @@ jobs:
           save-if: true
 
       - name: Cache Pre Build
+        if: runner.environment == 'github-hosted'
         uses: actions/cache@v4
         with:
           path: |
