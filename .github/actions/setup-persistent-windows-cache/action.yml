@@ -61,6 +61,7 @@ runs:
 
         @(
           "CARGO_HOME=$cacheRoot\cargo",
+          "CARGO_TARGET_DIR=$shortTarget",
           "RUSTUP_HOME=$cacheRoot\rustup",
           "SCCACHE_DIR=$cacheRoot\sccache",
           'RUSTC_WRAPPER=sccache',
