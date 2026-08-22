@@ -154,8 +154,10 @@ export function shouldClearActivityReturn(
  */
 export function NativeTimelineBridge({
   onReturnToActivity,
+  onToggleSidebar,
 }: {
   onReturnToActivity?: () => void;
+  onToggleSidebar?: () => void;
 } = {}) {
   const [dailySummaryRequest, setDailySummaryRequest] = useState<{
     date: Date;
@@ -170,6 +172,9 @@ export function NativeTimelineBridge({
       }),
       listen("timeline-open-chat", () => {
         void commands.showWindow("Chat");
+      }),
+      listen("timeline-toggle-sidebar", () => {
+        onToggleSidebar?.();
       }),
       listen("timeline-return-to-activity", () => {
         onReturnToActivity?.();
@@ -269,7 +274,7 @@ export function NativeTimelineBridge({
         void subscription.then((unlisten) => unlisten());
       }
     };
-  }, [onReturnToActivity]);
+  }, [onReturnToActivity, onToggleSidebar]);
 
   if (!dailySummaryRequest) return null;
 

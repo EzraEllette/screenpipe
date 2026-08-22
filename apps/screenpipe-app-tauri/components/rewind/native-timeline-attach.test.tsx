@@ -63,7 +63,7 @@ vi.mock("@/components/rewind/timeline/daily-summary", () => ({
 vi.mock("@/lib/chat-utils", () => ({ showChatWithPrefill: vi.fn() }));
 vi.mock("@/components/ui/use-toast", () => ({ toast: vi.fn() }));
 
-import { NativeTimeline } from "./native-timeline";
+import { NativeTimeline, NativeTimelineBridge } from "./native-timeline";
 
 class ResizeObserverMock {
   observe() {}
@@ -131,5 +131,24 @@ describe("native timeline startup API config", () => {
         }),
       );
     });
+  });
+
+  it("routes the native timeline sidebar shortcut back to its Home shell", async () => {
+    const onToggleSidebar = vi.fn();
+    render(<NativeTimelineBridge onToggleSidebar={onToggleSidebar} />);
+
+    await waitFor(() => {
+      expect(mocks.listen).toHaveBeenCalledWith(
+        "timeline-toggle-sidebar",
+        expect.any(Function),
+      );
+    });
+    const handler = mocks.listen.mock.calls.find(
+      ([eventName]) => eventName === "timeline-toggle-sidebar",
+    )?.[1] as (() => void) | undefined;
+
+    act(() => handler?.());
+
+    expect(onToggleSidebar).toHaveBeenCalledTimes(1);
   });
 });

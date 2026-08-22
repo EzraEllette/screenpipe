@@ -1196,7 +1196,10 @@ function HomeContent() {
           palette use teaches the direct key. Home window only: the settings
           page binds its own ⌘K for search focus while mounted. */}
       {/* Routes actions the native timeline window cannot perform itself. */}
-      <NativeTimelineBridge onReturnToActivity={returnToActivity} />
+      <NativeTimelineBridge
+        onReturnToActivity={returnToActivity}
+        onToggleSidebar={toggleSidebar}
+      />
 
       <CommandPalette
         open={commandPaletteOpen}

@@ -172,6 +172,7 @@ pub enum TimelineAction {
     OpenSearch,
     OpenDailySummary { date: String },
     OpenChat,
+    ToggleSidebar,
     OpenRecordingSettings,
     CopyFrame { frame_id: String },
     CopyText,
@@ -232,6 +233,7 @@ impl TimelineAction {
                 date: date.to_string(),
             },
             ("open_chat", _) => Self::OpenChat,
+            ("toggle_sidebar", _) => Self::ToggleSidebar,
             ("open_recording_settings", _) => Self::OpenRecordingSettings,
             ("copy_frame", Some(id)) => Self::CopyFrame {
                 frame_id: id.to_string(),
@@ -505,6 +507,10 @@ mod tests {
         );
         assert_eq!(TimelineAction::parse("open_search"), TimelineAction::OpenSearch);
         assert_eq!(TimelineAction::parse("open_chat"), TimelineAction::OpenChat);
+        assert_eq!(
+            TimelineAction::parse("toggle_sidebar"),
+            TimelineAction::ToggleSidebar
+        );
         assert_eq!(
             TimelineAction::parse("open_recording_settings"),
             TimelineAction::OpenRecordingSettings

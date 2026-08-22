@@ -215,6 +215,9 @@ struct TimelineKeyHandler {
                 model.emitAction("copy_text")
             }
             return true
+        case "b" where command && !shift && !option && !control && embedded:
+            model.emitAction("toggle_sidebar")
+            return true
         case "l" where control && command:
             if let action = model.askAISelectionAction() {
                 model.emitAction(action)

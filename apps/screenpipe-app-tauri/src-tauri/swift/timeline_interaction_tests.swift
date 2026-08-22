@@ -894,6 +894,17 @@ private func testKeyboardThroughWindow(window: NSWindow, model: TimelineViewMode
     _ = handler.handle(TimelineKeyEvent(keyCode: TimelineKeyEvent.leftArrow))
     expectEqual(model.currentIndex, 51, "left arrow steps older through the window's handler")
 
+    _ = TimelineActionBridge.shared.drainEmitted()
+    let embeddedHandler = TimelineKeyHandler(model: model, embedded: true)
+    let consumed = embeddedHandler.handle(
+        TimelineKeyEvent(keyCode: 11, characters: "b", command: true)
+    )
+    expect(consumed, "Command-B is consumed by an embedded timeline")
+    expect(
+        TimelineActionBridge.shared.drainEmitted().contains("toggle_sidebar"),
+        "Command-B asks the owning Home shell to toggle its sidebar"
+    )
+
     // A key monitor must be installed while the window is up, or nothing the
     // keyboard does reaches the timeline.
     expect(window.isVisible, "the window must still be visible for key handling")

@@ -215,6 +215,9 @@ fn native_timeline_action_callback_inner(action_ptr: *const std::os::raw::c_char
         TimelineAction::OpenChat => {
             emit_timeline_event(&app, target.as_deref(), "timeline-open-chat", ());
         }
+        TimelineAction::ToggleSidebar => {
+            emit_timeline_event(&app, target.as_deref(), "timeline-toggle-sidebar", ());
+        }
         TimelineAction::OpenRecordingSettings => {
             let _ = app.emit("timeline-open-recording-settings", ());
         }
