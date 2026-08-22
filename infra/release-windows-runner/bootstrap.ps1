@@ -74,20 +74,24 @@ if (-not (Test-Path $vswhere) -or -not (& $vswhere -latest -products * -requires
 
 [Environment]::SetEnvironmentVariable('CARGO_HOME', "$cacheRoot\cargo", 'Machine')
 [Environment]::SetEnvironmentVariable('RUSTUP_HOME', "$cacheRoot\rustup", 'Machine')
+$env:CARGO_HOME = "$cacheRoot\cargo"
+$env:RUSTUP_HOME = "$cacheRoot\rustup"
 New-Item -ItemType Directory -Force -Path "$cacheRoot\cargo", "$cacheRoot\rustup" | Out-Null
 
 $rustup = "$cacheRoot\cargo\bin\rustup.exe"
 if (-not (Test-Path $rustup)) {
   $rustupInit = Join-Path $env:TEMP 'rustup-init.exe'
   Invoke-WebRequest 'https://win.rustup.rs/x86_64' -OutFile $rustupInit
-  $env:CARGO_HOME = "$cacheRoot\cargo"
-  $env:RUSTUP_HOME = "$cacheRoot\rustup"
   & $rustupInit -y --profile minimal --default-toolchain stable --default-host x86_64-pc-windows-msvc
+  if ($LASTEXITCODE -ne 0) { throw "rustup-init failed with exit code $LASTEXITCODE" }
   Remove-Item $rustupInit -Force
 }
 & $rustup toolchain install stable --profile minimal
+if ($LASTEXITCODE -ne 0) { throw "rustup toolchain install failed with exit code $LASTEXITCODE" }
 & $rustup default stable
+if ($LASTEXITCODE -ne 0) { throw "rustup default failed with exit code $LASTEXITCODE" }
 & $rustup target add x86_64-pc-windows-msvc
+if ($LASTEXITCODE -ne 0) { throw "rustup target add failed with exit code $LASTEXITCODE" }
 
 $sccacheRoot = Join-Path $toolsRoot 'sccache'
 if (-not (Test-Path (Join-Path $sccacheRoot 'sccache.exe'))) {
@@ -167,6 +171,7 @@ $commands = @(
 foreach ($command in $commands) {
   Write-Host "> $command"
   Invoke-Expression $command
+  if ($LASTEXITCODE -ne 0) { throw "$command failed with exit code $LASTEXITCODE" }
 }
 Write-Host "bootstrap complete; cache=$cacheRoot; runner=$runnerRoot"
 Write-Output '__SCREENPIPE_BOOTSTRAP_OK__'
