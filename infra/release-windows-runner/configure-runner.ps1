@@ -68,7 +68,7 @@ if (Test-Path '.runner') {
   if ($LASTEXITCODE -ne 0) { throw "runner removal failed with exit code $LASTEXITCODE" }
 }
 
-& icacls.exe $cacheRoot /grant 'NT AUTHORITY\NETWORK SERVICE:(OI)(CI)F' /T /Q
+& icacls.exe $cacheRoot /grant 'NT AUTHORITY\NETWORK SERVICE:(OI)(CI)F' /Q
 if ($LASTEXITCODE -ne 0) { throw "cache ACL setup failed with exit code $LASTEXITCODE" }
 
 & .\config.cmd --unattended --replace --url "https://github.com/$Repository" --token $RegistrationToken --name $runnerName --labels $runnerLabel --no-default-labels --work "$cacheRoot\work" --runasservice --windowslogonaccount 'NT AUTHORITY\NETWORK SERVICE'
