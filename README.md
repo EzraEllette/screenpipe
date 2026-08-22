@@ -50,17 +50,9 @@ https://github.com/user-attachments/assets/70fe94eb-6d2a-47ca-b7c3-c8ead13a5b7f
 
 ---
 
-## news
-
-- 06/10 - **we updated our license to keep screenpipe sustainable** — more funding, more shipping, better product
-- 05/29 - **we released an [alpha version of our AI PII model](https://screenpipe.github.io/screenleak/) outperforming Google, Microsoft, and OpenAI models** on computer recording data and running at 9ms on consumer device
-- 05/14 - **we joined YC S26** 
-
-
-
 ## what is this?
 
-screenpipe turns your computer into a personal AI that knows everything you've done. record. search. automate. all local, all private, all yours
+screenpipe capture all your computer work locally and power your agents
 
 ```
 ┌─────────────────────────────────────────┐
@@ -69,7 +61,7 @@ screenpipe turns your computer into a personal AI that knows everything you've d
 ```
 
 - **remember everything** - never forget what you saw, heard, or did
-- **run agents that work based on what you do** - pipes are agents triggered by your work activity
+- **run agents that work based on what you do** generate agents, skills, and automations based on what you do
 
 <img width="360" height="311" alt="image" src="https://github.com/user-attachments/assets/cfbf0fd3-84ef-4feb-8c6d-2779d67058a7" />
 
