@@ -34,7 +34,6 @@ tauri = { version = "=2.11.2", features = [
   "protocol-asset",
   "macos-private-api",
   "tray-icon",
-  "devtools",
   "image-png",
   "image-ico",
   # Embedded child webview (the agent-controlled browser sidebar) requires
