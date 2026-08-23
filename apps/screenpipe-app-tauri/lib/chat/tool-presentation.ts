@@ -469,6 +469,7 @@ export interface PresentableToolCall {
   kind?: string;
   isRunning?: boolean;
   isError?: boolean;
+  agentId?: string;
   // Set when this call is a subagent launch (Claude's Task/Agent tool). It is a
   // container for the nested transcript, so it is labeled as a subagent run
   // rather than by its `think` kind, which reads as "Thought it through".
@@ -508,6 +509,19 @@ const GENERIC_ACTIVITY: ToolActivityPresentation = {
   completedLabel: "Completed a background step",
   icon: "work",
 };
+
+function providerToolActivity(agentId?: string): ToolActivityPresentation | null {
+  if (!agentId) return null;
+  const provider = ({
+    "cursor": "Cursor",
+    "claude-acp": "Claude",
+    "codex-acp": "Codex",
+    "pi-acp": "Pi",
+    "github-copilot-cli": "GitHub Copilot",
+  } as Record<string, string>)[agentId.toLowerCase()] ?? "ACP";
+  const article = provider === "ACP" ? "an" : "a";
+  return activity(`Using ${article} ${provider} tool`, `Used ${article} ${provider} tool`, "work");
+}
 
 function activity(
   runningLabel: string,
@@ -1038,7 +1052,7 @@ export function presentToolActivity(toolCall: PresentableToolCall): ToolActivity
       return activity(humanized, humanized, "work");
     }
   }
-  return GENERIC_ACTIVITY;
+  return providerToolActivity(toolCall.agentId) ?? GENERIC_ACTIVITY;
 }
 
 /**

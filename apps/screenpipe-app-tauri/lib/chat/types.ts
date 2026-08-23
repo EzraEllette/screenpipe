@@ -59,6 +59,9 @@ export type ChatAttachment = {
 export interface ToolCall {
   id: string;
   toolName: string;
+  /** ACP adapter id that produced this call. Used only for a safe provider
+   *  fallback when the adapter never supplies a meaningful tool title. */
+  agentId?: string;
   /** ACP tool-call kind (read/edit/execute/fetch/search/think/…) when the agent
    *  provides one; drives a sensible activity label for native ACP tools. */
   kind?: string;

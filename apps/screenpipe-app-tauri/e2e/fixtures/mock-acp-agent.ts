@@ -17,7 +17,7 @@ type JsonRpcMessage = {
   error?: unknown;
 };
 
-type Scenario = "normal" | "malformed" | "exit" | "auth" | "mcp" | "tree" | "terminal" | "subagent" | "resume";
+type Scenario = "normal" | "malformed" | "exit" | "auth" | "mcp" | "tree" | "terminal" | "subagent" | "metadata" | "resume";
 
 const scenarioArg = process.argv.find((arg) => arg.startsWith("--scenario="));
 const scenario = (scenarioArg?.slice("--scenario=".length) ?? "normal") as Scenario;
@@ -304,6 +304,45 @@ function emitPromptPrelude(): void {
     content: { type: "text", text: "First streamed chunk. " },
     messageId: "mock-message-1",
   });
+}
+
+function emitMetadataRefinementFlow(requestId: JsonRpcId): void {
+  update({
+    sessionUpdate: "tool_call",
+    toolCallId: "mock-refined",
+    title: "MCP: tool",
+    status: "in_progress",
+    rawInput: {},
+  });
+  update({
+    sessionUpdate: "tool_call_update",
+    toolCallId: "mock-refined",
+    title: "mcp__screenpipe__search-content",
+    kind: "search",
+    status: "completed",
+    rawInput: { query: "late ACP metadata" },
+    rawOutput: { error: "Tool execution error" },
+  });
+  update({
+    sessionUpdate: "tool_call",
+    toolCallId: "mock-provider-fallback",
+    title: "MCP: tool",
+    status: "in_progress",
+    rawInput: {},
+  });
+  update({
+    sessionUpdate: "tool_call_update",
+    toolCallId: "mock-provider-fallback",
+    status: "completed",
+    rawOutput: { success: true },
+  });
+  update({
+    sessionUpdate: "agent_message_chunk",
+    content: { type: "text", text: "Metadata refinement turn complete." },
+    messageId: "mock-metadata-final",
+  });
+  respond(requestId, { stopReason: "end_turn" });
+  activePromptRequestId = undefined;
 }
 
 /** Deterministic subagent turn matching the claude-agent-acp and codex-acp
@@ -610,6 +649,10 @@ async function handleRequest(message: JsonRpcMessage): Promise<void> {
       }
       if (scenario === "subagent") {
         emitSubagentFlow(message.id);
+        return;
+      }
+      if (scenario === "metadata") {
+        emitMetadataRefinementFlow(message.id);
         return;
       }
       if (!activePromptIsCancellation) beginPermissionFlow();

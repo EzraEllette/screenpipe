@@ -756,15 +756,20 @@ function applyEventToSessionContent(sid: string, payload: PiInnerEvent) {
     if (!cur?.streamingMessageId) return;
     const msgId = cur.streamingMessageId;
     const parentToolCallId = (payload as any).parentToolCallId;
+    const agentId = (payload as any).agentId;
+    const toolKind = (payload as any).kind;
     const tool = {
       id: (payload as any).toolCallId || `${Date.now()}`,
       toolName: (payload as any).toolName || "unknown",
       args: (payload as any).args || {},
       isRunning: true,
       startedAtMs: Date.now(),
+      ...(typeof agentId === "string" && agentId ? { agentId } : {}),
+      ...(typeof toolKind === "string" && toolKind ? { kind: toolKind } : {}),
       ...(typeof parentToolCallId === "string" && parentToolCallId
         ? { parentToolCallId }
         : {}),
+      ...((payload as any).subagent === true ? { subagent: true } : {}),
     };
     const blocks = [...((cur.contentBlocks as any[]) ?? []), { type: "tool", toolCall: tool }];
     store.actions.setStreaming(sid, { contentBlocks: blocks });
@@ -817,6 +822,9 @@ function applyEventToSessionContent(sid: string, payload: PiInnerEvent) {
       if (typeof p.subagentType === "string") next.subagentType = p.subagentType;
       if (p.retry !== undefined) next.retry = p.retry;
       if (typeof p.title === "string" && p.title) next.toolName = p.title;
+      if (typeof p.agentId === "string" && p.agentId) next.agentId = p.agentId;
+      if (typeof p.kind === "string" && p.kind) next.kind = p.kind;
+      if (p.args && typeof p.args === "object" && !Array.isArray(p.args)) next.args = p.args;
       if (typeof p.outputDelta === "string" && p.outputDelta) {
         const combined = `${next.progress ?? ""}${p.outputDelta}`;
         next.progress = combined.length > 4000 ? combined.slice(-4000) : combined;
@@ -850,6 +858,12 @@ function applyEventToSessionContent(sid: string, payload: PiInnerEvent) {
             ...b,
             toolCall: {
               ...b.toolCall,
+              ...((payload as any).toolName ? { toolName: (payload as any).toolName } : {}),
+              ...((payload as any).agentId ? { agentId: (payload as any).agentId } : {}),
+              ...((payload as any).kind ? { kind: (payload as any).kind } : {}),
+              ...((payload as any).args && typeof (payload as any).args === "object"
+                ? { args: (payload as any).args }
+                : {}),
               isRunning: false,
               result: truncated,
               isError: (payload as any).isError,

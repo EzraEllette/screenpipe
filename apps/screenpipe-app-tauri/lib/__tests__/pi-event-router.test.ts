@@ -953,6 +953,48 @@ describe("pi-event-router: subagent tool progress", () => {
     ).toolCall;
     expect(cmd.progress.length).toBe(4000);
   });
+
+  it("keeps late ACP metadata on a completed background tool", async () => {
+    seed("A");
+    useChatStore.setState({ currentId: "B" });
+    await handlePiEvent(
+      piEvt("A", { type: "message_start", message: { role: "assistant" } }),
+    );
+    await handlePiEvent(
+      piEvt("A", {
+        type: "tool_execution_start",
+        toolCallId: "late-metadata",
+        toolName: "MCP: tool",
+        agentId: "cursor",
+        args: {},
+      } as unknown as AgentInnerEvent),
+    );
+    await handlePiEvent(
+      piEvt("A", {
+        type: "tool_execution_end",
+        toolCallId: "late-metadata",
+        toolName: "mcp__screenpipe__search-content",
+        agentId: "cursor",
+        kind: "search",
+        args: { query: "late ACP metadata" },
+        result: { content: [{ type: "text", text: '{"error":"Tool execution error"}' }] },
+        isError: true,
+      } as unknown as AgentInnerEvent),
+    );
+
+    const session = useChatStore.getState().sessions.A;
+    const tool = (session.contentBlocks as any[]).find(
+      (block) => block.type === "tool" && block.toolCall.id === "late-metadata",
+    ).toolCall;
+    expect(tool).toMatchObject({
+      toolName: "mcp__screenpipe__search-content",
+      agentId: "cursor",
+      kind: "search",
+      args: { query: "late ACP metadata" },
+      isRunning: false,
+      isError: true,
+    });
+  });
 });
 
 describe("pi-event-router: honest interruption on quit/crash", () => {

@@ -469,6 +469,21 @@ describe("presentToolActivity — ACP tool calls", () => {
       "Completed a background step",
     );
   });
+
+  it("identifies the provider when ACP supplies no meaningful tool metadata", () => {
+    expect(
+      presentToolActivity({ toolName: "MCP: tool", agentId: "cursor", args: {} }),
+    ).toMatchObject({
+      runningLabel: "Using a Cursor tool",
+      completedLabel: "Used a Cursor tool",
+    });
+    expect(
+      presentToolActivity({ toolName: "MCP: tool", agentId: "pi-acp", args: {} }).completedLabel,
+    ).toBe("Used a Pi tool");
+    expect(
+      presentToolActivity({ toolName: "MCP: tool", agentId: "custom", args: {} }).completedLabel,
+    ).toBe("Used an ACP tool");
+  });
 });
 
 describe("MCP server startup diagnostics", () => {
