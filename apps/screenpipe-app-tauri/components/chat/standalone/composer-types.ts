@@ -90,6 +90,7 @@ export interface ComposerInputProps {
   chipPrefixWidth: number;
   chipScrollTop: number;
   onClearConnectionChip: () => void;
+  onValueChange: (value: string) => void;
   onChange: (event: React.ChangeEvent<HTMLTextAreaElement>) => void;
   onCompositionStart: () => void;
   onCompositionEnd: () => void;
