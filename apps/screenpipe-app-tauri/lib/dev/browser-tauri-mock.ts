@@ -388,6 +388,11 @@ function createBrowserDevActivityOpportunities(
           verification:
             "Every finding maps to the request, diff, or a focused check.",
         },
+        occurrences: [
+          { activityIds: ["browser-dev-pr-export"] },
+          { activityIds: ["browser-dev-pr-notifications"] },
+          { activityIds: ["browser-dev-pr-timeline"] },
+        ],
         evidence: evidence(
           "browser-dev-pr-export",
           "browser-dev-pr-notifications",

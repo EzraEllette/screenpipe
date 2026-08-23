@@ -78,9 +78,22 @@ function supportingActivityCount(evidence: OpportunityEvidence[]): number {
   ).size;
 }
 
-function visibleSkillsByRepetition(
-  skills: SkillOpportunity[],
-): SkillOpportunity[] {
+function supportingOccurrenceCount(skill: SkillOpportunity): number {
+  const includedActivityIds = new Set(
+    skill.evidence
+      .filter((item) => !item.excluded)
+      .map((item) => item.activityId),
+  );
+  const occurrences = skill.occurrences ?? [];
+  if (!occurrences.length) return includedActivityIds.size;
+  return occurrences.filter((occurrence) =>
+    occurrence.activityIds.some((activityId) =>
+      includedActivityIds.has(activityId),
+    ),
+  ).length;
+}
+
+function visibleSkills(skills: SkillOpportunity[]): SkillOpportunity[] {
   return skills
     .filter((skill) => skill.status !== "dismissed")
     .map((skill, index) => ({ skill, index }))
@@ -90,8 +103,8 @@ function visibleSkillsByRepetition(
         Number(right.skill.status !== "pending");
       return (
         statusOrder ||
-        supportingActivityCount(right.skill.evidence) -
-          supportingActivityCount(left.skill.evidence) ||
+        supportingOccurrenceCount(right.skill) -
+          supportingOccurrenceCount(left.skill) ||
         left.index - right.index
       );
     })
@@ -627,7 +640,7 @@ export function BrainOpportunities({
     taskDrafts,
   ]);
 
-  const skills = visibleSkillsByRepetition(snapshot?.skills ?? []);
+  const skills = visibleSkills(snapshot?.skills ?? []);
   const pendingTasks =
     snapshot?.unfinished.filter((task) => task.status === "pending") ?? [];
   const dismissedTasks =
@@ -1041,7 +1054,7 @@ export function BrainOpportunities({
                           ? "creating"
                           : skill.status === "created"
                             ? "created"
-                            : `${supportingActivityCount(skill.evidence)} activities`}
+                            : `${supportingOccurrenceCount(skill)} repeats`}
                       </span>
                     </div>
                   </button>
@@ -1070,9 +1083,8 @@ export function BrainOpportunities({
                   description: selectedSkill.description,
                   notes: selectedSkill.notes,
                 };
-                const includedCount = selectedSkill.evidence.filter(
-                  (evidence) => !evidence.excluded,
-                ).length;
+                const includedOccurrenceCount =
+                  supportingOccurrenceCount(selectedSkill);
                 const creating = creatingSkillId === selectedSkill.id;
                 const created = selectedSkill.status === "created";
                 const showPreview =
@@ -1081,7 +1093,7 @@ export function BrainOpportunities({
                 const canCreate =
                   draft.name.trim().length > 0 &&
                   draft.description.trim().length > 0 &&
-                  includedCount > 0;
+                  includedOccurrenceCount >= 2;
 
                 if (showPreview) {
                   if (!selectedSkill.createdSkill) {
@@ -1184,7 +1196,9 @@ export function BrainOpportunities({
                         className="group mt-6 border-y border-border"
                       >
                         <summary className="flex cursor-pointer list-none items-center justify-between gap-3 py-3 text-sm text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-foreground">
-                          <span>evidence · {includedCount}</span>
+                          <span>
+                            evidence · {includedOccurrenceCount} repeats
+                          </span>
                           <span className="font-mono text-[9px] uppercase tracking-wide text-muted-foreground group-open:hidden">
                             show
                           </span>

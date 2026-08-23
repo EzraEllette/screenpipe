@@ -89,6 +89,11 @@ function readySnapshot(): ActivityOpportunitySnapshot {
           steps: ["Read the report", "Implement the fix", "Verify the result"],
           verification: "Attach direct acceptance evidence.",
         },
+        occurrences: [
+          { activityIds: ["activity-101"] },
+          { activityIds: ["activity-102"] },
+          { activityIds: ["activity-105"] },
+        ],
         evidence: [
           evidence(
             "activity-101",
@@ -101,6 +106,12 @@ function readySnapshot(): ActivityOpportunitySnapshot {
             "Refine the activity ledger",
             "Cursor",
             "2026-08-20T17:04:00Z",
+          ),
+          evidence(
+            "activity-105",
+            "Verify the focused fix",
+            "Arc",
+            "2026-08-21T18:22:00Z",
           ),
         ],
       },
@@ -311,7 +322,7 @@ describe("BrainOpportunities", () => {
     expect(onCountChange).toHaveBeenLastCalledWith(5);
   });
 
-  it("ranks skill suggestions by distinct included supporting activities", async () => {
+  it("ranks skills by occurrences instead of supporting activity rows", async () => {
     const sources = (...activityIds: string[]) =>
       activityIds.map((activityId, index) =>
         evidence(
@@ -321,40 +332,43 @@ describe("BrainOpportunities", () => {
           new Date(Date.UTC(2026, 7, 15, index)).toISOString(),
         ),
       );
-    const [twoActivities, fourActivities, threeActivities] =
+    const [threeOccurrences, twoOccurrencesFourRows, twoOccurrencesTwoRows] =
       backendSnapshot.skills;
-    fourActivities.evidence = sources(
+    threeOccurrences.evidence = sources(
+      "activity-101",
+      "activity-102",
+      "activity-105",
+    );
+    threeOccurrences.occurrences = [
+      { activityIds: ["activity-101"] },
+      { activityIds: ["activity-102"] },
+      { activityIds: ["activity-105"] },
+    ];
+    twoOccurrencesFourRows.evidence = sources(
       "activity-103",
       "activity-106",
       "activity-107",
       "activity-108",
     );
-    threeActivities.evidence = [
-      ...sources(
-        "activity-104",
-        "activity-109",
-        "activity-110",
-        "activity-110",
-      ),
-      {
-        ...sources("activity-111")[0],
-        excluded: true,
-      },
+    twoOccurrencesFourRows.occurrences = [
+      { activityIds: ["activity-103", "activity-106"] },
+      { activityIds: ["activity-107", "activity-108"] },
     ];
-    const tiedThreeActivities = clone(threeActivities);
-    tiedThreeActivities.id = "meeting-followups-tied";
-    tiedThreeActivities.name = "turn another meeting into follow-ups";
+    twoOccurrencesTwoRows.evidence = sources("activity-104", "activity-109");
+    twoOccurrencesTwoRows.occurrences = [
+      { activityIds: ["activity-104"] },
+      { activityIds: ["activity-109"] },
+    ];
     backendSnapshot.skills = [
-      twoActivities,
-      threeActivities,
-      tiedThreeActivities,
-      fourActivities,
+      twoOccurrencesFourRows,
+      threeOccurrences,
+      twoOccurrencesTwoRows,
     ];
 
     render(<BrainOpportunities />);
 
     const panel = await screen.findByTestId("skill-opportunities-panel");
-    await screen.findByTestId("skill-opportunity-review-brief");
+    await screen.findByTestId("skill-opportunity-feedback-to-fix");
     const rowIds = Array.from(
       panel.querySelectorAll<HTMLElement>(
         "[data-testid^='skill-opportunity-']",
@@ -362,20 +376,19 @@ describe("BrainOpportunities", () => {
       (row) => row.dataset.testid,
     );
     expect(rowIds).toEqual([
+      "skill-opportunity-feedback-to-fix",
       "skill-opportunity-review-brief",
       "skill-opportunity-meeting-followups",
-      "skill-opportunity-meeting-followups-tied",
-      "skill-opportunity-feedback-to-fix",
     ]);
     expect(
-      within(screen.getByTestId("skill-opportunity-review-brief")).getByText(
-        "4 activities",
+      within(screen.getByTestId("skill-opportunity-feedback-to-fix")).getByText(
+        "3 repeats",
       ),
     ).toBeTruthy();
     expect(
-      within(
-        screen.getByTestId("skill-opportunity-meeting-followups"),
-      ).getByText("3 activities"),
+      within(screen.getByTestId("skill-opportunity-review-brief")).getByText(
+        "2 repeats",
+      ),
     ).toBeTruthy();
   });
 
@@ -394,7 +407,7 @@ describe("BrainOpportunities", () => {
     });
 
     const sourceEvidence = screen.getByTestId("skill-source-evidence");
-    fireEvent.click(within(sourceEvidence).getByText("evidence · 2"));
+    fireEvent.click(within(sourceEvidence).getByText("evidence · 3 repeats"));
     fireEvent.click(
       within(sourceEvidence).getByRole("button", {
         name: "exclude Review sample onboarding issue",
@@ -407,6 +420,9 @@ describe("BrainOpportunities", () => {
         }),
       ).toBeTruthy(),
     );
+    expect(
+      within(sourceEvidence).getByText("evidence · 2 repeats"),
+    ).toBeTruthy();
 
     fireEvent.click(screen.getByTestId("create-skill-draft"));
     expect(screen.getByTestId("create-skill-draft")).toHaveTextContent(
@@ -618,7 +634,7 @@ describe("BrainOpportunities", () => {
       await screen.findByTestId("skill-opportunity-feedback-to-fix"),
     );
     const sourceEvidence = screen.getByTestId("skill-source-evidence");
-    fireEvent.click(within(sourceEvidence).getByText("evidence · 2"));
+    fireEvent.click(within(sourceEvidence).getByText("evidence · 3 repeats"));
     fireEvent.click(
       within(sourceEvidence).getByRole("button", {
         name: "exclude Review sample onboarding issue",
