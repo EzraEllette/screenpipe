@@ -21,6 +21,7 @@ import {
   type LearningWindowOptions,
 } from "@/lib/first-run/use-learning-window";
 import { FirstRunNextSteps } from "@/components/first-run/next-steps";
+import { FirstRunChatShortcutPractice } from "@/components/first-run/chat-shortcut-practice";
 import type { AgentHandoffTarget } from "@/lib/first-run/agent-handoff";
 
 function CapturedAppIcon({ app }: { app: FirstRunCapturedApp }) {
@@ -32,7 +33,7 @@ function CapturedAppIcon({ app }: { app: FirstRunCapturedApp }) {
       className="flex h-5 w-5 shrink-0 items-center justify-center overflow-hidden border border-border text-[10px] font-medium uppercase text-muted-foreground"
     >
       {failed ? (
-        (app.name.trim().charAt(0) || "?")
+        app.name.trim().charAt(0) || "?"
       ) : (
         // Icons come from the local app server, not a remote host, so
         // next/image optimization does not apply. Same as the timeline.
@@ -150,7 +151,8 @@ export function FirstRunSetupReadyPanel({
 
       <div className="flex items-center justify-between gap-4 border-t border-border px-4 py-3">
         <p className="text-[10px] leading-relaxed text-muted-foreground">
-          these optional setups remain available from Automations and Connections.
+          these optional setups remain available from Automations and
+          Connections.
         </p>
         <Button
           size="sm"
@@ -246,8 +248,11 @@ export function FirstRunLearningBanner(
     markSummaryOpened,
     dismiss,
   } = useLearningWindow(learningOptions);
-  const { targets: handoffTargets, hint: handoffHint, askAgent } =
-    useAgentHandoff(phase === "ready" && !summaryOpenedAt);
+  const {
+    targets: handoffTargets,
+    hint: handoffHint,
+    askAgent,
+  } = useAgentHandoff(phase === "ready" && !summaryOpenedAt);
 
   // Only show progress when setup just caused it. A foreground empty result is
   // still a terminal onboarding state: hiding it also hid the daily-summary
@@ -288,6 +293,7 @@ export function FirstRunLearningBanner(
           data-phase="ready"
           className="mx-auto mb-4 w-full max-w-3xl overflow-hidden border border-border bg-background"
         >
+          <FirstRunChatShortcutPractice />
           <FirstRunSetupDock
             onDismiss={() => dismiss()}
             nextSteps={
@@ -360,8 +366,8 @@ export function FirstRunLearningBanner(
               ceiling, so a timer here would tick to 0:00 and then keep
               spinning. */}
           <p className="text-[11px] leading-relaxed text-muted-foreground">
-            Screenpipe saw enough. Putting the summary together now — this
-            takes a few seconds.
+            Screenpipe saw enough. Putting the summary together now — this takes
+            a few seconds.
           </p>
           {capturedApps.length > 0 && (
             <div className="flex items-center gap-2 pt-0.5">
@@ -385,14 +391,18 @@ export function FirstRunLearningBanner(
           onOpenSummary={() => void openSummary()}
           onPickAgent={(target) => void askAgent(target)}
           onDismiss={() => dismiss()}
-          nextSteps={<FirstRunNextSteps userToken={learningOptions.userToken} />}
+          nextSteps={
+            <FirstRunNextSteps userToken={learningOptions.userToken} />
+          }
         />
       )}
 
       {phase === "empty" && (
         <FirstRunSetupReadyPanel
           onDismiss={() => dismiss()}
-          nextSteps={<FirstRunNextSteps userToken={learningOptions.userToken} />}
+          nextSteps={
+            <FirstRunNextSteps userToken={learningOptions.userToken} />
+          }
         />
       )}
     </section>

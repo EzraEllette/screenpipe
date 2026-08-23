@@ -27,7 +27,10 @@ vi.mock("@/lib/first-run/use-learning-window", () => ({
   useLearningWindow: () => mocks.view,
 }));
 
-vi.mock("@tauri-apps/api/event", () => ({ emit: mocks.emit }));
+vi.mock("@tauri-apps/api/event", () => ({
+  emit: mocks.emit,
+  listen: vi.fn(async () => () => {}),
+}));
 
 vi.mock("@/lib/first-run/use-agent-handoff", () => ({
   useAgentHandoff: () => mocks.handoff,
@@ -37,6 +40,16 @@ vi.mock("@/components/first-run/next-steps", () => ({
   FirstRunNextSteps: () => (
     <div data-testid="first-run-next-steps">next steps</div>
   ),
+}));
+
+vi.mock("@/lib/hooks/use-settings", () => ({
+  useSettings: () => ({
+    settings: {
+      showChatShortcut: "Control+Super+L",
+      disabledShortcuts: [],
+      platform: "macos",
+    },
+  }),
 }));
 
 function view(over: Partial<LearningWindowView> = {}): LearningWindowView {
@@ -58,6 +71,7 @@ function view(over: Partial<LearningWindowView> = {}): LearningWindowView {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  window.localStorage.clear();
   // Default: no connected agent. Every handoff assertion opts in explicitly so
   // the fallback path is what the other tests exercise.
   mocks.handoff = {

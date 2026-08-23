@@ -32,10 +32,7 @@
 
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import {
-  E2E_DATA_DIR,
-  E2E_SEED_FLAGS,
-} from "../helpers/app-launcher.js";
+import { E2E_DATA_DIR, E2E_SEED_FLAGS } from "../helpers/app-launcher.js";
 import { saveScreenshot } from "../helpers/screenshot-utils.js";
 import {
   invokeOrThrow,
@@ -53,6 +50,7 @@ const seedFlags = E2E_SEED_FLAGS.split(",")
 const canRun = seedFlags.includes("onboarding");
 
 const LEARNING_STORAGE_KEY = "screenpipe.first-run.learning-window.v1";
+const CHAT_SHORTCUT_STORAGE_KEY = "screenpipe.first-run.chat-shortcut.v1";
 // The app's own E2E account hook (components/app-entitlement-gate.tsx), compiled
 // in only for e2e builds. Brain sits behind the account gate, and no seed flag
 // creates a signed-in user, so without this the section never renders.
@@ -61,7 +59,11 @@ const BANNER = '[data-testid="first-run-learning-banner"]';
 const SUMMARY_CHAT_ID = "first-run-e2e";
 const SUMMARY_TEXT =
   "Screenpipe saw work across Arc and Cursor. You reviewed onboarding and prepared the next app release.";
-const SUMMARY_CHAT_PATH = join(E2E_DATA_DIR, "chats", `${SUMMARY_CHAT_ID}.json`);
+const SUMMARY_CHAT_PATH = join(
+  E2E_DATA_DIR,
+  "chats",
+  `${SUMMARY_CHAT_ID}.json`,
+);
 
 const writeSummaryConversation = () => {
   mkdirSync(join(E2E_DATA_DIR, "chats"), { recursive: true });
@@ -117,6 +119,34 @@ const storedLearningState = async (): Promise<Record<string, unknown> | null> =>
     }
   }, LEARNING_STORAGE_KEY)) as Record<string, unknown> | null;
 
+const emitTauri = async (event: string, payload: unknown): Promise<void> => {
+  await browser.executeAsync(
+    (name: string, value: unknown, done: (result?: unknown) => void) => {
+      const runtime = globalThis as unknown as {
+        __TAURI__?: {
+          event?: {
+            emit: (eventName: string, body: unknown) => Promise<unknown>;
+          };
+        };
+        __TAURI_INTERNALS__?: {
+          invoke: (command: string, args: object) => Promise<unknown>;
+        };
+      };
+      const emit = runtime.__TAURI__?.event?.emit;
+      const promise = emit
+        ? emit(name, value)
+        : runtime.__TAURI_INTERNALS__?.invoke("plugin:event|emit", {
+            event: name,
+            payload: value,
+          });
+      if (!promise) return done();
+      void promise.then(() => done()).catch(() => done());
+    },
+    event,
+    payload,
+  );
+};
+
 /**
  * Seed window state and land on Home.
  *
@@ -136,10 +166,7 @@ const openHomeWith = async (
     typeof state.startedAt === "string" ? Date.parse(state.startedAt) : NaN;
   if (options.alignCompletion !== false && Number.isFinite(startedAt)) {
     await invokeOrThrow("plugin:e2e|set_onboarding_completed_ago", {
-      seconds: Math.max(
-        1,
-        Math.ceil((Date.now() - startedAt) / 1_000) + 1,
-      ),
+      seconds: Math.max(1, Math.ceil((Date.now() - startedAt) / 1_000) + 1),
     });
   }
 
@@ -320,6 +347,9 @@ const learningState = (over: Record<string, unknown> = {}) => ({
 
   it("opens the summary without inventing a user turn or losing setup", async () => {
     writeSummaryConversation();
+    await browser.execute((key: string) => {
+      window.localStorage.removeItem(key);
+    }, CHAT_SHORTCUT_STORAGE_KEY);
     await openHomeWith(
       learningState({
         phase: "ready",
@@ -360,6 +390,14 @@ const learningState = (over: Record<string, unknown> = {}) => ({
         () => !!document.querySelector('[data-testid="first-run-setup-dock"]'),
       ),
     ).toBe(true);
+    expect(
+      await browser.execute(
+        () =>
+          !!document.querySelector(
+            '[data-testid="first-run-chat-shortcut-practice"]',
+          ),
+      ),
+    ).toBe(true);
 
     const bodyText = (await browser.execute(
       () => document.body.textContent ?? "",
@@ -377,10 +415,61 @@ const learningState = (over: Record<string, unknown> = {}) => ({
     })) as boolean;
     expect(composerAvailable).toBe(true);
 
-    const collapsedScreenshot = await saveScreenshot(
-      "first-run-summary-with-setup-dock",
+    const teachScreenshot = await saveScreenshot(
+      "first-run-summary-shortcut-teach",
     );
-    expect(existsSync(collapsedScreenshot)).toBe(true);
+    expect(existsSync(teachScreenshot)).toBe(true);
+
+    const practice = await browser.$(
+      '[data-testid="first-run-chat-shortcut-start"]',
+    );
+    await practice.click();
+    await browser.waitUntil(
+      async () =>
+        Boolean(
+          await browser.execute(
+            () =>
+              !!document.querySelector(
+                '[data-testid="first-run-chat-shortcut-waiting"]',
+              ),
+          ),
+        ),
+      {
+        timeout: t(10_000),
+        timeoutMsg: "shortcut lesson never entered its practice state",
+      },
+    );
+    const waitingScreenshot = await saveScreenshot(
+      "first-run-summary-shortcut-waiting",
+    );
+    expect(existsSync(waitingScreenshot)).toBe(true);
+
+    await emitTauri("shortcut-show-chat", {});
+    await browser.waitUntil(
+      async () =>
+        Boolean(
+          await browser.execute(
+            () =>
+              !!document.querySelector(
+                '[data-testid="first-run-chat-shortcut-complete"]',
+              ),
+          ),
+        ),
+      {
+        timeout: t(10_000),
+        timeoutMsg: "native shortcut event did not complete the lesson",
+      },
+    );
+    const completionScreenshot = await saveScreenshot(
+      "first-run-summary-shortcut-complete",
+    );
+    expect(existsSync(completionScreenshot)).toBe(true);
+    expect(
+      await browser.execute((key: string) => {
+        const raw = window.localStorage.getItem(key);
+        return raw ? JSON.parse(raw).status : null;
+      }, CHAT_SHORTCUT_STORAGE_KEY),
+    ).toBe("completed");
 
     const toggle = await browser.$('[data-testid="first-run-toggle-setup"]');
     await toggle.click();
@@ -388,7 +477,8 @@ const learningState = (over: Record<string, unknown> = {}) => ({
       async () =>
         Boolean(
           await browser.execute(
-            () => !!document.querySelector('[data-testid="first-run-next-steps"]'),
+            () =>
+              !!document.querySelector('[data-testid="first-run-next-steps"]'),
           ),
         ),
       {
