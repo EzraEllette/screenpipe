@@ -36,6 +36,16 @@ import type { ConnectionListItem } from "@/lib/chat/connection-suggestions";
 import type { InlineConnectStatus } from "@/lib/connections/inline-connect";
 import type { MarkdownCitationPlan } from "@/lib/chat/markdown-export";
 
+const MAX_MESSAGE_EDIT_HEIGHT_PX = 240;
+
+function resizeMessageEditTextarea(textarea: HTMLTextAreaElement) {
+  textarea.style.height = "auto";
+  const nextHeight = Math.min(textarea.scrollHeight, MAX_MESSAGE_EDIT_HEIGHT_PX);
+  textarea.style.height = `${nextHeight}px`;
+  textarea.style.overflowY =
+    textarea.scrollHeight > MAX_MESSAGE_EDIT_HEIGHT_PX ? "auto" : "hidden";
+}
+
 function messageDate(timestamp: number): Date | null {
   const date = new Date(timestamp);
   return Number.isFinite(date.getTime()) ? date : null;
@@ -139,6 +149,18 @@ export function ChatMessageList({
 }: ChatMessageListProps) {
   // Null unless an ACP agent is installing/starting. Ticks only while it is.
   const acpBoot = useAcpBootLabel();
+  const messageBubbleRefs = React.useRef(new Map<string, HTMLDivElement>());
+  const [editBubbleWidth, setEditBubbleWidth] = React.useState<number | null>(null);
+
+  const beginEditingMessage = React.useCallback(
+    (message: Message, caretPos?: number) => {
+      const measuredWidth =
+        messageBubbleRefs.current.get(message.id)?.getBoundingClientRect().width ?? 0;
+      setEditBubbleWidth(measuredWidth > 0 ? measuredWidth : null);
+      enterEditMode(message, caretPos);
+    },
+    [enterEditMode],
+  );
 
   return (
     <>
@@ -291,7 +313,7 @@ export function ChatMessageList({
                   className={cn(
                     "group/message flex flex-col min-w-0",
                     message.role === "user"
-                      ? (editingMessageId === message.id ? "items-end w-full" : "items-end max-w-[82%]")
+                      ? "items-end max-w-[82%]"
                       : "items-start w-full"
                   )}
                 >
@@ -307,6 +329,10 @@ export function ChatMessageList({
                   ) : null}
                   {hideSupersededSteerBody ? null : (
                     <div
+                      ref={(node) => {
+                        if (node) messageBubbleRefs.current.set(message.id, node);
+                        else messageBubbleRefs.current.delete(message.id);
+                      }}
                       onMouseDown={(e) => {
                         if (!canEditMessage || editingMessageId === message.id) return;
                         pendingCaretRef.current = caretOffsetFromClick(e, message.content);
@@ -322,7 +348,7 @@ export function ChatMessageList({
                           pendingCaretRef.current = null;
                           return;
                         }
-                        enterEditMode(message, pendingCaretRef.current ?? undefined);
+                        beginEditingMessage(message, pendingCaretRef.current ?? undefined);
                       }}
                       className={cn(
                         "relative rounded-xl text-sm overflow-hidden max-w-full transition-all",
@@ -330,15 +356,30 @@ export function ChatMessageList({
                           ? "bg-muted/60 text-foreground px-4 py-3"
                           : "bg-background text-foreground py-1 w-full",
                         canEditMessage && editingMessageId !== message.id && "cursor-text",
-                        editingMessageId === message.id && message.role === "user" && "w-full"
+                        editingMessageId === message.id &&
+                          message.role === "user" &&
+                          "min-w-[min(12rem,100%)]"
                       )}
+                      style={
+                        editingMessageId === message.id && message.role === "user" && editBubbleWidth
+                          ? { width: editBubbleWidth, maxWidth: "100%" }
+                          : undefined
+                      }
+                      data-testid="chat-message-bubble"
+                      data-editing={editingMessageId === message.id ? "true" : "false"}
                     >
                       {editingMessageId === message.id ? (
-                        <div className="flex flex-col gap-2 w-full min-w-0">
+                        <div
+                          className="flex flex-col gap-2 w-full min-w-0"
+                          data-testid="chat-message-editor"
+                        >
                           <textarea
+                            aria-label="Edit message"
                             ref={(el) => {
                               editTextareaRef.current = el;
-                              if (el && pendingCaretRef.current != null) {
+                              if (!el) return;
+                              resizeMessageEditTextarea(el);
+                              if (pendingCaretRef.current != null) {
                                 const pos = pendingCaretRef.current;
                                 pendingCaretRef.current = null;
                                 el.focus({ preventScroll: true });
@@ -346,7 +387,10 @@ export function ChatMessageList({
                               }
                             }}
                             value={editDraft}
-                            onChange={(e) => onEditDraftChange(e.target.value)}
+                            onChange={(e) => {
+                              resizeMessageEditTextarea(e.currentTarget);
+                              onEditDraftChange(e.target.value);
+                            }}
                             onBlur={() => commitEditedMessage(message, editDraft)}
                             onKeyDown={(e) => {
                               if (e.key === "Escape") {
@@ -358,8 +402,8 @@ export function ChatMessageList({
                                 (e.currentTarget as HTMLTextAreaElement).blur();
                               }
                             }}
-                            rows={Math.min(10, Math.max(1, editDraft.split("\n").length))}
-                            className="block w-full min-w-0 resize-none bg-transparent text-foreground placeholder:text-muted-foreground focus:outline-none leading-relaxed"
+                            rows={1}
+                            className="block w-full min-w-0 resize-none overflow-y-hidden bg-transparent text-foreground placeholder:text-muted-foreground focus:outline-none leading-relaxed"
                           />
                           <div className="flex items-center justify-end gap-2">
                             <button
@@ -472,7 +516,7 @@ export function ChatMessageList({
                               onMouseUp={(e) => e.stopPropagation()}
                               onClick={(e) => {
                                 e.stopPropagation();
-                                enterEditMode(message);
+                                beginEditingMessage(message);
                               }}
                               className="p-1 rounded-md hover:bg-muted text-muted-foreground hover:text-foreground"
                               title="Edit"
