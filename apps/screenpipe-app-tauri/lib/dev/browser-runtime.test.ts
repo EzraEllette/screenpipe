@@ -4,11 +4,23 @@
 
 import { describe, expect, it, vi } from "vitest";
 import type {
+  ActivityOpportunitySnapshot,
   BrainViewCanvasDocument,
   BrainViewDefinition,
+  CreatedSkill,
+  UnfinishedOpportunity,
 } from "@/lib/utils/tauri";
 import { mockLocalApiResponse, createMockHealth } from "./browser-engine-mock";
 import { createBrowserIpcMock } from "./browser-tauri-mock";
+
+function commandError(run: () => unknown): unknown {
+  try {
+    run();
+    return null;
+  } catch (error) {
+    return error;
+  }
+}
 
 describe("browser development runtime", () => {
   it("provides a stateful Tauri store", async () => {
@@ -186,6 +198,224 @@ describe("browser development runtime", () => {
     expect(savedView).toMatchObject({ timeRange: "24h", revision: 2 });
     expect(savedView.slots[0].value).toEqual(view.slots[0].value);
     expect(invoke("list_brain_views")).toEqual([savedView]);
+  });
+
+  it("exposes ready, empty, and analysis-error opportunity snapshots", () => {
+    const readyInvoke = createBrowserIpcMock({
+      mode: "mock",
+      scenario: "ready",
+      apiPort: 3030,
+    });
+    const emptyInvoke = createBrowserIpcMock({
+      mode: "mock",
+      scenario: "empty",
+      apiPort: 3030,
+    });
+    const errorInvoke = createBrowserIpcMock({
+      mode: "mock",
+      scenario: "backend-error",
+      apiPort: 3030,
+    });
+
+    const ready = readyInvoke(
+      "get_activity_opportunities",
+    ) as ActivityOpportunitySnapshot;
+    expect(ready).toMatchObject({
+      analysisState: "ready",
+      analysisError: null,
+    });
+    expect(ready.skills).toHaveLength(3);
+    expect(ready.unfinished).toHaveLength(2);
+    expect(ready.skills[0].evidence[0]).toMatchObject({
+      activityId: "browser-dev-slack",
+      apps: ["Slack"],
+      excluded: false,
+    });
+
+    expect(emptyInvoke("get_activity_opportunities")).toMatchObject({
+      analysisState: "ready",
+      skills: [],
+      unfinished: [],
+    });
+    expect(errorInvoke("get_activity_opportunities")).toEqual({
+      analysisState: "error",
+      generatedAt: null,
+      analysisError: "mock opportunity analysis failed",
+      skills: [],
+      unfinished: [],
+    });
+  });
+
+  it("persists revisioned opportunity edits, exclusions, and dismissal", () => {
+    const invoke = createBrowserIpcMock({
+      mode: "mock",
+      scenario: "ready",
+      apiPort: 3030,
+    });
+    const initial = invoke(
+      "get_activity_opportunities",
+    ) as ActivityOpportunitySnapshot;
+    const skill = initial.skills[0];
+    const excludedActivityId = skill.evidence[0].activityId;
+
+    const dismissed = invoke("update_activity_opportunity", {
+      request: {
+        kind: "skill",
+        id: skill.id,
+        revision: skill.revision,
+        name: "  focused feedback fix  ",
+        notes: "  preserve the customer wording  ",
+        excludedActivityIds: [excludedActivityId],
+        dismissed: true,
+      },
+    }) as ActivityOpportunitySnapshot;
+    expect(dismissed.skills[0]).toMatchObject({
+      revision: 2,
+      status: "dismissed",
+      name: "focused feedback fix",
+      notes: "preserve the customer wording",
+    });
+    expect(
+      dismissed.skills[0].evidence.find(
+        (source) => source.activityId === excludedActivityId,
+      )?.excluded,
+    ).toBe(true);
+
+    expect(
+      commandError(() =>
+        invoke("update_activity_opportunity", {
+          request: {
+            kind: "skill",
+            id: skill.id,
+            revision: skill.revision,
+            dismissed: false,
+          },
+        }),
+      ),
+    ).toBe("Opportunity changed; reload it before saving");
+
+    const restored = invoke("update_activity_opportunity", {
+      request: {
+        kind: "skill",
+        id: skill.id,
+        revision: 2,
+        dismissed: false,
+      },
+    }) as ActivityOpportunitySnapshot;
+    expect(restored.skills[0]).toMatchObject({
+      revision: 3,
+      status: "pending",
+    });
+    expect(
+      commandError(() =>
+        invoke("update_activity_opportunity", {
+          request: {
+            kind: "skill",
+            id: skill.id,
+            revision: 3,
+            name: "must not survive a rejected update",
+            excludedActivityIds: ["foreign-activity"],
+          },
+        }),
+      ),
+    ).toBe("excludedActivityIds contains an activity outside this opportunity");
+    const afterRejectedUpdate = invoke(
+      "get_activity_opportunities",
+    ) as ActivityOpportunitySnapshot;
+    expect(afterRejectedUpdate.skills[0]).toMatchObject({
+      revision: 3,
+      name: "focused feedback fix",
+    });
+  });
+
+  it("creates an idempotent skill from included activity evidence", () => {
+    const invoke = createBrowserIpcMock({
+      mode: "mock",
+      scenario: "ready",
+      apiPort: 3030,
+    });
+    const initial = invoke(
+      "get_activity_opportunities",
+    ) as ActivityOpportunitySnapshot;
+    const skill = initial.skills[1];
+    const excluded = skill.evidence[0].activityId;
+    const included = skill.evidence[1].activityId;
+    const updated = invoke("update_activity_opportunity", {
+      request: {
+        kind: "skill",
+        id: skill.id,
+        revision: skill.revision,
+        excludedActivityIds: [excluded],
+      },
+    }) as ActivityOpportunitySnapshot;
+    const revision = updated.skills[1].revision;
+
+    expect(
+      commandError(() =>
+        invoke("create_activity_opportunity_skill", {
+          request: { id: skill.id, revision: skill.revision },
+        }),
+      ),
+    ).toBe("Opportunity changed; reload it before creating the skill");
+
+    const created = invoke("create_activity_opportunity_skill", {
+      request: { id: skill.id, revision },
+    }) as CreatedSkill;
+    expect(created.path).toMatch(
+      /\/prepare-a-pull-request-review-brief\/SKILL\.md$/,
+    );
+    expect(created.skillMd).toContain(`\`${included}\``);
+    expect(created.skillMd).not.toContain(`\`${excluded}\``);
+
+    const saved = invoke(
+      "get_activity_opportunities",
+    ) as ActivityOpportunitySnapshot;
+    expect(saved.skills[1]).toMatchObject({
+      revision: revision + 1,
+      status: "created",
+      createdSkill: created,
+    });
+    expect(
+      invoke("create_activity_opportunity_skill", {
+        request: { id: skill.id, revision: skill.revision },
+      }),
+    ).toEqual(created);
+  });
+
+  it("records an idempotent unfinished-work handoff to one chat", () => {
+    const invoke = createBrowserIpcMock({
+      mode: "mock",
+      scenario: "ready",
+      apiPort: 3030,
+    });
+    const initial = invoke(
+      "get_activity_opportunities",
+    ) as ActivityOpportunitySnapshot;
+    const task = initial.unfinished[0];
+    const request = {
+      id: task.id,
+      revision: task.revision,
+      conversationId: "chat-browser-1",
+    };
+
+    const handedOff = invoke("handoff_activity_opportunity", {
+      request,
+    }) as UnfinishedOpportunity;
+    expect(handedOff).toMatchObject({
+      revision: 2,
+      status: "handed_off",
+      conversationId: "chat-browser-1",
+    });
+    expect(invoke("handoff_activity_opportunity", { request })).toEqual(
+      handedOff,
+    );
+    expect(
+      commandError(() =>
+        invoke("handoff_activity_opportunity", {
+          request: { ...request, conversationId: "chat-browser-2" },
+        }),
+      ),
+    ).toBe("This work is already handed off to another chat");
   });
 
   it("provides external schedules for browser design review", () => {

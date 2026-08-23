@@ -1829,7 +1829,6 @@ export function BrainSection({
       {typeFilter === "opportunities" ? (
         <BrainOpportunities
           navigation={brainViewSwitcher}
-          preview={process.env.NEXT_PUBLIC_SCREENPIPE_WEB_DEV === "mock"}
           onOpportunityCountChange={setOpportunitiesTabCount}
         />
       ) : typeFilter === "overview" ? (

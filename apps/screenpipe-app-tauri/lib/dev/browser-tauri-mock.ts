@@ -4,16 +4,23 @@
 
 import type { InvokeArgs } from "@tauri-apps/api/core";
 import type {
+  ActivityOpportunitySnapshot,
   BrainViewCanvasDocument,
   BrainViewDefinition,
   BrainViewTemplateKit,
+  CreateActivityOpportunitySkillRequest,
+  CreatedSkill,
+  HandoffActivityOpportunityRequest,
   ImportedSkill,
+  OpportunityEvidence,
   PiExtensionPackage,
   PiInfo,
   ProviderAutomation,
   RegistrySkill,
   SaveBrainViewCanvasRequest,
   SaveBrainViewRequest,
+  SkillOpportunity,
+  UpdateActivityOpportunityRequest,
 } from "@/lib/utils/tauri";
 import type { BrowserDevScenario } from "./browser-engine-mock";
 
@@ -251,6 +258,348 @@ const GRANTED_PERMISSION_COMMANDS = new Set([
   "check_permission",
   "check_screen_recording_permission",
 ]);
+
+function cloneActivityOpportunitySnapshot(
+  snapshot: ActivityOpportunitySnapshot,
+): ActivityOpportunitySnapshot {
+  return structuredClone(snapshot);
+}
+
+function createBrowserDevActivityOpportunities(
+  scenario: BrowserDevScenario | undefined,
+  now: string,
+): ActivityOpportunitySnapshot {
+  if (scenario === "backend-error") {
+    return {
+      analysisState: "error",
+      generatedAt: null,
+      analysisError: "mock opportunity analysis failed",
+      skills: [],
+      unfinished: [],
+    };
+  }
+  if (scenario === "empty") {
+    return {
+      analysisState: "ready",
+      generatedAt: now,
+      analysisError: null,
+      skills: [],
+      unfinished: [],
+    };
+  }
+
+  const at = (minutesAgo: number) =>
+    new Date(Date.parse(now) - minutesAgo * 60_000).toISOString();
+  const evidenceById: Record<string, OpportunityEvidence> = {
+    "browser-dev-slack": {
+      activityId: "browser-dev-slack",
+      startAt: at(170),
+      endAt: at(132),
+      title: "Review sample onboarding issue",
+      summary:
+        "Reviewed the synthetic onboarding discussion and drafted a response.",
+      apps: ["Slack"],
+      frameIds: [92_001],
+      meetingIds: [],
+      excluded: false,
+    },
+    "browser-dev-cursor": {
+      activityId: "browser-dev-cursor",
+      startAt: at(124),
+      endAt: at(48),
+      title: "Refine the activity ledger",
+      summary: "Worked through the synthetic Activity ledger implementation.",
+      apps: ["Cursor"],
+      frameIds: [92_002],
+      meetingIds: [],
+      excluded: false,
+    },
+    "browser-dev-arc": {
+      activityId: "browser-dev-arc",
+      startAt: at(39),
+      endAt: at(4),
+      title: "Inspect sample pull request",
+      summary: "Reviewed a synthetic pull request and its supporting context.",
+      apps: ["Arc"],
+      frameIds: [92_003],
+      meetingIds: [],
+      excluded: false,
+    },
+  };
+  const evidence = (...activityIds: string[]) =>
+    activityIds.map((activityId) => structuredClone(evidenceById[activityId]));
+
+  return {
+    analysisState: "ready",
+    generatedAt: now,
+    analysisError: null,
+    skills: [
+      {
+        id: "feedback-to-fix",
+        revision: 1,
+        status: "pending",
+        name: "turn product feedback into a focused fix",
+        description:
+          "Trace a reported issue from its source through implementation and review-ready evidence.",
+        notes: "",
+        blueprint: {
+          trigger:
+            "When product feedback needs a focused, review-ready change.",
+          steps: [
+            "Return to the source and name the expected outcome.",
+            "Reproduce and narrow the smallest complete change.",
+            "Implement, verify, and close the loop with direct evidence.",
+          ],
+          verification:
+            "Preserve the original request and attach direct acceptance evidence.",
+        },
+        evidence: evidence(
+          "browser-dev-slack",
+          "browser-dev-cursor",
+          "browser-dev-arc",
+        ),
+      },
+      {
+        id: "review-brief",
+        revision: 1,
+        status: "pending",
+        name: "prepare a pull request review brief",
+        description:
+          "Turn a code change into a short reviewer brief with scope, risk, verification, and source links.",
+        notes: "",
+        blueprint: {
+          trigger: "When a focused code change is ready for review.",
+          steps: [
+            "Read the diff and identify its user-visible boundary.",
+            "Record scope, risk, and focused verification.",
+            "Publish the brief with direct source links.",
+          ],
+          verification:
+            "Map every claim to the diff, a focused check, or an explicit unknown.",
+        },
+        evidence: evidence("browser-dev-cursor", "browser-dev-arc"),
+      },
+      {
+        id: "meeting-followups",
+        revision: 1,
+        status: "pending",
+        name: "turn decisions into follow-ups",
+        description:
+          "Extract decisions, owners, and next actions, then prepare a source-backed follow-up.",
+        notes: "",
+        blueprint: {
+          trigger: "When a discussion ends with decisions that need follow-up.",
+          steps: [
+            "Return to the source discussion.",
+            "Separate decisions from open questions.",
+            "Prepare owned next actions with source links.",
+          ],
+          verification:
+            "Every follow-up has an owner, destination, and source discussion.",
+        },
+        evidence: evidence("browser-dev-slack", "browser-dev-arc"),
+      },
+    ],
+    unfinished: [
+      {
+        id: "activity-review-flow",
+        revision: 1,
+        status: "pending",
+        title: "finish the Activity ledger review flow",
+        description:
+          "Complete the empty, populated, and evidence-review states for the Activity ledger.",
+        goal: "The Activity ledger is ready for a focused review with source links preserved.",
+        leftOff:
+          "The populated flow was reviewed, but the empty state was not yet verified.",
+        lastSeenAt: at(4),
+        agentSteps: [
+          "reopen the Activity ledger work",
+          "verify empty and populated states",
+          "prepare the review handoff",
+        ],
+        notes: "",
+        evidence: evidence("browser-dev-cursor", "browser-dev-arc"),
+        conversationId: null,
+      },
+      {
+        id: "onboarding-reply",
+        revision: 1,
+        status: "pending",
+        title: "close the onboarding issue thread",
+        description:
+          "Return to the onboarding report with a clear outcome and next step.",
+        goal: "The person who raised the issue has a verified outcome and next step.",
+        leftOff:
+          "A partial status update remained in the reply field when attention moved away.",
+        lastSeenAt: at(132),
+        agentSteps: [
+          "reopen the original onboarding thread",
+          "verify the current issue outcome",
+          "send the final customer handoff",
+        ],
+        notes: "",
+        evidence: evidence("browser-dev-slack"),
+        conversationId: null,
+      },
+    ],
+  };
+}
+
+function throwCommandError(message: string): never {
+  // Rust command errors reject Tauri `invoke` with their serialized string.
+  throw message;
+}
+
+function requiredText(label: string, value: string): string {
+  const cleaned = value.trim();
+  if (!cleaned) throwCommandError(`${label} cannot be empty`);
+  return cleaned;
+}
+
+function updateOpportunityEvidence(
+  evidence: OpportunityEvidence[],
+  excludedActivityIds: string[] | null | undefined,
+) {
+  if (!excludedActivityIds) return;
+  const known = new Set(evidence.map((item) => item.activityId));
+  if (excludedActivityIds.some((id) => !known.has(id))) {
+    throwCommandError(
+      "excludedActivityIds contains an activity outside this opportunity",
+    );
+  }
+  const excluded = new Set(excludedActivityIds);
+  for (const item of evidence) {
+    item.excluded = excluded.has(item.activityId);
+  }
+}
+
+function applyActivityOpportunityUpdate(
+  snapshot: ActivityOpportunitySnapshot,
+  request: UpdateActivityOpportunityRequest,
+) {
+  if (request.kind === "skill") {
+    const item = snapshot.skills.find(
+      (candidate) => candidate.id === request.id,
+    );
+    if (!item) throwCommandError("Skill opportunity was not found");
+    if (item.revision !== request.revision) {
+      throwCommandError("Opportunity changed; reload it before saving");
+    }
+    if (item.status === "created") {
+      throwCommandError("Created skills cannot be edited");
+    }
+    if (typeof request.name === "string") {
+      item.name = requiredText("name", request.name);
+    }
+    if (typeof request.description === "string") {
+      item.description = requiredText("description", request.description);
+    }
+    if (typeof request.notes === "string") item.notes = request.notes.trim();
+    if (typeof request.trigger === "string") {
+      item.blueprint.trigger = requiredText("trigger", request.trigger);
+    }
+    if (Array.isArray(request.steps)) {
+      if (
+        request.steps.length === 0 ||
+        request.steps.some((step) => !step.trim())
+      ) {
+        throwCommandError("steps cannot contain empty values");
+      }
+      item.blueprint.steps = [...request.steps];
+    }
+    if (typeof request.verification === "string") {
+      item.blueprint.verification = requiredText(
+        "verification",
+        request.verification,
+      );
+    }
+    updateOpportunityEvidence(item.evidence, request.excludedActivityIds);
+    if (typeof request.dismissed === "boolean") {
+      item.status = request.dismissed
+        ? "dismissed"
+        : item.status === "dismissed"
+          ? "pending"
+          : item.status;
+    }
+    item.revision += 1;
+    return;
+  }
+
+  const item = snapshot.unfinished.find(
+    (candidate) => candidate.id === request.id,
+  );
+  if (!item) throwCommandError("Unfinished opportunity was not found");
+  if (item.revision !== request.revision) {
+    throwCommandError("Opportunity changed; reload it before saving");
+  }
+  if (item.status === "handed_off") {
+    throwCommandError("Handed-off work cannot be edited");
+  }
+  if (typeof request.title === "string") {
+    item.title = requiredText("title", request.title);
+  }
+  if (typeof request.description === "string") {
+    item.description = requiredText("description", request.description);
+  }
+  if (typeof request.goal === "string") item.goal = request.goal.trim();
+  if (typeof request.notes === "string") item.notes = request.notes.trim();
+  if (typeof request.leftOff === "string") {
+    item.leftOff = requiredText("leftOff", request.leftOff);
+  }
+  if (Array.isArray(request.agentSteps)) {
+    if (
+      request.agentSteps.length === 0 ||
+      request.agentSteps.some((step) => !step.trim())
+    ) {
+      throwCommandError("agentSteps cannot contain empty values");
+    }
+    item.agentSteps = [...request.agentSteps];
+  }
+  updateOpportunityEvidence(item.evidence, request.excludedActivityIds);
+  if (typeof request.dismissed === "boolean") {
+    item.status = request.dismissed
+      ? "dismissed"
+      : item.status === "dismissed"
+        ? "pending"
+        : item.status;
+  }
+  item.revision += 1;
+}
+
+function activityOpportunitySkillInstructions(item: SkillOpportunity): string {
+  const steps = item.blueprint.steps
+    .map((step, index) => `${index + 1}. ${step.trim()}`)
+    .join("\n");
+  const sources = item.evidence
+    .filter((source) => !source.excluded)
+    .map(
+      (source) =>
+        `- \`${source.activityId}\` (${source.startAt} to ${source.endAt}): ${source.title} — ${source.summary}`,
+    )
+    .join("\n");
+  const notes = item.notes.trim() ? `\n\n## Notes\n\n${item.notes.trim()}` : "";
+  return `# ${item.name.trim()}\n\n## Trigger\n\n${item.blueprint.trigger.trim()}\n\n## Steps\n\n${steps}\n\n## Verification\n\n${item.blueprint.verification.trim()}${notes}\n\n## Source activities\n\n${sources}`;
+}
+
+function browserSkillKey(name: string): string {
+  return name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+function createBrowserDevSkill(item: SkillOpportunity): CreatedSkill {
+  if (item.evidence.every((source) => source.excluded)) {
+    throwCommandError("At least one activity must remain included");
+  }
+  const instructions = activityOpportunitySkillInstructions(item);
+  const skillMd = `---\nname: ${JSON.stringify(item.name.trim())}\ndescription: ${JSON.stringify(item.description.trim())}\n---\n\n${instructions}\n`;
+  return {
+    path: `/Users/screenpipe/.screenpipe/skills/${browserSkillKey(item.name)}/SKILL.md`,
+    skillMd,
+  };
+}
 
 function createBrowserDevLiveView(now: string): BrainViewDefinition {
   const dataTimestamp = new Date(
@@ -537,6 +886,14 @@ export function createBrowserIpcMock(options: BrowserIpcMockOptions) {
     liveViews[0]?.id ?? "browser-dev-live-view",
     initialTimestamp,
   );
+  let activityOpportunities = createBrowserDevActivityOpportunities(
+    options.scenario,
+    initialTimestamp,
+  );
+  const createdSkills = new Map<
+    string,
+    { created: CreatedSkill; content: string }
+  >();
 
   const getStore = (resourceId: number) => {
     let store = stores.get(resourceId);
@@ -1004,6 +1361,79 @@ export function createBrowserIpcMock(options: BrowserIpcMockOptions) {
       case "generate_activity_history":
       case "get_activity_history":
         return mockActivityHistory(input.start, input.end);
+      case "get_activity_opportunities":
+        return cloneActivityOpportunitySnapshot(activityOpportunities);
+      case "update_activity_opportunity": {
+        const request = input.request as UpdateActivityOpportunityRequest;
+        const next = cloneActivityOpportunitySnapshot(activityOpportunities);
+        applyActivityOpportunityUpdate(next, request);
+        activityOpportunities = next;
+        return cloneActivityOpportunitySnapshot(activityOpportunities);
+      }
+      case "create_activity_opportunity_skill": {
+        const request = input.request as CreateActivityOpportunitySkillRequest;
+        const item = activityOpportunities.skills.find(
+          (candidate) => candidate.id === request.id,
+        );
+        if (!item) throwCommandError("Skill opportunity was not found");
+        if (item.createdSkill) return structuredClone(item.createdSkill);
+        if (item.revision !== request.revision) {
+          throwCommandError(
+            "Opportunity changed; reload it before creating the skill",
+          );
+        }
+        if (item.status !== "pending") {
+          throwCommandError("Only pending skill opportunities can be created");
+        }
+        const created = createBrowserDevSkill(item);
+        const key = browserSkillKey(item.name);
+        const existing = createdSkills.get(key);
+        if (existing && existing.content !== created.skillMd) {
+          throwCommandError(
+            `skill '${key}' already exists; read it before deciding whether it is agent-owned and patchable`,
+          );
+        }
+        const result = existing?.created ?? created;
+        createdSkills.set(key, {
+          created: structuredClone(result),
+          content: created.skillMd,
+        });
+        item.status = "created";
+        item.createdSkill = structuredClone(result);
+        item.revision += 1;
+        return structuredClone(result);
+      }
+      case "handoff_activity_opportunity": {
+        const request = input.request as HandoffActivityOpportunityRequest;
+        const conversationId = requiredText(
+          "conversationId",
+          request.conversationId,
+        );
+        const item = activityOpportunities.unfinished.find(
+          (candidate) => candidate.id === request.id,
+        );
+        if (!item) {
+          throwCommandError("Unfinished opportunity was not found");
+        }
+        if (item.status === "handed_off") {
+          if (item.conversationId === conversationId) {
+            return structuredClone(item);
+          }
+          throwCommandError("This work is already handed off to another chat");
+        }
+        if (item.revision !== request.revision) {
+          throwCommandError(
+            "Opportunity changed; reload it before recording the handoff",
+          );
+        }
+        if (item.status !== "pending") {
+          throwCommandError("Only pending unfinished work can be handed off");
+        }
+        item.status = "handed_off";
+        item.conversationId = conversationId;
+        item.revision += 1;
+        return structuredClone(item);
+      }
       case "is_enterprise_build_cmd":
       case "is_capture_paused":
         return false;
