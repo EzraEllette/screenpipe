@@ -2186,6 +2186,7 @@ export function StandaloneChat({
           chipPrefixWidth,
           chipScrollTop,
           onClearConnectionChip: () => setConnectionChip(null),
+          onValueChange: setInput,
           onChange: handleMentionInputChange,
           onCompositionStart: () => setIsComposing(true),
           onCompositionEnd: () => setIsComposing(false),

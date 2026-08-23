@@ -105,6 +105,14 @@ export function ChatComposer({
             filters={filters}
             modelControls={modelControls}
             isStreaming={input.isLoading || input.isStreaming}
+            dictation={{
+              inputValue: input.value,
+              inputRef: input.inputRef,
+              onValueChange: input.onValueChange,
+              disabled: !input.canChat,
+              sessionId: modelControls.currentQueueSessionId,
+              isMac: queue.isMac,
+            }}
             sendButton={{
               isStopMode,
               hasPendingDocs,
