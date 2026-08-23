@@ -75,12 +75,10 @@ function RecentChatSwitcherMount() {
   );
 }
 
-function ExperimentalFeatureControls() {
-  const enabled = useExperimentalFeaturesEnabled();
-
+function WebviewGestureControls() {
   useEffect(() => {
-    void commands.setHistorySwipeNavigationEnabled(enabled).catch(() => {});
-  }, [enabled]);
+    void commands.setHistorySwipeNavigationEnabled(false).catch(() => {});
+  }, []);
 
   return null;
 }
@@ -316,7 +314,7 @@ export default function RootLayout({
           {!isOverlay && <ShortcutTracker />}
           {!isOverlay && <PipeInstallDialog />}
           {!isOverlay && <BrowserPairingDialog />}
-          <ExperimentalFeatureControls />
+          <WebviewGestureControls />
           <Suspense fallback={null}>
             <RecentChatSwitcherMount />
           </Suspense>
