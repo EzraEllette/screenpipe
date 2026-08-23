@@ -420,10 +420,9 @@ const learningState = (over: Record<string, unknown> = {}) => ({
     );
     expect(existsSync(teachScreenshot)).toBe(true);
 
-    const practice = await browser.$(
-      '[data-testid="first-run-chat-shortcut-start"]',
-    );
-    await practice.click();
+    await (
+      await browser.$('[data-testid="first-run-chat-shortcut-start"]')
+    ).click();
     await browser.waitUntil(
       async () =>
         Boolean(
@@ -444,7 +443,40 @@ const learningState = (over: Record<string, unknown> = {}) => ({
     );
     expect(existsSync(waitingScreenshot)).toBe(true);
 
-    await emitTauri("shortcut-show-chat", {});
+    // A toggle that closes an already-visible Chat must not be mistaken for
+    // learning the shortcut. The lesson explains the result and asks for one
+    // more press, which will now show Chat.
+    await emitTauri("shortcut-show-chat", {
+      action: "hidden",
+      success: true,
+    });
+    await browser.waitUntil(
+      async () =>
+        (
+          (await browser.execute(
+            () =>
+              document.querySelector(
+                '[data-testid="first-run-chat-shortcut-issue"]',
+              )?.textContent ?? "",
+          )) as string
+        ).includes("already open"),
+      {
+        timeout: t(10_000),
+        timeoutMsg: "hidden Chat outcome was incorrectly accepted",
+      },
+    );
+    const hiddenScreenshot = await saveScreenshot(
+      "first-run-summary-shortcut-already-open",
+    );
+    expect(existsSync(hiddenScreenshot)).toBe(true);
+
+    await (
+      await browser.$('[data-testid="first-run-chat-shortcut-start"]')
+    ).click();
+    await emitTauri("shortcut-show-chat", {
+      action: "shown",
+      success: true,
+    });
     await browser.waitUntil(
       async () =>
         Boolean(
@@ -467,9 +499,20 @@ const learningState = (over: Record<string, unknown> = {}) => ({
     expect(
       await browser.execute((key: string) => {
         const raw = window.localStorage.getItem(key);
-        return raw ? JSON.parse(raw).status : null;
+        return raw ? JSON.parse(raw) : null;
       }, CHAT_SHORTCUT_STORAGE_KEY),
-    ).toBe("completed");
+    ).toMatchObject({ status: "completed", acknowledged: false });
+
+    const done = await browser.$(
+      '[data-testid="first-run-chat-shortcut-done"]',
+    );
+    await done.click();
+    expect(
+      await browser.execute((key: string) => {
+        const raw = window.localStorage.getItem(key);
+        return raw ? JSON.parse(raw) : null;
+      }, CHAT_SHORTCUT_STORAGE_KEY),
+    ).toMatchObject({ status: "completed", acknowledged: true });
 
     const toggle = await browser.$('[data-testid="first-run-toggle-setup"]');
     await toggle.click();

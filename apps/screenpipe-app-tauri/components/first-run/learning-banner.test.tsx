@@ -7,6 +7,7 @@ import React from "react";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { FirstRunLearningBanner } from "./learning-banner";
+import { FIRST_RUN_CHAT_SHORTCUT_STORAGE_KEY } from "./chat-shortcut-practice";
 import type { LearningWindowView } from "@/lib/first-run/use-learning-window";
 
 const mocks = vi.hoisted(() => ({
@@ -44,6 +45,7 @@ vi.mock("@/components/first-run/next-steps", () => ({
 
 vi.mock("@/lib/hooks/use-settings", () => ({
   useSettings: () => ({
+    isSettingsLoaded: true,
     settings: {
       showChatShortcut: "Control+Super+L",
       disabledShortcuts: [],
@@ -171,7 +173,7 @@ describe("first-run learning banner", () => {
     expect(dismiss).not.toHaveBeenCalled();
   });
 
-  it("keeps a compact expandable setup dock over the opened summary", () => {
+  it("keeps a compact expandable setup dock over the opened summary", async () => {
     const dismiss = vi.fn();
     mocks.view = view({
       phase: "ready",
@@ -180,6 +182,12 @@ describe("first-run learning banner", () => {
       dismiss,
     });
     render(<FirstRunLearningBanner />);
+
+    await waitFor(() =>
+      expect(
+        screen.getByTestId("first-run-chat-shortcut-start"),
+      ).toBeEnabled(),
+    );
 
     expect(screen.getByTestId("first-run-setup-dock")).toBeInTheDocument();
     expect(
@@ -194,6 +202,12 @@ describe("first-run learning banner", () => {
 
     fireEvent.click(screen.getByTestId("first-run-hide-setup"));
     expect(dismiss).toHaveBeenCalledTimes(1);
+    expect(
+      JSON.parse(
+        window.localStorage.getItem(FIRST_RUN_CHAT_SHORTCUT_STORAGE_KEY) ||
+          "{}",
+      ),
+    ).toMatchObject({ status: "dismissed" });
   });
 
   it("offers the state-aware daily setup after learning resolves", () => {

@@ -12,6 +12,7 @@ import posthog from "posthog-js";
 import { Button } from "@/components/ui/button";
 import { formatShortcutDisplay } from "@/lib/chat-utils";
 import { useSettings } from "@/lib/hooks/use-settings";
+import { openSettingsWindow } from "@/lib/utils/window";
 
 export const FIRST_RUN_CHAT_SHORTCUT_STORAGE_KEY =
   "screenpipe.first-run.chat-shortcut.v1";
@@ -23,9 +24,16 @@ type StoredPractice = {
   status: "available" | "snoozed" | "completed" | "dismissed";
   exposureCount: number;
   snoozedUntil?: number;
+  acknowledged?: boolean;
 };
 
 type PracticePhase = "hidden" | "prompt" | "waiting" | "complete";
+type ListenerState = "connecting" | "ready" | "failed";
+type PracticeIssue = "already_hidden" | "failed" | "timeout" | "listener";
+type ChatShortcutOutcome = {
+  action: "shown" | "hidden";
+  success: boolean;
+};
 
 function readStoredPractice(): StoredPractice {
   if (typeof window === "undefined") {
@@ -50,6 +58,9 @@ function readStoredPractice(): StoredPractice {
       ...(typeof parsed.snoozedUntil === "number"
         ? { snoozedUntil: parsed.snoozedUntil }
         : {}),
+      ...(typeof parsed.acknowledged === "boolean"
+        ? { acknowledged: parsed.acknowledged }
+        : {}),
     };
   } catch {
     return { status: "available", exposureCount: 0 };
@@ -69,7 +80,10 @@ function writeStoredPractice(value: StoredPractice): void {
 
 function initialPhase(now = Date.now()): PracticePhase {
   const stored = readStoredPractice();
-  if (stored.status === "completed" || stored.status === "dismissed") {
+  if (stored.status === "completed") {
+    return stored.acknowledged ? "hidden" : "complete";
+  }
+  if (stored.status === "dismissed") {
     return "hidden";
   }
   if (
@@ -82,11 +96,34 @@ function initialPhase(now = Date.now()): PracticePhase {
   return "prompt";
 }
 
+export function dismissFirstRunChatShortcutFromParent(): void {
+  const stored = readStoredPractice();
+  if (stored.status === "completed" || stored.status === "dismissed") return;
+  writeStoredPractice({
+    status: "dismissed",
+    exposureCount: stored.exposureCount,
+  });
+  posthog.capture("shortcut_teach_dismissed", {
+    schema_version: 1,
+    surface: "first_run_summary",
+    shortcut_name: "show_chat",
+    dismissal_source: "parent_tips",
+    final_dismissal: true,
+  });
+}
+
 export function FirstRunChatShortcutPractice() {
-  const { settings } = useSettings();
+  const { settings, isSettingsLoaded } = useSettings();
   const [phase, setPhase] = React.useState<PracticePhase>(() => initialPhase());
+  const [listenerState, setListenerState] =
+    React.useState<ListenerState>("connecting");
+  const [issue, setIssue] = React.useState<PracticeIssue | null>(null);
   const phaseRef = React.useRef(phase);
+  const shouldInstallListenerRef = React.useRef(
+    phase === "prompt" || phase === "waiting",
+  );
   const shownRef = React.useRef(false);
+  const completionHandledRef = React.useRef(false);
   const practiceStartedAtRef = React.useRef<number | null>(null);
   phaseRef.current = phase;
 
@@ -105,7 +142,13 @@ export function FirstRunChatShortcutPractice() {
     : formatShortcutDisplay(settings.showChatShortcut, isMac);
 
   React.useEffect(() => {
-    if (phase !== "prompt" || shownRef.current || !shortcut) return;
+    if (
+      phase !== "prompt" ||
+      shownRef.current ||
+      !shortcut ||
+      !isSettingsLoaded
+    )
+      return;
     shownRef.current = true;
     const stored = readStoredPractice();
     const exposureCount = stored.exposureCount + 1;
@@ -116,14 +159,56 @@ export function FirstRunChatShortcutPractice() {
       shortcut_name: "show_chat",
       exposure_number: Math.min(exposureCount, 2),
     });
-  }, [phase, shortcut]);
+  }, [isSettingsLoaded, phase, shortcut]);
 
   React.useEffect(() => {
-    if ((phase !== "prompt" && phase !== "waiting") || !shortcut) return;
+    if (
+      !shouldInstallListenerRef.current ||
+      !shortcut ||
+      !isSettingsLoaded
+    )
+      return;
     let unlisten: (() => void) | undefined;
     let unmounted = false;
+    setListenerState("connecting");
 
-    void listen("shortcut-show-chat", () => {
+    void listen<ChatShortcutOutcome>("shortcut-show-chat", (event) => {
+      if (
+        phaseRef.current === "hidden" ||
+        phaseRef.current === "complete" ||
+        completionHandledRef.current
+      )
+        return;
+
+      if (event.payload.action === "hidden") {
+        practiceStartedAtRef.current = null;
+        setIssue(event.payload.success ? "already_hidden" : "failed");
+        setPhase("prompt");
+        if (!event.payload.success) {
+          posthog.capture("shortcut_practice_failed", {
+            schema_version: 1,
+            surface: "first_run_summary",
+            shortcut_name: "show_chat",
+            reason: "window_not_hidden",
+          });
+        }
+        return;
+      }
+
+      if (!event.payload.success) {
+        practiceStartedAtRef.current = null;
+        setIssue("failed");
+        setPhase("prompt");
+        posthog.capture("shortcut_practice_failed", {
+          schema_version: 1,
+          surface: "first_run_summary",
+          shortcut_name: "show_chat",
+          reason: "window_not_shown",
+        });
+        return;
+      }
+
+      completionHandledRef.current = true;
       const stored = readStoredPractice();
       const elapsedMs = practiceStartedAtRef.current
         ? Date.now() - practiceStartedAtRef.current
@@ -131,6 +216,7 @@ export function FirstRunChatShortcutPractice() {
       writeStoredPractice({
         status: "completed",
         exposureCount: Math.max(1, stored.exposureCount),
+        acknowledged: false,
       });
       posthog.capture("shortcut_practice_completed", {
         schema_version: 1,
@@ -150,20 +236,28 @@ export function FirstRunChatShortcutPractice() {
     })
       .then((fn) => {
         if (unmounted) fn();
-        else unlisten = fn;
+        else {
+          unlisten = fn;
+          setListenerState("ready");
+        }
       })
-      .catch(() => {});
+      .catch(() => {
+        if (unmounted) return;
+        setListenerState("failed");
+        setIssue("listener");
+      });
 
     return () => {
       unmounted = true;
       unlisten?.();
     };
-  }, [phase, shortcut]);
+  }, [isSettingsLoaded, shortcut]);
 
   React.useEffect(() => {
     if (phase !== "waiting") return;
     const timer = window.setTimeout(() => {
       practiceStartedAtRef.current = null;
+      setIssue("timeout");
       posthog.capture("shortcut_practice_timed_out", {
         schema_version: 1,
         surface: "first_run_summary",
@@ -174,15 +268,24 @@ export function FirstRunChatShortcutPractice() {
     return () => window.clearTimeout(timer);
   }, [phase]);
 
-  React.useEffect(() => {
-    if (phase !== "complete") return;
-    const timer = window.setTimeout(() => setPhase("hidden"), 3_000);
-    return () => window.clearTimeout(timer);
-  }, [phase]);
-
   if (!shortcut || phase === "hidden") return null;
 
   if (phase === "complete") {
+    const acknowledge = () => {
+      const stored = readStoredPractice();
+      writeStoredPractice({
+        status: "completed",
+        exposureCount: Math.max(1, stored.exposureCount),
+        acknowledged: true,
+      });
+      posthog.capture("shortcut_practice_acknowledged", {
+        schema_version: 1,
+        surface: "first_run_summary",
+        shortcut_name: "show_chat",
+      });
+      setPhase("hidden");
+    };
+
     return (
       <div
         data-testid="first-run-chat-shortcut-complete"
@@ -192,7 +295,7 @@ export function FirstRunChatShortcutPractice() {
         <span className="flex h-8 w-8 shrink-0 items-center justify-center border border-signal text-signal">
           <Check className="h-4 w-4" aria-hidden="true" />
         </span>
-        <div>
+        <div className="min-w-0 flex-1">
           <p className="font-mono text-xs font-semibold lowercase text-foreground">
             shortcut learned
           </p>
@@ -201,12 +304,24 @@ export function FirstRunChatShortcutPractice() {
             again.
           </p>
         </div>
+        <Button
+          type="button"
+          size="sm"
+          variant="ghost"
+          data-testid="first-run-chat-shortcut-done"
+          className="h-7 px-2 text-[9px]"
+          onClick={acknowledge}
+        >
+          done
+        </Button>
       </div>
     );
   }
 
   const startPractice = () => {
+    if (listenerState !== "ready") return;
     practiceStartedAtRef.current = Date.now();
+    setIssue(null);
     setPhase("waiting");
     posthog.capture("shortcut_practice_started", {
       schema_version: 1,
@@ -232,6 +347,17 @@ export function FirstRunChatShortcutPractice() {
     setPhase("hidden");
   };
 
+  const issueCopy =
+    issue === "already_hidden"
+      ? "chat was already open and is now hidden. press the shortcut again."
+      : issue === "timeout"
+        ? "nothing happened. check the shortcut or try again."
+        : issue === "listener"
+          ? "shortcut practice is unavailable in this window."
+          : issue === "failed"
+            ? "chat did not respond. check the shortcut and try again."
+            : null;
+
   return (
     <div
       data-testid="first-run-chat-shortcut-practice"
@@ -253,6 +379,26 @@ export function FirstRunChatShortcutPractice() {
             ? "now. screenpipe is waiting for the real shortcut."
             : "while screenpipe runs in the background."}
         </p>
+        {issueCopy ? (
+          <div className="mt-1 flex items-center gap-2">
+            <p
+              data-testid="first-run-chat-shortcut-issue"
+              role="status"
+              className="text-[9px] leading-relaxed text-muted-foreground"
+            >
+              {issueCopy}
+            </p>
+            {issue !== "already_hidden" ? (
+              <button
+                type="button"
+                className="shrink-0 font-mono text-[9px] underline underline-offset-2"
+                onClick={() => void openSettingsWindow("shortcuts")}
+              >
+                change shortcut
+              </button>
+            ) : null}
+          </div>
+        ) : null}
       </div>
       <div className="flex shrink-0 items-center gap-1">
         {phase === "prompt" ? (
@@ -263,8 +409,13 @@ export function FirstRunChatShortcutPractice() {
             data-testid="first-run-chat-shortcut-start"
             className="h-7 px-2 text-[9px]"
             onClick={startPractice}
+            disabled={listenerState !== "ready"}
           >
-            try it now
+            {listenerState === "connecting"
+              ? "getting ready"
+              : listenerState === "failed"
+                ? "unavailable"
+                : "try it now"}
           </Button>
         ) : (
           <span

@@ -21,7 +21,10 @@ import {
   type LearningWindowOptions,
 } from "@/lib/first-run/use-learning-window";
 import { FirstRunNextSteps } from "@/components/first-run/next-steps";
-import { FirstRunChatShortcutPractice } from "@/components/first-run/chat-shortcut-practice";
+import {
+  dismissFirstRunChatShortcutFromParent,
+  FirstRunChatShortcutPractice,
+} from "@/components/first-run/chat-shortcut-practice";
 import type { AgentHandoffTarget } from "@/lib/first-run/agent-handoff";
 
 function CapturedAppIcon({ app }: { app: FirstRunCapturedApp }) {
@@ -218,7 +221,7 @@ export function FirstRunSetupDock({
             data-testid="first-run-hide-setup"
             onClick={onDismiss}
           >
-            hide
+            hide tips
           </Button>
         </div>
       </div>
@@ -295,7 +298,10 @@ export function FirstRunLearningBanner(
         >
           <FirstRunChatShortcutPractice />
           <FirstRunSetupDock
-            onDismiss={() => dismiss()}
+            onDismiss={() => {
+              dismissFirstRunChatShortcutFromParent();
+              dismiss();
+            }}
             nextSteps={
               <FirstRunNextSteps userToken={learningOptions.userToken} />
             }
