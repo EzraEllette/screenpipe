@@ -672,13 +672,14 @@
       ],
       "features": [
         "chat",
+        "chat-home-card-placeholder-preview",
         "chat-sidebar-dedupe",
         "chat-session-activity"
       ],
       "criticality": "medium",
       "confidence": "partial",
       "ux": "real-user-flow",
-      "notes": "The Day Recap automation card must create exactly one persisted conversation and one sidebar row; status-only activity for an unknown session must not create an empty untitled sibling."
+      "notes": "The Day Recap automation card previews its user-facing prompt in the empty composer on hover, restores the default placeholder on leave, and creates exactly one persisted conversation and one sidebar row; status-only activity for an unknown session must not create an empty untitled sibling."
     },
     {
       "spec": "chat-composer-isolation.spec.ts",
@@ -846,13 +847,14 @@
       ],
       "features": [
         "chat",
+        "chat-background-readiness",
         "chat-first-message-ux",
         "chat-turn-status"
       ],
       "criticality": "medium",
       "confidence": "partial",
       "ux": "real-user-flow",
-      "notes": "Real + new chat through the first assistant token over a cold Pi start: pins that the message and cleared composer land in the send frame, that only one status element is ever mounted, and that the pane never snaps alignment. Opt-in (SCREENPIPE_E2E_LOCAL_AI_GATEWAY)."
+      "notes": "Real + new chat through the first assistant token over a cold Pi start: holds the runtime-readiness gate while typing and submitting, pins that the early send waits with its message visible, that the message and cleared composer land in the send frame, that only one status element is ever mounted, and that the pane never snaps alignment. Opt-in (SCREENPIPE_E2E_LOCAL_AI_GATEWAY)."
     },
     {
       "spec": "chat-new-session-stale-save.spec.ts",

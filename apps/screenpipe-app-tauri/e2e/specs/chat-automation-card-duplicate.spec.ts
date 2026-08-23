@@ -30,7 +30,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { readFileSync, readdirSync, rmSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import {
   openHomeWindow,
@@ -42,6 +42,12 @@ import { E2E_DATA_DIR } from "../helpers/app-launcher.js";
 import { PiConversationHarness } from "../helpers/pi-conversation-harness.js";
 
 const CHATS_DIR = join(E2E_DATA_DIR, "chats");
+const SHOTS_DIR = join(
+  process.cwd(),
+  "e2e",
+  "screenshots",
+  "home-card-placeholder",
+);
 const CARD_SLUG = "day-recap";
 const CARD_DISPLAY_LABEL = "📋 Day Recap";
 const PHANTOM_ACTIVITY_ID = "88888888-cccc-4ccc-8ccc-cccccccccccc";
@@ -330,6 +336,49 @@ describe("Automation card creates exactly one chat (#4719)", function () {
     await piConversation.restartPi();
     await settleRetryArtifacts(CARD_DISPLAY_LABEL);
     await waitForCard(CARD_SLUG);
+
+    const card = await $(`[data-testid="summary-card-${CARD_SLUG}"]`);
+    const composer = await $("form textarea");
+    await card.moveTo();
+    // The macOS WebKit driver moves the pointer but does not consistently
+    // deliver React's delegated mouseover event in an occluded E2E window.
+    // Emit that browser event after the real move so the screenshot keeps the
+    // hover styling while the state transition remains deterministic.
+    await browser.execute((slug: string) => {
+      document
+        .querySelector(`[data-testid="summary-card-${slug}"]`)
+        ?.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+    }, CARD_SLUG);
+    await browser.waitUntil(
+      async () =>
+        (await composer.getAttribute("placeholder")) ===
+        "Summarize what I worked on today",
+      {
+        timeout: t(5_000),
+        interval: 50,
+        timeoutMsg: "Home card hover did not preview its prompt in the composer",
+      },
+    );
+    expect(await composer.getValue()).toBe("");
+    mkdirSync(SHOTS_DIR, { recursive: true });
+    await browser.saveScreenshot(join(SHOTS_DIR, "day-recap-hover.png"));
+
+    await composer.moveTo();
+    await browser.execute((slug: string) => {
+      document
+        .querySelector(`[data-testid="summary-card-${slug}"]`)
+        ?.dispatchEvent(new MouseEvent("mouseout", { bubbles: true }));
+    }, CARD_SLUG);
+    await browser.waitUntil(
+      async () =>
+        (await composer.getAttribute("placeholder")) ===
+        "Ask a question or describe a task",
+      {
+        timeout: t(5_000),
+        interval: 50,
+        timeoutMsg: "composer placeholder did not reset after leaving the Home card",
+      },
+    );
     const sidebarBefore = await sidebarSnapshot();
 
     await clickCard(CARD_SLUG);

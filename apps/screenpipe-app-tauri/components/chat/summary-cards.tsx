@@ -20,6 +20,7 @@ import {
   AUTOMATE_MY_WORK_TEMPLATE_NAME,
   buildAutomateMyWorkPrompt,
   FALLBACK_TEMPLATES,
+  parseTemplateInstructions,
   type CustomTemplate,
 } from "@/lib/summary-templates";
 import { type AutomationPipeInventory } from "@/lib/automation-pipe-evals";
@@ -41,6 +42,7 @@ interface SummaryCardsProps {
     entrySource?: ChatEntrySource,
     entryCard?: ChatEntryCard,
   ) => void;
+  onPreviewPrompt?: (prompt: string | null) => void;
   customTemplates: CustomTemplate[];
   onSaveCustomTemplate: (template: CustomTemplate) => void;
   onUpdateCustomTemplate: (template: CustomTemplate) => void;
@@ -104,10 +106,27 @@ function HomeCardArrow({ slug }: { slug: string }) {
   );
 }
 
+function previewPromptForPipe(pipe: TemplatePipe): string {
+  return pipe.previewPrompt || pipe.description || pipe.title;
+}
+
+function promptPreviewHandlers(
+  prompt: string,
+  onPreviewPrompt?: (prompt: string | null) => void,
+) {
+  return {
+    onMouseEnter: () => onPreviewPrompt?.(prompt),
+    onMouseLeave: () => onPreviewPrompt?.(null),
+    onFocus: () => onPreviewPrompt?.(prompt),
+    onBlur: () => onPreviewPrompt?.(null),
+  };
+}
+
 // ─── Main component ──────────────────────────────────────────────────────────
 
 export function SummaryCards({
   onSendMessage,
+  onPreviewPrompt,
   customTemplates,
   onSaveCustomTemplate,
   onUpdateCustomTemplate,
@@ -151,7 +170,13 @@ export function SummaryCards({
     }
   }, [impressionSignature]);
 
+  useEffect(
+    () => () => onPreviewPrompt?.(null),
+    [onPreviewPrompt],
+  );
+
   const handleCardClick = (pipe: TemplatePipe) => {
+    onPreviewPrompt?.(null);
     const entryCard = entryCardForHomeTemplate(pipe.name);
     posthog.capture("home_card_clicked", {
       kind: pipe.featured ? "template_featured" : "template_discover",
@@ -169,6 +194,7 @@ export function SummaryCards({
   // immediately — saved prompts often reference dates or context that
   // changed since they were saved (#5239). Run lives inside the dialog.
   const handleCustomTemplateClick = (template: CustomTemplate) => {
+    onPreviewPrompt?.(null);
     posthog.capture("home_card_clicked", {
       kind: "custom_template",
     });
@@ -198,6 +224,10 @@ export function SummaryCards({
           type="button"
           data-testid={`summary-card-${featured[0].name}`}
           onClick={() => handleCardClick(featured[0])}
+          {...promptPreviewHandlers(
+            previewPromptForPipe(featured[0]),
+            onPreviewPrompt,
+          )}
           className="group relative mb-1.5 w-full max-w-lg cursor-pointer rounded-lg border border-foreground/25 border-l-2 border-l-signal bg-card px-4 py-3.5 text-left text-foreground transition-colors duration-150 hover:border-foreground hover:bg-foreground hover:text-background focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-foreground focus-visible:ring-offset-2 focus-visible:ring-offset-background motion-reduce:transition-none"
         >
           <div className="flex items-center gap-3">
@@ -223,6 +253,10 @@ export function SummaryCards({
           type="button"
           data-testid={`summary-card-${featured[1].name}`}
           onClick={() => handleCardClick(featured[1])}
+          {...promptPreviewHandlers(
+            previewPromptForPipe(featured[1]),
+            onPreviewPrompt,
+          )}
           className="group mb-1.5 w-full max-w-lg cursor-pointer rounded-lg border border-foreground/20 bg-card px-4 py-3 text-left text-foreground transition-colors duration-150 hover:border-foreground hover:bg-foreground hover:text-background focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-foreground focus-visible:ring-offset-2 focus-visible:ring-offset-background motion-reduce:transition-none"
         >
           <div className="flex items-center gap-3">
@@ -259,6 +293,10 @@ export function SummaryCards({
             key={pipe.name}
             data-testid={`summary-card-${pipe.name}`}
             onClick={() => handleCardClick(pipe)}
+            {...promptPreviewHandlers(
+              previewPromptForPipe(pipe),
+              onPreviewPrompt,
+            )}
             className="grow cursor-pointer rounded-md border border-foreground/20 bg-card px-2 py-0.5 text-[11px] text-foreground/75 transition-colors duration-150 hover:border-foreground hover:bg-foreground hover:text-background focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-foreground focus-visible:ring-offset-1 focus-visible:ring-offset-background motion-reduce:transition-none"
           >
             {pipe.title}
@@ -272,7 +310,9 @@ export function SummaryCards({
           <button
             type="button"
             key={qt.label}
+            {...promptPreviewHandlers(qt.prompt, onPreviewPrompt)}
             onClick={() => {
+              onPreviewPrompt?.(null);
               posthog.capture("home_card_clicked", {
                 kind: "quick_summary_chip",
               });
@@ -296,6 +336,12 @@ export function SummaryCards({
           <button
             type="button"
             key={ct.id}
+            {...promptPreviewHandlers(
+              ct.instructions ??
+                parseTemplateInstructions(ct.prompt) ??
+                ct.prompt,
+              onPreviewPrompt,
+            )}
             onClick={() => handleCustomTemplateClick(ct)}
             title={ct.description || ct.timeRange}
             className="inline-flex max-w-[140px] grow cursor-pointer items-center justify-center gap-1 rounded-md border border-foreground/20 bg-card px-2 py-0.5 text-[11px] text-foreground/70 transition-colors duration-150 hover:border-foreground hover:bg-foreground hover:text-background focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-foreground focus-visible:ring-offset-1 focus-visible:ring-offset-background motion-reduce:transition-none"
@@ -328,6 +374,10 @@ export function SummaryCards({
             <button
               key={pipe.name}
               onClick={() => handleCardClick(pipe)}
+              {...promptPreviewHandlers(
+                previewPromptForPipe(pipe),
+                onPreviewPrompt,
+              )}
               className="group cursor-pointer rounded-lg border border-border/30 bg-muted/10 p-2 text-left transition-all duration-150 hover:border-foreground hover:bg-foreground hover:text-background"
             >
               <div className="text-sm mb-0.5">{pipe.icon}</div>

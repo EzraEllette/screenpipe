@@ -265,6 +265,8 @@ export function StandaloneChat({
     setChipScrollTop,
     clearConnectionChip,
   } = useChatComposerShell();
+  const [homeCardPromptPreview, setHomeCardPromptPreview] =
+    useState<string | null>(null);
   // Holds the exact text a contextual starter put in the composer, so the send
   // can tell "sent the starter as-is" from "reworked it into their own
   // question". The second is the outcome the experiment is actually testing —
@@ -272,6 +274,7 @@ export function StandaloneChat({
   const pendingContextualHomeSuggestionRef = useRef<string | null>(null);
   const fillContextualHomeSuggestion = useCallback(
     (text: string) => {
+      setHomeCardPromptPreview(null);
       pendingContextualHomeSuggestionRef.current = text;
       setInput(text);
       requestAnimationFrame(() => {
@@ -282,7 +285,11 @@ export function StandaloneChat({
     [inputRef, setInput],
   );
   useEffect(() => {
-    if (!input.trim()) pendingContextualHomeSuggestionRef.current = null;
+    if (!input.trim()) {
+      pendingContextualHomeSuggestionRef.current = null;
+      return;
+    }
+    setHomeCardPromptPreview(null);
   }, [input]);
   useTryInChatEvent({
     startNewRef: tryInChatStartNewRef,
@@ -949,10 +956,12 @@ export function StandaloneChat({
     piStreamingTextRef,
     piMessageIdRef,
     piContentBlocksRef,
+    piStartInFlightRef,
     forceQueueModeRef,
     sendDispatchInFlightRef,
     setIsLoading,
     setIsStreaming,
+    setPiStarting,
   });
   useChatWindowSyncEvents({
     aiPresets: settings?.aiPresets,
@@ -1007,7 +1016,6 @@ export function StandaloneChat({
     appItems,
     allConnectionItems,
     connections,
-    piStarting,
     piInfo,
     setPiInfo,
     isStreaming,
@@ -2077,10 +2085,11 @@ export function StandaloneChat({
           await commands.showWindow({ Home: { page: "pipes" } });
         }}
         summaryCardsProps={{
+          onPreviewPrompt: setHomeCardPromptPreview,
           onSendMessage: (message, displayLabel, entrySource, entryCard) => {
             pendingContextualHomeSuggestionRef.current = null;
-            // Control cards send their prompt on click without ever showing it,
-            // so the user authored nothing.
+            // Control cards may preview their prompt as placeholder text, but
+            // never place it in the editable value, so the user authored nothing.
             return sendMessage(message, displayLabel, undefined, {
               entrySource,
               entryCard,
@@ -2166,6 +2175,7 @@ export function StandaloneChat({
           inputRef,
           value: input,
           disabledReason: composerDisabledReason,
+          placeholder: homeCardPromptPreview ?? undefined,
           canChat: Boolean(canSendChatMessage),
           isLoading,
           isStreaming,

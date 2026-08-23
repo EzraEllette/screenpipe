@@ -51,7 +51,10 @@ function ContextualSuggestions({
   isRefreshing,
   onFillSuggestion,
   onRefresh,
-}: Omit<HomeStarterSurfaceProps, "summaryCardsProps">) {
+  onPreviewPrompt,
+}: Omit<HomeStarterSurfaceProps, "summaryCardsProps"> & {
+  onPreviewPrompt?: (prompt: string | null) => void;
+}) {
   const visibleSuggestions = suggestions.slice(0, 3);
   const impressionSignature = visibleSuggestions
     .map((suggestion) =>
@@ -74,6 +77,11 @@ function ContextualSuggestions({
     // change. Prompt text is deliberately never sent to analytics.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activityMode, impressionSignature]);
+
+  useEffect(
+    () => () => onPreviewPrompt?.(null),
+    [onPreviewPrompt],
+  );
 
   return (
     <div className="ph-no-capture relative flex w-full flex-col items-center px-4 pb-2 pt-6">
@@ -112,7 +120,12 @@ function ContextualSuggestions({
                 type="button"
                 data-testid={`home-contextual-suggestion-${index + 1}`}
                 title={suggestion.preview || suggestion.text}
+                onMouseEnter={() => onPreviewPrompt?.(suggestion.text)}
+                onMouseLeave={() => onPreviewPrompt?.(null)}
+                onFocus={() => onPreviewPrompt?.(suggestion.text)}
+                onBlur={() => onPreviewPrompt?.(null)}
                 onClick={() => {
+                  onPreviewPrompt?.(null);
                   posthog.capture("home_card_clicked", {
                     ...suggestionAnalyticsProperties(
                       suggestion,
@@ -197,6 +210,7 @@ export function HomeStarterSurface({
       isRefreshing={isRefreshing}
       onFillSuggestion={onFillSuggestion}
       onRefresh={onRefresh}
+      onPreviewPrompt={summaryCardsProps.onPreviewPrompt}
     />
   );
 }
