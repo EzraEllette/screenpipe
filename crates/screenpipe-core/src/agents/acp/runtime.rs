@@ -1783,7 +1783,10 @@ impl RuntimeState {
             self.output.send(json!({
                 "type": "tool_execution_end",
                 "toolCallId": tool_call_id,
+                "agentId": self.agent_id,
                 "toolName": tool_name(&tool),
+                "kind": tool_kind(&tool),
+                "args": tool_args(&tool),
                 "result": result,
                 "isError": is_error
             }));
@@ -1917,6 +1920,7 @@ impl RuntimeState {
                 let mut start = json!({
                     "type": "tool_execution_start",
                     "toolCallId": id,
+                    "agentId": self.agent_id,
                     "toolName": tool_name(&update),
                     // The ACP category (read/edit/execute/fetch/search/...) lets
                     // the desktop label native agent tools whose human title
@@ -1936,7 +1940,7 @@ impl RuntimeState {
                 self.output.send(start);
                 if update_status_finished(&update) {
                     self.observe_provider_schedule(&update);
-                    finish_tool(&self.output, &id, &update);
+                    finish_tool(&self.output, &self.agent_id, &id, &update);
                     turn.active_tools.remove(&id);
                 }
             }
@@ -1963,6 +1967,7 @@ impl RuntimeState {
                     let mut start = json!({
                         "type": "tool_execution_start",
                         "toolCallId": id,
+                        "agentId": self.agent_id,
                         "toolName": tool_name(&merged),
                         "kind": tool_kind(&merged),
                         "args": tool_args(&merged),
@@ -1975,12 +1980,13 @@ impl RuntimeState {
                 }
                 if update_status_finished(&merged) {
                     self.observe_provider_schedule(&merged);
-                    finish_tool(&self.output, &id, &merged);
+                    finish_tool(&self.output, &self.agent_id, &id, &merged);
                     turn.active_tools.remove(&id);
                 } else if let Some(progress) = tool_progress(&update) {
                     let mut event = json!({
                         "type": "tool_execution_progress",
                         "toolCallId": id,
+                        "agentId": self.agent_id,
                     });
                     // Carry the parent so a subagent heartbeat nests under its
                     // Task row even when linkage only appears on updates.
@@ -2308,6 +2314,12 @@ fn tool_progress(update: &Value) -> Option<Value> {
     {
         fields.insert("title".into(), json!(title));
     }
+    if let Some(kind) = tool_kind(update) {
+        fields.insert("kind".into(), json!(kind));
+    }
+    if let Some(args) = tool_args_if_present(update) {
+        fields.insert("args".into(), args);
+    }
     if fields.is_empty() {
         None
     } else {
@@ -2391,12 +2403,16 @@ fn tool_kind(update: &Value) -> Option<String> {
 // adapters omit it and carry the invocation under `input`/`arguments`. Falling
 // back keeps the desktop tool card (and its citations) from rendering empty.
 fn tool_args(update: &Value) -> Value {
+    tool_args_if_present(update).unwrap_or_else(|| json!({}))
+}
+
+fn tool_args_if_present(update: &Value) -> Option<Value> {
     for key in ["rawInput", "input", "arguments"] {
         if let Some(object) = update.get(key).filter(|value| value.is_object()) {
-            return object.clone();
+            return Some(object.clone());
         }
     }
-    json!({})
+    None
 }
 
 fn update_status_finished(update: &Value) -> bool {
@@ -2415,8 +2431,44 @@ fn tool_result_text(update: &Value) -> String {
         .unwrap_or_default()
 }
 
-fn finish_tool(output: &ParentOutput, id: &str, update: &Value) {
-    let is_error = update.get("status").and_then(Value::as_str) == Some("failed");
+fn tool_result_is_error(update: &Value) -> bool {
+    if update.get("status").and_then(Value::as_str) == Some("failed") {
+        return true;
+    }
+
+    fn explicit_error(value: &Value) -> bool {
+        let parsed;
+        let value = if let Some(text) = value.as_str() {
+            parsed = match serde_json::from_str::<Value>(text.trim()) {
+                Ok(value) => value,
+                Err(_) => return false,
+            };
+            &parsed
+        } else {
+            value
+        };
+        let Some(object) = value.as_object() else {
+            return false;
+        };
+        if object.get("success").and_then(Value::as_bool) == Some(true) {
+            return false;
+        }
+        match object.get("error") {
+            Some(Value::Null | Value::Bool(false)) | None => false,
+            Some(Value::String(message)) => !message.trim().is_empty(),
+            Some(_) => true,
+        }
+    }
+
+    update.get("rawOutput").is_some_and(explicit_error)
+        || update
+            .get("content")
+            .and_then(|content| content_text(Some(content)))
+            .is_some_and(|text| explicit_error(&Value::String(text)))
+}
+
+fn finish_tool(output: &ParentOutput, agent_id: &str, id: &str, update: &Value) {
+    let is_error = tool_result_is_error(update);
     let mut result = tool_result_text(update);
     if result.trim().is_empty() {
         // Some adapters report completion with neither content nor rawOutput; a
@@ -2429,7 +2481,10 @@ fn finish_tool(output: &ParentOutput, id: &str, update: &Value) {
     output.send(json!({
         "type": "tool_execution_end",
         "toolCallId": id,
+        "agentId": agent_id,
         "toolName": tool_name(update),
+        "kind": tool_kind(update),
+        "args": tool_args(update),
         // The desktop event router reads the raw-Pi result shape
         // ({content: [{text}]}), not a bare string.
         "result": { "content": [{ "type": "text", "text": result }] },
@@ -5533,6 +5588,17 @@ mod tests {
         .expect("output progress");
         assert_eq!(progress["outputDelta"], json!("compiling...\n"));
 
+        // Late ACP metadata must be visible to the desktop before completion.
+        let progress = tool_progress(&json!({
+            "title": "mcp__screenpipe__search-content",
+            "kind": "search",
+            "rawInput": { "query": "late metadata" }
+        }))
+        .expect("metadata progress");
+        assert_eq!(progress["title"], json!("mcp__screenpipe__search-content"));
+        assert_eq!(progress["kind"], json!("search"));
+        assert_eq!(progress["args"], json!({ "query": "late metadata" }));
+
         // A bare status merge carries nothing renderable.
         assert_eq!(tool_progress(&json!({ "status": "in_progress" })), None);
     }
@@ -5680,6 +5746,50 @@ mod tests {
         let events = output.drain();
         assert!(events_of_type(&events, "tool_execution_start").is_empty());
         assert_eq!(events_of_type(&events, "tool_execution_end").len(), 1);
+    }
+
+    #[test]
+    fn terminal_tool_update_keeps_metadata_and_error_payload() {
+        let output = ParentOutput::buffer();
+        let state = test_state(&output);
+        state.handle_update(json!({
+            "sessionUpdate": "tool_call",
+            "toolCallId": "late-tool",
+            "title": "MCP: tool",
+            "status": "in_progress",
+            "rawInput": {}
+        }));
+        output.drain();
+
+        state.handle_update(json!({
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "late-tool",
+            "title": "mcp__screenpipe__search-content",
+            "kind": "search",
+            "status": "completed",
+            "rawInput": { "query": "late ACP metadata" },
+            "rawOutput": { "error": "Tool execution error" }
+        }));
+        let events = output.drain();
+        let ends = events_of_type(&events, "tool_execution_end");
+        assert_eq!(ends.len(), 1);
+        assert_eq!(ends[0]["agentId"], json!("test-agent"));
+        assert_eq!(
+            ends[0]["toolName"],
+            json!("mcp__screenpipe__search-content")
+        );
+        assert_eq!(ends[0]["kind"], json!("search"));
+        assert_eq!(ends[0]["args"], json!({ "query": "late ACP metadata" }));
+        assert_eq!(ends[0]["isError"], json!(true));
+
+        assert!(!tool_result_is_error(&json!({
+            "status": "completed",
+            "rawOutput": { "success": true, "error": "diagnostic field" }
+        })));
+        assert!(!tool_result_is_error(&json!({
+            "status": "completed",
+            "rawOutput": { "error": null }
+        })));
     }
 
     #[test]

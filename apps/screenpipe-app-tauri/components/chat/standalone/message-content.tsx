@@ -1368,11 +1368,16 @@ function ToolActivityGroup({
   // Tool activity is progressively disclosed: one friendly status is visible
   // by default, and the user can expand a high-level activity list. Interactive
   // tools stay open because hiding a question would block the conversation.
+  const e2eForceExpanded =
+    process.env.NEXT_PUBLIC_SCREENPIPE_E2E === "true" &&
+    typeof window !== "undefined" &&
+    (window as typeof window & { __e2eExpandToolActivity?: boolean })
+      .__e2eExpandToolActivity === true;
   const isExpanded = forceCollapsed
     ? false
     : hideSummary
       ? true
-      : hasInteractiveTool
+      : hasInteractiveTool || e2eForceExpanded
         ? true
         : manualExpand !== null ? manualExpand : defaultExpanded;
 
@@ -1438,10 +1443,10 @@ function ToolActivityGroup({
       <AnimatePresence>
         {isExpanded && (
           <motion.div
-            initial={{ height: 0, opacity: 0 }}
+            initial={e2eForceExpanded ? false : { height: 0, opacity: 0 }}
             animate={{ height: "auto", opacity: 1 }}
             exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: reduceMotion ? 0 : 0.15 }}
+            transition={{ duration: reduceMotion || e2eForceExpanded ? 0 : 0.15 }}
             className="overflow-hidden"
           >
             <div
@@ -1484,9 +1489,12 @@ function ToolActivityGroup({
                   return (
                     <motion.div
                       key={toolCallRenderKey(tc, i)}
-                      initial={reduceMotion ? false : { opacity: 0, x: -8 }}
+                      initial={reduceMotion || e2eForceExpanded ? false : { opacity: 0, x: -8 }}
                       animate={{ opacity: 1, x: 0 }}
-                      transition={{ duration: reduceMotion ? 0 : 0.15, delay: reduceMotion ? 0 : i * 0.03 }}
+                      transition={{
+                        duration: reduceMotion || e2eForceExpanded ? 0 : 0.15,
+                        delay: reduceMotion || e2eForceExpanded ? 0 : i * 0.03,
+                      }}
                     >
                       <ToolCallRailItem
                         toolCall={tc}

@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 
 import { openHomeWindow, waitForAppReady, t } from "../helpers/test-utils.js";
 import { invokeOrThrow } from "../helpers/tauri.js";
+import { saveScreenshot } from "../helpers/screenshot-utils.js";
 
 type AgentEnvelope = {
   source?: string;
@@ -42,7 +43,7 @@ type ProcessMarker = {
   descendantPid?: number;
 };
 
-type AcpScenario = "normal" | "malformed" | "exit" | "auth" | "mcp" | "tree" | "terminal" | "subagent" | "resume";
+type AcpScenario = "normal" | "malformed" | "exit" | "auth" | "mcp" | "tree" | "terminal" | "subagent" | "metadata" | "resume";
 
 const fixturePath = fileURLToPath(new URL("../fixtures/mock-acp-agent.ts", import.meta.url));
 let normalSession = "";
@@ -55,6 +56,7 @@ let treeSession = "";
 let mcpSession = "";
 let terminalSession = "";
 let subagentSession = "";
+let metadataSession = "";
 let resumeSession = "";
 let orphanedPresetSession = "";
 let treeMarkerPrefix = "";
@@ -71,6 +73,7 @@ function resetRunIdentifiers(): void {
   mcpSession = randomUUID();
   terminalSession = randomUUID();
   subagentSession = randomUUID();
+  metadataSession = randomUUID();
   resumeSession = randomUUID();
   orphanedPresetSession = randomUUID();
   treeMarkerPrefix = path.join(os.tmpdir(), `screenpipe-acp-process-${treeSession}`);
@@ -85,7 +88,7 @@ function acpProviderConfig(
   return {
     backend: "acp",
     acpAgent: {
-      id: "custom",
+      id: scenario === "metadata" ? "pi-acp" : "custom",
       command: process.execPath,
       args: [fixturePath, `--scenario=${scenario}`],
       env,
@@ -304,7 +307,7 @@ async function answerAgentAction(
 
 async function startAcp(
   sessionId: string,
-  scenario: "normal" | "malformed" | "mcp" | "tree" | "terminal" | "subagent" | "resume",
+  scenario: "normal" | "malformed" | "mcp" | "tree" | "terminal" | "subagent" | "metadata" | "resume",
   env: Record<string, string> = {},
   userToken: string | null = null,
   resumeSessionId: string | null = null,
@@ -552,6 +555,7 @@ describe("ACP backend", function () {
     await invokeOrThrow("pi_stop", { sessionId: treeSession }).catch(() => undefined);
     await invokeOrThrow("pi_stop", { sessionId: mcpSession }).catch(() => undefined);
     await invokeOrThrow("pi_stop", { sessionId: terminalSession }).catch(() => undefined);
+    await invokeOrThrow("pi_stop", { sessionId: metadataSession }).catch(() => undefined);
     rmSync(processMarkerPath("adapter"), { force: true });
     rmSync(processMarkerPath("descendant"), { force: true });
   });
@@ -911,6 +915,63 @@ describe("ACP backend", function () {
       "mock-task-1",
     ]);
     await stopAndAssertGone(subagentSession);
+  });
+
+  it("preserves terminal ACP metadata and renders traceable tool activity", async () => {
+    await startAcp(metadataSession, "metadata");
+    await foregroundChat(metadataSession);
+    await browser.execute(() => {
+      (window as any).__e2eExpandToolActivity = true;
+    });
+    await beginPrompt(metadataSession, "refine late tool metadata");
+    const prompt = await waitForPromptDone();
+    expect(prompt.error).toBeUndefined();
+    await browser.waitUntil(
+      async () => (await capturedEvents(metadataSession)).some(
+        (envelope) => envelope.event?.type === "agent_end",
+      ),
+      {
+        timeout: t(10_000),
+        interval: 100,
+        timeoutMsg: "metadata refinement turn did not complete",
+      },
+    );
+
+    const widgets = await $$('[data-testid="tool-activity-widget"]');
+    expect(widgets.length).toBeGreaterThan(0);
+    const widget = widgets[widgets.length - 1];
+    const list = await widget.$('[data-testid="tool-activity-list"]');
+    await list.waitForExist({ timeout: t(10_000) });
+    const rows = await widget.$$('[data-testid="tool-activity-item"]');
+    expect(rows).toHaveLength(2);
+    const listText = await list.getText();
+    expect(listText).toContain("Searched your history");
+    expect(listText).toContain("Used a Pi tool");
+    expect(listText).not.toContain("Completed a background step");
+
+    await rows[0].click();
+    await browser.waitUntil(async () => (await widget.getText()).includes("late ACP metadata"), {
+      timeout: t(5_000),
+      interval: 100,
+      timeoutMsg: "refined ACP arguments were not disclosed in the tool row",
+    });
+    const variant = process.env.SCREENPIPE_PR_PROOF_VARIANT ?? "after";
+    const screenshot = await saveScreenshot(`acp-tool-metadata-${variant}`);
+    expect(existsSync(screenshot)).toBe(true);
+
+    const terminal = (await capturedEvents(metadataSession)).find(
+      (envelope) =>
+        envelope.event?.type === "tool_execution_end" &&
+        envelope.event?.toolCallId === "mock-refined",
+    )?.event;
+    expect(terminal).toMatchObject({
+      toolName: "mcp__screenpipe__search-content",
+      agentId: "pi-acp",
+      kind: "search",
+      args: { query: "late ACP metadata" },
+      isError: true,
+    });
+    await stopAndAssertGone(metadataSession);
   });
 
   it("reattaches to a prior session via session/resume when one is provided", async () => {
