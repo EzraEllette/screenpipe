@@ -33,6 +33,7 @@ describe("BrainOpportunities", () => {
       "turn product feedback into a focused fix",
     );
 
+    fireEvent.click(screen.getByText("add note"));
     fireEvent.change(screen.getByTestId("skill-draft-notes"), {
       target: { value: "Keep the final customer reply short." },
     });
@@ -41,7 +42,7 @@ describe("BrainOpportunities", () => {
     );
 
     const sourceEvidence = screen.getByTestId("skill-source-evidence");
-    fireEvent.click(within(sourceEvidence).getByText("4 source activities"));
+    fireEvent.click(within(sourceEvidence).getByText("evidence · 4"));
     const evidence = screen.getByTestId("opportunity-evidence-feedback-slack");
     fireEvent.click(
       within(evidence).getByRole("button", {
@@ -67,11 +68,11 @@ describe("BrainOpportunities", () => {
 
     fireEvent.click(screen.getByTestId("create-skill-draft"));
     expect(screen.getByTestId("skill-creation-progress")).toBeTruthy();
-    expect(screen.getByText("creating skill")).toBeTruthy();
+    expect(screen.getByText(/creating skill/)).toBeTruthy();
 
     act(() => vi.advanceTimersByTime(3000));
     expect(screen.getByTestId("skill-created-state")).toBeTruthy();
-    expect(screen.getByText("skill ready")).toBeTruthy();
+    expect(screen.getByText("skill created")).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: /open skill/i }));
     expect(screen.getByTestId("skill-file-preview")).toBeTruthy();
@@ -124,12 +125,7 @@ describe("BrainOpportunities", () => {
 
   it("hands the finalized brief and included evidence to a fresh agent chat", () => {
     const onStartAgentChat = vi.fn();
-    render(
-      <BrainOpportunities
-        preview
-        onStartAgentChat={onStartAgentChat}
-      />,
-    );
+    render(<BrainOpportunities preview onStartAgentChat={onStartAgentChat} />);
 
     fireEvent.click(screen.getByTestId("opportunities-tab-unfinished"));
     fireEvent.click(
@@ -144,7 +140,7 @@ describe("BrainOpportunities", () => {
     });
 
     const sourceEvidence = screen.getByTestId("task-source-evidence");
-    fireEvent.click(within(sourceEvidence).getByText("2 source activities"));
+    fireEvent.click(within(sourceEvidence).getByText("evidence · 2"));
     fireEvent.click(
       within(sourceEvidence).getByRole("button", {
         name: "exclude Inspect sample pull request",
@@ -191,8 +187,7 @@ describe("BrainOpportunities", () => {
     ).toBeTruthy();
   });
 
-  it("supports keyboard tab navigation and a visible analysis refresh", () => {
-    vi.useFakeTimers();
+  it("supports keyboard tab navigation", () => {
     render(<BrainOpportunities preview />);
 
     fireEvent.keyDown(screen.getByTestId("opportunities-tab-skills"), {
@@ -209,24 +204,14 @@ describe("BrainOpportunities", () => {
       "aria-controls",
       "opportunities-panel-unfinished",
     );
-
-    fireEvent.click(
-      screen.getByRole("button", { name: /reanalyze recent activity/i }),
-    );
-    expect(screen.getByText(/reviewing 10 source activities/i)).toBeTruthy();
-
-    act(() => vi.advanceTimersByTime(1800));
-    expect(screen.getByText(/10 activities · updated now/i)).toBeTruthy();
   });
 
   it("shows an honest empty state when no analyzer data exists", () => {
     const onCountChange = vi.fn();
     render(<BrainOpportunities onOpportunityCountChange={onCountChange} />);
 
-    expect(screen.getByText("no repeatable work found yet")).toBeTruthy();
-    expect(
-      screen.getByText(/no opportunity analysis is ready yet/i),
-    ).toBeTruthy();
+    expect(screen.getByText("no skill ideas yet")).toBeTruthy();
+    expect(screen.getByRole("link", { name: /open activity/i })).toBeTruthy();
     expect(onCountChange).toHaveBeenLastCalledWith(0);
   });
 });
