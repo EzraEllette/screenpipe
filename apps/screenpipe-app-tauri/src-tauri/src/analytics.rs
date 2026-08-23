@@ -14,7 +14,8 @@ use sysinfo::{System, SystemExt};
 use tokio::sync::Mutex;
 use tokio::time::interval;
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
 pub struct Attribution {
     pub utm_source: Option<String>,
     pub utm_medium: Option<String>,
@@ -144,6 +145,13 @@ impl AnalyticsManager {
                 warn!("failed to fetch attribution (non-fatal): {}", e);
             }
         }
+    }
+
+    /// Return the website attribution cached at app startup without making
+    /// another network request. The onboarding webview uses this snapshot to
+    /// put the observed UTM fields on the same event as the user's answer.
+    pub async fn attribution_snapshot(&self) -> Option<Attribution> {
+        self.attribution.lock().await.clone()
     }
 
     /// Send a $create_alias event so PostHog merges the email-based identity
@@ -641,5 +649,29 @@ mod tests {
             audio_capture_mode_setting(&json!({"audioCaptureMode": false})),
             "always"
         );
+    }
+
+    #[tokio::test]
+    async fn attribution_snapshot_returns_the_cached_first_touch_values() {
+        let manager = AnalyticsManager::new(
+            "posthog-key".to_string(),
+            "analytics-id".to_string(),
+            String::new(),
+            1,
+            "http://127.0.0.1:3030".to_string(),
+            None,
+            PathBuf::new(),
+            false,
+        );
+        let expected = Attribution {
+            utm_source: Some("chatgpt.com".to_string()),
+            utm_medium: Some("referral".to_string()),
+            utm_campaign: None,
+            utm_content: None,
+            utm_term: None,
+        };
+        *manager.attribution.lock().await = Some(expected.clone());
+
+        assert_eq!(manager.attribution_snapshot().await, Some(expected));
     }
 }

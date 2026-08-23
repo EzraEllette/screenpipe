@@ -707,6 +707,15 @@ async getMonitors() : Promise<Result<MonitorDevice[], string>> {
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * Return the website UTM attribution already resolved at app startup.
+ *
+ * This is read-only and never triggers another network request. Analytics can
+ * be disabled before the manager is installed, so absence is a normal result.
+ */
+async getOnboardingAttribution() : Promise<Attribution | null> {
+    return await TAURI_INVOKE("get_onboarding_attribution");
+},
 async getOnboardingStatus() : Promise<Result<OnboardingStore, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_onboarding_status") };
@@ -2972,6 +2981,7 @@ export type ActivityHistoryCoverage = { start: string; end: string }
 export type ActivityHistoryEntry = { id: string; kind: string; meeting_id: number | null; start_at: string; end_at: string; title: string; summary: string; evidence: ActivityHistoryEvidence[] }
 export type ActivityHistoryEvidence = { kind: string; at: string; frame_id: number | null; meeting_id: number | null; app_name: string | null; label: string }
 export type AecMode = "off" | "screenpipe" | "macos" | "windows"
+export type Attribution = { utmSource: string | null; utmMedium: string | null; utmCampaign: string | null; utmContent: string | null; utmTerm: string | null }
 export type AudioDeviceInfo = { name: string; isDefault: boolean;
 /**
  * True for a Bluetooth *input* device that is also a combo headset (the

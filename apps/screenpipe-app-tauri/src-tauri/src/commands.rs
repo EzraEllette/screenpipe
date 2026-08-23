@@ -10,6 +10,7 @@ mod native_actions;
 pub(crate) mod overlay_anchor;
 
 use crate::{
+    analytics::{AnalyticsManager, Attribution},
     native_notification, native_shortcut_reminder,
     store::{OnboardingStore, SettingsStore},
     updates::is_enterprise_build,
@@ -411,6 +412,18 @@ pub fn is_enterprise_build_cmd(app_handle: tauri::AppHandle) -> bool {
 #[specta::specta]
 pub fn is_telemetry_disabled_by_env() -> bool {
     screenpipe_engine::analytics::telemetry_disabled_by_env()
+}
+
+/// Return the website UTM attribution already resolved at app startup.
+///
+/// This is read-only and never triggers another network request. Analytics can
+/// be disabled before the manager is installed, so absence is a normal result.
+#[tauri::command]
+#[specta::specta]
+pub async fn get_onboarding_attribution(app_handle: tauri::AppHandle) -> Option<Attribution> {
+    let analytics = app_handle.try_state::<std::sync::Arc<AnalyticsManager>>()?;
+    let analytics = std::sync::Arc::clone(&analytics);
+    analytics.attribution_snapshot().await
 }
 
 /// Return the macOS bundle identifier of the running app
