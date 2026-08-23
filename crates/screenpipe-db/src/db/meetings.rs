@@ -50,6 +50,28 @@ impl DatabaseManager {
         attendees: Option<&str>,
         calendar_event_id: Option<&str>,
     ) -> Result<i64, SqlxError> {
+        self.insert_meeting_with_calendar_at(
+            meeting_app,
+            detection_source,
+            title,
+            attendees,
+            calendar_event_id,
+            chrono::Utc::now(),
+        )
+        .await
+    }
+
+    /// Insert a meeting with an explicit start timestamp in the same immediate
+    /// transaction that creates the row.
+    pub async fn insert_meeting_with_calendar_at(
+        &self,
+        meeting_app: &str,
+        detection_source: &str,
+        title: Option<&str>,
+        attendees: Option<&str>,
+        calendar_event_id: Option<&str>,
+        meeting_start: chrono::DateTime<chrono::Utc>,
+    ) -> Result<i64, SqlxError> {
         match self
             .try_insert_meeting(
                 meeting_app,
@@ -57,14 +79,22 @@ impl DatabaseManager {
                 title,
                 attendees,
                 calendar_event_id,
+                meeting_start,
             )
             .await
         {
             Err(e) if calendar_event_id.is_some() && is_calendar_event_conflict(&e) => {
                 // Lost the race to another meeting between the pre-check and
                 // this insert. The event belongs to whoever claimed it first.
-                self.try_insert_meeting(meeting_app, detection_source, None, None, None)
-                    .await
+                self.try_insert_meeting(
+                    meeting_app,
+                    detection_source,
+                    None,
+                    None,
+                    None,
+                    meeting_start,
+                )
+                .await
             }
             other => other,
         }
@@ -77,15 +107,14 @@ impl DatabaseManager {
         title: Option<&str>,
         attendees: Option<&str>,
         calendar_event_id: Option<&str>,
+        meeting_start: chrono::DateTime<chrono::Utc>,
     ) -> Result<i64, SqlxError> {
         let mut tx = self.begin_immediate_with_retry().await?;
-        let now = chrono::Utc::now()
-            .format("%Y-%m-%dT%H:%M:%S%.3fZ")
-            .to_string();
+        let meeting_start = meeting_start.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
         let id = sqlx::query(
             "INSERT INTO meetings (meeting_start, meeting_app, detection_source, title, attendees, calendar_event_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         )
-        .bind(&now)
+        .bind(&meeting_start)
         .bind(meeting_app)
         .bind(detection_source)
         .bind(title)
