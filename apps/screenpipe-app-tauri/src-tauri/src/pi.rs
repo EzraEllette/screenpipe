@@ -713,6 +713,21 @@ fn sync_queue_state_from_event(
     }
 }
 
+/// Apply an SDK event to the durable queue state, then expose whether an
+/// `agent_end` was only an intermediate tool boundary to the webview. Pi can
+/// end the assistant's tool-request message before the tool result and the
+/// follow-up assistant message exist; the queue already preserves that logical
+/// turn, so the visible loading state must use the same predicate.
+fn sync_and_annotate_queue_state(
+    queue_state: &Arc<crate::pi_command_queue::PiQueueState>,
+    event: &mut Value,
+) {
+    sync_queue_state_from_event(queue_state, event);
+    if event.get("type").and_then(Value::as_str) == Some("agent_end") {
+        event["turnBusy"] = Value::Bool(queue_state.has_active_turn_work());
+    }
+}
+
 /// Process-scoped conversation synchronization state.
 ///
 /// Replacing this value when Pi stops gives each subprocess a distinct
@@ -3446,7 +3461,7 @@ pub async fn pi_start_inner(
         let mut pending_text_delta: Option<PendingAgentTextDelta> = None;
         while let Some(line) = read_lines_lossy(&mut reader) {
             line_count += 1;
-            let parsed = serde_json::from_str::<Value>(&line).ok();
+            let mut parsed = serde_json::from_str::<Value>(&line).ok();
             let is_stdout_text_delta = parsed.as_ref().and_then(assistant_text_delta).is_some();
             let event_type = parsed.as_ref().and_then(|v| {
                 v.get("type")
@@ -3505,8 +3520,10 @@ pub async fn pi_start_inner(
             // Drive the command queue's turn/tool/lifecycle state machine from
             // this event. Extracted into one helper so the production reader and
             // the watchdog e2e test share a single, tested code path.
-            if let (Some(qs), Some(event)) = (queue_state_for_reader.as_ref(), parsed.as_ref()) {
-                sync_queue_state_from_event(qs, event);
+            if let (Some(qs), Some(event)) =
+                (queue_state_for_reader.as_ref(), parsed.as_mut())
+            {
+                sync_and_annotate_queue_state(qs, event);
             }
 
             if let Some(event) = parsed.as_ref() {
@@ -5936,6 +5953,38 @@ mod tests {
             !state.is_agent_active(),
             "terminal agent_end releases the queue"
         );
+    }
+
+    #[test]
+    fn agent_end_reports_when_tool_work_still_owns_the_turn() {
+        let state = crate::pi_command_queue::PiQueueState::new();
+        super::sync_queue_state_from_event(&state, &json!({ "type": "agent_start" }));
+        super::sync_queue_state_from_event(
+            &state,
+            &json!({
+                "type": "message_end",
+                "message": {
+                    "role": "assistant",
+                    "stopReason": "toolUse",
+                    "content": [{ "type": "toolCall", "id": "tool-1" }]
+                }
+            }),
+        );
+
+        let mut intermediate_end = json!({ "type": "agent_end" });
+        super::sync_and_annotate_queue_state(&state, &mut intermediate_end);
+        assert_eq!(intermediate_end["turnBusy"], true);
+
+        super::sync_queue_state_from_event(
+            &state,
+            &json!({
+                "type": "message_end",
+                "message": { "role": "toolResult", "toolCallId": "tool-1" }
+            }),
+        );
+        let mut terminal_end = json!({ "type": "agent_end" });
+        super::sync_and_annotate_queue_state(&state, &mut terminal_end);
+        assert_eq!(terminal_end["turnBusy"], false);
     }
 
     #[test]
