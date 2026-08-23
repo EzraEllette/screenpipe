@@ -79,7 +79,6 @@ export interface ComposerInputProps {
   inputRef: React.RefObject<HTMLTextAreaElement>;
   value: string;
   disabledReason: string | null;
-  readinessReason: string | null;
   canChat: boolean;
   isLoading: boolean;
   isStreaming: boolean;

@@ -135,7 +135,7 @@ describe("preset switch serialization", () => {
       error: "ACP authentication cancelled",
     });
 
-    const { result, rerender, unmount } = renderHook(({ piStarting }) => usePiSessionLifecycle({
+    const { result, unmount } = renderHook(() => usePiSessionLifecycle({
       activePreset: acpPreset,
       setActivePreset: vi.fn(),
       aiPresets: [acpPreset],
@@ -145,7 +145,6 @@ describe("preset switch serialization", () => {
       appItems: [],
       allConnectionItems: [],
       connections: [],
-      piStarting,
       piInfo: runningInfo,
       setPiInfo,
       isStreaming: false,
@@ -157,19 +156,14 @@ describe("preset switch serialization", () => {
       piIntentionallyStoppedPidsRef: { current: new Set<number>() },
       piStoppedIntentionallyRef: { current: false },
       piPresetSwitchPromiseRef: presetSwitchRef,
-    }), { initialProps: { piStarting: false } });
+    }));
 
-    expect(result.current.canChat).toBe(true);
-    rerender({ piStarting: true });
     expect(result.current.canChat).toBe(true);
     expect(result.current.disabledReason).toBeNull();
-    expect(result.current.readinessReason).toBe("Starting AI assistant...");
 
-    rerender({ piStarting: false });
     act(() => result.current.handlePiRestart(acpPreset));
     expect(result.current.canChat).toBe(true);
     expect(result.current.disabledReason).toBeNull();
-    expect(result.current.readinessReason).toBe("Switching AI assistant...");
 
     const switchPromise = presetSwitchRef.current;
     expect(switchPromise).not.toBeNull();

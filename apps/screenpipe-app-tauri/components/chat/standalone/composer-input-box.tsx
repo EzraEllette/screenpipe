@@ -67,14 +67,7 @@ export function ComposerInputBox({
           placeholder={
             input.disabledReason
               ? input.disabledReason
-              : input.readinessReason
-                ? `${input.readinessReason} Keep typing.`
-              : input.isLoading || input.isStreaming
-                ? "Message will be queued..."
-                : // Kept to the same rendered width as the previous legend so it
-                  // still fits the 600px minimum chat window on one line. `~`
-                  // and `#` stay live and are taught by the palette itself.
-                  "Ask about your screen... (/ for commands, @ chats, $ skills)"
+              : "Ask a question or describe a task"
           }
           disabled={!input.canChat}
           spellCheck={false}

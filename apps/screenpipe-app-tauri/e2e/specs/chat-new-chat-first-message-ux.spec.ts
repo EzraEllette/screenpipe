@@ -104,16 +104,9 @@ describe("New chat, first message", function () {
     await browser.execute(() => {
       (window as any).__e2eSetPiStartInFlight?.(true);
     });
-    await browser.waitUntil(
-      async () =>
-        (await $("form textarea").getAttribute("placeholder"))?.includes(
-          "Starting AI assistant... Keep typing.",
-        ) === true,
-      {
-        timeout: t(5_000),
-        interval: 50,
-        timeoutMsg: "composer did not expose editable background-start state",
-      },
+    await browser.pause(t(100));
+    expect(await $("form textarea").getAttribute("placeholder")).toBe(
+      "Ask a question or describe a task",
     );
     await browser.saveScreenshot(join(SHOTS, "01-background-start.png"));
 
