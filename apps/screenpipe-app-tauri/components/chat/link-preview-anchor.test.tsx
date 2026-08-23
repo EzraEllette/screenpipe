@@ -86,9 +86,15 @@ describe("LinkPreviewAnchor", () => {
       resolvePreview(preview);
       await Promise.resolve();
     });
-    expect(screen.getByRole("tooltip")).toHaveTextContent(
-      "Add link previews to chat",
+    const tooltip = screen.getByRole("tooltip");
+    expect(tooltip).toHaveTextContent("Add link previews to chat");
+    expect(tooltip).toHaveTextContent(
+      "screenpipe/screenpipe · pull request #6450",
     );
+    expect(tooltip).toHaveTextContent(
+      "Show useful context before opening a link.",
+    );
+    expect(tooltip).toHaveTextContent("by @screenpipe");
     expect(screen.getByText("open")).toHaveClass("uppercase");
   });
 });

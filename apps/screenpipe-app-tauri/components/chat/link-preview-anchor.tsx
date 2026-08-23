@@ -227,7 +227,7 @@ export function LinkPreviewAnchor({
           onPointerEnter={() => clearTimer(closeTimer)}
           onPointerLeave={closeSoon}
           className={cn(
-            "z-50 w-80 border border-border bg-popover text-popover-foreground shadow-lg shadow-black/5 outline-none",
+            "z-50 w-96 max-w-[calc(100vw-1.5rem)] border border-border bg-popover text-popover-foreground shadow-lg shadow-black/5 outline-none",
             "data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=open]:fade-in-0 data-[state=closed]:fade-out-0",
           )}
         >
