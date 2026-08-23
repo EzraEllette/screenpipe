@@ -24,7 +24,7 @@ vi.mock("@/components/chat/standalone/hooks/use-composer-dictation", () => ({
     error: mocks.error,
     canRetry: mocks.canRetry,
     elapsedMs: 2_000,
-    waveform: [0.1, 0.3, 0.8, 0.4, 0.2],
+    waveform: [0.1, 0.25, 0.45, 0.7, 1, 0.65, 0.4, 0.2, 0.08],
     start: mocks.start,
     finish: mocks.finish,
     cancel: mocks.cancel,
@@ -96,6 +96,9 @@ describe("ComposerDictationControl", () => {
       "aria-label",
       "Recording dictation, 0:02",
     );
+    const waveform = screen.getByTestId("composer-dictation-waveform");
+    expect(waveform.children).toHaveLength(9);
+    expect(waveform.children[4]).toHaveStyle({ height: "18px", opacity: "1" });
     fireEvent.click(screen.getByRole("button", { name: "Cancel dictation" }));
     fireEvent.click(screen.getByRole("button", { name: "Finish dictation" }));
     expect(mocks.cancel).toHaveBeenCalledTimes(1);

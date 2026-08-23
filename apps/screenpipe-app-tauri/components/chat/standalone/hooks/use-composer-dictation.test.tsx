@@ -22,6 +22,28 @@ const stopTrack = vi.fn();
 const stream = {
   getTracks: () => [{ stop: stopTrack }],
 } as unknown as MediaStream;
+let frameCallback: FrameRequestCallback | null = null;
+
+class FakeAudioContext {
+  createAnalyser() {
+    return {
+      fftSize: 0,
+      getByteTimeDomainData: (samples: Uint8Array) => {
+        samples.forEach((_, index) => {
+          samples[index] = index % 2 === 0 ? 190 : 66;
+        });
+      },
+    } as AnalyserNode;
+  }
+
+  createMediaStreamSource() {
+    return { connect: vi.fn() } as unknown as MediaStreamAudioSourceNode;
+  }
+
+  close() {
+    return Promise.resolve();
+  }
+}
 
 class FakeMediaRecorder {
   static isTypeSupported = () => true;
@@ -53,6 +75,16 @@ describe("useComposerDictation", () => {
     stopTrack.mockReset();
     transcribeComposerAudio.mockReset();
     vi.stubGlobal("MediaRecorder", FakeMediaRecorder);
+    vi.stubGlobal("AudioContext", FakeAudioContext);
+    vi.stubGlobal(
+      "requestAnimationFrame",
+      vi.fn((callback: FrameRequestCallback) => {
+        frameCallback = callback;
+        return 1;
+      }),
+    );
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+    frameCallback = null;
     Object.defineProperty(navigator, "mediaDevices", {
       configurable: true,
       value: { getUserMedia: vi.fn().mockResolvedValue(stream) },
@@ -111,5 +143,21 @@ describe("useComposerDictation", () => {
     );
     expect(onValueChange).toHaveBeenCalledWith("Ask now about yesterday");
     expect(result.current.status).toBe("idle");
+  });
+
+  it("turns live microphone amplitude into a moving nine-bar trace", async () => {
+    const { result } = setup();
+
+    await act(async () => result.current.start());
+    expect(frameCallback).not.toBeNull();
+    act(() => frameCallback?.(100));
+
+    expect(result.current.waveform).toHaveLength(9);
+    expect(result.current.waveform.at(-1)).toBeGreaterThan(0.5);
+
+    await act(async () => {
+      result.current.cancel();
+      await Promise.resolve();
+    });
   });
 });

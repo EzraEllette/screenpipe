@@ -27,7 +27,7 @@ type UseComposerDictationOptions = {
 };
 
 const MAX_RECORDING_MS = 5 * 60 * 1000;
-const DEFAULT_WAVEFORM = [0.12, 0.12, 0.12, 0.12, 0.12];
+const DEFAULT_WAVEFORM = Array.from({ length: 9 }, () => 0.04);
 
 function preferredAudioType(): string | undefined {
   if (typeof MediaRecorder === "undefined") return undefined;
@@ -135,9 +135,10 @@ export function useComposerDictation({
       audioContextRef.current = context;
       const samples = new Uint8Array(analyser.fftSize);
       let lastPaintAt = 0;
+      let smoothedLevel = 0.04;
       const paint = (now: number) => {
         if (!mountedRef.current || statusRef.current !== "recording") return;
-        if (now - lastPaintAt >= 80) {
+        if (now - lastPaintAt >= 64) {
           analyser.getByteTimeDomainData(samples);
           let squareSum = 0;
           for (const sample of samples) {
@@ -145,8 +146,13 @@ export function useComposerDictation({
             squareSum += centered * centered;
           }
           const rms = Math.sqrt(squareSum / samples.length);
-          const level = Math.min(1, Math.max(0.08, rms * 5));
-          setWaveform((previous) => [...previous.slice(1), level]);
+          const responsiveLevel =
+            rms < 0.015 ? 0.04 : Math.min(1, (rms - 0.015) * 9);
+          smoothedLevel = Math.max(
+            0.04,
+            smoothedLevel * 0.45 + responsiveLevel * 0.55,
+          );
+          setWaveform((previous) => [...previous.slice(1), smoothedLevel]);
           lastPaintAt = now;
         }
         animationFrameRef.current = requestAnimationFrame(paint);

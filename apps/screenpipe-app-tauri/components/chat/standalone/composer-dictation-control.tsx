@@ -87,12 +87,19 @@ export function ComposerDictationControl({
         className="flex h-8 shrink-0 items-center gap-1 rounded-md border border-signal/45 bg-signal/10 px-1 text-signal"
         data-testid="composer-dictation-recording"
       >
-        <div className="flex h-4 items-center gap-[2px] px-1" aria-hidden="true">
+        <div
+          className="flex h-5 items-center gap-[2px] px-1"
+          aria-hidden="true"
+          data-testid="composer-dictation-waveform"
+        >
           {dictation.waveform.map((level, index) => (
             <span
               key={index}
-              className="w-[2px] rounded-full bg-signal transition-[height] duration-75 motion-reduce:transition-none"
-              style={{ height: `${Math.round(4 + level * 12)}px` }}
+              className="w-[2px] rounded-full bg-signal transition-[height,opacity] duration-150 ease-out motion-reduce:transition-none"
+              style={{
+                height: `${Math.round(3 + level * 15)}px`,
+                opacity: 0.45 + level * 0.55,
+              }}
             />
           ))}
         </div>
