@@ -9,8 +9,10 @@ import { ChatMessageList, type ChatMessageListProps } from "./chat-message-list"
 import type { Message } from "@/lib/chat/types";
 
 vi.mock("@/components/chat/standalone/message-content", () => ({
-  MessageContent: ({ message }: { message: Message }) => (
-    <span>{message.content}</span>
+  MessageContent: ({ message, isGenerating }: { message: Message; isGenerating: boolean }) => (
+    <span data-testid={`message-content-${message.id}`} data-generating={String(isGenerating)}>
+      {message.content}
+    </span>
   ),
 }));
 
@@ -176,5 +178,68 @@ describe("ChatMessageList inline message editing", () => {
     expect(
       screen.queryByRole("textbox", { name: "Edit message" }),
     ).not.toBeInTheDocument();
+  });
+});
+
+describe("ChatMessageList turn status ownership", () => {
+  const completedToolMessage: Message = {
+    id: "tool-answer",
+    role: "assistant",
+    content: "",
+    timestamp: Date.now(),
+    contentBlocks: [{
+      type: "tool",
+      toolCall: {
+        id: "read-1",
+        toolName: "read",
+        args: {},
+        isRunning: false,
+      },
+    }],
+  };
+
+  it("keeps the active tool group live through a silent post-tool gap", () => {
+    const { rerender } = render(<ChatMessageList {...messageListProps({
+      messages: [userMessage, completedToolMessage],
+      isLoading: true,
+      isStreaming: true,
+      activeSourceFooterMessageId: completedToolMessage.id,
+    })} />);
+
+    expect(screen.getByTestId(`message-content-${completedToolMessage.id}`))
+      .toHaveAttribute("data-generating", "true");
+    expect(screen.queryByTestId("chat-turn-status")).not.toBeInTheDocument();
+
+    const finalMessage: Message = {
+      ...completedToolMessage,
+      content: "diagnostic complete",
+      contentBlocks: [
+        ...(completedToolMessage.contentBlocks ?? []),
+        { type: "text", text: "diagnostic complete" },
+      ],
+    };
+    rerender(<ChatMessageList {...messageListProps({
+      messages: [userMessage, finalMessage],
+      isLoading: false,
+      isStreaming: false,
+      activeSourceFooterMessageId: null,
+    })} />);
+
+    expect(screen.getByTestId(`message-content-${finalMessage.id}`))
+      .toHaveAttribute("data-generating", "false");
+    expect(screen.getByText("diagnostic complete")).toBeInTheDocument();
+  });
+
+  it("shows the fallback when only historical tool work exists", () => {
+    render(<ChatMessageList {...messageListProps({
+      messages: [userMessage, completedToolMessage],
+      isLoading: true,
+      isStreaming: false,
+      activeSourceFooterMessageId: "new-turn-placeholder",
+    })} />);
+
+    expect(screen.getByTestId(`message-content-${completedToolMessage.id}`))
+      .toHaveAttribute("data-generating", "false");
+    expect(screen.getByTestId("chat-turn-status")).toBeInTheDocument();
   });
 });

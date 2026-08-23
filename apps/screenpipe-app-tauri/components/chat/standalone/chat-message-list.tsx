@@ -25,6 +25,7 @@ import {
   getMessageIntentLabel,
   isNormalUserMessage,
   isSteeredAssistantMessage,
+  hasAssistantToolWorkBody,
   hasRenderableAssistantBody,
   isPendingAgentActionMessage,
   hasPendingPermissionRequest,
@@ -162,71 +163,63 @@ export function ChatMessageList({
     [enterEditMode],
   );
 
+  const turnActive = isLoading || isStreaming;
+  const visibleMessages = messages.filter((message) => {
+    if (message.role !== "assistant") return true;
+    return hasRenderableAssistantBody(message) || isSteeredAssistantMessage(message);
+  });
+  // The transport-owned message id is the authoritative owner of the live
+  // turn. The visible-message fallback only covers hydration before that id
+  // reaches this surface; it must never promote an older completed answer.
+  const lastVisibleAssistantId = [...visibleMessages]
+    .reverse()
+    .find((candidate) => candidate.role === "assistant" && !isPendingAgentActionMessage(candidate))?.id;
+  const lastAssistantId = [...messages]
+    .reverse()
+    .find((candidate) => candidate.role === "assistant" && !isPendingAgentActionMessage(candidate))?.id;
+  const activeAssistantMessageId =
+    activeSourceFooterMessageId ??
+    (lastVisibleAssistantId === lastAssistantId ? lastVisibleAssistantId : undefined);
+  const activeAssistantIndex = activeAssistantMessageId
+    ? messages.findIndex((candidate) => candidate.id === activeAssistantMessageId)
+    : -1;
+  const waitingForApproval =
+    turnActive &&
+    activeAssistantIndex >= 0 &&
+    hasPendingPermissionRequest(messages.slice(activeAssistantIndex));
+
+  // A steered child keeps its parent tool receipt live. This set also lets the
+  // generic status row ask whether a visible tool group truly owns liveness,
+  // instead of disappearing merely because some historical tool block exists.
+  const steerChildActiveParentIds = new Set<string>();
+  if (turnActive && activeAssistantMessageId) {
+    const activeIdx = visibleMessages.findIndex((message) => message.id === activeAssistantMessageId);
+    const activeMessage = activeIdx >= 0 ? visibleMessages[activeIdx] : undefined;
+    if (activeMessage && isSteeredAssistantMessage(activeMessage)) {
+      for (let index = activeIdx - 1; index >= 0; index -= 1) {
+        const previous = visibleMessages[index];
+        if (previous.role === "user" && previous.intent !== "steer") break;
+        if (previous.role === "assistant" && !isSteeredAssistantMessage(previous)) {
+          steerChildActiveParentIds.add(previous.id);
+          break;
+        }
+      }
+    }
+  }
+  const hasLiveToolStatusOwner = turnActive && visibleMessages.some(
+    (message) =>
+      message.role === "assistant" &&
+      hasAssistantToolWorkBody(message) &&
+      (message.id === activeAssistantMessageId || steerChildActiveParentIds.has(message.id)),
+  );
+
   return (
     <>
       <AnimatePresence mode="popLayout">
         {(() => {
-          const visibleMessages = messages.filter((m) => {
-            if (m.role !== "assistant") return true;
-            if (!hasRenderableAssistantBody(m) && !isSteeredAssistantMessage(m)) return false;
-            return true;
-          });
           const renderItems = buildCollapsedSteerRenderItems(visibleMessages, {
             canCollapseSteerWork: !isLoading && !isStreaming && !activeSourceFooterMessageId,
           });
-          // Fall back to the newest visible assistant message — but only when
-          // it is also the newest assistant message overall. Right after a
-          // send, the fresh assistant row is still the invisible
-          // "Processing..." placeholder (filtered above), so the newest
-          // *visible* assistant is the previous turn's completed answer;
-          // marking that one live would hide its action bar and tick a bogus
-          // "Working for …" header on it until the first token arrives.
-          // A pending permission/sign-in card is a separate assistant message,
-          // but the real turn is still live and blocked on the user's answer.
-          // Skip these cards so the true assistant turn stays the active one and
-          // its tool group keeps showing "working" instead of a false "done".
-          const lastVisibleAssistantId = [...visibleMessages]
-            .reverse()
-            .find((candidate) => candidate.role === "assistant" && !isPendingAgentActionMessage(candidate))?.id;
-          const lastAssistantId = [...messages]
-            .reverse()
-            .find((candidate) => candidate.role === "assistant" && !isPendingAgentActionMessage(candidate))?.id;
-          const activeAssistantMessageId =
-            activeSourceFooterMessageId ??
-            (lastVisibleAssistantId === lastAssistantId ? lastVisibleAssistantId : undefined);
-          // The live turn is blocked on the user approving an agent action.
-          // Scope to the current turn: only a pending permission card AFTER the
-          // active assistant message counts. A stale card left earlier in the
-          // transcript (e.g. one that outlived its runtime waiter) must not mark
-          // a fresh turn "waiting for approval".
-          const activeAssistantIndex = activeAssistantMessageId
-            ? messages.findIndex((candidate) => candidate.id === activeAssistantMessageId)
-            : -1;
-          const waitingForApproval =
-            (isLoading || isStreaming) &&
-            activeAssistantIndex >= 0 &&
-            hasPendingPermissionRequest(messages.slice(activeAssistantIndex));
-
-          // Find parent assistant IDs whose steered child is currently streaming.
-          // Walk backwards from the active streaming assistant to find the
-          // preceding non-steered assistant in the same turn — that's the parent
-          // whose ToolCallGroup should also show "Working".
-          const steerChildActiveParentIds = new Set<string>();
-          if ((isLoading || isStreaming) && activeAssistantMessageId) {
-            const activeIdx = visibleMessages.findIndex((m) => m.id === activeAssistantMessageId);
-            const activeMsg = activeIdx >= 0 ? visibleMessages[activeIdx] : undefined;
-            if (activeMsg && isSteeredAssistantMessage(activeMsg)) {
-              for (let j = activeIdx - 1; j >= 0; j -= 1) {
-                const prev = visibleMessages[j];
-                if (prev.role === "user" && prev.intent !== "steer") break;
-                if (prev.role === "assistant" && !isSteeredAssistantMessage(prev)) {
-                  steerChildActiveParentIds.add(prev.id);
-                  break;
-                }
-              }
-            }
-          }
-
           return renderItems.map((item) => {
             if (item.type === "collapsed-steer-work") {
               const expanded = expandedSteerWorkIds.has(item.id);
@@ -622,10 +615,10 @@ export function ChatMessageList({
           // on the user ("needs your approval"); a generic status row below it
           // is both redundant and wrong (the agent is waiting, not working).
           if (lastAssistant && isPendingAgentActionMessage(lastAssistant)) return null;
-          // Once a tool group exists, it owns the live status and completion
-          // receipt. A second status row makes completed work look like it is
-          // still running and adds technical-looking visual noise.
-          if (blocks?.some((block) => block.type === "tool")) return null;
+          // Suppress the fallback only when the active turn's visible tool
+          // group is actually rendering its live state. Historical tool blocks
+          // cannot erase the only indication that a newer turn is still active.
+          if (hasLiveToolStatusOwner) return null;
 
           // One row, one phase. The ACP boot label is a phase of this row
           // rather than a second loader mounted beside it: a cold npx fetch can
