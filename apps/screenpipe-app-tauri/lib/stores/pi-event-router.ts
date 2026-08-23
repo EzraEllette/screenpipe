@@ -131,10 +131,10 @@ export function statusForEvent(evt: PiInnerEvent): SessionStatus | null {
     case "tool_execution_end":
       return "streaming";
     case "agent_end":
-      // Retry backoff and tool-use boundaries both keep the logical turn
-      // active. The native queue owns this predicate so the sidebar and the
-      // transcript cannot disagree about whether work is still in flight.
-      if (evt.willRetry === true || evt.turnBusy === true) return "streaming";
+      // Pi emits agent_end before its retry backoff. `willRetry` means the
+      // logical turn is still active; marking it idle here makes foreground
+      // and background composers send directly into a busy process.
+      if (evt.willRetry === true) return "streaming";
       if (evt.message?.stopReason === "error") return "error";
       return "idle";
     case "turn_end":
@@ -894,7 +894,6 @@ function applyEventToSessionContent(sid: string, payload: PiInnerEvent) {
   // a chat that completes while the user is looking elsewhere still
   // ends up on disk and survives a restart.
   if (t === "agent_end") {
-    if ((payload as { turnBusy?: boolean }).turnBusy === true) return;
     store.actions.endTurn(sid);
     const willRetry = (payload as { willRetry?: boolean }).willRetry === true;
     void persistBackgroundSession(sid).finally(() => {

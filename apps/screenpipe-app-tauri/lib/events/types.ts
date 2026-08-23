@@ -61,8 +61,6 @@ export interface AgentInnerEvent {
   isError?: boolean;
   /** Pi keeps the logical turn active across provider retry backoff. */
   willRetry?: boolean;
-  /** The native queue still owns tool/steer work after an intermediate agent_end. */
-  turnBusy?: boolean;
   success?: boolean;
   attempt?: number;
   maxAttempts?: number;
