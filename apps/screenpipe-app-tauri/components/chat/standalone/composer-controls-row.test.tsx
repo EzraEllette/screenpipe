@@ -68,7 +68,46 @@ vi.mock("@/components/usage/usage-popover", () => ({
 
 import { ComposerControlsRow } from "./composer-controls-row";
 
-describe("ComposerControlsRow preset selection", () => {
+describe("ComposerControlsRow", () => {
+  it("uses an upward arrow for the send action", () => {
+    render(
+      <ComposerControlsRow
+        canChat
+        filters={
+          {
+            activeFilterCount: 0,
+            activeFilters: [],
+            activeFilterLabels: [],
+            hasActiveFilters: false,
+            appFilterOpen: false,
+            onFilterMenuOpenChange: vi.fn(),
+          } as any
+        }
+        modelControls={{
+          settings: { aiPresets: [] },
+          activePreset: null,
+          activePipeExecution: null,
+          currentQueueSessionId: null,
+          onSelectPreset: vi.fn(),
+          onPresetSaved: vi.fn(),
+        }}
+        isStreaming={false}
+        sendButton={{
+          isStopMode: false,
+          hasPendingDocs: false,
+          sendDisabled: false,
+          onStop: vi.fn(),
+        }}
+      />,
+    );
+
+    expect(
+      screen
+        .getByRole("button", { name: "send message" })
+        .querySelector(".lucide-arrow-up"),
+    ).toBeInTheDocument();
+  });
+
   it("activates and restarts with a newly created preset absent from the stale settings list", () => {
     const onSelectPreset = vi.fn();
     const onPresetSaved = vi.fn();
