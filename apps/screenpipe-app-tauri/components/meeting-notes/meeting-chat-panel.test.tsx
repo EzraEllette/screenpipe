@@ -307,6 +307,43 @@ describe("meeting chat panel", () => {
     );
   });
 
+  it("renders assistant Markdown without breaking transcript citations", () => {
+    setup({
+      turns: [
+        {
+          id: "a",
+          role: "assistant",
+          text: "At **3:34**, this was *important*.\n\n- first point\n- second point",
+          done: true,
+        },
+      ],
+    });
+
+    expect(
+      screen.getByTestId("meeting-chat-citation").closest("strong"),
+    ).not.toBeNull();
+    expect(screen.getByText("important").closest("em")).not.toBeNull();
+    expect(screen.getByText("first point").closest("li")).not.toBeNull();
+    expect(screen.queryByText("**3:34**")).toBeNull();
+  });
+
+  it("keeps images out of the meeting thread", () => {
+    setup({
+      turns: [
+        {
+          id: "a",
+          role: "assistant",
+          text: "text before ![chart](https://example.com/chart.png) text after",
+          done: true,
+        },
+      ],
+    });
+
+    expect(
+      screen.getByTestId("meeting-chat-answer").querySelector("img"),
+    ).toBeNull();
+  });
+
   it("case 66: a finished empty turn says so rather than rendering blank", () => {
     setup({
       turns: [{ id: "a", role: "assistant", text: "", done: true }],

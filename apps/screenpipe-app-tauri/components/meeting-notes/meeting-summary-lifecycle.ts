@@ -171,7 +171,7 @@ export function latestSummaryInputAt(
 }
 
 export interface MeetingSummaryFailurePresentation {
-  kind: PipeErrorType;
+  kind: PipeErrorType | "auth_failed";
   copy: string;
   /** Validated plan-upgrade action when the gateway offered one. */
   upgrade: QuotaUpgradeAction | null;
@@ -192,8 +192,24 @@ export function meetingSummaryFailure(
   execution: MeetingSummaryExecution,
 ): MeetingSummaryFailurePresentation {
   const errorMessage = execution.error_message ?? "";
+  const normalizedErrorType = (execution.error_type ?? "")
+    .trim()
+    .toLowerCase();
+  const authFailed =
+    normalizedErrorType === "auth_failed" ||
+    /authentication failed|invalid api key|unauthorized/.test(
+      errorMessage.toLowerCase(),
+    );
+  if (authFailed) {
+    return {
+      kind: "auth_failed",
+      copy: "The summary couldn't authenticate with your AI provider. Check its API key or switch models, then retry. Your meeting and transcript are safe.",
+      upgrade: null,
+      retryable: false,
+    };
+  }
   const kind =
-    RUST_ERROR_TYPE_MAP[(execution.error_type ?? "").trim().toLowerCase()] ??
+    RUST_ERROR_TYPE_MAP[normalizedErrorType] ??
     parsePipeError(`${execution.error_type ?? ""} ${errorMessage}`.trim()).type;
   const upgrade = parseQuotaUpgradeAction(errorMessage);
 

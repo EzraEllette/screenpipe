@@ -34,6 +34,8 @@ import React, {
   useState,
 } from "react";
 import { ArrowUp, Loader2, X } from "lucide-react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { AIPresetsSelector } from "@/components/rewind/ai-presets-selector";
@@ -41,9 +43,15 @@ import {
   AcpConfigSelector,
   type AcpConfigDefaultChange,
 } from "@/components/chat/standalone/acp-config-selector";
+import { createScreenpipeUrlTransform } from "@/components/markdown";
 import type { AIPreset } from "@/lib/utils/tauri";
 import { cn } from "@/lib/utils";
-import { splitCitations, type CitationWindow } from "./meeting-chat-citations";
+import {
+  createMeetingCitationPlugin,
+  meetingCitationAtFromHref,
+  MEETING_CITATION_HOST,
+  type CitationWindow,
+} from "./meeting-chat-citations";
 import {
   canSubmitTurn,
   clampPanelWidth,
@@ -427,28 +435,55 @@ function AnswerBody({
   window: CitationWindow | null;
   onCitationClick: (atMs: number) => void;
 }) {
-  const runs = useMemo(
-    () => splitCitations(text, citationWindow),
-    [text, citationWindow],
+  const citationPlugin = useMemo(
+    () => createMeetingCitationPlugin(citationWindow),
+    [citationWindow],
   );
+  const urlTransform = useMemo(
+    () => createScreenpipeUrlTransform([MEETING_CITATION_HOST]),
+    [],
+  );
+
   return (
-    <span className="[overflow-wrap:anywhere]">
-      {runs.map((run, index) =>
-        run.at === null ? (
-          <React.Fragment key={index}>{run.text}</React.Fragment>
-        ) : (
-          <button
-            key={index}
-            type="button"
-            data-testid="meeting-chat-citation"
-            data-at={run.at}
-            onClick={() => onCitationClick(run.at as number)}
-            className="border-b border-muted-foreground font-mono text-[11px] text-foreground transition-colors hover:border-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-foreground"
-          >
-            {run.text}
-          </button>
-        ),
-      )}
-    </span>
+    <ReactMarkdown
+      className="prose prose-sm max-w-none [overflow-wrap:anywhere] dark:prose-invert prose-p:my-0 prose-p:text-[13px] prose-p:leading-relaxed prose-p:[&+p]:mt-2 prose-li:my-0 prose-li:text-[13px] prose-strong:text-foreground"
+      remarkPlugins={[remarkGfm, citationPlugin]}
+      urlTransform={urlTransform}
+      components={{
+        a({ href, children }) {
+          const at = meetingCitationAtFromHref(href);
+          if (at !== null) {
+            return (
+              <button
+                type="button"
+                data-testid="meeting-chat-citation"
+                data-at={at}
+                onClick={() => onCitationClick(at)}
+                className="border-b border-muted-foreground font-mono text-[11px] text-foreground transition-colors hover:border-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-foreground"
+              >
+                {children}
+              </button>
+            );
+          }
+
+          return (
+            <a
+              href={href}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="underline underline-offset-2"
+            >
+              {children}
+            </a>
+          );
+        },
+        // Case 78: the meeting thread is text; media belongs in the note.
+        img() {
+          return null;
+        },
+      }}
+    >
+      {text}
+    </ReactMarkdown>
   );
 }

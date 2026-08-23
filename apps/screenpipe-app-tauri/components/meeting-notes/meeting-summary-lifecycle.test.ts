@@ -330,6 +330,17 @@ describe("meetingSummaryFailure", () => {
     expect(failure.copy.toLowerCase()).toContain("model");
   });
 
+  it("explains an AI provider authentication failure", () => {
+    const failure = meetingSummaryFailure(
+      failed("auth_failed", "authentication failed — check API key"),
+    );
+    expect(failure.kind).toBe("auth_failed");
+    expect(failure.retryable).toBe(false);
+    expect(failure.copy).toContain("AI provider");
+    expect(failure.copy).toContain("API key");
+    expect(failure.copy).toContain("meeting and transcript are safe");
+  });
+
   it("classifies from the error message when error_type is missing", () => {
     const failure = meetingSummaryFailure(
       failed(null, 'pipe failed: {"error":"credits_exhausted"}'),
