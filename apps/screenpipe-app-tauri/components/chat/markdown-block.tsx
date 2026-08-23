@@ -22,6 +22,7 @@ import { commands } from "@/lib/utils/tauri";
 import { useTimelineStore } from "@/lib/hooks/use-timeline-store";
 import { cn } from "@/lib/utils";
 import { sanitizeToolCallXml } from "@/lib/utils/sanitize-tool-call-xml";
+import { LinkPreviewAnchor } from "@/components/chat/link-preview-anchor";
 
 interface MarkdownBlockProps {
   text: string;
@@ -90,7 +91,7 @@ export function MarkdownBlock({
             </summary>
           );
         },
-        a({ href, children, ...props }) {
+        a({ href, children, node: _node, ...props }) {
           if (
             href?.startsWith("screenpipe://timeline") ||
             href?.startsWith("screenpipe://frame") ||
@@ -146,6 +147,20 @@ export function MarkdownBlock({
               >
                 {children}
               </a>
+            );
+          }
+
+          if (href?.startsWith("http://") || href?.startsWith("https://")) {
+            return (
+              <LinkPreviewAnchor
+                href={href}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="underline underline-offset-2"
+                {...props}
+              >
+                {children}
+              </LinkPreviewAnchor>
             );
           }
 
