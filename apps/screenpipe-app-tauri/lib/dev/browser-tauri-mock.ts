@@ -325,6 +325,42 @@ function createBrowserDevActivityOpportunities(
       meetingIds: [],
       excluded: false,
     },
+    "browser-dev-pr-export": {
+      activityId: "browser-dev-pr-export",
+      startAt: at(640),
+      endAt: at(604),
+      title: "Review export patch",
+      summary:
+        "Reviewed a focused export change for scope, risks, and acceptance evidence.",
+      apps: ["Arc"],
+      frameIds: [92_004],
+      meetingIds: [],
+      excluded: false,
+    },
+    "browser-dev-pr-notifications": {
+      activityId: "browser-dev-pr-notifications",
+      startAt: at(390),
+      endAt: at(348),
+      title: "Review notification patch",
+      summary:
+        "Reviewed a separate notification change for scope, risks, and acceptance evidence.",
+      apps: ["Arc"],
+      frameIds: [92_005],
+      meetingIds: [],
+      excluded: false,
+    },
+    "browser-dev-pr-timeline": {
+      activityId: "browser-dev-pr-timeline",
+      startAt: at(92),
+      endAt: at(54),
+      title: "Review timeline patch",
+      summary:
+        "Reviewed a third independent timeline change for scope, risks, and acceptance evidence.",
+      apps: ["Arc"],
+      frameIds: [92_006],
+      meetingIds: [],
+      excluded: false,
+    },
   };
   const evidence = (...activityIds: string[]) =>
     activityIds.map((activityId) => structuredClone(evidenceById[activityId]));
@@ -335,69 +371,28 @@ function createBrowserDevActivityOpportunities(
     analysisError: null,
     skills: [
       {
-        id: "feedback-to-fix",
+        id: "review-pull-request",
         revision: 1,
         status: "pending",
-        name: "turn product feedback into a focused fix",
+        name: "review a pull request",
         description:
-          "Trace a reported issue from its source through implementation and review-ready evidence.",
-        notes: "",
-        blueprint: {
-          trigger:
-            "When product feedback needs a focused, review-ready change.",
-          steps: [
-            "Return to the source and name the expected outcome.",
-            "Reproduce and narrow the smallest complete change.",
-            "Implement, verify, and close the loop with direct evidence.",
-          ],
-          verification:
-            "Preserve the original request and attach direct acceptance evidence.",
-        },
-        evidence: evidence(
-          "browser-dev-slack",
-          "browser-dev-cursor",
-          "browser-dev-arc",
-        ),
-      },
-      {
-        id: "review-brief",
-        revision: 1,
-        status: "pending",
-        name: "prepare a pull request review brief",
-        description:
-          "Turn a code change into a short reviewer brief with scope, risk, verification, and source links.",
+          "Check a focused code change for scope, risks, and acceptance evidence before handoff.",
         notes: "",
         blueprint: {
           trigger: "When a focused code change is ready for review.",
           steps: [
-            "Read the diff and identify its user-visible boundary.",
-            "Record scope, risk, and focused verification.",
-            "Publish the brief with direct source links.",
+            "Read the request and diff to identify the intended boundary.",
+            "Check the highest-risk behavior with focused evidence.",
+            "Write a concise handoff with findings and explicit unknowns.",
           ],
           verification:
-            "Map every claim to the diff, a focused check, or an explicit unknown.",
+            "Every finding maps to the request, diff, or a focused check.",
         },
-        evidence: evidence("browser-dev-cursor", "browser-dev-arc"),
-      },
-      {
-        id: "meeting-followups",
-        revision: 1,
-        status: "pending",
-        name: "turn decisions into follow-ups",
-        description:
-          "Extract decisions, owners, and next actions, then prepare a source-backed follow-up.",
-        notes: "",
-        blueprint: {
-          trigger: "When a discussion ends with decisions that need follow-up.",
-          steps: [
-            "Return to the source discussion.",
-            "Separate decisions from open questions.",
-            "Prepare owned next actions with source links.",
-          ],
-          verification:
-            "Every follow-up has an owner, destination, and source discussion.",
-        },
-        evidence: evidence("browser-dev-slack", "browser-dev-arc"),
+        evidence: evidence(
+          "browser-dev-pr-export",
+          "browser-dev-pr-notifications",
+          "browser-dev-pr-timeline",
+        ),
       },
     ],
     unfinished: [

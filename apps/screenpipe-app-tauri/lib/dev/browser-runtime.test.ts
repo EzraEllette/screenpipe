@@ -224,11 +224,11 @@ describe("browser development runtime", () => {
       analysisState: "ready",
       analysisError: null,
     });
-    expect(ready.skills).toHaveLength(3);
+    expect(ready.skills).toHaveLength(1);
     expect(ready.unfinished).toHaveLength(2);
     expect(ready.skills[0].evidence[0]).toMatchObject({
-      activityId: "browser-dev-slack",
-      apps: ["Slack"],
+      activityId: "browser-dev-pr-export",
+      apps: ["Arc"],
       excluded: false,
     });
 
@@ -337,7 +337,7 @@ describe("browser development runtime", () => {
     const initial = invoke(
       "get_activity_opportunities",
     ) as ActivityOpportunitySnapshot;
-    const skill = initial.skills[1];
+    const skill = initial.skills[0];
     const excluded = skill.evidence[0].activityId;
     const included = skill.evidence[1].activityId;
     const updated = invoke("update_activity_opportunity", {
@@ -348,7 +348,7 @@ describe("browser development runtime", () => {
         excludedActivityIds: [excluded],
       },
     }) as ActivityOpportunitySnapshot;
-    const revision = updated.skills[1].revision;
+    const revision = updated.skills[0].revision;
 
     expect(
       commandError(() =>
@@ -361,16 +361,14 @@ describe("browser development runtime", () => {
     const created = invoke("create_activity_opportunity_skill", {
       request: { id: skill.id, revision },
     }) as CreatedSkill;
-    expect(created.path).toMatch(
-      /\/prepare-a-pull-request-review-brief\/SKILL\.md$/,
-    );
+    expect(created.path).toMatch(/\/review-a-pull-request\/SKILL\.md$/);
     expect(created.skillMd).toContain(`\`${included}\``);
     expect(created.skillMd).not.toContain(`\`${excluded}\``);
 
     const saved = invoke(
       "get_activity_opportunities",
     ) as ActivityOpportunitySnapshot;
-    expect(saved.skills[1]).toMatchObject({
+    expect(saved.skills[0]).toMatchObject({
       revision: revision + 1,
       status: "created",
       createdSkill: created,
