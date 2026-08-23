@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "suite": "screenpipe-app-coding-agent-regressions",
-  "dataset_version": "2026-08-19.3",
+  "dataset_version": "2026-08-23.1",
   "suite_type": "regression",
   "owner": "screenpipe engineering",
   "policy": {
@@ -499,6 +499,39 @@
           { "source_path": "apps/screenpipe-app-tauri/lib/settings/__tests__/capture-categories.test.ts" }
         ],
         "command": "cd apps/screenpipe-app-tauri && bun x vitest run --config vitest.config.ts lib/settings/__tests__/capture-categories.test.ts"
+      }
+    },
+    {
+      "id": "app-acp-explicit-full-access-boundary",
+      "name": "Keep ACP full access explicit, reversible, and adapter-safe",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "e83222db608f55b3931204e061262469411de94a",
+        "pull_request": "https://github.com/screenpipe/screenpipe/pull/6514"
+      },
+      "base_ref": "989a53b86af113e0e408b4ee6c5f7dd14d886d3d",
+      "oracle_ref": "e83222db608f55b3931204e061262469411de94a",
+      "gate": "advisory",
+      "trigger_paths": [
+        "apps/screenpipe-app-tauri/components/chat/standalone/**acp**",
+        "apps/screenpipe-app-tauri/lib/stores/acp-session-config.ts",
+        "apps/screenpipe-app-tauri/lib/utils/tauri.ts",
+        "apps/screenpipe-app-tauri/src-tauri/src/pi.rs",
+        "crates/screenpipe-core/src/agents/acp/**"
+      ],
+      "tags": ["regression", "escaped-failure", "chat", "acp", "permissions", "safety-boundary"],
+      "prompt": "An ACP adapter can advertise working modes without an unrestricted one, leaving users unable to grant full access explicitly. Add a clearly warned opt-in full-access choice that restores a tool-capable mode and enables client-side automatic approval. Keep the default and unknown states approval-based, return to approval prompts when a prompted or read-only choice is selected, persist and reapply the policy for live sessions, and preserve adapter-owned unrestricted controls without duplicates.",
+      "agent_timeout_seconds": 1200,
+      "grader_dependency_links": [
+        { "source_path": "apps/screenpipe-app-tauri/node_modules", "destination_path": "apps/screenpipe-app-tauri/node_modules" }
+      ],
+      "grader": {
+        "timeout_seconds": 420,
+        "fixtures": [
+          { "source_path": "apps/screenpipe-app-tauri/components/chat/standalone/acp-permission-selector.test.tsx" },
+          { "source_path": "apps/screenpipe-app-tauri/lib/stores/acp-session-config.test.ts" }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && NODE_OPTIONS=--localstorage-file=.eval-localstorage bun x vitest run --config vitest.config.ts components/chat/standalone/acp-permission-selector.test.tsx lib/stores/acp-session-config.test.ts"
       }
     }
   ]
