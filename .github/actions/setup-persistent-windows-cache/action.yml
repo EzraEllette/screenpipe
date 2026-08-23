@@ -31,7 +31,6 @@ runs:
         $cacheRoot = 'S:\screenpipe-cache'
         $persistentTarget = "$cacheRoot\targets-v3\$env:SCREENPIPE_RELEASE_FLAVOR\$env:SCREENPIPE_RELEASE_TARGET"
         $workspaceTarget = "$env:GITHUB_WORKSPACE\apps\screenpipe-app-tauri\src-tauri\target"
-        $workspaceNodeModules = "$env:GITHUB_WORKSPACE\apps\screenpipe-app-tauri\node_modules"
         $workspaceTauri = "$env:GITHUB_WORKSPACE\apps\screenpipe-app-tauri\.tauri"
         $shortTarget = 'C:\t'
 
@@ -47,9 +46,6 @@ runs:
 
         # Bundle output is release-specific. Compiler outputs and downloads stay warm.
         Remove-Item "$persistentTarget\$env:SCREENPIPE_RELEASE_TARGET\release\bundle" -Recurse -Force -ErrorAction SilentlyContinue
-        # Match the Mac runners: materialize node_modules per job because Bun
-        # omits native optional packages when it installs through a junction.
-        Remove-Item $workspaceNodeModules -Recurse -Force -ErrorAction SilentlyContinue
 
         foreach ($path in @($workspaceTarget, $workspaceTauri, $shortTarget)) {
           if (-not (Test-Path $path)) { continue }

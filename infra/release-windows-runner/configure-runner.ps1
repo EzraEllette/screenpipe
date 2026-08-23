@@ -12,12 +12,13 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $runnerRoot = 'C:\actions-runner'
+$workRoot = 'C:\actions-runner-work'
 $hookRoot = 'C:\screenpipe-release-runner\hooks'
 $cacheRoot = 'S:\screenpipe-cache'
 $runnerName = if ($RunnerArchitecture -eq 'arm64') { 'screenpipe-release-windows-arm64' } else { 'screenpipe-release-windows' }
 $runnerLabel = $runnerName
 
-New-Item -ItemType Directory -Force -Path $hookRoot, "$cacheRoot\work" | Out-Null
+New-Item -ItemType Directory -Force -Path $hookRoot, $workRoot | Out-Null
 
 $allowedRefs = @("$Repository/.github/workflows/release-app.yml@refs/heads/main")
 if ($RunnerArchitecture -eq 'x64') {
@@ -97,8 +98,10 @@ if (Test-Path '.runner') {
 
 & icacls.exe $cacheRoot /grant 'NT AUTHORITY\NETWORK SERVICE:(OI)(CI)F' /Q
 if ($LASTEXITCODE -ne 0) { throw "cache ACL setup failed with exit code $LASTEXITCODE" }
+& icacls.exe $workRoot /grant 'NT AUTHORITY\NETWORK SERVICE:(OI)(CI)F' /Q
+if ($LASTEXITCODE -ne 0) { throw "work directory ACL setup failed with exit code $LASTEXITCODE" }
 
-& .\config.cmd --unattended --replace --url "https://github.com/$Repository" --token $RegistrationToken --name $runnerName --labels $runnerLabel --no-default-labels --work "$cacheRoot\work" --runasservice --windowslogonaccount 'NT AUTHORITY\NETWORK SERVICE'
+& .\config.cmd --unattended --replace --url "https://github.com/$Repository" --token $RegistrationToken --name $runnerName --labels $runnerLabel --no-default-labels --work $workRoot --runasservice --windowslogonaccount 'NT AUTHORITY\NETWORK SERVICE'
 if ($LASTEXITCODE -ne 0) { throw "runner configuration failed with exit code $LASTEXITCODE" }
 
 $service = Get-Service 'actions.runner.*' | Select-Object -First 1

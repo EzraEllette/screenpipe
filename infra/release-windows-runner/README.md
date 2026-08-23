@@ -8,8 +8,9 @@ This stack provisions two always-on native Azure release runners: Windows Server
 2022 x64 for the x64 jobs in `Release App` and `Release Enterprise`, and Windows
 11 ARM64 Preview for the ARM64 job in `Release App`. Each default size has 16
 vCPUs and 64 GiB RAM. Each runner has a retained 2 TiB Premium SSD for Cargo,
-Rust, Bun, native dependency, compiler, and Tauri target caches; GitHub checkouts
-remain job-local.
+Rust, Bun, native dependency, compiler, and Tauri target caches. GitHub checkouts
+and job-local `node_modules` stay on the OS disk so Bun can materialize packages
+without the severe Windows non-system-drive penalty.
 
 Each VM has explicit NAT egress and no public IP or inbound network rule. The x64
 runner uses Trusted Launch and automatic platform patching. Azure's Windows 11

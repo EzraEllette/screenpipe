@@ -96,6 +96,14 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.resolve-release.outputs.release_sha }}
+          # The persistent Windows runner keeps a regular node_modules tree on
+          # C:. Clean it explicitly below while retaining that one warm path.
+          clean: ${{ runner.environment != 'self-hosted' }}
+
+      - name: Clean persistent Windows workspace
+        if: runner.environment == 'self-hosted'
+        shell: pwsh
+        run: git clean -ffdx -e apps/screenpipe-app-tauri/node_modules/
 
       - name: Checkout persistent Windows cache action
         if: runner.environment == 'self-hosted'

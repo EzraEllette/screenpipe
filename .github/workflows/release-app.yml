@@ -219,6 +219,14 @@ jobs:
           # check out different code (and re-runs pick up commits that were
           # never in the release). The published tag points at the bump commit.
           ref: ${{ needs.check_commit.outputs.release_sha }}
+          # The persistent Windows runners keep a regular node_modules tree on
+          # C:. Clean it explicitly below while retaining that one warm path.
+          clean: ${{ runner.environment != 'self-hosted' || matrix.os_type != 'windows' }}
+
+      - name: Clean persistent Windows workspace
+        if: runner.environment == 'self-hosted' && matrix.os_type == 'windows'
+        shell: pwsh
+        run: git clean -ffdx -e apps/screenpipe-app-tauri/node_modules/
 
       - name: Attach persistent EC2 Mac cache
         if: runner.environment == 'self-hosted' && matrix.os_type == 'macos'
