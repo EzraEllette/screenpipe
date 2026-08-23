@@ -48,6 +48,7 @@ jobs:
       macos_x64_runner: ${{ steps.check-runner.outputs.macos_x64_runner }}
       windows_runner: ${{ steps.check-runner.outputs.windows_runner }}
       windows_arm_runner: ${{ steps.check-runner.outputs.windows_arm_runner }}
+      linux_runner: ${{ steps.check-runner.outputs.linux_runner }}
       release_sha: ${{ steps.resolve-release.outputs.sha }}
       release_version: ${{ steps.resolve-release.outputs.version }}
     steps:
@@ -130,6 +131,7 @@ jobs:
               echo "macos_x64_runner=macos-26"
               echo "windows_runner=windows-2022"
               echo "windows_arm_runner=windows-11-arm"
+              echo "linux_runner=ubuntu-24.04"
             } >> "$GITHUB_OUTPUT"
           else
             {
@@ -137,6 +139,7 @@ jobs:
               echo "macos_x64_runner=screenpipe-release-macos"
               echo "windows_runner=screenpipe-release-windows"
               echo "windows_arm_runner=screenpipe-release-windows-arm64"
+              echo "linux_runner=screenpipe-release-linux"
             } >> "$GITHUB_OUTPUT"
           fi
 
@@ -189,7 +192,7 @@ jobs:
             tauri-args: "--target aarch64-pc-windows-msvc --features official-build,directml,redact-onnx-directml"
             target: aarch64-pc-windows-msvc
             os_type: "windows"
-          - platform: "ubuntu-24.04"
+          - platform: ${{ needs.check_commit.outputs.linux_runner || 'ubuntu-24.04' }}
             args: "--target x86_64-unknown-linux-gnu --features redact-onnx-cpu"
             target: x86_64-unknown-linux-gnu
             tauri-args: "--target x86_64-unknown-linux-gnu --features official-build,redact-onnx-cpu"
@@ -249,6 +252,21 @@ jobs:
           target: ${{ matrix.target }}
           flavor: consumer
 
+      - name: Checkout persistent Linux cache action
+        if: runner.environment == 'self-hosted' && matrix.os_type == 'linux'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .release-workflow
+          sparse-checkout: .github/actions/setup-persistent-linux-cache
+
+      - name: Attach persistent Azure Linux cache
+        if: runner.environment == 'self-hosted' && matrix.os_type == 'linux'
+        uses: ./.release-workflow/.github/actions/setup-persistent-linux-cache
+        with:
+          target: ${{ matrix.target }}
+          flavor: consumer
+
       - name: Shorten target dir to avoid MAX_PATH (Windows)
         if: runner.environment == 'github-hosted' && matrix.os_type == 'windows'
         shell: pwsh
@@ -267,7 +285,7 @@ jobs:
           Write-Host "Created junction: $targetDir -> $shortDir"
 
       - name: Setup Bun
-        if: runner.environment != 'self-hosted' || matrix.os_type != 'windows'
+        if: runner.environment != 'self-hosted' || (matrix.os_type != 'windows' && matrix.os_type != 'linux')
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.3.10
@@ -278,8 +296,13 @@ jobs:
         run: |
           if ((bun --version) -ne '1.3.10') { throw 'Expected Bun 1.3.10 on persistent runner' }
 
+      - name: Verify preinstalled Bun (persistent Linux)
+        if: runner.environment == 'self-hosted' && matrix.os_type == 'linux'
+        shell: bash
+        run: test "$(bun --version)" = '1.3.10'
+
       - name: Setup Node
-        if: runner.environment != 'self-hosted' || matrix.os_type != 'windows'
+        if: runner.environment != 'self-hosted' || (matrix.os_type != 'windows' && matrix.os_type != 'linux')
         uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.target == 'aarch64-pc-windows-msvc' && '22' || '20' }}
@@ -289,12 +312,25 @@ jobs:
         shell: pwsh
         run: node --version
 
+      - name: Verify preinstalled Node (persistent Linux)
+        if: runner.environment == 'self-hosted' && matrix.os_type == 'linux'
+        shell: bash
+        run: node --version
+
       - name: Set up Rust
-        if: matrix.os_type != 'windows'
+        if: matrix.os_type != 'windows' && (runner.environment != 'self-hosted' || matrix.os_type != 'linux')
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
           targets: ${{ matrix.target }}
+
+      - name: Verify preinstalled Rust (persistent Linux)
+        if: runner.environment == 'self-hosted' && matrix.os_type == 'linux'
+        shell: bash
+        run: |
+          rustup target add "${{ matrix.target }}"
+          rustc --version
+          cargo --version
 
       - name: Install Rust (Windows x64)
         if: runner.environment == 'github-hosted' && matrix.os_type == 'windows' && matrix.target == 'x86_64-pc-windows-msvc'
@@ -446,7 +482,7 @@ jobs:
           brew install ffmpeg wget
 
       - name: Install dependencies
-        if: matrix.os_type == 'linux'
+        if: matrix.os_type == 'linux' && runner.environment == 'github-hosted'
         shell: bash
         run: |
           .github/scripts/apt-install-with-retries.sh \
@@ -500,6 +536,16 @@ jobs:
           sudo ln -sf /usr/lib/x86_64-linux-gnu/libopenblas.so /usr/lib/x86_64-linux-gnu/openblas/lib/liblibopenblas.so
           sudo ln -sf /usr/lib/x86_64-linux-gnu/libopenblas.a /usr/lib/x86_64-linux-gnu/openblas/lib/liblibopenblas.a
           echo "OPENBLAS_PATH=/usr/lib/x86_64-linux-gnu/openblas" >> $GITHUB_ENV
+
+      - name: Verify preinstalled dependencies (persistent Linux)
+        if: matrix.os_type == 'linux' && runner.environment == 'self-hosted'
+        shell: bash
+        run: |
+          cmake --version
+          ffmpeg -version | head -1
+          command -v xdg-mime
+          pkg-config --exists gtk+-3.0 webkit2gtk-4.1 libpipewire-0.3
+          bash .github/scripts/linux/verify-pipewire-runtime-packages.sh
 
       - name: Install frontend dependencies
         working-directory: ${{ github.workspace }}/apps/screenpipe-app-tauri
@@ -855,7 +901,16 @@ jobs:
         run: |
           # Wrap ldd so linuxdeploy doesn't crash on the statically-linked bun sidecar.
           # bun is built with musl and ldd exits 1 on it, which kills linuxdeploy's GTK plugin.
-          sudo mv /usr/bin/ldd /usr/bin/ldd.real
+          # Persistent runners may already have this wrapper from a prior job.
+          # Repair the one bad state created by the old unconditional move,
+          # then preserve the real implementation across subsequent runs.
+          if [[ -f /usr/bin/ldd.real ]] && grep -q 'exec /usr/bin/ldd.real' /usr/bin/ldd.real; then
+            sudo rm -f /usr/bin/ldd.real
+            sudo env DEBIAN_FRONTEND=noninteractive apt-get install --reinstall -y libc-bin
+          fi
+          if [[ ! -x /usr/bin/ldd.real ]]; then
+            sudo mv /usr/bin/ldd /usr/bin/ldd.real
+          fi
           sudo tee /usr/bin/ldd > /dev/null << 'WRAPPER'
           #!/bin/bash
           if [[ "$1" == *"/bun"* ]] || [[ "$1" == *"bun-"* ]]; then
