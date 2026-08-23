@@ -7,6 +7,7 @@ import React from "react";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { FirstRunLearningBanner } from "./learning-banner";
+import { FIRST_RUN_SEARCH_SHORTCUT_STORAGE_KEY } from "./search-shortcut-practice";
 import type { LearningWindowView } from "@/lib/first-run/use-learning-window";
 
 const mocks = vi.hoisted(() => ({
@@ -27,7 +28,10 @@ vi.mock("@/lib/first-run/use-learning-window", () => ({
   useLearningWindow: () => mocks.view,
 }));
 
-vi.mock("@tauri-apps/api/event", () => ({ emit: mocks.emit }));
+vi.mock("@tauri-apps/api/event", () => ({
+  emit: mocks.emit,
+  listen: vi.fn(async () => () => {}),
+}));
 
 vi.mock("@/lib/first-run/use-agent-handoff", () => ({
   useAgentHandoff: () => mocks.handoff,
@@ -37,6 +41,17 @@ vi.mock("@/components/first-run/next-steps", () => ({
   FirstRunNextSteps: () => (
     <div data-testid="first-run-next-steps">next steps</div>
   ),
+}));
+
+vi.mock("@/lib/hooks/use-settings", () => ({
+  useSettings: () => ({
+    isSettingsLoaded: true,
+    settings: {
+      searchShortcut: "Control+Super+K",
+      disabledShortcuts: [],
+      platform: "macos",
+    },
+  }),
 }));
 
 function view(over: Partial<LearningWindowView> = {}): LearningWindowView {
@@ -58,6 +73,7 @@ function view(over: Partial<LearningWindowView> = {}): LearningWindowView {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  window.localStorage.clear();
   // Default: no connected agent. Every handoff assertion opts in explicitly so
   // the fallback path is what the other tests exercise.
   mocks.handoff = {
@@ -157,7 +173,7 @@ describe("first-run learning banner", () => {
     expect(dismiss).not.toHaveBeenCalled();
   });
 
-  it("keeps a compact expandable setup dock over the opened summary", () => {
+  it("keeps a compact expandable setup dock over the opened summary", async () => {
     const dismiss = vi.fn();
     mocks.view = view({
       phase: "ready",
@@ -166,6 +182,12 @@ describe("first-run learning banner", () => {
       dismiss,
     });
     render(<FirstRunLearningBanner />);
+
+    await waitFor(() =>
+      expect(
+        screen.getByTestId("first-run-search-shortcut-start"),
+      ).toBeEnabled(),
+    );
 
     expect(screen.getByTestId("first-run-setup-dock")).toBeInTheDocument();
     expect(
@@ -180,6 +202,12 @@ describe("first-run learning banner", () => {
 
     fireEvent.click(screen.getByTestId("first-run-hide-setup"));
     expect(dismiss).toHaveBeenCalledTimes(1);
+    expect(
+      JSON.parse(
+        window.localStorage.getItem(FIRST_RUN_SEARCH_SHORTCUT_STORAGE_KEY) ||
+          "{}",
+      ),
+    ).toMatchObject({ status: "dismissed" });
   });
 
   it("offers the state-aware daily setup after learning resolves", () => {

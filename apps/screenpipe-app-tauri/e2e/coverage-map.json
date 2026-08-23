@@ -1381,13 +1381,14 @@
       ],
       "features": [
         "onboarding",
-        "first-run-learning"
+        "first-run-learning",
+        "shortcuts"
       ],
       "criticality": "high",
       "confidence": "strong",
       "ux": "real-user-flow",
       "tests": 8,
-      "notes": "Post-setup summary on Home under the authenticated seed: immediate runs show a live countdown, empty engine results settle silently with their diagnostic reason preserved, silent states stay silent across reloads, late returns retry in the background, ready summaries remain actionable, and idle/done never render."
+      "notes": "Post-setup summary on Home under the authenticated seed: immediate runs show a live countdown, empty engine results settle silently with their diagnostic reason preserved, silent states stay silent across reloads, late returns retry in the background, ready summaries remain actionable, a verified shown Chat-shortcut outcome completes the contextual practice lesson while a hidden outcome stays recoverable, and idle/done never render."
     },
     {
       "spec": "first-run-reset-learning-window.spec.ts",
