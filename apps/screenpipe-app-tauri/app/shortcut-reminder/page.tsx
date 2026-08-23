@@ -28,7 +28,7 @@ import {
 import { useOverlayData } from "./use-overlay-data";
 import { useMeetingOverlay } from "./use-meeting-overlay";
 import { AudioEqualizer } from "./audio-equalizer";
-import { formatShortcut } from "./format-shortcut";
+import { formatShortcut, type ShortcutPlatform } from "./format-shortcut";
 import { DragStage } from "./drag-stage";
 import { useOverlayDrag } from "./use-overlay-drag";
 import {
@@ -73,7 +73,12 @@ const INCIDENT_SIZE = { width: 160, height: 40 };
 const MEETING_SIZE = { width: 280, height: 80 };
 
 export default function ShortcutReminderPage() {
-  const { isMac, isLoading } = usePlatform();
+  const { isMac, isWindows, isLoading } = usePlatform();
+  const shortcutPlatform: ShortcutPlatform = isMac
+    ? "macos"
+    : isWindows
+      ? "windows"
+      : "linux";
   const [healthState, setHealthState] = useState<RecordingHealthState>("normal");
   const [healthDetail, setHealthDetail] = useState("");
   // "audio" | "screen" | "" — empty when the cause spans subsystems or could
@@ -106,6 +111,8 @@ export default function ShortcutReminderPage() {
   const appliedSizeRef = useRef<{ width: number; height: number } | null>(null);
   const isMacRef = useRef(isMac);
   isMacRef.current = isMac;
+  const platformRef = useRef<ShortcutPlatform>(shortcutPlatform);
+  platformRef.current = shortcutPlatform;
   const anchorRef = useRef(anchor);
   anchorRef.current = anchor;
 
@@ -128,7 +135,7 @@ export default function ShortcutReminderPage() {
           : isMacRef.current
             ? fallback.mac
             : fallback.other;
-      return formatShortcut(raw, isMacRef.current);
+      return formatShortcut(raw, platformRef.current);
     };
 
     setOverlayShortcut(
@@ -196,7 +203,7 @@ export default function ShortcutReminderPage() {
       // Reached when there is no settings object at all (fresh profile, or the
       // read threw); `applyReminderSettings` covers the partially-filled case.
       const fallback = (d: { mac: string; other: string }) =>
-        formatShortcut(isMac ? d.mac : d.other, isMac);
+        formatShortcut(isMac ? d.mac : d.other, shortcutPlatform);
       setOverlayShortcut(prev => prev ?? fallback(DEFAULT_SHORTCUTS.overlay));
       setChatShortcut(prev => prev ?? fallback(DEFAULT_SHORTCUTS.chat));
       setSearchShortcut(prev => prev ?? fallback(DEFAULT_SHORTCUTS.search));
@@ -223,7 +230,7 @@ export default function ShortcutReminderPage() {
       if (reloadTimer) clearTimeout(reloadTimer);
       unlistenStore?.();
     };
-  }, [isLoading, isMac, loadShortcutsFromFile]);
+  }, [isLoading, isMac, loadShortcutsFromFile, shortcutPlatform]);
 
   useEffect(() => {
     // Listen for explicit shortcut-reminder-update event (from Rust side)

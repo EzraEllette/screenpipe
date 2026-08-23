@@ -102,7 +102,7 @@ vi.mock("posthog-js", () => ({
 }));
 
 vi.mock("@/lib/hooks/use-platform", () => ({
-  usePlatform: () => ({ isMac: true, isLoading: false }),
+  usePlatform: () => ({ isMac: true, isWindows: false, isLoading: false }),
 }));
 
 vi.mock("@/lib/hooks/use-settings", () => ({
@@ -470,7 +470,7 @@ describe("recording health hover detail", () => {
     fireEvent.mouseEnter(screen.getByTitle("Open timeline"));
 
     expect(
-      await screen.findByText(formatShortcut("Super+Ctrl+S", true), {
+      await screen.findByText(formatShortcut("Super+Ctrl+S", "macos"), {
         exact: false,
       }),
     ).toBeVisible();
@@ -512,12 +512,15 @@ describe("recording health hover detail", () => {
 });
 
 describe("shortcut display ordering", () => {
-  it("renders modifiers in a stable platform order", () => {
-    expect(formatShortcut("Control+Super+s", true)).toBe("⌘⌃S");
-    expect(formatShortcut("Control+Super+s", false)).toBe("Win+Ctrl+S");
-    expect(formatShortcut("Shift+Alt+Control+Super+k", false)).toBe(
-      "Win+Ctrl+Alt+Shift+K",
+  it("renders familiar modifier notation in a stable platform order", () => {
+    expect(formatShortcut("Control+Super+s", "macos")).toBe("⌘⌃S");
+    expect(formatShortcut("Control+Super+s", "windows")).toBe("⊞+Ctrl+S");
+    expect(formatShortcut("Control+Super+s", "linux")).toBe("Super+Ctrl+S");
+    expect(formatShortcut("Shift+Alt+Control+Super+k", "windows")).toBe(
+      "⊞+Ctrl+Alt+Shift+K",
     );
+    expect(formatShortcut("⊞+Ctrl+S", "windows")).toBe("⊞+Ctrl+S");
+    expect(formatShortcut("Super+Ctrl+S", "linux")).toBe("Super+Ctrl+S");
   });
 });
 
