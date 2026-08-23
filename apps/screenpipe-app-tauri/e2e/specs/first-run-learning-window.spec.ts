@@ -281,6 +281,34 @@ const learningState = (over: Record<string, unknown> = {}) => ({
     expect(existsSync(filepath)).toBe(true);
   });
 
+  it("recovers an interrupted first attempt exactly once and stays quiet", async () => {
+    const expiredAt = new Date(Date.now() - 10 * 60 * 1_000).toISOString();
+    await openHomeWith(
+      learningState({
+        startedAt: expiredAt,
+        lateRetryUsed: false,
+      }),
+    );
+
+    await browser.waitUntil(
+      async () => {
+        const state = await storedLearningState();
+        return (
+          state?.phase === "learning" &&
+          state?.lateRetryUsed === true &&
+          state?.showProgress === false &&
+          typeof state?.startedAt === "string" &&
+          state.startedAt !== expiredAt
+        );
+      },
+      {
+        timeout: t(30_000),
+        timeoutMsg: "expired first attempt did not become one quiet recovery",
+      },
+    );
+    expect(await bannerCount()).toBe(0);
+  });
+
   it("ends an empty foreground result on useful setup choices", async () => {
     // Ceiling already elapsed, so the window must settle on this mount. With
     // recording off the engine answers that it is not recording, and that
@@ -289,6 +317,9 @@ const learningState = (over: Record<string, unknown> = {}) => ({
     await openHomeWith(
       learningState({
         startedAt: new Date(Date.now() - 10 * 60 * 1_000).toISOString(),
+        // The one recovery was already spent. This must now settle rather than
+        // opening an unbounded loop of fresh two-minute attempts.
+        lateRetryUsed: true,
       }),
     );
 

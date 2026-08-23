@@ -1346,8 +1346,8 @@
       "criticality": "high",
       "confidence": "strong",
       "ux": "real-user-flow",
-      "tests": 1,
-      "notes": "Opt-in hosted-AI lane for the post-setup summary: the real app starts its own Pi session through the Rust command and the production Worker under Miniflare, and the forwarded provider request is asserted to carry the screen and audio excerpts plus the browser URL, not just app names. Guards the regression where the summary was AI-written but built from containers only, so it read templated. The seeded chat must hold the model's text and never the deterministic opener."
+      "tests": 3,
+      "notes": "Opt-in hosted-AI lane for the post-setup summary: the real app starts its own Pi session through the Rust command and the production Worker under Miniflare. It proves a low-tier parsed-only fixture with one sustained app and no Timeline dependency reaches the model, accessibility evidence is used when parsed context is unavailable, and two transient activity-engine failures recover without a deterministic fallback. The seeded chat must hold the model's text and never the deterministic opener."
     },
     {
       "spec": "first-run-guide.spec.ts",
@@ -1390,8 +1390,8 @@
       "criticality": "high",
       "confidence": "strong",
       "ux": "real-user-flow",
-      "tests": 8,
-      "notes": "Post-setup summary on Home under the authenticated seed: immediate runs show a live countdown, empty engine results settle silently with their diagnostic reason preserved, silent states stay silent across reloads, late returns retry in the background, ready summaries remain actionable, a verified shown Chat-shortcut outcome completes the contextual practice lesson while a hidden outcome stays recoverable, and idle/done never render."
+      "tests": 9,
+      "notes": "Post-setup summary on Home under the authenticated seed: immediate runs show a live countdown, an interrupted first attempt gets exactly one quiet recovery, exhausted empty engine results settle with their diagnostic reason preserved, silent states stay silent across reloads, late returns retry in the background, ready summaries remain actionable, a verified shown Chat-shortcut outcome completes the contextual practice lesson while a hidden outcome stays recoverable, and idle/done never render."
     },
     {
       "spec": "first-run-reset-learning-window.spec.ts",
