@@ -29,7 +29,7 @@ use tracing::error;
 use super::request_origin::ExplicitApiClient;
 use crate::server::AppState;
 use crate::{analytics, qualified_value::ApiOutcomeKind};
-use screenpipe_db::DatabaseManager;
+use screenpipe_db::{DatabaseManager, Order, SemanticContextQuery};
 
 /// Frames more than this many seconds apart are treated as idle (screen
 /// untouched), so the gap between them does not count as active time. Shared
@@ -90,6 +90,12 @@ pub struct ActivitySummaryQuery {
     /// Default: true.
     #[serde(default = "default_true")]
     pub include_guidance: bool,
+
+    /// Include the number of parsed semantic contexts in the requested range.
+    /// Default: false. This is a cheap, content-free signal for callers that
+    /// need to know whether parsed evidence exists without loading excerpts.
+    #[serde(default)]
+    pub include_parsed_count: bool,
 
     /// Cap on combined screen+audio snippets returned. Default 8, max 12.
     #[serde(default = "default_max_snippets")]
@@ -216,7 +222,8 @@ pub struct ActivityMemory {
 
 #[derive(Serialize, OaSchema)]
 pub struct ActivitySnippet {
-    /// "screen" | "audio"
+    /// "parsed" | "screen" | "audio". `screen` is the bounded accessibility
+    /// fallback retained for compatibility with existing callers.
     pub source: String,
     pub text: String,
     pub app_name: Option<String>,
@@ -262,6 +269,10 @@ pub struct ActivitySummaryResponse {
     /// apart) excluded. Use this as the grand total / denominator; summing
     /// `windows[].minutes` undercounts because `windows` is capped at 30.
     pub total_active_minutes: f64,
+    /// Parsed semantic contexts in range. Omitted unless
+    /// `include_parsed_count=true`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parsed_context_count: Option<usize>,
     pub time_range: TimeRange,
 
     // --- agent context fields ---
@@ -321,7 +332,7 @@ pub async fn get_activity_summary(
     // Run optional sidecars in parallel — each is best-effort; failures
     // degrade to None rather than blowing up the whole response.
     let memory_query = query.q.as_deref().map(str::trim).filter(|q| !q.is_empty());
-    let (recording_opt, memories_opt, snippets_opt) = tokio::join!(
+    let (recording_opt, memories_opt, snippets_opt, parsed_count_opt) = tokio::join!(
         async {
             if query.include_recording {
                 load_recording_status(&state.db, &start, &end, query.app_name.as_deref())
@@ -353,6 +364,19 @@ pub async fn get_activity_summary(
                 load_snippets(&state.db, &query, &summary_core.key_texts, &start, &end)
                     .await
                     .map_err(|e| error!("activity summary: snippets failed: {}", e))
+                    .ok()
+            } else {
+                None
+            }
+        },
+        async {
+            if query.include_parsed_count {
+                let parsed_query = semantic_context_query(&query, 1);
+                state
+                    .db
+                    .count_semantic_context(&parsed_query)
+                    .await
+                    .map_err(|e| error!("activity summary: parsed count failed: {}", e))
                     .ok()
             } else {
                 None
@@ -393,6 +417,7 @@ pub async fn get_activity_summary(
         total_frames: summary_core.total_frames,
         app_attribution: summary_core.app_attribution,
         total_active_minutes: summary_core.total_active_minutes,
+        parsed_context_count: parsed_count_opt,
         time_range: TimeRange { start, end },
         data_status,
         query_status,
@@ -1005,32 +1030,68 @@ async fn load_snippets(
 
     let audio_query = balanced_audio_query(start, end, &audio_text_filter, audio_limit);
 
-    let screen_candidates: Vec<&KeyText> = key_texts
-        .iter()
-        .filter(|key_text| {
-            let text = key_text.text.trim();
-            text.len() >= 20
-                && query_text_lower
-                    .as_ref()
-                    .is_none_or(|q| text.to_lowercase().contains(q))
-        })
-        .collect();
-
     let mut snippets = Vec::new();
-    for index in evenly_spaced_indices(screen_candidates.len(), screen_limit as usize) {
-        let key_text = screen_candidates[index];
-        let text = key_text.text.trim();
+
+    // Parsed app-specific records are substantially denser than raw screen
+    // trees, so prefer them whenever the parser handled this range. Fall back
+    // to the bounded accessibility sample only when parsed produced nothing;
+    // mixing both repeats the same UI in two representations.
+    let parsed_contexts = match db
+        .search_semantic_context(&semantic_context_query(query, screen_limit))
+        .await
+    {
+        Ok(contexts) => contexts,
+        Err(error) => {
+            // Parsed is an enrichment layer. A stale/migrating semantic table
+            // must not suppress the accessibility fallback that already made
+            // this endpoint useful on every supported machine.
+            error!("activity summary: parsed snippets failed: {}", error);
+            Vec::new()
+        }
+    };
+    for context in parsed_contexts {
         push_snippet(
             &mut snippets,
             ActivitySnippet {
-                source: "screen".to_string(),
-                text: truncate_text(text, max_snippet_chars),
-                app_name: Some(key_text.app_name.clone()).filter(|s| !s.is_empty()),
-                window_name: Some(key_text.window_name.clone()).filter(|s| !s.is_empty()),
+                source: "parsed".to_string(),
+                text: truncate_text(&context.render_compact(), max_snippet_chars),
+                app_name: Some(context.app_name).filter(|s| !s.is_empty()),
+                window_name: Some(context.window_name).filter(|s| !s.is_empty()),
                 speaker: None,
-                timestamp: key_text.timestamp.clone(),
+                timestamp: context.timestamp.to_rfc3339(),
             },
         );
+    }
+
+    // A parser run can exist yet render no useful text (for example an empty
+    // supported surface). Treat that exactly like no parsed result and retain
+    // the accessibility fallback.
+    if snippets.is_empty() {
+        let screen_candidates: Vec<&KeyText> = key_texts
+            .iter()
+            .filter(|key_text| {
+                let text = key_text.text.trim();
+                text.len() >= 20
+                    && query_text_lower
+                        .as_ref()
+                        .is_none_or(|q| text.to_lowercase().contains(q))
+            })
+            .collect();
+
+        for index in evenly_spaced_indices(screen_candidates.len(), screen_limit as usize) {
+            let key_text = screen_candidates[index];
+            push_snippet(
+                &mut snippets,
+                ActivitySnippet {
+                    source: "screen".to_string(),
+                    text: truncate_text(key_text.text.trim(), max_snippet_chars),
+                    app_name: Some(key_text.app_name.clone()).filter(|s| !s.is_empty()),
+                    window_name: Some(key_text.window_name.clone()).filter(|s| !s.is_empty()),
+                    speaker: None,
+                    timestamp: key_text.timestamp.clone(),
+                },
+            );
+        }
     }
 
     let audio_rows = db
@@ -1056,6 +1117,21 @@ async fn load_snippets(
     snippets.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
     snippets.truncate(max_snippets as usize);
     Ok(snippets)
+}
+
+fn semantic_context_query(query: &ActivitySummaryQuery, limit: u32) -> SemanticContextQuery {
+    SemanticContextQuery {
+        frame_id: None,
+        q: query.q.clone(),
+        start_time: Some(query.start_time),
+        end_time: Some(query.end_time),
+        app_name: query.app_name.clone(),
+        window_name: None,
+        actor_id: None,
+        limit: limit.clamp(1, 12),
+        offset: 0,
+        order: Order::Descending,
+    }
 }
 
 fn push_snippet(snippets: &mut Vec<ActivitySnippet>, snippet: ActivitySnippet) {
@@ -1620,6 +1696,7 @@ mod tests {
             include_memories: true,
             include_snippets: true,
             include_guidance: true,
+            include_parsed_count: false,
             max_snippets: 8,
             max_snippet_chars: 500,
             max_memories: 5,
@@ -1811,6 +1888,7 @@ mod db_tests {
             include_memories: false,
             include_snippets: false,
             include_guidance: false,
+            include_parsed_count: false,
             max_snippets: 8,
             max_snippet_chars: 500,
             max_memories: 5,
@@ -2808,6 +2886,7 @@ mod include_flag_tests {
                 coverage: 1.0,
             },
             total_active_minutes: 1.0,
+            parsed_context_count: None,
             time_range: TimeRange {
                 start: "2026-06-02T10:00:00Z".to_string(),
                 end: "2026-06-02T11:00:00Z".to_string(),
@@ -2844,6 +2923,7 @@ mod include_flag_tests {
         assert_eq!(j["app_attribution"]["coverage"], 1.0);
         assert_eq!(j["total_active_minutes"], 1.0);
         assert_eq!(j["data_status"], "ok");
+        assert!(j.get("parsed_context_count").is_none());
     }
 
     /// The headline lean-mode case: `include_key_texts=false` omits the
@@ -2909,6 +2989,7 @@ mod include_flag_tests {
         assert!(q.include_apps);
         assert!(q.include_windows);
         assert!(q.include_key_texts);
+        assert!(!q.include_parsed_count);
     }
 
     /// Each flag is parsed independently from the query string.
@@ -2921,5 +3002,11 @@ mod include_flag_tests {
         assert!(q.include_apps, "include_apps stays default-true");
         assert!(q.include_windows, "include_windows stays default-true");
         assert!(!q.include_key_texts, "include_key_texts honored as false");
+
+        let q = parse_query(
+            "start_time=2026-06-02T10:00:00Z&end_time=2026-06-02T11:00:00Z\
+             &include_parsed_count=true",
+        );
+        assert!(q.include_parsed_count);
     }
 }

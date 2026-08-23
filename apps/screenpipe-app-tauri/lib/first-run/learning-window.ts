@@ -108,6 +108,8 @@ export type FirstRunLearningState = {
    * times the banner remounts.
    */
   pendingEmptyReport: boolean;
+  /** Prevents an expired first attempt from reopening on every app launch. */
+  lateRetryUsed: boolean;
   /** Live-only, never persisted: rehydrating these would show stale apps. */
   capturedApps: FirstRunCapturedApp[];
 };
@@ -193,6 +195,7 @@ const EMPTY_STATE: FirstRunLearningState = {
   summaryOpenedAt: null,
   emptyReason: null,
   pendingEmptyReport: false,
+  lateRetryUsed: false,
   capturedApps: [],
 };
 
@@ -223,7 +226,7 @@ export type ActivityWindow = {
  * is why the summary reads like a real observation instead of a window list.
  */
 export type ActivitySnippet = {
-  /** "screen" | "audio" */
+  /** "parsed" | "screen" (accessibility fallback) | "audio" */
   source?: string;
   text?: string;
   app_name?: string | null;
@@ -234,6 +237,7 @@ export type ActivitySnapshot = {
   data_status?: string;
   total_frames?: number;
   total_active_minutes?: number;
+  parsed_context_count?: number;
   apps?: ActivityApp[] | null;
   windows?: ActivityWindow[] | null;
   edited_files?: ActivityEditedFile[] | null;
@@ -325,6 +329,18 @@ export function hasEnoughEvidence(activity: ActivitySnapshot): boolean {
   const appCount = capturedAppsFrom(activity, 0).length;
   const audioSegments = Number(activity.audio_summary?.segment_count ?? 0);
   const activeMinutes = Number(activity.total_active_minutes ?? 0);
+  const parsedContexts = Number(activity.parsed_context_count ?? 0);
+
+  // Parsed records say what happened inside the app, so one sustained app is
+  // enough when at least one parser projection exists. This is the important
+  // low-tier path: it does not depend on screenshots, Timeline, or pixels.
+  if (
+    appCount >= 1 &&
+    parsedContexts > 0 &&
+    activeMinutes >= MIN_EVIDENCE_ACTIVE_MINUTES
+  ) {
+    return true;
+  }
 
   // Several apps over real observed time, with no frame floor beside it.
   //
@@ -589,6 +605,7 @@ function normalize(value: unknown): FirstRunLearningState {
         // the ceiling effect would have, so diagnostics keep their fidelity.
         emptyReason: "unknown",
         pendingEmptyReport: true,
+        lateRetryUsed: state.lateRetryUsed === true,
       };
     }
   }
@@ -613,6 +630,7 @@ function normalize(value: unknown): FirstRunLearningState {
             : null,
         emptyReason: null,
         pendingEmptyReport: false,
+        lateRetryUsed: state.lateRetryUsed === true,
         capturedApps: [],
       };
     }
@@ -628,6 +646,7 @@ function normalize(value: unknown): FirstRunLearningState {
       // from here races it and can clear the chat id out from under a summary
       // that actually landed.
       pendingEmptyReport: false,
+      lateRetryUsed: state.lateRetryUsed === true,
     };
   }
 
@@ -646,6 +665,7 @@ function normalize(value: unknown): FirstRunLearningState {
         : null,
     emptyReason: state.emptyReason ?? null,
     pendingEmptyReport: state.pendingEmptyReport === true,
+    lateRetryUsed: state.lateRetryUsed === true,
     // Always live; see the type comment.
     capturedApps: [],
   };
@@ -674,12 +694,14 @@ function writeLearningWindow(state: FirstRunLearningState): FirstRunLearningStat
 export function beginLearningWindow(
   startedAt = new Date().toISOString(),
   showProgress = true,
+  lateRetryUsed = false,
 ) {
   return writeLearningWindow({
     ...EMPTY_STATE,
     phase: "learning",
     startedAt,
     showProgress,
+    lateRetryUsed,
   });
 }
 

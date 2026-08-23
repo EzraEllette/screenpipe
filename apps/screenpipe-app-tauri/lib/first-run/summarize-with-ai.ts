@@ -88,7 +88,12 @@ export function buildActivityFacts(
         .trim()
         .slice(0, MAX_SNIPPET_CHARS);
       const where = (s.app_name ?? "").trim();
-      const kind = s.source === "audio" ? "heard" : "screen";
+      const kind =
+        s.source === "audio"
+          ? "heard"
+          : s.source === "parsed"
+            ? "parsed"
+            : "screen";
       return where ? `- [${kind}, ${where}] ${text}` : `- [${kind}] ${text}`;
     });
   if (snippets.length > 0) lines.push(`excerpts:\n${snippets.join("\n")}`);

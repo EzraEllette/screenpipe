@@ -12,6 +12,7 @@ import { commands } from "@/lib/utils/tauri";
 import {
   LEARNING_POLL_INTERVAL_MS,
   LEARNING_WINDOW_CEILING_MS,
+  LEARNING_WINDOW_GRACE_MS,
   LEARNING_WINDOW_RESET_EVENT,
   beginLearningWindow,
   buildLearningSummary,
@@ -215,7 +216,12 @@ export function useLearningWindow(
       // costs the account its only AI-written summary, permanently, for a
       // reason that resolves itself a moment later. The ceiling still settles
       // the window if settings somehow never arrive.
-      if (aiRef.current.aiSettingsLoaded === false) return;
+      if (
+        aiRef.current.aiSettingsLoaded === false &&
+        learningWindowRemainingMs(startedAt) > 0
+      ) {
+        return;
+      }
       if (seedingRef.current || !claimLearningSeed()) return;
       seedingRef.current = true;
       // Leave `learning` the moment the evidence gate is satisfied, before the
@@ -327,10 +333,38 @@ export function useLearningWindow(
   // Ceiling: settle honestly if evidence never arrived.
   useEffect(() => {
     if (!isLearning || !startedAt) return;
+    let cancelled = false;
 
     const settle = async () => {
       if (seedingRef.current) return;
-      const activity = await fetchRecentActivity(startedAt);
+      let activity: Awaited<ReturnType<typeof fetchRecentActivity>> = null;
+      // Engine startup and WebView handoff can transiently miss the local API
+      // exactly when the deadline fires. Retry briefly instead of turning a
+      // transport race into a permanent empty first run.
+      for (let attempt = 0; attempt < 3 && !activity && !cancelled; attempt += 1) {
+        activity = await fetchRecentActivity(startedAt);
+        if (!activity && attempt < 2) {
+          await new Promise((resolve) =>
+            setTimeout(resolve, LEARNING_POLL_INTERVAL_MS),
+          );
+        }
+      }
+      if (cancelled || seedingRef.current) return;
+
+      if (!activity && !state.lateRetryUsed) {
+        posthog.capture("first_run_learning_started", {
+          opening: "recovery",
+        });
+        setState(beginLearningWindow(new Date().toISOString(), false, true));
+        return;
+      }
+
+      // The deadline and the regular poll can finish in either order. Valid
+      // evidence must win; leaving the phase live gives the poll one final
+      // turn to claim and write the summary instead of racing it to `empty`.
+      if (activity && hasEnoughEvidence(activity) && canResolveYet(startedAt)) {
+        return;
+      }
       const reason = classifyEmptyReason(activity);
       posthog.capture("first_run_learning_empty", {
         reason,
@@ -349,8 +383,11 @@ export function useLearningWindow(
       return;
     }
     const timer = setTimeout(() => void settle(), remaining);
-    return () => clearTimeout(timer);
-  }, [isLearning, startedAt]);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [isLearning, startedAt, state.lateRetryUsed]);
 
   // Report a window that rehydration settled. That path is the one settle with
   // no telemetry: the ceiling effect above is gated on `learning`, and
@@ -360,11 +397,25 @@ export function useLearningWindow(
   // finished setup" in PostHog.
   const pendingEmptyReport = state.pendingEmptyReport;
   const pendingStartedAt = state.startedAt;
+  const lateRetryUsed = state.lateRetryUsed;
   useEffect(() => {
     if (!pendingEmptyReport) return;
     let cancelled = false;
 
     void (async () => {
+      const startedMs = Date.parse(pendingStartedAt ?? "");
+      if (
+        !lateRetryUsed &&
+        Number.isFinite(startedMs) &&
+        Date.now() - startedMs <= LEARNING_WINDOW_GRACE_MS
+      ) {
+        posthog.capture("first_run_learning_started", {
+          opening: "recovery",
+        });
+        setState(beginLearningWindow(new Date().toISOString(), false, true));
+        return;
+      }
+
       // Ask the engine the same question the ceiling effect would have, so the
       // user sees a reason they can act on rather than the `unknown` shrug
       // rehydration parked there. Reporting a real reason is the whole point
@@ -390,7 +441,7 @@ export function useLearningWindow(
     return () => {
       cancelled = true;
     };
-  }, [pendingEmptyReport, pendingStartedAt]);
+  }, [lateRetryUsed, pendingEmptyReport, pendingStartedAt]);
 
   const markSummaryOpened = useCallback(() => {
     setState(markLearningSummaryOpened());
