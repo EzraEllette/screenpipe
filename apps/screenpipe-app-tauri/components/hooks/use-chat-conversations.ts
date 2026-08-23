@@ -1332,7 +1332,11 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
         useAcpSessionConfig.getState().seedSessionId(conv.id, priorAcpSessionId);
       }
       if (persisted) {
-        if (!store.sessions[conv.id]) {
+        // Disk I/O yields to the event router. Re-read before reconciling so a
+        // session created or advanced while the file was loading keeps its
+        // router-owned activity fields (status, counts, and freshness).
+        const sessionAfterLoad = useChatStore.getState().sessions[conv.id];
+        if (!sessionAfterLoad) {
           store.actions.upsert({
             id: conv.id,
             title: persisted.title || "untitled",
@@ -1355,11 +1359,14 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
           });
         } else {
           store.actions.patch(conv.id, {
-            title: persisted.title || existing?.title || "untitled",
+            title: persisted.title || sessionAfterLoad.title || "untitled",
             ...(persisted.titleSource ? { titleSource: persisted.titleSource } : {}),
             pinned: persisted.pinned === true,
             hidden: persisted.hidden === true,
-            updatedAt: Math.max(existing?.updatedAt ?? 0, persisted.updatedAt ?? 0),
+            updatedAt: Math.max(
+              sessionAfterLoad.updatedAt,
+              persisted.updatedAt ?? 0,
+            ),
             ...(persisted.kind ? { kind: persisted.kind } : {}),
             ...(persisted.pipeContext ? { pipeContext: persisted.pipeContext } : {}),
             ...(persisted.sidebarGroup ? { sidebarGroup: persisted.sidebarGroup } : {}),
@@ -1370,16 +1377,30 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
         }
       }
     }
-    let messagesForPanel: any[];
-    if (existing?.messages && existing.messages.length > 0) {
-      messagesForPanel = existing.messages as any[];
+    // Re-read after the disk await so a router or sibling-window update that
+    // advanced this session during I/O participates in transcript selection.
+    const currentSession = useChatStore.getState().sessions[conv.id];
+    const persistedMessages = persisted
+      ? toRuntimeMessages(persisted.messages as Message[])
+      : [];
+    let messagesForPanel: Message[];
+    if (currentSession?.messages && currentSession.messages.length > 0) {
+      const currentMessages = currentSession.messages as Message[];
+      const adoptPersisted = shouldAdoptPersistedTranscript(
+        currentMessages,
+        persistedMessages,
+      );
+      messagesForPanel = adoptPersisted ? persistedMessages : currentMessages;
+      if (adoptPersisted) {
+        store.actions.setMessages(conv.id, messagesForPanel);
+      }
       // Restore in-flight streaming markers so the panel resumes
       // exactly where the user left it. The router has been keeping
       // these up-to-date for any tokens that arrived while the user
       // was elsewhere.
-      piStreamingTextRef.current = existing.streamingText ?? "";
-      piMessageIdRef.current = existing.streamingMessageId ?? null;
-      piContentBlocksRef.current = (existing.contentBlocks as any[]) ?? [];
+      piStreamingTextRef.current = currentSession.streamingText ?? "";
+      piMessageIdRef.current = currentSession.streamingMessageId ?? null;
+      piContentBlocksRef.current = (currentSession.contentBlocks as any[]) ?? [];
       // Self-heal a stuck `isStreaming` flag. The router bumps
       // `updatedAt` on every token via patchMessage, so silence past
       // STALE_MS means the stream is dead (Pi process died without
@@ -1388,15 +1409,16 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
       // the typing-cursor / loading dots forever.
       const STALE_MS = 30_000;
       const isStale =
-        !!existing.isStreaming && Date.now() - existing.updatedAt > STALE_MS;
+        !!currentSession.isStreaming &&
+        Date.now() - currentSession.updatedAt > STALE_MS;
       if (isStale) {
         store.actions.endTurn(conv.id);
         piStreamingTextRef.current = "";
         piMessageIdRef.current = null;
         piContentBlocksRef.current = [];
       } else {
-        if (existing.isLoading) setIsLoading(true);
-        if (existing.isStreaming) setIsStreaming(true);
+        if (currentSession.isLoading) setIsLoading(true);
+        if (currentSession.isStreaming) setIsStreaming(true);
       }
       store.actions.markHydrated(conv.id);
     } else {
@@ -1436,7 +1458,8 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
         ...((m as any).stoppedByUser ? { stoppedByUser: true } : {}),
       }));
       // Make sure a record exists, then seed messages and mark hydrated.
-      if (!store.sessions[conv.id]) {
+      const sessionBeforeSeed = useChatStore.getState().sessions[conv.id];
+      if (!sessionBeforeSeed) {
         store.actions.upsert({
           id: conv.id,
           title: full.title || "untitled",
@@ -1462,11 +1485,11 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
         });
       } else if (conv.kind || conv.pipeContext || conv.sidebarGroup || full.sidebarGroup) {
         store.actions.patch(conv.id, {
-          title: full.title || store.sessions[conv.id]?.title || "untitled",
+          title: full.title || sessionBeforeSeed.title || "untitled",
           ...(full.titleSource ? { titleSource: full.titleSource } : {}),
           pinned: full.pinned === true,
           hidden: full.hidden === true,
-          updatedAt: Math.max(store.sessions[conv.id]?.updatedAt ?? 0, full.updatedAt ?? 0),
+          updatedAt: Math.max(sessionBeforeSeed.updatedAt, full.updatedAt ?? 0),
           ...(conv.kind ? { kind: conv.kind } : {}),
           ...(conv.pipeContext ? { pipeContext: conv.pipeContext } : {}),
           ...(conv.sidebarGroup ? { sidebarGroup: conv.sidebarGroup } : full.sidebarGroup ? { sidebarGroup: full.sidebarGroup } : {}),
