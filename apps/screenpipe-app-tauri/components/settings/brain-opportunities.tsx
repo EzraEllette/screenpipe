@@ -20,8 +20,7 @@ import { cn } from "@/lib/utils";
 
 type OpportunityGroup = "skills" | "unfinished";
 
-type SkillFlow =
-  "review" | "reading" | "structuring" | "writing" | "created" | "preview";
+type SkillFlow = "review" | "creating" | "created" | "preview";
 
 type OpportunityEvidence = {
   id: string;
@@ -292,10 +291,12 @@ const PREVIEW_TASKS: TaskOpportunity[] = [
 function EvidenceRow({
   evidence,
   excluded,
+  disabled = false,
   onToggle,
 }: {
   evidence: OpportunityEvidence;
   excluded: boolean;
+  disabled?: boolean;
   onToggle: () => void;
 }) {
   return (
@@ -330,6 +331,7 @@ function EvidenceRow({
         <button
           type="button"
           onClick={onToggle}
+          disabled={disabled}
           className="inline-flex h-8 items-center gap-1 border border-transparent px-2 font-mono text-[10px] uppercase tracking-wide text-muted-foreground transition-colors duration-150 hover:border-foreground hover:bg-foreground hover:text-background focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-foreground focus-visible:ring-offset-2"
           aria-label={
             excluded
@@ -511,21 +513,14 @@ export function BrainOpportunities({
   const createSkill = (id: string) => {
     const key = `skill:${id}`;
     clearFlowTimers(key);
-    setSkillFlow(id, "reading");
+    setSkillFlow(id, "creating");
     flowTimers.current[key] = [
-      setTimeout(() => setSkillFlow(id, "structuring"), 850),
-      setTimeout(() => setSkillFlow(id, "writing"), 1800),
       setTimeout(() => {
         setCreatedSkillIds((current) => new Set(current).add(id));
         setSkillFlow(id, "created");
         delete flowTimers.current[key];
-      }, 3000),
+      }, 1200),
     ];
-  };
-
-  const cancelSkillCreation = (id: string) => {
-    clearFlowTimers(`skill:${id}`);
-    setSkillFlow(id, "review");
   };
 
   const toggleEvidence = (ownerId: string, evidenceId: string) => {
@@ -727,9 +722,7 @@ export function BrainOpportunities({
               {skills.map((skill) => {
                 const railDraft = skillDrafts[skill.id] ?? skill;
                 const flow = skillFlows[skill.id] ?? "review";
-                const building = ["reading", "structuring", "writing"].includes(
-                  flow,
-                );
+                const building = flow === "creating";
                 const created = createdSkillIds.has(skill.id);
                 return (
                   <button
@@ -785,80 +778,9 @@ export function BrainOpportunities({
                   draft.description.trim().length > 0 &&
                   includedCount > 0;
                 const flow = skillFlows[selectedSkill.id] ?? "review";
+                const creating = flow === "creating";
+                const reviewLocked = creating || flow === "created";
                 const alreadyCreated = createdSkillIds.has(selectedSkill.id);
-
-                if (["reading", "structuring", "writing"].includes(flow)) {
-                  const currentAction =
-                    flow === "reading"
-                      ? `reading ${includedCount} activities`
-                      : flow === "structuring"
-                        ? "finding the repeatable steps"
-                        : "writing SKILL.md";
-                  return (
-                    <div
-                      data-testid="skill-creation-progress"
-                      className="flex min-h-0 flex-1 flex-col"
-                    >
-                      <div className="flex min-h-0 flex-1 flex-col justify-center overflow-y-auto p-4 sm:p-6">
-                        <div
-                          role="status"
-                          aria-live="polite"
-                          className="flex items-center gap-2 text-sm text-foreground"
-                        >
-                          <span
-                            className="h-2 w-2 bg-phosphor"
-                            aria-hidden="true"
-                          />
-                          <span>creating skill · {currentAction}</span>
-                        </div>
-                        <h3 className="mt-3 text-xl font-medium lowercase text-foreground">
-                          {draft.name}
-                        </h3>
-                      </div>
-                      <div className="sticky bottom-0 z-10 flex items-center justify-end gap-3 border-t border-border bg-background px-4 py-3 sm:px-6">
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => cancelSkillCreation(selectedSkill.id)}
-                        >
-                          cancel
-                        </Button>
-                      </div>
-                    </div>
-                  );
-                }
-
-                if (flow === "created") {
-                  return (
-                    <div
-                      data-testid="skill-created-state"
-                      className="flex min-h-0 flex-1 flex-col"
-                    >
-                      <div className="flex min-h-0 flex-1 flex-col justify-center overflow-y-auto p-4 sm:p-6">
-                        <h3
-                          role="status"
-                          aria-live="polite"
-                          className="text-xl font-medium lowercase text-foreground"
-                        >
-                          skill created
-                        </h3>
-                        <p className="mt-2 text-sm text-muted-foreground">
-                          {draft.name}
-                        </p>
-                      </div>
-                      <div className="sticky bottom-0 z-10 flex flex-wrap items-center justify-end gap-2 border-t border-border bg-background px-4 py-3 sm:px-6">
-                        <Button
-                          size="sm"
-                          onClick={() =>
-                            setSkillFlow(selectedSkill.id, "preview")
-                          }
-                        >
-                          open skill <ArrowRight className="ml-2 h-3.5 w-3.5" />
-                        </Button>
-                      </div>
-                    </div>
-                  );
-                }
 
                 if (flow === "preview") {
                   return (
@@ -930,7 +852,13 @@ export function BrainOpportunities({
 
                 return (
                   <>
-                    <div className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-6">
+                    <div
+                      data-testid={
+                        creating ? "skill-creation-progress" : undefined
+                      }
+                      aria-busy={creating}
+                      className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-6"
+                    >
                       <div className="grid gap-4">
                         <label className="grid gap-1.5">
                           <span className="font-mono text-[9px] uppercase tracking-[0.16em] text-muted-foreground">
@@ -939,6 +867,7 @@ export function BrainOpportunities({
                           <Input
                             data-testid="skill-draft-name"
                             value={draft.name}
+                            disabled={reviewLocked}
                             onChange={(event) =>
                               updateSkillDraft(selectedSkill.id, {
                                 name: event.target.value,
@@ -954,6 +883,7 @@ export function BrainOpportunities({
                           <Textarea
                             data-testid="skill-draft-description"
                             value={draft.description}
+                            disabled={reviewLocked}
                             onChange={(event) =>
                               updateSkillDraft(selectedSkill.id, {
                                 description: event.target.value,
@@ -986,6 +916,7 @@ export function BrainOpportunities({
                               key={evidence.id}
                               evidence={evidence}
                               excluded={excluded}
+                              disabled={reviewLocked}
                               onToggle={() =>
                                 toggleEvidence(selectedSkill.id, evidence.id)
                               }
@@ -1001,6 +932,7 @@ export function BrainOpportunities({
                         <Textarea
                           data-testid="skill-draft-notes"
                           value={draft.notes}
+                          disabled={reviewLocked}
                           onChange={(event) =>
                             updateSkillDraft(selectedSkill.id, {
                               notes: event.target.value,
@@ -1012,20 +944,57 @@ export function BrainOpportunities({
                         />
                       </details>
                     </div>
-                    <div className="sticky bottom-0 z-10 flex flex-wrap items-center justify-end gap-3 border-t border-border bg-background px-4 py-3 sm:px-6">
-                      <Button
-                        data-testid="create-skill-draft"
-                        size="sm"
-                        disabled={!canCreate}
-                        onClick={() =>
-                          alreadyCreated
-                            ? setSkillFlow(selectedSkill.id, "preview")
-                            : createSkill(selectedSkill.id)
-                        }
-                      >
-                        {alreadyCreated ? "save changes" : "create skill"}
-                        <ArrowRight className="ml-2 h-3.5 w-3.5" />
-                      </Button>
+                    <div
+                      data-testid={
+                        flow === "created" ? "skill-created-state" : undefined
+                      }
+                      className={cn(
+                        "sticky bottom-0 z-10 flex flex-wrap items-center gap-3 border-t border-border bg-background px-4 py-3 sm:px-6",
+                        flow === "created" ? "justify-between" : "justify-end",
+                      )}
+                    >
+                      {flow === "created" ? (
+                        <>
+                          <span
+                            role="status"
+                            aria-live="polite"
+                            className="text-sm text-foreground"
+                          >
+                            skill created
+                          </span>
+                          <Button
+                            size="sm"
+                            onClick={() =>
+                              setSkillFlow(selectedSkill.id, "preview")
+                            }
+                          >
+                            open skill
+                            <ArrowRight className="ml-2 h-3.5 w-3.5" />
+                          </Button>
+                        </>
+                      ) : (
+                        <Button
+                          data-testid="create-skill-draft"
+                          size="sm"
+                          disabled={!canCreate || creating}
+                          onClick={() =>
+                            alreadyCreated
+                              ? setSkillFlow(selectedSkill.id, "preview")
+                              : createSkill(selectedSkill.id)
+                          }
+                        >
+                          <span aria-live="polite">
+                            {creating
+                              ? "creating…"
+                              : alreadyCreated
+                                ? "save changes"
+                                : "create skill"}
+                          </span>
+                          {!creating && (
+                            <ArrowRight className="ml-2 h-3.5 w-3.5" />
+                          )}
+                        </Button>
+                      )}
                     </div>
                   </>
                 );
@@ -1136,46 +1105,42 @@ export function BrainOpportunities({
               return (
                 <>
                   <div className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-6">
-                    <h3 className="text-lg font-medium lowercase text-foreground">
-                      {selectedTask.title}
-                    </h3>
-                    <p className="mt-2 max-w-2xl text-xs leading-relaxed text-muted-foreground">
+                    <label className="grid gap-1.5">
+                      <span className="font-mono text-[9px] uppercase tracking-[0.16em] text-muted-foreground">
+                        task
+                      </span>
+                      <Textarea
+                        data-testid="unfinished-task-description"
+                        value={draft.description}
+                        onChange={(event) =>
+                          updateTaskDraft(selectedTask.id, {
+                            description: event.target.value,
+                          })
+                        }
+                        className="min-h-[76px] resize-y rounded-none font-sans text-lg font-medium leading-snug focus-visible:ring-1"
+                      />
+                    </label>
+
+                    <p className="mt-3 max-w-2xl text-xs leading-relaxed text-muted-foreground">
                       left off {selectedTask.lastSeen} · {selectedTask.leftOff}
                     </p>
 
-                    <div className="mt-5 grid gap-4 sm:grid-cols-2">
-                      <label className="grid gap-1.5">
-                        <span className="font-mono text-[9px] uppercase tracking-[0.16em] text-muted-foreground">
-                          task
-                        </span>
-                        <Textarea
-                          data-testid="unfinished-task-description"
-                          value={draft.description}
-                          onChange={(event) =>
-                            updateTaskDraft(selectedTask.id, {
-                              description: event.target.value,
-                            })
-                          }
-                          className="min-h-[88px] resize-y rounded-none font-serif text-sm leading-relaxed focus-visible:ring-1"
-                        />
-                      </label>
-                      <label className="grid gap-1.5">
-                        <span className="font-mono text-[9px] uppercase tracking-[0.16em] text-muted-foreground">
-                          done when
-                        </span>
-                        <Textarea
-                          data-testid="unfinished-task-goal"
-                          value={draft.goal}
-                          onChange={(event) =>
-                            updateTaskDraft(selectedTask.id, {
-                              goal: event.target.value,
-                            })
-                          }
-                          placeholder="What must be true for this to be done?"
-                          className="min-h-[88px] resize-y rounded-none font-serif text-sm leading-relaxed focus-visible:ring-1"
-                        />
-                      </label>
-                    </div>
+                    <label className="mt-5 grid gap-1.5">
+                      <span className="font-mono text-[9px] uppercase tracking-[0.16em] text-muted-foreground">
+                        done when
+                      </span>
+                      <Textarea
+                        data-testid="unfinished-task-goal"
+                        value={draft.goal}
+                        onChange={(event) =>
+                          updateTaskDraft(selectedTask.id, {
+                            goal: event.target.value,
+                          })
+                        }
+                        placeholder="What must be true for this to be done?"
+                        className="min-h-[88px] resize-y rounded-none font-serif text-sm leading-relaxed focus-visible:ring-1"
+                      />
+                    </label>
 
                     <details
                       data-testid="task-source-evidence"

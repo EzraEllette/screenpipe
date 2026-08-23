@@ -68,11 +68,21 @@ describe("BrainOpportunities", () => {
 
     fireEvent.click(screen.getByTestId("create-skill-draft"));
     expect(screen.getByTestId("skill-creation-progress")).toBeTruthy();
-    expect(screen.getByText(/creating skill/)).toBeTruthy();
+    expect(screen.getByTestId("create-skill-draft")).toBeDisabled();
+    expect(screen.getByTestId("create-skill-draft")).toHaveTextContent(
+      "creating…",
+    );
+    expect(screen.getByTestId("skill-draft-name")).toBeDisabled();
+    expect(
+      within(evidence).getByRole("button", {
+        name: "exclude Review sample onboarding issue",
+      }),
+    ).toBeDisabled();
 
-    act(() => vi.advanceTimersByTime(3000));
+    act(() => vi.advanceTimersByTime(1200));
     expect(screen.getByTestId("skill-created-state")).toBeTruthy();
     expect(screen.getByText("skill created")).toBeTruthy();
+    expect(screen.getByTestId("skill-draft-name")).toBeDisabled();
 
     fireEvent.click(screen.getByRole("button", { name: /open skill/i }));
     expect(screen.getByTestId("skill-file-preview")).toBeTruthy();
@@ -85,6 +95,7 @@ describe("BrainOpportunities", () => {
     expect(screen.getByTestId("skill-draft-name")).toHaveValue(
       "turn product feedback into a focused fix",
     );
+    expect(screen.getByTestId("skill-draft-name")).not.toBeDisabled();
     expect(screen.getByRole("button", { name: /save changes/i })).toBeTruthy();
     expect(screen.getByTestId("opportunities-tab-skills")).toHaveTextContent(
       "2",
