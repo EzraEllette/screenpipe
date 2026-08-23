@@ -194,6 +194,7 @@ export const FALLBACK_TEMPLATES: TemplatePipe[] = [
     name: AUTOMATE_MY_WORK_TEMPLATE_NAME,
     title: "Automate My Work",
     description: "Find one repeated workflow and propose a testable automation",
+    previewPrompt: "Find a repeated workflow I could automate",
     icon: "⚡",
     featured: true,
     prompt: buildAutomateMyWorkPrompt(),
@@ -202,6 +203,7 @@ export const FALLBACK_TEMPLATES: TemplatePipe[] = [
     name: "day-recap",
     title: "Day Recap",
     description: "Today's accomplishments, key moments, and unfinished work",
+    previewPrompt: "Summarize what I worked on today",
     icon: "\u{1F4CB}",
     featured: true,
     prompt: `Analyze my screen and audio recordings from today (last 16 hours). Read the screenpipe skill first. Use limit=10 per search, max 5 searches total. For app-usage totals, aggregate by app over the time range using whatever screenpipe query tool you have (a COUNT/GROUP BY query or the activity summary). Use only screenpipe's recorded data, not this project's files or other apps' source.
@@ -229,6 +231,7 @@ Only report what you can verify from the data. End with: "**Next step:** [most i
     name: "time-breakdown",
     title: "Time Breakdown",
     description: "Where your time went — by app, project, and category",
+    previewPrompt: "Show me where my time went today",
     icon: "⏱",
     featured: true,
     prompt: `Analyze my app usage from today (last 12 hours). Read the screenpipe skill first. Use limit=10 per search, max 4 searches. For time per app, aggregate frames by app over the range using whatever screenpipe query tool you have (a COUNT/GROUP BY query or the activity summary). Use only screenpipe's recorded data, not this project's files or other apps' source.
@@ -253,6 +256,7 @@ End with: "**Suggestion:** [one specific change to improve tomorrow]"`,
     name: "missed-todos",
     title: "Missed To-Dos",
     description: "Action items from the last few days you may have missed",
+    previewPrompt: "Find action items I may have missed",
     icon: "✅",
     featured: true,
     prompt: `Find action items and to-dos from the last 3 days that I may have missed. Read the screenpipe skill first. Use limit=10 per search, max 5 searches over the last 3 days. Use only screenpipe's recorded data, not this project's files or other apps' source.

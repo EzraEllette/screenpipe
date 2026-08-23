@@ -67,7 +67,7 @@ export function ComposerInputBox({
           placeholder={
             input.disabledReason
               ? input.disabledReason
-              : "Ask a question or describe a task"
+              : input.placeholder ?? "Ask a question or describe a task"
           }
           disabled={!input.canChat}
           spellCheck={false}

@@ -115,6 +115,39 @@ describe("SummaryCards", () => {
     expect(quickAction.className).toContain("focus-visible:ring-1");
   });
 
+  it("previews a card prompt on hover and keyboard focus without sending", () => {
+    const onPreviewPrompt = vi.fn();
+    const onSendMessage = vi.fn();
+    render(
+      <SummaryCards
+        onSendMessage={onSendMessage}
+        onPreviewPrompt={onPreviewPrompt}
+        customTemplates={[]}
+        onSaveCustomTemplate={vi.fn()}
+        onUpdateCustomTemplate={vi.fn()}
+        onDeleteCustomTemplate={vi.fn()}
+        userGoalCategory="work_memory"
+      />,
+    );
+
+    const card = screen.getByTestId("summary-card-day-recap");
+    fireEvent.mouseEnter(card);
+    expect(onPreviewPrompt).toHaveBeenLastCalledWith(
+      "Summarize what I worked on today",
+    );
+    expect(onSendMessage).not.toHaveBeenCalled();
+
+    fireEvent.mouseLeave(card);
+    expect(onPreviewPrompt).toHaveBeenLastCalledWith(null);
+
+    fireEvent.focus(card);
+    expect(onPreviewPrompt).toHaveBeenLastCalledWith(
+      "Summarize what I worked on today",
+    );
+    fireEvent.blur(card);
+    expect(onPreviewPrompt).toHaveBeenLastCalledWith(null);
+  });
+
   it("keeps the user's saved templates alongside the built-in actions", () => {
     render(
       <SummaryCards

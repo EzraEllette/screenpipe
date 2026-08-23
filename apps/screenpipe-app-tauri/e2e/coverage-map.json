@@ -672,13 +672,14 @@
       ],
       "features": [
         "chat",
+        "chat-home-card-placeholder-preview",
         "chat-sidebar-dedupe",
         "chat-session-activity"
       ],
       "criticality": "medium",
       "confidence": "partial",
       "ux": "real-user-flow",
-      "notes": "The Day Recap automation card must create exactly one persisted conversation and one sidebar row; status-only activity for an unknown session must not create an empty untitled sibling."
+      "notes": "The Day Recap automation card previews its user-facing prompt in the empty composer on hover, restores the default placeholder on leave, and creates exactly one persisted conversation and one sidebar row; status-only activity for an unknown session must not create an empty untitled sibling."
     },
     {
       "spec": "chat-composer-isolation.spec.ts",

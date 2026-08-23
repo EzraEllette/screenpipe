@@ -24,9 +24,9 @@ results and `cargo llvm-cov` data on top when judging release confidence.
 
 | Platform | Specs | Declared tests | Weighted points | Layers | Features | Critical score |
 | --- | --- | --- | --- | --- | --- | --- |
-| windows | 91 | 302 | 246.6 | 15 | 99 | 92% |
-| macos | 116 | 314 | 246.0 | 17 | 107 | 90% |
-| linux | 80 | 260 | 216.0 | 14 | 96 | 88% |
+| windows | 91 | 302 | 246.6 | 15 | 100 | 92% |
+| macos | 116 | 314 | 246.0 | 17 | 108 | 90% |
+| linux | 80 | 260 | 216.0 | 14 | 97 | 88% |
 
 ### Core Engine
 

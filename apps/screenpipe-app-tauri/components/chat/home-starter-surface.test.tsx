@@ -44,10 +44,11 @@ const suggestions = [
 
 function renderSurface(overrides: Record<string, unknown> = {}) {
   const onFillSuggestion = vi.fn();
+  const onPreviewPrompt = vi.fn();
   const onRefresh = vi.fn();
   const rendered = render(
     <HomeStarterSurface
-      summaryCardsProps={{} as never}
+      summaryCardsProps={{ onPreviewPrompt } as never}
       suggestions={suggestions}
       activityMode="meeting"
       isLoading={false}
@@ -57,7 +58,7 @@ function renderSurface(overrides: Record<string, unknown> = {}) {
       {...overrides}
     />,
   );
-  return { ...rendered, onFillSuggestion, onRefresh };
+  return { ...rendered, onFillSuggestion, onPreviewPrompt, onRefresh };
 }
 
 describe("HomeStarterSurface", () => {
@@ -113,6 +114,22 @@ describe("HomeStarterSurface", () => {
     const analyticsPayload = JSON.stringify(mocks.capture.mock.calls);
     expect(analyticsPayload).not.toContain(suggestions[0].text);
     expect(analyticsPayload).not.toContain(suggestions[0].preview);
+  });
+
+  it("previews contextual prompts on hover and keyboard focus", () => {
+    mocks.variant = "contextual";
+    const { onPreviewPrompt } = renderSurface();
+    const card = screen.getByTestId("home-contextual-suggestion-1");
+
+    fireEvent.mouseEnter(card);
+    expect(onPreviewPrompt).toHaveBeenLastCalledWith(suggestions[0].text);
+    fireEvent.mouseLeave(card);
+    expect(onPreviewPrompt).toHaveBeenLastCalledWith(null);
+
+    fireEvent.focus(card);
+    expect(onPreviewPrompt).toHaveBeenLastCalledWith(suggestions[0].text);
+    fireEvent.blur(card);
+    expect(onPreviewPrompt).toHaveBeenLastCalledWith(null);
   });
 
   it("renders stable placeholders while contextual prompts load", () => {

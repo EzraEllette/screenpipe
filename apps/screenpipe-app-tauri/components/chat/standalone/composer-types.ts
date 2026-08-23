@@ -79,6 +79,7 @@ export interface ComposerInputProps {
   inputRef: React.RefObject<HTMLTextAreaElement>;
   value: string;
   disabledReason: string | null;
+  placeholder?: string;
   canChat: boolean;
   isLoading: boolean;
   isStreaming: boolean;
