@@ -6,8 +6,13 @@ import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { LinkPreviewAnchor } from "./link-preview-anchor";
 
-const { fetchGitHubLinkPreviewMock } = vi.hoisted(() => ({
-  fetchGitHubLinkPreviewMock: vi.fn(),
+const { fetchRichLinkPreviewMock, posthogCaptureMock } = vi.hoisted(() => ({
+  fetchRichLinkPreviewMock: vi.fn(),
+  posthogCaptureMock: vi.fn(),
+}));
+
+vi.mock("posthog-js", () => ({
+  default: { capture: posthogCaptureMock },
 }));
 
 vi.mock("@/lib/chat/link-preview", async (importOriginal) => {
@@ -15,7 +20,7 @@ vi.mock("@/lib/chat/link-preview", async (importOriginal) => {
     await importOriginal<typeof import("@/lib/chat/link-preview")>();
   return {
     ...original,
-    fetchGitHubLinkPreview: fetchGitHubLinkPreviewMock,
+    fetchRichLinkPreview: fetchRichLinkPreviewMock,
   };
 });
 
@@ -37,7 +42,15 @@ describe("LinkPreviewAnchor", () => {
     expect(screen.getByRole("tooltip")).toHaveTextContent("example.com");
     expect(screen.getByRole("tooltip")).toHaveTextContent("/docs/start");
     expect(screen.getByRole("tooltip")).not.toHaveTextContent("token=secret");
-    expect(fetchGitHubLinkPreviewMock).not.toHaveBeenCalled();
+    expect(fetchRichLinkPreviewMock).not.toHaveBeenCalled();
+    expect(posthogCaptureMock).toHaveBeenCalledWith(
+      "chat_link_preview_opened",
+      {
+        schema_version: 1,
+        provider: "generic",
+        preview_result: "generic",
+      },
+    );
   });
 
   it("waits for hover intent before loading GitHub details", async () => {
@@ -47,9 +60,10 @@ describe("LinkPreviewAnchor", () => {
       description: string;
       author: string;
       state: "open";
+      thumbnailUrl: null;
       updatedAt: string;
     }) => void = () => undefined;
-    fetchGitHubLinkPreviewMock.mockImplementation(
+    fetchRichLinkPreviewMock.mockImplementation(
       () =>
         new Promise((resolve) => {
           resolvePreview = resolve;
@@ -60,6 +74,7 @@ describe("LinkPreviewAnchor", () => {
       description: "Show useful context before opening a link.",
       author: "screenpipe",
       state: "open",
+      thumbnailUrl: null,
       updatedAt: "2026-08-23T20:00:00Z",
     } as const;
 
@@ -71,7 +86,7 @@ describe("LinkPreviewAnchor", () => {
 
     fireEvent.pointerEnter(screen.getByRole("link", { name: "#6450" }));
     expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
-    expect(fetchGitHubLinkPreviewMock).not.toHaveBeenCalled();
+    expect(fetchRichLinkPreviewMock).not.toHaveBeenCalled();
 
     await act(async () => {
       vi.advanceTimersByTime(240);
@@ -80,7 +95,7 @@ describe("LinkPreviewAnchor", () => {
     expect(screen.getByRole("tooltip")).toHaveTextContent(
       "loading public details",
     );
-    expect(fetchGitHubLinkPreviewMock).toHaveBeenCalledTimes(1);
+    expect(fetchRichLinkPreviewMock).toHaveBeenCalledTimes(1);
 
     await act(async () => {
       resolvePreview(preview);
@@ -96,5 +111,58 @@ describe("LinkPreviewAnchor", () => {
     );
     expect(tooltip).toHaveTextContent("by @screenpipe");
     expect(screen.getByText("open")).toHaveClass("uppercase");
+    expect(posthogCaptureMock).toHaveBeenCalledWith(
+      "chat_link_preview_opened",
+      {
+        schema_version: 1,
+        provider: "github",
+        preview_result: "enriched",
+      },
+    );
+  });
+
+  it("shows a title from a Linear issue URL without a remote request", () => {
+    render(
+      <LinkPreviewAnchor href="https://linear.app/screenpipe/issue/SCR-123/fix-chat-link-previews">
+        SCR-123
+      </LinkPreviewAnchor>,
+    );
+
+    fireEvent.focus(screen.getByRole("link", { name: "SCR-123" }));
+
+    const tooltip = screen.getByRole("tooltip");
+    expect(tooltip).toHaveTextContent("Fix Chat Link Previews");
+    expect(tooltip).toHaveTextContent("Linear · issue SCR-123");
+    expect(fetchRichLinkPreviewMock).not.toHaveBeenCalled();
+  });
+
+  it("shows public video metadata and a provider-owned thumbnail", async () => {
+    fetchRichLinkPreviewMock.mockResolvedValue({
+      title: "Embedded Web Player Customization",
+      description: null,
+      author: "Google for Developers",
+      state: null,
+      thumbnailUrl: "https://i.ytimg.com/vi/M7lc1UVf-VE/hqdefault.jpg",
+      updatedAt: null,
+    });
+    render(
+      <LinkPreviewAnchor href="https://youtu.be/M7lc1UVf-VE">
+        watch the demo
+      </LinkPreviewAnchor>,
+    );
+
+    fireEvent.focus(screen.getByRole("link", { name: "watch the demo" }));
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const tooltip = screen.getByRole("tooltip");
+    expect(tooltip).toHaveTextContent("Embedded Web Player Customization");
+    expect(tooltip).toHaveTextContent("YouTube · video");
+    expect(tooltip).toHaveTextContent("by Google for Developers");
+    expect(tooltip.querySelector("img")).toHaveAttribute(
+      "src",
+      "https://i.ytimg.com/vi/M7lc1UVf-VE/hqdefault.jpg",
+    );
   });
 });

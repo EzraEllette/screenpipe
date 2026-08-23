@@ -4,13 +4,25 @@
 "use client";
 
 import * as PopoverPrimitive from "@radix-ui/react-popover";
-import { ExternalLink, Github, Globe2, Loader2 } from "lucide-react";
+import {
+  CalendarDays,
+  CircleDot,
+  ExternalLink,
+  FileText,
+  Github,
+  Globe2,
+  Loader2,
+  Mail,
+  MessagesSquare,
+  Video,
+} from "lucide-react";
+import posthog from "posthog-js";
 import React, { useEffect, useId, useMemo, useRef, useState } from "react";
 import {
-  fetchGitHubLinkPreview,
+  fetchRichLinkPreview,
   parseLinkPreview,
-  type GitHubLinkPreview,
   type ParsedLinkPreview,
+  type RichLinkPreview,
 } from "@/lib/chat/link-preview";
 import { cn } from "@/lib/utils";
 
@@ -18,9 +30,10 @@ const OPEN_DELAY_MS = 240;
 const CLOSE_DELAY_MS = 120;
 
 type PreviewState =
-  | { status: "idle" | "loading" }
-  | { status: "ready"; preview: GitHubLinkPreview }
-  | { status: "unavailable" };
+  | { status: "idle" }
+  | { status: "loading" }
+  | { status: "ready"; href: string; preview: RichLinkPreview }
+  | { status: "unavailable"; href: string };
 
 export interface LinkPreviewAnchorProps extends React.AnchorHTMLAttributes<HTMLAnchorElement> {
   href: string;
@@ -33,22 +46,30 @@ function clearTimer(
   timer.current = null;
 }
 
-function kindLabel(link: ParsedLinkPreview): string {
-  const github = link.github;
-  if (!github) return link.path || "web link";
-  if (github.kind === "pull") return `pull request #${github.number}`;
-  if (github.kind === "issue") return `issue #${github.number}`;
-  return "repository";
-}
-
 function previewTitle(link: ParsedLinkPreview, state: PreviewState): string {
   if (state.status === "ready") return state.preview.title;
-  if (link.github) return `${link.github.owner}/${link.github.repository}`;
+  if (link.provider.title) return link.provider.title;
+  if (link.provider.id !== "generic") return link.provider.label;
   return link.host;
 }
 
 function PreviewIcon({ link }: { link: ParsedLinkPreview }) {
-  const Icon = link.github ? Github : Globe2;
+  const Icon =
+    link.provider.category === "code"
+      ? Github
+      : link.provider.category === "video"
+        ? Video
+        : link.provider.category === "email"
+          ? Mail
+          : link.provider.category === "calendar"
+            ? CalendarDays
+            : link.provider.category === "issue"
+              ? CircleDot
+              : link.provider.category === "document"
+                ? FileText
+                : link.provider.category === "chat"
+                  ? MessagesSquare
+                  : Globe2;
   return (
     <span className="flex size-8 shrink-0 items-center justify-center border border-border bg-muted/40">
       <Icon className="size-4" aria-hidden="true" />
@@ -63,9 +84,11 @@ function PreviewBody({
   link: ParsedLinkPreview;
   state: PreviewState;
 }) {
-  const githubContext = link.github
-    ? `${link.github.owner}/${link.github.repository} · ${kindLabel(link)}`
-    : kindLabel(link);
+  const context = link.github
+    ? `${link.github.owner}/${link.github.repository} · ${link.provider.objectLabel}`
+    : link.provider.id === "generic"
+      ? link.path || link.provider.objectLabel
+      : `${link.provider.label} · ${link.provider.objectLabel}`;
 
   return (
     <div className="min-w-0 flex-1">
@@ -73,7 +96,7 @@ function PreviewBody({
         {previewTitle(link, state)}
       </p>
       <p className="mt-0.5 truncate font-mono text-[10px] text-muted-foreground">
-        {githubContext}
+        {context}
       </p>
       {state.status === "ready" && state.preview.description ? (
         <p className="mt-2 line-clamp-3 text-xs leading-4 text-muted-foreground">
@@ -82,16 +105,17 @@ function PreviewBody({
       ) : null}
       {state.status === "ready" && state.preview.author ? (
         <p className="mt-2 font-mono text-[10px] text-muted-foreground">
-          by @{state.preview.author}
+          by {link.provider.id === "github" ? "@" : ""}
+          {state.preview.author}
         </p>
       ) : null}
-      {link.github?.apiUrl && state.status === "loading" ? (
+      {link.remote && state.status === "loading" ? (
         <p className="mt-2 flex items-center gap-1.5 font-mono text-[10px] text-muted-foreground">
           <Loader2 className="size-3 animate-spin" aria-hidden="true" />
           loading public details
         </p>
       ) : null}
-      {link.github?.apiUrl && state.status === "unavailable" ? (
+      {link.remote && state.status === "unavailable" ? (
         <p className="mt-2 font-mono text-[10px] text-muted-foreground">
           public details unavailable
         </p>
@@ -101,11 +125,47 @@ function PreviewBody({
 }
 
 function StateLabel({ state }: { state: PreviewState }) {
-  if (state.status !== "ready") return null;
+  if (state.status !== "ready" || !state.preview.state) return null;
   return (
     <span className="border border-border px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wide text-muted-foreground">
       {state.preview.state}
     </span>
+  );
+}
+
+function LinkPreviewCardContent({
+  link,
+  state,
+}: {
+  link: ParsedLinkPreview;
+  state: PreviewState;
+}) {
+  return (
+    <>
+      <div className="flex items-start gap-3 p-3">
+        {state.status === "ready" && state.preview.thumbnailUrl ? (
+          <img
+            src={state.preview.thumbnailUrl}
+            alt=""
+            loading="lazy"
+            decoding="async"
+            referrerPolicy="no-referrer"
+            className="aspect-video w-24 shrink-0 border border-border object-cover"
+          />
+        ) : (
+          <PreviewIcon link={link} />
+        )}
+        <PreviewBody link={link} state={state} />
+        <StateLabel state={state} />
+      </div>
+      <div className="flex items-center justify-between border-t border-border px-3 py-2 font-mono text-[10px] text-muted-foreground">
+        <span className="max-w-[14rem] truncate">{link.host}</span>
+        <span className="flex shrink-0 items-center gap-1">
+          open link
+          <ExternalLink className="size-3" aria-hidden="true" />
+        </span>
+      </div>
+    </>
   );
 }
 
@@ -126,6 +186,17 @@ export function LinkPreviewAnchor({
   const openTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const loadedHref = useRef<string | null>(null);
+  const capturedOpen = useRef(false);
+  const resolvedState: PreviewState =
+    state.status === "idle" || state.status === "loading" || !link
+      ? state
+      : state.href === link.href
+        ? state
+        : { status: "idle" };
+  const displayState: PreviewState =
+    open && link?.remote && resolvedState.status === "idle"
+      ? { status: "loading" }
+      : resolvedState;
 
   const openSoon = () => {
     clearTimer(closeTimer);
@@ -148,25 +219,25 @@ export function LinkPreviewAnchor({
   }, []);
 
   useEffect(() => {
-    if (!open || !link?.github?.apiUrl || loadedHref.current === link.href)
-      return;
+    if (!open || !link?.remote || loadedHref.current === link.href) return;
 
     const controller = new AbortController();
     let completed = false;
     loadedHref.current = link.href;
-    setState({ status: "loading" });
-    void fetchGitHubLinkPreview(link, controller.signal)
+    void fetchRichLinkPreview(link, controller.signal)
       .then((preview) => {
         if (controller.signal.aborted) return;
         completed = true;
         setState(
-          preview ? { status: "ready", preview } : { status: "unavailable" },
+          preview
+            ? { status: "ready", href: link.href, preview }
+            : { status: "unavailable", href: link.href },
         );
       })
       .catch(() => {
         if (!controller.signal.aborted) {
           completed = true;
-          setState({ status: "unavailable" });
+          setState({ status: "unavailable", href: link.href });
         }
       });
 
@@ -175,6 +246,29 @@ export function LinkPreviewAnchor({
       if (!completed) loadedHref.current = null;
     };
   }, [link, open]);
+
+  useEffect(() => {
+    if (!open) {
+      capturedOpen.current = false;
+      return;
+    }
+    if (!link || capturedOpen.current) return;
+    const previewResult = !link.remote
+      ? "generic"
+      : displayState.status === "ready"
+        ? "enriched"
+        : displayState.status === "unavailable"
+          ? "unavailable"
+          : null;
+    if (!previewResult) return;
+
+    capturedOpen.current = true;
+    posthog.capture("chat_link_preview_opened", {
+      schema_version: 1,
+      provider: link.provider.id,
+      preview_result: previewResult,
+    });
+  }, [displayState.status, link, open]);
 
   if (!link) {
     return (
@@ -231,18 +325,7 @@ export function LinkPreviewAnchor({
             "data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=open]:fade-in-0 data-[state=closed]:fade-out-0",
           )}
         >
-          <div className="flex items-start gap-3 p-3">
-            <PreviewIcon link={link} />
-            <PreviewBody link={link} state={state} />
-            <StateLabel state={state} />
-          </div>
-          <div className="flex items-center justify-between border-t border-border px-3 py-2 font-mono text-[10px] text-muted-foreground">
-            <span className="max-w-[14rem] truncate">{link.host}</span>
-            <span className="flex shrink-0 items-center gap-1">
-              open link
-              <ExternalLink className="size-3" aria-hidden="true" />
-            </span>
-          </div>
+          <LinkPreviewCardContent link={link} state={displayState} />
         </PopoverPrimitive.Content>
       </PopoverPrimitive.Portal>
     </PopoverPrimitive.Root>
