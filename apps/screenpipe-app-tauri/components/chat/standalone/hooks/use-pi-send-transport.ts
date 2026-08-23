@@ -59,6 +59,24 @@ export async function awaitPendingPiPresetSwitch(
   if (pendingSwitch) await pendingSwitch;
 }
 
+/**
+ * Wait for a background start to finish before dispatching a prompt.
+ *
+ * ACP processes can report `running` before their initialize/auth handshake is
+ * ready, so process liveness alone is not a safe readiness signal. The shared
+ * in-flight guard covers that complete handshake and is released by every
+ * start path in `finally`/cleanup.
+ */
+export async function awaitPiStartInFlight(
+  startInFlightRef: { current: boolean },
+  waitForNextTick: () => Promise<void> = () =>
+    new Promise((resolve) => setTimeout(resolve, 50)),
+): Promise<void> {
+  while (startInFlightRef.current) {
+    await waitForNextTick();
+  }
+}
+
 /** Read the process manager instead of trusting the render-time `piInfo`. */
 export async function checkLivePiSession(
   sessionId: string,
@@ -310,8 +328,8 @@ export function usePiSendTransport(options: PiSendTransportOptions) {
     setInput("");
     if (inputRef.current) inputRef.current.style.height = "auto";
 
-    // A selector change may be in the narrow gap before React disables the
-    // composer. Wait for it here as the authoritative boundary. Rejections
+    // A selector change may still be in flight when the user submits. Wait for
+    // it here as the authoritative boundary. Rejections
     // (including "not now" during ACP authentication) abort this send before
     // a user bubble is persisted or a provider receives the prompt.
     try {
@@ -329,6 +347,13 @@ export function usePiSendTransport(options: PiSendTransportOptions) {
       return;
     }
 
+    // A new chat can warm an ACP harness in the background, and a crash can
+    // already be restarting the current harness. Keep the user's optimistic
+    // bubble visible and wait for that work instead of rejecting the send.
+    // This must happen before the liveness check: ACP may report a running
+    // process while its initialize/auth handshake is still in flight.
+    await awaitPiStartInFlight(piStartInFlightRef);
+
     // React's `piInfo` may still describe the process from before a completed
     // preset switch. Ask the process manager first so a successful switch is
     // not immediately started a second time, and a failed one cannot reuse the
@@ -343,26 +368,12 @@ export function usePiSendTransport(options: PiSendTransportOptions) {
 
     // Auto-start Pi if it is actually not running (new session or recovery).
     if (!liveSession.running) {
-      if (piStartInFlightRef.current) {
-        if (!autoSendBypassRef.current) {
-          toast({ title: "Pi starting", description: "Please wait a moment", variant: "destructive" });
-          finishAttempt();
-          return;
-        }
-        // Prefill auto-send: wait for in-flight start to complete
-        const startWait = Date.now();
-        while (piStartInFlightRef.current && Date.now() - startWait < 10000) {
-          await new Promise(r => setTimeout(r, 300));
-        }
-        if (piStartInFlightRef.current) {
-          finishAttempt();
-          return; // timed out
-        }
-      } else {
-        console.log("[Pi] Not running, auto-starting before sending message");
-        piStartInFlightRef.current = true;
-        setPiStarting(true);
+      console.log("[Pi] Not running, auto-starting before sending message");
+      piStartInFlightRef.current = true;
+      setPiStarting(true);
 
+      // Keep fallback bookkeeping local to this one start attempt.
+      {
         // Build a list of presets to try: active first, then other available
         // presets as fallbacks. This ensures that if the active preset fails
         // (e.g. ChatGPT OAuth expired), we try alternatives before giving up.

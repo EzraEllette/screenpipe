@@ -168,7 +168,16 @@ export function usePiSessionLifecycle({
     ? Boolean(activePreset.acpAgent?.id?.trim())
     : Boolean(activePreset?.model && activePreset.model.trim() !== "");
   const needsLogin = activePreset?.provider === "screenpipe-cloud" && !userToken;
-  const canChat = hasPresets && hasValidModel && !piStarting && !presetSwitching;
+  // Composition and submission do not depend on runtime readiness. A valid
+  // preset is enough to accept the user's intent; the send transport waits for
+  // an in-flight start/switch before dispatching it to the selected provider.
+  const canChat = hasPresets && hasValidModel;
+
+  const readinessReason = (() => {
+    if (piStarting) return "Starting AI assistant...";
+    if (presetSwitching) return "Switching AI assistant...";
+    return null;
+  })();
 
   const disabledReason = (() => {
     if (!hasPresets) return "No AI presets configured";
@@ -178,8 +187,6 @@ export function usePiSessionLifecycle({
         ? `No agent selected in "${activePreset.id}" preset`
         : `No model selected in "${activePreset.id}" preset`;
     }
-    if (piStarting) return "Starting Pi agent...";
-    if (presetSwitching) return "Switching AI assistant...";
     return null;
   })();
 
@@ -471,6 +478,7 @@ export function usePiSessionLifecycle({
     buildProviderConfig,
     canChat,
     disabledReason,
+    readinessReason,
     handlePiRestart,
     hasPresets,
     hasValidModel,

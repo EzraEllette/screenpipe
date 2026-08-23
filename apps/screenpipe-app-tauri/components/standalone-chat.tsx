@@ -949,10 +949,12 @@ export function StandaloneChat({
     piStreamingTextRef,
     piMessageIdRef,
     piContentBlocksRef,
+    piStartInFlightRef,
     forceQueueModeRef,
     sendDispatchInFlightRef,
     setIsLoading,
     setIsStreaming,
+    setPiStarting,
   });
   useChatWindowSyncEvents({
     aiPresets: settings?.aiPresets,
@@ -990,6 +992,7 @@ export function StandaloneChat({
     buildProviderConfig,
     canChat,
     disabledReason,
+    readinessReason,
     handlePiRestart,
     hasPresets,
     hasValidModel,
@@ -2166,6 +2169,7 @@ export function StandaloneChat({
           inputRef,
           value: input,
           disabledReason: composerDisabledReason,
+          readinessReason,
           canChat: Boolean(canSendChatMessage),
           isLoading,
           isStreaming,

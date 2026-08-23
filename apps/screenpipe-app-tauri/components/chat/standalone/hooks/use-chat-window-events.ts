@@ -330,10 +330,12 @@ interface UseChatE2EGlobalsOptions {
   piStreamingTextRef: React.MutableRefObject<string>;
   piMessageIdRef: React.MutableRefObject<string | null>;
   piContentBlocksRef: React.MutableRefObject<ContentBlock[]>;
+  piStartInFlightRef: React.MutableRefObject<boolean>;
   forceQueueModeRef: React.MutableRefObject<boolean>;
   sendDispatchInFlightRef: React.MutableRefObject<boolean>;
   setIsLoading: React.Dispatch<React.SetStateAction<boolean>>;
   setIsStreaming: React.Dispatch<React.SetStateAction<boolean>>;
+  setPiStarting: React.Dispatch<React.SetStateAction<boolean>>;
 }
 
 export function useChatE2EGlobals({
@@ -344,10 +346,12 @@ export function useChatE2EGlobals({
   piStreamingTextRef,
   piMessageIdRef,
   piContentBlocksRef,
+  piStartInFlightRef,
   forceQueueModeRef,
   sendDispatchInFlightRef,
   setIsLoading,
   setIsStreaming,
+  setPiStarting,
 }: UseChatE2EGlobalsOptions) {
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -557,12 +561,23 @@ export function useChatE2EGlobals({
       void emit("chat-current-session", { id: sid });
     };
 
+    // Hold/release the same readiness gate owned by real background starts.
+    // Visual E2E uses this to keep the handshake pending long enough to prove
+    // the composer remains editable and an early send waits without dispatch.
+    (window as unknown as {
+      __e2eSetPiStartInFlight?: (inFlight: boolean) => void;
+    }).__e2eSetPiStartInFlight = (inFlight: boolean) => {
+      piStartInFlightRef.current = inFlight;
+      setPiStarting(inFlight);
+    };
+
     return () => {
       delete (window as unknown as { __e2eSeedUserMessage?: unknown }).__e2eSeedUserMessage;
       delete (window as unknown as { __e2eSeedAssistantMessage?: unknown }).__e2eSeedAssistantMessage;
       delete (window as unknown as { __e2eReadActiveTurn?: unknown }).__e2eReadActiveTurn;
       delete (window as unknown as { __e2eLatchActiveSend?: unknown }).__e2eLatchActiveSend;
       delete (window as unknown as { __e2eLatchPreflightSend?: unknown }).__e2eLatchPreflightSend;
+      delete (window as unknown as { __e2eSetPiStartInFlight?: unknown }).__e2eSetPiStartInFlight;
     };
   }, [
     forceQueueModeRef,
@@ -571,9 +586,11 @@ export function useChatE2EGlobals({
     piMessageIdRef,
     piSessionIdRef,
     piSessionSyncedRef,
+    piStartInFlightRef,
     piStreamingTextRef,
     setConversationId,
     setIsLoading,
+    setPiStarting,
     setIsStreaming,
     setMessages,
   ]);
