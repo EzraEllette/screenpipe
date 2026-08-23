@@ -40,6 +40,7 @@ use updates::start_update_check;
 use window::ShowRewindWindow;
 
 mod activity_history;
+mod activity_opportunities;
 mod first_run_summary;
 mod analytics;
 mod auth_session;
@@ -1163,6 +1164,7 @@ async fn main() {
 
     let app = app.manage(recording_state)
         .manage(activity_history::ActivityHistoryState::default())
+        .manage(activity_opportunities::ActivityOpportunitiesState::default())
         .manage(first_run_summary::FirstRunSummaryState::default())
         .manage(disk_pressure_notifications::DiskPressureNotificationState::default())
         .manage(pi_state)

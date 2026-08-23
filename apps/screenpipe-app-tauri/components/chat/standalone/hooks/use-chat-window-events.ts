@@ -148,6 +148,7 @@ export function useChatPrefillListener({
       source?: string;
       targetWindow?: string;
       filePreviewPath?: string;
+      conversationId?: string;
     }>("chat-prefill", (event) => {
       const {
         context,
@@ -159,6 +160,7 @@ export function useChatPrefillListener({
         source,
         targetWindow,
         filePreviewPath,
+        conversationId,
       } = event.payload;
       const prefillImages = normalizeImageDataUrls(images);
 
@@ -195,7 +197,7 @@ export function useChatPrefillListener({
             setPrefillFrameId(null);
             setInput(visiblePrompt);
 
-            const newSid = crypto.randomUUID();
+            const newSid = conversationId?.trim() || crypto.randomUUID();
             piSessionIdRef.current = newSid;
             setConversationId(newSid);
             // Publish the new id to the store as the active session (#4719).

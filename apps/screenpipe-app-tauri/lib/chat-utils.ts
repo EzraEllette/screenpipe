@@ -135,6 +135,8 @@ export interface ChatPrefillData {
   useHomeChat?: boolean;
   /** Show this local artifact beside the editable composer. */
   filePreviewPath?: string;
+  /** Pin an auto-send handoff to this fresh conversation ID. */
+  conversationId?: string;
 }
 
 export type ChatTargetWindow = "home" | "chat";
@@ -192,6 +194,13 @@ export function shouldHandleChatPrefillForWindow(
   if (!payload) return false;
   const target = payload.targetWindow ?? (payload.autoSend ? "home" : null);
   return !target || target === windowLabel;
+}
+
+export function resolveChatPrefillConversationId(
+  data: Pick<ChatPrefillData, "autoSend" | "conversationId">,
+): string | null {
+  if (!data.autoSend) return null;
+  return data.conversationId?.trim() || crypto.randomUUID();
 }
 
 const CHAT_READY_TIMEOUT_MS = 2500;
@@ -288,9 +297,11 @@ export async function openChatConversationInCurrentChatSurface(
  * "chat-ping". We wait for "chat-ready" before emitting the prefill event,
  * with a 5-second timeout fallback.
  */
-export async function showChatWithPrefill(data: ChatPrefillData): Promise<void> {
+export async function showChatWithPrefill(data: ChatPrefillData): Promise<string | null> {
   const targetWindow = data.useHomeChat ? "home" : "chat";
   const currentWindowLabel = getCurrentWindow().label;
+  const conversationId = resolveChatPrefillConversationId(data);
+  const handoff = conversationId ? { ...data, conversationId } : data;
 
   // If we're already in the Home window but on another route (e.g. /settings),
   // route locally and pass prefill through sessionStorage so the embedded chat
@@ -302,10 +313,10 @@ export async function showChatWithPrefill(data: ChatPrefillData): Promise<void> 
     if (!isHomeRoute || !isHomeSection) {
       sessionStorage.setItem(
         PENDING_CHAT_PREFILL_KEY,
-        JSON.stringify({ ...data, targetWindow }),
+        JSON.stringify({ ...handoff, targetWindow }),
       );
       window.location.assign("/home?section=home");
-      return;
+      return conversationId;
     }
   }
 
@@ -324,7 +335,8 @@ export async function showChatWithPrefill(data: ChatPrefillData): Promise<void> 
   }
 
   await waitForChatReady(targetWindow);
-  await emit("chat-prefill", { ...data, targetWindow });
+  await emit("chat-prefill", { ...handoff, targetWindow });
+  return conversationId;
 }
 
 // ============================================================================

@@ -1130,7 +1130,11 @@ pub(crate) async fn run_background_pi(
     result?
 }
 
-async fn run_pi(app: &AppHandle, session_prefix: &str, prompt: String) -> Result<String, String> {
+pub(crate) async fn run_pi(
+    app: &AppHandle,
+    session_prefix: &str,
+    prompt: String,
+) -> Result<String, String> {
     run_background_pi(
         app,
         session_prefix,
@@ -1566,6 +1570,7 @@ async fn generate_inner(
     }
     stored.coverage = merge_coverage(stored.coverage);
     write_all(app, &stored)?;
+    crate::activity_opportunities::schedule_analysis(app.clone(), stored.clone());
     if source == "manual" {
         let settings = SettingsStore::get(app)?.ok_or("Settings are not available")?;
         set_next_run(

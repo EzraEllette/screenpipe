@@ -365,6 +365,14 @@ async copyTextToClipboard(text: string) : Promise<Result<null, string>> {
     else return { status: "error", error: e  as any };
 }
 },
+async createActivityOpportunitySkill(request: CreateActivityOpportunitySkillRequest) : Promise<Result<CreatedSkill, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("create_activity_opportunity_skill", { request }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async deleteBrainView(id: string) : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("delete_brain_view", { id }) };
@@ -525,6 +533,14 @@ async getActiveDataDir() : Promise<Result<string, string>> {
 async getActivityHistory(start: string, end: string) : Promise<Result<PersistedActivityHistory, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_activity_history", { start, end }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async getActivityOpportunities() : Promise<Result<ActivityOpportunitySnapshot, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_activity_opportunities") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -826,6 +842,14 @@ async getSyncDevices() : Promise<Result<SyncDeviceInfo[], string>> {
 async getSyncStatus() : Promise<Result<SyncStatusResponse, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_sync_status") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async handoffActivityOpportunity(request: HandoffActivityOpportunityRequest) : Promise<Result<UnfinishedOpportunity, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("handoff_activity_opportunity", { request }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2909,6 +2933,14 @@ async unregisterWindowShortcuts() : Promise<Result<null, string>> {
     else return { status: "error", error: e  as any };
 }
 },
+async updateActivityOpportunity(request: UpdateActivityOpportunityRequest) : Promise<Result<ActivityOpportunitySnapshot, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("update_activity_opportunity", { request }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async updateGlobalShortcuts(showShortcut: string, startShortcut: string, stopShortcut: string, startAudioShortcut: string, stopAudioShortcut: string, profileShortcuts: { [key in string]: string }) : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("update_global_shortcuts", { showShortcut, startShortcut, stopShortcut, startAudioShortcut, stopAudioShortcut, profileShortcuts }) };
@@ -3101,6 +3133,7 @@ useScreenpipeCloud?: boolean | null }
 export type ActivityHistoryCoverage = { start: string; end: string }
 export type ActivityHistoryEntry = { id: string; kind: string; meeting_id: number | null; start_at: string; end_at: string; title: string; summary: string; evidence: ActivityHistoryEvidence[] }
 export type ActivityHistoryEvidence = { kind: string; at: string; frame_id: number | null; meeting_id: number | null; app_name: string | null; label: string }
+export type ActivityOpportunitySnapshot = { analysisState: OpportunityAnalysisState; generatedAt: string | null; analysisError?: string | null; skills: SkillOpportunity[]; unfinished: UnfinishedOpportunity[] }
 export type AecMode = "off" | "screenpipe" | "macos" | "windows"
 export type Attribution = { utmSource: string | null; utmMedium: string | null; utmCampaign: string | null; utmContent: string | null; utmTerm: string | null }
 export type AudioDeviceInfo = { name: string; isDefault: boolean;
@@ -3213,6 +3246,8 @@ export type ChatGptOAuthStatus = { logged_in: boolean;
 error: string | null }
 export type CodingWorkspace = { version: number; conversationId: string; repoRoot: string; gitCommonDir: string; worktreePath: string; branch: string; baseCommit: string; sourceDirty: boolean; createdAt: string }
 export type CodingWorkspacePreparation = { status: string; workspace: CodingWorkspace | null; candidates: string[]; reason: string | null; routeSessionId: string | null }
+export type CreateActivityOpportunitySkillRequest = { id: string; revision: number }
+export type CreatedSkill = { path: string; skillMd: string }
 export type Credits = { amount: number }
 /**
  * A skill folder discovered somewhere on the user's device.
@@ -3263,6 +3298,7 @@ export type ExcludedApp = { bundleId: string; name: string | null; icon: string 
 export type ExportEvent = { kind: "started"; jobId: string; request: ExportRequestInfo } | { kind: "completed"; jobId: string; request: ExportRequestInfo; summary: MeetingExportSummary } | { kind: "failed"; jobId: string; request: ExportRequestInfo; error: string }
 export type ExportRequestInfo = { meetingId: number | null; start: string | null; end: string | null; outputPath: string }
 export type FeedbackUploadRequest = { jobId: string; identifier: string; reportType: string; feedbackText: string; settingsJson: string; chatHistory: string; consoleLog: string; analyticsId: string | null; os: string; osVersion: string; appVersion: string; screenshotDataUrl: string | null; videoDataUrl: string | null; videoPath: string | null; videoExt: string | null }
+export type HandoffActivityOpportunityRequest = { id: string; revision: number; conversationId: string }
 export type HardwareCapability = { hasGpu: boolean; cpuCores: number; totalMemoryGb: number; recommendedEngine: string; reason: string }
 export type IcsCalendarEntry = { name: string; url: string; enabled: boolean }
 /**
@@ -3347,6 +3383,9 @@ currentStep?: string | null; firstRunSummaryPhase?: string; firstRunSummaryStart
  * clears it, so onboarding replay can never enter the experiment.
  */
 trialActivationFreshInstall?: boolean }
+export type OpportunityAnalysisState = "running" | "ready" | "error"
+export type OpportunityEvidence = { activityId: string; startAt: string; endAt: string; title: string; summary: string; apps: string[]; frameIds: number[]; meetingIds: number[]; excluded?: boolean }
+export type OpportunityKind = "skill" | "unfinished"
 /**
  * Snapshot of a pending update, exposed to the frontend via
  * `get_pending_update`. The banner queries this on mount so it can hydrate
@@ -4267,6 +4306,9 @@ headless?: boolean;
  */
 headlessRecordOnly?: boolean }
 export type ShowRewindWindow = "Main" | { Home: { page: string | null } } | { Search: { query: string | null } } | "Onboarding" | "Chat" | "PermissionRecovery"
+export type SkillBlueprint = { trigger: string; steps: string[]; verification: string }
+export type SkillOpportunity = { id: string; revision: number; status: SkillOpportunityStatus; name: string; description: string; notes: string; blueprint: SkillBlueprint; evidence: OpportunityEvidence[]; createdSkill?: CreatedSkill | null }
+export type SkillOpportunityStatus = "pending" | "dismissed" | "created"
 export type StartExportRecordingResponse = { jobId: string }
 export type Suggestion = { text: string;
 /**
@@ -4297,6 +4339,13 @@ export type SyncStatusResponse = { enabled: boolean; isSyncing: boolean; lastSyn
  * subdomain, and exception semantics without introducing a second setting.
  */
 export type UrlRule = string | DomainRule
+export type UnfinishedOpportunity = { id: string; revision: number; status: UnfinishedOpportunityStatus; title: string; description: string; goal: string; leftOff: string; lastSeenAt: string; agentSteps: string[]; notes: string; evidence: OpportunityEvidence[]; conversationId?: string | null }
+export type UnfinishedOpportunityStatus = "pending" | "dismissed" | "handed_off"
+export type UpdateActivityOpportunityRequest = { kind: OpportunityKind; id: string; revision: number; name?: string | null; title?: string | null; description?: string | null; goal?: string | null; notes?: string | null; trigger?: string | null; steps?: string[] | null; verification?: string | null; leftOff?: string | null; agentSteps?: string[] | null; excludedActivityIds?: string[] | null;
+/**
+ * `true` dismisses and `false` undoes a dismissal.
+ */
+dismissed?: boolean | null }
 export type User = { id: string | null; name: string | null; email: string | null; image: string | null; token: string | null; clerk_id: string | null; api_key: string | null; credits: Credits | null; stripe_connected: boolean | null; stripe_account_status: string | null; github_username: string | null; bio: string | null; website: string | null; contact: string | null; cloud_subscribed: boolean | null; credits_balance: number | null; app_entitled: boolean | null; subscription_plan: string | null; entitlement: JsonValue | null; enterprise_account: JsonValue | null }
 export type ViewerContent = { kind: "text"; text: string; name: string; path: string; truncated: boolean; total_bytes: number } | { kind: "image"; data_url: string; name: string; path: string } |
 /**
