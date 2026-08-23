@@ -14,6 +14,7 @@ import {
   LEARNING_WINDOW_CEILING_MS,
   LEARNING_WINDOW_GRACE_MS,
   LEARNING_WINDOW_RESET_EVENT,
+  LEARNING_SUMMARY_OPENED_EVENT,
   beginLearningWindow,
   buildLearningSummary,
   canResolveYet,
@@ -26,6 +27,7 @@ import {
   markLearningDone,
   markLearningEmpty,
   markLearningReady,
+  markLearningNotificationSent,
   markLearningSummaryOpened,
   markLearningWriting,
   releaseLearningSeed,
@@ -47,6 +49,7 @@ import type { AIPreset } from "@/lib/utils/tauri";
 export type LearningWindowView = FirstRunLearningState & {
   remainingMs: number;
   markSummaryOpened: () => void;
+  markNotificationSent: () => void;
   dismiss: () => void;
 };
 
@@ -159,6 +162,18 @@ export function useLearningWindow(
       setCapturedApps([]);
       // Back to `idle`, which re-arms the opening effect above. It will only
       // actually open once setup writes a fresh `completedAt`.
+      setState(readLearningWindow());
+    });
+    return () => {
+      void unlisten.then((off) => off()).catch(() => {});
+    };
+  }, []);
+
+  // A notification deep link can open the summary outside this component.
+  // Re-read the persisted state so the ready card collapses just as it does
+  // for its own button, without relying on a reload.
+  useEffect(() => {
+    const unlisten = listen(LEARNING_SUMMARY_OPENED_EVENT, () => {
       setState(readLearningWindow());
     });
     return () => {
@@ -447,6 +462,10 @@ export function useLearningWindow(
     setState(markLearningSummaryOpened());
   }, []);
 
+  const markNotificationSent = useCallback(() => {
+    setState(markLearningNotificationSent());
+  }, []);
+
   const dismiss = useCallback(
     () => {
       posthog.capture("first_run_learning_dismissed", {
@@ -466,6 +485,7 @@ export function useLearningWindow(
     capturedApps,
     remainingMs,
     markSummaryOpened,
+    markNotificationSent,
     dismiss,
   };
 }

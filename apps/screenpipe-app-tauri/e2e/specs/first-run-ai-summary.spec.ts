@@ -46,9 +46,59 @@ import {
 import { t, waitForAppReady } from "../helpers/test-utils.js";
 
 const LEARNING_STORAGE_KEY = "screenpipe.first-run.learning-window.v1";
+const SUMMARY_NOTIFICATION_ID = "first-run-summary-ready-v1";
 const E2E_ACCOUNT_USER_KEY = "screenpipe_e2e_account_user";
 const BANNER = '[data-testid="first-run-learning-banner"]';
 const CHATS_DIR = join(E2E_DATA_DIR, "chats");
+const FOCUS_PORT = Number(process.env.SCREENPIPE_FOCUS_PORT ?? "11436");
+const NOTIFICATIONS_URL = `http://127.0.0.1:${FOCUS_PORT}/notifications`;
+
+type NotificationEntry = {
+  id: string;
+  title?: string;
+  body?: string;
+  actions?: Array<{ type?: string; label?: string; url?: string }>;
+};
+
+async function readNotifications(): Promise<NotificationEntry[]> {
+  return (await browser.executeAsync(
+    (url: string, done: (entries: NotificationEntry[]) => void) => {
+      void fetch(url)
+        .then(async (response) =>
+          done(response.ok ? ((await response.json()) as NotificationEntry[]) : []),
+        )
+        .catch(() => done([]));
+    },
+    NOTIFICATIONS_URL,
+  )) as NotificationEntry[];
+}
+
+async function deleteSummaryNotification(): Promise<void> {
+  await browser.executeAsync(
+    (url: string, id: string, done: () => void) => {
+      void fetch(`${url}/${encodeURIComponent(id)}`, { method: "DELETE" })
+        .then(() => done())
+        .catch(() => done());
+    },
+    NOTIFICATIONS_URL,
+    SUMMARY_NOTIFICATION_ID,
+  );
+}
+
+async function emitHomeDeepLink(url: string): Promise<void> {
+  const error = (await browser.executeAsync(
+    (payload: string, done: (value: string | null) => void) => {
+      const event = (globalThis as any).__TAURI__?.event;
+      if (!event?.emitTo) return done("emitTo unavailable");
+      void event
+        .emitTo("home", "deep-link-received", payload)
+        .then(() => done(null))
+        .catch((reason: unknown) => done(String(reason)));
+    },
+    url,
+  )) as string | null;
+  expect(error).toBeNull();
+}
 
 /** The deterministic builder's fixed opener. Its presence means the model did
  *  not win, whatever else the paragraph says. */
@@ -447,6 +497,7 @@ describe("First-run summary is written by the model", function () {
     }
     clearSeededSummaries();
     await waitForAppReady();
+    await deleteSummaryNotification();
     // The preset and token are seeded inside openHomeMidWindow, after the
     // entitlement gate has finished writing `settings.user`.
     await openHomeMidWindow(gatewayUrl, token);
@@ -454,6 +505,7 @@ describe("First-run summary is written by the model", function () {
 
   after(() => {
     clearSeededSummaries();
+    void deleteSummaryNotification();
   });
 
   it("sends the model what the work was, and persists what the model wrote", async () => {
@@ -495,6 +547,53 @@ describe("First-run summary is written by the model", function () {
     expect(forwarded).toContain("[parsed, Obsidian]");
     expect(forwarded).toContain(AUDIO_EXCERPT);
     expectModelSummaryPersisted();
+
+    await browser.waitUntil(
+      async () =>
+        (await readNotifications()).some(
+          (entry) => entry.id === SUMMARY_NOTIFICATION_ID,
+        ),
+      {
+        timeout: t(20_000),
+        interval: 250,
+        timeoutMsg: "ready summary never reached /notify",
+      },
+    );
+    const notification = (await readNotifications()).find(
+      (entry) => entry.id === SUMMARY_NOTIFICATION_ID,
+    );
+    expect(notification).toMatchObject({
+      title: "your first summary is ready",
+      actions: [
+        expect.objectContaining({
+          type: "deeplink",
+          label: "open summary",
+          url: "screenpipe://first-run-summary",
+        }),
+      ],
+    });
+    const serializedNotification = JSON.stringify(notification);
+    expect(serializedNotification).not.toContain(PARSED_EXCERPT);
+    expect(serializedNotification).not.toContain("conversation");
+
+    await emitHomeDeepLink("screenpipe://first-run-summary");
+    await browser.waitUntil(
+      async () =>
+        Boolean(
+          await browser.execute(
+            (key: string) => {
+              const stored = JSON.parse(localStorage.getItem(key) ?? "{}");
+              return stored.summaryOpenedAt;
+            },
+            LEARNING_STORAGE_KEY,
+          ),
+        ),
+      {
+        timeout: t(15_000),
+        interval: 250,
+        timeoutMsg: "notification deep link did not open the seeded summary",
+      },
+    );
   });
 
   it("falls back to accessibility evidence when parsed context is unavailable", async () => {

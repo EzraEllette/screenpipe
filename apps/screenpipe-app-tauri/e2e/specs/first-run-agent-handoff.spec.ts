@@ -25,8 +25,8 @@
 //   2. The probe cannot break the banner. It touches the filesystem several
 //      times on mount, and a throw there must degrade to "no handoff", never
 //      to a dead ready state or an unclickable summary.
-//   3. Clicking the summary still settles the window with the handoff wired
-//      in. This is the path the fix in the parent PR restored.
+//   3. Clicking the summary still opens it and collapses the large result into
+//      the compact setup dock with the handoff wired in.
 //
 // Does NOT assert which agent is offered. `detectAiTools()` runs in the
 // webview and resolves the REAL home directory: `SCREENPIPE_E2E_AI_TOOLS_HOME`
@@ -35,8 +35,8 @@
 // here would pass on a developer laptop and fail on a clean CI runner, or the
 // reverse. Which agent wins, the connected-not-merely-detected rule, prompt
 // routes, and clipboard/deeplink failure handling are covered
-// deterministically in lib/first-run/agent-handoff.test.ts (16 cases),
-// lib/first-run/use-agent-handoff.test.ts (16 cases) and the banner render in
+// deterministically in lib/first-run/agent-handoff.test.ts (21 cases),
+// lib/first-run/use-agent-handoff.test.ts (17 cases) and the banner render in
 // components/first-run/learning-banner.test.tsx.
 //
 // The one thing this spec DOES assert about the handoff is conditional and
@@ -61,12 +61,6 @@ const E2E_ACCOUNT_USER_KEY = "screenpipe_e2e_account_user";
 const BANNER = '[data-testid="first-run-learning-banner"]';
 const SUMMARY = '[data-testid="first-run-open-summary"]';
 const ASK_AGENT = '[data-testid="first-run-ask-agent"]';
-
-const bannerCount = async (): Promise<number> =>
-  (await browser.execute(
-    (selector: string) => document.querySelectorAll(selector).length,
-    BANNER,
-  )) as number;
 
 const bannerPhase = async (): Promise<string | null> =>
   (await browser.execute(
@@ -245,11 +239,29 @@ describeOrSkip("first-run agent handoff", () => {
     const summary = await browser.$(SUMMARY);
     await summary.click();
 
-    // Acting on the summary still settles the window with the handoff wired in.
-    await browser.waitUntil(async () => (await bannerCount()) === 0, {
+    // Opening the result deliberately keeps optional setup in a compact dock.
+    // The old oracle expected the whole banner to disappear, contradicting
+    // the current product contract and reporting a working click as a failure.
+    await browser.waitUntil(
+      async () =>
+        Boolean(
+          await browser.execute(
+            (key: string) => {
+              const state = JSON.parse(localStorage.getItem(key) ?? "{}");
+              return (
+                state.summaryOpenedAt &&
+                document.querySelector('[data-testid="first-run-setup-dock"]') &&
+                !document.querySelector('[data-testid="first-run-open-summary"]')
+              );
+            },
+            LEARNING_STORAGE_KEY,
+          ),
+        ),
+      {
       timeout: t(10_000),
-      timeoutMsg: "banner survived opening the summary",
-    });
+        timeoutMsg: "summary did not open into the compact setup dock",
+      },
+    );
   });
 
   it("shows the handoff result only after the handoff runs", async () => {

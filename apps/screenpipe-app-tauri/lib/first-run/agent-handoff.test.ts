@@ -8,9 +8,12 @@ import {
   CURSOR_DEEPLINK_REPLAY_DELAY_MS,
   HANDOFF_PROMPT,
   handoffTargets,
+  handoffTargetById,
   openAgentHandoffDeeplink,
+  performAgentHandoff,
   pickHandoffTarget,
   pickHandoffTargets,
+  preferredHandoffTargetForRecentApps,
 } from "./agent-handoff";
 
 describe("pickHandoffTargets", () => {
@@ -134,6 +137,65 @@ describe("openAgentHandoffDeeplink", () => {
       replayed: false,
       failedStage: "replay",
     });
+  });
+});
+
+describe("notification handoff recovery", () => {
+  it("copies before opening and preserves Cursor's cold-start replay", async () => {
+    const cursor = handoffTargetById("cursor")!;
+    const copyText = vi.fn(async () => {});
+    const openUrl = vi.fn(async () => {});
+    const delay = vi.fn(async () => {});
+
+    const result = await performAgentHandoff(cursor, {
+      copyText,
+      openUrl,
+      delay,
+    });
+
+    expect(copyText).toHaveBeenCalledWith(HANDOFF_PROMPT);
+    expect(openUrl).toHaveBeenCalledTimes(2);
+    expect(result).toMatchObject({ copied: true, prefilled: true, replayed: true });
+  });
+
+  it("rejects unknown target ids instead of opening attacker-selected schemes", () => {
+    expect(handoffTargetById("terminal")).toBeNull();
+    expect(handoffTargetById(null)).toBeNull();
+  });
+});
+
+describe("preferredHandoffTargetForRecentApps", () => {
+  const connected = pickHandoffTargets(["claude", "cursor", "codex"]);
+
+  it("uses aggregate active time before frames", () => {
+    expect(
+      preferredHandoffTargetForRecentApps(connected, [
+        { name: "Claude", activeMinutes: 1, frameCount: 100, lastSeenAt: 0 },
+        { name: "Cursor", activeMinutes: 4, frameCount: 2, lastSeenAt: 0 },
+      ])?.id,
+    ).toBe("cursor");
+  });
+
+  it("recognizes ChatGPT as the Codex desktop handoff", () => {
+    expect(
+      preferredHandoffTargetForRecentApps(connected, [
+        { name: "ChatGPT", activeMinutes: 2, frameCount: 3, lastSeenAt: 0 },
+      ])?.id,
+    ).toBe("codex");
+  });
+
+  it("never infers preference from window content or an unconnected app", () => {
+    expect(
+      preferredHandoffTargetForRecentApps(connected, [
+        { name: "Arc", activeMinutes: 9, frameCount: 90, lastSeenAt: 0 },
+      ]),
+    ).toBeNull();
+    expect(
+      preferredHandoffTargetForRecentApps(
+        pickHandoffTargets(["claude"]),
+        [{ name: "Cursor", activeMinutes: 9, frameCount: 90, lastSeenAt: 0 }],
+      ),
+    ).toBeNull();
   });
 });
 

@@ -73,6 +73,7 @@ export type FirstRunEmptyReason =
 export type FirstRunCapturedApp = {
   name: string;
   frameCount: number;
+  activeMinutes?: number;
   lastSeenAt: number;
 };
 
@@ -100,6 +101,8 @@ export type FirstRunLearningState = {
    * dock while the summary conversation remains usable underneath it.
    */
   summaryOpenedAt: string | null;
+  /** Set only after /notify accepts the one-shot ready notification. */
+  notificationSentAt: string | null;
   emptyReason: FirstRunEmptyReason | null;
   /**
    * Set when a window is settled by rehydration rather than by the ceiling
@@ -193,6 +196,7 @@ const EMPTY_STATE: FirstRunLearningState = {
   seededAt: null,
   chatId: null,
   summaryOpenedAt: null,
+  notificationSentAt: null,
   emptyReason: null,
   pendingEmptyReport: false,
   lateRetryUsed: false,
@@ -309,6 +313,7 @@ export function capturedAppsFrom(
     .map((app) => ({
       name: app.name.trim(),
       frameCount: Number.isFinite(app.frame_count) ? Number(app.frame_count) : 0,
+      activeMinutes: Number.isFinite(app.minutes) ? Number(app.minutes) : 0,
       lastSeenAt: now,
     }))
     .sort((left, right) => right.frameCount - left.frameCount)
@@ -628,6 +633,10 @@ function normalize(value: unknown): FirstRunLearningState {
           typeof state.summaryOpenedAt === "string"
             ? state.summaryOpenedAt
             : null,
+        notificationSentAt:
+          typeof state.notificationSentAt === "string"
+            ? state.notificationSentAt
+            : null,
         emptyReason: null,
         pendingEmptyReport: false,
         lateRetryUsed: state.lateRetryUsed === true,
@@ -662,6 +671,10 @@ function normalize(value: unknown): FirstRunLearningState {
     summaryOpenedAt:
       typeof state.summaryOpenedAt === "string"
         ? state.summaryOpenedAt
+        : null,
+    notificationSentAt:
+      typeof state.notificationSentAt === "string"
+        ? state.notificationSentAt
         : null,
     emptyReason: state.emptyReason ?? null,
     pendingEmptyReport: state.pendingEmptyReport === true,
@@ -764,6 +777,21 @@ export function markLearningSummaryOpened(
   return writeLearningWindow({ ...current, summaryOpenedAt: openedAt });
 }
 
+/**
+ * Latch the ready notification after the local app server accepts it.
+ *
+ * The /notify payload also has a deterministic id, which closes the tiny race
+ * between two mounted Home windows. This persisted latch prevents fresh
+ * requests after reload and lets a failed request retry on the next mount.
+ */
+export function markLearningNotificationSent(
+  sentAt = new Date().toISOString(),
+): FirstRunLearningState {
+  const current = readLearningWindow();
+  if (current.phase !== "ready" || !current.chatId) return current;
+  return writeLearningWindow({ ...current, notificationSentAt: sentAt });
+}
+
 export function markLearningEmpty(
   reason: FirstRunEmptyReason,
 ): FirstRunLearningState {
@@ -807,6 +835,7 @@ export function markLearningDone(): FirstRunLearningState {
  * already-cleared storage and reaches the same result.
  */
 export const LEARNING_WINDOW_RESET_EVENT = "first-run-learning-window-reset";
+export const LEARNING_SUMMARY_OPENED_EVENT = "first-run-summary-opened";
 
 export function resetLearningWindow(): void {
   if (typeof window === "undefined") return;

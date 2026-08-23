@@ -26,6 +26,15 @@ import { foregroundAfterOAuth } from "@/lib/connections/foreground-oauth";
 import { settingsSectionFromDeepLink } from "@/lib/utils/settings-deep-link";
 import posthog from "posthog-js";
 import { handleExternalDeepLink } from "@/lib/external-deeplink";
+import {
+  handoffTargetById,
+  performAgentHandoff,
+} from "@/lib/first-run/agent-handoff";
+import {
+  LEARNING_SUMMARY_OPENED_EVENT,
+  markLearningSummaryOpened,
+  readLearningWindow,
+} from "@/lib/first-run/learning-window";
 
 const DEEPLINK_RECENT_TTL_MS = 1_000;
 const activeDeepLinks = new Set<string>();
@@ -81,6 +90,71 @@ export function DeeplinkHandler() {
     // and the custom Tauri event from single-instance handoff.
     const processDeepLinkUrl = async (url: string) => {
       const parsedUrl = new URL(url);
+
+      if (
+        parsedUrl.host === "first-run-summary" ||
+        parsedUrl.pathname === "first-run-summary"
+      ) {
+        const learning = readLearningWindow();
+        if (learning.phase !== "ready" || !learning.chatId) return;
+        await commands.showWindowActivated({ Home: { page: "home" } });
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        await emit("chat-load-conversation", {
+          conversationId: learning.chatId,
+          targetWindow: "home",
+        });
+        markLearningSummaryOpened();
+        await emit(LEARNING_SUMMARY_OPENED_EVENT);
+        posthog.capture("first_run_summary_opened", {
+          source: "notification",
+        });
+        return;
+      }
+
+      if (
+        parsedUrl.host === "first-run-agent" ||
+        parsedUrl.pathname === "first-run-agent"
+      ) {
+        const target = handoffTargetById(parsedUrl.searchParams.get("target"));
+        if (!target) return;
+        await commands.showWindowActivated({ Home: { page: "home" } });
+        const result = await performAgentHandoff(target, {
+          copyText: async (text) => {
+            const copied = await commands.copyTextToClipboard(text);
+            if (copied.status === "error") throw new Error(copied.error);
+          },
+          openUrl: async (targetUrl) => {
+            const { openUrl } = await import("@tauri-apps/plugin-opener");
+            await openUrl(targetUrl);
+          },
+        });
+        if (!result.copied) {
+          posthog.capture("first_run_agent_handoff_failed", {
+            agent: target.id,
+            stage: "clipboard",
+            source: "notification",
+          });
+        }
+        if (result.failedStage) {
+          posthog.capture("first_run_agent_handoff_failed", {
+            agent: target.id,
+            stage: result.failedStage,
+            source: "notification",
+          });
+        }
+        if (result.prefilled || result.copied) {
+          posthog.capture("first_run_agent_handoff_clicked", {
+            agent: target.id,
+            opened: result.launched,
+            prefilled: result.prefilled,
+            replayed: result.replayed,
+            copy_only: !result.prefilled,
+            clipboard_copied: result.copied,
+            source: "notification",
+          });
+        }
+        return;
+      }
 
       if (
         parsedUrl.host === "database-recovery" ||

@@ -584,8 +584,7 @@ pub(crate) fn dispatch_notification_action(json: String) {
                 if is_meeting_deeplink(&url) {
                     emit_meeting_note_route_with_retries(&app_clone, &url);
                 } else {
-                    std::thread::sleep(std::time::Duration::from_millis(150));
-                    let _ = app_clone.emit("deep-link-received", url);
+                    emit_notification_deeplink(&app_clone, url);
                 }
             } else {
                 use tauri_plugin_opener::OpenerExt;
@@ -698,8 +697,7 @@ pub(crate) fn dispatch_notification_action(json: String) {
                 if is_meeting_deeplink(&url) {
                     emit_meeting_note_route_with_retries(&app_clone, &url);
                 } else {
-                    std::thread::sleep(std::time::Duration::from_millis(150));
-                    let _ = app_clone.emit("deep-link-received", url);
+                    emit_notification_deeplink(&app_clone, url);
                 }
             } else {
                 // External URL — hand off to the opener plugin.
@@ -808,6 +806,12 @@ fn is_activity_deeplink(url: &str) -> bool {
     url == "screenpipe://activity" || url.starts_with("screenpipe://activity?")
 }
 
+fn is_first_run_deeplink(url: &str) -> bool {
+    url == "screenpipe://first-run-summary"
+        || url.starts_with("screenpipe://first-run-summary?")
+        || url.starts_with("screenpipe://first-run-agent?")
+}
+
 fn notification_deeplink_target(url: &str) -> ShowRewindWindow {
     if is_meeting_deeplink(url) {
         ShowRewindWindow::Home {
@@ -817,8 +821,31 @@ fn notification_deeplink_target(url: &str) -> ShowRewindWindow {
         ShowRewindWindow::Home {
             page: Some("activity".to_string()),
         }
+    } else if is_first_run_deeplink(url) {
+        ShowRewindWindow::Home {
+            page: Some("home".to_string()),
+        }
     } else {
         ShowRewindWindow::Main
+    }
+}
+
+fn emit_notification_deeplink(app: &tauri::AppHandle, url: String) {
+    if !is_first_run_deeplink(&url) {
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        let _ = app.emit("deep-link-received", url);
+        return;
+    }
+
+    // A ready-summary notification is specifically meant to recover a user
+    // from another app. On a cold launch the Home webview may not have mounted
+    // its deep-link listener at 150ms yet. Retry inside its one-second JS
+    // dedupe window: whichever delivery first reaches the handler wins, while
+    // the others are ignored there (and an in-flight Cursor handoff remains
+    // protected by the active-link guard for its full replay delay).
+    for delay_ms in [150_u64, 350, 400] {
+        std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+        let _ = app.emit("deep-link-received", url.clone());
     }
 }
 
@@ -1258,6 +1285,20 @@ mod tests {
             crate::window::ShowRewindWindow::Home { page: Some(page) }
                 if page == "activity"
         ));
+    }
+
+    #[test]
+    fn first_run_notification_deeplinks_target_home() {
+        for url in [
+            "screenpipe://first-run-summary",
+            "screenpipe://first-run-agent?target=claude",
+        ] {
+            assert!(matches!(
+                notification_deeplink_target(url),
+                crate::window::ShowRewindWindow::Home { page: Some(page) }
+                    if page == "home"
+            ));
+        }
     }
 
     #[test]
