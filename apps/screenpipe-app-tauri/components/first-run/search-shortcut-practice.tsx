@@ -14,8 +14,8 @@ import { formatShortcutDisplay } from "@/lib/chat-utils";
 import { useSettings } from "@/lib/hooks/use-settings";
 import { openSettingsWindow } from "@/lib/utils/window";
 
-export const FIRST_RUN_CHAT_SHORTCUT_STORAGE_KEY =
-  "screenpipe.first-run.chat-shortcut.v1";
+export const FIRST_RUN_SEARCH_SHORTCUT_STORAGE_KEY =
+  "screenpipe.first-run.search-shortcut.v1";
 
 const PRACTICE_TIMEOUT_MS = 90_000;
 const SNOOZE_MS = 24 * 60 * 60 * 1_000;
@@ -29,9 +29,8 @@ type StoredPractice = {
 
 type PracticePhase = "hidden" | "prompt" | "waiting" | "complete";
 type ListenerState = "connecting" | "ready" | "failed";
-type PracticeIssue = "already_hidden" | "failed" | "timeout" | "listener";
-type ChatShortcutOutcome = {
-  action: "shown" | "hidden";
+type PracticeIssue = "failed" | "timeout" | "listener";
+type SearchShortcutOutcome = {
   success: boolean;
 };
 
@@ -41,7 +40,7 @@ function readStoredPractice(): StoredPractice {
   }
   try {
     const raw = window.localStorage.getItem(
-      FIRST_RUN_CHAT_SHORTCUT_STORAGE_KEY,
+      FIRST_RUN_SEARCH_SHORTCUT_STORAGE_KEY,
     );
     if (!raw) return { status: "available", exposureCount: 0 };
     const parsed = JSON.parse(raw) as Partial<StoredPractice>;
@@ -70,7 +69,7 @@ function readStoredPractice(): StoredPractice {
 function writeStoredPractice(value: StoredPractice): void {
   try {
     window.localStorage.setItem(
-      FIRST_RUN_CHAT_SHORTCUT_STORAGE_KEY,
+      FIRST_RUN_SEARCH_SHORTCUT_STORAGE_KEY,
       JSON.stringify(value),
     );
   } catch {
@@ -96,7 +95,7 @@ function initialPhase(now = Date.now()): PracticePhase {
   return "prompt";
 }
 
-export function dismissFirstRunChatShortcutFromParent(): void {
+export function dismissFirstRunSearchShortcutFromParent(): void {
   const stored = readStoredPractice();
   if (stored.status === "completed" || stored.status === "dismissed") return;
   writeStoredPractice({
@@ -106,13 +105,13 @@ export function dismissFirstRunChatShortcutFromParent(): void {
   posthog.capture("shortcut_teach_dismissed", {
     schema_version: 1,
     surface: "first_run_summary",
-    shortcut_name: "show_chat",
+    shortcut_name: "show_search",
     dismissal_source: "parent_tips",
     final_dismissal: true,
   });
 }
 
-export function FirstRunChatShortcutPractice() {
+export function FirstRunSearchShortcutPractice() {
   const { settings, isSettingsLoaded } = useSettings();
   const [phase, setPhase] = React.useState<PracticePhase>(() => initialPhase());
   const [listenerState, setListenerState] =
@@ -129,9 +128,9 @@ export function FirstRunChatShortcutPractice() {
 
   const disabledShortcuts = settings.disabledShortcuts ?? [];
   const disabled =
-    !settings.showChatShortcut ||
-    disabledShortcuts.includes("showChatShortcut") ||
-    disabledShortcuts.includes("show_chat");
+    !settings.searchShortcut ||
+    disabledShortcuts.includes("searchShortcut") ||
+    disabledShortcuts.includes("search");
   const isMac =
     settings.platform === "macos" ||
     (settings.platform === "unknown" &&
@@ -139,7 +138,7 @@ export function FirstRunChatShortcutPractice() {
       /Mac/.test(navigator.platform));
   const shortcut = disabled
     ? ""
-    : formatShortcutDisplay(settings.showChatShortcut, isMac);
+    : formatShortcutDisplay(settings.searchShortcut, isMac);
 
   React.useEffect(() => {
     if (
@@ -156,44 +155,25 @@ export function FirstRunChatShortcutPractice() {
     posthog.capture("shortcut_teach_shown", {
       schema_version: 1,
       surface: "first_run_summary",
-      shortcut_name: "show_chat",
+      shortcut_name: "show_search",
       exposure_number: Math.min(exposureCount, 2),
     });
   }, [isSettingsLoaded, phase, shortcut]);
 
   React.useEffect(() => {
-    if (
-      !shouldInstallListenerRef.current ||
-      !shortcut ||
-      !isSettingsLoaded
-    )
+    if (!shouldInstallListenerRef.current || !shortcut || !isSettingsLoaded)
       return;
     let unlisten: (() => void) | undefined;
     let unmounted = false;
     setListenerState("connecting");
 
-    void listen<ChatShortcutOutcome>("shortcut-show-chat", (event) => {
+    void listen<SearchShortcutOutcome>("shortcut-show-search", (event) => {
       if (
         phaseRef.current === "hidden" ||
         phaseRef.current === "complete" ||
         completionHandledRef.current
       )
         return;
-
-      if (event.payload.action === "hidden") {
-        practiceStartedAtRef.current = null;
-        setIssue(event.payload.success ? "already_hidden" : "failed");
-        setPhase("prompt");
-        if (!event.payload.success) {
-          posthog.capture("shortcut_practice_failed", {
-            schema_version: 1,
-            surface: "first_run_summary",
-            shortcut_name: "show_chat",
-            reason: "window_not_hidden",
-          });
-        }
-        return;
-      }
 
       if (!event.payload.success) {
         practiceStartedAtRef.current = null;
@@ -202,7 +182,7 @@ export function FirstRunChatShortcutPractice() {
         posthog.capture("shortcut_practice_failed", {
           schema_version: 1,
           surface: "first_run_summary",
-          shortcut_name: "show_chat",
+          shortcut_name: "show_search",
           reason: "window_not_shown",
         });
         return;
@@ -221,7 +201,7 @@ export function FirstRunChatShortcutPractice() {
       posthog.capture("shortcut_practice_completed", {
         schema_version: 1,
         surface: "first_run_summary",
-        shortcut_name: "show_chat",
+        shortcut_name: "show_search",
         practice_started: practiceStartedAtRef.current !== null,
         seconds_to_practice_bucket:
           elapsedMs === null
@@ -261,7 +241,7 @@ export function FirstRunChatShortcutPractice() {
       posthog.capture("shortcut_practice_timed_out", {
         schema_version: 1,
         surface: "first_run_summary",
-        shortcut_name: "show_chat",
+        shortcut_name: "show_search",
       });
       setPhase("prompt");
     }, PRACTICE_TIMEOUT_MS);
@@ -281,14 +261,14 @@ export function FirstRunChatShortcutPractice() {
       posthog.capture("shortcut_practice_acknowledged", {
         schema_version: 1,
         surface: "first_run_summary",
-        shortcut_name: "show_chat",
+        shortcut_name: "show_search",
       });
       setPhase("hidden");
     };
 
     return (
       <div
-        data-testid="first-run-chat-shortcut-complete"
+        data-testid="first-run-search-shortcut-complete"
         aria-live="polite"
         className="flex items-center gap-3 border-b border-border px-4 py-3"
       >
@@ -300,7 +280,7 @@ export function FirstRunChatShortcutPractice() {
             shortcut learned
           </p>
           <p className="mt-0.5 text-[10px] leading-relaxed text-muted-foreground">
-            open chat from anywhere with {shortcut}. this lesson will not show
+            open search from anywhere with {shortcut}. this lesson will not show
             again.
           </p>
         </div>
@@ -308,7 +288,7 @@ export function FirstRunChatShortcutPractice() {
           type="button"
           size="sm"
           variant="ghost"
-          data-testid="first-run-chat-shortcut-done"
+          data-testid="first-run-search-shortcut-done"
           className="h-7 px-2 text-[9px]"
           onClick={acknowledge}
         >
@@ -326,7 +306,7 @@ export function FirstRunChatShortcutPractice() {
     posthog.capture("shortcut_practice_started", {
       schema_version: 1,
       surface: "first_run_summary",
-      shortcut_name: "show_chat",
+      shortcut_name: "show_search",
     });
   };
 
@@ -341,26 +321,24 @@ export function FirstRunChatShortcutPractice() {
     posthog.capture("shortcut_teach_dismissed", {
       schema_version: 1,
       surface: "first_run_summary",
-      shortcut_name: "show_chat",
+      shortcut_name: "show_search",
       final_dismissal: finalDismissal,
     });
     setPhase("hidden");
   };
 
   const issueCopy =
-    issue === "already_hidden"
-      ? "chat was already open and is now hidden. press the shortcut again."
-      : issue === "timeout"
-        ? "nothing happened. check the shortcut or try again."
-        : issue === "listener"
-          ? "shortcut practice is unavailable in this window."
-          : issue === "failed"
-            ? "chat did not respond. check the shortcut and try again."
-            : null;
+    issue === "timeout"
+      ? "nothing happened. check the shortcut or try again."
+      : issue === "listener"
+        ? "shortcut practice is unavailable in this window."
+        : issue === "failed"
+          ? "search did not open. check the shortcut and try again."
+          : null;
 
   return (
     <div
-      data-testid="first-run-chat-shortcut-practice"
+      data-testid="first-run-search-shortcut-practice"
       className="flex flex-col gap-3 border-b border-border px-4 py-3 sm:flex-row sm:items-center"
     >
       <span className="flex h-8 w-8 shrink-0 items-center justify-center border border-border text-foreground">
@@ -368,7 +346,7 @@ export function FirstRunChatShortcutPractice() {
       </span>
       <div className="min-w-0 flex-1">
         <p className="font-mono text-xs font-semibold lowercase text-foreground">
-          open chat from anywhere
+          find anything from anywhere
         </p>
         <p className="mt-0.5 text-[10px] leading-relaxed text-muted-foreground">
           {phase === "waiting" ? "press" : "use"}{" "}
@@ -382,21 +360,19 @@ export function FirstRunChatShortcutPractice() {
         {issueCopy ? (
           <div className="mt-1 flex items-center gap-2">
             <p
-              data-testid="first-run-chat-shortcut-issue"
+              data-testid="first-run-search-shortcut-issue"
               role="status"
               className="text-[9px] leading-relaxed text-muted-foreground"
             >
               {issueCopy}
             </p>
-            {issue !== "already_hidden" ? (
-              <button
-                type="button"
-                className="shrink-0 font-mono text-[9px] underline underline-offset-2"
-                onClick={() => void openSettingsWindow("shortcuts")}
-              >
-                change shortcut
-              </button>
-            ) : null}
+            <button
+              type="button"
+              className="shrink-0 font-mono text-[9px] underline underline-offset-2"
+              onClick={() => void openSettingsWindow("shortcuts")}
+            >
+              change shortcut
+            </button>
           </div>
         ) : null}
       </div>
@@ -406,7 +382,7 @@ export function FirstRunChatShortcutPractice() {
             type="button"
             size="sm"
             variant="outline"
-            data-testid="first-run-chat-shortcut-start"
+            data-testid="first-run-search-shortcut-start"
             className="h-7 px-2 text-[9px]"
             onClick={startPractice}
             disabled={listenerState !== "ready"}
@@ -419,7 +395,7 @@ export function FirstRunChatShortcutPractice() {
           </Button>
         ) : (
           <span
-            data-testid="first-run-chat-shortcut-waiting"
+            data-testid="first-run-search-shortcut-waiting"
             role="status"
             className="px-2 font-mono text-[9px] uppercase tracking-[0.12em] text-muted-foreground"
           >
@@ -430,7 +406,7 @@ export function FirstRunChatShortcutPractice() {
           type="button"
           size="sm"
           variant="ghost"
-          data-testid="first-run-chat-shortcut-snooze"
+          data-testid="first-run-search-shortcut-snooze"
           className="h-7 px-2 text-[9px]"
           onClick={snooze}
         >

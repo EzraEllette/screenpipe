@@ -14,12 +14,11 @@ import {
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
-  FIRST_RUN_CHAT_SHORTCUT_STORAGE_KEY,
-  FirstRunChatShortcutPractice,
-} from "./chat-shortcut-practice";
+  FIRST_RUN_SEARCH_SHORTCUT_STORAGE_KEY,
+  FirstRunSearchShortcutPractice,
+} from "./search-shortcut-practice";
 
 type ShortcutOutcome = {
-  action: "shown" | "hidden";
   success: boolean;
 };
 
@@ -31,7 +30,7 @@ const mocks = vi.hoisted(() => ({
   listenerShouldFail: false,
   isSettingsLoaded: true,
   settings: {
-    showChatShortcut: "Control+Super+L",
+    searchShortcut: "Control+Super+K",
     disabledShortcuts: [] as string[],
     platform: "macos",
   },
@@ -71,7 +70,7 @@ const emitOutcome = (outcome: ShortcutOutcome) => {
 
 const waitUntilReady = async () => {
   await waitFor(() =>
-    expect(screen.getByTestId("first-run-chat-shortcut-start")).toBeEnabled(),
+    expect(screen.getByTestId("first-run-search-shortcut-start")).toBeEnabled(),
   );
 };
 
@@ -81,43 +80,45 @@ beforeEach(() => {
   mocks.listener = null;
   mocks.listenerShouldFail = false;
   mocks.isSettingsLoaded = true;
-  mocks.settings.showChatShortcut = "Control+Super+L";
+  mocks.settings.searchShortcut = "Control+Super+K";
   mocks.settings.disabledShortcuts = [];
   mocks.settings.platform = "macos";
 });
 
-describe("first-run chat shortcut practice", () => {
+describe("first-run search shortcut practice", () => {
   it("waits for loaded settings and a registered listener", async () => {
     mocks.isSettingsLoaded = false;
-    const view = render(<FirstRunChatShortcutPractice />);
+    const view = render(<FirstRunSearchShortcutPractice />);
 
     expect(mocks.capture).not.toHaveBeenCalled();
-    expect(screen.getByTestId("first-run-chat-shortcut-start")).toBeDisabled();
+    expect(
+      screen.getByTestId("first-run-search-shortcut-start"),
+    ).toBeDisabled();
 
     mocks.isSettingsLoaded = true;
-    view.rerender(<FirstRunChatShortcutPractice />);
+    view.rerender(<FirstRunSearchShortcutPractice />);
     await waitUntilReady();
-    expect(screen.getByText("⌘⌃L")).toBeInTheDocument();
+    expect(screen.getByText("⌘⌃K")).toBeInTheDocument();
     expect(mocks.capture).toHaveBeenCalledWith("shortcut_teach_shown", {
       schema_version: 1,
       surface: "first_run_summary",
-      shortcut_name: "show_chat",
+      shortcut_name: "show_search",
       exposure_number: 1,
     });
   });
 
-  it("completes only after native code verifies Chat was shown", async () => {
-    render(<FirstRunChatShortcutPractice />);
+  it("completes only after native code verifies Search was shown", async () => {
+    render(<FirstRunSearchShortcutPractice />);
     await waitUntilReady();
-    fireEvent.click(screen.getByTestId("first-run-chat-shortcut-start"));
-    emitOutcome({ action: "shown", success: true });
+    fireEvent.click(screen.getByTestId("first-run-search-shortcut-start"));
+    emitOutcome({ success: true });
 
     expect(
-      screen.getByTestId("first-run-chat-shortcut-complete"),
+      screen.getByTestId("first-run-search-shortcut-complete"),
     ).toHaveTextContent("shortcut learned");
     expect(
       JSON.parse(
-        window.localStorage.getItem(FIRST_RUN_CHAT_SHORTCUT_STORAGE_KEY) ||
+        window.localStorage.getItem(FIRST_RUN_SEARCH_SHORTCUT_STORAGE_KEY) ||
           "{}",
       ),
     ).toMatchObject({
@@ -128,63 +129,31 @@ describe("first-run chat shortcut practice", () => {
     expect(mocks.capture).toHaveBeenCalledWith(
       "shortcut_practice_completed",
       expect.objectContaining({
-        shortcut_name: "show_chat",
+        shortcut_name: "show_search",
         practice_started: true,
       }),
     );
   });
 
-  it("does not claim success when the shortcut hid an open Chat", async () => {
-    render(<FirstRunChatShortcutPractice />);
+  it("offers shortcut settings when Search failed to open", async () => {
+    render(<FirstRunSearchShortcutPractice />);
     await waitUntilReady();
-    fireEvent.click(screen.getByTestId("first-run-chat-shortcut-start"));
-    emitOutcome({ action: "hidden", success: true });
+    fireEvent.click(screen.getByTestId("first-run-search-shortcut-start"));
+    emitOutcome({ success: false });
 
     expect(
-      screen.queryByTestId("first-run-chat-shortcut-complete"),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.getByTestId("first-run-chat-shortcut-issue"),
-    ).toHaveTextContent("chat was already open");
-    expect(screen.getByTestId("first-run-chat-shortcut-start")).toBeEnabled();
-  });
-
-  it("shows recovery when an already-open Chat could not be hidden", async () => {
-    render(<FirstRunChatShortcutPractice />);
-    await waitUntilReady();
-    fireEvent.click(screen.getByTestId("first-run-chat-shortcut-start"));
-    emitOutcome({ action: "hidden", success: false });
-
-    expect(
-      screen.getByTestId("first-run-chat-shortcut-issue"),
-    ).toHaveTextContent("chat did not respond");
-    expect(mocks.capture).toHaveBeenCalledWith("shortcut_practice_failed", {
-      schema_version: 1,
-      surface: "first_run_summary",
-      shortcut_name: "show_chat",
-      reason: "window_not_hidden",
-    });
-  });
-
-  it("offers shortcut settings when Chat failed to open", async () => {
-    render(<FirstRunChatShortcutPractice />);
-    await waitUntilReady();
-    fireEvent.click(screen.getByTestId("first-run-chat-shortcut-start"));
-    emitOutcome({ action: "shown", success: false });
-
-    expect(
-      screen.getByTestId("first-run-chat-shortcut-issue"),
-    ).toHaveTextContent("chat did not respond");
+      screen.getByTestId("first-run-search-shortcut-issue"),
+    ).toHaveTextContent("search did not open");
     fireEvent.click(screen.getByRole("button", { name: "change shortcut" }));
     expect(mocks.openSettingsWindow).toHaveBeenCalledWith("shortcuts");
   });
 
   it("records completion once when a held shortcut repeats", async () => {
-    render(<FirstRunChatShortcutPractice />);
+    render(<FirstRunSearchShortcutPractice />);
     await waitUntilReady();
-    fireEvent.click(screen.getByTestId("first-run-chat-shortcut-start"));
-    emitOutcome({ action: "shown", success: true });
-    emitOutcome({ action: "shown", success: true });
+    fireEvent.click(screen.getByTestId("first-run-search-shortcut-start"));
+    emitOutcome({ success: true });
+    emitOutcome({ success: true });
 
     expect(
       mocks.capture.mock.calls.filter(
@@ -194,25 +163,25 @@ describe("first-run chat shortcut practice", () => {
   });
 
   it("keeps confirmation until the user returns and acknowledges it", async () => {
-    const first = render(<FirstRunChatShortcutPractice />);
+    const first = render(<FirstRunSearchShortcutPractice />);
     await waitUntilReady();
-    emitOutcome({ action: "shown", success: true });
+    emitOutcome({ success: true });
     expect(
-      screen.getByTestId("first-run-chat-shortcut-complete"),
+      screen.getByTestId("first-run-search-shortcut-complete"),
     ).toBeInTheDocument();
     first.unmount();
 
-    render(<FirstRunChatShortcutPractice />);
+    render(<FirstRunSearchShortcutPractice />);
     expect(
-      screen.getByTestId("first-run-chat-shortcut-complete"),
+      screen.getByTestId("first-run-search-shortcut-complete"),
     ).toBeInTheDocument();
-    fireEvent.click(screen.getByTestId("first-run-chat-shortcut-done"));
+    fireEvent.click(screen.getByTestId("first-run-search-shortcut-done"));
     expect(
-      screen.queryByTestId("first-run-chat-shortcut-complete"),
+      screen.queryByTestId("first-run-search-shortcut-complete"),
     ).not.toBeInTheDocument();
     expect(
       JSON.parse(
-        window.localStorage.getItem(FIRST_RUN_CHAT_SHORTCUT_STORAGE_KEY) ||
+        window.localStorage.getItem(FIRST_RUN_SEARCH_SHORTCUT_STORAGE_KEY) ||
           "{}",
       ),
     ).toMatchObject({ status: "completed", acknowledged: true });
@@ -220,46 +189,48 @@ describe("first-run chat shortcut practice", () => {
 
   it("shows recovery when the native listener is unavailable", async () => {
     mocks.listenerShouldFail = true;
-    render(<FirstRunChatShortcutPractice />);
+    render(<FirstRunSearchShortcutPractice />);
 
     await waitFor(() =>
       expect(
-        screen.getByTestId("first-run-chat-shortcut-issue"),
+        screen.getByTestId("first-run-search-shortcut-issue"),
       ).toHaveTextContent("practice is unavailable"),
     );
-    expect(screen.getByTestId("first-run-chat-shortcut-start")).toBeDisabled();
+    expect(
+      screen.getByTestId("first-run-search-shortcut-start"),
+    ).toBeDisabled();
   });
 
   it("honors not now and does not nag again during the snooze", async () => {
-    const first = render(<FirstRunChatShortcutPractice />);
+    const first = render(<FirstRunSearchShortcutPractice />);
     await waitUntilReady();
-    fireEvent.click(screen.getByTestId("first-run-chat-shortcut-snooze"));
+    fireEvent.click(screen.getByTestId("first-run-search-shortcut-snooze"));
     expect(
-      screen.queryByTestId("first-run-chat-shortcut-practice"),
+      screen.queryByTestId("first-run-search-shortcut-practice"),
     ).not.toBeInTheDocument();
     first.unmount();
 
-    render(<FirstRunChatShortcutPractice />);
+    render(<FirstRunSearchShortcutPractice />);
     expect(
-      screen.queryByTestId("first-run-chat-shortcut-practice"),
+      screen.queryByTestId("first-run-search-shortcut-practice"),
     ).not.toBeInTheDocument();
   });
 
-  it("stays absent when Chat shortcuts are disabled", () => {
-    mocks.settings.disabledShortcuts = ["showChatShortcut"];
-    render(<FirstRunChatShortcutPractice />);
+  it("stays absent when Search shortcuts are disabled", () => {
+    mocks.settings.disabledShortcuts = ["searchShortcut"];
+    render(<FirstRunSearchShortcutPractice />);
     expect(
-      screen.queryByTestId("first-run-chat-shortcut-practice"),
+      screen.queryByTestId("first-run-search-shortcut-practice"),
     ).not.toBeInTheDocument();
     expect(mocks.capture).not.toHaveBeenCalled();
   });
 
   it("keeps telemetry content-free", async () => {
-    mocks.settings.showChatShortcut = "Private+Secret+L";
-    render(<FirstRunChatShortcutPractice />);
+    mocks.settings.searchShortcut = "Private+Secret+K";
+    render(<FirstRunSearchShortcutPractice />);
     await waitUntilReady();
-    fireEvent.click(screen.getByTestId("first-run-chat-shortcut-start"));
-    emitOutcome({ action: "shown", success: true });
+    fireEvent.click(screen.getByTestId("first-run-search-shortcut-start"));
+    emitOutcome({ success: true });
 
     const serialized = JSON.stringify(mocks.capture.mock.calls);
     expect(serialized).not.toContain("Private");

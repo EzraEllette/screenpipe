@@ -20,47 +20,33 @@ use crate::store::{get_store, SettingsStore};
 use crate::window::ShowRewindWindow;
 
 #[derive(Clone, Serialize)]
-struct ChatShortcutOutcome {
-    action: &'static str,
+struct SearchShortcutOutcome {
     success: bool,
 }
 
-fn chat_transition_succeeded(action: &str, visible: bool) -> bool {
-    match action {
-        "shown" => visible,
-        "hidden" => !visible,
-        _ => false,
-    }
+fn search_transition_succeeded(visible: bool, focused: bool) -> bool {
+    visible && focused
 }
 
-fn emit_chat_shortcut_outcome_after_settle(app: &AppHandle, action: &'static str) {
+fn emit_search_shortcut_outcome_after_settle(app: &AppHandle) {
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
         let app_for_check = app.clone();
         if let Err(error) = app.run_on_main_thread(move || {
-            #[cfg(target_os = "macos")]
-            let visible = {
-                use tauri_nspanel::ManagerExt;
-                app_for_check
-                    .get_webview_panel("chat")
-                    .map(|panel| panel.is_visible())
-                    .unwrap_or(false)
-            };
-
-            #[cfg(not(target_os = "macos"))]
-            let visible = app_for_check
-                .get_webview_window("chat")
-                .and_then(|window| window.is_visible().ok())
-                .unwrap_or(false);
-
-            let success = chat_transition_succeeded(action, visible);
-            let _ = app_for_check.emit(
-                "shortcut-show-chat",
-                ChatShortcutOutcome { action, success },
-            );
+            let (visible, focused) = app_for_check
+                .get_webview_window("search")
+                .map(|window| {
+                    (
+                        window.is_visible().unwrap_or(false),
+                        window.is_focused().unwrap_or(false),
+                    )
+                })
+                .unwrap_or((false, false));
+            let success = search_transition_succeeded(visible, focused);
+            let _ = app_for_check.emit("shortcut-show-search", SearchShortcutOutcome { success });
         }) {
-            error!("failed to verify chat shortcut outcome: {}", error);
+            error!("failed to verify search shortcut outcome: {}", error);
         }
     });
 }
@@ -348,6 +334,7 @@ async fn apply_shortcuts(app: &AppHandle, config: &ShortcutConfig) -> Result<(),
             let _ = app.run_on_main_thread(move || {
                 let app = &app_for_closure;
                 info!("show chat shortcut triggered");
+                let _ = app.emit("shortcut-show-chat", ());
                 if let Some(_window) = app.get_webview_window("chat") {
                     #[cfg(target_os = "macos")]
                     {
@@ -355,7 +342,6 @@ async fn apply_shortcuts(app: &AppHandle, config: &ShortcutConfig) -> Result<(),
                         if let Ok(panel) = app.get_webview_panel("chat") {
                             if panel.is_visible() {
                                 panel.order_out(None);
-                                emit_chat_shortcut_outcome_after_settle(app, "hidden");
                                 return;
                             }
                         }
@@ -364,26 +350,11 @@ async fn apply_shortcuts(app: &AppHandle, config: &ShortcutConfig) -> Result<(),
                     {
                         if _window.is_visible().unwrap_or(false) {
                             let _ = _window.hide();
-                            emit_chat_shortcut_outcome_after_settle(app, "hidden");
                             return;
                         }
                     }
                 }
-                #[cfg(target_os = "macos")]
-                let existed = app.get_webview_window("chat").is_some();
-                match ShowRewindWindow::Chat.show(app) {
-                    Ok(_) => {
-                        // A newly created macOS Chat panel starts hidden so it can
-                        // be configured safely. Reuse the normal existing-window
-                        // path once to bring that first panel to the foreground.
-                        #[cfg(target_os = "macos")]
-                        if !existed {
-                            let _ = ShowRewindWindow::Chat.show(app);
-                        }
-                    }
-                    Err(error) => error!("failed to show chat from shortcut: {}", error),
-                }
-                emit_chat_shortcut_outcome_after_settle(app, "shown");
+                let _ = ShowRewindWindow::Chat.show(app);
             });
         },
     )
@@ -396,7 +367,10 @@ async fn apply_shortcuts(app: &AppHandle, config: &ShortcutConfig) -> Result<(),
             let app = &app_for_closure;
             info!("search shortcut triggered");
             hide_main_window(app.clone());
-            let _ = ShowRewindWindow::Search { query: None }.show(app);
+            if let Err(error) = (ShowRewindWindow::Search { query: None }).show(app) {
+                error!("failed to show search from shortcut: {}", error);
+            }
+            emit_search_shortcut_outcome_after_settle(app);
         });
     })
     .await?;
@@ -503,14 +477,13 @@ pub fn parse_shortcut(shortcut_str: &str) -> Result<Shortcut, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::chat_transition_succeeded;
+    use super::search_transition_succeeded;
 
     #[test]
-    fn chat_shortcut_outcome_requires_the_requested_visibility() {
-        assert!(chat_transition_succeeded("shown", true));
-        assert!(!chat_transition_succeeded("shown", false));
-        assert!(chat_transition_succeeded("hidden", false));
-        assert!(!chat_transition_succeeded("hidden", true));
-        assert!(!chat_transition_succeeded("unknown", true));
+    fn search_shortcut_outcome_requires_visible_focused_search() {
+        assert!(search_transition_succeeded(true, true));
+        assert!(!search_transition_succeeded(true, false));
+        assert!(!search_transition_succeeded(false, true));
+        assert!(!search_transition_succeeded(false, false));
     }
 }

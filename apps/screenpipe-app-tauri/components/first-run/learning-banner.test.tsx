@@ -7,7 +7,7 @@ import React from "react";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { FirstRunLearningBanner } from "./learning-banner";
-import { FIRST_RUN_CHAT_SHORTCUT_STORAGE_KEY } from "./chat-shortcut-practice";
+import { FIRST_RUN_SEARCH_SHORTCUT_STORAGE_KEY } from "./search-shortcut-practice";
 import type { LearningWindowView } from "@/lib/first-run/use-learning-window";
 
 const mocks = vi.hoisted(() => ({
@@ -47,7 +47,7 @@ vi.mock("@/lib/hooks/use-settings", () => ({
   useSettings: () => ({
     isSettingsLoaded: true,
     settings: {
-      showChatShortcut: "Control+Super+L",
+      searchShortcut: "Control+Super+K",
       disabledShortcuts: [],
       platform: "macos",
     },
@@ -185,7 +185,7 @@ describe("first-run learning banner", () => {
 
     await waitFor(() =>
       expect(
-        screen.getByTestId("first-run-chat-shortcut-start"),
+        screen.getByTestId("first-run-search-shortcut-start"),
       ).toBeEnabled(),
     );
 
@@ -204,7 +204,7 @@ describe("first-run learning banner", () => {
     expect(dismiss).toHaveBeenCalledTimes(1);
     expect(
       JSON.parse(
-        window.localStorage.getItem(FIRST_RUN_CHAT_SHORTCUT_STORAGE_KEY) ||
+        window.localStorage.getItem(FIRST_RUN_SEARCH_SHORTCUT_STORAGE_KEY) ||
           "{}",
       ),
     ).toMatchObject({ status: "dismissed" });

@@ -22,9 +22,9 @@ import {
 } from "@/lib/first-run/use-learning-window";
 import { FirstRunNextSteps } from "@/components/first-run/next-steps";
 import {
-  dismissFirstRunChatShortcutFromParent,
-  FirstRunChatShortcutPractice,
-} from "@/components/first-run/chat-shortcut-practice";
+  dismissFirstRunSearchShortcutFromParent,
+  FirstRunSearchShortcutPractice,
+} from "@/components/first-run/search-shortcut-practice";
 import type { AgentHandoffTarget } from "@/lib/first-run/agent-handoff";
 
 function CapturedAppIcon({ app }: { app: FirstRunCapturedApp }) {
@@ -296,10 +296,10 @@ export function FirstRunLearningBanner(
           data-phase="ready"
           className="mx-auto mb-4 w-full max-w-3xl overflow-hidden border border-border bg-background"
         >
-          <FirstRunChatShortcutPractice />
+          <FirstRunSearchShortcutPractice />
           <FirstRunSetupDock
             onDismiss={() => {
-              dismissFirstRunChatShortcutFromParent();
+              dismissFirstRunSearchShortcutFromParent();
               dismiss();
             }}
             nextSteps={

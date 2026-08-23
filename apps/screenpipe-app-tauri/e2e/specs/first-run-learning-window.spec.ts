@@ -50,7 +50,7 @@ const seedFlags = E2E_SEED_FLAGS.split(",")
 const canRun = seedFlags.includes("onboarding");
 
 const LEARNING_STORAGE_KEY = "screenpipe.first-run.learning-window.v1";
-const CHAT_SHORTCUT_STORAGE_KEY = "screenpipe.first-run.chat-shortcut.v1";
+const SEARCH_SHORTCUT_STORAGE_KEY = "screenpipe.first-run.search-shortcut.v1";
 // The app's own E2E account hook (components/app-entitlement-gate.tsx), compiled
 // in only for e2e builds. Brain sits behind the account gate, and no seed flag
 // creates a signed-in user, so without this the section never renders.
@@ -349,7 +349,7 @@ const learningState = (over: Record<string, unknown> = {}) => ({
     writeSummaryConversation();
     await browser.execute((key: string) => {
       window.localStorage.removeItem(key);
-    }, CHAT_SHORTCUT_STORAGE_KEY);
+    }, SEARCH_SHORTCUT_STORAGE_KEY);
     await openHomeWith(
       learningState({
         phase: "ready",
@@ -394,7 +394,7 @@ const learningState = (over: Record<string, unknown> = {}) => ({
       await browser.execute(
         () =>
           !!document.querySelector(
-            '[data-testid="first-run-chat-shortcut-practice"]',
+            '[data-testid="first-run-search-shortcut-practice"]',
           ),
       ),
     ).toBe(true);
@@ -421,7 +421,7 @@ const learningState = (over: Record<string, unknown> = {}) => ({
     expect(existsSync(teachScreenshot)).toBe(true);
 
     await (
-      await browser.$('[data-testid="first-run-chat-shortcut-start"]')
+      await browser.$('[data-testid="first-run-search-shortcut-start"]')
     ).click();
     await browser.waitUntil(
       async () =>
@@ -429,7 +429,7 @@ const learningState = (over: Record<string, unknown> = {}) => ({
           await browser.execute(
             () =>
               !!document.querySelector(
-                '[data-testid="first-run-chat-shortcut-waiting"]',
+                '[data-testid="first-run-search-shortcut-waiting"]',
               ),
           ),
         ),
@@ -443,47 +443,14 @@ const learningState = (over: Record<string, unknown> = {}) => ({
     );
     expect(existsSync(waitingScreenshot)).toBe(true);
 
-    // A toggle that closes an already-visible Chat must not be mistaken for
-    // learning the shortcut. The lesson explains the result and asks for one
-    // more press, which will now show Chat.
-    await emitTauri("shortcut-show-chat", {
-      action: "hidden",
-      success: true,
-    });
-    await browser.waitUntil(
-      async () =>
-        (
-          (await browser.execute(
-            () =>
-              document.querySelector(
-                '[data-testid="first-run-chat-shortcut-issue"]',
-              )?.textContent ?? "",
-          )) as string
-        ).includes("already open"),
-      {
-        timeout: t(10_000),
-        timeoutMsg: "hidden Chat outcome was incorrectly accepted",
-      },
-    );
-    const hiddenScreenshot = await saveScreenshot(
-      "first-run-summary-shortcut-already-open",
-    );
-    expect(existsSync(hiddenScreenshot)).toBe(true);
-
-    await (
-      await browser.$('[data-testid="first-run-chat-shortcut-start"]')
-    ).click();
-    await emitTauri("shortcut-show-chat", {
-      action: "shown",
-      success: true,
-    });
+    await emitTauri("shortcut-show-search", { success: true });
     await browser.waitUntil(
       async () =>
         Boolean(
           await browser.execute(
             () =>
               !!document.querySelector(
-                '[data-testid="first-run-chat-shortcut-complete"]',
+                '[data-testid="first-run-search-shortcut-complete"]',
               ),
           ),
         ),
@@ -500,18 +467,18 @@ const learningState = (over: Record<string, unknown> = {}) => ({
       await browser.execute((key: string) => {
         const raw = window.localStorage.getItem(key);
         return raw ? JSON.parse(raw) : null;
-      }, CHAT_SHORTCUT_STORAGE_KEY),
+      }, SEARCH_SHORTCUT_STORAGE_KEY),
     ).toMatchObject({ status: "completed", acknowledged: false });
 
     const done = await browser.$(
-      '[data-testid="first-run-chat-shortcut-done"]',
+      '[data-testid="first-run-search-shortcut-done"]',
     );
     await done.click();
     expect(
       await browser.execute((key: string) => {
         const raw = window.localStorage.getItem(key);
         return raw ? JSON.parse(raw) : null;
-      }, CHAT_SHORTCUT_STORAGE_KEY),
+      }, SEARCH_SHORTCUT_STORAGE_KEY),
     ).toMatchObject({ status: "completed", acknowledged: true });
 
     const toggle = await browser.$('[data-testid="first-run-toggle-setup"]');
