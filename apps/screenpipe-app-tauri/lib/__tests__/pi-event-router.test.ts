@@ -205,6 +205,33 @@ describe("pi-event-router: status mirroring for backgrounded sessions", () => {
     expect(useChatStore.getState().sessions.A.status).toBe("streaming");
   });
 
+  it("stays streaming across an intermediate tool-boundary agent_end", async () => {
+    seed("A", {
+      status: "tool",
+      streamingMessageId: "assistant-1",
+      streamingText: "",
+      contentBlocks: [],
+      messages: [
+        {
+          id: "assistant-1",
+          role: "assistant",
+          content: "",
+          timestamp: 1_000,
+        },
+      ],
+      messageCount: 1,
+    });
+    useChatStore.setState({ currentId: "B" });
+
+    await handlePiEvent(piEvt("A", { type: "agent_end", turnBusy: true }));
+    await Promise.resolve();
+
+    const session = useChatStore.getState().sessions.A;
+    expect(session.status).toBe("streaming");
+    expect(session.streamingMessageId).toBe("assistant-1");
+    expect(routerCommandMocks.piStopIfIdle).not.toHaveBeenCalled();
+  });
+
   it("marks an exhausted automatic retry as an error", async () => {
     seed("A", { status: "streaming" });
     useChatStore.setState({ currentId: "B" });

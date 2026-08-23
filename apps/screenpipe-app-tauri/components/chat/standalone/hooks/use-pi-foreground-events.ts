@@ -988,6 +988,17 @@ export function usePiForegroundEvents({
             }
           }
 
+          // Pi also emits agent_end at tool-use boundaries. The native queue
+          // annotates those events from its durable agent/tool/steer state;
+          // keep this assistant row live until the logical turn actually
+          // settles instead of flashing a false "done" receipt after a tool.
+          if (!isPipeWatch && data.turnBusy === true) {
+            setIsLoading(true);
+            setIsStreaming(true);
+            emitSessionActivity({ status: "streaming" });
+            return;
+          }
+
           // Always clear loading/streaming state on agent_end, even if piMessageIdRef is null
           // This fixes the "stuck loading" bug when the ref was cleared prematurely
           if (!isPipeWatch) {
