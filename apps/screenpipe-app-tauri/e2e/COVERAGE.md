@@ -7,8 +7,8 @@ and layer declared in the manifest, weighted by confidence and criticality.
 - Manifest: `e2e/coverage-map.json`
 - Specs directory: `e2e/specs`
 - Mapped specs: 120
-- Declared test blocks: 352
-- Weighted coverage points: 276.2
+- Declared test blocks: 355
+- Weighted coverage points: 279.2
 
 Confidence weights: strong=1.0, partial=0.7, conditional=0.4, smoke=0.3.
 Criticality weights: high=1.0, medium=0.7, low=0.4.
@@ -19,9 +19,9 @@ can execute more runtime cases than this number shows.
 
 | Platform | Specs | Declared tests | Weighted points | Layers | Features | Critical score |
 | --- | --- | --- | --- | --- | --- | --- |
-| windows | 91 | 302 | 246.6 | 15 | 100 | 92% |
-| macos | 116 | 314 | 246.0 | 17 | 108 | 90% |
-| linux | 80 | 260 | 216.0 | 14 | 97 | 88% |
+| windows | 91 | 303 | 247.6 | 15 | 100 | 92% |
+| macos | 116 | 317 | 249.0 | 17 | 108 | 90% |
+| linux | 80 | 261 | 217.0 | 14 | 97 | 88% |
 
 ## Runtime Results
 
@@ -37,18 +37,18 @@ pass/fail/skip counts.
 | auth | - | 1 specs / 1 tests / 1.0 pts | - |
 | billing | 4 specs / 6 tests / 5.7 pts | 4 specs / 6 tests / 5.7 pts | 4 specs / 6 tests / 5.7 pts |
 | capture-ocr | 2 specs / 16 tests / 6.4 pts | 8 specs / 12 tests / 4.8 pts | 1 specs / 3 tests / 1.2 pts |
-| chat-ai | 26 specs / 58 tests / 43.8 pts | 38 specs / 80 tests / 57.9 pts | 25 specs / 57 tests / 43.3 pts |
+| chat-ai | 26 specs / 58 tests / 43.8 pts | 38 specs / 82 tests / 59.9 pts | 25 specs / 57 tests / 43.3 pts |
 | entitlement | - | 1 specs / 1 tests / 1.0 pts | - |
-| local-api | 25 specs / 114 tests / 95.0 pts | 33 specs / 104 tests / 87.5 pts | 20 specs / 82 tests / 73.2 pts |
+| local-api | 25 specs / 114 tests / 95.0 pts | 34 specs / 107 tests / 90.5 pts | 20 specs / 82 tests / 73.2 pts |
 | notifications | 4 specs / 26 tests / 17.3 pts | 3 specs / 5 tests / 3.4 pts | 2 specs / 4 tests / 3.1 pts |
-| onboarding | 9 specs / 37 tests / 32.8 pts | 11 specs / 39 tests / 34.2 pts | 9 specs / 37 tests / 32.8 pts |
+| onboarding | 9 specs / 38 tests / 33.8 pts | 11 specs / 42 tests / 37.2 pts | 9 specs / 38 tests / 33.8 pts |
 | os-integration | 7 specs / 31 tests / 26.2 pts | 14 specs / 28 tests / 16.7 pts | 2 specs / 14 tests / 10.1 pts |
 | performance | 2 specs / 44 tests / 44.0 pts | 4 specs / 34 tests / 30.5 pts | 1 specs / 29 tests / 29.0 pts |
 | pipes | 6 specs / 19 tests / 19.0 pts | 8 specs / 25 tests / 25.0 pts | 6 specs / 19 tests / 19.0 pts |
-| real-ui-e2e | 65 specs / 202 tests / 166.5 pts | 79 specs / 210 tests / 172.4 pts | 60 specs / 178 tests / 152.6 pts |
+| real-ui-e2e | 65 specs / 203 tests / 167.5 pts | 79 specs / 213 tests / 175.4 pts | 60 specs / 179 tests / 153.6 pts |
 | settings | 14 specs / 40 tests / 37.0 pts | 16 specs / 34 tests / 29.7 pts | 13 specs / 31 tests / 28.0 pts |
 | storage-privacy | 9 specs / 42 tests / 33.3 pts | 9 specs / 27 tests / 26.1 pts | 6 specs / 20 tests / 19.1 pts |
-| tauri-command | 19 specs / 53 tests / 40.8 pts | 27 specs / 65 tests / 49.0 pts | 18 specs / 54 tests / 41.6 pts |
+| tauri-command | 19 specs / 53 tests / 40.8 pts | 27 specs / 67 tests / 51.0 pts | 18 specs / 54 tests / 41.6 pts |
 | window-lifecycle | 19 specs / 66 tests / 55.0 pts | 19 specs / 46 tests / 32.4 pts | 13 specs / 39 tests / 29.9 pts |
 
 ## Critical Feature Matrix
@@ -150,10 +150,10 @@ pass/fail/skip counts.
 | chat-within-session-context-loss.spec.ts | macos | chat-ai | chat, chat-context | medium | conditional | synthetic | 5 | macOS-only within-chat context retention regression. |
 | connected-share.spec.ts | windows, macos, linux | real-ui-e2e, local-api | meeting-notes, brain-overview, live-views, connections | high | strong | real-user-flow | 1 | Exercises the Send snapshot dialog from meeting notes and Live Views across disconnected setup, connected direct-send, receipt, and Chat-draft destinations, with mocked connection APIs and screenshot coverage. |
 | db-hard-fault-fail-closed.spec.ts | windows, macos, linux | local-api, tauri-command, real-ui-e2e | database-hard-fault-containment, app-launch | high | strong | mixed | 1 | Opt-in packaged-desktop regression: causes real SQLITE_CORRUPT in the isolated E2E database, then proves the engine API and database owners stop while the desktop stays alive and does not respawn across the watchdog window. |
-| first-run-agent-handoff.spec.ts | windows, macos, linux | onboarding, real-ui-e2e | onboarding, first-run-learning, mcp-registration | high | partial | real-user-flow | 4 | Agent handoff beside the first-run summary: the summary stays primary and clickable whether or not an agent is offered, an offered target is never nameless or unclickable, the filesystem probe cannot break the ready banner or the summary click-through, and the paste instruction appears only after the handoff runs. Waits for the async probe before concluding absence. Does not assert WHICH agent: detectAiTools resolves the real home in the webview (SCREENPIPE_E2E_AI_TOOLS_HOME is Rust-only), so selection is host-dependent and is covered in lib/first-run/agent-handoff.test.ts and use-agent-handoff.test.ts. |
-| first-run-ai-summary.spec.ts | macos | onboarding, chat-ai, real-ui-e2e, tauri-command | onboarding, first-run-learning, chat | high | strong | real-user-flow | 1 | Opt-in hosted-AI lane for the post-setup summary: the real app starts its own Pi session through the Rust command and the production Worker under Miniflare, and the forwarded provider request is asserted to carry the screen and audio excerpts plus the browser URL, not just app names. Guards the regression where the summary was AI-written but built from containers only, so it read templated. The seeded chat must hold the model's text and never the deterministic opener. |
+| first-run-agent-handoff.spec.ts | windows, macos, linux | onboarding, real-ui-e2e | onboarding, first-run-learning, mcp-registration | high | partial | real-user-flow | 4 | Agent handoff beside the first-run summary: the summary stays primary and clickable whether or not an agent is offered, an offered target is never nameless or unclickable, the filesystem probe cannot break the ready banner or the summary click-through, opening the result collapses into the compact setup dock, and the paste instruction appears only after the handoff runs. Waits for the async probe before concluding absence. Does not assert WHICH agent: detectAiTools resolves the real home in the webview (SCREENPIPE_E2E_AI_TOOLS_HOME is Rust-only), so selection is host-dependent and is covered in lib/first-run/agent-handoff.test.ts and use-agent-handoff.test.ts. |
+| first-run-ai-summary.spec.ts | macos | onboarding, chat-ai, local-api, real-ui-e2e, tauri-command | onboarding, first-run-learning, chat, notifications | high | strong | real-user-flow | 3 | Opt-in hosted-AI lane for the post-setup summary: the real app starts its own Pi session through the Rust command and the production Worker under Miniflare. It proves a low-tier parsed-only fixture with one sustained app and no Timeline dependency reaches the model, accessibility evidence is used when parsed context is unavailable, and two transient activity-engine failures recover without a deterministic fallback. The seeded chat must hold the model's text and never the deterministic opener. Once ready, the real app must persist one content-free /notify entry whose primary deep link returns to the locally resolved summary and marks it opened. |
 | first-run-guide.spec.ts | windows, macos, linux | onboarding, chat-ai, real-ui-e2e | onboarding, chat, first-run-guide | high | strong | real-user-flow | 3 | Replayed first-run guide verifies the composer remains focused and clickable above its scrim, fails open when stacking defeats the lift, and remembers decline across reloads. |
-| first-run-learning-window.spec.ts | windows, macos, linux | onboarding, real-ui-e2e | onboarding, first-run-learning, shortcuts | high | strong | real-user-flow | 8 | Post-setup summary on Home under the authenticated seed: immediate runs show a live countdown, empty engine results settle silently with their diagnostic reason preserved, silent states stay silent across reloads, late returns retry in the background, ready summaries remain actionable, a verified shown Chat-shortcut outcome completes the contextual practice lesson while a hidden outcome stays recoverable, and idle/done never render. |
+| first-run-learning-window.spec.ts | windows, macos, linux | onboarding, real-ui-e2e | onboarding, first-run-learning, shortcuts | high | strong | real-user-flow | 9 | Post-setup summary on Home under the authenticated seed: immediate runs show a live countdown, an interrupted first attempt gets exactly one quiet recovery, exhausted empty engine results settle with their diagnostic reason preserved, silent states stay silent across reloads, late returns retry in the background, ready summaries remain actionable, a verified shown Chat-shortcut outcome completes the contextual practice lesson while a hidden outcome stays recoverable, and idle/done never render. |
 | first-run-reset-learning-window.spec.ts | windows, macos, linux | onboarding, real-ui-e2e, tauri-command | onboarding, first-run-learning, settings-persistence | high | strong | real-user-flow | 2 | Home is the single first-summary lifecycle owner: reset events clear the mounted Home state, while the separate Chat webview neither renders nor claims a second learning window from the shared onboarding completion. |
 | focus-server.spec.ts | windows, macos, linux | local-api, window-lifecycle, tauri-command | window-lifecycle, focus-server, deeplink | medium | partial | api | 2 | Focus server opens windows and forwards deeplink args. |
 | hd-recording-pipeline.spec.ts | macos | capture-ocr, local-api, performance | capture-ocr, hd-recording, timeline | high | conditional | api | 1 | Opt-in macOS HD capture and OCR indexing. |

@@ -137,6 +137,19 @@ describe("evidence gate", () => {
     ).toBe(true);
   });
 
+  it("resolves one sustained app from parsed data without screenshots", () => {
+    expect(
+      hasEnoughEvidence(
+        ok({
+          total_frames: 2,
+          total_active_minutes: 2,
+          parsed_context_count: 1,
+          apps: [{ name: "Slack", frame_count: 2 }],
+        }),
+      ),
+    ).toBe(true);
+  });
+
   it("resolves on one app plus captured speech", () => {
     // A call with screenshots off: the screen says almost nothing, the audio
     // says plenty, and audio is independent of the pixel path.

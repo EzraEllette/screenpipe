@@ -29,6 +29,7 @@
  */
 
 import type { ConnectAllToolId } from "@/lib/ai-tools-mcp";
+import type { FirstRunCapturedApp } from "@/lib/first-run/learning-window";
 
 export type AgentHandoffTarget = {
   id: ConnectAllToolId;
@@ -56,6 +57,10 @@ export type AgentHandoffOpenResult = {
   /** A target-specific cold-start replay completed. */
   replayed: boolean;
   failedStage?: "open" | "replay";
+};
+
+export type AgentHandoffResult = AgentHandoffOpenResult & {
+  copied: boolean;
 };
 
 /**
@@ -163,6 +168,39 @@ export async function openAgentHandoffDeeplink(
 }
 
 /**
+ * Copy first, then open the verified prompt route.
+ *
+ * Both the ready card and a notification deep link use this exact operation.
+ * Keeping it below the React hook is important: native notification clicks can
+ * arrive before the ready card is mounted, and Cursor still needs its cold
+ * start replay in that case.
+ */
+export async function performAgentHandoff(
+  target: AgentHandoffTarget,
+  deps: {
+    copyText: (text: string) => Promise<void>;
+    openUrl: (url: string) => Promise<void>;
+    delay?: (ms: number) => Promise<void>;
+  },
+): Promise<AgentHandoffResult> {
+  let copied = false;
+  try {
+    await deps.copyText(HANDOFF_PROMPT);
+    copied = true;
+  } catch {
+    // The prompt is also encoded in every supported deeplink, so clipboard is
+    // recovery rather than a gate.
+  }
+
+  const opened = await openAgentHandoffDeeplink(
+    target,
+    deps.openUrl,
+    deps.delay,
+  );
+  return { ...opened, copied };
+}
+
+/**
  * Every connected target, in preference order.
  *
  * The user picks; we only decide the order. Someone with both Claude and Codex
@@ -186,6 +224,63 @@ export function pickHandoffTarget(
   connected: readonly ConnectAllToolId[],
 ): AgentHandoffTarget | null {
   return pickHandoffTargets(connected)[0] ?? null;
+}
+
+/** Resolve a validated target id from a notification deep link. */
+export function handoffTargetById(
+  id: string | null | undefined,
+): AgentHandoffTarget | null {
+  return HANDOFF_TARGETS.find((target) => target.id === id) ?? null;
+}
+
+const APP_MATCHERS: Partial<Record<ConnectAllToolId, readonly RegExp[]>> = {
+  claude: [/^claude(?: desktop)?$/i],
+  cursor: [/^cursor$/i],
+  codex: [/^codex$/i, /^chatgpt$/i],
+};
+
+/**
+ * Pick the connected agent the user was actually using during this bounded
+ * first-run window.
+ *
+ * App names and aggregate local duration/frame counts are enough. We never
+ * inspect window titles, prompts, snippets, or captured content. A static
+ * preference is deliberately not returned when no app matched: in that case
+ * the notification should only bring the user back to their Screenpipe result
+ * rather than guessing which external app they prefer.
+ */
+export function preferredHandoffTargetForRecentApps(
+  targets: readonly AgentHandoffTarget[],
+  apps: readonly FirstRunCapturedApp[],
+): AgentHandoffTarget | null {
+  let best: { target: AgentHandoffTarget; minutes: number; frames: number } | null =
+    null;
+
+  for (const target of targets) {
+    const matchers = APP_MATCHERS[target.id] ?? [];
+    const matches = apps.filter((app) =>
+      matchers.some((matcher) => matcher.test(app.name.trim())),
+    );
+    if (matches.length === 0) continue;
+
+    const minutes = matches.reduce(
+      (sum, app) => sum + Math.max(0, app.activeMinutes ?? 0),
+      0,
+    );
+    const frames = matches.reduce(
+      (sum, app) => sum + Math.max(0, app.frameCount),
+      0,
+    );
+    if (
+      !best ||
+      minutes > best.minutes ||
+      (minutes === best.minutes && frames > best.frames)
+    ) {
+      best = { target, minutes, frames };
+    }
+  }
+
+  return best?.target ?? null;
 }
 
 /** Exposed for tests and for callers that need the whole preference order. */

@@ -26,25 +26,79 @@
  *      Both are plausible paragraphs in the same chat bubble, so the only
  *      reliable discriminator is the deterministic builder's fixed opener.
  *
- * Deliberately stubbed: `/activity-summary`. Resolving needs >= 10 captured
- * frames within the window, which on a CI machine with no desktop is neither
- * available nor the thing under test. The REAL engine's answers — including
- * every empty reason — are covered against a live engine in
- * first-run-learning-window.spec.ts. Everything downstream of that one
- * response here is real.
+ * Deliberately stubbed: `/activity-summary`. A CI machine has no meaningful
+ * desktop activity, so this spec pins three explicit engine boundaries: parsed
+ * low-tier evidence, accessibility fallback, and transient engine failures.
+ * The REAL engine's answers — including every empty reason — are covered
+ * against a live engine in first-run-learning-window.spec.ts. Everything
+ * downstream of that response here is real.
  */
 
 import { existsSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { E2E_DATA_DIR, E2E_SEED_FLAGS } from "../helpers/app-launcher.js";
 import { saveScreenshot } from "../helpers/screenshot-utils.js";
-import { invokeOrThrow, showWindow, waitForWindowHandle } from "../helpers/tauri.js";
+import {
+  invokeOrThrow,
+  showWindow,
+  waitForWindowHandle,
+} from "../helpers/tauri.js";
 import { t, waitForAppReady } from "../helpers/test-utils.js";
 
 const LEARNING_STORAGE_KEY = "screenpipe.first-run.learning-window.v1";
+const SUMMARY_NOTIFICATION_ID = "first-run-summary-ready-v1";
 const E2E_ACCOUNT_USER_KEY = "screenpipe_e2e_account_user";
 const BANNER = '[data-testid="first-run-learning-banner"]';
 const CHATS_DIR = join(E2E_DATA_DIR, "chats");
+const FOCUS_PORT = Number(process.env.SCREENPIPE_FOCUS_PORT ?? "11436");
+const NOTIFICATIONS_URL = `http://127.0.0.1:${FOCUS_PORT}/notifications`;
+
+type NotificationEntry = {
+  id: string;
+  title?: string;
+  body?: string;
+  actions?: Array<{ type?: string; label?: string; url?: string }>;
+};
+
+async function readNotifications(): Promise<NotificationEntry[]> {
+  return (await browser.executeAsync(
+    (url: string, done: (entries: NotificationEntry[]) => void) => {
+      void fetch(url)
+        .then(async (response) =>
+          done(response.ok ? ((await response.json()) as NotificationEntry[]) : []),
+        )
+        .catch(() => done([]));
+    },
+    NOTIFICATIONS_URL,
+  )) as NotificationEntry[];
+}
+
+async function deleteSummaryNotification(): Promise<void> {
+  await browser.executeAsync(
+    (url: string, id: string, done: () => void) => {
+      void fetch(`${url}/${encodeURIComponent(id)}`, { method: "DELETE" })
+        .then(() => done())
+        .catch(() => done());
+    },
+    NOTIFICATIONS_URL,
+    SUMMARY_NOTIFICATION_ID,
+  );
+}
+
+async function emitHomeDeepLink(url: string): Promise<void> {
+  const error = (await browser.executeAsync(
+    (payload: string, done: (value: string | null) => void) => {
+      const event = (globalThis as any).__TAURI__?.event;
+      if (!event?.emitTo) return done("emitTo unavailable");
+      void event
+        .emitTo("home", "deep-link-received", payload)
+        .then(() => done(null))
+        .catch((reason: unknown) => done(String(reason)));
+    },
+    url,
+  )) as string | null;
+  expect(error).toBeNull();
+}
 
 /** The deterministic builder's fixed opener. Its presence means the model did
  *  not win, whatever else the paragraph says. */
@@ -54,34 +108,53 @@ const MODEL_REPLY_MARKER = "local gateway app e2e ok";
 
 /** A distinctive line only reachable through `snippets`. If the forwarded
  *  prompt contains it, the model was given the work and not just the window. */
-const SCREEN_EXCERPT = "quarterly retention model needs a second reviewer";
+const PARSED_EXCERPT = "quarterly retention model needs a second reviewer";
+const ACCESSIBILITY_EXCERPT =
+  "release checklist is waiting for the Linux verification";
 const AUDIO_EXCERPT = "can you take the migration rollback section";
 
-/** Shaped exactly like the engine's `/activity-summary`, with enough frames to
- *  clear the evidence floor (MIN_EVIDENCE_FRAMES = 10). */
-const ACTIVITY_FIXTURE = {
+/** Low-tier shape: no Timeline or screenshot dependency, one sustained app,
+ *  and a parsed projection as the useful evidence. */
+const PARSED_ACTIVITY_FIXTURE = {
   data_status: "ok",
-  total_frames: 48,
+  total_frames: 2,
   total_active_minutes: 3.4,
+  parsed_context_count: 1,
+  apps: [{ name: "Obsidian", frame_count: 2, minutes: 3 }],
+  windows: [
+    { app_name: "Obsidian", window_name: "retention-notes", minutes: 3 },
+  ],
+  edited_files: [{ path: "/Users/e2e/notes/retention-notes.md" }],
+  snippets: [
+    { source: "parsed", text: PARSED_EXCERPT, app_name: "Obsidian" },
+    { source: "audio", text: AUDIO_EXCERPT, app_name: null },
+  ],
+  audio_summary: { segment_count: 4, speakers: [{}, {}] },
+};
+
+/** Parser unavailable/empty, but accessibility still observed real work. */
+const ACCESSIBILITY_ACTIVITY_FIXTURE = {
+  data_status: "ok",
+  total_frames: 2,
+  total_active_minutes: 3.1,
+  parsed_context_count: 0,
   apps: [
-    { name: "Arc", frame_count: 30, minutes: 3 },
-    { name: "Obsidian", frame_count: 18, minutes: 2 },
+    { name: "Arc", frame_count: 1, minutes: 2 },
+    { name: "Terminal", frame_count: 1, minutes: 1 },
   ],
   windows: [
     {
       app_name: "Arc",
-      window_name: "Meet",
-      browser_url: "https://meet.google.com/e2e-first-run",
-      minutes: 3,
+      window_name: "screenpipe release",
+      browser_url: "https://github.com/screenpipe/screenpipe/releases",
+      minutes: 2,
     },
-    { app_name: "Obsidian", window_name: "retention-notes", minutes: 2 },
   ],
-  edited_files: [{ path: "/Users/e2e/notes/retention-notes.md" }],
+  edited_files: [],
   snippets: [
-    { source: "screen", text: SCREEN_EXCERPT, app_name: "Obsidian" },
-    { source: "audio", text: AUDIO_EXCERPT, app_name: null },
+    { source: "screen", text: ACCESSIBILITY_EXCERPT, app_name: "Arc" },
   ],
-  audio_summary: { segment_count: 4, speakers: [{}, {}] },
+  audio_summary: { segment_count: 0, speakers: [] },
 };
 
 const seedFlags = E2E_SEED_FLAGS.split(",")
@@ -96,14 +169,21 @@ const seedFlags = E2E_SEED_FLAGS.split(",")
  * strongest available evidence — not what the app intended to send, but what
  * actually left toward the model.
  */
-function forwardedToProvider(): string {
+type ForwardedProviderRequest = { url?: string; body?: unknown };
+
+function forwardedProviderRequests(): ForwardedProviderRequest[] {
   const path = process.env.SCREENPIPE_E2E_GATEWAY_REQUESTS_FILE;
-  if (!path || !existsSync(path)) return "";
+  if (!path || !existsSync(path)) return [];
   try {
-    return JSON.stringify(JSON.parse(readFileSync(path, "utf8")));
+    const parsed = JSON.parse(readFileSync(path, "utf8"));
+    return Array.isArray(parsed) ? parsed : [];
   } catch {
-    return "";
+    return [];
   }
+}
+
+function forwardedSince(index: number): string {
+  return JSON.stringify(forwardedProviderRequests().slice(index));
 }
 
 function readSeededSummary(): string | null {
@@ -142,12 +222,16 @@ function clearSeededSummaries(): void {
  *
  * `pickPipePreset` selects the `pipes` entry, and skips any `acp` preset.
  */
-async function seedHostedPreset(gatewayUrl: string, apiKey: string): Promise<void> {
+async function seedHostedPreset(
+  gatewayUrl: string,
+  apiKey: string,
+): Promise<void> {
   const storePath = join(E2E_DATA_DIR, "store.bin");
   const rid = await invokeOrThrow<number | null>("plugin:store|get_store", {
     path: storePath,
   });
-  if (rid == null) throw new Error(`settings store is not loaded: ${storePath}`);
+  if (rid == null)
+    throw new Error(`settings store is not loaded: ${storePath}`);
 
   const [settings, exists] = await invokeOrThrow<
     [Record<string, unknown>, boolean]
@@ -186,7 +270,15 @@ async function seedHostedPreset(gatewayUrl: string, apiKey: string): Promise<voi
 async function openHomeMidWindow(
   gatewayUrl: string,
   apiKey: string,
+  fixture: Record<string, unknown> = PARSED_ACTIVITY_FIXTURE,
+  failActivityRequests = 0,
 ): Promise<void> {
+  // Keep native onboarding completion older than the learning floor but still
+  // inside the two-minute attempt ceiling. Otherwise restoring this state can
+  // legitimately start the one quiet recovery attempt instead of resolving.
+  await invokeOrThrow("plugin:e2e|set_onboarding_completed_ago", {
+    seconds: 100,
+  });
   await showWindow({ Home: { page: "home" } });
   await waitForWindowHandle("home", t(20_000));
   await browser.switchToWindow("home");
@@ -226,9 +318,8 @@ async function openHomeMidWindow(
     LEARNING_STORAGE_KEY,
     JSON.stringify({
       phase: "learning",
-      // Older than MIN_LEARNING_MS (90s) so the window may resolve on its
-      // first poll instead of holding the spec open for the floor.
-      startedAt: new Date(Date.now() - 3 * 60_000).toISOString(),
+      // Older than the 60s learning floor, younger than the two-minute ceiling.
+      startedAt: new Date(Date.now() - 90_000).toISOString(),
       seededAt: null,
       chatId: null,
       emptyReason: null,
@@ -280,68 +371,112 @@ async function openHomeMidWindow(
   // patched global. Racing the banner's first poll is harmless: an
   // insufficient answer just schedules another poll three seconds later, and
   // the durable seed claim is not taken until the evidence floor is cleared.
-  await browser.execute((fixture: string) => {
-    const parsed = JSON.parse(fixture);
+  await browser.execute(
+    (fixture: string, failures: number) => {
+      const parsed = JSON.parse(fixture);
+      let failuresRemaining = Math.max(0, failures);
+      const store = window as unknown as Record<string, unknown>;
+      store.__firstRunFallbacks = [];
+      store.__firstRunActivityUrls = [];
 
-    // Record the prompt the app hands to Pi. The facts block is rendered into
-    // it, so this is where "the model was given the work" is provable.
-    const internals = (window as unknown as Record<string, any>)
-      .__TAURI_INTERNALS__;
-    if (internals?.invoke && !internals.__firstRunPatched) {
-      const realInvoke = internals.invoke.bind(internals);
-      internals.invoke = (cmd: string, args?: Record<string, unknown>) => {
-        // `pi_prompt` takes `message`, not `prompt`.
-        if (cmd === "pi_prompt" && typeof args?.message === "string") {
+      // Keep the decline reason. Falling back is a legitimate outcome the code
+      // reports on purpose, so a failure here should say WHICH fallback happened
+      // rather than only that the excerpts were missing.
+      const realWarn = console.warn.bind(console);
+      console.warn = (...args: unknown[]) => {
+        if (String(args[0] ?? "").includes("fell back to deterministic")) {
           const store = window as unknown as Record<string, unknown>;
-          store.__firstRunPiPrompts = [
-            ...((store.__firstRunPiPrompts as string[]) ?? []),
-            args.message as string,
+          store.__firstRunFallbacks = [
+            ...((store.__firstRunFallbacks as string[]) ?? []),
+            args.map((a) => JSON.stringify(a)).join(" "),
           ];
         }
-        return realInvoke(cmd, args);
+        realWarn(...args);
       };
-      internals.__firstRunPatched = true;
-    }
 
-    // Keep the decline reason. Falling back is a legitimate outcome the code
-    // reports on purpose, so a failure here should say WHICH fallback happened
-    // rather than only that the excerpts were missing.
-    const realWarn = console.warn.bind(console);
-    console.warn = (...args: unknown[]) => {
-      if (String(args[0] ?? "").includes("fell back to deterministic")) {
-        const store = window as unknown as Record<string, unknown>;
-        store.__firstRunFallbacks = [
-          ...((store.__firstRunFallbacks as string[]) ?? []),
-          args.map((a) => JSON.stringify(a)).join(" "),
-        ];
-      }
-      realWarn(...args);
-    };
+      const realFetch = window.fetch.bind(window);
+      window.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+        const url =
+          typeof input === "string"
+            ? input
+            : String((input as Request).url ?? input);
+        if (url.includes("/activity-summary")) {
+          // Record what the app asked for, so the spec can prove the detail call
+          // opted into excerpts rather than assuming the fixture was used.
+          const store = window as unknown as Record<string, unknown>;
+          store.__firstRunActivityUrls = [
+            ...((store.__firstRunActivityUrls as string[]) ?? []),
+            url,
+          ];
+          if (failuresRemaining > 0) {
+            failuresRemaining -= 1;
+            return Promise.resolve(
+              new Response("engine starting", { status: 503 }),
+            );
+          }
+          return Promise.resolve(
+            new Response(JSON.stringify(parsed), {
+              status: 200,
+              headers: { "Content-Type": "application/json" },
+            }),
+          );
+        }
+        return realFetch(input as RequestInfo, init);
+      }) as typeof window.fetch;
+    },
+    JSON.stringify(fixture),
+    failActivityRequests,
+  );
+}
 
-    const realFetch = window.fetch.bind(window);
-    window.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
-      const url =
-        typeof input === "string"
-          ? input
-          : String((input as Request).url ?? input);
-      if (url.includes("/activity-summary")) {
-        // Record what the app asked for, so the spec can prove the detail call
-        // opted into excerpts rather than assuming the fixture was used.
-        const store = window as unknown as Record<string, unknown>;
-        store.__firstRunActivityUrls = [
-          ...((store.__firstRunActivityUrls as string[]) ?? []),
-          url,
-        ];
-        return Promise.resolve(
-          new Response(JSON.stringify(parsed), {
-            status: 200,
-            headers: { "Content-Type": "application/json" },
-          }),
-        );
-      }
-      return realFetch(input as RequestInfo, init);
-    }) as typeof window.fetch;
-  }, JSON.stringify(ACTIVITY_FIXTURE));
+async function waitForWrittenSummary(): Promise<void> {
+  const banner = await $(BANNER);
+  await banner.waitForExist({ timeout: t(30_000) });
+  await browser.waitUntil(
+    async () =>
+      (await browser.execute(
+        (selector: string) =>
+          document.querySelector(selector)?.getAttribute("data-phase") ?? null,
+        BANNER,
+      )) === "ready",
+    {
+      timeout: t(120_000),
+      interval: 500,
+      timeoutMsg: "first-run window never resolved to a written summary",
+    },
+  );
+}
+
+async function activityRequestUrls(): Promise<string[]> {
+  return (await browser.execute(
+    () =>
+      ((window as unknown as Record<string, unknown>)
+        .__firstRunActivityUrls as string[]) ?? [],
+  )) as string[];
+}
+
+async function fallbackReasons(): Promise<string[]> {
+  return (await browser.execute(
+    () =>
+      ((window as unknown as Record<string, unknown>)
+        .__firstRunFallbacks as string[]) ?? [],
+  )) as string[];
+}
+
+function localGatewayCredentials(): { gatewayUrl: string; token: string } {
+  const token = process.env.SCREENPIPE_E2E_LOCAL_AI_GATEWAY_TOKEN;
+  const gatewayUrl = process.env.SCREENPIPE_E2E_AI_GATEWAY_URL;
+  if (!token || !gatewayUrl) {
+    throw new Error("local hosted-AI gateway lifecycle was not initialized");
+  }
+  return { gatewayUrl, token };
+}
+
+function expectModelSummaryPersisted(): void {
+  const summary = readSeededSummary();
+  expect(summary).toBeTruthy();
+  expect(summary as string).toContain(MODEL_REPLY_MARKER);
+  expect(summary as string).not.toContain(DETERMINISTIC_OPENER);
 }
 
 describe("First-run summary is written by the model", function () {
@@ -362,6 +497,7 @@ describe("First-run summary is written by the model", function () {
     }
     clearSeededSummaries();
     await waitForAppReady();
+    await deleteSummaryNotification();
     // The preset and token are seeded inside openHomeMidWindow, after the
     // entitlement gate has finished writing `settings.user`.
     await openHomeMidWindow(gatewayUrl, token);
@@ -369,46 +505,27 @@ describe("First-run summary is written by the model", function () {
 
   after(() => {
     clearSeededSummaries();
+    void deleteSummaryNotification();
   });
 
   it("sends the model what the work was, and persists what the model wrote", async () => {
-    const banner = await $(BANNER);
-    await banner.waitForExist({ timeout: t(30_000) });
-
-    await browser.waitUntil(
-      async () =>
-        (await browser.execute(
-          (selector: string) =>
-            document.querySelector(selector)?.getAttribute("data-phase") ?? null,
-          BANNER,
-        )) === "ready",
-      {
-        timeout: t(120_000),
-        interval: 500,
-        timeoutMsg: "first-run window never resolved to a written summary",
-      },
-    );
+    await waitForWrittenSummary();
     await saveScreenshot("first-run-ai-summary-ready");
 
     // 1. The detail call opted into the excerpts at all. Without this the two
     //    assertions below would still pass on a snapshot that carried none.
-    const activityUrls = (await browser.execute(
-      () =>
-        ((window as unknown as Record<string, unknown>)
-          .__firstRunActivityUrls as string[]) ?? [],
-    )) as string[];
-    expect(activityUrls.some((url) => url.includes("include_snippets=true"))).toBe(
-      true,
-    );
+    const activityUrls = await activityRequestUrls();
+    expect(
+      activityUrls.some((url) => url.includes("include_parsed_count=true")),
+    ).toBe(true);
+    expect(
+      activityUrls.some((url) => url.includes("include_snippets=true")),
+    ).toBe(true);
 
     // 2. The model received the work, not just the container. This is the
     //    assertion that fails against the reported behaviour.
 
-    const declines = (await browser.execute(
-      () =>
-        ((window as unknown as Record<string, unknown>)
-          .__firstRunFallbacks as string[]) ?? [],
-    )) as string[];
+    const declines = await fallbackReasons();
     // A silent deterministic fallback is the failure mode this spec guards,
     // and "prompt was empty" alone does not say which one happened. Comparing
     // the joined reasons puts them straight in the diff.
@@ -417,23 +534,116 @@ describe("First-run summary is written by the model", function () {
     // The flush is on a short interval in the launcher, so give the last
     // request a moment to land rather than racing it.
     await browser.waitUntil(
-      async () => forwardedToProvider().includes(SCREEN_EXCERPT),
+      async () => forwardedSince(0).includes(PARSED_EXCERPT),
       {
         timeout: t(15_000),
         interval: 250,
         timeoutMsg:
-          "the provider never received the screen excerpt, so the model was summarizing containers only",
+          "the provider never received the parsed excerpt, so the low-tier path did not reach the model",
       },
     );
-    const forwarded = forwardedToProvider();
-    expect(forwarded).toContain(SCREEN_EXCERPT);
+    const forwarded = forwardedSince(0);
+    expect(forwarded).toContain(PARSED_EXCERPT);
+    expect(forwarded).toContain("[parsed, Obsidian]");
     expect(forwarded).toContain(AUDIO_EXCERPT);
-    expect(forwarded).toContain("meet.google.com/e2e-first-run");
+    expectModelSummaryPersisted();
 
-    // 3. What the model wrote is what the user gets.
-    const summary = readSeededSummary();
-    expect(summary).toBeTruthy();
-    expect(summary as string).toContain(MODEL_REPLY_MARKER);
-    expect(summary as string).not.toContain(DETERMINISTIC_OPENER);
+    await browser.waitUntil(
+      async () =>
+        (await readNotifications()).some(
+          (entry) => entry.id === SUMMARY_NOTIFICATION_ID,
+        ),
+      {
+        timeout: t(20_000),
+        interval: 250,
+        timeoutMsg: "ready summary never reached /notify",
+      },
+    );
+    const notification = (await readNotifications()).find(
+      (entry) => entry.id === SUMMARY_NOTIFICATION_ID,
+    );
+    expect(notification).toMatchObject({
+      title: "your first summary is ready",
+      actions: [
+        expect.objectContaining({
+          type: "deeplink",
+          label: "open summary",
+          url: "screenpipe://first-run-summary",
+        }),
+      ],
+    });
+    const serializedNotification = JSON.stringify(notification);
+    expect(serializedNotification).not.toContain(PARSED_EXCERPT);
+    expect(serializedNotification).not.toContain("conversation");
+
+    await emitHomeDeepLink("screenpipe://first-run-summary");
+    await browser.waitUntil(
+      async () =>
+        Boolean(
+          await browser.execute(
+            (key: string) => {
+              const stored = JSON.parse(localStorage.getItem(key) ?? "{}");
+              return stored.summaryOpenedAt;
+            },
+            LEARNING_STORAGE_KEY,
+          ),
+        ),
+      {
+        timeout: t(15_000),
+        interval: 250,
+        timeoutMsg: "notification deep link did not open the seeded summary",
+      },
+    );
+  });
+
+  it("falls back to accessibility evidence when parsed context is unavailable", async () => {
+    const { gatewayUrl, token } = localGatewayCredentials();
+    const requestCountBefore = forwardedProviderRequests().length;
+    clearSeededSummaries();
+    await openHomeMidWindow(gatewayUrl, token, ACCESSIBILITY_ACTIVITY_FIXTURE);
+    await waitForWrittenSummary();
+
+    expect((await fallbackReasons()).join("; ")).toBe("");
+    await browser.waitUntil(
+      async () =>
+        forwardedSince(requestCountBefore).includes(ACCESSIBILITY_EXCERPT),
+      {
+        timeout: t(15_000),
+        interval: 250,
+        timeoutMsg: "the provider never received accessibility fallback evidence",
+      },
+    );
+    const forwarded = forwardedSince(requestCountBefore);
+    expect(forwarded).toContain("[screen, Arc]");
+    expect(forwarded).not.toContain(PARSED_EXCERPT);
+    const activityUrls = await activityRequestUrls();
+    expect(
+      activityUrls.some((url) => url.includes("include_parsed_count=true")),
+    ).toBe(true);
+    expect(
+      activityUrls.some((url) => url.includes("include_snippets=true")),
+    ).toBe(true);
+    expectModelSummaryPersisted();
+  });
+
+  it("recovers from transient activity-engine failures without falling back", async () => {
+    const { gatewayUrl, token } = localGatewayCredentials();
+    const requestCountBefore = forwardedProviderRequests().length;
+    clearSeededSummaries();
+    await openHomeMidWindow(gatewayUrl, token, PARSED_ACTIVITY_FIXTURE, 2);
+    await waitForWrittenSummary();
+
+    const activityUrls = await activityRequestUrls();
+    expect(activityUrls.length).toBeGreaterThanOrEqual(3);
+    expect((await fallbackReasons()).join("; ")).toBe("");
+    await browser.waitUntil(
+      async () => forwardedSince(requestCountBefore).includes(PARSED_EXCERPT),
+      {
+        timeout: t(15_000),
+        interval: 250,
+        timeoutMsg: "the recovered request never reached the provider",
+      },
+    );
+    expectModelSummaryPersisted();
   });
 });

@@ -26,6 +26,7 @@ import {
   FirstRunSearchShortcutPractice,
 } from "@/components/first-run/search-shortcut-practice";
 import type { AgentHandoffTarget } from "@/lib/first-run/agent-handoff";
+import { sendFirstRunSummaryNotification } from "@/lib/first-run/summary-notification";
 
 function CapturedAppIcon({ app }: { app: FirstRunCapturedApp }) {
   const [failed, setFailed] = React.useState(false);
@@ -80,7 +81,7 @@ export function FirstRunReadyPanel({
           screenpipe learned enough to help
         </h2>
         <p className="mt-2 max-w-xl text-[11px] leading-relaxed text-muted-foreground">
-          a source-backed summary of the apps and activity captured since setup
+          an evidence-backed summary of the apps and activity captured since setup
           is waiting in a new chat.
         </p>
         <div className="mt-4 flex flex-wrap items-center gap-2">
@@ -247,15 +248,61 @@ export function FirstRunLearningBanner(
     remainingMs,
     chatId,
     summaryOpenedAt,
+    notificationSentAt,
     showProgress,
     markSummaryOpened,
+    markNotificationSent,
     dismiss,
   } = useLearningWindow(learningOptions);
   const {
     targets: handoffTargets,
+    resolved: handoffResolved,
+    preferredTarget,
     hint: handoffHint,
     askAgent,
-  } = useAgentHandoff(phase === "ready" && !summaryOpenedAt);
+  } = useAgentHandoff(
+    phase === "ready" && !summaryOpenedAt,
+    capturedApps,
+  );
+
+  React.useEffect(() => {
+    if (
+      phase !== "ready" ||
+      !chatId ||
+      summaryOpenedAt ||
+      notificationSentAt ||
+      !handoffResolved
+    ) {
+      return;
+    }
+    let cancelled = false;
+    void sendFirstRunSummaryNotification(preferredTarget)
+      .then(() => {
+        if (cancelled) return;
+        markNotificationSent();
+        posthog.capture("first_run_summary_notification_sent", {
+          agent: preferredTarget?.id ?? null,
+          has_agent_action: Boolean(preferredTarget),
+        });
+      })
+      .catch(() => {
+        if (cancelled) return;
+        posthog.capture("first_run_summary_notification_failed", {
+          has_agent_action: Boolean(preferredTarget),
+        });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    chatId,
+    handoffResolved,
+    markNotificationSent,
+    notificationSentAt,
+    phase,
+    preferredTarget,
+    summaryOpenedAt,
+  ]);
 
   // Only show progress when setup just caused it. A foreground empty result is
   // still a terminal onboarding state: hiding it also hid the daily-summary

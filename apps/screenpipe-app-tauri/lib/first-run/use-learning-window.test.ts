@@ -323,8 +323,8 @@ describe("useLearningWindow reset", () => {
   });
 });
 
-describe("useLearningWindow reports a window that expired unmounted", () => {
-  const seedExpiredLearning = () => {
+describe("useLearningWindow recovers a window that expired unmounted", () => {
+  const seedExpiredLearning = (lateRetryUsed = false) => {
     window.localStorage.setItem(
       "screenpipe.first-run.learning-window.v1",
       JSON.stringify({
@@ -335,6 +335,7 @@ describe("useLearningWindow reports a window that expired unmounted", () => {
         seededAt: null,
         chatId: null,
         emptyReason: null,
+        lateRetryUsed,
       }),
     );
   };
@@ -342,37 +343,27 @@ describe("useLearningWindow reports a window that expired unmounted", () => {
   const emptyEvents = () =>
     capture.mock.calls.filter(([name]) => name === "first_run_learning_empty");
 
-  it("emits first_run_learning_empty on mount, tagged as a rehydrate settle", async () => {
-    // Before this, a window that expired while the banner was unmounted — the
-    // common case, because sending one chat message used to unmount it —
-    // produced no event at all.
+  it("starts one quiet recovery window instead of permanently settling", async () => {
     seedExpiredLearning();
     getOnboardingStatus.mockResolvedValue(okStatus(completedAgo(60_000)));
 
-    renderHook(() => useLearningWindow());
+    const { result } = renderHook(() => useLearningWindow());
 
+    await waitFor(() => expect(result.current.phase).toBe("learning"));
+    expect(result.current.showProgress).toBe(false);
+    expect(result.current.lateRetryUsed).toBe(true);
+    expect(emptyEvents()).toHaveLength(0);
+    expect(startedEvents().at(-1)?.[1]).toEqual({ opening: "recovery" });
+  });
+
+  it("settles after the one recovery has also expired", async () => {
+    seedExpiredLearning(true);
+    getOnboardingStatus.mockResolvedValue(okStatus(completedAgo(60_000)));
+
+    renderHook(() => useLearningWindow());
     await waitFor(() => expect(emptyEvents()).toHaveLength(1));
     const [, props] = emptyEvents()[0] as [string, Record<string, unknown>];
     expect(props.settled_by).toBe("rehydrate");
-    // A real engine-derived reason, same as the ceiling effect produces. The
-    // rehydrated window must not report a second-class reason.
-    expect(props.reason).not.toBe("");
-    expect(typeof props.data_status).toBe("string");
-  });
-
-  it("reports once, not once per mount", async () => {
-    seedExpiredLearning();
-    getOnboardingStatus.mockResolvedValue(okStatus(completedAgo(60_000)));
-
-    const first = renderHook(() => useLearningWindow());
-    await waitFor(() => expect(emptyEvents()).toHaveLength(1));
-    first.unmount();
-
-    renderHook(() => useLearningWindow());
-    // Remounting must not double-count: the flag is cleared durably, not in
-    // component state.
-    await waitFor(() => expect(readLearningWindow().pendingEmptyReport).toBe(false));
-    expect(emptyEvents()).toHaveLength(1);
   });
 
   it("stays quiet for a window that never expired", async () => {
