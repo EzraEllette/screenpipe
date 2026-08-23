@@ -1123,7 +1123,8 @@ async fn active_meeting_blocks_audio_process_insert() {
         .unwrap();
     let manual_meeting = tokio::sync::RwLock::new(None);
     let outcome =
-        start_or_adopt_auto_meeting(&db, &manual_meeting, "Google Meet", None, None).await;
+        start_or_adopt_auto_meeting(&db, &manual_meeting, "Google Meet", None, None, Utc::now())
+            .await;
     assert_eq!(outcome, AutoStartOutcome::BlockedByActive(active_id));
 
     let open_count: (i64,) =
@@ -1132,6 +1133,78 @@ async fn active_meeting_blocks_audio_process_insert() {
             .await
             .unwrap();
     assert_eq!(open_count.0, 1);
+}
+
+#[test]
+fn episode_start_utc_subtracts_monotonic_pending_duration() {
+    let action_now = Instant::now();
+    let action_now_utc = chrono::DateTime::parse_from_rfc3339("2026-08-22T20:44:50.168Z")
+        .unwrap()
+        .with_timezone(&Utc);
+
+    let start = episode_start_utc(
+        action_now - Duration::from_secs(681),
+        action_now,
+        action_now_utc,
+    );
+
+    assert_eq!(
+        start,
+        chrono::DateTime::parse_from_rfc3339("2026-08-22T20:33:29.168Z")
+            .unwrap()
+            .with_timezone(&Utc)
+    );
+}
+
+#[tokio::test]
+async fn late_browser_classification_persists_original_episode_start() {
+    let (_dir, db) = setup_db().await;
+    let action_now = Instant::now();
+    let first_seen_at = action_now - Duration::from_secs(681);
+    let action_now_utc = chrono::DateTime::parse_from_rfc3339("2026-08-22T20:44:50.168Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let process = arc_process();
+    let action = AudioProcessStateAction::StartMeeting {
+        platform: "WhatsApp".to_string(),
+        session_key: ProcessKey::from_process(&process).unwrap(),
+        meeting_url: Some("https://web.whatsapp.com".to_string()),
+        first_seen_at,
+        is_browser: true,
+        pid: process.pid,
+        bundle_id: process.bundle_id,
+    };
+    let manual_meeting = tokio::sync::RwLock::new(None);
+    let mut state = AudioProcessMeetingState::Idle;
+    let mut suppressed = Vec::new();
+    let mut flap_count = 0;
+    let in_meeting = AtomicBool::new(false);
+
+    apply_state_action(
+        action,
+        &db,
+        &manual_meeting,
+        &mut state,
+        &mut suppressed,
+        &mut flap_count,
+        &in_meeting,
+        &None,
+        None,
+        &[],
+        action_now,
+        action_now_utc,
+    )
+    .await;
+
+    let row = db.get_most_recent_active_meeting().await.unwrap().unwrap();
+    assert_eq!(row.meeting_start, "2026-08-22T20:33:29.168Z");
+    assert!(matches!(
+        state,
+        AudioProcessMeetingState::Active {
+            first_seen_at: active_first_seen,
+            ..
+        } if active_first_seen == first_seen_at
+    ));
 }
 
 #[test]
@@ -1250,6 +1323,97 @@ fn ax_resolution_only_runs_before_a_meeting_is_active() {
 // Call signal gate tests (#4776) — WhatsApp/Signal/Telegram voice note phantom
 // meeting prevention.
 // ---------------------------------------------------------------------------
+
+fn browser_platform_candidate(
+    platform: &str,
+    process: AudioInputProcess,
+) -> ResolvedMeetingCandidate {
+    ResolvedMeetingCandidate::Browser {
+        platform: platform.to_string(),
+        meeting_url: format!("https://web.{}.com", platform.to_lowercase()),
+        browser_app: "Arc".to_string(),
+        session_key: ProcessKey::from_process(&process).unwrap(),
+        first_seen_at: Instant::now(),
+        process,
+        live_evidence: true,
+    }
+}
+
+#[test]
+fn browser_whatsapp_without_keyed_call_signal_is_blocked() {
+    let profiles = load_detection_profiles();
+    let mut candidates = vec![browser_platform_candidate("WhatsApp", arc_process())];
+
+    retain_candidates_with_required_call_signal(&mut candidates, &profiles, &[]);
+
+    assert!(candidates.is_empty());
+}
+
+#[test]
+fn browser_whatsapp_with_same_session_call_signal_passes() {
+    let profiles = load_detection_profiles();
+    let process = arc_process();
+    let session_key = ProcessKey::from_process(&process).unwrap();
+    let mut candidates = vec![browser_platform_candidate("WhatsApp", process)];
+    let evidence = [CallSignalEvidence {
+        session_key,
+        platform: "whatsapp".to_string(),
+        is_in_call: true,
+        matched_signals: vec!["Calling_Window".to_string()],
+    }];
+
+    retain_candidates_with_required_call_signal(&mut candidates, &profiles, &evidence);
+
+    assert_eq!(candidates.len(), 1);
+}
+
+#[test]
+fn call_signal_for_other_session_does_not_admit_browser_candidate() {
+    let profiles = load_detection_profiles();
+    let mut candidates = vec![browser_platform_candidate("WhatsApp", arc_process())];
+    let evidence = [CallSignalEvidence {
+        session_key: ProcessKey::from_process(&chrome_process()).unwrap(),
+        platform: "whatsapp".to_string(),
+        is_in_call: true,
+        matched_signals: vec!["Calling_Window".to_string()],
+    }];
+
+    retain_candidates_with_required_call_signal(&mut candidates, &profiles, &evidence);
+
+    assert!(candidates.is_empty());
+}
+
+#[test]
+fn browser_telegram_without_signal_is_blocked() {
+    let profiles = load_detection_profiles();
+    let mut candidates = vec![browser_platform_candidate("Telegram", arc_process())];
+
+    retain_candidates_with_required_call_signal(&mut candidates, &profiles, &[]);
+
+    assert!(candidates.is_empty());
+}
+
+#[test]
+fn required_candidate_without_pid_fails_closed() {
+    let profiles = load_detection_profiles();
+    let mut process = arc_process();
+    process.pid = None;
+    let mut candidates = vec![browser_platform_candidate("WhatsApp", process)];
+
+    retain_candidates_with_required_call_signal(&mut candidates, &profiles, &[]);
+
+    assert!(candidates.is_empty());
+}
+
+#[test]
+fn browser_google_meet_without_call_signal_is_unchanged() {
+    let profiles = load_detection_profiles();
+    let mut candidates = vec![browser_platform_candidate("Google Meet", arc_process())];
+
+    retain_candidates_with_required_call_signal(&mut candidates, &profiles, &[]);
+
+    assert_eq!(candidates.len(), 1);
+}
 
 fn whatsapp_process() -> AudioInputProcess {
     AudioInputProcess {
@@ -1486,20 +1650,13 @@ fn whatsapp_without_call_signal_blocked_by_gate() {
 
     // Simulate what build_candidates does: check call_evidence with no call signals.
     let call_evidence = [CallSignalEvidence {
+        session_key: ProcessKey::from_process(&process).unwrap(),
         platform: "whatsapp".to_string(),
         is_in_call: false,
         matched_signals: vec![],
     }];
     let mut candidates = vec![candidate];
-    candidates.retain(|c| {
-        if let ResolvedMeetingCandidate::Native { platform, .. } = c {
-            let platform_lower = platform.to_lowercase();
-            if let Some(evidence) = call_evidence.iter().find(|e| e.platform == platform_lower) {
-                return evidence.is_in_call;
-            }
-        }
-        true
-    });
+    retain_candidates_with_required_call_signal(&mut candidates, &profiles, &call_evidence);
     assert!(
         candidates.is_empty(),
         "WhatsApp without call signals should be blocked"
@@ -1526,20 +1683,13 @@ fn whatsapp_with_call_signal_passes_gate() {
     ));
 
     let call_evidence = [CallSignalEvidence {
+        session_key: ProcessKey::from_process(&process).unwrap(),
         platform: "whatsapp".to_string(),
         is_in_call: true,
         matched_signals: vec!["AutomationIdContains(Calling_Window)".to_string()],
     }];
     let mut candidates = vec![candidate];
-    candidates.retain(|c| {
-        if let ResolvedMeetingCandidate::Native { platform, .. } = c {
-            let platform_lower = platform.to_lowercase();
-            if let Some(evidence) = call_evidence.iter().find(|e| e.platform == platform_lower) {
-                return evidence.is_in_call;
-            }
-        }
-        true
-    });
+    retain_candidates_with_required_call_signal(&mut candidates, &profiles, &call_evidence);
     assert_eq!(
         candidates.len(),
         1,
@@ -1567,18 +1717,8 @@ fn zoom_not_filtered_by_call_signal_gate() {
         ResolvedMeetingCandidate::Native { ref platform, .. } if platform == "Zoom"
     ));
 
-    // No call_evidence for Zoom (scan_messaging_call_signals skips it).
-    let call_evidence: Vec<CallSignalEvidence> = vec![];
     let mut candidates = vec![candidate];
-    candidates.retain(|c| {
-        if let ResolvedMeetingCandidate::Native { platform, .. } = c {
-            let platform_lower = platform.to_lowercase();
-            if let Some(evidence) = call_evidence.iter().find(|e| e.platform == platform_lower) {
-                return evidence.is_in_call;
-            }
-        }
-        true
-    });
+    retain_candidates_with_required_call_signal(&mut candidates, &profiles, &[]);
     assert_eq!(
         candidates.len(),
         1,
@@ -2117,7 +2257,15 @@ async fn start_meeting_with_calendar(
 ) -> AutoStartOutcome {
     let manual_meeting = tokio::sync::RwLock::new(None);
     let calendar = resolve_calendar_binding(db, events, Utc::now()).await;
-    start_or_adopt_auto_meeting(db, &manual_meeting, platform, calendar.as_ref(), None).await
+    start_or_adopt_auto_meeting(
+        db,
+        &manual_meeting,
+        platform,
+        calendar.as_ref(),
+        None,
+        Utc::now(),
+    )
+    .await
 }
 
 async fn end_meeting_ago(db: &DatabaseManager, id: i64, ago: chrono::Duration) {
@@ -2125,6 +2273,66 @@ async fn end_meeting_ago(db: &DatabaseManager, id: i64, ago: chrono::Duration) {
         .format("%Y-%m-%dT%H:%M:%S%.3fZ")
         .to_string();
     db.end_meeting(id, &ended_at, None).await.unwrap();
+}
+
+#[tokio::test]
+async fn explicit_audio_process_start_is_persisted_atomically() {
+    let (_dir, db) = setup_db().await;
+    let start = chrono::DateTime::parse_from_rfc3339("2026-08-22T20:32:59.123Z")
+        .unwrap()
+        .with_timezone(&Utc);
+
+    let id = db
+        .insert_meeting_with_calendar_at(
+            "WhatsApp",
+            "audio_process",
+            Some("Call"),
+            None,
+            None,
+            start,
+        )
+        .await
+        .unwrap();
+
+    let row = db.get_meeting_by_id(id).await.unwrap();
+    assert_eq!(row.meeting_start, "2026-08-22T20:32:59.123Z");
+    assert_eq!(row.meeting_app, "WhatsApp");
+    assert_eq!(row.detection_source, "audio_process");
+    assert_eq!(row.title.as_deref(), Some("Call"));
+    assert!(row.meeting_end.is_none());
+}
+
+#[tokio::test]
+async fn calendar_conflict_retry_preserves_explicit_start() {
+    let (_dir, db) = setup_db().await;
+    let first = db
+        .insert_meeting_with_calendar("Google Meet", "audio_process", None, None, Some("evt"))
+        .await
+        .unwrap();
+    end_meeting_ago(&db, first, chrono::Duration::minutes(5)).await;
+    let start = chrono::DateTime::parse_from_rfc3339("2026-08-22T20:44:50.168Z")
+        .unwrap()
+        .with_timezone(&Utc);
+
+    let second = db
+        .insert_meeting_with_calendar_at(
+            "WhatsApp",
+            "audio_process",
+            Some("Wrong calendar title"),
+            None,
+            Some("evt"),
+            start,
+        )
+        .await
+        .unwrap();
+
+    let row = db.get_meeting_by_id(second).await.unwrap();
+    assert_eq!(row.meeting_start, "2026-08-22T20:44:50.168Z");
+    assert!(row.title.is_none());
+    assert_eq!(
+        db.meeting_id_for_calendar_event("evt").await.unwrap(),
+        Some(first)
+    );
 }
 
 /// Reproduces the 2026-08-13 incident. An 11:30–12:00 calendar event was still
