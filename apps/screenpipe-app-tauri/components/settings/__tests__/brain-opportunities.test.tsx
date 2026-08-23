@@ -311,6 +311,74 @@ describe("BrainOpportunities", () => {
     expect(onCountChange).toHaveBeenLastCalledWith(5);
   });
 
+  it("ranks skill suggestions by distinct included supporting activities", async () => {
+    const sources = (...activityIds: string[]) =>
+      activityIds.map((activityId, index) =>
+        evidence(
+          activityId,
+          `Source ${activityId}`,
+          "Cursor",
+          new Date(Date.UTC(2026, 7, 15, index)).toISOString(),
+        ),
+      );
+    const [twoActivities, fourActivities, threeActivities] =
+      backendSnapshot.skills;
+    fourActivities.evidence = sources(
+      "activity-103",
+      "activity-106",
+      "activity-107",
+      "activity-108",
+    );
+    threeActivities.evidence = [
+      ...sources(
+        "activity-104",
+        "activity-109",
+        "activity-110",
+        "activity-110",
+      ),
+      {
+        ...sources("activity-111")[0],
+        excluded: true,
+      },
+    ];
+    const tiedThreeActivities = clone(threeActivities);
+    tiedThreeActivities.id = "meeting-followups-tied";
+    tiedThreeActivities.name = "turn another meeting into follow-ups";
+    backendSnapshot.skills = [
+      twoActivities,
+      threeActivities,
+      tiedThreeActivities,
+      fourActivities,
+    ];
+
+    render(<BrainOpportunities />);
+
+    const panel = await screen.findByTestId("skill-opportunities-panel");
+    await screen.findByTestId("skill-opportunity-review-brief");
+    const rowIds = Array.from(
+      panel.querySelectorAll<HTMLElement>(
+        "[data-testid^='skill-opportunity-']",
+      ),
+      (row) => row.dataset.testid,
+    );
+    expect(rowIds).toEqual([
+      "skill-opportunity-review-brief",
+      "skill-opportunity-meeting-followups",
+      "skill-opportunity-meeting-followups-tied",
+      "skill-opportunity-feedback-to-fix",
+    ]);
+    expect(
+      within(screen.getByTestId("skill-opportunity-review-brief")).getByText(
+        "4 activities",
+      ),
+    ).toBeTruthy();
+    expect(
+      within(
+        screen.getByTestId("skill-opportunity-meeting-followups"),
+      ).getByText("3 activities"),
+    ).toBeTruthy();
+  });
+
   it("persists review changes and creates the real skill artifact", async () => {
     render(<BrainOpportunities />);
 

@@ -72,6 +72,32 @@ function excludedActivityIds(evidence: OpportunityEvidence[]): string[] {
     .sort();
 }
 
+function supportingActivityCount(evidence: OpportunityEvidence[]): number {
+  return new Set(
+    evidence.filter((item) => !item.excluded).map((item) => item.activityId),
+  ).size;
+}
+
+function visibleSkillsByRepetition(
+  skills: SkillOpportunity[],
+): SkillOpportunity[] {
+  return skills
+    .filter((skill) => skill.status !== "dismissed")
+    .map((skill, index) => ({ skill, index }))
+    .sort((left, right) => {
+      const statusOrder =
+        Number(left.skill.status !== "pending") -
+        Number(right.skill.status !== "pending");
+      return (
+        statusOrder ||
+        supportingActivityCount(right.skill.evidence) -
+          supportingActivityCount(left.skill.evidence) ||
+        left.index - right.index
+      );
+    })
+    .map(({ skill }) => skill);
+}
+
 function formatMoment(value: string): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
@@ -601,8 +627,7 @@ export function BrainOpportunities({
     taskDrafts,
   ]);
 
-  const skills =
-    snapshot?.skills.filter((skill) => skill.status !== "dismissed") ?? [];
+  const skills = visibleSkillsByRepetition(snapshot?.skills ?? []);
   const pendingTasks =
     snapshot?.unfinished.filter((task) => task.status === "pending") ?? [];
   const dismissedTasks =
@@ -1016,7 +1041,7 @@ export function BrainOpportunities({
                           ? "creating"
                           : skill.status === "created"
                             ? "created"
-                            : `${skill.evidence.length} activities`}
+                            : `${supportingActivityCount(skill.evidence)} activities`}
                       </span>
                     </div>
                   </button>
