@@ -20,8 +20,8 @@ a pointer.
 - `docs/human-only-app-publication.md` — before anything release-related.
 - `docs/macos-dev-builds.md` — canonical fast native build commands and the
   exceptional signed-bundle/TCC path.
-- skill `develop-screenpipe-windows` — before developing or testing any
-  Windows-native change on a cloud VM or cloned release builder.
+- skill `develop-screenpipe-windows` — before any Windows-native development or
+  testing on a cloud VM; it defines the supported disposable-image workflow.
 - skill `screenpipe-tauri` — before adding or changing Tauri commands or their
   TypeScript bindings.
 

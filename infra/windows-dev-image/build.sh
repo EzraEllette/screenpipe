@@ -59,11 +59,12 @@ fi
 password=''
 provision_result="$(mktemp -t screenpipe-win-dev-provision.XXXXXX.json)"
 provision_payload="$(mktemp -t screenpipe-win-dev-provision.XXXXXX.ps1)"
+sysprep_payload="$(mktemp -t screenpipe-win-dev-sysprep.XXXXXX.ps1)"
 cleanup() {
   status=$?
   trap - EXIT
   unset password
-  rm -f "$provision_result" "$provision_payload"
+  rm -f "$provision_result" "$provision_payload" "$sysprep_payload"
   if [[ "$build_succeeded" != 'true' ]] && [[ "$(az group exists --name "$build_group" 2>/dev/null)" == 'true' ]]; then
     for _ in $(seq 1 6); do
       if az group delete --name "$build_group" --yes --output none; then break; fi
@@ -120,12 +121,20 @@ if ! grep -Fq '__SCREENPIPE_DEV_IMAGE_READY__' <<<"$provision_output"; then
   exit 1
 fi
 
+{
+  sed -n '1,4p' "$script_dir/unattend.xml" | sed 's/^/# /'
+  printf '\n$unattendBytes = [Convert]::FromBase64String(\x27%s\x27)\n' "$(base64 <"$script_dir/unattend.xml" | tr -d '\r\n')"
+  printf '[IO.File]::WriteAllBytes(\x27C:\\screenpipe-dev\\unattend.xml\x27, $unattendBytes)\n'
+  printf '$process = Start-Process C:\\Windows\\System32\\Sysprep\\Sysprep.exe -ArgumentList \x27/generalize\x27, \x27/oobe\x27, \x27/shutdown\x27, \x27/quiet\x27, \x27/unattend:C:\\screenpipe-dev\\unattend.xml\x27 -Wait -PassThru\n'
+  printf 'if ($process.ExitCode -ne 0) { throw "Sysprep exited with code $($process.ExitCode)" }\n'
+} >"$sysprep_payload"
+
 az vm run-command invoke \
   --resource-group "$build_group" \
   --name "$vm_name" \
   --command-id RunPowerShellScript \
-  --scripts 'Start-Process C:\Windows\System32\Sysprep\Sysprep.exe -ArgumentList "/generalize /oobe /shutdown /quiet" -Wait' \
-  --output none || true
+  --scripts @"$sysprep_payload" \
+  --output none
 
 for _ in $(seq 1 120); do
   power_state="$(az vm get-instance-view --resource-group "$build_group" --name "$vm_name" --query "instanceView.statuses[?starts_with(code, 'PowerState/')].code | [0]" --output tsv)"

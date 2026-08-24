@@ -20,6 +20,7 @@ blob_root="${AZURE_BLOB_ROOT:-windows-autonomous}"
 identity_client_id="${AZURE_WORKER_IDENTITY_CLIENT_ID:-efd998c9-a39c-4699-80ab-26bd185fc2d4}"
 identity_resource_id="${AZURE_WORKER_IDENTITY_RESOURCE_ID:-}"
 branch="${GITHUB_HEAD_BRANCH:-codex/$task_id}"
+resume_local_head="${RESUME_LOCAL_HEAD:-}"
 
 if [[ ! "$task_id" =~ ^[a-z0-9][a-z0-9-]{2,39}$ ]]; then
   printf 'task ID must match [a-z0-9][a-z0-9-]{2,39}\n' >&2
@@ -27,6 +28,10 @@ if [[ ! "$task_id" =~ ^[a-z0-9][a-z0-9-]{2,39}$ ]]; then
 fi
 if [[ ! "$base_sha" =~ ^[0-9a-f]{40}$ ]]; then
   printf 'base SHA must be 40 lowercase hexadecimal characters\n' >&2
+  exit 1
+fi
+if [[ -n "$resume_local_head" && ! "$resume_local_head" =~ ^[0-9a-f]{40}$ ]]; then
+  printf 'resume local head must be 40 lowercase hexadecimal characters\n' >&2
   exit 1
 fi
 if [[ -z "$image_id" || -z "$identity_resource_id" || ! -r "$prompt_file" ]]; then
@@ -53,6 +58,7 @@ jq -n \
   --arg taskId "$task_id" \
   --arg baseSha "$base_sha" \
   --arg branch "$branch" \
+  --arg resumeLocalHead "$resume_local_head" \
   --rawfile prompt "$prompt_file" \
   --arg storageAccount "$storage_account" \
   --arg storageContainer "$storage_container" \
@@ -65,6 +71,8 @@ jq -n \
     taskId: $taskId,
     baseSha: $baseSha,
     branch: $branch,
+    resumeLocalHead: $resumeLocalHead,
+    autonomousVisualTask: true,
     prompt: $prompt,
     storageAccount: $storageAccount,
     storageContainer: $storageContainer,

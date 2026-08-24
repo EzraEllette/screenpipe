@@ -17,6 +17,10 @@ $nodeVersion = '22.23.2'
 $sccacheVersion = '0.16.0'
 $codexVersion = '0.149.1'
 
+$oobePolicy = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\OOBE'
+New-Item -Path $oobePolicy -Force | Out-Null
+Set-ItemProperty -Path $oobePolicy -Name DisablePrivacyExperience -Type DWord -Value 1
+
 New-Item -ItemType Directory -Force -Path $toolsRoot, $cacheRoot, $devRoot, 'C:\src', $targetRoot | Out-Null
 if (-not $RuntimeScriptPayloads -or $RuntimeScriptPayloads.Count -ne 3) {
   throw 'autonomous runtime scripts were not supplied by the image builder'

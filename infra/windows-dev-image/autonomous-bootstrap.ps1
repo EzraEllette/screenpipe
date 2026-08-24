@@ -13,6 +13,10 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $workerRoot = 'C:\screenpipe-worker'
 
+$oobePolicy = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\OOBE'
+New-Item -Path $oobePolicy -Force | Out-Null
+Set-ItemProperty -Path $oobePolicy -Name DisablePrivacyExperience -Type DWord -Value 1
+
 function Get-ManagedIdentityToken([string] $Resource) {
   $encoded = [Uri]::EscapeDataString($Resource)
   foreach ($attempt in 1..30) {

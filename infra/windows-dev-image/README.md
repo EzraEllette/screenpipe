@@ -28,7 +28,8 @@ Normal runs refuse pre-existing build groups. Resume mode verifies the VM's
 project, environment, and image-version tags before using it.
 
 After publishing, launch a fresh VM from the exact image version and run
-`smoke.ps1`. Then dispatch an immutable smoke task and verify console auto-logon,
+`smoke.ps1 -AutonomousVisualTaskId <task-id>`. Then dispatch that exact immutable
+visual smoke task and verify console auto-logon,
 native validation, recording/evidence upload, credential cleanup, and shutdown
 without an inbound rule or operator session before setting `validated=true`.
 Never use an unvalidated version for development.
@@ -43,6 +44,7 @@ runner, or any publication action.
 ```bash
 AZURE_IMAGE_VERSION_ID=<exact-gallery-version-resource-id> \
 AZURE_WORKER_IDENTITY_RESOURCE_ID=<managed-identity-resource-id> \
+RESUME_LOCAL_HEAD=<optional-existing-PR-head-sha> \
 ./infra/windows-dev-image/dispatch-autonomous.sh <task-id> <base-sha> <prompt-file>
 ```
 

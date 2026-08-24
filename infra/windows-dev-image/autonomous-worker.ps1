@@ -106,6 +106,7 @@ try {
   Write-Host "Base: $($task.baseSha)"
   Write-Host "Branch: $($task.branch)"
   Write-Host 'No inbound desktop session is attached. This console and recording are VM-owned.'
+  if ($task.autonomousVisualTask -ne $true) { throw 'task must require autonomous visual evidence' }
   $recorder = Start-DesktopRecorder
 
   $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
@@ -123,7 +124,17 @@ try {
   Invoke-Checked 'gh.exe' @('auth', 'setup-git')
 
   Invoke-Checked 'git.exe' @('-C', $repository, 'fetch', '--force', $task.pushRemote, $task.baseSha)
-  Invoke-Checked 'git.exe' @('-C', $repository, 'checkout', '--force', '-B', $task.branch, $task.baseSha)
+  $startCommit = $task.baseSha
+  if ($task.resumeLocalHead) {
+    Invoke-Checked 'git.exe' @('-C', $repository, 'fetch', '--force', $task.pushRemote, $task.resumeLocalHead)
+    & git.exe -C $repository cat-file -e "$($task.resumeLocalHead)^{commit}"
+    if ($LASTEXITCODE -ne 0) { throw "resume commit is not present in the guest repository: $($task.resumeLocalHead)" }
+    & git.exe -C $repository merge-base --is-ancestor $task.baseSha $task.resumeLocalHead
+    if ($LASTEXITCODE -ne 0) { throw 'resume commit does not descend from the requested base' }
+    $startCommit = $task.resumeLocalHead
+    Write-Host "Resuming guest commit: $startCommit"
+  }
+  Invoke-Checked 'git.exe' @('-C', $repository, 'checkout', '--force', '-B', $task.branch, $startCommit)
   Invoke-Checked 'git.exe' @('-C', $repository, 'clean', '-ffd', '--exclude', 'target')
   Invoke-Checked 'git.exe' @('-C', $repository, 'config', 'user.name', 'screenpipe Windows autonomous worker')
   Invoke-Checked 'git.exe' @('-C', $repository, 'config', 'user.email', 'windows-worker@screenpipe.local')
@@ -188,8 +199,17 @@ exit /b %ERRORLEVEL%
   Invoke-Checked 'git.exe' @('-C', $repository, 'push', "--force-with-lease=$remoteRef`:$remoteSha", $task.pushRemote, "HEAD:$remoteRef")
   $expiry = (Get-Date).ToUniversalTime().AddDays(6).ToString('yyyy-MM-ddTHH:mmZ')
   Invoke-Checked 'az.cmd' @('login', '--identity', '--client-id', $task.identityClientId, '--allow-no-subscriptions', '--output', 'none')
-  $videoUrl = (& az.cmd storage blob generate-sas --account-name $task.storageAccount --container-name $task.storageContainer --name "$($task.blobRoot)/$($task.taskId)/acceptance.mp4" --permissions r --expiry $expiry --https-only --as-user --auth-mode login --full-uri --output tsv).Trim()
-  if ($LASTEXITCODE -ne 0 -or -not $videoUrl) { throw 'read-only evidence URL generation failed' }
+  $azErrorPath = Join-Path $resultRoot 'azure-cli.stderr.log'
+  $priorErrorPreference = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  $videoUrlOutput = & az.cmd storage blob generate-sas --account-name $task.storageAccount --container-name $task.storageContainer --name "$($task.blobRoot)/$($task.taskId)/acceptance.mp4" --permissions r --expiry $expiry --https-only --as-user --auth-mode login --full-uri --output tsv 2>$azErrorPath | Out-String
+  $azExitCode = $LASTEXITCODE
+  $ErrorActionPreference = $priorErrorPreference
+  if ($azExitCode -ne 0 -or [string]::IsNullOrWhiteSpace($videoUrlOutput)) {
+    $azFailure = if (Test-Path $azErrorPath) { (Get-Content $azErrorPath -Raw).Trim() } else { '' }
+    throw "read-only evidence URL generation failed with code $azExitCode`: $azFailure"
+  }
+  $videoUrl = $videoUrlOutput.Trim()
 
   $prBodyPath = Join-Path $resultRoot 'pr-body.md'
   @"
@@ -203,8 +223,25 @@ $($task.prBody)
 - Tested tree: ``$testedTree``
 - The disposable VM ran Codex, native validation, recording, push, and PR creation without an inbound desktop connection or a host-held process.
 "@ | Set-Content -Encoding UTF8 $prBodyPath
-  $prUrl = (& gh.exe pr create --repo $task.baseRepository --base $task.baseBranch --head "$($task.headOwner):$($task.branch)" --title $task.prTitle --body-file $prBodyPath).Trim()
-  if ($LASTEXITCODE -ne 0 -or -not $prUrl) { throw 'pull request creation failed' }
+  $ghErrorPath = Join-Path $resultRoot 'github-cli.stderr.log'
+  $ErrorActionPreference = 'Continue'
+  $existingPrOutput = & gh.exe pr list --repo $task.baseRepository --head "$($task.headOwner):$($task.branch)" --state open --json url --jq '.[0].url // empty' 2>$ghErrorPath | Out-String
+  $ghExitCode = $LASTEXITCODE
+  if ($ghExitCode -eq 0 -and -not [string]::IsNullOrWhiteSpace($existingPrOutput)) {
+    $prUrl = $existingPrOutput.Trim()
+    & gh.exe pr edit $prUrl --body-file $prBodyPath 2>>$ghErrorPath | Out-Null
+    $ghExitCode = $LASTEXITCODE
+    $prUrlOutput = $prUrl
+  } else {
+    $prUrlOutput = & gh.exe pr create --repo $task.baseRepository --base $task.baseBranch --head "$($task.headOwner):$($task.branch)" --title $task.prTitle --body-file $prBodyPath 2>>$ghErrorPath | Out-String
+    $ghExitCode = $LASTEXITCODE
+  }
+  $ErrorActionPreference = $priorErrorPreference
+  if ($ghExitCode -ne 0 -or [string]::IsNullOrWhiteSpace($prUrlOutput)) {
+    $ghFailure = if (Test-Path $ghErrorPath) { (Get-Content $ghErrorPath -Raw).Trim() } else { '' }
+    throw "pull request creation or evidence update failed with code $ghExitCode`: $ghFailure"
+  }
+  $prUrl = $prUrlOutput.Trim()
   Write-Host "PULL REQUEST CREATED BY VM: $prUrl"
   Start-Process $prUrl
   Start-Sleep -Seconds 12
@@ -236,7 +273,9 @@ $($task.prBody)
     @($agentLog, 'codex.jsonl', 'application/x-ndjson'),
     @($finalPath, 'codex-final.md', 'text/markdown'),
     @($agentError, 'codex.stderr.log', 'text/plain'),
-    @($recorderLog, 'ffmpeg-recorder.log', 'text/plain')
+    @($recorderLog, 'ffmpeg-recorder.log', 'text/plain'),
+    @($azErrorPath, 'azure-cli.stderr.log', 'text/plain'),
+    @($ghErrorPath, 'github-cli.stderr.log', 'text/plain')
   )) {
     try { Send-ResultBlob $file[0] $file[1] $file[2] } catch { }
   }

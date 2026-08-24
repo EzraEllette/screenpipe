@@ -50,11 +50,16 @@ Treat image construction as its own controlled infrastructure operation:
    remove repository credentials and task-specific source state.
 4. Remove logs, temporary installers, tokens, credentials, machine-specific
    identifiers, and other provisioning residue.
-5. Generalize the VM with Sysprep and publish an immutable Compute Gallery image
-   version. Record the Windows base version, provisioning commit, tool versions,
-   and cache-warm commit as image metadata.
+5. Set the device `DisablePrivacyExperience` policy, then generalize the VM with
+   Sysprep and a supported `oobeSystem` answer containing `HideEULAPage`,
+   `HideOnlineAccountScreens`, `HideWirelessSetupInOOBE`,
+   `HideOEMRegistrationScreen`, and `ProtectYourPC=3`. Do not use
+   `SkipMachineOOBE`. Publish an immutable Compute Gallery image version and
+   record its base version, provisioning commit, tool versions, and cache-warm
+   commit as image metadata.
 6. Launch a separate disposable VM from that exact image version. Dispatch an
-   exact immutable smoke-task blob and verify runtime Codex authentication,
+   exact immutable autonomous visual smoke-task blob and verify the OOBE policy,
+   runtime Codex authentication,
    console auto-logon, the supported native test, desktop recording, private
    evidence upload, credential cleanup, and shutdown. Verify TCP 3389 is not
    listening and the VM has no inbound NSG rule.
