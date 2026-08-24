@@ -6,9 +6,10 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $workerRoot = 'C:\screenpipe-worker'
 $task = Get-Content (Join-Path $workerRoot 'task.json') -Raw | ConvertFrom-Json
-$resultRoot = Join-Path $workerRoot 'result'
+$resultRoot = Join-Path $workerRoot "results\$($task.taskId)"
 $repository = 'C:\src\screenpipe'
 $videoPath = Join-Path $resultRoot 'acceptance.mp4'
+$recorderLog = Join-Path $resultRoot 'ffmpeg-recorder.log'
 $transcriptPath = Join-Path $resultRoot 'worker.log'
 $manifestPath = Join-Path $resultRoot 'evidence.json'
 $finalPath = Join-Path $resultRoot 'codex-final.md'
@@ -69,17 +70,28 @@ function Invoke-Checked([string] $FilePath, [string[]] $ArgumentList) {
 }
 
 function Start-DesktopRecorder {
-  $startInfo = New-Object Diagnostics.ProcessStartInfo
-  $startInfo.FileName = 'ffmpeg.exe'
-  $startInfo.Arguments = "-y -loglevel error -f gdigrab -framerate 15 -draw_mouse 1 -i desktop -c:v libx264 -preset ultrafast -pix_fmt yuv420p `"$videoPath`""
-  $startInfo.UseShellExecute = $false
-  $startInfo.RedirectStandardInput = $true
-  $startInfo.RedirectStandardError = $false
-  $startInfo.CreateNoWindow = $true
-  $process = New-Object Diagnostics.Process
-  $process.StartInfo = $startInfo
-  if (-not $process.Start()) { throw 'desktop recorder did not start' }
-  return $process
+  $lastExitCode = $null
+  foreach ($attempt in 1..30) {
+    Remove-Item $videoPath -Force -ErrorAction SilentlyContinue
+    Remove-Item $recorderLog -Force -ErrorAction SilentlyContinue
+    $startInfo = New-Object Diagnostics.ProcessStartInfo
+    $startInfo.FileName = 'ffmpeg.exe'
+    $startInfo.Arguments = "-y -loglevel error -f gdigrab -framerate 15 -draw_mouse 1 -i desktop -c:v libx264 -preset ultrafast -pix_fmt yuv420p `"$videoPath`""
+    $startInfo.UseShellExecute = $false
+    $startInfo.RedirectStandardInput = $true
+    $startInfo.RedirectStandardError = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.EnvironmentVariables['FFREPORT'] = "file=$recorderLog`:level=32"
+    $process = New-Object Diagnostics.Process
+    $process.StartInfo = $startInfo
+    if (-not $process.Start()) { throw 'desktop recorder did not start' }
+    Start-Sleep -Seconds 2
+    if (-not $process.HasExited) { return $process }
+    $lastExitCode = $process.ExitCode
+    if ($attempt -lt 30) { Start-Sleep -Seconds 2 }
+  }
+  $detail = if (Test-Path $recorderLog) { (Get-Content $recorderLog -Tail 20 | Out-String).Trim() } else { '' }
+  throw "desktop recorder did not become ready; last exit code $lastExitCode`: $detail"
 }
 
 function Stop-DesktopRecorder([Diagnostics.Process] $Process) {
@@ -223,7 +235,8 @@ $($task.prBody)
     @($transcriptPath, 'worker.log', 'text/plain'),
     @($agentLog, 'codex.jsonl', 'application/x-ndjson'),
     @($finalPath, 'codex-final.md', 'text/markdown'),
-    @($agentError, 'codex.stderr.log', 'text/plain')
+    @($agentError, 'codex.stderr.log', 'text/plain'),
+    @($recorderLog, 'ffmpeg-recorder.log', 'text/plain')
   )) {
     try { Send-ResultBlob $file[0] $file[1] $file[2] } catch { }
   }

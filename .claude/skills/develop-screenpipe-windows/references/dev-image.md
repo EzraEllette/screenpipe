@@ -83,8 +83,9 @@ For every Windows-native task:
    explicit native exit code, and preserve the tested SHA. Under strict
    PowerShell, isolate noisy native stderr so harmless banners do not become
    terminating errors.
-6. The worker records its console desktop for visual or interactive acceptance
-   and uploads evidence to private Blob Storage before delivery.
+6. The worker records its console desktop for visual or interactive acceptance.
+   It uses a bounded recorder-readiness loop and keeps every local and uploaded
+   evidence file isolated under the immutable task ID before delivery.
 7. When the task authorizes delivery, the worker pushes, creates the PR, and
    adds the video link plus exact tested commit and tree to the PR body. It has
    no signing, release, or publication permission.
