@@ -21,6 +21,7 @@ identity_client_id="${AZURE_WORKER_IDENTITY_CLIENT_ID:-efd998c9-a39c-4699-80ab-2
 identity_resource_id="${AZURE_WORKER_IDENTITY_RESOURCE_ID:-}"
 branch="${GITHUB_HEAD_BRANCH:-codex/$task_id}"
 resume_local_head="${RESUME_LOCAL_HEAD:-}"
+allow_unvalidated_image_for_smoke="${ALLOW_UNVALIDATED_IMAGE_FOR_SMOKE:-false}"
 
 if [[ ! "$task_id" =~ ^[a-z0-9][a-z0-9-]{2,39}$ ]]; then
   printf 'task ID must match [a-z0-9][a-z0-9-]{2,39}\n' >&2
@@ -39,9 +40,13 @@ if [[ -z "$image_id" || -z "$identity_resource_id" || ! -r "$prompt_file" ]]; th
   exit 1
 fi
 
-if [[ "$(az sig image-version show --ids "$image_id" --query tags.validated --output tsv)" != 'true' ]]; then
+image_validated="$(az sig image-version show --ids "$image_id" --query tags.validated --output tsv)"
+if [[ "$image_validated" != 'true' && "$allow_unvalidated_image_for_smoke" != 'true' ]]; then
   printf 'image version is not validated: %s\n' "$image_id" >&2
   exit 1
+fi
+if [[ "$image_validated" != 'true' ]]; then
+  printf 'warning: allowing unvalidated image for this fresh-image smoke run: %s\n' "$image_id" >&2
 fi
 
 repository_root="$(git rev-parse --show-toplevel)"
@@ -101,6 +106,10 @@ for file in \
   az storage blob upload --account-name "$storage_account" --container-name "$storage_container" --auth-mode "$storage_auth_mode" --name "$prefix/$blob_name" --file "$source_path" --overwrite false --only-show-errors --output none
 done
 
+if [[ "$(az group exists --name "$resource_group")" == 'true' ]]; then
+  printf 'task resource group already exists; use a unique task ID or resource group: %s\n' "$resource_group" >&2
+  exit 1
+fi
 admin_password="Sp!$(openssl rand -hex 24)aA9"
 az group create --name "$resource_group" --location "$location" --tags project=screenpipe-windows-dev-task environment=ephemeral task-id="$task_id" --output none
 az vm create \
@@ -112,12 +121,30 @@ az vm create \
   --admin-username screenpipe \
   --admin-password "$admin_password" \
   --assign-identity "$identity_resource_id" \
-  --public-ip-address '' \
+  --public-ip-sku Standard \
   --nsg-rule NONE \
   --tags project=screenpipe-windows-dev-task environment=ephemeral task-id="$task_id" execution=autonomous inbound-desktop=disabled \
   --output none
 unset admin_password
-shutdown_time="$(date -u -d '+6 hours' +%H%M)"
+nic_id="$(az vm show --resource-group "$resource_group" --name "$vm_name" --query 'networkProfile.networkInterfaces[0].id' --output tsv)"
+nsg_id="$(az network nic show --ids "$nic_id" --query 'networkSecurityGroup.id' --output tsv)"
+public_ip_id="$(az network nic show --ids "$nic_id" --query 'ipConfigurations[0].publicIPAddress.id' --output tsv)"
+custom_inbound_rules="$(az network nsg show --ids "$nsg_id" --query "length(securityRules[?direction == 'Inbound'])" --output tsv)"
+public_ip_sku="$(az network public-ip show --ids "$public_ip_id" --query 'sku.name' --output tsv)"
+if [[ "$custom_inbound_rules" != '0' ]]; then
+  printf 'VM NSG has custom inbound rules; refusing autonomous dispatch: %s\n' "$nsg_id" >&2
+  exit 1
+fi
+if [[ "$public_ip_sku" != 'Standard' ]]; then
+  printf 'VM public IP is not Standard SKU: %s\n' "$public_ip_id" >&2
+  exit 1
+fi
+
+if shutdown_time="$(date -u -v+6H +%H%M 2>/dev/null)"; then
+  : # macOS BSD date
+else
+  shutdown_time="$(date -u -d '+6 hours' +%H%M)" # GNU date
+fi
 az vm auto-shutdown --resource-group "$resource_group" --name "$vm_name" --time "$shutdown_time" --output none
 
 az vm update --resource-group "$resource_group" --name "$vm_name" --set tags.task-id="$task_id" tags.execution=autonomous tags.inbound-desktop=disabled --output none
