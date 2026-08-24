@@ -370,7 +370,21 @@ export function buildProviderErrorPresentation(
   }
 
   const message = buildGenericProviderErrorMessage(errorStr, preset);
-  return message ? { kind: "provider", message, retryable: true } : null;
+  if (message) return { kind: "provider", message, retryable: true };
+
+  if (
+    isNativeOllamaProvider(preset?.provider) &&
+    errorStr.toLowerCase().includes("does not support tools")
+  ) {
+    const model = preset?.model?.trim() || "the selected model";
+    return {
+      kind: "provider",
+      message: `Ollama model "${model}" does not support tools. Switch your AI preset to an Ollama model that supports tools.`,
+      retryable: false,
+    };
+  }
+
+  return null;
 }
 
 export function buildProviderErrorMessage(
