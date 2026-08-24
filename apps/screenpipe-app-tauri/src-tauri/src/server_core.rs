@@ -1267,10 +1267,10 @@ impl ServerCore {
                     let pipeline = pipeline.with_pseudonyms(pseudonymizer);
                     let pipeline_arc = Arc::new(pipeline) as Arc<dyn Redactor>;
                     let cfg = WorkerConfig {
-                        // Match the local ONNX inference width. One batched
-                        // call finishes faster than the former four serial
-                        // calls on the element backlog, while the adaptive
-                        // whole-process controller still enforces 30% CPU.
+                        // Keep 16 as the throughput ceiling. The worker starts
+                        // each table at four rows and adapts toward a 250 ms
+                        // work slice, while the whole-process governor still
+                        // enforces the sustained 30% CPU budget.
                         batch_size: 16,
                         tables: ALL_TARGET_TABLES.to_vec(),
                         ..Default::default()

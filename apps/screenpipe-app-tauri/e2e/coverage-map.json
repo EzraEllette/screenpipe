@@ -2030,6 +2030,28 @@
       "notes": "Opens Home -> Connections, opens the first AI tools setting, verifies the common tool toggles are first and directly visible in the modal, checks plain-language built-ins and compatibility labels, filters the package search, and captures a screenshot. Read-only smoke: does not install packages."
     },
     {
+      "spec": "pii-redaction-coordination.spec.ts",
+      "platforms": [
+        "windows",
+        "macos",
+        "linux"
+      ],
+      "layers": [
+        "real-ui-e2e",
+        "local-api",
+        "performance"
+      ],
+      "features": [
+        "app-launch",
+        "health",
+        "local-api-load"
+      ],
+      "criticality": "high",
+      "confidence": "strong",
+      "ux": "api",
+      "notes": "Starts the opt-in local ONNX text reconciliation worker in the desktop app, redacts a 24-row SQLite backlog, and probes WebDriver plus health responsiveness while it runs."
+    },
+    {
       "spec": "pipe-continuous-chat.spec.ts",
       "platforms": [
         "macos"

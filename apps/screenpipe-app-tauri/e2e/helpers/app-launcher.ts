@@ -87,6 +87,9 @@ const APP_PID_FILE = resolve(E2E_DATA_DIR, 'app.pid');
 // src-tauri/src/e2e/seeds.rs) so the search-bugs spec runs inside the normal
 // `test:e2e` job instead of needing a separate CI step. Harmless for other
 // specs (namespaced "vector" frames; the empty-state spec uses its own query).
+// `pii-text-redaction` enables only the local text reconciliation worker. The
+// dedicated coordination spec uses it with `no-recording`, then writes a
+// synthetic backlog through `/add` and verifies redaction plus app liveness.
 // `sck-enumeration-hang-once` is a debug-only macOS fault injection used by the
 // opt-in SCK startup recovery spec; the first monitor callback never returns.
 // `visual-check-hang-once` is a debug-only macOS fault injection used by the

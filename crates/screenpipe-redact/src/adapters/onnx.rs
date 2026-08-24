@@ -612,12 +612,20 @@ mod runtime {
                 .lock()
                 .map_err(|_| RedactError::Runtime("session mutex poisoned".into()))?;
 
+            let inference_started = std::time::Instant::now();
             let outputs = session
                 .run(ort::inputs![
                     "input_ids" => TensorRef::from_array_view(&ids_arr).map_err(|e| RedactError::Runtime(format!("ids tensor: {e}")))?,
                     "attention_mask" => TensorRef::from_array_view(&mask_arr).map_err(|e| RedactError::Runtime(format!("mask tensor: {e}")))?,
                 ])
                 .map_err(|e| RedactError::Runtime(format!("session.run: {e}")))?;
+            tracing::debug!(
+                batch_size,
+                sequence_width = width,
+                padded_tokens = batch_size.saturating_mul(width),
+                inference_ms = inference_started.elapsed().as_millis(),
+                "onnx text redaction inference"
+            );
 
             // logits shape: [batch, padded_seq_len, num_labels]
             let logits = outputs

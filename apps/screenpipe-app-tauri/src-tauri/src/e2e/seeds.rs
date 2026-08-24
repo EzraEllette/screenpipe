@@ -68,6 +68,13 @@ pub(crate) fn apply_settings(app: &AppHandle, store: &mut SettingsStore) {
         store.recording.disable_audio = true;
         info!("E2E seed: audio disabled");
     }
+    if e2e_flags.iter().any(|f| f == "pii-text-redaction") {
+        store.recording.async_pii_redaction = true;
+        store.recording.async_image_pii_redaction = false;
+        store.recording.pii_backend = "local".to_string();
+        store.recording.pii_redaction_labels = vec!["secret".to_string()];
+        info!("E2E seed: local async text-PII reconciliation enabled");
+    }
     if e2e_flags.iter().any(|f| f == "sck-capture-hang-once") {
         // The CoreGraphics recovery path cannot enforce SCK window-id
         // exclusions. This isolated lane deliberately removes filters

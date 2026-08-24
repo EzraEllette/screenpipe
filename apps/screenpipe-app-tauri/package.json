@@ -58,6 +58,7 @@
     "test:e2e:recording-health-focus-cold:macos": "SCREENPIPE_E2E_SEED=onboarding,no-audio,ignore-disk-pressure,focus-cold-heartbeat SCREENPIPE_PORT=3047 bun run wdio run e2e/wdio.conf.ts --spec e2e/specs/recording-health-focus-cold.spec.ts",
     "test:e2e:recording-health-return-race": "SCREENPIPE_E2E_SEED=onboarding,no-recording,recording-health-return-race SCREENPIPE_PORT=3044 bun run wdio run e2e/wdio.conf.ts --spec e2e/specs/recording-health-return-race.spec.ts",
     "test:e2e:search-bugs": "SCREENPIPE_E2E_SEED=onboarding,no-recording,search-fixture SCREENPIPE_E2E_TIMELINE_FRAME_LIMIT=2 SCREENPIPE_PORT=3041 bun run wdio run e2e/wdio.conf.ts --spec e2e/specs/search/search-bugs-4645.spec.ts",
+    "test:e2e:pii-redaction": "SCREENPIPE_E2E_SEED=onboarding,no-recording,pii-text-redaction SCREENPIPE_PORT=3044 bun run wdio run e2e/wdio.conf.ts --spec e2e/specs/pii-redaction-coordination.spec.ts",
     "typecheck": "bun x tsc --noEmit",
     "bindings:check": "bun scripts/native-build-queue.ts test tauri_bindings_are_current -- --nocapture",
     "bindings:generate": "UPDATE_TAURI_BINDINGS=1 bun scripts/native-build-queue.ts test export_typescript_bindings -- --nocapture",

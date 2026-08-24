@@ -71,6 +71,11 @@ name = "onnx_text_memory_probe"
 path = "examples/onnx_text_memory_probe.rs"
 required-features = ["onnx-cpu"]
 
+[[example]]
+name = "work_slice_benchmark"
+path = "examples/work_slice_benchmark.rs"
+required-features = ["onnx-cpu"]
+
 # Optional model adapters. Off by default so the crate builds without
 # any heavy ML deps. Picks the platform-appropriate accelerator.
 #
