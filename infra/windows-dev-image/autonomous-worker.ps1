@@ -69,6 +69,22 @@ function Invoke-Checked([string] $FilePath, [string[]] $ArgumentList) {
   if ($LASTEXITCODE -ne 0) { throw "$FilePath exited with code $LASTEXITCODE" }
 }
 
+function Wait-InteractiveDesktop {
+  $sessionId = [Diagnostics.Process]::GetCurrentProcess().SessionId
+  foreach ($attempt in 1..90) {
+    $explorer = Get-Process -Name explorer -ErrorAction SilentlyContinue | Where-Object SessionId -EQ $sessionId
+    $oobe = Get-Process -ErrorAction SilentlyContinue | Where-Object {
+      $_.SessionId -eq $sessionId -and $_.ProcessName -match '^(CloudExperienceHost|CloudExperienceHostBroker|UserOOBEBroker|oobe|WWAHost)'
+    }
+    if ($explorer -and -not $oobe) {
+      Start-Sleep -Seconds 15
+      return
+    }
+    Start-Sleep -Seconds 2
+  }
+  throw 'interactive desktop did not become ready after OOBE'
+}
+
 function Start-DesktopRecorder {
   $lastExitCode = $null
   foreach ($attempt in 1..30) {
@@ -102,6 +118,7 @@ function Stop-DesktopRecorder([Diagnostics.Process] $Process) {
 }
 
 try {
+  Wait-InteractiveDesktop
   Write-Host "SCREENPIPE AUTONOMOUS WINDOWS TASK: $($task.taskId)"
   Write-Host "Base: $($task.baseSha)"
   Write-Host "Branch: $($task.branch)"
@@ -210,6 +227,7 @@ exit /b %ERRORLEVEL%
     throw "read-only evidence URL generation failed with code $azExitCode`: $azFailure"
   }
   $videoUrl = $videoUrlOutput.Trim()
+  if (-not $recorder -or $recorder.HasExited) { throw 'desktop recorder exited before PR evidence delivery' }
 
   $prBodyPath = Join-Path $resultRoot 'pr-body.md'
   @"
@@ -225,7 +243,7 @@ $($task.prBody)
 "@ | Set-Content -Encoding UTF8 $prBodyPath
   $ghErrorPath = Join-Path $resultRoot 'github-cli.stderr.log'
   $ErrorActionPreference = 'Continue'
-  $existingPrOutput = & gh.exe pr list --repo $task.baseRepository --head "$($task.headOwner):$($task.branch)" --state open --json url --jq '.[0].url // empty' 2>$ghErrorPath | Out-String
+  $existingPrOutput = & gh.exe pr list --repo $task.baseRepository --head $task.branch --state open --json url --jq '.[0].url // empty' 2>$ghErrorPath | Out-String
   $ghExitCode = $LASTEXITCODE
   if ($ghExitCode -eq 0 -and -not [string]::IsNullOrWhiteSpace($existingPrOutput)) {
     $prUrl = $existingPrOutput.Trim()
