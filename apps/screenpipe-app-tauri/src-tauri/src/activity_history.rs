@@ -17,9 +17,10 @@ use serde_json::{json, Value};
 use specta::Type;
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::Instant;
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::Mutex;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 const STORE_KEY: &str = "activityHistory:activity-history-pi-v9";
 const DEFAULT_INTERVAL_MINUTES: u64 = 15;
@@ -169,6 +170,37 @@ impl QualityAudit {
 #[derive(Default)]
 pub struct ActivityHistoryState {
     run_lock: Arc<Mutex<()>>,
+}
+
+fn track_generation_event(app: &AppHandle, event: &'static str, properties: Value) {
+    if let Some(analytics) = app.try_state::<std::sync::Arc<crate::analytics::AnalyticsManager>>() {
+        let analytics = std::sync::Arc::clone(&analytics);
+        tauri::async_runtime::spawn(async move {
+            if let Err(error) = analytics.send_event(event, Some(properties)).await {
+                warn!(%error, event, "activity generation telemetry delivery failed");
+            }
+        });
+    }
+}
+
+fn generation_event_properties(
+    run_id: &str,
+    source: &str,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    elapsed: std::time::Duration,
+) -> Value {
+    json!({
+        "telemetry_schema_version": 1,
+        "run_id": run_id,
+        "source": source,
+        "duration_ms": elapsed.as_millis().min(u64::MAX as u128) as u64,
+        "requested_range_seconds": (end - start).num_seconds().max(0),
+    })
+}
+
+fn repair_run_failure(error: &str) -> String {
+    format!("activity_quality_failed:repair_run_failed:{error}")
 }
 
 fn parse_time(value: &str) -> Option<DateTime<Utc>> {
@@ -857,6 +889,81 @@ async fn generate(
     end: DateTime<Utc>,
     source: &'static str,
 ) -> Result<PersistedActivityHistory, String> {
+    let run_id = uuid::Uuid::new_v4().to_string();
+    let started_at = Instant::now();
+    track_generation_event(
+        app,
+        "activity_generation_run_started",
+        generation_event_properties(&run_id, source, start, end, started_at.elapsed()),
+    );
+
+    match generate_inner(app, state, start, end, source).await {
+        Ok(result) => {
+            let mut properties =
+                generation_event_properties(&run_id, source, start, end, started_at.elapsed());
+            if let Some(object) = properties.as_object_mut() {
+                object.insert("outcome".into(), json!("completed"));
+                object.insert("activity_count".into(), json!(result.entries.len()));
+            }
+            track_generation_event(app, "activity_generation_run_completed", properties);
+            info!(
+                activity_run_id = %run_id,
+                activity_source = source,
+                duration_ms = started_at.elapsed().as_millis() as u64,
+                activity_count = result.entries.len(),
+                "activity generation completed"
+            );
+            Ok(result)
+        }
+        Err(error_message) => {
+            let skipped = error_message.starts_with("activity_no_data:");
+            let mut properties =
+                generation_event_properties(&run_id, source, start, end, started_at.elapsed());
+            if let Some(object) = properties.as_object_mut() {
+                object.insert(
+                    "outcome".into(),
+                    json!(if skipped { "skipped" } else { "failed" }),
+                );
+                object.insert("error_message".into(), json!(error_message));
+            }
+            track_generation_event(
+                app,
+                if skipped {
+                    "activity_generation_run_skipped"
+                } else {
+                    "activity_generation_run_failed"
+                },
+                properties,
+            );
+
+            if skipped {
+                info!(
+                    activity_run_id = %run_id,
+                    activity_source = source,
+                    error = %error_message,
+                    "activity generation skipped"
+                );
+            } else {
+                error!(
+                    activity_run_id = %run_id,
+                    activity_source = source,
+                    error = %error_message,
+                    "activity generation failed: {}",
+                    error_message,
+                );
+            }
+            Err(error_message)
+        }
+    }
+}
+
+async fn generate_inner(
+    app: &AppHandle,
+    state: &ActivityHistoryState,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    source: &'static str,
+) -> Result<PersistedActivityHistory, String> {
     if start >= end {
         return Err("Start time must be before end time".to_string());
     }
@@ -898,8 +1005,11 @@ async fn generate(
         )
         .await
         .map_err(|error| {
-            warn!(%error, "activity history: repair run failed; preserving stored history and coverage");
-            "activity_quality_failed:repair_run_failed".to_string()
+            warn!(
+                %error,
+                "activity history: repair run failed; preserving stored history and coverage"
+            );
+            repair_run_failure(&error)
         })?;
         let repaired = parse_or_rejected(&repaired_raw, start, end);
         let repaired_audit = audit_document(
@@ -1340,5 +1450,34 @@ mod tests {
     fn only_manual_generation_notifies_on_completion() {
         assert!(should_notify_completion("manual"));
         assert!(!should_notify_completion("automatic"));
+    }
+
+    #[test]
+    fn repair_failure_preserves_the_exact_root_error() {
+        assert_eq!(
+            repair_run_failure("HTTP 429 daily_cost_limit_exceeded"),
+            "activity_quality_failed:repair_run_failed:HTTP 429 daily_cost_limit_exceeded"
+        );
+    }
+
+    #[test]
+    fn generation_health_properties_are_content_free_and_correlatable() {
+        let start = parse_time("2026-08-24T10:00:00Z").unwrap();
+        let end = parse_time("2026-08-24T11:00:00Z").unwrap();
+        let properties = generation_event_properties(
+            "run-123",
+            "automatic",
+            start,
+            end,
+            std::time::Duration::from_millis(321),
+        );
+
+        assert_eq!(properties["run_id"], "run-123");
+        assert_eq!(properties["source"], "automatic");
+        assert_eq!(properties["duration_ms"], 321);
+        assert_eq!(properties["requested_range_seconds"], 3_600);
+        assert!(properties.get("title").is_none());
+        assert!(properties.get("summary").is_none());
+        assert!(properties.get("evidence").is_none());
     }
 }
