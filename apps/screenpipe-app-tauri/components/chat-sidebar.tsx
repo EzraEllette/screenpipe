@@ -134,6 +134,7 @@ import {
   latestSidebarPipeRunTimes,
   listMoveTargetGroups,
   recurringPipeGroupKeys,
+  sortSidebarPipeRuns,
   visibleSidebarPipeNames,
   sessionGroupKey,
   type SidebarItem,
@@ -762,11 +763,13 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
       });
       const merged = [...(sessionsByPipe.get(name) ?? []), ...cached];
       const seen = new Set<string>();
-      const sessions = merged.filter((session) => {
-        if (seen.has(session.id)) return false;
-        seen.add(session.id);
-        return true;
-      });
+      const sessions = sortSidebarPipeRuns(
+        merged.filter((session) => {
+          if (seen.has(session.id)) return false;
+          seen.add(session.id);
+          return true;
+        }),
+      );
       return {
         kind: "group" as const,
         key: `pipe:${name}`,

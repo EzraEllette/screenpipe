@@ -80,6 +80,33 @@ export function visibleSidebarPipeNames(
     .map(([name]) => name);
 }
 
+/**
+ * Pipe history is ordered by execution recency, independently from the global
+ * chat sidebar order. The chat order intentionally prioritizes user-authored
+ * conversations, which can otherwise leave a newly completed pipe run below
+ * older runs that contain a persisted user prompt.
+ */
+export function sortSidebarPipeRuns(
+  sessions: SessionRecord[],
+): SessionRecord[] {
+  return [...sessions].sort((a, b) => {
+    const aExecutionId = a.pipeContext?.executionId;
+    const bExecutionId = b.pipeContext?.executionId;
+    if (
+      aExecutionId != null &&
+      bExecutionId != null &&
+      aExecutionId !== bExecutionId
+    ) {
+      return bExecutionId - aExecutionId;
+    }
+    return (
+      b.updatedAt - a.updatedAt ||
+      b.createdAt - a.createdAt ||
+      a.id.localeCompare(b.id)
+    );
+  });
+}
+
 // ── Types ────────────────────────────────────────────────────────────
 
 export type SidebarItem =

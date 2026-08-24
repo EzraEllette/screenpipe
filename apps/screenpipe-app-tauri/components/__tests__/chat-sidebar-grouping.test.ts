@@ -10,6 +10,7 @@ import {
   buildGroupedRecents,
   buildSidebarRecentsSections,
   latestSidebarPipeRunTimes,
+  sortSidebarPipeRuns,
   visibleSidebarPipeNames,
   listMoveTargetGroups,
   recurringPipeGroupKeys,
@@ -224,6 +225,46 @@ describe("visibleSidebarPipeNames", () => {
         ],
       ),
     ).toEqual(["new-pipe", "older-pipe", "oldest-pipe"]);
+  });
+});
+
+describe("sortSidebarPipeRuns", () => {
+  it("keeps the newest execution first regardless of global chat priority", () => {
+    const olderUserPromptRun = {
+      ...s("old", "imessage-sync #23034", "imessage-sync"),
+      createdAt: Date.parse("2026-08-24T12:00:00.000Z"),
+      updatedAt: Date.parse("2026-08-24T12:01:00.000Z"),
+      lastUserMessageAt: Date.parse("2026-08-24T12:00:30.000Z"),
+      pipeContext: { pipeName: "imessage-sync", executionId: 23034 },
+    };
+    const newestRun = {
+      ...s("new", "imessage-sync #23055", "imessage-sync"),
+      createdAt: Date.parse("2026-08-24T13:00:00.000Z"),
+      updatedAt: Date.parse("2026-08-24T13:01:00.000Z"),
+      pipeContext: { pipeName: "imessage-sync", executionId: 23055 },
+    };
+
+    expect(
+      sortSidebarPipeRuns([olderUserPromptRun, newestRun]).map((run) => run.id),
+    ).toEqual(["new", "old"]);
+  });
+
+  it("falls back to run timestamps when execution ids are unavailable", () => {
+    const older = {
+      ...s("older", "legacy run", "legacy"),
+      updatedAt: 100,
+      pipeContext: { pipeName: "legacy" },
+    };
+    const newer = {
+      ...s("newer", "legacy run", "legacy"),
+      updatedAt: 200,
+      pipeContext: { pipeName: "legacy" },
+    };
+
+    expect(sortSidebarPipeRuns([older, newer]).map((run) => run.id)).toEqual([
+      "newer",
+      "older",
+    ]);
   });
 });
 
