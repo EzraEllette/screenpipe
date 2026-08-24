@@ -2027,8 +2027,13 @@ impl SettingsStore {
         }
     }
 
-    pub(crate) fn restricts_paid_local_features(&self) -> bool {
+    /// True for verified Free or missing/conflicting/unverified plan truth.
+    pub(crate) fn is_free_or_unattributed_user(&self) -> bool {
         self.local_plan_policy() != LocalPlanPolicy::VerifiedPaid
+    }
+
+    pub(crate) fn restricts_paid_local_features(&self) -> bool {
+        self.is_free_or_unattributed_user()
     }
 
     pub(crate) fn has_account_identity(&self) -> bool {
@@ -3098,6 +3103,7 @@ mod tests {
         }));
 
         assert_eq!(store.local_plan_policy(), LocalPlanPolicy::VerifiedFree);
+        assert!(store.is_free_or_unattributed_user());
         let config = store.to_recording_config(std::path::PathBuf::from("/tmp/screenpipe"));
         assert_eq!(config.max_non_template_pipes, Some(2));
     }
@@ -3125,6 +3131,7 @@ mod tests {
             "features": { "app": true }
         }));
         assert_eq!(lifetime.local_plan_policy(), LocalPlanPolicy::VerifiedPaid);
+        assert!(!lifetime.is_free_or_unattributed_user());
         let config = lifetime.to_recording_config(std::path::PathBuf::from("/tmp/screenpipe"));
         assert_eq!(config.max_non_template_pipes, None);
     }
@@ -3144,6 +3151,7 @@ mod tests {
         }));
 
         assert_eq!(store.local_plan_policy(), LocalPlanPolicy::Unknown);
+        assert!(store.is_free_or_unattributed_user());
         assert!(store.restricts_paid_local_features());
         let config = store.to_recording_config(std::path::PathBuf::from("/tmp/screenpipe"));
         assert_eq!(config.max_non_template_pipes, Some(2));

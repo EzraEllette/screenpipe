@@ -258,6 +258,13 @@ export function getLocalPlanPolicy(
   return "unknown";
 }
 
+/** Free or missing/conflicting/unverified plan truth. */
+export function isFreeOrUnattributedUser(
+  user: AppUser | null | undefined,
+): boolean {
+  return getLocalPlanPolicy(user) !== "verified-paid";
+}
+
 export function hasFreePlanPolicy(user: AppUser | null | undefined): boolean {
   return getLocalPlanPolicy(user) === "verified-free";
 }
