@@ -1641,11 +1641,21 @@ export function ActivityLedger({
                 ? quota.message
                 : "History could not be updated. Try again.",
         );
-        posthog.capture("activity_generation_failed", {
-          range: preset,
-          source,
-          error_kind: qualityFailure ? "quality_validation" : quota.kind,
-        });
+        if (noDataStatus) {
+          posthog.capture("activity_generation_completed", {
+            range: preset,
+            source,
+            outcome: "no_activity",
+            activity_count: 0,
+            data_status: noDataStatus,
+          });
+        } else {
+          posthog.capture("activity_generation_failed", {
+            range: preset,
+            source,
+            error_kind: qualityFailure ? "quality_validation" : quota.kind,
+          });
+        }
       } finally {
         if (historyAbortRef.current === controller) {
           historyLoadingRef.current = false;

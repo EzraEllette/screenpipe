@@ -1667,6 +1667,20 @@ describe("ActivityLedger", () => {
     );
     expect(mocks.runDailySummaryWithPi).not.toHaveBeenCalled();
     expect(screen.getByRole("button", { name: "Try again" })).toBeVisible();
+    expect(mocks.posthogCapture).toHaveBeenCalledWith(
+      "activity_generation_completed",
+      {
+        range: "today",
+        source: "empty_state",
+        outcome: "no_activity",
+        activity_count: 0,
+        data_status: "empty_but_recording",
+      },
+    );
+    expect(mocks.posthogCapture).not.toHaveBeenCalledWith(
+      "activity_generation_failed",
+      expect.anything(),
+    );
   });
 
   it("keeps a slow backend generation running past two minutes", async () => {
