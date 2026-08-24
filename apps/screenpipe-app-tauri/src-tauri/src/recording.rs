@@ -1140,7 +1140,7 @@ async fn spawn_screenpipe_inner(
 
     #[cfg(target_os = "macos")]
     let screen_recording_start_permitted =
-        screenpipe_core::permissions::check_screen_recording_tauri().is_granted();
+        crate::permissions::screen_recording_permission_usable_in_process();
     #[cfg(not(target_os = "macos"))]
     let screen_recording_start_permitted = true;
 
