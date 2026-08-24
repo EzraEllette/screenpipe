@@ -186,7 +186,7 @@ exit /b %ERRORLEVEL%
   if ($LASTEXITCODE -ne 0) { throw 'remote branch lease lookup failed' }
   $remoteSha = if ($remoteLine) { ($remoteLine -split '\s+')[0] } else { '' }
   Invoke-Checked 'git.exe' @('-C', $repository, 'push', "--force-with-lease=$remoteRef`:$remoteSha", $task.pushRemote, "HEAD:$remoteRef")
-  $expiry = (Get-Date).ToUniversalTime().AddDays(14).ToString('yyyy-MM-ddTHH:mmZ')
+  $expiry = (Get-Date).ToUniversalTime().AddDays(6).ToString('yyyy-MM-ddTHH:mmZ')
   Invoke-Checked 'az.cmd' @('login', '--identity', '--client-id', $task.identityClientId, '--allow-no-subscriptions', '--output', 'none')
   $videoUrl = (& az.cmd storage blob generate-sas --account-name $task.storageAccount --container-name $task.storageContainer --name "$($task.blobRoot)/$($task.taskId)/acceptance.mp4" --permissions r --expiry $expiry --https-only --as-user --auth-mode login --full-uri --output tsv).Trim()
   if ($LASTEXITCODE -ne 0 -or -not $videoUrl) { throw 'read-only evidence URL generation failed' }

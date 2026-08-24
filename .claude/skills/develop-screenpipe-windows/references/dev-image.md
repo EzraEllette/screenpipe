@@ -87,8 +87,10 @@ For every Windows-native task:
    It uses a bounded recorder-readiness loop and keeps every local and uploaded
    evidence file isolated under the immutable task ID before delivery.
 7. When the task authorizes delivery, the worker pushes, creates the PR, and
-   adds the video link plus exact tested commit and tree to the PR body. It has
-   no signing, release, or publication permission.
+   adds a six-day read-only user-delegation SAS video link plus the exact tested
+   commit and tree to the PR body. The lease stays within Azure's seven-day
+   user-delegation limit and leaves clock-skew margin. The VM has no signing,
+   release, or publication permission.
 8. In `finally`, upload failure evidence, remove environment credentials and
    Codex auth state, disable auto-logon, and shut down. Delete the exact stopped
    VM resources later and verify absence; keep the shared immutable image.
