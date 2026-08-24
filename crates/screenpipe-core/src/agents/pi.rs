@@ -4190,6 +4190,20 @@ mod tests {
     }
 
     #[test]
+    fn screenpipe_api_skill_targets_the_launching_app_for_history_reads() {
+        let skill = PiExecutor::render_screenpipe_api_skill();
+
+        for path in ["/activity-summary", "/search", "/raw_sql", "/meetings"] {
+            assert!(
+                skill.contains(&format!(
+                    "${{SCREENPIPE_LOCAL_API_URL:-http://localhost:3030}}{path}"
+                )),
+                "history example for {path} must use the launching app API URL"
+            );
+        }
+    }
+
+    #[test]
     fn structured_output_extension_keeps_screen_text_out_of_system_state() {
         let dir = tempfile::tempdir().expect("tempdir");
         PiExecutor::ensure_structured_output_extension(dir.path())

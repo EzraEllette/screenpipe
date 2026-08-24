@@ -61,6 +61,7 @@ pub mod frame_linker;
 pub mod frame_linker_actor;
 pub mod hd_recorder;
 pub mod high_fps_controller;
+pub mod history_access;
 pub mod hot_frame_cache;
 pub mod live_views;
 pub mod local_chat;

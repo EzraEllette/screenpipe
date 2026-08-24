@@ -39,6 +39,7 @@ import {
   normalizeTime,
   normalizeTimeFields,
 } from "./time-normalization";
+import { resolveScreenpipeApiBase } from "./api-base";
 
 initMcpTelemetry({ transport: "stdio" });
 
@@ -67,14 +68,11 @@ for (let i = 0; i < args.length; i++) {
 // screenpipe (e.g. an agent on a VPS reading a synced copy of your data),
 // not just localhost. Priority:
 //   1. --screenpipe-url / --screenpipe-api-url flag
-//   2. SCREENPIPE_API_URL env (set by `screenpipe agent setup --api-url`)
-//   3. --screenpipe-host (+ --port) → http://host:port
-//   4. default http://localhost:<port>
-const SCREENPIPE_API = (
-  baseOverride ||
-  process.env.SCREENPIPE_API_URL ||
-  `http://${host}:${port}`
-).replace(/\/+$/, "");
+//   2. SCREENPIPE_LOCAL_API_URL / PORT from the launching desktop instance
+//   3. SCREENPIPE_API_URL env (set by `screenpipe agent setup --api-url`)
+//   4. --screenpipe-host (+ --port) → http://host:port
+//   5. default http://localhost:<port>
+const SCREENPIPE_API = resolveScreenpipeApiBase({ baseOverride, host, port });
 
 // Discover the local API key, in priority order:
 //

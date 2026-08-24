@@ -15,6 +15,7 @@ use tracing::{debug, error, info};
 
 use crate::{
     analytics,
+    history_access::HistoryAccessPolicy,
     hot_frame_cache::HotFrameCache,
     routes::{
         activity_ledger::get_activity_ledger,
@@ -159,6 +160,7 @@ fn search_query_concurrency(read_pool_max: u32) -> usize {
 
 pub struct AppState {
     pub db: Arc<DatabaseManager>,
+    pub history_access: HistoryAccessPolicy,
     pub audio_manager: Arc<AudioManager>,
     pub app_start_time: DateTime<Utc>,
     pub screenpipe_dir: PathBuf,
@@ -249,6 +251,9 @@ pub struct AppState {
 
 pub struct SCServer {
     db: Arc<DatabaseManager>,
+    /// Rolling history policy. Standalone/headless construction is unrestricted;
+    /// the consumer desktop app explicitly supplies its live account policy.
+    pub history_access: HistoryAccessPolicy,
     addr: SocketAddr,
     audio_manager: Arc<AudioManager>,
     screenpipe_dir: PathBuf,
@@ -380,6 +385,7 @@ impl SCServer {
         let audio_metrics = audio_manager.metrics.clone();
         SCServer {
             db,
+            history_access: HistoryAccessPolicy::unrestricted(),
             addr,
             screenpipe_dir,
             vision_disabled,
@@ -763,6 +769,7 @@ impl SCServer {
 
         let app_state = Arc::new(AppState {
             db: self.db.clone(),
+            history_access: self.history_access.clone(),
             audio_manager: self.audio_manager.clone(),
             app_start_time: Utc::now(),
             screenpipe_dir: self.screenpipe_dir.clone(),

@@ -27,6 +27,7 @@ use std::sync::Arc;
 use tracing::error;
 
 use super::request_origin::ExplicitApiClient;
+use crate::history_access::HistoryAccessPolicy;
 use crate::server::AppState;
 use crate::{analytics, qualified_value::ApiOutcomeKind};
 use screenpipe_db::{DatabaseManager, Order, SemanticContextQuery};
@@ -311,7 +312,7 @@ pub struct ActivitySummaryResponse {
 #[oasgen]
 pub async fn get_activity_summary(
     State(state): State<Arc<AppState>>,
-    Query(query): Query<ActivitySummaryQuery>,
+    Query(mut query): Query<ActivitySummaryQuery>,
     api_client: ExplicitApiClient,
 ) -> Result<JsonResponse<ActivitySummaryResponse>, (StatusCode, JsonResponse<Value>)> {
     if query.start_time >= query.end_time {
@@ -322,6 +323,9 @@ pub async fn get_activity_summary(
                 "hint": "Try start_time=30m ago&end_time=now"
             })),
         ));
+    }
+    if apply_activity_summary_history_access(&state.history_access, &mut query, Utc::now()) {
+        return Ok(JsonResponse(empty_activity_summary_response(&query)));
     }
 
     let start = query.start_time.format("%Y-%m-%dT%H:%M:%SZ").to_string();
@@ -426,6 +430,61 @@ pub async fn get_activity_summary(
         snippets: snippets_opt,
         guidance,
     }))
+}
+
+fn apply_activity_summary_history_access(
+    policy: &HistoryAccessPolicy,
+    query: &mut ActivitySummaryQuery,
+    now: DateTime<Utc>,
+) -> bool {
+    let Some(cutoff) = policy.cutoff(now) else {
+        return false;
+    };
+    if query.end_time < cutoff {
+        return true;
+    }
+    query.start_time = query.start_time.max(cutoff);
+    false
+}
+
+fn empty_activity_summary_response(query: &ActivitySummaryQuery) -> ActivitySummaryResponse {
+    let start = query.start_time.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let end = query.end_time.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let query_status = if query.q.as_deref().is_some_and(|q| !q.trim().is_empty()) {
+        "no_query_matches"
+    } else {
+        "not_requested"
+    };
+    ActivitySummaryResponse {
+        apps: query.include_apps.then(Vec::new),
+        windows: query.include_windows.then(Vec::new),
+        key_texts: query.include_key_texts.then(Vec::new),
+        edited_files: Vec::new(),
+        audio_summary: AudioSummary {
+            segment_count: 0,
+            speakers: Vec::new(),
+            top_transcriptions: Vec::new(),
+        },
+        total_frames: 0,
+        app_attribution: AppAttributionStatus {
+            native_frames: 0,
+            recovered_frames: 0,
+            unresolved_frames: 0,
+            coverage: 0.0,
+        },
+        total_active_minutes: 0.0,
+        parsed_context_count: query.include_parsed_count.then_some(0),
+        time_range: TimeRange { start, end },
+        data_status: "no_capture_in_range".to_string(),
+        query_status: query_status.to_string(),
+        recording: None,
+        memories: query.include_memories.then(Vec::new),
+        snippets: query.include_snippets.then(Vec::new),
+        guidance: query.include_guidance.then(|| ActivityGuidance {
+            searched_endpoints: vec!["/activity-summary".to_string()],
+            next_best_query: None,
+        }),
+    }
 }
 
 // ---------- core summary ----------
@@ -1701,6 +1760,52 @@ mod tests {
             max_snippet_chars: 500,
             max_memories: 5,
         }
+    }
+
+    fn fixed_now() -> DateTime<Utc> {
+        "2026-08-24T20:00:00Z".parse().unwrap()
+    }
+
+    #[test]
+    fn restricted_activity_summary_clamps_partial_ranges_and_empties_old_ranges() {
+        let policy = HistoryAccessPolicy::last_24_hours();
+        let cutoff = fixed_now() - chrono::Duration::hours(24);
+        let mut partial = default_query();
+        partial.start_time = fixed_now() - chrono::Duration::days(7);
+        partial.end_time = fixed_now();
+        assert!(!apply_activity_summary_history_access(
+            &policy,
+            &mut partial,
+            fixed_now(),
+        ));
+        assert_eq!(partial.start_time, cutoff);
+
+        let mut old = default_query();
+        old.start_time = fixed_now() - chrono::Duration::days(7);
+        old.end_time = fixed_now() - chrono::Duration::days(2);
+        assert!(apply_activity_summary_history_access(
+            &policy,
+            &mut old,
+            fixed_now(),
+        ));
+        let empty = empty_activity_summary_response(&old);
+        assert_eq!(empty.total_frames, 0);
+        assert_eq!(empty.total_active_minutes, 0.0);
+        assert_eq!(empty.data_status, "no_capture_in_range");
+    }
+
+    #[test]
+    fn unrestricted_activity_summary_preserves_paid_ranges() {
+        let mut query = default_query();
+        query.start_time = fixed_now() - chrono::Duration::days(7);
+        query.end_time = fixed_now();
+        let original_start = query.start_time;
+        assert!(!apply_activity_summary_history_access(
+            &HistoryAccessPolicy::unrestricted(),
+            &mut query,
+            fixed_now(),
+        ));
+        assert_eq!(query.start_time, original_start);
     }
 
     #[test]

@@ -913,6 +913,7 @@ async fn main() {
         wants_recording: Arc::new(AtomicBool::new(false)),
         interrupted_meeting: Arc::new(tokio::sync::Mutex::new(None)),
         cloud_token: Arc::new(arc_swap::ArcSwap::new(Arc::new(initial_cloud_token))),
+        history_access: screenpipe_engine::history_access::HistoryAccessPolicy::unrestricted(),
         db_wedge_breaker: recording::new_db_wedge_breaker(),
     };
     let pi_state = pi::PiState(Arc::new(tokio::sync::Mutex::new(pi::PiPool::new())));
@@ -1390,6 +1391,10 @@ async fn main() {
             e2e::seeds::apply_settings(app.handle(), &mut store);
 
             app.manage(store.clone());
+            crate::recording::refresh_history_access_policy(
+                &app.state::<RecordingState>().history_access,
+                &store,
+            );
 
             // Set Chinese HuggingFace mirror early — before any model downloads
             if store.recording.use_chinese_mirror {
@@ -1854,6 +1859,7 @@ async fn main() {
                 let wants_recording = recording_state.wants_recording.clone();
                 let is_starting_clone = recording_state.is_starting.clone();
                 let cloud_token_arc = recording_state.cloud_token.clone();
+                let history_access = recording_state.history_access.clone();
                 // DB-wedge auto-recovery hook wiring — captured into the server
                 // thread so the freshly-built `ServerCore`'s DB gets the hook.
                 let app_for_db_wedge = app_handle.clone();
@@ -2008,6 +2014,7 @@ async fn main() {
                                 on_pipe_output,
                                 Some(owned_browser),
                                 cloud_token_arc.clone(),
+                                history_access.clone(),
                             )
                             .await
                             {

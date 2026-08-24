@@ -689,7 +689,15 @@ describe("isAuthenticatedFreeUser", () => {
     ).toBe("unknown");
   });
 
-  it.each(["standard", "pro", "team", "enterprise", "lifetime"])(
+  it.each([
+    "basic",
+    "standard",
+    "business",
+    "pro",
+    "team",
+    "enterprise",
+    "lifetime",
+  ])(
     "preserves retention choice for the paid %s plan",
     (plan) => {
       const paid = user({

@@ -64,7 +64,12 @@ import {
 } from "@/lib/frame-thumbnails";
 import { presentQuotaError } from "@/lib/chat/quota-errors";
 import { showChatWithPrefill } from "@/lib/chat-utils";
+import {
+  isFreeOrUnattributedUser,
+  type AppUser,
+} from "@/lib/app-entitlement";
 import { useSettings } from "@/lib/hooks/use-settings";
+import { useEnterpriseBuildStatus } from "@/lib/hooks/use-is-enterprise-build";
 import { useTauriEvent } from "@/lib/hooks/use-tauri-event";
 import { useTimelineStore } from "@/lib/hooks/use-timeline-store";
 import { getAppServerBaseUrl } from "@/lib/notifications/app-server";
@@ -158,6 +163,7 @@ const MAX_VISIBLE_ARTIFACTS = 6;
 const MAX_PREVIEW_FRAMES = 6;
 const PREVIEW_FRAME_INTERVAL_MS = 600;
 const ACTIVITY_HISTORY_REFRESH_INTERVAL_MS = 10 * 60_000;
+const FREE_ACTIVITY_HISTORY_MS = 24 * 3_600_000;
 const ACTIVITY_RANGE_STORAGE_KEY = "screenpipe:activity-history:range";
 const ACTIVITY_CUSTOM_START_STORAGE_KEY =
   "screenpipe:activity-history:custom-start";
@@ -190,6 +196,14 @@ const RANGE_SHORT_COPY: Record<RangePreset, string> = {
   "7d": "7d",
   custom: "Custom",
 };
+
+export function activityRangePresets(
+  historyAccessRestricted: boolean,
+): RangePreset[] {
+  return historyAccessRestricted
+    ? ["today", "24h"]
+    : ["today", "24h", "7d", "custom"];
+}
 
 function readStoredRangePreset(): RangePreset {
   if (typeof window === "undefined") return "today";
@@ -237,6 +251,24 @@ function endOfSelectedDay(value: Date, now: Date): Date {
   return end;
 }
 
+export function activityCalendarStartDate(now: Date): Date {
+  const yesterday = startOfLocalDay(now);
+  yesterday.setDate(yesterday.getDate() - 1);
+  return yesterday;
+}
+
+export function isActivityCalendarDateDisabled(
+  date: Date,
+  historyAccessRestricted: boolean,
+  now: Date,
+): boolean {
+  const day = startOfLocalDay(date).getTime();
+  const today = startOfLocalDay(now);
+  if (day > today.getTime()) return true;
+  if (!historyAccessRestricted) return false;
+  return day < activityCalendarStartDate(today).getTime();
+}
+
 function customRangeLabel(range: DateRange | undefined): string {
   if (!range?.from) return "Choose dates";
   if (!range.to) return `${format(range.from, "MMM d, yyyy")} – …`;
@@ -268,6 +300,26 @@ export function rangeForPreset(
   };
 }
 
+export function effectiveActivityRange(
+  range: TimeRange | null,
+  user: AppUser | null | undefined,
+  now: Date,
+  isEnterpriseBuild = false,
+): TimeRange | null {
+  if (
+    !range ||
+    isEnterpriseBuild ||
+    !isFreeOrUnattributedUser(user)
+  ) {
+    return range;
+  }
+  const start = new Date(
+    Math.max(range.start.getTime(), now.getTime() - FREE_ACTIVITY_HISTORY_MS),
+  );
+  const end = new Date(Math.min(range.end.getTime(), now.getTime()));
+  return start < end ? { start, end } : null;
+}
+
 export function buildActivitySummaryPath(range: TimeRange): string {
   const params = new URLSearchParams({
     start_time: range.start.toISOString(),
@@ -281,9 +333,20 @@ export function buildActivitySummaryPath(range: TimeRange): string {
   return `/activity-summary?${params.toString()}`;
 }
 
-export function buildActivityMeetingsPath(range: TimeRange): string {
+export function buildActivityMeetingsPath(
+  range: TimeRange,
+  earliestAccessibleAt?: Date,
+): string {
+  const expandedStart = new Date(
+    range.start.getTime() - FREE_ACTIVITY_HISTORY_MS,
+  );
   const params = new URLSearchParams({
-    start_time: new Date(range.start.getTime() - 24 * 3_600_000).toISOString(),
+    start_time: new Date(
+      Math.max(
+        expandedStart.getTime(),
+        earliestAccessibleAt?.getTime() ?? Number.NEGATIVE_INFINITY,
+      ),
+    ).toISOString(),
     end_time: range.end.toISOString(),
     limit: "100",
   });
@@ -1348,6 +1411,7 @@ export function ActivityLedger({
     string | null
   >(null);
   const { settings, updateSettings } = useSettings();
+  const enterpriseBuild = useEnterpriseBuildStatus();
   useEffect(() => {
     if (!selectedReviewPresetId && settings.activitiesAiPresetId) {
       setSelectedReviewPresetId(settings.activitiesAiPresetId);
@@ -1357,10 +1421,43 @@ export function ActivityLedger({
     settings.activitiesEnabled === undefined && historyCoverage.length > 0;
   const activitiesEnabled =
     settings.activitiesEnabled ?? legacyActivitiesEnabled;
+  const activityUser = settings.user as AppUser | null | undefined;
+  const activityHistoryRestricted =
+    !enterpriseBuild.isEnterprise &&
+    isFreeOrUnattributedUser(activityUser);
+  useEffect(() => {
+    if (
+      activityHistoryRestricted &&
+      preset !== "today" &&
+      preset !== "24h"
+    ) {
+      setPreset("24h");
+    }
+  }, [activityHistoryRestricted, preset]);
+  const activityHistoryAccessStart = useMemo(
+    () =>
+      activityHistoryRestricted
+        ? new Date(anchor.getTime() - FREE_ACTIVITY_HISTORY_MS)
+        : undefined,
+    [activityHistoryRestricted, anchor],
+  );
 
   const range = useMemo(
-    () => rangeForPreset(preset, anchor, customStart, customEnd),
-    [anchor, customEnd, customStart, preset],
+    () =>
+      effectiveActivityRange(
+        rangeForPreset(preset, anchor, customStart, customEnd),
+        settings.user as AppUser | null | undefined,
+        anchor,
+        enterpriseBuild.isEnterprise,
+      ),
+    [
+      anchor,
+      customEnd,
+      customStart,
+      enterpriseBuild.isEnterprise,
+      preset,
+      settings.user,
+    ],
   );
   const invalidRange = !range || range.start >= range.end;
   const reviewPresets = useMemo(
@@ -1386,10 +1483,22 @@ export function ActivityLedger({
       selectableReviewPresets[0],
     [selectableReviewPresets, selectedReviewPresetId],
   );
-  const recentRange = useMemo(
-    () => rangeForPreset(preset, new Date(), customStart, customEnd),
-    [customEnd, customStart, preset, recentEligibilityTick],
-  );
+  const recentRange = useMemo(() => {
+    const now = new Date();
+    return effectiveActivityRange(
+      rangeForPreset(preset, now, customStart, customEnd),
+      settings.user as AppUser | null | undefined,
+      now,
+      enterpriseBuild.isEnterprise,
+    );
+  }, [
+    customEnd,
+    customStart,
+    enterpriseBuild.isEnterprise,
+    preset,
+    recentEligibilityTick,
+    settings.user,
+  ]);
   const recentActivityAvailable = Boolean(
     recentRange && canAddRecentActivity(recentRange, historyCoverage),
   );
@@ -1480,9 +1589,12 @@ export function ActivityLedger({
             localFetch(buildActivitySummaryPath(range), {
               signal: controller.signal,
             }),
-            localFetch(buildActivityMeetingsPath(range), {
-              signal: controller.signal,
-            }),
+            localFetch(
+              buildActivityMeetingsPath(range, activityHistoryAccessStart),
+              {
+                signal: controller.signal,
+              },
+            ),
           ]);
           return { summaryResponse, meetingsResponse };
         } catch (reason) {
@@ -1529,7 +1641,7 @@ export function ActivityLedger({
         }
       });
     return () => controller.abort();
-  }, [range]);
+  }, [activityHistoryAccessStart, range]);
 
   useEffect(() => {
     historyAbortRef.current?.abort();
@@ -1638,11 +1750,11 @@ export function ActivityLedger({
             ? noActivityMessage(noDataStatus)
             : qualityFailure
               ? "Some recorded activity could not be validated. Your existing history was preserved; try again."
-            : rawError.toLowerCase().includes("hosted_ai_allowance_exceeded")
-              ? "This AI preset has no usage left. Choose a different AI preset, then try again."
-              : quota.kind !== "none"
-                ? quota.message
-                : "History could not be updated. Try again.",
+              : rawError.toLowerCase().includes("hosted_ai_allowance_exceeded")
+                ? "This AI preset has no usage left. Choose a different AI preset, then try again."
+                : quota.kind !== "none"
+                  ? quota.message
+                  : "History could not be updated. Try again.",
         );
         if (noDataStatus) {
           posthog.capture("activity_generation_completed", {
@@ -1671,24 +1783,33 @@ export function ActivityLedger({
 
   const regenerateSelectedRange = useCallback(
     (source: GenerationSource) => {
-      const clickedRange = rangeForPreset(
-        preset,
-        new Date(),
-        customStart,
-        customEnd,
+      const now = new Date();
+      const clickedRange = effectiveActivityRange(
+        rangeForPreset(preset, now, customStart, customEnd),
+        settings.user as AppUser | null | undefined,
+        now,
+        enterpriseBuild.isEnterprise,
       );
       if (!clickedRange) return;
       void generateHistory(clickedRange, source, clickedRange);
     },
-    [customEnd, customStart, generateHistory, preset],
+    [
+      customEnd,
+      customStart,
+      enterpriseBuild.isEnterprise,
+      generateHistory,
+      preset,
+      settings.user,
+    ],
   );
 
   const enableActivities = useCallback(async () => {
-    const clickedRange = rangeForPreset(
-      preset,
-      new Date(),
-      customStart,
-      customEnd,
+    const now = new Date();
+    const clickedRange = effectiveActivityRange(
+      rangeForPreset(preset, now, customStart, customEnd),
+      settings.user as AppUser | null | undefined,
+      now,
+      enterpriseBuild.isEnterprise,
     );
     if (!clickedRange) return;
     try {
@@ -1700,14 +1821,23 @@ export function ActivityLedger({
       return;
     }
     await generateHistory(clickedRange, "enable", clickedRange);
-  }, [customEnd, customStart, generateHistory, preset, updateSettings]);
+  }, [
+    customEnd,
+    customStart,
+    enterpriseBuild.isEnterprise,
+    generateHistory,
+    preset,
+    settings.user,
+    updateSettings,
+  ]);
 
   const addRecentActivity = useCallback(() => {
-    const clickedRange = rangeForPreset(
-      preset,
-      new Date(),
-      customStart,
-      customEnd,
+    const now = new Date();
+    const clickedRange = effectiveActivityRange(
+      rangeForPreset(preset, now, customStart, customEnd),
+      settings.user as AppUser | null | undefined,
+      now,
+      enterpriseBuild.isEnterprise,
     );
     const clickedHistoryRange = clickedRange
       ? nextActivityHistoryRange(clickedRange, historyCoverage, 0)
@@ -1728,12 +1858,14 @@ export function ActivityLedger({
     cacheReady,
     customEnd,
     customStart,
+    enterpriseBuild.isEnterprise,
     generateHistory,
     historyCoverage,
     historyLoading,
     invalidRange,
     loading,
     preset,
+    settings.user,
   ]);
 
   const recentActivityDisabled =
@@ -1834,13 +1966,13 @@ Re-query Screenpipe only inside the cited time range and use the cited frames an
                   <span aria-hidden="true">{RANGE_SHORT_COPY[preset]}</span>
                 </SelectTrigger>
                 <SelectContent>
-                  {(
-                    Object.entries(RANGE_COPY) as Array<[RangePreset, string]>
-                  ).map(([value, label]) => (
-                    <SelectItem key={value} value={value}>
-                      {label}
-                    </SelectItem>
-                  ))}
+                  {activityRangePresets(activityHistoryRestricted).map(
+                    (value) => (
+                      <SelectItem key={value} value={value}>
+                        {RANGE_COPY[value]}
+                      </SelectItem>
+                    ),
+                  )}
                 </SelectContent>
               </Select>
               {reviewPresets.length > 0 ? (
@@ -1927,8 +2059,28 @@ Re-query Screenpipe only inside the cited time range and use the cited frames an
                         toLocalInputValue(endOfSelectedDay(nextRange.to, now)),
                       );
                     }}
-                    defaultMonth={customDateRange?.from}
-                    disabled={{ after: new Date() }}
+                    defaultMonth={
+                      activityHistoryRestricted
+                        ? startOfLocalDay(anchor)
+                        : customDateRange?.from
+                    }
+                    fromMonth={
+                      activityHistoryRestricted
+                        ? activityCalendarStartDate(anchor)
+                        : undefined
+                    }
+                    toMonth={
+                      activityHistoryRestricted
+                        ? startOfLocalDay(anchor)
+                        : undefined
+                    }
+                    disabled={(date) =>
+                      isActivityCalendarDateDisabled(
+                        date,
+                        activityHistoryRestricted,
+                        anchor,
+                      )
+                    }
                     numberOfMonths={1}
                     className="p-3"
                     classNames={{

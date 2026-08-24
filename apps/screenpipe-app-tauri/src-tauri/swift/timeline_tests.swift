@@ -1122,6 +1122,51 @@ private func testDateNavigation() {
                 tolerance: 0.01)
 
     expectEqual(TimelineDateNavigation.dayKey(today).count, 10, "day key is yyyy-MM-dd")
+
+    expect(
+        TimelineDateNavigation.isCalendarDateAllowed(
+            yesterday,
+            historyAccessRestricted: true,
+            now: today
+        ),
+        "restricted calendar allows yesterday"
+    )
+    expect(
+        TimelineDateNavigation.isCalendarDateAllowed(
+            today,
+            historyAccessRestricted: true,
+            now: today
+        ),
+        "restricted calendar allows today"
+    )
+    expect(
+        !TimelineDateNavigation.isCalendarDateAllowed(
+            twoDaysAgo,
+            historyAccessRestricted: true,
+            now: today
+        ),
+        "restricted calendar disables dates before yesterday"
+    )
+    expect(
+        TimelineDateNavigation.isCalendarDateAllowed(
+            twoDaysAgo,
+            historyAccessRestricted: false,
+            now: today
+        ),
+        "unrestricted calendar preserves older dates"
+    )
+    expect(
+        cal.isDate(
+            TimelineDateNavigation.jumpDay(
+                from: yesterday,
+                delta: -1,
+                historyAccessRestricted: true,
+                now: today
+            ),
+            inSameDayAs: yesterday
+        ),
+        "restricted previous-day navigation stops at yesterday"
+    )
 }
 
 // MARK: - Frame accessors

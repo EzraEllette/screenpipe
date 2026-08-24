@@ -1331,7 +1331,11 @@ fn entitlement_is_lifetime(entitlement: &serde_json::Value) -> bool {
 fn is_verified_paid_plan_id(plan: &str) -> bool {
     matches!(
         plan.trim().to_ascii_lowercase().as_str(),
-        "standard"
+        "basic"
+            | "standard"
+            | "business"
+            | "business_max"
+            | "business_ultra"
             | "pro"
             | "pro_max"
             | "pro_ultra"
@@ -3181,6 +3185,33 @@ mod tests {
         }));
 
         assert_eq!(store.local_plan_policy(), LocalPlanPolicy::Unknown);
+    }
+
+    #[test]
+    fn recognized_paid_plan_names_are_unrestricted() {
+        for plan in [
+            "basic",
+            "standard",
+            "business",
+            "pro",
+            "team",
+            "enterprise",
+            "lifetime",
+        ] {
+            let mut store = SettingsStore::default();
+            store.user.id = Some("known_paid_user".to_string());
+            store.user.subscription_plan = Some(plan.to_string());
+            store.user.app_entitled = Some(true);
+            store.user.entitlement = Some(json!({
+                "active": true,
+                "plan": plan,
+                "source": if plan == "lifetime" { "lifetime" } else { "subscription" },
+                "checked_at": chrono::Utc::now().to_rfc3339(),
+                "features": { "app": true }
+            }));
+
+            assert!(!store.is_free_or_unattributed_user(), "plan={plan}");
+        }
     }
 
     #[test]

@@ -930,6 +930,14 @@ async isEnterpriseBuildCmd() : Promise<boolean> {
     return await TAURI_INVOKE("is_enterprise_build_cmd");
 },
 /**
+ * Whether the running local API currently enforces the rolling history window.
+ * This is the authoritative app-wide value shared by every webview and backend
+ * route, so detached windows do not depend on duplicating account hydration.
+ */
+async isHistoryAccessRestricted() : Promise<boolean> {
+    return await TAURI_INVOKE("is_history_access_restricted");
+},
+/**
  * Check if click-through is currently enabled (Windows only)
  */
 async isOverlayClickThrough() : Promise<boolean> {

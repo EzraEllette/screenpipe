@@ -84,7 +84,11 @@ export const PRICING_URL = screenpipeWebUrl("/onboarding", "https://screenpipe.c
 export const ENTERPRISE_BUILDS_URL = screenpipeWebUrl("/enterprise?tab=builds", "https://screenpipe.com");
 export const ENTERPRISE_DOWNLOAD_URL = screenpipeWebUrl("/api/download", "https://screenpipe.com");
 const VERIFIED_PAID_PLAN_IDS = new Set([
+  "basic",
   "standard",
+  "business",
+  "business_max",
+  "business_ultra",
   "pro",
   "pro_max",
   "pro_ultra",
