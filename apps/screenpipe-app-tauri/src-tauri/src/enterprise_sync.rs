@@ -732,6 +732,11 @@ mod imp {
     }
     const HIDDEN_UI_POLICY_POLL_INTERVAL: std::time::Duration =
         std::time::Duration::from_secs(5 * 60);
+    const RECORDING_DISABLED_BY_ADMIN_CODE: &str = "recording_disabled_by_admin";
+
+    fn default_recording_allowed() -> bool {
+        true
+    }
 
     #[derive(Deserialize)]
     struct HiddenUiPolicyResponse {
@@ -741,6 +746,8 @@ mod imp {
         locked_settings: HashMap<String, serde_json::Value>,
         #[serde(rename = "requireAccountLogin", default)]
         require_account_login: bool,
+        #[serde(rename = "recordingAllowed", default = "default_recording_allowed")]
+        recording_allowed: bool,
     }
 
     #[derive(Debug, PartialEq, Eq)]
@@ -748,6 +755,7 @@ mod imp {
         hidden_sections: Vec<String>,
         enforce_auto_start: bool,
         require_account_login: bool,
+        recording_allowed: bool,
     }
 
     fn locked_setting_enforces_auto_start(value: Option<&serde_json::Value>) -> bool {
@@ -769,6 +777,7 @@ mod imp {
                 hidden_sections: self.hidden_sections,
                 enforce_auto_start,
                 require_account_login: self.require_account_login,
+                recording_allowed: self.recording_allowed,
             }
         }
     }
@@ -835,14 +844,40 @@ mod imp {
         credentials
     }
 
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq, Eq)]
     enum NativePolicyFetchError {
         CredentialRejected(String),
+        RecordingDisabled,
         Unavailable(String),
+    }
+
+    #[derive(Deserialize)]
+    struct EnterpriseErrorResponse {
+        code: Option<String>,
+    }
+
+    fn classify_failed_enterprise_response(
+        status: reqwest::StatusCode,
+        code: Option<&str>,
+        context: &str,
+    ) -> NativePolicyFetchError {
+        if status == reqwest::StatusCode::FORBIDDEN
+            && code == Some(RECORDING_DISABLED_BY_ADMIN_CODE)
+        {
+            return NativePolicyFetchError::RecordingDisabled;
+        }
+
+        let error = format!("{context} HTTP {status}");
+        if explicitly_rejects_authorization(status) {
+            NativePolicyFetchError::CredentialRejected(error)
+        } else {
+            NativePolicyFetchError::Unavailable(error)
+        }
     }
 
     enum NativeAuthorizationResult {
         Authorized(NativeEnterprisePolicy),
+        RecordingDisabled,
         RequiresAccount,
         Rejected,
         Unavailable(String),
@@ -862,12 +897,17 @@ mod imp {
             .await
             .map_err(|error| NativePolicyFetchError::Unavailable(error.to_string()))?;
         if !response.status().is_success() {
-            let error = format!("HTTP {}", response.status());
-            return Err(if explicitly_rejects_authorization(response.status()) {
-                NativePolicyFetchError::CredentialRejected(error)
-            } else {
-                NativePolicyFetchError::Unavailable(error)
-            });
+            let status = response.status();
+            let code = response
+                .json::<EnterpriseErrorResponse>()
+                .await
+                .ok()
+                .and_then(|body| body.code);
+            return Err(classify_failed_enterprise_response(
+                status,
+                code.as_deref(),
+                "policy",
+            ));
         }
         response
             .json::<HiddenUiPolicyResponse>()
@@ -901,14 +941,19 @@ mod imp {
             return Ok(());
         }
 
-        let error = format!("heartbeat HTTP {}", response.status());
-        Err(if explicitly_rejects_authorization(response.status()) {
-            // 403 includes seat exhaustion. Policy validity alone must never
-            // bypass the enrollment limit that the heartbeat enforces.
-            NativePolicyFetchError::CredentialRejected(error)
-        } else {
-            NativePolicyFetchError::Unavailable(error)
-        })
+        let status = response.status();
+        let code = response
+            .json::<EnterpriseErrorResponse>()
+            .await
+            .ok()
+            .and_then(|body| body.code);
+        // Generic 403 still includes seat exhaustion. Policy validity alone
+        // must never bypass the enrollment limit that heartbeat enforces.
+        Err(classify_failed_enterprise_response(
+            status,
+            code.as_deref(),
+            "heartbeat",
+        ))
     }
 
     async fn resolve_native_authorization(
@@ -928,6 +973,9 @@ mod imp {
 
         for credential in credentials {
             match fetch_hidden_ui_policy(http, policy_url, device_id, &credential).await {
+                Ok(policy) if !policy.recording_allowed => {
+                    return NativeAuthorizationResult::RecordingDisabled;
+                }
                 Ok(policy)
                     if credential_authorizes_policy(
                         credential.kind(),
@@ -938,6 +986,9 @@ mod imp {
                         .await
                     {
                         Ok(()) => return NativeAuthorizationResult::Authorized(policy),
+                        Err(NativePolicyFetchError::RecordingDisabled) => {
+                            return NativeAuthorizationResult::RecordingDisabled;
+                        }
                         Err(NativePolicyFetchError::CredentialRejected(error)) => {
                             rejected += 1;
                             warn!(
@@ -957,6 +1008,9 @@ mod imp {
                     // company that mandates user sign-in. Keep trying the saved
                     // account token before revoking the running session.
                     account_required = true;
+                }
+                Err(NativePolicyFetchError::RecordingDisabled) => {
+                    return NativeAuthorizationResult::RecordingDisabled;
                 }
                 Err(NativePolicyFetchError::CredentialRejected(error)) => {
                     rejected += 1;
@@ -1030,7 +1084,7 @@ mod imp {
                 if credential_authorizes_policy(
                     credential.kind(),
                     policy.require_account_login,
-                ) =>
+                ) && policy.recording_allowed =>
             {
                 match send_enrollment_heartbeat(&http, &heartbeat_url, &device_id, &credential)
                     .await
@@ -1043,6 +1097,10 @@ mod imp {
                         );
                         Ok(())
                     }
+                    Err(NativePolicyFetchError::RecordingDisabled) => {
+                        crate::enterprise_policy::update_recording_authorized(false);
+                        Err(RECORDING_DISABLED_BY_ADMIN_CODE.to_string())
+                    }
                     Err(NativePolicyFetchError::CredentialRejected(_)) => {
                         crate::enterprise_policy::update_recording_authorized(false);
                         Err("enterprise enrollment was rejected".to_string())
@@ -1052,6 +1110,10 @@ mod imp {
                     }
                 }
             }
+            Ok(policy) if !policy.recording_allowed => {
+                crate::enterprise_policy::update_recording_authorized(false);
+                Err(RECORDING_DISABLED_BY_ADMIN_CODE.to_string())
+            }
             Ok(_) => {
                 crate::enterprise_policy::update_recording_authorized(false);
                 Err("organization requires account sign-in".to_string())
@@ -1059,6 +1121,10 @@ mod imp {
             Err(NativePolicyFetchError::CredentialRejected(_)) => {
                 crate::enterprise_policy::update_recording_authorized(false);
                 Err("enterprise credential was rejected".to_string())
+            }
+            Err(NativePolicyFetchError::RecordingDisabled) => {
+                crate::enterprise_policy::update_recording_authorized(false);
+                Err(RECORDING_DISABLED_BY_ADMIN_CODE.to_string())
             }
             Err(NativePolicyFetchError::Unavailable(error)) => {
                 Err(format!("enterprise policy is unavailable: {error}"))
@@ -1139,6 +1205,16 @@ mod imp {
                                 );
                             }
                         }
+                    }
+                    NativeAuthorizationResult::RecordingDisabled => {
+                        crate::enterprise_policy::update_recording_authorized(false);
+                        info!("enterprise: recording paused for this device by workspace admin");
+                        // The frontend policy poll may have revoked the grant
+                        // first. An explicit admin pause must still stop an
+                        // already-running recorder, so do not condition this
+                        // teardown on the current grant bit.
+                        let state = app.state::<crate::recording::RecordingState>();
+                        let _ = crate::recording::stop_screenpipe(state, app.clone()).await;
                     }
                     NativeAuthorizationResult::RequiresAccount => {
                         let was_authorized = crate::enterprise_policy::recording_authorized();
@@ -1448,10 +1524,11 @@ mod imp {
     #[cfg(test)]
     mod device_id_tests {
         use super::{
-            choose_device_id, credential_authorizes_policy, enterprise_license_hash,
-            exact_frame_url, explicitly_rejects_authorization, image_uploads_allowed,
-            locked_setting_enforces_auto_start, sibling_heartbeat_url,
-            EnterprisePolicyCredentialKind, HiddenUiPolicyResponse,
+            choose_device_id, classify_failed_enterprise_response, credential_authorizes_policy,
+            enterprise_license_hash, exact_frame_url, explicitly_rejects_authorization,
+            image_uploads_allowed, locked_setting_enforces_auto_start, sibling_heartbeat_url,
+            EnterprisePolicyCredentialKind, HiddenUiPolicyResponse, NativePolicyFetchError,
+            RECORDING_DISABLED_BY_ADMIN_CODE,
         };
         use std::collections::HashMap;
 
@@ -1521,6 +1598,7 @@ mod imp {
                     ),
                 ]),
                 require_account_login: true,
+                recording_allowed: false,
             };
 
             let policy = response.into_native_policy();
@@ -1534,6 +1612,19 @@ mod imp {
             );
             assert!(policy.enforce_auto_start);
             assert!(policy.require_account_login);
+            assert!(!policy.recording_allowed);
+        }
+
+        #[test]
+        fn recording_control_defaults_on_for_older_control_planes() {
+            let response: HiddenUiPolicyResponse = serde_json::from_value(serde_json::json!({
+                "hiddenSections": [],
+                "lockedSettings": {},
+                "requireAccountLogin": false
+            }))
+            .unwrap();
+
+            assert!(response.into_native_policy().recording_allowed);
         }
 
         #[test]
@@ -1568,6 +1659,26 @@ mod imp {
                     reqwest::StatusCode::from_u16(status).unwrap()
                 ));
             }
+        }
+
+        #[test]
+        fn admin_pause_is_distinct_from_seat_and_credential_rejection() {
+            assert_eq!(
+                classify_failed_enterprise_response(
+                    reqwest::StatusCode::FORBIDDEN,
+                    Some(RECORDING_DISABLED_BY_ADMIN_CODE),
+                    "heartbeat",
+                ),
+                NativePolicyFetchError::RecordingDisabled,
+            );
+            assert!(matches!(
+                classify_failed_enterprise_response(
+                    reqwest::StatusCode::FORBIDDEN,
+                    Some("seat_limit_reached"),
+                    "heartbeat",
+                ),
+                NativePolicyFetchError::CredentialRejected(_),
+            ));
         }
 
         #[test]

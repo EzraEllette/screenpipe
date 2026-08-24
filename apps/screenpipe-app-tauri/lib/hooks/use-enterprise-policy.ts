@@ -56,6 +56,9 @@ interface EnterprisePolicy {
   /** Admin requires employees to sign in with their screenpipe account —
    *  the enterprise license key alone must not authenticate this device. */
   requireAccountLogin: boolean;
+  /** False pauses new capture for this stable seat installation while keeping
+   *  Enterprise authentication and the rest of the app available. */
+  recordingAllowed: boolean;
 }
 
 const EMPTY_POLICY: EnterprisePolicy = {
@@ -68,12 +71,14 @@ const EMPTY_POLICY: EnterprisePolicy = {
   managedSkills: [],
   orgName: "",
   requireAccountLogin: false,
+  recordingAllowed: true,
 };
 
 const ACCOUNT_LOGIN_REQUIRED_ERROR =
   "your organization requires signing in with your screenpipe account";
 const NATIVE_RECORDING_AUTH_ERROR =
   "enterprise access was verified, but recording could not be enabled - check enrollment, seat availability, and your connection, then try again";
+const RECORDING_DISABLED_BY_ADMIN_CODE = "recording_disabled_by_admin";
 
 // Sections always hidden in enterprise builds (regardless of policy).
 // "account" is deliberately NOT here: authentication is handled by onboarding
@@ -420,7 +425,12 @@ type HeartbeatResult =
   | { ok: true }
   | {
       ok: false;
-      reason: "seat_limit" | "invalid_credential" | "expired_key" | "network_error";
+      reason:
+        | "seat_limit"
+        | "invalid_credential"
+        | "expired_key"
+        | "recording_disabled"
+        | "network_error";
       error?: string;
     };
 
@@ -510,6 +520,14 @@ async function sendHeartbeat(
     );
 
     if (res.status === 403) {
+      const body = await res.json().catch(() => ({}));
+      if (body?.code === RECORDING_DISABLED_BY_ADMIN_CODE) {
+        return {
+          ok: false,
+          reason: "recording_disabled",
+          error: "recording disabled by workspace admin",
+        };
+      }
       return { ok: false, reason: "seat_limit", error: "license seat limit reached" };
     }
     if (res.status === 401) {
@@ -564,6 +582,7 @@ function loadCachedPolicy(): EnterprisePolicy | null {
         managedSkills: Array.isArray(policy.managedSkills) ? policy.managedSkills : [],
         orgName: typeof policy.orgName === "string" ? policy.orgName : "",
         requireAccountLogin: policy.requireAccountLogin === true,
+        recordingAllowed: policy.recordingAllowed !== false,
       };
     }
   } catch {}
@@ -825,6 +844,7 @@ export function useEnterprisePolicyRuntime() {
         managedSkills: Array.isArray(data.managedSkills) ? data.managedSkills : [],
         orgName: data.orgName || "",
         requireAccountLogin: data.requireAccountLogin === true,
+        recordingAllowed: data.recordingAllowed !== false,
       };
 
       console.log(
@@ -1052,6 +1072,13 @@ export function useEnterprisePolicyRuntime() {
           await setNativeRecordingAuthorized(false);
           setAuthenticationState("account");
           setAuthenticationError(ACCOUNT_LOGIN_REQUIRED_ERROR);
+          return;
+        }
+        if (!result.policy.recordingAllowed) {
+          await setNativeRecordingAuthorized(false);
+          setAuthenticationError(null);
+          setAuthenticationState("authenticated");
+          return;
         }
       } else if (result.reason === "invalid_key") {
         console.warn("[enterprise] saved key is no longer valid, falling back to account auth");
@@ -1139,6 +1166,14 @@ export function useEnterprisePolicyRuntime() {
         setAuthenticationState("account");
         setAuthenticationError(ACCOUNT_LOGIN_REQUIRED_ERROR);
         return { authenticated: false, retryable: false };
+      }
+      if (!result.policy.recordingAllowed) {
+        await setNativeRecordingAuthorized(false);
+        setAuthenticationError(null);
+        setAuthenticationState("authenticated");
+        setPolicy(result.policy);
+        startPolling(credential);
+        return { authenticated: true, retryable: false };
       }
       if (!await setNativeRecordingAuthorized(true, credential)) {
         setAuthenticationState(credential.type);
@@ -1229,6 +1264,9 @@ export function useEnterprisePolicyRuntime() {
       reason: "network_error",
       error: String(e),
     }));
+    const recordingDisabledByAdmin =
+      !result.policy.recordingAllowed ||
+      (!heartbeat.ok && heartbeat.reason === "recording_disabled");
     if (!heartbeat.ok && heartbeat.reason === "seat_limit") {
       await setNativeRecordingAuthorized(false);
       return {
@@ -1261,6 +1299,15 @@ export function useEnterprisePolicyRuntime() {
     } catch (e) {
       await setNativeRecordingAuthorized(false);
       return { ok: false, error: `failed to save: ${e}` };
+    }
+
+    if (recordingDisabledByAdmin) {
+      await setNativeRecordingAuthorized(false);
+      setAuthenticationError(null);
+      setAuthenticationState("authenticated");
+      setPolicy({ ...result.policy, recordingAllowed: false });
+      startPolling(credential);
+      return { ok: true };
     }
 
     // Grant native recording before publishing the authenticated React state.
