@@ -136,6 +136,12 @@ struct QualityAudit {
     missing_meeting_ids: Vec<i64>,
 }
 
+#[derive(Debug)]
+struct GeneratedActivityBatch {
+    entries: Vec<ActivityHistoryEntry>,
+    coverage_complete: bool,
+}
+
 impl QualityAudit {
     fn is_complete(&self) -> bool {
         self.rejected_entries == 0
@@ -882,6 +888,39 @@ fn audit_document(
     }
 }
 
+fn preferred_partial_entries(
+    first: ParsedDocument,
+    repaired: Option<ParsedDocument>,
+) -> Option<Vec<ActivityHistoryEntry>> {
+    match repaired {
+        Some(repaired)
+            if !repaired.entries.is_empty() && repaired.entries.len() >= first.entries.len() =>
+        {
+            Some(repaired.entries)
+        }
+        _ if !first.entries.is_empty() => Some(first.entries),
+        _ => None,
+    }
+}
+
+fn merge_partial_entries(
+    stored: &mut Vec<ActivityHistoryEntry>,
+    generated: Vec<ActivityHistoryEntry>,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+) {
+    for entry in generated {
+        if let Some(existing) = stored
+            .iter_mut()
+            .find(|existing| existing.id == entry.id && overlaps(existing, start, end))
+        {
+            *existing = entry;
+        } else {
+            stored.push(entry);
+        }
+    }
+}
+
 async fn generate(
     app: &AppHandle,
     state: &ActivityHistoryState,
@@ -992,7 +1031,10 @@ async fn generate_inner(
         end,
     );
     let generated = if first_audit.is_complete() {
-        first.entries
+        GeneratedActivityBatch {
+            entries: first.entries,
+            coverage_complete: true,
+        }
     } else {
         warn!(
             audit = %first_audit.summary(),
@@ -1003,52 +1045,88 @@ async fn generate_inner(
             "activity-history-repair",
             repair_prompt(start, end, &first.entries, &first_audit),
         )
-        .await
-        .map_err(|error| {
-            warn!(
-                %error,
-                "activity history: repair run failed; preserving stored history and coverage"
-            );
-            repair_run_failure(&error)
-        })?;
-        let repaired = parse_or_rejected(&repaired_raw, start, end);
-        let repaired_audit = audit_document(
-            &repaired,
-            minimum_entries,
-            &observed_windows,
-            &meetings,
-            start,
-            end,
-        );
-        if !repaired_audit.is_complete() {
-            warn!(
-                audit = %repaired_audit.summary(),
-                "activity history: repair failed quality validation; preserving stored history and coverage"
-            );
-            return Err(format!(
-                "activity_quality_failed:{}",
-                repaired_audit.summary()
-            ));
+        .await;
+        match repaired_raw {
+            Ok(repaired_raw) => {
+                let repaired = parse_or_rejected(&repaired_raw, start, end);
+                let repaired_audit = audit_document(
+                    &repaired,
+                    minimum_entries,
+                    &observed_windows,
+                    &meetings,
+                    start,
+                    end,
+                );
+                if repaired_audit.is_complete() {
+                    info!(
+                        first_audit = %first_audit.summary(),
+                        repaired_entries = repaired.entries.len(),
+                        "activity history: repair recovered an incomplete generation"
+                    );
+                    GeneratedActivityBatch {
+                        entries: repaired.entries,
+                        coverage_complete: true,
+                    }
+                } else if let Some(entries) = preferred_partial_entries(first, Some(repaired)) {
+                    warn!(
+                        audit = %repaired_audit.summary(),
+                        partial_entries = entries.len(),
+                        "activity history: repair remained incomplete; preserving valid partial entries without advancing coverage"
+                    );
+                    GeneratedActivityBatch {
+                        entries,
+                        coverage_complete: false,
+                    }
+                } else {
+                    warn!(
+                        audit = %repaired_audit.summary(),
+                        "activity history: repair failed quality validation; preserving stored history and coverage"
+                    );
+                    return Err(format!(
+                        "activity_quality_failed:{}",
+                        repaired_audit.summary()
+                    ));
+                }
+            }
+            Err(error) => {
+                if let Some(entries) = preferred_partial_entries(first, None) {
+                    warn!(
+                        %error,
+                        partial_entries = entries.len(),
+                        "activity history: repair run failed; preserving valid partial entries without advancing coverage"
+                    );
+                    GeneratedActivityBatch {
+                        entries,
+                        coverage_complete: false,
+                    }
+                } else {
+                    warn!(
+                        %error,
+                        "activity history: repair run failed; preserving stored history and coverage"
+                    );
+                    return Err(repair_run_failure(&error));
+                }
+            }
         }
-        info!(
-            first_audit = %first_audit.summary(),
-            repaired_entries = repaired.entries.len(),
-            "activity history: repair recovered an incomplete generation"
-        );
-        repaired.entries
     };
     let mut stored = read_all(app)?;
-    stored.entries.retain(|entry| !overlaps(entry, start, end));
-    stored.entries.extend(generated);
+    if generated.coverage_complete {
+        stored.entries.retain(|entry| !overlaps(entry, start, end));
+        stored.entries.extend(generated.entries);
+    } else {
+        merge_partial_entries(&mut stored.entries, generated.entries, start, end);
+    }
     stored
         .entries
         .sort_by_key(|entry| parse_time(&entry.start_at));
     // Coverage means the recorded request was successfully audited, including
     // legitimate idle/unobserved gaps. It is not the union of activity spans.
-    stored.coverage.push(ActivityHistoryCoverage {
-        start: start.to_rfc3339(),
-        end: end.to_rfc3339(),
-    });
+    if generated.coverage_complete {
+        stored.coverage.push(ActivityHistoryCoverage {
+            start: start.to_rfc3339(),
+            end: end.to_rfc3339(),
+        });
+    }
     stored.coverage = merge_coverage(stored.coverage);
     write_all(app, &stored)?;
     if source == "manual" {
@@ -1377,6 +1455,88 @@ mod tests {
 
         assert!(document.entries.is_empty());
         assert!(document.parse_error.is_some());
+    }
+
+    #[test]
+    fn partial_generation_keeps_the_larger_valid_document() {
+        let first = ParsedDocument {
+            entries: vec![work_entry(
+                "first-pass",
+                "2026-08-19T10:05:00Z",
+                "2026-08-19T10:20:00Z",
+            )],
+            rejected_entries: 1,
+            rejected_evidence: 0,
+            rejection_reasons: BTreeMap::new(),
+            parse_error: None,
+        };
+        let repaired = ParsedDocument {
+            entries: vec![
+                work_entry(
+                    "repaired-one",
+                    "2026-08-19T10:05:00Z",
+                    "2026-08-19T10:20:00Z",
+                ),
+                work_entry(
+                    "repaired-two",
+                    "2026-08-19T10:25:00Z",
+                    "2026-08-19T10:40:00Z",
+                ),
+            ],
+            rejected_entries: 0,
+            rejected_evidence: 0,
+            rejection_reasons: BTreeMap::new(),
+            parse_error: None,
+        };
+
+        let entries = preferred_partial_entries(first, Some(repaired)).unwrap();
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].id, "repaired-one");
+    }
+
+    #[test]
+    fn partial_generation_keeps_the_valid_first_pass_when_repair_fails() {
+        let first = ParsedDocument {
+            entries: vec![work_entry(
+                "first-pass",
+                "2026-08-19T10:05:00Z",
+                "2026-08-19T10:20:00Z",
+            )],
+            rejected_entries: 1,
+            rejected_evidence: 0,
+            rejection_reasons: BTreeMap::new(),
+            parse_error: None,
+        };
+
+        let entries = preferred_partial_entries(first, None).unwrap();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id, "first-pass");
+    }
+
+    #[test]
+    fn partial_generation_preserves_existing_history_and_replaces_stable_ids() {
+        let start = parse_time("2026-08-19T10:00:00Z").unwrap();
+        let end = parse_time("2026-08-19T11:00:00Z").unwrap();
+        let mut stored = vec![
+            work_entry("existing", "2026-08-19T10:05:00Z", "2026-08-19T10:20:00Z"),
+            work_entry("stable", "2026-08-19T10:25:00Z", "2026-08-19T10:35:00Z"),
+        ];
+        let replacement = work_entry("stable", "2026-08-19T10:25:00Z", "2026-08-19T10:45:00Z");
+
+        merge_partial_entries(&mut stored, vec![replacement], start, end);
+
+        assert_eq!(stored.len(), 2);
+        assert!(stored.iter().any(|entry| entry.id == "existing"));
+        assert_eq!(
+            stored
+                .iter()
+                .find(|entry| entry.id == "stable")
+                .unwrap()
+                .end_at,
+            "2026-08-19T10:45:00Z"
+        );
     }
 
     #[test]
