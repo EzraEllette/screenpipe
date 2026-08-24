@@ -140,6 +140,14 @@ struct QualityAudit {
 struct GeneratedActivityBatch {
     entries: Vec<ActivityHistoryEntry>,
     coverage_complete: bool,
+    degraded_error: Option<String>,
+}
+
+#[derive(Debug)]
+struct ActivityGenerationResult {
+    history: PersistedActivityHistory,
+    degraded_error: Option<String>,
+    generated_activity_count: usize,
 }
 
 impl QualityAudit {
@@ -203,6 +211,30 @@ fn generation_event_properties(
         "duration_ms": elapsed.as_millis().min(u64::MAX as u128) as u64,
         "requested_range_seconds": (end - start).num_seconds().max(0),
     })
+}
+
+fn degraded_generation_event_properties(
+    run_id: &str,
+    source: &str,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    elapsed: std::time::Duration,
+    error_message: &str,
+    partial_activity_count: usize,
+    activity_count: usize,
+) -> Value {
+    let mut properties = generation_event_properties(run_id, source, start, end, elapsed);
+    if let Some(object) = properties.as_object_mut() {
+        object.insert("outcome".into(), json!("partial"));
+        object.insert("error_message".into(), json!(error_message));
+        object.insert("coverage_complete".into(), json!(false));
+        object.insert(
+            "partial_activity_count".into(),
+            json!(partial_activity_count),
+        );
+        object.insert("activity_count".into(), json!(activity_count));
+    }
+    properties
 }
 
 fn repair_run_failure(error: &str) -> String {
@@ -938,21 +970,54 @@ async fn generate(
 
     match generate_inner(app, state, start, end, source).await {
         Ok(result) => {
-            let mut properties =
-                generation_event_properties(&run_id, source, start, end, started_at.elapsed());
-            if let Some(object) = properties.as_object_mut() {
-                object.insert("outcome".into(), json!("completed"));
-                object.insert("activity_count".into(), json!(result.entries.len()));
+            let ActivityGenerationResult {
+                history,
+                degraded_error,
+                generated_activity_count,
+            } = result;
+            let activity_count = history.entries.len();
+            if let Some(error_message) = degraded_error {
+                track_generation_event(
+                    app,
+                    "activity_generation_run_degraded",
+                    degraded_generation_event_properties(
+                        &run_id,
+                        source,
+                        start,
+                        end,
+                        started_at.elapsed(),
+                        &error_message,
+                        generated_activity_count,
+                        activity_count,
+                    ),
+                );
+                error!(
+                    activity_run_id = %run_id,
+                    activity_source = source,
+                    duration_ms = started_at.elapsed().as_millis() as u64,
+                    partial_activity_count = generated_activity_count,
+                    activity_count,
+                    error = %error_message,
+                    "activity generation completed with partial recovery: {}",
+                    error_message,
+                );
+            } else {
+                let mut properties =
+                    generation_event_properties(&run_id, source, start, end, started_at.elapsed());
+                if let Some(object) = properties.as_object_mut() {
+                    object.insert("outcome".into(), json!("completed"));
+                    object.insert("activity_count".into(), json!(activity_count));
+                }
+                track_generation_event(app, "activity_generation_run_completed", properties);
+                info!(
+                    activity_run_id = %run_id,
+                    activity_source = source,
+                    duration_ms = started_at.elapsed().as_millis() as u64,
+                    activity_count,
+                    "activity generation completed"
+                );
             }
-            track_generation_event(app, "activity_generation_run_completed", properties);
-            info!(
-                activity_run_id = %run_id,
-                activity_source = source,
-                duration_ms = started_at.elapsed().as_millis() as u64,
-                activity_count = result.entries.len(),
-                "activity generation completed"
-            );
-            Ok(result)
+            Ok(history)
         }
         Err(error_message) => {
             let skipped = error_message.starts_with("activity_no_data:");
@@ -1002,7 +1067,7 @@ async fn generate_inner(
     start: DateTime<Utc>,
     end: DateTime<Utc>,
     source: &'static str,
-) -> Result<PersistedActivityHistory, String> {
+) -> Result<ActivityGenerationResult, String> {
     if start >= end {
         return Err("Start time must be before end time".to_string());
     }
@@ -1034,6 +1099,7 @@ async fn generate_inner(
         GeneratedActivityBatch {
             entries: first.entries,
             coverage_complete: true,
+            degraded_error: None,
         }
     } else {
         warn!(
@@ -1066,8 +1132,11 @@ async fn generate_inner(
                     GeneratedActivityBatch {
                         entries: repaired.entries,
                         coverage_complete: true,
+                        degraded_error: None,
                     }
                 } else if let Some(entries) = preferred_partial_entries(first, Some(repaired)) {
+                    let error_message =
+                        format!("activity_quality_failed:{}", repaired_audit.summary());
                     warn!(
                         audit = %repaired_audit.summary(),
                         partial_entries = entries.len(),
@@ -1076,6 +1145,7 @@ async fn generate_inner(
                     GeneratedActivityBatch {
                         entries,
                         coverage_complete: false,
+                        degraded_error: Some(error_message),
                     }
                 } else {
                     warn!(
@@ -1090,6 +1160,7 @@ async fn generate_inner(
             }
             Err(error) => {
                 if let Some(entries) = preferred_partial_entries(first, None) {
+                    let error_message = repair_run_failure(&error);
                     warn!(
                         %error,
                         partial_entries = entries.len(),
@@ -1098,6 +1169,7 @@ async fn generate_inner(
                     GeneratedActivityBatch {
                         entries,
                         coverage_complete: false,
+                        degraded_error: Some(error_message),
                     }
                 } else {
                     warn!(
@@ -1109,19 +1181,25 @@ async fn generate_inner(
             }
         }
     };
+    let GeneratedActivityBatch {
+        entries,
+        coverage_complete,
+        degraded_error,
+    } = generated;
+    let generated_activity_count = entries.len();
     let mut stored = read_all(app)?;
-    if generated.coverage_complete {
+    if coverage_complete {
         stored.entries.retain(|entry| !overlaps(entry, start, end));
-        stored.entries.extend(generated.entries);
+        stored.entries.extend(entries);
     } else {
-        merge_partial_entries(&mut stored.entries, generated.entries, start, end);
+        merge_partial_entries(&mut stored.entries, entries, start, end);
     }
     stored
         .entries
         .sort_by_key(|entry| parse_time(&entry.start_at));
     // Coverage means the recorded request was successfully audited, including
     // legitimate idle/unobserved gaps. It is not the union of activity spans.
-    if generated.coverage_complete {
+    if coverage_complete {
         stored.coverage.push(ActivityHistoryCoverage {
             start: start.to_rfc3339(),
             end: end.to_rfc3339(),
@@ -1169,7 +1247,11 @@ async fn generate_inner(
             crate::notifications::store::NotificationPriority::High,
         );
     }
-    Ok(result)
+    Ok(ActivityGenerationResult {
+        history: result,
+        degraded_error,
+        generated_activity_count,
+    })
 }
 
 fn should_notify_completion(source: &str) -> bool {
@@ -1639,5 +1721,30 @@ mod tests {
         assert!(properties.get("title").is_none());
         assert!(properties.get("summary").is_none());
         assert!(properties.get("evidence").is_none());
+    }
+
+    #[test]
+    fn degraded_generation_preserves_the_exact_error_and_partial_counts() {
+        let start = parse_time("2026-08-24T10:00:00Z").unwrap();
+        let end = parse_time("2026-08-24T11:00:00Z").unwrap();
+        let error_message =
+            "activity_quality_failed:repair_run_failed:HTTP 429 daily_cost_limit_exceeded";
+
+        let properties = degraded_generation_event_properties(
+            "run-123",
+            "automatic",
+            start,
+            end,
+            std::time::Duration::from_millis(321),
+            error_message,
+            2,
+            5,
+        );
+
+        assert_eq!(properties["outcome"], "partial");
+        assert_eq!(properties["error_message"], error_message);
+        assert_eq!(properties["coverage_complete"], false);
+        assert_eq!(properties["partial_activity_count"], 2);
+        assert_eq!(properties["activity_count"], 5);
     }
 }
