@@ -134,7 +134,10 @@ Set-MachineEnvironment 'SCREENPIPE_NATIVE_CACHE_DIR' (Join-Path $cacheRoot 'nati
 Set-MachineEnvironment 'NPM_CONFIG_PREFIX' $npmRoot
 
 $redistRoot = 'C:\BuildTools\VC\Redist\MSVC'
-$redistVersion = Get-ChildItem $redistRoot -Directory | Sort-Object Name -Descending | Select-Object -First 1
+$redistVersion = Get-ChildItem $redistRoot -Directory |
+  Where-Object Name -Match '^\d+\.' |
+  Sort-Object Name -Descending |
+  Select-Object -First 1
 if (-not $redistVersion) { throw "Visual C++ redistributable directory is unavailable under $redistRoot" }
 Set-MachineEnvironment 'VCToolsRedistDir' ($redistVersion.FullName + '\')
 
