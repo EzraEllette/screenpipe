@@ -82,7 +82,7 @@ export function ChatComposer({
             isDragging={input.isDragging}
           />
 
-          <UpgradeQuotaBanner />
+          <UpgradeQuotaBanner activePreset={modelControls.activePreset} />
           <FreePlanWallStrip />
           <FreeUpgradeSheet />
 
