@@ -1693,6 +1693,19 @@ impl DatabaseManager {
         .await
     }
 
+    pub async fn get_video_chunk_time_range(
+        &self,
+        chunk_id: i64,
+    ) -> Result<Option<(DateTime<Utc>, DateTime<Utc>)>, SqlxError> {
+        let range: Option<(Option<DateTime<Utc>>, Option<DateTime<Utc>>)> = sqlx::query_as(
+            "SELECT MIN(timestamp), MAX(timestamp) FROM frames WHERE video_chunk_id = ?1",
+        )
+        .bind(chunk_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(range.and_then(|(start, end)| start.zip(end)))
+    }
+
     /// Get all frames within a time range for meeting/video export.
     ///
     /// Returns `(frame_id, file_path, offset_index, timestamp, is_snapshot)` ordered by

@@ -35,7 +35,20 @@ const mocks = vi.hoisted(() => ({
   settings: {
     activitiesEnabled: true,
     enhancedAI: true,
-    user: { token: "test-token" },
+    user: {
+      id: "paid-user",
+      token: "test-token",
+      cloud_subscribed: false,
+      app_entitled: true,
+      subscription_plan: "lifetime",
+      entitlement: {
+        active: true,
+        plan: "lifetime",
+        source: "lifetime",
+        checked_at: "2026-08-01T00:00:00.000Z",
+        features: { app: true },
+      },
+    },
     aiPresets: [
       {
         id: "chat",
@@ -115,6 +128,13 @@ vi.mock("@/lib/hooks/use-settings", () => ({
     updateSettings: mocks.updateSettings,
   }),
 }));
+vi.mock("@/lib/hooks/use-is-enterprise-build", () => ({
+  useEnterpriseBuildStatus: () => ({
+    isEnterprise: false,
+    resolved: true,
+    error: false,
+  }),
+}));
 vi.mock("@/lib/hooks/use-timeline-store", () => ({
   useTimelineStore: (selector: (state: unknown) => unknown) =>
     selector({ setPendingNavigation: mocks.setPendingNavigation }),
@@ -159,12 +179,16 @@ vi.mock("@/components/rewind/ai-presets-selector", async () => {
 
 import {
   ActivityLedger,
+  activityCalendarStartDate,
+  activityRangePresets,
   artifactsForHistoryEntry,
   buildActivityLedgerArtifactsPath,
   buildActivityMeetingsPath,
   buildFramePreviewSamplesPath,
   buildActivitySummaryPath,
   canAddRecentActivity,
+  effectiveActivityRange,
+  isActivityCalendarDateDisabled,
   rangeForPreset,
 } from "@/components/activity-ledger";
 import {
@@ -441,6 +465,31 @@ async function generateActivities(): Promise<void> {
 }
 
 describe("activity history helpers", () => {
+  it("offers only today and 24 hours when activity history is restricted", () => {
+    expect(activityRangePresets(true)).toEqual(["today", "24h"]);
+    expect(activityRangePresets(false)).toEqual([
+      "today",
+      "24h",
+      "7d",
+      "custom",
+    ]);
+  });
+
+  it("limits the restricted activity calendar to yesterday and today", () => {
+    const now = new Date(2026, 7, 24, 12);
+    const twoDaysAgo = new Date(2026, 7, 22, 12);
+    const yesterday = new Date(2026, 7, 23, 12);
+    const today = new Date(2026, 7, 24, 8);
+    const tomorrow = new Date(2026, 7, 25, 8);
+
+    expect(activityCalendarStartDate(now)).toEqual(new Date(2026, 7, 23));
+    expect(isActivityCalendarDateDisabled(twoDaysAgo, true, now)).toBe(true);
+    expect(isActivityCalendarDateDisabled(yesterday, true, now)).toBe(false);
+    expect(isActivityCalendarDateDisabled(today, true, now)).toBe(false);
+    expect(isActivityCalendarDateDisabled(tomorrow, true, now)).toBe(true);
+    expect(isActivityCalendarDateDisabled(twoDaysAgo, false, now)).toBe(false);
+  });
+
   it("keeps the last 24 hours rolling across midnight", () => {
     const anchor = new Date("2026-08-18T08:02:00.000Z");
     const range = rangeForPreset("24h", anchor, "", "");
@@ -448,6 +497,75 @@ describe("activity history helpers", () => {
     expect(range?.start.toISOString()).toBe("2026-08-17T08:02:00.000Z");
     expect(range?.end.toISOString()).toBe("2026-08-18T08:02:00.000Z");
     expect(range!.end.getTime() - range!.start.getTime()).toBe(86_400_000);
+  });
+
+  it("limits free and unattributed activity ranges while preserving paid ranges", () => {
+    const now = new Date("2026-08-24T12:00:00.000Z");
+    const requested = {
+      start: new Date("2026-08-17T12:00:00.000Z"),
+      end: new Date("2026-08-25T12:00:00.000Z"),
+    };
+
+    expect(effectiveActivityRange(requested, null, now)).toEqual({
+      start: new Date("2026-08-23T12:00:00.000Z"),
+      end: now,
+    });
+    expect(
+      effectiveActivityRange(requested, mocks.settings.user as any, now),
+    ).toBe(requested);
+    expect(
+      effectiveActivityRange(
+        requested,
+        {
+          id: "enterprise-user",
+          subscription_plan: "enterprise",
+          app_entitled: true,
+          entitlement: {
+            active: true,
+            plan: "enterprise",
+            checked_at: "2026-08-17T19:00:00.000Z",
+            features: { app: true },
+          },
+          enterprise_account: {
+            org_name: "Acme",
+            role: "member",
+            requires_enterprise_app: true,
+          },
+        } as any,
+        now,
+      ),
+    ).toBe(requested);
+    expect(effectiveActivityRange(requested, null, now, true)).toBe(
+      requested,
+    );
+    expect(
+      effectiveActivityRange(
+        {
+          start: new Date("2026-08-17T12:00:00.000Z"),
+          end: new Date("2026-08-20T12:00:00.000Z"),
+        },
+        undefined,
+        now,
+      ),
+    ).toBeNull();
+  });
+
+  it("does not expand meeting evidence before the restricted access boundary", () => {
+    const accessStart = new Date("2026-08-23T12:00:00.000Z");
+    const meetings = new URL(
+      buildActivityMeetingsPath(
+        {
+          start: accessStart,
+          end: new Date("2026-08-24T12:00:00.000Z"),
+        },
+        accessStart,
+      ),
+      "http://localhost",
+    );
+
+    expect(meetings.searchParams.get("start_time")).toBe(
+      "2026-08-23T12:00:00.000Z",
+    );
   });
 
   it("builds a bounded summary path", () => {
@@ -717,11 +835,14 @@ describe("activity history helpers", () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(200);
     });
-    await waitFor(() => expect(previewCalls().length).toBeGreaterThanOrEqual(1));
+    await waitFor(() =>
+      expect(previewCalls().length).toBeGreaterThanOrEqual(1),
+    );
     expect(
-      new URL(String(previewCalls()[0][0]), "http://localhost").searchParams.get(
-        "app_name",
-      ),
+      new URL(
+        String(previewCalls()[0][0]),
+        "http://localhost",
+      ).searchParams.get("app_name"),
     ).toBe("Cursor");
     const preview = await screen.findByTestId("activity-artifact-preview");
     expect(within(preview).getAllByText("20 min")[0]).toBeVisible();
@@ -1445,6 +1566,39 @@ describe("ActivityLedger", () => {
     expect(timeRange).toBeVisible();
     expect(timeRange).toHaveTextContent("Today");
     expect(screen.getByLabelText("AI preset")).toBeVisible();
+  });
+
+  it("coerces a restricted persisted 7-day range to 24 hours", async () => {
+    const originalUser = mocks.settings.user;
+    (mocks.settings as any).user = null;
+    window.localStorage.setItem("screenpipe:activity-history:range", "7d");
+
+    try {
+      render(<ActivityLedger />);
+
+      const timeRange = await screen.findByRole("combobox", {
+        name: "Time range: Last 24 hours",
+      });
+      fireEvent.click(timeRange);
+
+      expect(
+        await screen.findByRole("option", { name: "Today" }),
+      ).toBeVisible();
+      expect(
+        screen.getByRole("option", { name: "Last 24 hours" }),
+      ).toBeVisible();
+      expect(
+        screen.queryByRole("option", { name: "Last 7 days" }),
+      ).toBeNull();
+      expect(
+        screen.queryByRole("option", { name: "Custom range" }),
+      ).toBeNull();
+      expect(window.localStorage.getItem("screenpipe:activity-history:range")).toBe(
+        "24h",
+      );
+    } finally {
+      mocks.settings.user = originalUser;
+    }
   });
 
   it("uses one popover trigger instead of two native custom-date inputs", async () => {

@@ -56,6 +56,7 @@ pub struct ServerCore {
     /// Local API auth key — exposed to the frontend via Tauri command so
     /// localFetch can inject it synchronously (no async store race).
     pub local_api_key: Option<String>,
+    pub history_access: screenpipe_engine::history_access::HistoryAccessPolicy,
     /// Shutdown signal for the redaction reconciliation workers. Fired
     /// from `shutdown()` so the workers exit before the tokio runtime
     /// tears down — otherwise their in-flight sqlx queries (which use
@@ -301,6 +302,7 @@ impl ServerCore {
         // replaced with this Arc so all three observers (cloud_proxy.rs,
         // PiExecutor, the Tauri command writer) share one storage cell.
         cloud_token_handle: std::sync::Arc<arc_swap::ArcSwap<Option<String>>>,
+        history_access: screenpipe_engine::history_access::HistoryAccessPolicy,
     ) -> Result<Self, String> {
         info!("Starting server core on port {}", config.port);
         crate::health::set_boot_phase("starting", Some("starting server"));
@@ -563,6 +565,7 @@ impl ServerCore {
         // restart — paying users who signed in after the sidecar started got
         // anonymous-tier 403s on every Sonnet/Opus pipe.
         server.cloud_token = cloud_token_handle.clone();
+        server.history_access = history_access.clone();
         // Seed the shared cell from persisted settings, but ONLY when empty
         // — if `set_cloud_token` has already pushed a fresher value (e.g. the
         // user signed in between sidecar boots), don't clobber it with the
@@ -1372,6 +1375,7 @@ impl ServerCore {
             data_path,
             port: config.port,
             local_api_key: config.api_auth_key.clone(),
+            history_access,
             redact_shutdown,
             oauth_refresher: oauth_refresher_handle,
             external_memory_sync: external_memory_sync_handle,

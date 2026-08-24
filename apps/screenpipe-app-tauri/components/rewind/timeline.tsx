@@ -45,6 +45,12 @@ import { useDateNavigation } from "@/components/rewind/hooks/use-date-navigation
 import { useTimelineKeyboard } from "@/components/rewind/hooks/use-timeline-keyboard";
 import { localFetch } from "@/lib/api";
 import { hydrateSearchResultNavigation } from "@/lib/search-result-navigation";
+import type { AppUser } from "@/lib/app-entitlement";
+import { useEnterpriseBuildStatus } from "@/lib/hooks/use-is-enterprise-build";
+import {
+	shouldRestrictTimelineHistory,
+	useAuthoritativeTimelineHistoryAccess,
+} from "@/lib/hooks/use-timeline-cache";
 
 export interface StreamTimeSeriesResponse {
 	timestamp: string;
@@ -99,6 +105,14 @@ const easeOutCubic = (x: number): number => {
 export default function Timeline({ embedded = false }: { embedded?: boolean }) {
 	const { isMac } = usePlatform();
 	const { settings } = useSettings();
+	const enterpriseBuild = useEnterpriseBuildStatus();
+	const locallyRestrictedHistory = shouldRestrictTimelineHistory(
+		settings?.user as AppUser | null | undefined,
+		enterpriseBuild.isEnterprise,
+	);
+	const historyAccessRestricted = useAuthoritativeTimelineHistoryAccess(
+		locallyRestrictedHistory,
+	);
 	const { health } = useHealthCheck();
 	const [currentIndex, setCurrentIndex] = useState(0);
 	const [showAudioTranscript, setShowAudioTranscript] = useState(false);
@@ -188,7 +202,18 @@ export default function Timeline({ embedded = false }: { embedded?: boolean }) {
 	const { frames, isLoading, error, message, fetchNextDayData, websocket } =
 		useTimelineData(currentDate, (frame) => {
 			setCurrentFrame(frame);
-		});
+		}, historyAccessRestricted, enterpriseBuild.resolved);
+
+	useEffect(() => {
+		if (!historyAccessRestricted || !currentFrame) return;
+		const timestampMs = new Date(currentFrame.timestamp).getTime();
+		if (
+			!Number.isFinite(timestampMs) ||
+			timestampMs < Date.now() - 24 * 60 * 60 * 1000
+		) {
+			setCurrentFrame(null);
+		}
+	}, [currentFrame, historyAccessRestricted, setCurrentFrame]);
 
 	// Audio-only markers advance the playhead and subtitles, but they have no
 	// image to render. Keep the nearest captured screenshot on the canvas while
@@ -1290,6 +1315,7 @@ export default function Timeline({ embedded = false }: { embedded?: boolean }) {
 						currentDate={currentDate}
 						currentTime={currentFrame ? new Date(currentFrame.timestamp) : null}
 						startAndEndDates={startAndEndDates}
+						historyAccessRestricted={historyAccessRestricted}
 						onDateChange={handleDateChange}
 						onJumpToday={handleJumpToday}
 						// Embedded timeline no longer renders a search button

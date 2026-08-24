@@ -38,6 +38,42 @@ use crate::{server::AppState, video_utils::extract_frame_from_video};
 
 use tokio::time::timeout;
 
+fn history_forbidden() -> (StatusCode, JsonResponse<Value>) {
+    (
+        StatusCode::FORBIDDEN,
+        JsonResponse(json!({
+            "error": "this content is outside the available 24-hour history",
+            "code": "history_access_limited"
+        })),
+    )
+}
+
+async fn require_frame_history_access(
+    state: &Arc<AppState>,
+    frame_id: i64,
+) -> Result<(), (StatusCode, JsonResponse<Value>)> {
+    if !state.history_access.is_restricted() {
+        return Ok(());
+    }
+    if let Some(timestamp) = state
+        .db
+        .get_frame_timestamp(frame_id)
+        .await
+        .map_err(|error| {
+            error!(%error, frame_id, "frame history lookup failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                JsonResponse(json!({ "error": "frame history lookup failed" })),
+            )
+        })?
+    {
+        if !state.history_access.allows(timestamp, Utc::now()) {
+            return Err(history_forbidden());
+        }
+    }
+    Ok(())
+}
+
 const DEFAULT_THUMBNAIL_WIDTH: u32 = 384;
 const DEFAULT_THUMBNAIL_QUALITY: u8 = 75;
 const MIN_THUMBNAIL_WIDTH: u32 = 64;
@@ -322,11 +358,20 @@ pub async fn get_frame_preview_samples(
 ) -> Result<JsonResponse<FramePreviewSamplesResponse>, (StatusCode, JsonResponse<Value>)> {
     let (app_name, browser_domain) =
         validate_frame_preview_query(&query).map_err(preview_bad_request)?;
+    let start_time = state
+        .history_access
+        .clamp_start(Some(query.start_time), Utc::now())
+        .unwrap_or(query.start_time);
+    if start_time >= query.end_time {
+        return Ok(JsonResponse(FramePreviewSamplesResponse {
+            frames: Vec::new(),
+        }));
+    }
 
     let candidates = state
         .db
         .get_frame_preview_candidates(
-            query.start_time,
+            start_time,
             query.end_time,
             &app_name,
             browser_domain.as_deref(),
@@ -408,6 +453,22 @@ pub async fn get_frame_preview_media(
     Path(video_chunk_id): Path<i64>,
     headers: HeaderMap,
 ) -> Result<Response<Body>, (StatusCode, JsonResponse<Value>)> {
+    if let Some((start, _end)) = state
+        .db
+        .get_video_chunk_time_range(video_chunk_id)
+        .await
+        .map_err(|error| {
+            error!(%error, "preview media history lookup failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                JsonResponse(json!({ "error": "preview media history lookup failed" })),
+            )
+        })?
+    {
+        if !state.history_access.allows(start, Utc::now()) {
+            return Err(history_forbidden());
+        }
+    }
     let Some(file_path) = state
         .db
         .get_video_chunk_path(video_chunk_id)
@@ -526,6 +587,7 @@ pub async fn get_frame_thumbnail(
     Path(frame_id): Path<i64>,
     Query(query): Query<FrameThumbnailQuery>,
 ) -> Result<Response<Body>, (StatusCode, JsonResponse<Value>)> {
+    require_frame_history_access(&state, frame_id).await?;
     if !(MIN_THUMBNAIL_WIDTH..=MAX_THUMBNAIL_WIDTH).contains(&query.width) {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -830,6 +892,7 @@ pub async fn get_frame_data(
     Path(frame_id): Path<i64>,
     Query(query): Query<FrameDataQuery>,
 ) -> Result<Response<Body>, (StatusCode, JsonResponse<Value>)> {
+    require_frame_history_access(&state, frame_id).await?;
     let start_time = Instant::now();
 
     match timeout(Duration::from_secs(5), async {
@@ -1205,6 +1268,10 @@ pub async fn get_next_valid_frame(
     // a non-zero size too, but must never become an FFmpeg input.
     let mut skipped = 0;
     for (frame_id, file_path, _offset_index, timestamp, _is_snapshot) in candidates {
+        if !state.history_access.allows(timestamp, Utc::now()) {
+            skipped += 1;
+            continue;
+        }
         if matches!(tokio::fs::metadata(&file_path).await, Ok(metadata) if metadata.is_file()) {
             return Ok(JsonResponse(NextValidFrameResponse {
                 frame_id,
@@ -1239,6 +1306,7 @@ pub async fn get_frame_metadata(
     State(state): State<Arc<AppState>>,
     Path(frame_id): Path<i64>,
 ) -> Result<JsonResponse<FrameMetadataResponse>, (StatusCode, JsonResponse<Value>)> {
+    require_frame_history_access(&state, frame_id).await?;
     match state.db.get_frame_timestamp(frame_id).await {
         Ok(Some(timestamp)) => Ok(JsonResponse(FrameMetadataResponse {
             frame_id,
@@ -1307,6 +1375,7 @@ pub async fn get_frame_context(
     State(state): State<Arc<AppState>>,
     Path(frame_id): Path<i64>,
 ) -> Result<JsonResponse<FrameContextResponse>, (StatusCode, JsonResponse<Value>)> {
+    require_frame_history_access(&state, frame_id).await?;
     // Try to get accessibility data; gracefully handle missing columns (pre-migration DBs)
     let (a11y_text, a11y_tree_json) = match state.db.get_frame_accessibility_data(frame_id).await {
         Ok(data) => data,
@@ -1524,6 +1593,7 @@ pub async fn get_frame_text_data(
     Path(frame_id): Path<i64>,
     Query(params): Query<FrameTextQuery>,
 ) -> Result<JsonResponse<FrameTextResponse>, (StatusCode, JsonResponse<Value>)> {
+    require_frame_history_access(&state, frame_id).await?;
     // Get OCR data (bounding boxes from Apple Vision)
     let mut text_positions = match state.db.get_frame_text_positions(frame_id).await {
         Ok(tp) => tp,
@@ -1671,6 +1741,7 @@ pub async fn run_frame_ocr(
     Path(frame_id): Path<i64>,
     Query(params): Query<FrameOcrQuery>,
 ) -> Result<JsonResponse<FrameTextResponse>, (StatusCode, JsonResponse<Value>)> {
+    require_frame_history_access(&state, frame_id).await?;
     // Check if OCR data already exists — avoid redundant work
     match state.db.get_frame_text_positions(frame_id).await {
         Ok(existing) if !existing.is_empty() => {

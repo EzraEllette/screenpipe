@@ -398,6 +398,17 @@ pub fn is_enterprise_build_cmd(app_handle: tauri::AppHandle) -> bool {
     is_enterprise_build(&app_handle)
 }
 
+/// Whether the running local API currently enforces the rolling history window.
+/// This is the authoritative app-wide value shared by every webview and backend
+/// route, so detached windows do not depend on duplicating account hydration.
+#[tauri::command]
+#[specta::specta]
+pub fn is_history_access_restricted(
+    state: tauri::State<'_, crate::recording::RecordingState>,
+) -> bool {
+    state.history_access.is_restricted()
+}
+
 /// Whether an automated environment has force-disabled telemetry
 /// (`SCREENPIPE_DISABLE_TELEMETRY` / `GITHUB_ACTIONS` / `CI`).
 ///
@@ -1157,6 +1168,14 @@ pub async fn set_cloud_token(
         .as_ref()
         .map(|settings| settings.restricts_paid_local_features())
         .unwrap_or(true);
+    if let Some(settings) = settings.as_ref() {
+        crate::recording::refresh_history_access_policy(&state.history_access, settings);
+    } else {
+        // Missing/corrupt settings are unattributed on consumer builds.
+        state
+            .history_access
+            .set_last_24_hours(!cfg!(feature = "enterprise-build"));
+    }
     let pipe_manager = {
         let server = state.server.lock().await;
         server.as_ref().map(|core| core.pipe_manager.clone())

@@ -1135,6 +1135,9 @@ public func timeline_show(_ json: UnsafePointer<CChar>?) -> Int32 {
         if let port = obj["port"] as? Int { config.port = port }
         if let host = obj["host"] as? String, !host.isEmpty { config.host = host }
         if let key = obj["apiKey"] as? String, !key.isEmpty { config.apiKey = key }
+        if let value = obj["historyAccessRestricted"] as? Bool {
+            config.historyAccessRestricted = value
+        }
         if let value = obj["embedded"] as? Bool { embedded = value }
         if let value = obj["closeOnEscape"] as? Bool { closeOnEscape = value }
         if let value = obj["showActivityReturn"] as? Bool { showActivityReturn = value }

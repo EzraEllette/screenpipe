@@ -21,6 +21,7 @@ use std::{sync::Arc, time::Duration};
 use tracing::{debug, error, info, warn};
 
 use crate::{
+    history_access::HistoryAccessPolicy,
     routes::search::is_screenpipe_app,
     server::AppState,
     video_cache::{AudioEntry, DeviceFrame, FrameMetadata, TimeSeriesFrame},
@@ -42,6 +43,23 @@ pub struct StreamFramesRequest {
     order: Order,
     #[serde(default)]
     limit: Option<usize>,
+}
+
+/// Clamp a timeline request to the rolling history window. Returns `true`
+/// when the requested range is wholly before the accessible window.
+fn apply_stream_history_access(
+    policy: &HistoryAccessPolicy,
+    request: &mut StreamFramesRequest,
+    now: DateTime<Utc>,
+) -> bool {
+    let Some(cutoff) = policy.cutoff(now) else {
+        return false;
+    };
+    if request.end_time < cutoff {
+        return true;
+    }
+    request.start_time = request.start_time.max(cutoff);
+    false
 }
 
 const MAX_STREAM_FRAME_LIMIT: usize = 10_000;
@@ -343,6 +361,7 @@ async fn handle_stream_frames_socket(
     let (mut sender, mut receiver) = socket.split();
     let cache = state.hot_frame_cache.clone();
     let db = state.db.clone();
+    let history_access = state.history_access.clone();
 
     // Shared state: track sent frame IDs to avoid duplicates
     let sent_frame_ids: Arc<Mutex<std::collections::HashSet<i64>>> =
@@ -358,6 +377,7 @@ async fn handle_stream_frames_socket(
     let live_sub_clone = live_subscribe.clone();
     let cache_clone = cache.clone();
     let db_clone = db.clone();
+    let receive_history_access = history_access.clone();
 
     // Handle incoming messages for time range requests
     let receive_lifecycle = lifecycle.clone();
@@ -365,7 +385,17 @@ async fn handle_stream_frames_socket(
         while let Some(Ok(msg)) = receiver.next().await {
             if let Message::Text(text) = msg {
                 match serde_json::from_str::<StreamFramesRequest>(&text) {
-                    Ok(request) => {
+                    Ok(mut request) => {
+                        let now = Utc::now();
+                        if apply_stream_history_access(
+                            &receive_history_access,
+                            &mut request,
+                            now,
+                        ) {
+                            sent_ids_clone.lock().await.clear();
+                            *live_sub_clone.lock().await = Some(false);
+                            continue;
+                        }
                         let start_time = request.start_time;
                         let end_time = request.end_time;
                         let is_descending = request.order == Order::Descending;
@@ -379,7 +409,6 @@ async fn handle_stream_frames_socket(
                         // Only use hot_cache if end_time reaches into the present/future.
                         // If the entire range is in the past (even on today's calendar day),
                         // use database — hot_cache only has recent in-memory frames.
-                        let now = Utc::now();
                         let is_today = (cache_clone.is_today(start_time).await
                             || cache_clone.is_today(end_time).await)
                             && end_time >= now;
@@ -579,6 +608,9 @@ async fn handle_stream_frames_socket(
                                     .await;
                                 continue;
                             }
+                            if !history_access.allows(tsf.timestamp, Utc::now()) {
+                                continue;
+                            }
                             push_stream_batch(
                                 &mut frame_buffer,
                                 StreamTimeSeriesResponse::from(tsf),
@@ -606,6 +638,9 @@ async fn handle_stream_frames_socket(
                             // Check if live subscription is active
                             let is_live = live_subscribe.lock().await.unwrap_or(false);
                             if !is_live {
+                                continue;
+                            }
+                            if !history_access.allows(hot_frame.timestamp, Utc::now()) {
                                 continue;
                             }
                             // Skip already-sent frames
@@ -690,6 +725,9 @@ async fn handle_stream_frames_socket(
                         Ok(hot_audio) => {
                             let is_live = live_subscribe.lock().await.unwrap_or(false);
                             if !is_live {
+                                continue;
+                            }
+                            if !history_access.allows(hot_audio.timestamp, Utc::now()) {
                                 continue;
                             }
                             // Send a lightweight audio-update message so the
@@ -1060,6 +1098,64 @@ mod tests {
             stream_frame_limit(Some(MAX_STREAM_FRAME_LIMIT + 1)),
             MAX_STREAM_FRAME_LIMIT
         );
+    }
+
+    fn stream_request(start: &str, end: &str) -> StreamFramesRequest {
+        StreamFramesRequest {
+            start_time: start.parse().unwrap(),
+            end_time: end.parse().unwrap(),
+            order: Order::Descending,
+            limit: None,
+        }
+    }
+
+    #[test]
+    fn restricted_stream_clamps_crossing_ranges_at_the_inclusive_cutoff() {
+        let now: DateTime<Utc> = "2026-08-24T20:00:00Z".parse().unwrap();
+        let cutoff = now - chrono::Duration::hours(24);
+        let mut request = stream_request("2026-08-20T00:00:00Z", "2026-08-24T20:00:00Z");
+
+        assert!(!apply_stream_history_access(
+            &HistoryAccessPolicy::last_24_hours(),
+            &mut request,
+            now,
+        ));
+        assert_eq!(request.start_time, cutoff);
+
+        let mut exact = stream_request("2026-08-20T00:00:00Z", "2026-08-23T20:00:00Z");
+        assert!(!apply_stream_history_access(
+            &HistoryAccessPolicy::last_24_hours(),
+            &mut exact,
+            now,
+        ));
+        assert_eq!(exact.start_time, cutoff);
+        assert_eq!(exact.end_time, cutoff);
+    }
+
+    #[test]
+    fn restricted_stream_marks_wholly_old_ranges_empty() {
+        let now: DateTime<Utc> = "2026-08-24T20:00:00Z".parse().unwrap();
+        let mut request = stream_request("2026-08-20T00:00:00Z", "2026-08-23T19:59:59Z");
+
+        assert!(apply_stream_history_access(
+            &HistoryAccessPolicy::last_24_hours(),
+            &mut request,
+            now,
+        ));
+    }
+
+    #[test]
+    fn unrestricted_stream_preserves_old_ranges() {
+        let now: DateTime<Utc> = "2026-08-24T20:00:00Z".parse().unwrap();
+        let mut request = stream_request("2025-08-20T00:00:00Z", "2025-08-21T00:00:00Z");
+        let original_start = request.start_time;
+
+        assert!(!apply_stream_history_access(
+            &HistoryAccessPolicy::unrestricted(),
+            &mut request,
+            now,
+        ));
+        assert_eq!(request.start_time, original_start);
     }
 
     #[test]

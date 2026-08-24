@@ -16,6 +16,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use tracing::error;
 
+use crate::history_access::HistoryAccessPolicy;
 use crate::server::AppState;
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, OaSchema, PartialEq, Eq)]
@@ -117,10 +118,13 @@ pub struct ActivityLedgerResponse {
 #[oasgen]
 pub async fn get_activity_ledger(
     State(state): State<Arc<AppState>>,
-    Query(query): Query<ActivityLedgerQuery>,
+    Query(mut query): Query<ActivityLedgerQuery>,
 ) -> Result<JsonResponse<ActivityLedgerResponse>, (StatusCode, JsonResponse<Value>)> {
     if query.start_time >= query.end_time {
         return Err(bad_request("start_time must be before end_time"));
+    }
+    if apply_activity_ledger_history_access(&state.history_access, &mut query, Utc::now()) {
+        return Ok(JsonResponse(empty_activity_ledger_response(&query)));
     }
     if query.end_time - query.start_time > Duration::days(31) {
         return Err(bad_request("activity ledger ranges are limited to 31 days"));
@@ -160,6 +164,7 @@ pub async fn get_activity_ledger(
         query.start_time,
         query.end_time,
         query.include_artifacts,
+        state.history_access.is_restricted(),
     );
     let data_status = if intervals.is_empty() { "empty" } else { "ok" }.to_string();
     Ok(JsonResponse(ActivityLedgerResponse {
@@ -174,12 +179,41 @@ pub async fn get_activity_ledger(
     }))
 }
 
+fn apply_activity_ledger_history_access(
+    policy: &HistoryAccessPolicy,
+    query: &mut ActivityLedgerQuery,
+    now: DateTime<Utc>,
+) -> bool {
+    let Some(cutoff) = policy.cutoff(now) else {
+        return false;
+    };
+    if query.end_time < cutoff {
+        return true;
+    }
+    query.start_time = query.start_time.max(cutoff);
+    false
+}
+
+fn empty_activity_ledger_response(query: &ActivityLedgerQuery) -> ActivityLedgerResponse {
+    ActivityLedgerResponse {
+        intervals: Vec::new(),
+        depth: query.depth,
+        data_status: "empty".to_string(),
+        time_range: ActivityLedgerTimeRange {
+            start: query.start_time.to_rfc3339(),
+            end: query.end_time.to_rfc3339(),
+        },
+        generated_at: Utc::now().to_rfc3339(),
+    }
+}
+
 fn project_intervals(
     records: Vec<ActivityIntervalRecord>,
     depth: ActivityLedgerDepth,
     range_start: DateTime<Utc>,
     range_end: DateTime<Utc>,
     include_artifacts: bool,
+    restrict_evidence_to_range: bool,
 ) -> Vec<ActivityLedgerInterval> {
     let mut projected = Vec::with_capacity(records.len());
     for record in records {
@@ -208,15 +242,37 @@ fn project_intervals(
                 record.title,
             ),
         };
-        let actions = (depth == ActivityLedgerDepth::Action)
-            .then(|| record.actions.into_iter().map(map_action).collect());
+        let actions = (depth == ActivityLedgerDepth::Action).then(|| {
+            record
+                .actions
+                .into_iter()
+                .filter(|action| {
+                    !restrict_evidence_to_range
+                        || parse_timestamp(&action.occurred_at)
+                            .is_some_and(|at| at >= range_start && at <= range_end)
+                })
+                .map(map_action)
+                .collect()
+        });
         let evidence = (depth == ActivityLedgerDepth::Action || include_artifacts).then(|| {
             record
                 .evidence
                 .into_iter()
+                .filter(|evidence| {
+                    !restrict_evidence_to_range
+                        || parse_timestamp(&evidence.occurred_at)
+                            .is_some_and(|at| at >= range_start && at <= range_end)
+                })
                 .map(|evidence| map_evidence(evidence, include_artifacts))
                 .collect()
         });
+        let evidence_count = if restrict_evidence_to_range {
+            evidence
+                .as_ref()
+                .map_or(0, |evidence: &Vec<_>| evidence.len() as i64)
+        } else {
+            record.evidence_count
+        };
         projected.push(ActivityLedgerInterval {
             id: record.id,
             task_id,
@@ -230,7 +286,7 @@ fn project_intervals(
             state: record.state,
             confidence: record.confidence,
             producer: record.producer,
-            evidence_count: record.evidence_count,
+            evidence_count,
             actions,
             evidence,
         });
@@ -360,6 +416,52 @@ fn bad_request(message: &str) -> (StatusCode, JsonResponse<Value>) {
 mod tests {
     use super::*;
 
+    fn fixed_now() -> DateTime<Utc> {
+        "2026-08-24T20:00:00Z".parse().unwrap()
+    }
+
+    fn query(start: &str, end: &str) -> ActivityLedgerQuery {
+        ActivityLedgerQuery {
+            start_time: start.parse().unwrap(),
+            end_time: end.parse().unwrap(),
+            depth: ActivityLedgerDepth::Task,
+            include_artifacts: false,
+            refresh: true,
+        }
+    }
+
+    #[test]
+    fn restricted_activity_ledger_clamps_partial_ranges_and_empties_old_ranges() {
+        let policy = HistoryAccessPolicy::last_24_hours();
+        let cutoff = fixed_now() - Duration::hours(24);
+        let mut partial = query("2026-08-17T20:00:00Z", "2026-08-24T20:00:00Z");
+        assert!(!apply_activity_ledger_history_access(
+            &policy,
+            &mut partial,
+            fixed_now(),
+        ));
+        assert_eq!(partial.start_time, cutoff);
+
+        let mut old = query("2026-08-17T20:00:00Z", "2026-08-20T20:00:00Z");
+        assert!(apply_activity_ledger_history_access(
+            &policy,
+            &mut old,
+            fixed_now(),
+        ));
+    }
+
+    #[test]
+    fn unrestricted_activity_ledger_preserves_paid_ranges() {
+        let mut query = query("2026-08-17T20:00:00Z", "2026-08-24T20:00:00Z");
+        let original_start = query.start_time;
+        assert!(!apply_activity_ledger_history_access(
+            &HistoryAccessPolicy::unrestricted(),
+            &mut query,
+            fixed_now(),
+        ));
+        assert_eq!(query.start_time, original_start);
+    }
+
     fn record(id: i64, task: i64, parent: i64, start: &str, end: &str) -> ActivityIntervalRecord {
         ActivityIntervalRecord {
             id,
@@ -392,6 +494,7 @@ mod tests {
             ActivityLedgerDepth::Category,
             start,
             end,
+            false,
             false,
         );
         assert_eq!(output.len(), 1);
@@ -437,11 +540,55 @@ mod tests {
             },
         ];
 
-        let output = project_intervals(vec![row], ActivityLedgerDepth::Task, start, end, true);
+        let output = project_intervals(
+            vec![row],
+            ActivityLedgerDepth::Task,
+            start,
+            end,
+            true,
+            false,
+        );
         let evidence = output[0].evidence.as_ref().unwrap();
         assert_eq!(evidence.len(), 2);
         assert_eq!(evidence[0].frame_id, Some(41));
         assert_eq!(evidence[0].app_name.as_deref(), Some("Arc"));
         assert_eq!(evidence[1].app_name.as_deref(), Some("Cursor"));
+    }
+
+    #[test]
+    fn restricted_projection_drops_evidence_before_the_accessible_range() {
+        let start = "2026-08-23T20:00:00Z".parse().unwrap();
+        let end = "2026-08-24T20:00:00Z".parse().unwrap();
+        let mut row = record(1, 11, 7, "2026-08-23T19:00:00Z", "2026-08-23T21:00:00Z");
+        row.evidence = vec![
+            ActivityEvidenceRecord {
+                source_type: "frame".to_string(),
+                source_id: 40,
+                occurred_at: "2026-08-23T19:30:00Z".to_string(),
+                frame_id: Some(40),
+                app_name: Some("Arc".to_string()),
+                window_title: Some("Old".to_string()),
+                browser_url: None,
+            },
+            ActivityEvidenceRecord {
+                source_type: "frame".to_string(),
+                source_id: 41,
+                occurred_at: "2026-08-23T20:30:00Z".to_string(),
+                frame_id: Some(41),
+                app_name: Some("Arc".to_string()),
+                window_title: Some("Recent".to_string()),
+                browser_url: None,
+            },
+        ];
+
+        let output =
+            project_intervals(vec![row], ActivityLedgerDepth::Task, start, end, true, true);
+
+        assert_eq!(output[0].start_at, "2026-08-23T20:00:00+00:00");
+        assert_eq!(output[0].end_at, "2026-08-23T21:00:00+00:00");
+        assert_eq!(output[0].evidence_count, 1);
+        let evidence = output[0].evidence.as_ref().unwrap();
+        assert_eq!(evidence.len(), 1);
+        assert_eq!(evidence[0].frame_id, Some(41));
     }
 }

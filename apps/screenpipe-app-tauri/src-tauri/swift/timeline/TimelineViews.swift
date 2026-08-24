@@ -634,6 +634,7 @@ struct TimelineCalendarPopover: View {
             HStack {
                 Button { shiftMonth(-1) } label: { Image(systemName: "chevron.left") }
                     .buttonStyle(TimelinePlainButtonStyle())
+                    .disabled(!canShiftMonth(-1))
                 Spacer()
                 Text(monthLabel).font(.system(size: 12, weight: .semibold))
                 Spacer()
@@ -659,8 +660,10 @@ struct TimelineCalendarPopover: View {
                 // An empty set means the day index has not loaded; disabling
                 // everything then would look like a broken calendar.
                 let hasData = model.daysWithData.isEmpty || model.daysWithData.contains(key)
-                let isFuture = day > Date()
-                let enabled = hasData && !isFuture
+                let enabled = hasData && TimelineDateNavigation.isCalendarDateAllowed(
+                    day,
+                    historyAccessRestricted: model.historyAccessRestricted
+                )
                 Button {
                     model.changeDate(to: day)
                     isPresented = false
@@ -690,9 +693,23 @@ struct TimelineCalendarPopover: View {
     }
 
     private func shiftMonth(_ delta: Int) {
-        if let next = Calendar.current.date(byAdding: .month, value: delta, to: month) {
+        if canShiftMonth(delta),
+           let next = Calendar.current.date(byAdding: .month, value: delta, to: month) {
             month = next
         }
+    }
+
+    private func canShiftMonth(_ delta: Int) -> Bool {
+        let cal = Calendar.current
+        guard let next = cal.date(byAdding: .month, value: delta, to: month) else { return false }
+        if delta > 0 {
+            return cal.compare(next, to: Date(), toGranularity: .month) != .orderedDescending
+        }
+        guard model.historyAccessRestricted else { return true }
+        let earliest = TimelineDateNavigation.earliestAccessibleDay(
+            historyAccessRestricted: true
+        )
+        return cal.compare(next, to: earliest, toGranularity: .month) != .orderedAscending
     }
 
     private var daysInMonth: [Date?] {

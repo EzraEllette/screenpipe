@@ -101,6 +101,12 @@ fn install_native_timeline_placement(app_handle: &tauri::AppHandle) {
         let Ok(mut payload) = serde_json::from_str::<serde_json::Value>(event.payload()) else {
             return;
         };
+        payload["historyAccessRestricted"] = serde_json::json!(
+            attach_handle
+                .state::<crate::recording::RecordingState>()
+                .history_access
+                .is_restricted()
+        );
         payload["hostWindow"] = serde_json::json!(-1);
         let pointer = host_window_pointer(&attach_handle, &payload);
         if let Some(pointer) = pointer {

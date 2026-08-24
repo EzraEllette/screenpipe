@@ -1971,6 +1971,18 @@ fn pi_launch_fingerprint(
     hasher.finish()
 }
 
+fn apply_local_api_context(command: &mut Command, api: &crate::recording::LocalApiContext) {
+    command.env("SCREENPIPE_LOCAL_API_PORT", api.port.to_string());
+    command.env("SCREENPIPE_LOCAL_API_URL", api.url(""));
+    // Older published screenpipe-mcp versions only read this legacy URL
+    // name. Keep it pointed at this app instance too, otherwise a dev or
+    // fallback-port Chat silently talks to another app on port 3030.
+    command.env("SCREENPIPE_API_URL", api.url(""));
+    if let Some(ref key) = api.api_key {
+        command.env("SCREENPIPE_LOCAL_API_KEY", key);
+    }
+}
+
 fn apply_pi_tool_allowlist(command: &mut Command, provider_config: Option<&PiProviderConfig>) {
     let Some(allowed_tools) = provider_config.and_then(|config| config.allowed_tools.as_ref())
     else {
@@ -3232,11 +3244,7 @@ pub async fn pi_start_inner(
     {
         use crate::recording::local_api_context_from_app;
         let api = local_api_context_from_app(&app);
-        cmd.env("SCREENPIPE_LOCAL_API_PORT", api.port.to_string());
-        cmd.env("SCREENPIPE_LOCAL_API_URL", api.url(""));
-        if let Some(ref key) = api.api_key {
-            cmd.env("SCREENPIPE_LOCAL_API_KEY", key);
-        }
+        apply_local_api_context(&mut cmd, &api);
     }
 
     // Tag this chat's local API calls with its session id so the owned-browser
@@ -7323,6 +7331,40 @@ error: InstallFailed extracting tarball"#;
             .collect::<Vec<_>>();
 
         assert_eq!(args, vec!["--no-tools"]);
+    }
+
+    #[test]
+    fn test_chat_mcp_targets_the_launching_app_api_port() {
+        let mut command = Command::new("pi");
+        super::apply_local_api_context(
+            &mut command,
+            &crate::recording::LocalApiContext {
+                api_key: Some("sp-test".to_string()),
+                port: 3130,
+            },
+        );
+        let env = command
+            .get_envs()
+            .filter_map(|(key, value)| {
+                Some((
+                    key.to_string_lossy().into_owned(),
+                    value?.to_string_lossy().into_owned(),
+                ))
+            })
+            .collect::<std::collections::HashMap<_, _>>();
+
+        assert_eq!(
+            env.get("SCREENPIPE_LOCAL_API_URL").map(String::as_str),
+            Some("http://localhost:3130")
+        );
+        assert_eq!(
+            env.get("SCREENPIPE_API_URL").map(String::as_str),
+            Some("http://localhost:3130")
+        );
+        assert_eq!(
+            env.get("SCREENPIPE_LOCAL_API_PORT").map(String::as_str),
+            Some("3130")
+        );
     }
 
     #[tokio::test]

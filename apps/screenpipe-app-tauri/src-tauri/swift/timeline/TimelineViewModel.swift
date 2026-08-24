@@ -244,6 +244,7 @@ final class TimelineViewModel: ObservableObject {
     @Published var selection: TimelineSelection?
     @Published var searchReview: TimelineSearchReview?
     @Published var currentDate = Date()
+    @Published private(set) var historyAccessRestricted: Bool
     @Published private(set) var connectionError: String?
     @Published private(set) var isLoading = true
     @Published private(set) var isNavigating = false
@@ -344,6 +345,7 @@ final class TimelineViewModel: ObservableObject {
 
     init(config: TimelineAPIConfig = .fromEnvironment()) {
         self.config = config
+        self.historyAccessRestricted = config.historyAccessRestricted
         self.rest = TimelineRESTClient(config: config)
         self.stream = FrameStreamClient(config: config)
         self.images = FrameImageLoader(rest: rest)
@@ -412,6 +414,13 @@ final class TimelineViewModel: ObservableObject {
         stop()
         apiGeneration &+= 1
         config = updated
+        historyAccessRestricted = updated.historyAccessRestricted
+        if !TimelineDateNavigation.isCalendarDateAllowed(
+            currentDate,
+            historyAccessRestricted: historyAccessRestricted
+        ) {
+            currentDate = Date()
+        }
         rest = TimelineRESTClient(config: updated)
         stream = FrameStreamClient(config: updated)
         stream.delegate = self
@@ -514,6 +523,10 @@ final class TimelineViewModel: ObservableObject {
     // MARK: Requests
 
     func requestDay(_ date: Date, order: String = "descending") {
+        guard TimelineDateNavigation.isCalendarDateAllowed(
+            date,
+            historyAccessRestricted: historyAccessRestricted
+        ) else { return }
         let key = TimelineDateNavigation.dayKey(date)
         let range = TimelineDateNavigation.dayRange(for: date)
         requestedDays.insert(key)
@@ -1129,7 +1142,11 @@ final class TimelineViewModel: ObservableObject {
     // MARK: Dates
 
     func jumpDay(_ delta: Int) {
-        let target = TimelineDateNavigation.jumpDay(from: currentDate, delta: delta)
+        let target = TimelineDateNavigation.jumpDay(
+            from: currentDate,
+            delta: delta,
+            historyAccessRestricted: historyAccessRestricted
+        )
         // An older/empty day may never yield a frame batch, so its navigation
         // guard must not trap the user there. Moving forward supersedes that
         // pending request; moving further backward stays guarded to avoid a
@@ -1159,6 +1176,10 @@ final class TimelineViewModel: ObservableObject {
         preservePendingSearchNavigation: Bool = false
     ) {
         guard !isNavigating || supersedePendingNavigation else { return }
+        guard TimelineDateNavigation.isCalendarDateAllowed(
+            date,
+            historyAccessRestricted: historyAccessRestricted
+        ) else { return }
         navigationGeneration += 1
         if !preservePendingSearchNavigation { pendingSearchNavigation = nil }
         let generation = navigationGeneration
@@ -1186,7 +1207,13 @@ final class TimelineViewModel: ObservableObject {
     }
 
     var isAtToday: Bool { TimelineDateNavigation.isAtToday(currentDate) }
-    var isAtEarliest: Bool { TimelineDateNavigation.isAtEarliest(currentDate, earliest: earliestRecording) }
+    var isAtEarliest: Bool {
+        TimelineDateNavigation.isAtEarliest(
+            currentDate,
+            earliest: earliestRecording,
+            historyAccessRestricted: historyAccessRestricted
+        )
+    }
 
     // MARK: Selection
 

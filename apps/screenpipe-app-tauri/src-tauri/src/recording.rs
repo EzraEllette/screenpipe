@@ -271,6 +271,9 @@ pub struct RecordingState {
     /// one update propagates to all three readers (cloud_proxy.rs, the
     /// pi-agent's models.json apiKey, and any future Tauri-side consumer).
     pub cloud_token: Arc<arc_swap::ArcSwap<Option<String>>>,
+    /// Live rolling-history policy shared with the local HTTP server. Consumer
+    /// plan refreshes update this in place; server restart is not required.
+    pub history_access: screenpipe_engine::history_access::HistoryAccessPolicy,
     /// Restart-storm guard for DB-wedge auto-recovery. Shared across server
     /// restarts so a DB that stays broken after N restarts stops retrying.
     pub db_wedge_breaker: DbWedgeBreaker,
@@ -302,6 +305,20 @@ impl RecordingState {
     pub fn capture_intended(&self) -> bool {
         capture_intended_now(&self.wants_recording)
     }
+}
+
+pub(crate) fn refresh_history_access_policy(
+    policy: &screenpipe_engine::history_access::HistoryAccessPolicy,
+    settings: &SettingsStore,
+) {
+    policy.set_last_24_hours(history_access_restricted(
+        cfg!(feature = "enterprise-build"),
+        settings.is_free_or_unattributed_user(),
+    ));
+}
+
+fn history_access_restricted(is_enterprise_build: bool, free_or_unattributed: bool) -> bool {
+    !is_enterprise_build && free_or_unattributed
 }
 
 fn capture_intended_now(wants_recording: &AtomicBool) -> bool {
@@ -1244,6 +1261,7 @@ async fn spawn_screenpipe_inner(
     let capture_arc = state.capture.clone();
     let wants_recording = state.wants_recording.clone();
     let cloud_token_arc = state.cloud_token.clone();
+    let history_access = state.history_access.clone();
     // Orphan-closing exists to clean up meetings a *crash* left open. When this
     // restart is the thing that interrupted the meeting we already know which
     // one is still running, so sweeping it is not cleanup — it is the bug: the
@@ -1314,6 +1332,7 @@ async fn spawn_screenpipe_inner(
                     on_pipe_output,
                     Some(owned_browser),
                     cloud_token_arc.clone(),
+                    history_access.clone(),
                 )
                 .await
                 {
@@ -1577,6 +1596,26 @@ mod recording_access_tests {
         assert!(!recording_access_policy(
             false, false, true, true, true
         ));
+    }
+}
+
+#[cfg(test)]
+mod history_access_tests {
+    use super::history_access_restricted;
+
+    #[test]
+    fn consumer_free_and_unattributed_accounts_are_restricted() {
+        assert!(history_access_restricted(false, true));
+    }
+
+    #[test]
+    fn verified_paid_consumer_is_unrestricted() {
+        assert!(!history_access_restricted(false, false));
+    }
+
+    #[test]
+    fn enterprise_build_is_unrestricted_without_consumer_plan_truth() {
+        assert!(!history_access_restricted(true, true));
     }
 }
 

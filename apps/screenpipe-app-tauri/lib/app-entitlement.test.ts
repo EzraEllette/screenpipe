@@ -16,6 +16,7 @@ import {
   hasPersistedEntitlementEvidence,
   hasVerifiedPaidPlan,
   isAuthenticatedFreeUser,
+  isFreeOrUnattributedUser,
   isSignedInCloudSubscriber,
   isTokenHydrationCandidate,
   isTokenHydrationPending,
@@ -601,6 +602,7 @@ describe("isAuthenticatedFreeUser", () => {
 
   it("recognizes only a signed-in account with explicit verified free-plan truth", () => {
     expect(isAuthenticatedFreeUser(explicitFree())).toBe(true);
+    expect(isFreeOrUnattributedUser(explicitFree())).toBe(true);
     const tokenlessCachedFreeUser = explicitFree({ token: null });
     expect(isAuthenticatedFreeUser(tokenlessCachedFreeUser)).toBe(false);
     expect(hasFreePlanPolicy(tokenlessCachedFreeUser)).toBe(true);
@@ -687,7 +689,15 @@ describe("isAuthenticatedFreeUser", () => {
     ).toBe("unknown");
   });
 
-  it.each(["standard", "pro", "team", "enterprise", "lifetime"])(
+  it.each([
+    "basic",
+    "standard",
+    "business",
+    "pro",
+    "team",
+    "enterprise",
+    "lifetime",
+  ])(
     "preserves retention choice for the paid %s plan",
     (plan) => {
       const paid = user({
@@ -704,6 +714,7 @@ describe("isAuthenticatedFreeUser", () => {
       });
       expect(isAuthenticatedFreeUser(paid)).toBe(false);
       expect(hasVerifiedPaidPlan(paid)).toBe(true);
+      expect(isFreeOrUnattributedUser(paid)).toBe(false);
     },
   );
 
@@ -722,6 +733,7 @@ describe("isAuthenticatedFreeUser", () => {
     });
     expect(hasVerifiedPaidPlan(fabricated)).toBe(false);
     expect(getLocalPlanPolicy(fabricated)).toBe("unknown");
+    expect(isFreeOrUnattributedUser(fabricated)).toBe(true);
   });
 
   it("does not classify manual, enterprise, lifetime, dev, grace, or cloud grants as free", () => {
