@@ -89,13 +89,6 @@ native exit code. Under strict PowerShell, run noisy native tools through
 errors. Do not call `sccache --stop-server` unless necessary; an absent server
 returns an error.
 
-For port 3030 conflict tests, spawn real foreign Windows listeners and prove
-both branches. Select only the exact local listening socket—not client
-connections mentioning the port. Avoid localized `LISTENING` text when parsing
-`netstat`; a listener row has a remote endpoint port of zero. Preserve the
-healthy compatible listener and gracefully terminate the unhealthy listener,
-using forced termination only as fallback.
-
 ## Teardown
 
 Clear Run Command guest-agent blobs and retained test artifacts. Delete the

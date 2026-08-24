@@ -42,10 +42,5 @@ present that as Windows evidence.
 8. Clear remote command/evidence blobs and destroy the exact disposable cloud
    resources even after failure. Verify the source release builder is unchanged.
 
-For port-owner cleanup, the invariant is: preserve a healthy Screenpipe
-instance; reclaim an unhealthy or non-Screenpipe owner. Probe before killing,
-identify the exact listening socket, request graceful termination first, and
-force-kill only after the grace period expires.
-
 This workflow never authorizes publishing an app release, tag, updater
 metadata, or release pointer.
