@@ -195,17 +195,18 @@ Set-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services
 
 if (Test-Path $sourceRoot) { Remove-Item $sourceRoot -Recurse -Force }
 Invoke-Checked 'git.exe' @('clone', '--depth', '1', 'https://github.com/screenpipe/screenpipe.git', $sourceRoot)
-Push-Location $sourceRoot
+$appRoot = Join-Path $sourceRoot 'apps\screenpipe-app-tauri'
+Push-Location $appRoot
 try {
   Invoke-Checked (Join-Path $bunRoot 'bun.exe') @('install', '--frozen-lockfile')
   $warmLog = Join-Path $devRoot 'warm-build.log'
-  $warmCommand = "cd /d C:\src\screenpipe\apps\screenpipe-app-tauri && `"$bunRoot\bun.exe`" run test:tauri tauri_bindings_are_current -- --nocapture > `"$warmLog`" 2>&1"
+  $warmCommand = "cd /d `"$appRoot`" && `"$bunRoot\bun.exe`" run test:tauri tauri_bindings_are_current -- --nocapture > `"$warmLog`" 2>&1"
   & cmd.exe /d /s /c $warmCommand
   if ($LASTEXITCODE -ne 0) {
     Get-Content $warmLog -Tail 200
     throw "Screenpipe debug-dev cache warm failed with code $LASTEXITCODE"
   }
-  $warmCommit = (& git.exe rev-parse HEAD).Trim()
+  $warmCommit = (& git.exe -C $sourceRoot rev-parse HEAD).Trim()
 } finally {
   Pop-Location
 }

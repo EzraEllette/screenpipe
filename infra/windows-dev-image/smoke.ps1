@@ -31,6 +31,13 @@ foreach ($command in $commands) {
   if ($LASTEXITCODE -ne 0) { throw "$command exited with code $LASTEXITCODE" }
 }
 
+& 'C:\screenpipe-dev\with-openai-key.ps1' `
+  -Command 'codex.cmd' `
+  -CommandArgs @('login', '--with-api-key') `
+  -PipeKeyToStdin
+& codex.cmd login status
+if ($LASTEXITCODE -ne 0) { throw "Codex login status exited with code $LASTEXITCODE" }
+
 $rdp = Get-Service TermService
 if ($rdp.Status -ne 'Running') { throw "Remote Desktop service is $($rdp.Status)" }
 $rdpListener = Get-NetTCPConnection -LocalPort 3389 -State Listen -ErrorAction SilentlyContinue

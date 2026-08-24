@@ -13,15 +13,20 @@ build_group="${AZURE_BUILD_RESOURCE_GROUP:-rg-screenpipe-win-dev-image-build}"
 gallery_name="${AZURE_GALLERY_NAME:-screenpipeDevGallery}"
 definition_name="${AZURE_IMAGE_DEFINITION:-screenpipeWindowsDev}"
 image_version="${1:-$(date -u +%Y.%m.%d)}"
-vm_name="sp-win-dev-build"
+vm_name="spwindevbuild"
+build_succeeded=false
 
-for command in az openssl; do
+for command in az jq openssl; do
   command -v "$command" >/dev/null || { printf 'missing command: %s\n' "$command" >&2; exit 1; }
 done
 
 az account set --subscription "$subscription_id"
 if az sig image-version show --resource-group "$gallery_group" --gallery-name "$gallery_name" --gallery-image-definition "$definition_name" --gallery-image-version "$image_version" --output none 2>/dev/null; then
   printf 'image version already exists: %s\n' "$image_version" >&2
+  exit 1
+fi
+if [[ "$(az group exists --name "$build_group")" == 'true' ]]; then
+  printf 'build resource group already exists; inspect or remove it before retrying: %s\n' "$build_group" >&2
   exit 1
 fi
 
@@ -38,14 +43,24 @@ if ! az sig image-definition show --resource-group "$gallery_group" --gallery-na
     --os-type Windows \
     --os-state Generalized \
     --hyper-v-generation V2 \
-    --features SecurityType=TrustedLaunchSupported \
+    --features SecurityType=TrustedLaunch \
     --output none
 fi
 
 az group create --name "$build_group" --location "$location" --tags project=screenpipe-windows-dev-image environment=ephemeral managed-by=screenpipe-repo --output none
 password="Sp!$(openssl rand -hex 24)aA9"
-cleanup_secret() { unset password; }
-trap cleanup_secret EXIT
+provision_result="$(mktemp -t screenpipe-win-dev-provision.XXXXXX.json)"
+cleanup() {
+  status=$?
+  trap - EXIT
+  unset password
+  rm -f "$provision_result"
+  if [[ "$build_succeeded" != 'true' ]] && [[ "$(az group exists --name "$build_group" 2>/dev/null)" == 'true' ]]; then
+    az group delete --name "$build_group" --yes --output none || true
+  fi
+  exit "$status"
+}
+trap cleanup EXIT
 
 az vm create \
   --resource-group "$build_group" \
@@ -71,8 +86,13 @@ az vm run-command invoke \
   --name "$vm_name" \
   --command-id RunPowerShellScript \
   --scripts @"$script_dir/provision.ps1" \
-  --query 'value[0].message' \
-  --output tsv
+  --output json >"$provision_result"
+provision_output="$(jq -r '.value[].message' "$provision_result")"
+printf '%s\n' "$provision_output"
+if ! grep -Fq '__SCREENPIPE_DEV_IMAGE_READY__' <<<"$provision_output"; then
+  printf 'guest provisioning did not emit the required ready marker\n' >&2
+  exit 1
+fi
 
 az vm run-command invoke \
   --resource-group "$build_group" \
@@ -100,5 +120,6 @@ az sig image-version create \
   --tags validated=false provisioning-commit="$(git -C "$script_dir/../.." rev-parse HEAD)" \
   --output none
 
-az group delete --name "$build_group" --yes --no-wait
+az group delete --name "$build_group" --yes --output none
+build_succeeded=true
 printf 'image version created: %s/%s/%s\n' "$gallery_name" "$definition_name" "$image_version"
