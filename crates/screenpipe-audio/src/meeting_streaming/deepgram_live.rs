@@ -366,19 +366,37 @@ fn handle_results_event(
     let captured_at = latest_audio_time(latest_audio_ms);
 
     if is_final {
-        let speaker_name = resolve_speaker_name(value, device_type, config);
-        let event = MeetingTranscriptFinal {
-            meeting_id,
-            provider: config.provider.as_str().to_string(),
-            model: config.model.clone(),
-            item_id,
-            device_name: device_name.to_string(),
-            device_type: device_type.to_string(),
-            speaker_name,
-            transcript: transcript.to_string(),
-            captured_at,
-        };
-        let _ = screenpipe_events::send_event("meeting_transcript_final", event);
+        let turns = speaker_turns(value);
+        if turns.is_empty() {
+            emit_final(
+                meeting_id,
+                config,
+                device_name,
+                device_type,
+                item_id,
+                None,
+                transcript.to_string(),
+                captured_at,
+            );
+        } else {
+            for (index, turn) in turns.into_iter().enumerate() {
+                let turn_item_id = if index == 0 {
+                    item_id.clone()
+                } else {
+                    format!("{item_id}:turn:{index}")
+                };
+                emit_final(
+                    meeting_id,
+                    config,
+                    device_name,
+                    device_type,
+                    turn_item_id,
+                    Some(format!("speaker {}", turn.speaker + 1)),
+                    turn.transcript,
+                    captured_at + chrono::Duration::milliseconds(index as i64),
+                );
+            }
+        }
     } else {
         let event = MeetingTranscriptDelta {
             meeting_id,
@@ -395,34 +413,74 @@ fn handle_results_event(
     }
 }
 
-/// Pick a speaker label from a Deepgram `Results` payload with `diarize=true`.
-/// Counts speaker indices across the words array and returns the dominant one.
-/// `device_type == "input"` + `speaker 0` is treated as the local user when
-/// `local_speaker_name` is set, since deepgram numbers speakers in order of
-/// first utterance and the local user typically speaks first into their own
-/// mic. All other indices fall back to a generic `speaker N` (1-indexed).
-fn resolve_speaker_name(
-    value: &Value,
-    device_type: &str,
+fn emit_final(
+    meeting_id: i64,
     config: &MeetingStreamingConfig,
-) -> Option<String> {
-    let words = value
-        .pointer("/channel/alternatives/0/words")
-        .and_then(Value::as_array)?;
-    let mut counts: std::collections::HashMap<i64, usize> = std::collections::HashMap::new();
-    for word in words {
-        if let Some(speaker) = word.get("speaker").and_then(Value::as_i64) {
-            *counts.entry(speaker).or_insert(0) += 1;
-        }
-    }
-    let (dominant, _) = counts.into_iter().max_by_key(|&(_, n)| n)?;
+    device_name: &str,
+    device_type: &str,
+    item_id: String,
+    speaker_name: Option<String>,
+    transcript: String,
+    captured_at: DateTime<Utc>,
+) {
+    let event = MeetingTranscriptFinal {
+        meeting_id,
+        provider: config.provider.as_str().to_string(),
+        model: config.model.clone(),
+        item_id,
+        device_name: device_name.to_string(),
+        device_type: device_type.to_string(),
+        speaker_name,
+        transcript,
+        captured_at,
+    };
+    let _ = screenpipe_events::send_event("meeting_transcript_final", event);
+}
 
-    if dominant == 0 && device_type == "input" {
-        if let Some(name) = config.local_speaker_name.clone() {
-            return Some(name);
+#[derive(Debug, PartialEq, Eq)]
+struct DeepgramSpeakerTurn {
+    speaker: i64,
+    transcript: String,
+}
+
+/// Preserve Deepgram's consecutive per-word speaker runs instead of assigning
+/// a mixed-speaker result to whichever speaker happened to say more words.
+///
+/// A partial diarization payload falls back to the top-level transcript rather
+/// than dropping unlabelled words or guessing their speaker.
+fn speaker_turns(value: &Value) -> Vec<DeepgramSpeakerTurn> {
+    let Some(words) = value
+        .pointer("/channel/alternatives/0/words")
+        .and_then(Value::as_array)
+    else {
+        return Vec::new();
+    };
+    let mut turns: Vec<DeepgramSpeakerTurn> = Vec::new();
+    for word in words {
+        let Some(text) = word
+            .get("punctuated_word")
+            .and_then(Value::as_str)
+            .or_else(|| word.get("word").and_then(Value::as_str))
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+        else {
+            continue;
+        };
+        let Some(speaker) = word.get("speaker").and_then(Value::as_i64) else {
+            return Vec::new();
+        };
+
+        if let Some(turn) = turns.last_mut().filter(|turn| turn.speaker == speaker) {
+            turn.transcript.push(' ');
+            turn.transcript.push_str(text);
+        } else {
+            turns.push(DeepgramSpeakerTurn {
+                speaker,
+                transcript: text.to_string(),
+            });
         }
     }
-    Some(format!("speaker {}", dominant + 1))
+    turns
 }
 
 fn latest_audio_time(latest_audio_ms: &AtomicU64) -> DateTime<Utc> {
@@ -475,6 +533,48 @@ fn device_type_label(device_type: &DeviceType) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preserves_consecutive_deepgram_speaker_turns() {
+        let payload = json!({
+            "channel": { "alternatives": [{ "words": [
+                { "word": "hello", "punctuated_word": "Hello,", "speaker": 0 },
+                { "word": "there", "punctuated_word": "there.", "speaker": 0 },
+                { "word": "hi", "punctuated_word": "Hi!", "speaker": 1 },
+                { "word": "yes", "punctuated_word": "Yes.", "speaker": 0 }
+            ]}]}
+        });
+
+        assert_eq!(
+            speaker_turns(&payload),
+            vec![
+                DeepgramSpeakerTurn {
+                    speaker: 0,
+                    transcript: "Hello, there.".to_string(),
+                },
+                DeepgramSpeakerTurn {
+                    speaker: 1,
+                    transcript: "Hi!".to_string(),
+                },
+                DeepgramSpeakerTurn {
+                    speaker: 0,
+                    transcript: "Yes.".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn incomplete_diarization_falls_back_without_dropping_words() {
+        let payload = json!({
+            "channel": { "alternatives": [{ "words": [
+                { "word": "labelled", "speaker": 0 },
+                { "word": "unknown" }
+            ]}]}
+        });
+
+        assert!(speaker_turns(&payload).is_empty());
+    }
 
     fn live_query(language: Option<&str>) -> String {
         let config = MeetingStreamingConfig {

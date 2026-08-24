@@ -499,9 +499,10 @@ mod timeline_live_meeting_tests {
     }
 
     /// Until a segment is resolved, the Meeting view falls back to Deepgram's
-    /// free-text `speaker_name`, and the backfill maps nothing.
+    /// free-text `speaker_name` even for mic input. A capture source is not a
+    /// speaker identity, and the backfill may have nothing to map yet.
     #[tokio::test]
-    async fn test_meeting_segment_falls_back_to_freetext_speaker() {
+    async fn test_input_meeting_segment_falls_back_to_freetext_speaker() {
         let db = setup_test_db().await;
         let base = Utc::now();
 
@@ -514,8 +515,8 @@ mod timeline_live_meeting_tests {
             "screenpipe-cloud",
             None,
             "deepgram:0:0",
-            "System Audio",
-            "output",
+            "Built-in Mic",
+            "input",
             Some("speaker 2"),
             "unresolved line",
             base,
