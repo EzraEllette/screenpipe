@@ -15,7 +15,16 @@ $workerRoot = 'C:\screenpipe-worker'
 
 function Get-ManagedIdentityToken([string] $Resource) {
   $encoded = [Uri]::EscapeDataString($Resource)
-  (Invoke-RestMethod -Headers @{ Metadata = 'true' } -Method Get -Uri "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=$encoded").access_token
+  foreach ($attempt in 1..30) {
+    try {
+      $token = (Invoke-RestMethod -Headers @{ Metadata = 'true' } -Method Get -Uri "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=$encoded").access_token
+      if ($token) { return $token }
+    } catch {
+      if ($attempt -eq 30) { throw }
+    }
+    Start-Sleep -Seconds 2
+  }
+  throw "managed identity did not return a token for $Resource"
 }
 
 function Receive-TaskBlob([string] $Name, [string] $Destination) {

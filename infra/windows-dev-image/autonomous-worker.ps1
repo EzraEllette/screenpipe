@@ -24,12 +24,30 @@ Start-Transcript -Path $transcriptPath -Force
 
 function Get-ManagedIdentityToken([string] $Resource) {
   $encoded = [Uri]::EscapeDataString($Resource)
-  (Invoke-RestMethod -Headers @{ Metadata = 'true' } -Method Get -Uri "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=$encoded").access_token
+  foreach ($attempt in 1..30) {
+    try {
+      $token = (Invoke-RestMethod -Headers @{ Metadata = 'true' } -Method Get -Uri "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=$encoded").access_token
+      if ($token) { return $token }
+    } catch {
+      if ($attempt -eq 30) { throw }
+    }
+    Start-Sleep -Seconds 2
+  }
+  throw "managed identity did not return a token for $Resource"
 }
 
 function Get-KeyVaultSecret([string] $Name) {
-  $token = Get-ManagedIdentityToken 'https://vault.azure.net'
-  (Invoke-RestMethod -Headers @{ Authorization = "Bearer $token" } -Method Get -Uri "https://$($task.vaultName).vault.azure.net/secrets/$Name`?api-version=7.4").value
+  foreach ($attempt in 1..30) {
+    try {
+      $token = Get-ManagedIdentityToken 'https://vault.azure.net'
+      $secret = (Invoke-RestMethod -Headers @{ Authorization = "Bearer $token" } -Method Get -Uri "https://$($task.vaultName).vault.azure.net/secrets/$Name`?api-version=7.4").value
+      if ($secret) { return $secret }
+    } catch {
+      if ($attempt -eq 30) { throw }
+    }
+    Start-Sleep -Seconds 2
+  }
+  throw "Key Vault did not return runtime secret $Name"
 }
 
 function Send-ResultBlob([string] $FilePath, [string] $Name, [string] $ContentType) {
@@ -118,13 +136,34 @@ Execution contract:
 "@
   $promptPath = Join-Path $workerRoot 'prompt.txt'
   $agentPrompt | Set-Content -Encoding UTF8 $promptPath
-  Get-Content $promptPath -Raw | & codex.cmd exec --ephemeral --sandbox danger-full-access -c approval_policy=never --json --output-last-message $finalPath -C $repository - 1>$agentLog 2>$agentError
-  if ($LASTEXITCODE -ne 0) { throw "Codex exited with code $LASTEXITCODE" }
+  $codexRunner = Join-Path $workerRoot 'run-codex.cmd'
+  @"
+@echo off
+type "$promptPath" | codex.cmd exec --ephemeral --sandbox danger-full-access -c approval_policy=never --json --output-last-message "$finalPath" -C "$repository" - 1>"$agentLog" 2>"$agentError"
+exit /b %ERRORLEVEL%
+"@ | Set-Content -Encoding ASCII $codexRunner
+  & cmd.exe /d /c $codexRunner
+  $codexExitCode = $LASTEXITCODE
+  if ($codexExitCode -ne 0) {
+    $currentHead = (git.exe -C $repository rev-parse HEAD).Trim()
+    $hasWork = $currentHead -ne $task.baseSha -or [bool](git.exe -C $repository status --porcelain)
+    if (-not $hasWork -or -not (Test-Path $finalPath)) { throw "Codex exited with code $codexExitCode without a reviewable result" }
+    Write-Warning "Codex exited with code $codexExitCode after leaving a reviewable result; deterministic outer validation will decide delivery"
+  }
 
   if (git.exe -C $repository status --porcelain) {
     Invoke-Checked 'git.exe' @('-C', $repository, 'add', '--all')
     Invoke-Checked 'git.exe' @('-C', $repository, 'commit', '-m', $task.commitMessage)
   }
+  $parseFailed = $false
+  Get-ChildItem (Join-Path $repository 'infra\windows-dev-image') -Filter '*.ps1' | ForEach-Object {
+    $tokens = $null
+    $errors = $null
+    [Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$errors) | Out-Null
+    if ($errors.Count) { $parseFailed = $true; $errors | ForEach-Object { Write-Error $_.Message } }
+  }
+  if ($parseFailed) { throw 'PowerShell parsing failed' }
+  Invoke-Checked 'bash.exe' @('-n', (Join-Path $repository 'infra/windows-dev-image/build.sh'), (Join-Path $repository 'infra/windows-dev-image/dispatch-autonomous.sh'))
   Invoke-Checked 'git.exe' @('-C', $repository, 'diff', '--check', "$($task.baseSha)..HEAD")
   $testedHead = (git.exe -C $repository rev-parse HEAD).Trim()
   $testedTree = (git.exe -C $repository rev-parse 'HEAD^{tree}').Trim()
