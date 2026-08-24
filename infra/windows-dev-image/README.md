@@ -27,10 +27,24 @@ RESUME_EXISTING_BUILD=true ./infra/windows-dev-image/build.sh 2026.8.24
 Normal runs refuse pre-existing build groups. Resume mode verifies the VM's
 project, environment, and image-version tags before using it.
 
-After publishing, launch a fresh VM from the exact image version, run
-`smoke.ps1` through Azure Run Command, and verify an RDP login before changing
-the image version's `validated` tag to `true`. Never use an unvalidated version
-for development.
+After publishing, launch a fresh VM from the exact image version and run
+`smoke.ps1`. Then dispatch an immutable smoke task and verify console auto-logon,
+native validation, recording/evidence upload, credential cleanup, and shutdown
+without an inbound rule or operator session before setting `validated=true`.
+Never use an unvalidated version for development.
+
+`dispatch-autonomous.sh` uploads the exact task and versioned runtime scripts,
+invokes bootstrap once, and returns. The VM then owns Codex, testing, video,
+private evidence, push/PR delivery, cleanup, and shutdown; no host process is
+needed. Runtime OpenAI and GitHub credentials come only from managed identity
+plus Key Vault. This workflow never uses the release builder, a GitHub Actions
+runner, or any publication action.
+
+```bash
+AZURE_IMAGE_VERSION_ID=<exact-gallery-version-resource-id> \
+AZURE_WORKER_IDENTITY_RESOURCE_ID=<managed-identity-resource-id> \
+./infra/windows-dev-image/dispatch-autonomous.sh <task-id> <base-sha> <prompt-file>
+```
 
 Defaults target West US 2 and `Standard_D16s_v5`. Override
 `AZURE_SUBSCRIPTION_ID`, `AZURE_LOCATION`, `AZURE_VM_SIZE`,

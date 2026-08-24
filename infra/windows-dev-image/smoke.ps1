@@ -6,6 +6,9 @@ $ErrorActionPreference = 'Stop'
 $required = @(
   'C:\screenpipe-dev\image-manifest.json',
   'C:\screenpipe-dev\with-openai-key.ps1',
+  'C:\screenpipe-dev\autonomous-bootstrap.ps1',
+  'C:\screenpipe-dev\autonomous-worker.ps1',
+  'C:\screenpipe-dev\dispatch-autonomous.sh',
   'C:\Users\Public\Desktop\screenpipe-record-desktop.ps1',
   'C:\Tools\bun\bun.exe',
   'C:\Tools\cargo\bin\cargo.exe',
@@ -31,17 +34,21 @@ foreach ($command in $commands) {
   if ($LASTEXITCODE -ne 0) { throw "$command exited with code $LASTEXITCODE" }
 }
 
-& 'C:\screenpipe-dev\with-openai-key.ps1' `
-  -Command 'codex.cmd' `
-  -CommandArgs @('login', '--with-api-key') `
-  -PipeKeyToStdin
-& codex.cmd login status
-if ($LASTEXITCODE -ne 0) { throw "Codex login status exited with code $LASTEXITCODE" }
+try {
+  & 'C:\screenpipe-dev\with-openai-key.ps1' `
+    -Command 'codex.cmd' `
+    -CommandArgs @('login', '--with-api-key') `
+    -PipeKeyToStdin
+  & codex.cmd login status
+  if ($LASTEXITCODE -ne 0) { throw "Codex login status exited with code $LASTEXITCODE" }
+} finally {
+  Remove-Item (Join-Path $env:USERPROFILE '.codex') -Recurse -Force -ErrorAction SilentlyContinue
+}
 
 $rdp = Get-Service TermService
-if ($rdp.Status -ne 'Running') { throw "Remote Desktop service is $($rdp.Status)" }
+if ($rdp.StartType -ne 'Disabled' -or $rdp.Status -ne 'Stopped') { throw "Remote Desktop must be disabled and stopped; found $($rdp.StartType)/$($rdp.Status)" }
 $rdpListener = Get-NetTCPConnection -LocalPort 3389 -State Listen -ErrorAction SilentlyContinue
-if (-not $rdpListener) { throw 'Remote Desktop is not listening on TCP 3389' }
+if ($rdpListener) { throw 'Remote Desktop must not listen on TCP 3389' }
 
 $manifest = Get-Content 'C:\screenpipe-dev\image-manifest.json' -Raw | ConvertFrom-Json
 Write-Output ($manifest | ConvertTo-Json -Compress)

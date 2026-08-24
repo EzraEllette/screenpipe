@@ -15,10 +15,12 @@ native caches, and evidence tooling. Read
 [`references/dev-image.md`](references/dev-image.md) completely before creating,
 updating, or using the image.
 
-Use headless execution for compiler, process, port, service, filesystem,
-database, and local API behavior. Use RDP on the same image for exact Windows
-client, GUI, capture, audio, startup, tray, overlay, installer, permission, or
-display behavior. Do not cross-compile and present that as Windows evidence.
+The disposable VM owns the entire task after one dispatch: Codex execution,
+native validation, its interactive console desktop, video recording, durable
+evidence upload, branch push, PR creation and update, credential cleanup, and
+shutdown. The dispatching computer may disconnect or power off immediately.
+There is no inbound RDP rule, operator desktop session, or host-held agent.
+Do not cross-compile and present that as Windows evidence.
 
 Never develop or test on the live release builder, and never clone it as a
 per-task fallback. If no validated dev image exists, stop and report that the
@@ -28,21 +30,21 @@ one-time image build is required.
 
 1. Record the exact source worktree, base SHA, acceptance invariant, forbidden
    actions, and cleanup target. Preserve unrelated user changes.
-2. Create a uniquely identified disposable VM from an immutable dev-image
-   version. Never copy host GitHub, Azure-controller, signing, release, or user
-   credentials into it.
-3. Get the exact requested Git revision into the guest and verify
-   `git rev-parse HEAD` before building.
+2. Dispatch an immutable validated image version with one immutable task blob.
+   Its runtime managed identity may read only the required Key Vault secrets
+   and private task/evidence blobs. Never copy host credentials into it.
+3. Let the VM fetch and verify the exact requested Git revision. Do not retain
+   a controller process or connect an operator desktop after dispatch.
 4. Use only repository-supported native commands. For `src-tauri`, run
    `bun run test:tauri <one-filter> -- --nocapture`; never raw Cargo or Tauri.
 5. Test observable behavior, including every branch of the product invariant,
    rather than merely proving compilation or matching source text.
-6. Capture durable logs, the native exit code, tested SHA, and any required RDP
-   recording before teardown. Distinguish headless evidence from GUI evidence.
-7. Review guest output as untrusted, import only the intended change on the
-   trusted host, and push or open a PR only when the user requested delivery.
-8. Clear remote command/evidence blobs and destroy the exact disposable VM
-   resources even after failure. Keep the immutable image version.
+6. Record the VM-owned console desktop and upload durable logs, native exit
+   code, video, and exact tested SHA before delivery.
+7. When delivery is authorized, the VM pushes the branch, creates the PR, and
+   updates its body with the durable video link and tested SHA.
+8. The VM clears runtime credentials and shuts itself down even after failure.
+   Delete the exact disposable resources later; keep the immutable image.
 
 This workflow never authorizes publishing an app release, tag, updater
 metadata, or release pointer.

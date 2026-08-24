@@ -17,7 +17,7 @@ vm_name="spwindevbuild"
 build_succeeded=false
 resume_existing="${RESUME_EXISTING_BUILD:-false}"
 
-for command in az jq openssl; do
+for command in az base64 jq openssl; do
   command -v "$command" >/dev/null || { printf 'missing command: %s\n' "$command" >&2; exit 1; }
 done
 
@@ -58,11 +58,12 @@ fi
 
 password=''
 provision_result="$(mktemp -t screenpipe-win-dev-provision.XXXXXX.json)"
+provision_payload="$(mktemp -t screenpipe-win-dev-provision.XXXXXX.ps1)"
 cleanup() {
   status=$?
   trap - EXIT
   unset password
-  rm -f "$provision_result"
+  rm -f "$provision_result" "$provision_payload"
   if [[ "$build_succeeded" != 'true' ]] && [[ "$(az group exists --name "$build_group" 2>/dev/null)" == 'true' ]]; then
     for _ in $(seq 1 6); do
       if az group delete --name "$build_group" --yes --output none; then break; fi
@@ -96,11 +97,21 @@ if [[ "$build_group_exists" != 'true' ]]; then
   unset password
 fi
 
+{
+  sed -n '1,4p' "$script_dir/provision.ps1"
+  printf '\n$RuntimeScriptPayloads = @{\n'
+  for runtime_script in autonomous-bootstrap.ps1 autonomous-worker.ps1 dispatch-autonomous.sh; do
+    printf "  '%s' = '%s'\n" "$runtime_script" "$(base64 <"$script_dir/$runtime_script" | tr -d '\r\n')"
+  done
+  printf '}\n'
+  sed -n '5,$p' "$script_dir/provision.ps1"
+} >"$provision_payload"
+
 az vm run-command invoke \
   --resource-group "$build_group" \
   --name "$vm_name" \
   --command-id RunPowerShellScript \
-  --scripts @"$script_dir/provision.ps1" \
+  --scripts @"$provision_payload" \
   --output json >"$provision_result"
 provision_output="$(jq -r '.value[].message' "$provision_result")"
 printf '%s\n' "$provision_output"

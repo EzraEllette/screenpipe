@@ -18,6 +18,12 @@ $sccacheVersion = '0.16.0'
 $codexVersion = '0.149.1'
 
 New-Item -ItemType Directory -Force -Path $toolsRoot, $cacheRoot, $devRoot, 'C:\src', $targetRoot | Out-Null
+if (-not $RuntimeScriptPayloads -or $RuntimeScriptPayloads.Count -ne 3) {
+  throw 'autonomous runtime scripts were not supplied by the image builder'
+}
+foreach ($entry in $RuntimeScriptPayloads.GetEnumerator()) {
+  [IO.File]::WriteAllBytes((Join-Path $devRoot $entry.Key), [Convert]::FromBase64String($entry.Value))
+}
 
 function Set-MachineEnvironment([string] $Name, [string] $Value) {
   [Environment]::SetEnvironmentVariable($Name, $Value, 'Machine')
@@ -38,7 +44,7 @@ $env:Path = 'C:\ProgramData\chocolatey\bin;' + [Environment]::GetEnvironmentVari
 choco feature enable -n allowGlobalConfirmation | Out-Null
 Invoke-Checked 'choco.exe' @(
   'install', 'git', 'git-lfs', '7zip', 'jq', 'cmake', 'ninja',
-  'powershell-core', 'llvm', 'ffmpeg', '--no-progress'
+  'powershell-core', 'llvm', 'ffmpeg', 'github-cli', 'azure-cli', '--no-progress'
 )
 
 $nodeMsi = Join-Path $env:TEMP "node-v$nodeVersion-x64.msi"
@@ -192,9 +198,9 @@ Start-Service Audiosrv
 powercfg.exe /change monitor-timeout-ac 0
 powercfg.exe /change standby-timeout-ac 0
 powercfg.exe /hibernate off
-Set-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services' -Name fEnableTimeZoneRedirection -Type DWord -Value 1
-Set-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services' -Name fDisableAudioCapture -Type DWord -Value 0
-Set-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services' -Name fDisableCam -Type DWord -Value 0
+Stop-Service TermService -Force -ErrorAction SilentlyContinue
+Set-Service TermService -StartupType Disabled
+Set-NetFirewallRule -DisplayGroup 'Remote Desktop' -Enabled False -ErrorAction SilentlyContinue
 
 if (Test-Path $sourceRoot) { Remove-Item $sourceRoot -Recurse -Force }
 Invoke-Checked 'git.exe' @('clone', '--depth', '1', 'https://github.com/screenpipe/screenpipe.git', $sourceRoot)
@@ -227,6 +233,8 @@ $manifest = [ordered]@{
   sourcePath = $sourceRoot
   cargoTargetDir = $targetRoot
   vcToolsRedistDir = $env:VCToolsRedistDir
+  execution = 'autonomous-console'
+  inboundDesktop = 'disabled'
 }
 $manifest | ConvertTo-Json | Set-Content -Encoding UTF8 (Join-Path $devRoot 'image-manifest.json')
 
