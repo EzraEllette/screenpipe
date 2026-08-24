@@ -108,6 +108,7 @@ mod permissions;
 mod pi;
 mod pi_command_queue;
 mod power_awake;
+mod port_conflict;
 mod process_exit;
 mod provider_automations;
 mod recording;
@@ -599,6 +600,11 @@ async fn main() {
             if resp.status().is_success() {
                 eprintln!("screenpipe: another instance is already running — focused existing window, exiting.");
                 std::process::exit(0);
+            } else if resp.status() == reqwest::StatusCode::CONFLICT {
+                // The control endpoint answered with Screenpipe's explicit
+                // cross-install rejection. Preserve that healthy instance;
+                // the bind path will report it instead of reclaiming its port.
+                crate::port_conflict::mark_healthy_control_server_present();
             }
         }
     }
@@ -2008,6 +2014,12 @@ async fn main() {
                                 Ok(s) => s,
                                 Err(e) => {
                                     error!("Failed to start server core: {}", e);
+                                    if crate::port_conflict::is_error(&e, config.port) {
+                                        crate::port_conflict::show_reclaim_failed(
+                                            &app_for_owned,
+                                            config.port,
+                                        );
+                                    }
                                     is_starting_clone.store(false, std::sync::atomic::Ordering::SeqCst);
                                     return;
                                 }

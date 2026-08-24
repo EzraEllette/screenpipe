@@ -931,8 +931,8 @@ async fn spawn_screenpipe_inner(
         return Err(err);
     }
     // `to_recording_config` applies SCREENPIPE_PORT for isolated dev/E2E
-    // instances. Lifecycle health checks and orphan cleanup must use that
-    // same effective port or a restart can kill an unrelated app on :3030.
+    // instances. Lifecycle health checks and conflict detection must use that
+    // same effective port or one instance can block an unrelated app on :3030.
     let port = configured_local_api_port(&app);
     let health_url = format!("http://localhost:{}/health", port);
 
@@ -1080,6 +1080,24 @@ async fn spawn_screenpipe_inner(
         }
     }
 
+    // A healthy server without our in-process handle belongs to another
+    // Screenpipe instance. Preserve it and ask the user to quit that instance.
+    // Only an owner that fails the Screenpipe health probe may be reclaimed.
+    let settings_key = if store.recording.api_key.is_empty() {
+        None
+    } else {
+        Some(store.recording.api_key.as_str())
+    };
+    let external_owner = state.server.lock().await.is_none();
+    if external_owner && probe_server_health(&health_url, settings_key).await {
+        state.is_starting.store(false, Ordering::SeqCst);
+        state.is_starting_capture.store(false, Ordering::SeqCst);
+        crate::port_conflict::show_healthy_screenpipe(&app, port);
+        return Err(format!(
+            "another healthy screenpipe is already using local port {port}"
+        ));
+    }
+
     // --- Full start: server + capture ---
     // Stop any existing capture first (self-contained, no server lock needed)
     if let Some(session) = state.capture.lock().await.take() {
@@ -1093,34 +1111,32 @@ async fn spawn_screenpipe_inner(
         }
     }
 
-    // Kill orphaned processes. Bound the cleanup so a hung OS helper cannot
-    // leak `is_starting=true` and wedge future restarts behind the
-    // "start already in progress" guard.
+    // The health probe above ruled out a healthy Screenpipe owner. Reclaim an
+    // unhealthy or unrelated owner gracefully first, with a forced fallback.
     if tokio::time::timeout(
         std::time::Duration::from_secs(10),
-        kill_process_on_port(port),
+        crate::port_conflict::reclaim_owner(port, false),
     )
     .await
     .is_err()
     {
-        warn!(
-            "Timed out while killing orphaned process(es) on port {}; continuing with port-release wait",
-            port
-        );
+        warn!("Timed out while reclaiming unhealthy owner of port {port}");
     }
 
-    // Wait for port release
+    // Wait for port release.
     let max_poll_iters = if cfg!(windows) { 40 } else { 20 };
+    let mut port_released = false;
     for i in 0..max_poll_iters {
         match tokio::net::TcpListener::bind(format!("127.0.0.1:{}", port)).await {
             Ok(_) => {
                 debug!("Port {} is free after {}ms", port, i * 250);
+                port_released = true;
                 break;
             }
             Err(_) => {
                 if i == max_poll_iters - 1 {
                     warn!(
-                        "Port {} still in use after {}s, will attempt start anyway",
+                        "Port {} still in use after {}s after reclaim attempt",
                         port,
                         max_poll_iters * 250 / 1000
                     );
@@ -1129,6 +1145,15 @@ async fn spawn_screenpipe_inner(
                 }
             }
         }
+    }
+    if !port_released {
+        state.is_starting.store(false, Ordering::SeqCst);
+        state.is_starting_capture.store(false, Ordering::SeqCst);
+        crate::health::set_recording_status(crate::health::RecordingStatus::Error);
+        crate::port_conflict::show_reclaim_failed(&app, port);
+        return Err(format!(
+            "local port {port} is already in use; quit the other screenpipe or app and retry"
+        ));
     }
 
     // Permissions check. The UI-facing status includes the engine's sticky
@@ -1239,6 +1264,7 @@ async fn spawn_screenpipe_inner(
     // helper in `apps/screenpipe-app-tauri/lib/events/types.ts`).
     let app_for_pipe = app.clone();
     let app_for_owned = app.clone();
+    let app_for_port_conflict = app.clone();
 
     // Owned-browser: create the connect-side instance and kick off the
     // webview install in the background. The engine starts immediately;
@@ -1294,6 +1320,12 @@ async fn spawn_screenpipe_inner(
                     Ok(s) => s,
                     Err(e) => {
                         error!("Failed to start server core: {}", e);
+                        if crate::port_conflict::is_error(&e, recording_config.port) {
+                            crate::port_conflict::show_reclaim_failed(
+                                &app_for_port_conflict,
+                                recording_config.port,
+                            );
+                        }
                         let _ = result_tx.send(Err(e));
                         return;
                     }
@@ -1449,120 +1481,6 @@ async fn start_capture_internal(
 
     info!("Capture started on existing server");
     Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Port cleanup (unchanged)
-// ---------------------------------------------------------------------------
-
-async fn kill_process_on_port(port: u16) {
-    #[allow(unused_variables)]
-    let my_pid = std::process::id().to_string();
-
-    #[cfg(unix)]
-    {
-        let child = match tokio::process::Command::new("lsof")
-            .args(["-nP", "-ti", &format!(":{}", port)])
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-        {
-            Ok(c) => c,
-            Err(_) => return,
-        };
-
-        let child_id = child.id();
-        let output =
-            match tokio::time::timeout(std::time::Duration::from_secs(5), child.wait_with_output())
-                .await
-            {
-                Ok(Ok(o)) => o,
-                _ => {
-                    if let Some(pid) = child_id {
-                        let _ = std::process::Command::new("kill")
-                            .args(["-9", &pid.to_string()])
-                            .output();
-                    }
-                    warn!("lsof timed out checking port {}, killed", port);
-                    return;
-                }
-            };
-
-        if output.status.success() {
-            let pids_str = String::from_utf8_lossy(&output.stdout);
-            let pids: Vec<&str> = pids_str
-                .trim()
-                .split('\n')
-                .filter(|s| !s.is_empty() && *s != my_pid)
-                .collect();
-            if pids.is_empty() {
-                debug!("No orphaned processes on port {} (only our own PID)", port);
-                return;
-            }
-            warn!(
-                "Found {} orphaned process(es) on port {}: {:?}. Killing to free port (our pid: {}).",
-                pids.len(), port, pids, my_pid
-            );
-            for pid in &pids {
-                let _ = tokio::process::Command::new("kill")
-                    .args(["-9", pid])
-                    .output()
-                    .await;
-            }
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            info!("Killed orphaned process(es) on port {}", port);
-        }
-    }
-
-    #[cfg(windows)]
-    {
-        let my_pid_num: u32 = std::process::id();
-        let mut netstat_cmd = tokio::process::Command::new("cmd");
-        netstat_cmd.args(["/C", &format!("netstat -ano | findstr :{}", port)]);
-        {
-            #[allow(unused_imports)]
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x08000000;
-            netstat_cmd.creation_flags(CREATE_NO_WINDOW);
-        }
-        match netstat_cmd.output().await {
-            Ok(output) if output.status.success() => {
-                let text = String::from_utf8_lossy(&output.stdout);
-                let mut pids = std::collections::HashSet::new();
-                for line in text.lines() {
-                    if let Some(pid) = line.split_whitespace().last() {
-                        if let Ok(pid_num) = pid.parse::<u32>() {
-                            if pid_num > 0 && pid_num != my_pid_num {
-                                pids.insert(pid_num);
-                            }
-                        }
-                    }
-                }
-                if pids.is_empty() {
-                    debug!("No orphaned processes on port {} (only our own PID)", port);
-                    return;
-                }
-                warn!(
-                    "Found {} orphaned process(es) on port {}: {:?}. Killing to free port (our pid: {}).",
-                    pids.len(), port, pids, my_pid_num
-                );
-                for pid in &pids {
-                    let mut kill_cmd = tokio::process::Command::new("taskkill");
-                    kill_cmd.args(["/F", "/PID", &pid.to_string()]);
-                    {
-                        #[allow(unused_imports)]
-                        use std::os::windows::process::CommandExt;
-                        const CREATE_NO_WINDOW: u32 = 0x08000000;
-                        kill_cmd.creation_flags(CREATE_NO_WINDOW);
-                    }
-                    let _ = kill_cmd.output().await;
-                }
-                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                info!("Killed orphaned process(es) on port {}", port);
-            }
-            _ => {}
-        }
-    }
 }
 
 #[cfg(test)]
