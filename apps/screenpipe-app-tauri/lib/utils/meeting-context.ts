@@ -37,6 +37,7 @@ export interface MeetingAudioChunk {
   audioFilePath: string;
   speakerId: number | null;
   speakerName: string;
+  deviceName?: string;
   deviceType: string;
   isInput: boolean;
   transcription: string;
@@ -853,6 +854,7 @@ interface SearchAudioItem {
     transcription?: string;
     timestamp?: string;
     file_path?: string;
+    device?: string;
     device_type?: string;
     speaker?: { id?: number; name?: string } | null;
   };
@@ -904,6 +906,7 @@ export async function fetchMeetingAudio(
           // Mic rows show "me" only until someone is actually assigned —
           // hardcoding "me" made input lines look impossible to reassign.
           speakerName: c.speaker?.name?.trim() || (isInput ? "me" : ""),
+          deviceName: c.device,
           deviceType,
           isInput,
           transcription: c.transcription,
@@ -982,6 +985,7 @@ async function fetchRoutedMeetingTranscript(
           // masked by a hardcoded "me".
           speakerName:
             segment.speakerName?.trim() || (isInput ? "me" : "speaker"),
+          deviceName: segment.deviceName,
           deviceType,
           isInput,
           transcription: segment.transcript,
