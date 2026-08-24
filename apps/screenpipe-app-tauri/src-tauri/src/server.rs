@@ -195,111 +195,6 @@ async fn handle_focus(
     }))
 }
 
-async fn kill_process_on_port(port: u16) {
-    #[cfg(unix)]
-    {
-        let my_pid = std::process::id().to_string();
-        // lsof can hang indefinitely on macOS — always enforce a timeout
-        // and kill the child if it exceeds it, to avoid zombie lsof processes.
-        let child = match tokio::process::Command::new("lsof")
-            .args(["-nP", "-ti", &format!(":{}", port)])
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-        {
-            Ok(c) => c,
-            Err(_) => return,
-        };
-
-        let child_id = child.id();
-        let output =
-            match tokio::time::timeout(std::time::Duration::from_secs(5), child.wait_with_output())
-                .await
-            {
-                Ok(Ok(o)) => o,
-                _ => {
-                    // Kill the hung lsof process by pid
-                    if let Some(pid) = child_id {
-                        let _ = std::process::Command::new("kill")
-                            .args(["-9", &pid.to_string()])
-                            .output();
-                    }
-                    tracing::warn!("lsof timed out checking port {}, killed", port);
-                    return;
-                }
-            };
-
-        if output.status.success() {
-            let pids_str = String::from_utf8_lossy(&output.stdout);
-            let pids: Vec<&str> = pids_str
-                .trim()
-                .split('\n')
-                .filter(|s| !s.is_empty() && *s != my_pid)
-                .collect();
-            if pids.is_empty() {
-                return;
-            }
-            tracing::warn!(
-                "found {} orphaned process(es) on port {}: {:?}, killing (our pid: {})",
-                pids.len(),
-                port,
-                pids,
-                my_pid
-            );
-            for pid in &pids {
-                let _ = tokio::process::Command::new("kill")
-                    .args(["-9", pid])
-                    .output()
-                    .await;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        }
-    }
-
-    #[cfg(windows)]
-    {
-        let my_pid_num: u32 = std::process::id();
-        let mut netstat_cmd = tokio::process::Command::new("cmd");
-        netstat_cmd.args(["/C", &format!("netstat -ano | findstr :{}", port)]);
-        {
-            #[allow(unused_imports)]
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x08000000;
-            netstat_cmd.creation_flags(CREATE_NO_WINDOW);
-        }
-        if let Ok(output) = netstat_cmd.output().await {
-            if output.status.success() {
-                let text = String::from_utf8_lossy(&output.stdout);
-                let mut pids = std::collections::HashSet::new();
-                for line in text.lines() {
-                    if let Some(pid_str) = line.split_whitespace().last() {
-                        if let Ok(pid) = pid_str.parse::<u32>() {
-                            if pid != 0 && pid != my_pid_num {
-                                pids.insert(pid);
-                            }
-                        }
-                    }
-                }
-                for pid in &pids {
-                    tracing::warn!("killing orphaned process {} on port {}", pid, port);
-                    let mut kill_cmd = tokio::process::Command::new("cmd");
-                    kill_cmd.args(["/C", &format!("taskkill /F /PID {}", pid)]);
-                    {
-                        #[allow(unused_imports)]
-                        use std::os::windows::process::CommandExt;
-                        const CREATE_NO_WINDOW: u32 = 0x08000000;
-                        kill_cmd.creation_flags(CREATE_NO_WINDOW);
-                    }
-                    let _ = kill_cmd.output().await;
-                }
-                if !pids.is_empty() {
-                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                }
-            }
-        }
-    }
-}
-
 /// Loopback hostnames the control server treats as first-party. A `127.0.0.1`
 /// bind is reachable by any website the user visits and by any local process,
 /// so the only trustworthy `Origin`/`Host` values are these.
@@ -423,7 +318,9 @@ where
 }
 
 pub async fn run_server(app_handle: tauri::AppHandle, port: u16) {
-    let state = ServerState { app_handle };
+    let state = ServerState {
+        app_handle: app_handle.clone(),
+    };
 
     let app = Router::new()
         .route(
@@ -479,8 +376,14 @@ pub async fn run_server(app_handle: tauri::AppHandle, port: u16) {
 
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
 
-    // Kill any orphaned process occupying this port from a previous instance
-    kill_process_on_port(port).await;
+    // main.rs marks a responsive Screenpipe control endpoint before this task
+    // starts. Preserve that healthy instance; reclaim only an unrelated or
+    // unresponsive owner left on the control port.
+    crate::port_conflict::reclaim_owner(
+        port,
+        crate::port_conflict::healthy_control_server_present(),
+    )
+    .await;
 
     // Retry binding with backoff — avoids panic when a previous instance hasn't
     // released the port yet (e.g. fast restart, TIME_WAIT on Linux).
@@ -508,6 +411,11 @@ pub async fn run_server(app_handle: tauri::AppHandle, port: u16) {
         addr,
         last_err.map(|e| e.to_string()).unwrap_or_default()
     );
+    if crate::port_conflict::healthy_control_server_present() {
+        crate::port_conflict::show_healthy_screenpipe(&app_handle, port);
+    } else {
+        crate::port_conflict::show_reclaim_failed(&app_handle, port);
+    }
 }
 
 async fn send_inbox_message(
