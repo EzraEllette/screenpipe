@@ -28,6 +28,7 @@ foreach ($path in $required) {
 $commands = @(
   'codex.cmd --version',
   'git.exe --version',
+  'gh.exe --version',
   'C:\Tools\bun\bun.exe --version',
   'C:\Tools\cargo\bin\rustc.exe --version',
   'C:\Tools\cargo\bin\cargo.exe --version',

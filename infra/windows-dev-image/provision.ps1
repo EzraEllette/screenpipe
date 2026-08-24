@@ -48,7 +48,7 @@ $env:Path = 'C:\ProgramData\chocolatey\bin;' + [Environment]::GetEnvironmentVari
 choco feature enable -n allowGlobalConfirmation | Out-Null
 Invoke-Checked 'choco.exe' @(
   'install', 'git', 'git-lfs', '7zip', 'jq', 'cmake', 'ninja',
-  'powershell-core', 'llvm', 'ffmpeg', 'github-cli', 'azure-cli', '--no-progress'
+  'powershell-core', 'llvm', 'ffmpeg', 'gh', 'azure-cli', '--no-progress'
 )
 
 $nodeMsi = Join-Path $env:TEMP "node-v$nodeVersion-x64.msi"
