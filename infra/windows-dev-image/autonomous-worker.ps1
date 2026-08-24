@@ -169,7 +169,11 @@ exit /b %ERRORLEVEL%
   $testedTree = (git.exe -C $repository rev-parse 'HEAD^{tree}').Trim()
   if ((git.exe -C $repository status --porcelain)) { throw 'worktree is dirty after autonomous development' }
 
-  Invoke-Checked 'git.exe' @('-C', $repository, 'push', '--force-with-lease', $task.pushRemote, "HEAD:refs/heads/$($task.branch)")
+  $remoteRef = "refs/heads/$($task.branch)"
+  $remoteLine = (& git.exe -C $repository ls-remote $task.pushRemote $remoteRef | Out-String).Trim()
+  if ($LASTEXITCODE -ne 0) { throw 'remote branch lease lookup failed' }
+  $remoteSha = if ($remoteLine) { ($remoteLine -split '\s+')[0] } else { '' }
+  Invoke-Checked 'git.exe' @('-C', $repository, 'push', "--force-with-lease=$remoteRef`:$remoteSha", $task.pushRemote, "HEAD:$remoteRef")
   $expiry = (Get-Date).ToUniversalTime().AddDays(14).ToString('yyyy-MM-ddTHH:mmZ')
   Invoke-Checked 'az.cmd' @('login', '--identity', '--client-id', $task.identityClientId, '--allow-no-subscriptions', '--output', 'none')
   $videoUrl = (& az.cmd storage blob generate-sas --account-name $task.storageAccount --container-name $task.storageContainer --name "$($task.blobRoot)/$($task.taskId)/acceptance.mp4" --permissions r --expiry $expiry --https-only --as-user --auth-mode login --full-uri --output tsv).Trim()
@@ -187,9 +191,8 @@ $($task.prBody)
 - Tested tree: ``$testedTree``
 - The disposable VM ran Codex, native validation, recording, push, and PR creation without an inbound desktop connection or a host-held process.
 "@ | Set-Content -Encoding UTF8 $prBodyPath
-  $prUrl = (& gh.exe pr create --repo $task.baseRepository --base $task.baseBranch --head "$($task.headOwner):$($task.branch)" --title $task.prTitle --body $task.prBody).Trim()
+  $prUrl = (& gh.exe pr create --repo $task.baseRepository --base $task.baseBranch --head "$($task.headOwner):$($task.branch)" --title $task.prTitle --body-file $prBodyPath).Trim()
   if ($LASTEXITCODE -ne 0 -or -not $prUrl) { throw 'pull request creation failed' }
-  Invoke-Checked 'gh.exe' @('pr', 'edit', $prUrl, '--body-file', $prBodyPath)
   Write-Host "PULL REQUEST CREATED BY VM: $prUrl"
   Start-Process $prUrl
   Start-Sleep -Seconds 12
