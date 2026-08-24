@@ -216,12 +216,25 @@ export function splitCitations(
     );
     if (at === null) continue;
 
-    if (match.index > cursor) {
-      runs.push({ text: text.slice(cursor, match.index), at: null });
+    // Keep a parenthesized citation atomic. Previously `(3:46)` became three
+    // inline nodes — `(`, the link, and `)` — so a narrow meeting rail could
+    // strand the closing parenthesis on the next line.
+    let citationStart = match.index;
+    let citationEnd = match.index + raw.length;
+    if (
+      masked[citationStart - 1] === "(" &&
+      masked[citationEnd] === ")"
+    ) {
+      citationStart -= 1;
+      citationEnd += 1;
+    }
+
+    if (citationStart > cursor) {
+      runs.push({ text: text.slice(cursor, citationStart), at: null });
     }
     // Slice from the original so masked code never leaks into output.
-    runs.push({ text: text.slice(match.index, match.index + raw.length), at });
-    cursor = match.index + raw.length;
+    runs.push({ text: text.slice(citationStart, citationEnd), at });
+    cursor = citationEnd;
   }
 
   if (cursor < text.length) runs.push({ text: text.slice(cursor), at: null });

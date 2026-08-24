@@ -180,6 +180,21 @@ export function mockLocalApiResponse(
   if (url.pathname === "/health") {
     return Response.json(createMockHealth(scenario));
   }
+  // Sharing fixtures are synthetic but connected, so the meeting preview can
+  // exercise the same ranked app stack and review dialog as the desktop app.
+  if (url.pathname === "/connections") {
+    return Response.json({
+      data:
+        scenario === "empty"
+          ? []
+          : [
+              { id: "slack", name: "Slack", connected: true },
+              { id: "notion", name: "Notion", connected: true, mcp: true },
+              { id: "linear", name: "Linear", connected: true, mcp: true },
+              { id: "obsidian", name: "Obsidian", connected: true },
+            ],
+    });
+  }
   if (url.pathname === "/audio/device/status") return Response.json([]);
   if (url.pathname === "/vision/device/status") return Response.json([]);
   if (url.pathname === "/raw_sql") {
@@ -450,6 +465,13 @@ function mockActivitySummary() {
         first_seen: start.toISOString(),
         last_seen: end.toISOString(),
       },
+      {
+        name: "Obsidian",
+        frame_count: 62,
+        minutes: 3,
+        first_seen: start.toISOString(),
+        last_seen: end.toISOString(),
+      },
     ],
     windows: [
       {
@@ -461,10 +483,17 @@ function mockActivitySummary() {
       },
       {
         app_name: "Google Chrome",
-        window_name: "Sample tracker — board",
-        browser_url: "https://example.com/board/sample",
+        window_name: "Sample tracker — Linear",
+        browser_url: "https://linear.app/sample/board",
         minutes: 4,
         frame_count: 120,
+      },
+      {
+        app_name: "Google Chrome",
+        window_name: "Rollout notes — Notion",
+        browser_url: "https://notion.so/sample-rollout-notes",
+        minutes: 3,
+        frame_count: 88,
       },
       {
         app_name: "Cursor",
@@ -479,6 +508,13 @@ function mockActivitySummary() {
         browser_url: "",
         minutes: 2,
         frame_count: 44,
+      },
+      {
+        app_name: "Obsidian",
+        window_name: "sample rollout notes",
+        browser_url: "",
+        minutes: 3,
+        frame_count: 62,
       },
     ],
     edited_files: [

@@ -8,7 +8,10 @@ import { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { Check, Calendar, ChevronDown, ChevronRight, ChevronUp, KeyRound, Loader2, Plug, RefreshCw, ShieldCheck } from "lucide-react";
 import { SourceCitationFooter } from "@/components/chat/source-citation-footer";
-import { MarkdownBlock } from "@/components/chat/markdown-block";
+import {
+  MarkdownBlock,
+  type MarkdownBlockOptions,
+} from "@/components/chat/markdown-block";
 import { AskUserToolCard, isAskUserToolCall } from "@/components/chat/standalone/ask-user-tool-card";
 import {
   AttachedContextCard,
@@ -1547,6 +1550,7 @@ export function MessageContent({
   onAnswerAgentAction,
   onAskUserReply,
   onSendPrompt,
+  markdownOptions,
 }: {
   message: Message;
   isGenerating?: boolean;
@@ -1565,6 +1569,8 @@ export function MessageContent({
   onAnswerAgentAction?: (block: Extract<ContentBlock, { type: "agent_action" }>, selectedOptionId?: string) => Promise<boolean> | boolean;
   onAskUserReply?: (reply: string, displayLabel: string) => void | Promise<void>;
   onSendPrompt?: (prompt: string, displayLabel: string) => void | Promise<void>;
+  /** Bounded renderer extensions for embedded Chat surfaces such as meetings. */
+  markdownOptions?: MarkdownBlockOptions;
 }) {
   const isUser = message.role === "user";
   const chartPromptSender = !isUser && !isGenerating ? onSendPrompt : undefined;
@@ -1737,6 +1743,7 @@ export function MessageContent({
           if (group.type === "text") {
             return (
               <MarkdownBlock
+                {...markdownOptions}
                 key={`text-${group.key}`}
                 text={group.text}
                 isUser={isUser}
@@ -1862,6 +1869,7 @@ export function MessageContent({
       {attachmentsRow}
       {displayText ? (
         <MarkdownBlock
+          {...markdownOptions}
           text={displayText}
           isUser={isUser}
           onOpenViewerPath={onOpenViewerPath}

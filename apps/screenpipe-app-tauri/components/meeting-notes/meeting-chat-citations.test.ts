@@ -97,6 +97,12 @@ describe("splitCitations", () => {
     expect(cited("at 3:34 and again at 3:34")).toHaveLength(2);
   });
 
+  it("keeps balanced parentheses inside the citation run", () => {
+    const text = "agreed at (3:34), then moved on";
+    expect(cited(text)[0].text).toBe("(3:34)");
+    expect(rebuild(text)).toBe(text);
+  });
+
   it("case 80: an out-of-range time stays plain", () => {
     expect(cited("scheduled for 9:15 tomorrow")).toHaveLength(0);
   });

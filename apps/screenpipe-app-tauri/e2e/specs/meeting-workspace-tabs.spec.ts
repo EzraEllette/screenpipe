@@ -233,7 +233,15 @@ describe("meeting workspace tabs and responsive layout", function () {
       'button[role="tab"][aria-controls="meeting-panel-summary"]',
     );
 
-    expect(await transcriptTab.getAttribute("aria-selected")).toBe("true");
+    // A completed meeting reopens on its saved outcome. Transcript remains an
+    // explicit source view instead of being the first thing every reader sees.
+    expect(await summaryTab.getAttribute("aria-selected")).toBe("true");
+    const initialSummary = await waitForTestId(
+      "meeting-summary-surface",
+      10_000,
+    );
+    expect(await initialSummary.getText()).toContain(SUMMARY_MARKER);
+    expect(await initialSummary.getText()).not.toContain(NOTE_MARKER);
     await notesTab.click();
     const editor = await waitForTestId("note-editor", 20_000);
     expect(await notesTab.getAttribute("aria-selected")).toBe("true");

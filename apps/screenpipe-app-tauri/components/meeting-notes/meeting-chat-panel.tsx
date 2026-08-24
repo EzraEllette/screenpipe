@@ -34,16 +34,16 @@ import React, {
   useState,
 } from "react";
 import { ArrowUp, Loader2, X } from "lucide-react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
+import { MessageContent } from "@/components/chat/standalone/message-content";
 import { AIPresetsSelector } from "@/components/rewind/ai-presets-selector";
 import {
   AcpConfigSelector,
   type AcpConfigDefaultChange,
 } from "@/components/chat/standalone/acp-config-selector";
 import { createScreenpipeUrlTransform } from "@/components/markdown";
+import type { Message } from "@/lib/chat/types";
 import type { AIPreset } from "@/lib/utils/tauri";
 import { cn } from "@/lib/utils";
 import {
@@ -74,6 +74,9 @@ export interface MeetingChatTurn {
 
 export interface MeetingChatPanelProps {
   conditions: MeetingChatConditions;
+  meetingTitle: string;
+  meetingStart: string | number | null;
+  meetingEnd: string | number | null;
   turns: MeetingChatTurn[];
   draft: string;
   onDraftChange: (value: string) => void;
@@ -96,8 +99,35 @@ export interface MeetingChatPanelProps {
   onWidthChange: (width: number) => void;
 }
 
+function meetingChatDate(value: string | number | null): Date | null {
+  if (value === null || value === "") return null;
+  const date = new Date(value);
+  return Number.isFinite(date.getTime()) ? date : null;
+}
+
+/** Compact local time range for the context line; accepts ISO or epoch ms. */
+export function formatMeetingChatTimeRange(
+  startValue: string | number | null,
+  endValue: string | number | null,
+): string | null {
+  const start = meetingChatDate(startValue);
+  if (!start) return null;
+  const end = meetingChatDate(endValue);
+  const day = start.toLocaleDateString([], {
+    month: "short",
+    day: "numeric",
+  });
+  const time = (date: Date) =>
+    date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+
+  return `${day} · ${time(start)}–${end ? time(end) : "now"}`;
+}
+
 export function MeetingChatPanel({
   conditions,
+  meetingTitle,
+  meetingStart,
+  meetingEnd,
   turns,
   draft,
   onDraftChange,
@@ -128,6 +158,15 @@ export function MeetingChatPanel({
     [conditions, hasThread],
   );
   const isAcp = activePreset?.provider === "acp";
+  const contextSource =
+    conditions.transcriptTurnCount > 0 && conditions.hasWrittenContext
+      ? "transcript + notes"
+      : conditions.transcriptTurnCount > 0
+        ? "transcript"
+        : conditions.hasWrittenContext
+          ? "notes"
+          : "meeting context";
+  const contextTime = formatMeetingChatTimeRange(meetingStart, meetingEnd);
 
   // Case 30: opening the panel puts the cursor where the user is going.
   useEffect(() => {
@@ -251,10 +290,25 @@ export function MeetingChatPanel({
         <span className="absolute inset-y-0 left-1 w-px bg-transparent transition-colors group-hover:bg-foreground/40 group-focus-visible:bg-foreground" />
       </div>
 
-      <div className="flex shrink-0 items-center justify-between gap-2 border-b border-border px-3 py-2">
-        <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
-          ask
-        </span>
+      <div className="flex shrink-0 items-start justify-between gap-2 border-b border-border px-3 py-2">
+        <div className="min-w-0">
+          <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
+            ask this meeting
+          </p>
+          <p
+            className="mt-0.5 truncate text-xs font-medium text-foreground"
+            title={meetingTitle || "untitled meeting"}
+          >
+            {meetingTitle || "untitled meeting"}
+          </p>
+          <p
+            data-testid="meeting-chat-context"
+            className="mt-0.5 truncate text-[10px] text-muted-foreground"
+          >
+            {contextSource}
+            {contextTime ? ` · ${contextTime}` : ""}
+          </p>
+        </div>
         <Button
           type="button"
           size="icon"
@@ -299,18 +353,22 @@ export function MeetingChatPanel({
             {turns.map((turn) =>
               turn.role === "user" ? (
                 <div key={turn.id} className="flex justify-end">
-                  <span className="max-w-[88%] bg-muted px-2.5 py-1.5 text-[13px] text-foreground">
-                    {turn.text}
-                  </span>
+                  <div className="max-w-[88%] bg-muted px-2.5 py-1.5 text-[13px] text-foreground">
+                    <MeetingTurnBody
+                      turn={turn}
+                      window={citationWindow}
+                      onCitationClick={onCitationClick}
+                    />
+                  </div>
                 </div>
               ) : (
                 <div
                   key={turn.id}
                   data-testid="meeting-chat-answer"
-                  className="text-[13px] leading-relaxed text-muted-foreground"
+                  className="text-[13px] leading-relaxed text-foreground"
                 >
-                  <AnswerBody
-                    text={turn.text}
+                  <MeetingTurnBody
+                    turn={turn}
                     window={citationWindow}
                     onCitationClick={onCitationClick}
                   />
@@ -420,70 +478,75 @@ export function MeetingChatPanel({
   );
 }
 
-/**
- * Render an answer with clock times linked back into the transcript.
- *
- * Case 78: images are stripped — the thread is text, the note is where media
- * lives.
- */
-function AnswerBody({
-  text,
+/** Main Chat message rendering with one meeting-only link extension. */
+function MeetingTurnBody({
+  turn,
   window: citationWindow,
   onCitationClick,
 }: {
-  text: string;
+  turn: MeetingChatTurn;
   window: CitationWindow | null;
   onCitationClick: (atMs: number) => void;
 }) {
-  const citationPlugin = useMemo(
-    () => createMeetingCitationPlugin(citationWindow),
-    [citationWindow],
+  const message = useMemo<Message>(
+    () => ({
+      id: turn.id,
+      role: turn.role,
+      content: turn.text,
+      // The meeting thread does not persist per-message wall-clock metadata.
+      // MessageContent needs the field for its shared contract but does not
+      // present it; transcript citations carry the meaningful time here.
+      timestamp: 0,
+    }),
+    [turn.id, turn.role, turn.text],
   );
   const urlTransform = useMemo(
     () => createScreenpipeUrlTransform([MEETING_CITATION_HOST]),
     [],
   );
+  const additionalRemarkPlugins = useMemo(
+    () =>
+      turn.role === "assistant"
+        ? [createMeetingCitationPlugin(citationWindow)]
+        : [],
+    [citationWindow, turn.role],
+  );
+  const renderLink = useCallback(
+    ({ href, children }: { href?: string; children: React.ReactNode }) => {
+      const at = meetingCitationAtFromHref(href);
+      if (at === null) return undefined;
+      return (
+        <button
+          type="button"
+          data-testid="meeting-chat-citation"
+          data-at={at}
+          aria-label={`jump to transcript at ${new Date(at).toLocaleTimeString([], {
+            hour: "numeric",
+            minute: "2-digit",
+          })}`}
+          onClick={() => onCitationClick(at)}
+          className="inline-flex whitespace-nowrap rounded-sm bg-muted/70 px-1 align-baseline font-mono text-[11px] text-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-foreground"
+        >
+          {children}
+        </button>
+      );
+    },
+    [onCitationClick],
+  );
 
   return (
-    <ReactMarkdown
-      className="prose prose-sm max-w-none [overflow-wrap:anywhere] dark:prose-invert prose-p:my-0 prose-p:text-[13px] prose-p:leading-relaxed prose-p:[&+p]:mt-2 prose-li:my-0 prose-li:text-[13px] prose-strong:text-foreground"
-      remarkPlugins={[remarkGfm, citationPlugin]}
-      urlTransform={urlTransform}
-      components={{
-        a({ href, children }) {
-          const at = meetingCitationAtFromHref(href);
-          if (at !== null) {
-            return (
-              <button
-                type="button"
-                data-testid="meeting-chat-citation"
-                data-at={at}
-                onClick={() => onCitationClick(at)}
-                className="border-b border-muted-foreground font-mono text-[11px] text-foreground transition-colors hover:border-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-foreground"
-              >
-                {children}
-              </button>
-            );
-          }
-
-          return (
-            <a
-              href={href}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="underline underline-offset-2"
-            >
-              {children}
-            </a>
-          );
-        },
+    <MessageContent
+      message={message}
+      isGenerating={!turn.done && !turn.error}
+      markdownOptions={{
+        additionalRemarkPlugins,
+        urlTransform,
+        renderLink,
         // Case 78: the meeting thread is text; media belongs in the note.
-        img() {
-          return null;
-        },
+        suppressImages: true,
+        className:
+          "[overflow-wrap:anywhere] prose-p:my-0 prose-p:text-[13px] prose-p:leading-relaxed prose-p:[&+p]:mt-2 prose-li:my-0 prose-li:text-[13px] prose-strong:text-foreground",
       }}
-    >
-      {text}
-    </ReactMarkdown>
+    />
   );
 }

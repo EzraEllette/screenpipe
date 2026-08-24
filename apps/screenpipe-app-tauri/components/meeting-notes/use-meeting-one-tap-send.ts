@@ -8,8 +8,10 @@ import { localFetch } from "@/lib/api";
 import {
   renderConnectedShareArtifact,
   renderSlackMessage,
+  rankedShareSuggestions,
   shareConnectionAvailability,
   type ConnectedShareArtifact,
+  type ConnectedShareSuggestion,
 } from "@/lib/connected-share";
 import {
   rememberedOneTapSend,
@@ -39,43 +41,54 @@ import {
  * reachable. A remembered channel whose Slack connection has since been revoked
  * is not a shortcut, it is a button that fails.
  */
-export function useMeetingOneTapSend(artifact: ConnectedShareArtifact) {
+const EMPTY_MEETING_EVIDENCE: readonly string[] = [];
+
+export function useMeetingOneTapSend(
+  artifact: ConnectedShareArtifact,
+  meetingEvidence: readonly string[] = EMPTY_MEETING_EVIDENCE,
+) {
   const [label, setLabel] = useState<string | null>(null);
+  const [suggestions, setSuggestions] = useState<ConnectedShareSuggestion[]>(
+    [],
+  );
   const [sending, setSending] = useState(false);
 
   const remembered = rememberedOneTapSend(readRememberedShare("meeting"));
   const rememberedDestination = remembered?.destination ?? null;
   const rememberedLabel = remembered?.label ?? null;
 
-  // Availability is checked before the control renders rather than at press
-  // time, so a revoked connection removes the shortcut instead of turning it
-  // into a failure the user only discovers by pressing it.
+  // One connection check drives both the exact repeat shortcut and the compact
+  // app stack. Raw app/window evidence stays local; the ranker returns only
+  // known destination ids and display names.
   useEffect(() => {
-    if (!rememberedDestination) {
-      setLabel(null);
-      return;
-    }
     let cancelled = false;
     void localFetch("/connections")
       .then(async (response) => {
         if (!response.ok) throw new Error("unavailable");
         const body = await response.json();
-        const ready = shareConnectionAvailability(
-          Array.isArray(body?.data) ? body.data : [],
-        );
+        const entries = Array.isArray(body?.data) ? body.data : [];
+        const ready = shareConnectionAvailability(entries);
         if (cancelled) return;
-        setLabel(ready.direct[rememberedDestination] ? rememberedLabel : null);
+        setSuggestions(rankedShareSuggestions(entries, meetingEvidence));
+        setLabel(
+          rememberedDestination && ready.direct[rememberedDestination]
+            ? rememberedLabel
+            : null,
+        );
       })
       .catch(() => {
         // A failed check is not evidence the connection is gone, but it is not
         // evidence it is there either. Hide the shortcut: the dialog still
         // works and reports the real error.
-        if (!cancelled) setLabel(null);
+        if (!cancelled) {
+          setLabel(null);
+          setSuggestions([]);
+        }
       });
     return () => {
       cancelled = true;
     };
-  }, [rememberedDestination, rememberedLabel]);
+  }, [meetingEvidence, rememberedDestination, rememberedLabel]);
 
   useEffect(() => {
     if (!label) return;
@@ -141,5 +154,5 @@ export function useMeetingOneTapSend(artifact: ConnectedShareArtifact) {
     }
   }, [artifact, remembered, sending]);
 
-  return { label, sending, send };
+  return { label, sending, suggestions, send };
 }

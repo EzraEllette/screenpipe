@@ -163,6 +163,17 @@ export function extractMeetingSummary(markdown: string): string | null {
   return body || null;
 }
 
+/**
+ * A completed meeting should reopen on its outcome, not its raw capture.
+ * Notes remain the useful fallback when no saved summary exists; Transcript is
+ * still available as an explicit tab, deep link, or source jump.
+ */
+export function preferredMeetingWorkspaceTab(
+  note: string | null | undefined,
+): Exclude<MeetingWorkspaceTab, "transcript"> {
+  return extractMeetingSummary(note ?? "") ? "summary" : "notes";
+}
+
 export interface MeetingSummaryRecovery {
   title: string;
   detail: string;

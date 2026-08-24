@@ -138,7 +138,10 @@ import {
 } from "./meeting-share-menu";
 import { copyMeetingSummary, emailMeetingSummary } from "./share-summary";
 import { ConnectedShareDialog } from "@/components/connected-share-dialog";
-import { createMeetingShareArtifact } from "@/lib/connected-share";
+import {
+  createMeetingShareArtifact,
+  type ConnectedShareDestination,
+} from "@/lib/connected-share";
 import {
   readRememberedShare,
   rememberedSendLabel,
@@ -304,6 +307,8 @@ export function NoteView({
     null,
   );
   const [shareOpen, setShareOpen] = useState(false);
+  const [requestedShareDestination, setRequestedShareDestination] =
+    useState<ConnectedShareDestination | null>(null);
   // Read once per open rather than on every render: the menu only needs to
   // name the app, and the dialog re-reads the full preference when it mounts.
   const sendLabel = useMemo(
@@ -407,7 +412,25 @@ export function NoteView({
       }),
     [attendees, meeting, note, title],
   );
-  const oneTapSend = useMeetingOneTapSend(shareArtifact);
+  // The activity bundle is already loaded for receipts and replay. Reuse it to
+  // rank connected destinations without adding another history query or moving
+  // raw window/app evidence off device.
+  const meetingShareEvidence = useMemo(() => {
+    const activity = meetingCtx?.activity;
+    if (!activity) return [];
+    return [
+      ...activity.apps.map((app) => app.name),
+      ...activity.windows.flatMap((window) => [
+        window.app_name,
+        window.window_name,
+        window.browser_url,
+      ]),
+    ].filter(Boolean);
+  }, [meetingCtx?.activity]);
+  const oneTapSend = useMeetingOneTapSend(
+    shareArtifact,
+    meetingShareEvidence,
+  );
 
   /**
    * The press is the confirmation, so the receipt has to be unmissable.
@@ -2042,10 +2065,11 @@ export function NoteView({
   }, [meeting.meeting_start, meeting.meeting_end]);
   const summarySurfaceState = summaryWorking
     ? "working"
-    : visibleSummaryLifecycle.kind === "completed"
-      ? "ready"
-      : visibleSummaryLifecycle.kind === "failed"
-        ? "attention"
+    : visibleSummaryLifecycle.kind === "failed"
+      ? "attention"
+      : visibleSummaryLifecycle.kind === "completed" ||
+          extractMeetingSummary(note)
+        ? "ready"
         : "idle";
 
   // Every meeting action hangs off the single `⋯` menu on the tab rule.
@@ -2188,8 +2212,12 @@ export function NoteView({
     <div ref={rootRef} className="relative flex h-full flex-col bg-background">
       <ConnectedShareDialog
         open={shareOpen}
-        onOpenChange={setShareOpen}
+        onOpenChange={(open) => {
+          setShareOpen(open);
+          if (!open) setRequestedShareDestination(null);
+        }}
         artifact={shareArtifact}
+        initialDestination={requestedShareDestination}
       />
       {meetingConfirmations}
       {isDraggingImage && (
@@ -2334,6 +2362,7 @@ export function NoteView({
                   });
                 }}
                 resendLabel={oneTapSend.label ?? undefined}
+                suggestedDestinations={oneTapSend.suggestions}
                 onShare={(action) => {
                   posthog.capture("meeting_share_action", {
                     action,
@@ -2346,9 +2375,23 @@ export function NoteView({
                   if (action === "summary") void handleCopySummary();
                   else if (action === "email") void handleEmailSummary();
                   else if (action === "transcript") void handleCopyTranscript();
-                  else if (action === "send") setShareOpen(true);
+                  else if (action === "send") {
+                    setRequestedShareDestination(null);
+                    setShareOpen(true);
+                  }
                   else if (action === "resend") void handleOneTapSend();
                   else void handleCopy();
+                }}
+                onDestinationSelect={(destination) => {
+                  const suggestion = oneTapSend.suggestions.find(
+                    (item) => item.destination === destination,
+                  );
+                  posthog.capture("meeting_share_destination_clicked", {
+                    destination,
+                    observed_in_meeting: suggestion?.observed === true,
+                  });
+                  setRequestedShareDestination(destination);
+                  setShareOpen(true);
                 }}
               />
               </>
@@ -2387,7 +2430,9 @@ export function NoteView({
               key={meeting.id}
               value={note}
               onChange={setNote}
-              placeholder={'write notes, or type "/" for blocks'}
+              placeholder={
+                'write what matters — it helps focus the summary · "/" for blocks'
+              }
               readOnly={summaryWorking}
               summaryRevealKey={summaryRevealKey}
               className={cn(
@@ -2516,6 +2561,9 @@ export function NoteView({
       {chatOpen && (
         <MeetingChatPanel
           conditions={chatConditions}
+          meetingTitle={title}
+          meetingStart={meeting.meeting_start}
+          meetingEnd={meeting.meeting_end}
           turns={meetingChat.turns}
           draft={chatDraft}
           onDraftChange={setChatDraft}

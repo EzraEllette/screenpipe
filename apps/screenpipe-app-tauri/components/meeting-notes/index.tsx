@@ -36,7 +36,7 @@ import { NoteView } from "./note-view";
 import type { ComingUpStatus } from "./coming-up";
 import type { TranscriptOpenIntent } from "./transcript-open-state";
 import {
-  extractMeetingSummary,
+  preferredMeetingWorkspaceTab,
   type MeetingWorkspaceTab,
 } from "./meeting-workspace";
 
@@ -215,9 +215,7 @@ export function MeetingNotesSection({
       const meetingForView =
         openedMeeting ?? meetingsRef.current.find((meeting) => meeting.id === id);
       const initialTab = preferBestView
-        ? extractMeetingSummary(meetingForView?.note ?? "")
-          ? "summary"
-          : "notes"
+        ? preferredMeetingWorkspaceTab(meetingForView?.note)
         : null;
       selectMeeting(id, { openTranscript: transcript, initialTab });
     },
@@ -703,7 +701,13 @@ export function MeetingNotesSection({
       meetings={meetings}
       activeId={activeId}
       activeMeeting={activeMeeting}
-      onSelect={(id) => selectMeeting(id, { openTranscript: true })}
+      onSelect={(id) => {
+        const meeting = meetings.find((candidate) => candidate.id === id);
+        selectMeeting(id, {
+          openTranscript: false,
+          initialTab: preferredMeetingWorkspaceTab(meeting?.note),
+        });
+      }}
       onDelete={handleDeleted}
       onMerged={handleMerged}
       onStart={() => handleStart()}

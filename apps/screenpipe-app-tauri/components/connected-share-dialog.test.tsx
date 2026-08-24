@@ -342,6 +342,44 @@ describe("ConnectedShareDialog", () => {
     ).toBe(false);
   });
 
+  it("opens a clicked Obsidian icon on Obsidian and keeps the write approval-gated", async () => {
+    mocks.localFetch.mockResolvedValue(
+      jsonResponse({ data: [{ id: "obsidian", connected: true }] }),
+    );
+    const onOpenChange = vi.fn();
+
+    render(
+      <ConnectedShareDialog
+        open
+        onOpenChange={onOpenChange}
+        artifact={artifact}
+        initialDestination="chat-obsidian"
+      />,
+    );
+
+    const destination = await screen.findByTestId(
+      "connected-share-destination",
+    );
+    expect(destination).toHaveTextContent("Obsidian");
+    expect(mocks.showChatWithPrefill).not.toHaveBeenCalled();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "prepare Obsidian in Chat" }),
+    );
+
+    await waitFor(() =>
+      expect(mocks.showChatWithPrefill).toHaveBeenCalledTimes(1),
+    );
+    expect(mocks.showChatWithPrefill).toHaveBeenCalledWith(
+      expect.objectContaining({
+        autoSend: false,
+        displayLabel: "Share “Roadmap” to Obsidian",
+        prompt: expect.stringContaining("exact vault-relative path"),
+      }),
+    );
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
   it("makes unchanged versus Chat processing an explicit choice", async () => {
     mocks.localFetch.mockImplementation(async (path: string) => {
       if (path === "/connections") {
@@ -511,9 +549,7 @@ describe("ConnectedShareDialog", () => {
     expect(
       await screen.findByTestId("connected-share-slack-channels-error"),
     ).toHaveTextContent("You can still send to your own Slack messages");
-    fireEvent.click(
-      screen.getByRole("button", { name: "send to Slack" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "send to Slack" }));
     await screen.findByText("sent to Slack");
   });
 
@@ -554,9 +590,7 @@ describe("ConnectedShareDialog", () => {
     expect(
       screen.queryByTestId("connected-share-receipt"),
     ).not.toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "send to Slack" }),
-    ).toBeEnabled();
+    expect(screen.getByRole("button", { name: "send to Slack" })).toBeEnabled();
   });
 
   // The dialog used to open on ten stacked regions and ask five questions
@@ -618,9 +652,13 @@ describe("ConnectedShareDialog", () => {
       fireEvent.click(
         await screen.findByTestId("connected-share-preview-toggle"),
       );
-      expect(screen.getByLabelText(/edits here apply only to Slack/)).toBeVisible();
+      expect(
+        screen.getByLabelText(/edits here apply only to Slack/),
+      ).toBeVisible();
 
-      fireEvent.click(await screen.findByTestId("connected-share-contents-toggle"));
+      fireEvent.click(
+        await screen.findByTestId("connected-share-contents-toggle"),
+      );
       expect(screen.getAllByRole("checkbox")).toHaveLength(3);
     });
 
@@ -714,7 +752,11 @@ describe("ConnectedShareDialog", () => {
     it("sends to the remembered channel without asking again", async () => {
       seedStorage({ destination: "slack", target: "C1", instance: "acme" });
       render(
-        <ConnectedShareDialog open onOpenChange={vi.fn()} artifact={artifact} />,
+        <ConnectedShareDialog
+          open
+          onOpenChange={vi.fn()}
+          artifact={artifact}
+        />,
       );
 
       // No destination pick and no channel pick: recall answered both.
@@ -738,7 +780,11 @@ describe("ConnectedShareDialog", () => {
       // outcome, because a self-send cannot leak into the wrong room.
       seedStorage({ destination: "slack", target: "C-deleted" });
       render(
-        <ConnectedShareDialog open onOpenChange={vi.fn()} artifact={artifact} />,
+        <ConnectedShareDialog
+          open
+          onOpenChange={vi.fn()}
+          artifact={artifact}
+        />,
       );
 
       const confirm = await screen.findByTestId("connected-share-confirm");
@@ -761,36 +807,42 @@ describe("ConnectedShareDialog", () => {
       seedStorage({ destination: "slack", target: "C1" });
       mocks.localFetch.mockImplementation(
         async (path: string, init?: RequestInit) => {
-        if (path === "/connections") {
-          return jsonResponse({
-            data: [
-              { id: "slack", connected: false },
-              { id: "linear", connected: true },
-            ],
-          });
-        }
-        if (path === "/connections/linear/proxy/graphql") {
-          const body = JSON.parse((init as RequestInit)?.body as string);
-          if (body?.variables?.input) {
+          if (path === "/connections") {
+            return jsonResponse({
+              data: [
+                { id: "slack", connected: false },
+                { id: "linear", connected: true },
+              ],
+            });
+          }
+          if (path === "/connections/linear/proxy/graphql") {
+            const body = JSON.parse((init as RequestInit)?.body as string);
+            if (body?.variables?.input) {
+              return jsonResponse({
+                data: {
+                  issueCreate: {
+                    success: true,
+                    issue: { id: "i1", identifier: "COR-1", title: "Roadmap" },
+                  },
+                },
+              });
+            }
             return jsonResponse({
               data: {
-                issueCreate: {
-                  success: true,
-                  issue: { id: "i1", identifier: "COR-1", title: "Roadmap" },
-                },
+                teams: { nodes: [{ id: "T1", name: "Core", key: "COR" }] },
               },
             });
           }
-          return jsonResponse({
-            data: { teams: { nodes: [{ id: "T1", name: "Core", key: "COR" }] } },
-          });
-        }
-        throw new Error(`unexpected request: ${path}`);
+          throw new Error(`unexpected request: ${path}`);
         },
       );
 
       render(
-        <ConnectedShareDialog open onOpenChange={vi.fn()} artifact={artifact} />,
+        <ConnectedShareDialog
+          open
+          onOpenChange={vi.fn()}
+          artifact={artifact}
+        />,
       );
 
       await openDestinations();

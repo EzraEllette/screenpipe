@@ -120,6 +120,7 @@ const DESTINATION_APP: Record<string, string> = {
   linear: "Linear",
   "chat-linear": "Linear",
   "chat-notion": "Notion",
+  "chat-obsidian": "Obsidian",
 };
 
 /**
@@ -156,7 +157,10 @@ export function rememberedOneTapSend(
   remembered: RememberedShare | null,
 ): { destination: "slack" | "linear"; target: string; label: string } | null {
   if (!remembered?.target || !remembered.targetLabel) return null;
-  if (remembered.destination !== "slack" && remembered.destination !== "linear") {
+  if (
+    remembered.destination !== "slack" &&
+    remembered.destination !== "linear"
+  ) {
     return null;
   }
   return {

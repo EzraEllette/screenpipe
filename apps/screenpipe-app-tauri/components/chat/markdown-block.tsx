@@ -7,6 +7,7 @@ import React from "react";
 import { emit } from "@tauri-apps/api/event";
 import rehypeRaw from "rehype-raw";
 import remarkGfm from "remark-gfm";
+import type { Options as ReactMarkdownOptions } from "react-markdown";
 import {
   MemoizedReactMarkdown,
   chatUrlTransform,
@@ -24,7 +25,22 @@ import { cn } from "@/lib/utils";
 import { sanitizeToolCallXml } from "@/lib/utils/sanitize-tool-call-xml";
 import { LinkPreviewAnchor } from "@/components/chat/link-preview-anchor";
 
-interface MarkdownBlockProps {
+export interface MarkdownBlockOptions {
+  /** Extra parsing passes layered onto the main Chat Markdown pipeline. */
+  additionalRemarkPlugins?: ReactMarkdownOptions["remarkPlugins"];
+  /** Extend the main Chat URL allowlist for a bounded embedded surface. */
+  urlTransform?: ReactMarkdownOptions["urlTransform"];
+  /** Return a node for links owned by the embedding surface; undefined falls back to Chat. */
+  renderLink?: (input: {
+    href?: string;
+    children: React.ReactNode;
+  }) => React.ReactNode | undefined;
+  /** Text-only surfaces can retain Chat formatting without rendering media. */
+  suppressImages?: boolean;
+  className?: string;
+}
+
+interface MarkdownBlockProps extends MarkdownBlockOptions {
   text: string;
   isUser: boolean;
   onOpenViewerPath?: (path: string) => void;
@@ -39,6 +55,11 @@ export function MarkdownBlock({
   isUser,
   onOpenViewerPath,
   renderSpecialCodeBlock,
+  additionalRemarkPlugins,
+  urlTransform,
+  renderLink,
+  suppressImages = false,
+  className,
 }: MarkdownBlockProps) {
   const renderText = rewriteLocalMarkdownLinksForChat(
     isUser ? text : sanitizeToolCallXml(text),
@@ -49,9 +70,10 @@ export function MarkdownBlock({
       className={cn(
         "prose prose-sm max-w-full break-words overflow-hidden [word-break:break-word] flex flex-col items-start",
         isUser ? "text-foreground dark:prose-invert" : "dark:prose-invert",
+        className,
       )}
-      remarkPlugins={[remarkGfm]}
-      urlTransform={chatUrlTransform}
+      remarkPlugins={[remarkGfm, ...(additionalRemarkPlugins ?? [])]}
+      urlTransform={urlTransform ?? chatUrlTransform}
       rehypePlugins={[rehypeRaw]}
       components={{
         p({ children }) {
@@ -92,6 +114,9 @@ export function MarkdownBlock({
           );
         },
         a({ href, children, node: _node, ...props }) {
+          const embeddedLink = renderLink?.({ href, children });
+          if (embeddedLink !== undefined) return <>{embeddedLink}</>;
+
           if (
             href?.startsWith("screenpipe://timeline") ||
             href?.startsWith("screenpipe://frame") ||
@@ -176,6 +201,13 @@ export function MarkdownBlock({
             </a>
           );
         },
+        ...(suppressImages
+          ? {
+              img() {
+                return null;
+              },
+            }
+          : {}),
         // Shared, theme-aware code rendering (block + inline + pre passthrough)
         // so a fenced block looks identical in the chat and the file-preview
         // sidebar, and stays readable in light and dark mode.

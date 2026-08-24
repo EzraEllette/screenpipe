@@ -53,6 +53,18 @@ describe("buildMeetingChatPrompt", () => {
     expect(buildMeetingChatPrompt(context, "q", [])).toContain("3:34");
   });
 
+  it("keeps the meeting primary but permits explicit bounded history searches", () => {
+    const prompt = buildMeetingChatPrompt(
+      context,
+      "check my screenpipe data for ten related demos",
+      [],
+    );
+    expect(prompt).toContain("broader screenpipe history");
+    expect(prompt).toContain("search-content");
+    expect(prompt).toContain("smallest relevant time range");
+    expect(prompt).toContain("Never imply broader evidence was part of this meeting");
+  });
+
   it("cases 2/16/20: discloses a transcript that is still arriving", () => {
     const settling = buildMeetingChatPrompt(
       { ...context, transcriptSettling: true },

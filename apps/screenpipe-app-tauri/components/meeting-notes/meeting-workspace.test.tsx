@@ -12,7 +12,24 @@ import {
   MEETING_SHELL_CLASS,
   MeetingSummarySurface,
   MeetingWorkspaceTabs,
+  preferredMeetingWorkspaceTab,
 } from "./meeting-workspace";
+
+describe("preferred meeting workspace tab", () => {
+  it("opens a completed meeting on its saved outcome", () => {
+    expect(
+      preferredMeetingWorkspaceTab(
+        "## Notes\nPrivate context.\n\n## Summary\nDecision and next step.",
+      ),
+    ).toBe("summary");
+  });
+
+  it("keeps notes primary until a real summary exists", () => {
+    expect(preferredMeetingWorkspaceTab(null)).toBe("notes");
+    expect(preferredMeetingWorkspaceTab("## Summary\n\n")).toBe("notes");
+    expect(preferredMeetingWorkspaceTab("working note")).toBe("notes");
+  });
+});
 
 describe("meeting shell width contract", () => {
   // The header (title, chips, tabs) used to sit in max-w-5xl while the note
