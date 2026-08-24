@@ -296,6 +296,7 @@ export function buildActivityLedgerArtifactsPath(range: TimeRange): string {
     end_time: range.end.toISOString(),
     depth: "task",
     include_artifacts: "true",
+    refresh: "false",
   });
   return `/activity-ledger?${params.toString()}`;
 }
@@ -1090,10 +1091,12 @@ function ArtifactPreviewTooltip({
 function ActivityEntryArtifacts({
   entry,
   intervals,
+  artifactsLoading,
   openEvidence,
 }: {
   entry: ActivityHistoryEntry;
   intervals: ActivityLedgerArtifactInterval[];
+  artifactsLoading: boolean;
   openEvidence: (evidence: ActivityArtifact) => void;
 }) {
   const artifacts = useMemo(
@@ -1172,7 +1175,7 @@ function ActivityEntryArtifacts({
               key={artifactKey(evidence)}
               evidence={evidence}
               artifactName={artifactName}
-              artifactsLoading={false}
+              artifactsLoading={artifactsLoading}
               loadPreviewFrames={loadPreviewFrames}
               onPreviewLoaded={onPreviewLoaded}
             >
@@ -1988,7 +1991,7 @@ Re-query Screenpipe only inside the cited time range and use the cited frames an
                 </div>
               </div>
             )
-          ) : history && ledgerArtifactsReady ? (
+          ) : history ? (
             <section aria-label="Activity history">
               {groupedEntries.map(([day, entries]) => (
                 <div key={day} className="mb-12 last:mb-0">
@@ -2034,6 +2037,7 @@ Re-query Screenpipe only inside the cited time range and use the cited frames an
                           <ActivityEntryArtifacts
                             entry={entry}
                             intervals={ledgerIntervals}
+                            artifactsLoading={!ledgerArtifactsReady}
                             openEvidence={openEvidence}
                           />
                           <span aria-hidden="true">·</span>
@@ -2061,7 +2065,7 @@ Re-query Screenpipe only inside the cited time range and use the cited frames an
                 </div>
               ))}
             </section>
-          ) : !ledgerArtifactsReady || (loading && !summary) ? (
+          ) : loading && !summary ? (
             <ActivityLedgerSkeleton label="Reading your day…" />
           ) : error ? (
             <p className="text-sm text-muted-foreground">{error}</p>

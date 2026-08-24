@@ -484,6 +484,7 @@ describe("activity history helpers", () => {
     expect(artifacts.pathname).toBe("/activity-ledger");
     expect(artifacts.searchParams.get("depth")).toBe("task");
     expect(artifacts.searchParams.get("include_artifacts")).toBe("true");
+    expect(artifacts.searchParams.get("refresh")).toBe("false");
   });
 
   it("requires more than 10 uncovered minutes before appending", () => {
@@ -921,7 +922,7 @@ describe("activity history helpers", () => {
     expect(within(previews[0]).getByText("github.com")).toBeVisible();
   });
 
-  it("shows the complete icon set together before preview loading starts", async () => {
+  it("shows persisted evidence before enriching the complete icon set", async () => {
     const persisted = parseActivityHistoryResponse(HISTORY_RESPONSE, {
       start: new Date("2026-08-17T16:00:00Z"),
       end: new Date("2026-08-17T20:00:00Z"),
@@ -961,10 +962,18 @@ describe("activity history helpers", () => {
       mocks.localFetch.mock.calls.filter(([path]) =>
         String(path).startsWith("/frames/preview-samples?"),
       );
-    await waitFor(() =>
-      expect(screen.getByTestId("activity-ledger-skeleton")).toBeVisible(),
-    );
-    expect(screen.queryByRole("link", { name: /Open Arc/ })).toBeNull();
+    expect(
+      await screen.findByRole("heading", {
+        name: "Fixed a capture reliability regression",
+      }),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("link", { name: /Open Arc .* in Timeline/ }),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("link", { name: /Open Transcript .* in Timeline/ }),
+    ).toBeVisible();
+    expect(screen.queryByTestId("activity-ledger-skeleton")).toBeNull();
     expect(previewCalls()).toHaveLength(0);
 
     await act(async () => {
@@ -1745,15 +1754,7 @@ describe("ActivityLedger", () => {
   });
 
   it("loads a completed encrypted ledger without regenerating it", async () => {
-    mocks.localFetch.mockImplementation((path: string) =>
-      path.startsWith("/activity-ledger?")
-        ? Promise.resolve({
-            ok: true,
-            status: 200,
-            json: async () => LEDGER_ARTIFACTS_RESPONSE,
-          })
-        : new Promise(() => undefined),
-    );
+    mocks.localFetch.mockImplementation(() => new Promise(() => undefined));
     mocks.loadPersistedActivityHistory.mockImplementation(
       async (_producer: string, range: { start: Date; end: Date }) => ({
         entries: parseActivityHistoryResponse(HISTORY_RESPONSE, range).entries,
@@ -1767,6 +1768,20 @@ describe("ActivityLedger", () => {
     );
 
     render(<ActivityLedger />);
+
+    expect(
+      await screen.findByText("Fixed a capture reliability regression"),
+    ).toBeVisible();
+    expect(mocks.generateActivityHistory).not.toHaveBeenCalled();
+    expect(
+      mocks.localFetch.mock.calls.some(([path]) => {
+        const url = new URL(String(path), "http://localhost");
+        return (
+          url.pathname === "/activity-ledger" &&
+          url.searchParams.get("refresh") === "false"
+        );
+      }),
+    ).toBe(true);
 
     expect(
       await screen.findByRole("heading", {

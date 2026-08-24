@@ -40,6 +40,15 @@ pub struct ActivityLedgerQuery {
     /// context they did not request.
     #[serde(default)]
     pub include_artifacts: bool,
+    /// Refresh the deterministic ledger before reading it. The desktop
+    /// Activities page disables this because generated history is already
+    /// persisted and artifact enrichment must not block first paint.
+    #[serde(default = "default_refresh")]
+    pub refresh: bool,
+}
+
+fn default_refresh() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, OaSchema)]
@@ -116,15 +125,17 @@ pub async fn get_activity_ledger(
     if query.end_time - query.start_time > Duration::days(31) {
         return Err(bad_request("activity ledger ranges are limited to 31 days"));
     }
-    crate::activity_ledger::reconcile_range(&state.db, query.start_time, query.end_time)
-        .await
-        .map_err(|error| {
-            error!(%error, "activity ledger generation failed");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                JsonResponse(json!({"error": "activity ledger generation failed"})),
-            )
-        })?;
+    if query.refresh {
+        crate::activity_ledger::reconcile_range(&state.db, query.start_time, query.end_time)
+            .await
+            .map_err(|error| {
+                error!(%error, "activity ledger generation failed");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    JsonResponse(json!({"error": "activity ledger generation failed"})),
+                )
+            })?;
+    }
     let include_actions = query.depth == ActivityLedgerDepth::Action;
     let include_evidence = include_actions || query.include_artifacts;
     let records = state
