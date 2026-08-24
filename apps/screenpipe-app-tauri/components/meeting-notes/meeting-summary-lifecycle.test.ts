@@ -262,7 +262,7 @@ describe("meeting summary lifecycle", () => {
       status: "failed",
       error_type: "daily_limit",
     });
-    expect(copy).toContain("usage limit is reached");
+    expect(copy).toContain("AI usage limit");
     expect(copy).toContain("Your meeting and transcript are safe");
   });
 });
@@ -281,6 +281,7 @@ describe("meetingSummaryFailure", () => {
   it("tells the user rate limits are transient and retryable", () => {
     const failure = meetingSummaryFailure(failed("rate_limited"));
     expect(failure.kind).toBe("rate_limit");
+    expect(failure.title).toBe("AI is temporarily rate-limited");
     expect(failure.retryable).toBe(true);
     expect(failure.copy).toContain("rate-limited");
     expect(failure.upgrade).toBeNull();
@@ -294,8 +295,10 @@ describe("meetingSummaryFailure", () => {
     ]) {
       const failure = meetingSummaryFailure(failed(errorType));
       expect(failure.retryable).toBe(false);
+      expect(failure.title).toBe("AI usage limit reached");
       expect(failure.copy).toContain("usage limit");
       expect(failure.copy).toContain("Your meeting and transcript are safe");
+      expect(failure.changeModelRecommended).toBe(true);
     }
   });
 
@@ -326,6 +329,7 @@ describe("meetingSummaryFailure", () => {
   it("suggests switching models when the plan gates the model", () => {
     const failure = meetingSummaryFailure(failed("model_not_allowed"));
     expect(failure.kind).toBe("model_not_allowed");
+    expect(failure.title).toBe("Summary model not included");
     expect(failure.retryable).toBe(false);
     expect(failure.copy.toLowerCase()).toContain("model");
   });
@@ -335,6 +339,7 @@ describe("meetingSummaryFailure", () => {
       failed("auth_failed", "authentication failed — check API key"),
     );
     expect(failure.kind).toBe("auth_failed");
+    expect(failure.title).toBe("AI provider needs attention");
     expect(failure.retryable).toBe(false);
     expect(failure.copy).toContain("AI provider");
     expect(failure.copy).toContain("API key");
@@ -351,6 +356,7 @@ describe("meetingSummaryFailure", () => {
   it("keeps the reassuring generic copy for unknown failures", () => {
     const failure = meetingSummaryFailure(failed("network", "socket hang up"));
     expect(failure.retryable).toBe(true);
+    expect(failure.changeModelRecommended).toBe(false);
     expect(failure.copy).toBe(
       "Your meeting and transcript are safe. Retry when you're ready.",
     );

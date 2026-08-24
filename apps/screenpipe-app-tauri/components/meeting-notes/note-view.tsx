@@ -162,6 +162,7 @@ import {
 } from "./meeting-summary-lifecycle";
 import { QUOTA_PLAN_LABELS } from "@/lib/chat/quota-errors";
 import { openExternalUrl } from "@/lib/open-external-url";
+import { openBusinessUpgradeSurface } from "@/lib/upgrade-flow";
 import { MeetingSummaryTransition } from "./meeting-summary-transition";
 import {
   advanceMeetingSummaryStream,
@@ -481,7 +482,7 @@ export function NoteView({
 
   const handleSummaryPresetSelect = useCallback(
     async (preset: AIPreset | null) => {
-      if (!preset || summaryPresetSaving) return;
+      if (!preset || summaryPresetSaving) return false;
       const previousPresetIds = summaryPresetIds;
       const optimisticPresetIds = [
         preset.id,
@@ -502,6 +503,7 @@ export function NoteView({
           pipe_slug: summaryPipeSlug,
           provider: preset.provider,
         });
+        return true;
       } catch (error) {
         setSummaryPresetIds(previousPresetIds);
         console.error("failed to save meeting summary model", error);
@@ -510,6 +512,7 @@ export function NoteView({
           description: "your previous model is still selected.",
           variant: "destructive",
         });
+        return false;
       } finally {
         setSummaryPresetSaving(false);
       }
@@ -1697,10 +1700,35 @@ export function NoteView({
           : "notes and transcript saved locally",
     };
   })();
-  const summaryUpgrade =
+  const summaryFailure =
     visibleSummaryLifecycle.kind === "failed"
-      ? meetingSummaryFailure(visibleSummaryLifecycle.execution).upgrade
+      ? meetingSummaryFailure(visibleSummaryLifecycle.execution)
       : null;
+  const summaryUpgrade = summaryFailure?.upgrade ?? null;
+  const handleSummaryUpgrade = useCallback(async () => {
+    if (!summaryUpgrade) return;
+    posthog.capture("meeting_summary_upgrade_clicked", {
+      source: "meeting-summary-limit",
+      target_plan: summaryUpgrade.requiredPlan,
+    });
+    try {
+      // The native account surface owns the common Basic → Business offer.
+      // Higher tiers and Basic have gateway-owned billing URLs whose exact
+      // target cannot be represented by that one offer card.
+      if (summaryUpgrade.requiredPlan === "business") {
+        await openBusinessUpgradeSurface("meeting-summary-limit");
+      } else {
+        await openExternalUrl(summaryUpgrade.upgradeUrl);
+      }
+    } catch (error) {
+      console.error("failed to open meeting summary upgrade", error);
+      toast({
+        title: "couldn't open upgrade options",
+        description: "try again from Settings → Account.",
+        variant: "destructive",
+      });
+    }
+  }, [summaryUpgrade, toast]);
   // Notes and Summary now own their summary lifecycle in the reading area.
   // Repeating the same state in the footer made the page look like two jobs
   // were running. Transcript still gets the global footer because it has no
@@ -2405,6 +2433,53 @@ export function NoteView({
               !retranscribing &&
               !summaryPresetSaving
             }
+            recovery={
+              summaryFailure
+                ? {
+                    title: summaryFailure.title,
+                    detail: summaryFailure.copy,
+                    retryable: summaryFailure.retryable,
+                    upgrade: summaryUpgrade
+                      ? {
+                          label: `upgrade to ${QUOTA_PLAN_LABELS[
+                            summaryUpgrade.requiredPlan
+                          ].toLowerCase()}`,
+                          onSelect: () => void handleSummaryUpgrade(),
+                        }
+                      : undefined,
+                    model: summaryFailure.changeModelRecommended
+                      ? {
+                          selectedId: summaryPresetId,
+                          selectedLabel: summaryPreset
+                            ? `${summaryPreset.id} · ${summaryPreset.model}`
+                            : "no summary model selected",
+                          saving: summaryPresetSaving,
+                          options: summaryPresets
+                            .filter((preset) => preset.id !== summaryPresetId)
+                            .map((preset) => ({
+                              id: preset.id,
+                              label: preset.id,
+                              detail: `${preset.provider.replace(/-/g, " ")} · ${preset.model}`,
+                              onSelect: () => {
+                                void (async () => {
+                                  const changed =
+                                    await handleSummaryPresetSelect(preset);
+                                  if (changed) await handleSummarize();
+                                })();
+                              },
+                            })),
+                          onManage: () => {
+                            window.dispatchEvent(
+                              new CustomEvent("open-settings", {
+                                detail: { section: "ai" },
+                              }),
+                            );
+                          },
+                        }
+                      : undefined,
+                  }
+                : undefined
+            }
             // Mounted with the tab rather than always: the strip pulls the
             // meeting's transcript rows and frame samples, and opening a
             // meeting to read notes or the transcript should not pay for
@@ -2578,9 +2653,7 @@ export function NoteView({
                         type="button"
                         data-testid="meeting-summary-upgrade-link"
                         className="underline underline-offset-2 transition-colors hover:text-foreground"
-                        onClick={() =>
-                          void openExternalUrl(summaryUpgrade.upgradeUrl)
-                        }
+                        onClick={() => void handleSummaryUpgrade()}
                       >
                         upgrade to{" "}
                         {QUOTA_PLAN_LABELS[

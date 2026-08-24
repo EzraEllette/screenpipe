@@ -332,4 +332,100 @@ describe("meeting summary surface", () => {
     expect(screen.getByRole("status")).toHaveTextContent("writing summary");
     expect(screen.getByTestId("meeting-summary-stream-cursor")).toBeVisible();
   });
+
+  it("turns a terminal usage limit into explicit upgrade and model recovery", async () => {
+    const onGenerate = vi.fn();
+    const onUpgrade = vi.fn();
+    const onSelectModel = vi.fn();
+    const onManage = vi.fn();
+    render(
+      <MeetingSummarySurface
+        note="notes only"
+        state="attention"
+        detail="summary needs attention"
+        onGenerate={onGenerate}
+        canGenerate
+        recovery={{
+          title: "AI usage limit reached",
+          detail:
+            "The configured summary model has no usage left. Choose another model or upgrade.",
+          retryable: false,
+          upgrade: {
+            label: "upgrade to business",
+            onSelect: onUpgrade,
+          },
+          model: {
+            selectedId: "cloud",
+            selectedLabel: "screenpipe cloud · frontier",
+            saving: false,
+            options: [
+              {
+                id: "local",
+                label: "local",
+                detail: "ollama · llama 3.2",
+                onSelect: onSelectModel,
+              },
+            ],
+            onManage,
+          },
+        }}
+      />,
+    );
+
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent("AI usage limit reached");
+    expect(alert).toHaveTextContent("configured summary model");
+    expect(
+      screen.getByText("Generation stopped before a summary was written."),
+    ).toBeVisible();
+    expect(screen.getAllByText(/configured summary model/i)).toHaveLength(1);
+    expect(screen.queryByRole("button", { name: "retry" })).toBeNull();
+    expect(screen.queryByText("no summary yet")).toBeNull();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "upgrade to business" }),
+    );
+    expect(onUpgrade).toHaveBeenCalledOnce();
+
+    fireEvent.keyDown(
+      screen.getByRole("button", { name: /change summary model/i }),
+      { key: "Enter" },
+    );
+    const localModel = (await screen.findByText("local")).closest(
+      '[role="menuitem"]',
+    );
+    expect(localModel).not.toBeNull();
+    fireEvent.click(localModel!);
+    expect(onSelectModel).toHaveBeenCalledOnce();
+
+    fireEvent.keyDown(
+      screen.getByRole("button", { name: /change summary model/i }),
+      { key: "Enter" },
+    );
+    fireEvent.click(
+      await screen.findByRole("menuitem", { name: "manage models & keys" }),
+    );
+    expect(onManage).toHaveBeenCalledOnce();
+  });
+
+  it("keeps retry available for a temporary rate limit", () => {
+    const onGenerate = vi.fn();
+    render(
+      <MeetingSummarySurface
+        note="notes only"
+        state="attention"
+        detail="summary needs attention"
+        onGenerate={onGenerate}
+        canGenerate
+        recovery={{
+          title: "AI is temporarily rate-limited",
+          detail: "Retry in a moment.",
+          retryable: true,
+        }}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "retry" }));
+    expect(onGenerate).toHaveBeenCalledOnce();
+  });
 });
