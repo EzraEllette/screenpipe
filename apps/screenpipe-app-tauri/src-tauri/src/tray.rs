@@ -262,6 +262,21 @@ struct PauseTimer {
 
 static PAUSE_TIMER: Lazy<Mutex<Option<PauseTimer>>> = Lazy::new(|| Mutex::new(None));
 
+#[derive(Debug, PartialEq, Eq)]
+enum PauseTimerWakeDecision {
+    Resume,
+    RecoveryReoffered,
+    CheckFailed,
+}
+
+fn pause_timer_wake_decision(recovery_reoffered: Result<bool, ()>) -> PauseTimerWakeDecision {
+    match recovery_reoffered {
+        Ok(false) => PauseTimerWakeDecision::Resume,
+        Ok(true) => PauseTimerWakeDecision::RecoveryReoffered,
+        Err(()) => PauseTimerWakeDecision::CheckFailed,
+    }
+}
+
 fn cancel_pause_timer() {
     if let Some(t) = PAUSE_TIMER.lock().unwrap_or_else(|e| e.into_inner()).take() {
         t.handle.abort();
@@ -1718,8 +1733,30 @@ fn handle_menu_event(app_handle: &AppHandle, event: tauri::menu::MenuEvent) {
             let app_for_resume = app_handle.clone();
             let handle = tauri::async_runtime::spawn(async move {
                 tokio::time::sleep(total).await;
-                let _ = app_for_resume.emit("shortcut-start-recording", ());
-                send_notify("Recording resumed", "screenpipe is recording again.");
+                let recovery_check =
+                    crate::db_recovery_notifications::reoffer_quarantined_database_recovery(
+                        &app_for_resume,
+                    );
+                let decision = pause_timer_wake_decision(
+                    recovery_check
+                        .as_ref()
+                        .map(|reoffered| *reoffered)
+                        .map_err(|_| ()),
+                );
+                match decision {
+                    PauseTimerWakeDecision::Resume => {
+                        let _ = app_for_resume.emit("shortcut-start-recording", ());
+                        send_notify("Recording resumed", "screenpipe is recording again.");
+                    }
+                    PauseTimerWakeDecision::RecoveryReoffered => {}
+                    PauseTimerWakeDecision::CheckFailed => {
+                        if let Err(error) = recovery_check {
+                            error!(
+                                "failed to check whether database recovery is required at pause timer wake: {error}"
+                            );
+                        }
+                    }
+                }
             });
             *PAUSE_TIMER.lock().unwrap_or_else(|e| e.into_inner()) = Some(PauseTimer {
                 handle,
@@ -2263,6 +2300,30 @@ fn to_accelerator(shortcut: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pause_timer_wake_resumes_when_database_is_healthy() {
+        assert_eq!(
+            pause_timer_wake_decision(Ok(false)),
+            PauseTimerWakeDecision::Resume
+        );
+    }
+
+    #[test]
+    fn pause_timer_wake_stays_paused_when_database_is_quarantined() {
+        assert_eq!(
+            pause_timer_wake_decision(Ok(true)),
+            PauseTimerWakeDecision::RecoveryReoffered
+        );
+    }
+
+    #[test]
+    fn pause_timer_wake_fails_closed_when_quarantine_check_errors() {
+        assert_eq!(
+            pause_timer_wake_decision(Err(())),
+            PauseTimerWakeDecision::CheckFailed
+        );
+    }
 
     #[test]
     fn recording_status_text_distinguishes_meetings_only_audio_states() {
