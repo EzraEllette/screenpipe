@@ -331,6 +331,9 @@ async fn bootstrap_sck_stream(monitor_id: u32) {
     if !preview_capture_expected() {
         return;
     }
+    if !crate::permissions::screen_recording_permission_usable_in_process() {
+        return;
+    }
     if user_disabled_monitor_ids().contains(&monitor_id) {
         return;
     }
