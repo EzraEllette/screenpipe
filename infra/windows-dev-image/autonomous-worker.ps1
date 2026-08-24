@@ -42,7 +42,7 @@ function Get-KeyVaultSecret([string] $Name) {
     try {
       $token = Get-ManagedIdentityToken 'https://vault.azure.net'
       $secret = (Invoke-RestMethod -Headers @{ Authorization = "Bearer $token" } -Method Get -Uri "https://$($task.vaultName).vault.azure.net/secrets/$Name`?api-version=7.4").value
-      if ($secret) { return $secret }
+      if ($secret) { return $secret.Trim() }
     } catch {
       if ($attempt -eq 30) { throw }
     }
