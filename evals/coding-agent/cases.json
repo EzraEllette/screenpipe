@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "suite": "screenpipe-app-coding-agent-regressions",
-  "dataset_version": "2026-08-23.1",
+  "dataset_version": "2026-08-24.1",
   "suite_type": "regression",
   "owner": "screenpipe engineering",
   "policy": {
@@ -532,6 +532,40 @@
           { "source_path": "apps/screenpipe-app-tauri/lib/stores/acp-session-config.test.ts" }
         ],
         "command": "cd apps/screenpipe-app-tauri && NODE_OPTIONS=--localstorage-file=.eval-localstorage bun x vitest run --config vitest.config.ts components/chat/standalone/acp-permission-selector.test.tsx lib/stores/acp-session-config.test.ts"
+      }
+    },
+    {
+      "id": "app-sqlite-process-ownership",
+      "name": "Keep one live SQLite owner per physical database",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "b68c120070351b90afb9e1df1e5f2c866f7fe396",
+        "pull_request": "https://github.com/screenpipe/screenpipe/pull/6517"
+      },
+      "base_ref": "6301ad06342d4bad420598db86db9e44423b05b6",
+      "oracle_ref": "b68c120070351b90afb9e1df1e5f2c866f7fe396",
+      "gate": "advisory",
+      "trigger_paths": [
+        "crates/screenpipe-db/src/db/**",
+        "crates/screenpipe-db/src/write_queue.rs",
+        "crates/screenpipe-sqlite-coordinator/src/lib.rs"
+      ],
+      "tags": ["regression", "escaped-failure", "database", "sqlite", "macos", "data-integrity", "process-ownership"],
+      "prompt": "On macOS, a live capture database can lose its process-wide SQLite ownership lock when another independently managed database generation or helper opens the same physical file. A foreign writable SQLite process can then attach while the original pools are still live, risking WAL-index invalidation and persistent disk-I/O failures. Keep exactly one live owner for each canonical physical database path, reject a duplicate before it can disturb the lock, avoid reopening an existing live file through a different SQLite path, release ownership only after authoritative pool shutdown, and allow a clean replacement after close. Preserve in-memory databases and safe missing-file recovery.",
+      "agent_timeout_seconds": 1800,
+      "grader_dependency_links": [
+        { "source_path": "target", "destination_path": "target" }
+      ],
+      "grader": {
+        "timeout_seconds": 1800,
+        "fixtures": [
+          {
+            "local_path": "graders/app-sqlite-process-ownership.rs",
+            "destination_path": "crates/screenpipe-db/tests/eval_sqlite_process_ownership.rs"
+          },
+          { "source_path": "crates/screenpipe-db/tests/sqlite_architecture_invariants_test.rs" }
+        ],
+        "command": "CARGO_TARGET_DIR=${SCREENPIPE_EVAL_CARGO_TARGET_DIR:-target} cargo test -p screenpipe-db --test eval_sqlite_process_ownership --test sqlite_architecture_invariants_test"
       }
     }
   ]
