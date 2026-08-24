@@ -17,6 +17,16 @@ build resource group. The gallery remains in `rg-screenpipe-win-dev-images`.
 ./infra/windows-dev-image/build.sh 2026.8.24
 ```
 
+If the host loses Azure connectivity after the exact tagged build VM is created
+but before provisioning begins, resume that VM explicitly:
+
+```bash
+RESUME_EXISTING_BUILD=true ./infra/windows-dev-image/build.sh 2026.8.24
+```
+
+Normal runs refuse pre-existing build groups. Resume mode verifies the VM's
+project, environment, and image-version tags before using it.
+
 After publishing, launch a fresh VM from the exact image version, run
 `smoke.ps1` through Azure Run Command, and verify an RDP login before changing
 the image version's `validated` tag to `true`. Never use an unvalidated version

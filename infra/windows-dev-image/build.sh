@@ -15,6 +15,7 @@ definition_name="${AZURE_IMAGE_DEFINITION:-screenpipeWindowsDev}"
 image_version="${1:-$(date -u +%Y.%m.%d)}"
 vm_name="spwindevbuild"
 build_succeeded=false
+resume_existing="${RESUME_EXISTING_BUILD:-false}"
 
 for command in az jq openssl; do
   command -v "$command" >/dev/null || { printf 'missing command: %s\n' "$command" >&2; exit 1; }
@@ -25,9 +26,17 @@ if az sig image-version show --resource-group "$gallery_group" --gallery-name "$
   printf 'image version already exists: %s\n' "$image_version" >&2
   exit 1
 fi
-if [[ "$(az group exists --name "$build_group")" == 'true' ]]; then
+build_group_exists="$(az group exists --name "$build_group")"
+if [[ "$build_group_exists" == 'true' && "$resume_existing" != 'true' ]]; then
   printf 'build resource group already exists; inspect or remove it before retrying: %s\n' "$build_group" >&2
   exit 1
+fi
+if [[ "$build_group_exists" == 'true' ]]; then
+  build_identity="$(az vm show --resource-group "$build_group" --name "$vm_name" --query "[tags.project, tags.environment, tags.\"image-version\"] | join('|', @)" --output tsv)"
+  if [[ "$build_identity" != "screenpipe-windows-dev-image|build|$image_version" ]]; then
+    printf 'existing build VM does not match the requested image build: %s\n' "$build_identity" >&2
+    exit 1
+  fi
 fi
 
 az group create --name "$gallery_group" --location "$location" --tags project=screenpipe-windows-dev-image environment=shared managed-by=screenpipe-repo --output none
@@ -47,8 +56,7 @@ if ! az sig image-definition show --resource-group "$gallery_group" --gallery-na
     --output none
 fi
 
-az group create --name "$build_group" --location "$location" --tags project=screenpipe-windows-dev-image environment=ephemeral managed-by=screenpipe-repo --output none
-password="Sp!$(openssl rand -hex 24)aA9"
+password=''
 provision_result="$(mktemp -t screenpipe-win-dev-provision.XXXXXX.json)"
 cleanup() {
   status=$?
@@ -56,30 +64,37 @@ cleanup() {
   unset password
   rm -f "$provision_result"
   if [[ "$build_succeeded" != 'true' ]] && [[ "$(az group exists --name "$build_group" 2>/dev/null)" == 'true' ]]; then
-    az group delete --name "$build_group" --yes --output none || true
+    for _ in $(seq 1 6); do
+      if az group delete --name "$build_group" --yes --output none; then break; fi
+      sleep 10
+    done
   fi
   exit "$status"
 }
 trap cleanup EXIT
 
-az vm create \
-  --resource-group "$build_group" \
-  --name "$vm_name" \
-  --location "$location" \
-  --image MicrosoftWindowsDesktop:windows-11:win11-24h2-pro:latest \
-  --size "${AZURE_VM_SIZE:-Standard_D16s_v5}" \
-  --security-type TrustedLaunch \
-  --enable-secure-boot true \
-  --enable-vtpm true \
-  --os-disk-size-gb 512 \
-  --storage-sku Premium_LRS \
-  --admin-username screenpipe \
-  --admin-password "$password" \
-  --public-ip-sku Standard \
-  --nsg-rule NONE \
-  --tags project=screenpipe-windows-dev-image environment=build image-version="$image_version" \
-  --output none
-unset password
+if [[ "$build_group_exists" != 'true' ]]; then
+  az group create --name "$build_group" --location "$location" --tags project=screenpipe-windows-dev-image environment=ephemeral managed-by=screenpipe-repo --output none
+  password="Sp!$(openssl rand -hex 24)aA9"
+  az vm create \
+    --resource-group "$build_group" \
+    --name "$vm_name" \
+    --location "$location" \
+    --image MicrosoftWindowsDesktop:windows-11:win11-24h2-pro:latest \
+    --size "${AZURE_VM_SIZE:-Standard_D16s_v5}" \
+    --security-type TrustedLaunch \
+    --enable-secure-boot true \
+    --enable-vtpm true \
+    --os-disk-size-gb 512 \
+    --storage-sku Premium_LRS \
+    --admin-username screenpipe \
+    --admin-password "$password" \
+    --public-ip-sku Standard \
+    --nsg-rule NONE \
+    --tags project=screenpipe-windows-dev-image environment=build image-version="$image_version" \
+    --output none
+  unset password
+fi
 
 az vm run-command invoke \
   --resource-group "$build_group" \
