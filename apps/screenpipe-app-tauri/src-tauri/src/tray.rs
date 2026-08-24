@@ -17,6 +17,7 @@ use crate::window::ShowRewindWindow;
 use anyhow::Result;
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use tauri::async_runtime::JoinHandle;
@@ -56,6 +57,18 @@ struct TrayMenuData {
     disable_timeline: bool,
     /// Both audio and vision are disabled in settings — nothing can record.
     all_capture_disabled: bool,
+    /// Durable SQLite quarantine requires protected recovery, not a normal retry.
+    database_quarantined: bool,
+}
+
+fn database_quarantined_in_data_dir(data_dir: &Path) -> bool {
+    screenpipe_db::sqlite_quarantine_exists(&data_dir.join("db.sqlite"))
+}
+
+fn database_quarantined_for_setting(data_dir_setting: &str) -> bool {
+    crate::config::resolve_data_dir(data_dir_setting)
+        .map(|(data_dir, _)| database_quarantined_in_data_dir(&data_dir))
+        .unwrap_or(false)
 }
 
 /// Gather all data needed by `create_dynamic_menu` on the current (non-main)
@@ -120,6 +133,7 @@ fn prefetch_tray_menu_data(app: &AppHandle) -> TrayMenuData {
     let disable_timeline = settings.recording.disable_timeline;
     let all_capture_disabled =
         settings.recording.disable_audio && settings.recording.disable_vision;
+    let database_quarantined = database_quarantined_for_setting(&settings.data_dir);
 
     let app_ui_hidden = is_app_ui_hidden();
 
@@ -148,6 +162,7 @@ fn prefetch_tray_menu_data(app: &AppHandle) -> TrayMenuData {
         app_ui_hidden,
         disable_timeline,
         all_capture_disabled,
+        database_quarantined,
     }
 }
 
@@ -675,6 +690,7 @@ fn snapshot_menu_state(data: &TrayMenuData, effective_status: RecordingStatus) -
         subscription_plan: data.subscription_plan.clone(),
         hd: hd_menu_state(&hd),
         all_capture_disabled: data.all_capture_disabled,
+        database_quarantined: data.database_quarantined,
     }
 }
 
@@ -831,6 +847,8 @@ struct MenuState {
     hd: HdMenuState,
     /// Both audio and vision disabled in settings.
     all_capture_disabled: bool,
+    /// Durable quarantine state, so clearing it restores normal controls.
+    database_quarantined: bool,
 }
 
 pub fn setup_tray(app: &AppHandle, update_item: Option<&tauri::menu::MenuItem<Wry>>) -> Result<()> {
@@ -1017,7 +1035,11 @@ fn recording_status_text(
     status: RecordingStatus,
     all_capture_disabled: bool,
     audio_capture_status: Option<AudioCaptureStatus>,
+    database_quarantined: bool,
 ) -> &'static str {
+    if database_quarantined {
+        return "◐ Paused · database repair needed";
+    }
     match (status, all_capture_disabled, audio_capture_status) {
         (RecordingStatus::Recording, true, _) => "○ Stopped",
         (RecordingStatus::Recording, false, Some(AudioCaptureStatus::WaitingForMeeting)) => {
@@ -1034,6 +1056,45 @@ fn recording_status_text(
         (RecordingStatus::ScheduledPause, _, _) => "○ Outside work hours",
         (RecordingStatus::Stopped, _, _) => "○ Stopped",
         (RecordingStatus::Error, _, _) => "○ Error",
+    }
+}
+
+#[derive(Debug, PartialEq)]
+enum RecordingControl {
+    RecoverDatabase,
+    Toggle {
+        label: &'static str,
+        checked: bool,
+        enabled: bool,
+    },
+}
+
+fn recording_control(
+    status: RecordingStatus,
+    all_capture_disabled: bool,
+    database_quarantined: bool,
+) -> RecordingControl {
+    if database_quarantined {
+        return RecordingControl::RecoverDatabase;
+    }
+
+    let checked = status == RecordingStatus::Recording && !all_capture_disabled;
+    let label = if all_capture_disabled {
+        "Stopped — no devices enabled"
+    } else {
+        match status {
+            RecordingStatus::Recording => "Recording",
+            RecordingStatus::Paused => "Paused — click to resume",
+            RecordingStatus::ScheduledPause => "Outside work hours — paused by schedule",
+            RecordingStatus::Starting => "Starting…",
+            RecordingStatus::Error => "Error — click to retry",
+            RecordingStatus::Stopped => "Stopped — click to record",
+        }
+    };
+    RecordingControl::Toggle {
+        label,
+        checked,
+        enabled: !all_capture_disabled,
     }
 }
 
@@ -1110,6 +1171,7 @@ fn create_dynamic_menu(
         effective_status,
         all_capture_disabled,
         info.audio_capture_status,
+        data.database_quarantined,
     );
     menu_builder = menu_builder.item(&PredefinedMenuItem::separator(app)?);
 
@@ -1130,7 +1192,7 @@ fn create_dynamic_menu(
             .build(app)?,
     );
 
-    if !all_capture_disabled {
+    if !all_capture_disabled && !data.database_quarantined {
         // Monitors: CheckMenuItem when the sidecar reports a numeric id (per-display
         // pause via /vision/device/*). Older sidecars stay display-only.
         let vision_status = get_vision_device_status();
@@ -1236,7 +1298,10 @@ fn create_dynamic_menu(
     }
 
     // Show "fix permissions" when recording is in error state
-    if effective_status == RecordingStatus::Error && data.has_permission_issue {
+    if effective_status == RecordingStatus::Error
+        && data.has_permission_issue
+        && !data.database_quarantined
+    {
         menu_builder = menu_builder
             .item(&MenuItemBuilder::with_id("fix_permissions", "⚠ Fix permissions").build(app)?);
     }
@@ -1285,28 +1350,37 @@ fn create_dynamic_menu(
             .build(app)?,
     );
 
-    // --- Recording controls ---
-    if !is_tray_item_hidden("tray_recording_controls") {
+    // Database repair is a safety path, not a routine recording control. It
+    // remains available even when enterprise/user policy hides those controls.
+    let recording_control = recording_control(
+        effective_status,
+        all_capture_disabled,
+        data.database_quarantined,
+    );
+    if recording_control == RecordingControl::RecoverDatabase {
+        menu_builder = menu_builder.item(&PredefinedMenuItem::separator(app)?);
+        menu_builder = menu_builder.item(
+            &MenuItemBuilder::with_id("recover_database", "Repair database to resume recording")
+                .build(app)?,
+        );
+    } else if !is_tray_item_hidden("tray_recording_controls") {
         menu_builder = menu_builder.item(&PredefinedMenuItem::separator(app)?);
 
         let is_recording = effective_status == RecordingStatus::Recording && !all_capture_disabled;
-        let label = if all_capture_disabled {
-            "Stopped — no devices enabled"
-        } else {
-            match effective_status {
-                RecordingStatus::Recording => "Recording",
-                RecordingStatus::Paused => "Paused — click to resume",
-                RecordingStatus::ScheduledPause => "Outside work hours — paused by schedule",
-                RecordingStatus::Starting => "Starting…",
-                RecordingStatus::Error => "Error — click to retry",
-                _ => "Stopped — click to record",
+        match recording_control {
+            RecordingControl::RecoverDatabase => unreachable!("quarantine handled above"),
+            RecordingControl::Toggle {
+                label,
+                checked,
+                enabled,
+            } => {
+                let toggle = CheckMenuItemBuilder::with_id("toggle_recording", label)
+                    .checked(checked)
+                    .enabled(enabled)
+                    .build(app)?;
+                menu_builder = menu_builder.item(&toggle);
             }
-        };
-        let toggle = CheckMenuItemBuilder::with_id("toggle_recording", label)
-            .checked(is_recording)
-            .enabled(!all_capture_disabled)
-            .build(app)?;
-        menu_builder = menu_builder.item(&toggle);
+        }
 
         // "Pause for…" submenu — only meaningful while currently recording.
         // Each click stops capture immediately, then a tokio task auto-resumes
@@ -1470,6 +1544,7 @@ fn tray_telemetry_item(menu_id: &str) -> Option<(&'static str, &'static str)> {
         "start_recording" | "stop_recording" | "toggle_recording" => {
             Some(("recording_toggle", "recording"))
         }
+        "recover_database" => Some(("recover_database", "recording")),
         "pause_5" => Some(("pause_5m", "recording")),
         "pause_15" => Some(("pause_15m", "recording")),
         "pause_30" => Some(("pause_30m", "recording")),
@@ -1582,6 +1657,16 @@ fn handle_menu_event(app_handle: &AppHandle, event: tauri::menu::MenuEvent) {
             });
         }
         "start_recording" | "stop_recording" | "toggle_recording" => {
+            match crate::db_recovery_notifications::reoffer_quarantined_database_recovery(
+                app_handle,
+            ) {
+                Ok(true) => return,
+                Ok(false) => {}
+                Err(error) => {
+                    error!("failed to check whether database recovery is required: {error}");
+                    return;
+                }
+            }
             // Manual toggle cancels any pending auto-resume — otherwise a user
             // who paused for 30 min and then resumed early would get re-paused
             // when the original timer fires.
@@ -1604,6 +1689,15 @@ fn handle_menu_event(app_handle: &AppHandle, event: tauri::menu::MenuEvent) {
                     error!("tray rebuild failed: {}", e);
                 }
             });
+        }
+        "recover_database" => {
+            if let Err(error) =
+                crate::db_recovery_notifications::start_quarantined_database_recovery(
+                    app_handle.clone(),
+                )
+            {
+                error!("failed to start protected database recovery: {error}");
+            }
         }
         id if id.starts_with("pause_") => {
             let mins: u64 = id
@@ -2177,6 +2271,7 @@ mod tests {
                 RecordingStatus::Recording,
                 false,
                 Some(AudioCaptureStatus::WaitingForMeeting),
+                false,
             ),
             "● Screen recording · audio waiting for meeting"
         );
@@ -2185,13 +2280,70 @@ mod tests {
                 RecordingStatus::Recording,
                 false,
                 Some(AudioCaptureStatus::MeetingDetectorUnavailable),
+                false,
             ),
             "● Screen recording · meeting detection unavailable"
         );
         assert_eq!(
-            recording_status_text(RecordingStatus::Recording, false, None),
+            recording_status_text(RecordingStatus::Recording, false, None, false),
             "● Recording"
         );
+    }
+
+    #[test]
+    fn quarantine_names_paused_repair_state_without_changing_healthy_or_error_status() {
+        assert_eq!(
+            recording_status_text(RecordingStatus::Error, false, None, true),
+            "◐ Paused · database repair needed"
+        );
+        assert_eq!(
+            recording_status_text(RecordingStatus::Error, false, None, false),
+            "○ Error"
+        );
+        assert_eq!(
+            recording_status_text(RecordingStatus::Recording, false, None, false),
+            "● Recording"
+        );
+    }
+
+    #[test]
+    fn quarantined_database_replaces_routine_recording_control_with_recovery() {
+        assert_eq!(
+            recording_control(RecordingStatus::Error, false, true),
+            RecordingControl::RecoverDatabase
+        );
+        assert_eq!(
+            recording_control(RecordingStatus::Error, false, false),
+            RecordingControl::Toggle {
+                label: "Error — click to retry",
+                checked: false,
+                enabled: true,
+            }
+        );
+        assert_eq!(
+            recording_control(RecordingStatus::Recording, false, false),
+            RecordingControl::Toggle {
+                label: "Recording",
+                checked: true,
+                enabled: true,
+            }
+        );
+    }
+
+    #[test]
+    fn quarantine_detection_uses_the_resolved_settings_data_directory() {
+        let custom_dir = tempfile::tempdir().expect("custom data directory");
+        let default_dir = tempfile::tempdir().expect("default data directory");
+        let custom_db = custom_dir.path().join("db.sqlite");
+        screenpipe_db::persist_sqlite_quarantine(&custom_db, Some(266), "disk I/O error")
+            .expect("persist quarantine marker");
+
+        assert!(database_quarantined_for_setting(
+            custom_dir.path().to_str().expect("UTF-8 custom path")
+        ));
+        assert!(!database_quarantined_for_setting(
+            default_dir.path().to_str().expect("UTF-8 default path")
+        ));
     }
 
     #[test]
@@ -2262,6 +2414,21 @@ mod tests {
             recording.clone()
         ));
         assert!(!menu_state_needs_update(&installed, &recording));
+    }
+
+    #[test]
+    fn quarantine_transition_changes_the_menu_rebuild_key() {
+        let healthy = MenuState {
+            database_quarantined: false,
+            ..MenuState::default()
+        };
+        let quarantined = MenuState {
+            database_quarantined: true,
+            ..MenuState::default()
+        };
+
+        assert!(menu_state_needs_update(&healthy, &quarantined));
+        assert!(menu_state_needs_update(&quarantined, &healthy));
     }
 
     #[test]
