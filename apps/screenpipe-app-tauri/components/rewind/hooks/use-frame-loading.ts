@@ -42,6 +42,11 @@ function markChunkFailed(path: string): void {
 // Cache calibrated fps per video file path so we only compute once
 const calibratedFpsCache = new Map<string, number>();
 
+export interface FrameLoadSuccessDetails {
+	frameId: string;
+	mode: "video_seek" | "snapshot_direct" | "search_nav_fallback" | "ffmpeg_fallback";
+}
+
 export function useFrameLoading(opts: {
 	currentFrame: StreamTimeSeriesResponse;
 	adjacentFrames?: StreamTimeSeriesResponse[];
@@ -50,6 +55,7 @@ export function useFrameLoading(opts: {
 	onSearchNavComplete?: () => void;
 	onFrameUnavailable?: () => void;
 	onFrameLoadError?: () => void;
+	onFrameLoadSuccess?: (details: FrameLoadSuccessDetails) => void;
 	videoRef: React.RefObject<HTMLVideoElement | null>;
 	/** Timeline is playing — lets HD chunks play natively instead of seek-stepping */
 	isPlaying?: boolean;
@@ -64,6 +70,7 @@ export function useFrameLoading(opts: {
 		onSearchNavComplete,
 		onFrameUnavailable,
 		onFrameLoadError,
+		onFrameLoadSuccess,
 		videoRef,
 		isPlaying,
 		playbackSpeed,
@@ -302,6 +309,7 @@ export function useFrameLoading(opts: {
 				setIsLoading(false);
 				setHasError(false);
 				setNaturalDimensions({ width: video.videoWidth, height: video.videoHeight });
+				onFrameLoadSuccess?.({ frameId: fid, mode: "video_seek" });
 				return;
 			}
 
@@ -332,6 +340,7 @@ export function useFrameLoading(opts: {
 				width: video.videoWidth,
 				height: video.videoHeight,
 			});
+			onFrameLoadSuccess?.({ frameId: fid, mode: "video_seek" });
 
 			// Analytics
 			if (frameLoadStartTimeRef.current !== null) {
@@ -360,7 +369,7 @@ export function useFrameLoading(opts: {
 			loadedChunkRef.current = null;
 			setUseVideoMode(false);
 		});
-	}, [debouncedFrame, useVideoMode, getVideoUrl, resolveEffectiveFps, isSnapshotFrame, searchNavFrame, isPlaying, playbackSpeed]);
+	}, [debouncedFrame, useVideoMode, getVideoUrl, resolveEffectiveFps, isSnapshotFrame, searchNavFrame, isPlaying, playbackSpeed, onFrameLoadSuccess]);
 
 	// Safety net: the <video> must only ever be *playing* during HD native
 	// playback. Pause it in every other state (paused, scrubbing, normal
@@ -396,6 +405,10 @@ export function useFrameLoading(opts: {
 				setIsLoading(false);
 				setHasError(false);
 				setNaturalDimensions({ width: img.naturalWidth, height: img.naturalHeight });
+				onFrameLoadSuccess?.({
+					frameId: debouncedFrame.frameId,
+					mode: "snapshot_direct",
+				});
 				if (frameLoadStartTimeRef.current !== null) {
 					const loadTime = performance.now() - frameLoadStartTimeRef.current;
 					posthog.capture("timeline_frame_load_time", {
@@ -417,7 +430,7 @@ export function useFrameLoading(opts: {
 		});
 
 		return () => { cancelled = true; };
-	}, [isSnapshotFrame, snapshotFailed, debouncedFrame?.filePath, debouncedFrame?.frameId, getVideoUrl]);
+	}, [isSnapshotFrame, snapshotFailed, debouncedFrame?.filePath, debouncedFrame?.frameId, getVideoUrl, onFrameLoadSuccess]);
 
 	// Fallback: ffmpeg <img> mode (same as old behavior)
 	// Skipped for snapshot frames that loaded successfully via asset protocol
@@ -448,6 +461,12 @@ export function useFrameLoading(opts: {
 			setIsLoading(false);
 			setHasError(false);
 			setNaturalDimensions({ width: img.naturalWidth, height: img.naturalHeight });
+			if (debouncedFrame?.frameId) {
+				onFrameLoadSuccess?.({
+					frameId: debouncedFrame.frameId,
+					mode: searchNavFrame ? "search_nav_fallback" : "ffmpeg_fallback",
+				});
+			}
 			if (frameLoadStartTimeRef.current !== null) {
 				const loadTime = performance.now() - frameLoadStartTimeRef.current;
 				posthog.capture("timeline_frame_load_time", {

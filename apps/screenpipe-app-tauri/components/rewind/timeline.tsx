@@ -36,6 +36,7 @@ import { useAudioPlayback } from "@/lib/hooks/use-audio-playback";
 import { useHealthCheck } from "@/lib/hooks/use-health-check";
 import { useSettings } from "@/lib/hooks/use-settings";
 import { usePipes, type TemplatePipe } from "@/lib/hooks/use-pipes";
+import type { FrameLoadSuccessDetails } from "@/components/rewind/hooks/use-frame-loading";
 
 import posthog from "posthog-js";
 import { toast } from "@/components/ui/use-toast";
@@ -136,7 +137,11 @@ export default function Timeline({ embedded = false }: { embedded?: boolean }) {
 
 	// Performance tracking refs
 	const timelineOpenedAtRef = useRef<number>(performance.now());
-	const firstFrameDisplayedRef = useRef<boolean>(false);
+	const firstFrameMeasurementStartedAtRef = useRef<number | null>(null);
+	const firstFrameReadyRef = useRef<FrameLoadSuccessDetails | null>(null);
+	const firstFrameMeasuredRef = useRef(false);
+	const firstFrameHadCacheRef = useRef(false);
+	const firstFrameCountRef = useRef(0);
 	const totalLoadingTimeRef = useRef<number>(0);
 	const loadingStartTimeRef = useRef<number | null>(null);
 	const framesViewedRef = useRef<number>(0);
@@ -196,7 +201,7 @@ export default function Timeline({ embedded = false }: { embedded?: boolean }) {
 
 	// Note: audio transcript is now on-demand (opened via subtitle bar click)
 
-	const { currentDate, setCurrentDate, fetchTimeRange, hasDateBeenFetched, onWindowFocus, clearNewFramesCount, clearSentRequestForDate, clearFramesForNavigation, pendingNavigation, setPendingNavigation } =
+	const { currentDate, setCurrentDate, fetchTimeRange, hasDateBeenFetched, onWindowFocus, clearNewFramesCount, clearSentRequestForDate, clearFramesForNavigation, pendingNavigation, setPendingNavigation, hasCachedData } =
 		useTimelineStore();
 
 	const { frames, isLoading, error, message, fetchNextDayData, websocket } =
@@ -692,6 +697,69 @@ export default function Timeline({ embedded = false }: { embedded?: boolean }) {
 	// blocker — the inline spinner on the date control is enough feedback.
 	const hasInitialFrames = frames.length > 0;
 	const showBlockingLoader = isLoading && !hasInitialFrames && !isNavigating;
+	firstFrameHadCacheRef.current = hasCachedData;
+	firstFrameCountRef.current = frames.length;
+
+	const captureFirstDisplayedFrame = useCallback(() => {
+		const startedAt = firstFrameMeasurementStartedAtRef.current;
+		const readyFrame = firstFrameReadyRef.current;
+		if (startedAt === null || !readyFrame || firstFrameMeasuredRef.current) return;
+
+		firstFrameMeasuredRef.current = true;
+		posthog.capture("timeline_time_to_first_frame", {
+			measurement_version: 2,
+			duration_ms: Math.max(0, Math.round(performance.now() - startedAt)),
+			had_cache: firstFrameHadCacheRef.current,
+			frames_count: firstFrameCountRef.current,
+			frame_id: readyFrame.frameId,
+			load_mode: readyFrame.mode,
+			surface: embedded ? "home" : "overlay",
+		});
+	}, [embedded]);
+
+	const beginFirstFrameMeasurement = useCallback(() => {
+		if (firstFrameMeasuredRef.current) return;
+		firstFrameMeasurementStartedAtRef.current = performance.now();
+		captureFirstDisplayedFrame();
+	}, [captureFirstDisplayedFrame]);
+
+	const handleFirstFrameLoaded = useCallback((details: FrameLoadSuccessDetails) => {
+		firstFrameReadyRef.current = details;
+		captureFirstDisplayedFrame();
+	}, [captureFirstDisplayedFrame]);
+
+	// The embedded Timeline mounts only when its section is opened. The overlay
+	// webview, however, can stay mounted for minutes while its window is hidden,
+	// so only count focused/visible time there. A frame decoded in the background
+	// is immediately ready on focus instead of inheriting the hidden interval.
+	useEffect(() => {
+		if (embedded) {
+			beginFirstFrameMeasurement();
+			return;
+		}
+
+		let disposed = false;
+		const unlisten = listen<boolean>("window-focused", (event) => {
+			if (event.payload) {
+				beginFirstFrameMeasurement();
+			} else if (!firstFrameMeasuredRef.current) {
+				firstFrameMeasurementStartedAtRef.current = null;
+			}
+		});
+
+		void import("@tauri-apps/api/window").then(({ getCurrentWindow }) =>
+			getCurrentWindow().isFocused(),
+		).then((focused) => {
+			if (!disposed && focused) beginFirstFrameMeasurement();
+		}).catch(() => {
+			// The focus event remains authoritative if the initial query is unavailable.
+		});
+
+		return () => {
+			disposed = true;
+			unlisten.then((fn) => fn());
+		};
+	}, [beginFirstFrameMeasurement, embedded]);
 
 
 	// Auto-select first frame when frames arrive and no frame is selected
@@ -714,7 +782,6 @@ export default function Timeline({ embedded = false }: { embedded?: boolean }) {
 	// Track timeline opened and setup session tracking
 	useEffect(() => {
 		timelineOpenedAtRef.current = performance.now();
-		firstFrameDisplayedRef.current = false;
 		totalLoadingTimeRef.current = 0;
 		framesViewedRef.current = 0;
 		framesFailedRef.current = 0;
@@ -758,24 +825,13 @@ export default function Timeline({ embedded = false }: { embedded?: boolean }) {
 		}
 	}, [isLoading, showBlockingLoader]);
 	
-	// Track time to first frame
+	// Track frames viewed. First-frame latency is recorded by the successful
+	// media-load callback above, not by selecting frame metadata.
 	useEffect(() => {
-		if (currentFrame && !firstFrameDisplayedRef.current) {
-			firstFrameDisplayedRef.current = true;
-			const timeToFirstFrame = performance.now() - timelineOpenedAtRef.current;
-			
-			posthog.capture("timeline_time_to_first_frame", {
-				duration_ms: Math.round(timeToFirstFrame),
-				had_cache: frames.length > 1, // If we have multiple frames, likely from cache
-				frames_count: frames.length,
-			});
-		}
-		
-		// Track frames viewed
 		if (currentFrame) {
 			framesViewedRef.current += 1;
 		}
-	}, [currentFrame, frames.length]);
+	}, [currentFrame]);
 
 	// Send timeline selection context to chat (optionally with a specific pipe)
 	const sendSelectionToChat = useCallback(async (pipe?: TemplatePipe) => {
@@ -1174,6 +1230,7 @@ export default function Timeline({ embedded = false }: { embedded?: boolean }) {
 							onFrameLoadError={() => {
 								framesFailedRef.current += 1;
 							}}
+							onFrameLoadSuccess={handleFirstFrameLoaded}
 							onFrameUnavailable={async () => {
 								// Get the current frame's frame_id
 								const failedFrameId = frames[currentIndex]?.devices?.[0]?.frame_id;
