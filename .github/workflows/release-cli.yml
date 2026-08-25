@@ -990,7 +990,7 @@ jobs:
           for pkg in screenpipe-darwin-arm64 screenpipe-darwin-x64 screenpipe-linux-x64 screenpipe-win32-x64; do
             cd packages/cli/$pkg
             err=$(mktemp)
-            if npm publish --access public 2>"$err"; then
+            if npm publish --access public --tag latest 2>"$err"; then
               echo "::notice::published $pkg"
             else
               if grep -q "You cannot publish over the previously published versions" "$err"; then
@@ -1048,7 +1048,7 @@ jobs:
         run: |
           cd packages/cli/screenpipe
           err=$(mktemp)
-          if npm publish --access public 2>"$err"; then
+          if npm publish --access public --tag latest 2>"$err"; then
             echo "::notice::published main package"
           else
             if grep -q "You cannot publish over the previously published versions" "$err"; then
