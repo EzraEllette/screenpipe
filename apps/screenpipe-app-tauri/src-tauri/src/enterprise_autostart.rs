@@ -165,6 +165,10 @@ pub fn spawn(app: &AppHandle) {
         debug!("enterprise: dev isolation active, skipping startup enrollment enforcement");
         return;
     }
+    if crate::macos_persistence::installed() {
+        debug!("enterprise: persistent package owns startup enrollment");
+        return;
+    }
 
     let app = app.clone();
     tauri::async_runtime::spawn(async move {

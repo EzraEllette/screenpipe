@@ -160,17 +160,35 @@ fn enterprise_update_mode(app: &tauri::AppHandle) -> Option<String> {
         .map(|mode| mode.to_lowercase())
 }
 
-fn enterprise_updates_managed_locally(app: &tauri::AppHandle) -> bool {
-    let metadata = crate::enterprise_install_metadata::get_enterprise_install_metadata();
-    match enterprise_update_mode(app).as_deref() {
+fn enterprise_updates_managed_locally_for(
+    mode: Option<&str>,
+    metadata_managed: bool,
+    persistence_installed: bool,
+) -> bool {
+    // The persistent package's root supervisor would immediately relaunch the
+    // app during an in-app bundle replacement. Persistent installations are
+    // therefore updated only by installing a newer persistent package, even
+    // if an old dashboard policy explicitly selected the Screenpipe updater.
+    if persistence_installed {
+        return true;
+    }
+
+    match mode {
         Some("screenpipe") => false,
-        Some("auto_detect") => metadata.managed,
+        Some("auto_detect") => metadata_managed,
         Some("mdm") | Some("manual") => true,
-        // Missing/unknown policy → behave like a new org with the consumer
-        // banner flow. Existing orgs are explicitly pinned to "manual" via
-        // the website migration so they hit the arm above, not this one.
         _ => false,
     }
+}
+
+fn enterprise_updates_managed_locally(app: &tauri::AppHandle) -> bool {
+    let metadata = crate::enterprise_install_metadata::get_enterprise_install_metadata();
+    let mode = enterprise_update_mode(app);
+    enterprise_updates_managed_locally_for(
+        mode.as_deref(),
+        metadata.managed,
+        crate::macos_persistence::installed(),
+    )
 }
 
 /// Snapshot of a pending update, exposed to the frontend via
@@ -2022,6 +2040,36 @@ mod tests {
         assert!(!resolve_auto_update_enabled(false, true, true));
         // and an explicitly-on setting is still honored
         assert!(resolve_auto_update_enabled(true, true, true));
+    }
+
+    #[test]
+    fn persistent_macos_package_always_uses_package_updates() {
+        assert!(enterprise_updates_managed_locally_for(None, false, true));
+        assert!(enterprise_updates_managed_locally_for(
+            Some("screenpipe"),
+            false,
+            true
+        ));
+    }
+
+    #[test]
+    fn ordinary_enterprise_update_policy_is_unchanged() {
+        assert!(!enterprise_updates_managed_locally_for(None, false, false));
+        assert!(!enterprise_updates_managed_locally_for(
+            Some("screenpipe"),
+            true,
+            false
+        ));
+        assert!(enterprise_updates_managed_locally_for(
+            Some("auto_detect"),
+            true,
+            false
+        ));
+        assert!(enterprise_updates_managed_locally_for(
+            Some("manual"),
+            false,
+            false
+        ));
     }
 
     #[test]

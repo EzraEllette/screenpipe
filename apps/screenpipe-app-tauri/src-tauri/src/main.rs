@@ -90,6 +90,7 @@ mod ics_calendar;
 mod livetext;
 #[cfg(target_os = "macos")]
 mod livetext_ffi;
+mod macos_persistence;
 mod meeting_export;
 mod meeting_live_notes;
 mod meeting_stall_notifications;
@@ -2145,6 +2146,16 @@ async fn main() {
             // installed app registered exactly as it is.
             if crate::dev_isolation::is_active() {
                 debug!("dev isolation active, skipping autostart registration");
+            } else if crate::macos_persistence::installed() {
+                #[cfg(all(feature = "enterprise-build", target_os = "macos"))]
+                match enterprise_autostart::set_macos_employee_autostart(&app_handle, false) {
+                    Ok(()) => {
+                        info!("persistence: retired redundant employee startup registrations")
+                    }
+                    Err(error) => warn!(
+                        "persistence: could not retire redundant startup registrations: {error}"
+                    ),
+                }
             } else if is_autostart_enabled {
                 let _ = autostart_manager.enable();
             } else {
