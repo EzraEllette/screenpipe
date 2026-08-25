@@ -6,6 +6,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   unlinkSync,
   writeFileSync,
@@ -28,7 +29,18 @@ const SCCACHE_DEFAULT_PORT = "4226";
 const LEGACY_SCCACHE_PORT = "4227";
 const WAIT_UPDATE_MS = 10_000;
 
-type BuildMode = "build" | "e2e" | "signed" | "test" | "warmup" | "test-hold";
+type BuildMode =
+  | "build"
+  | "e2e"
+  | "signed"
+  | "test"
+  | "persistence-test"
+  | "persistence-release"
+  | "persistence-package"
+  | "persistence-bundle"
+  | "enterprise-bundle"
+  | "warmup"
+  | "test-hold";
 
 type QueueOwner = {
   requestId: string;
@@ -58,7 +70,11 @@ export function sccacheHasBaseDirectories(output: string, worktrees: string[]): 
     .split("\n")
     .find((candidate) => candidate.startsWith("Base directories"));
   if (!line) return false;
-  return worktrees.every((worktree) => line.includes(`${worktree}/`));
+  const normalizedLine = line.replaceAll("\\", "/").toLowerCase();
+  return worktrees.every((worktree) => {
+    const normalizedWorktree = worktree.replaceAll("\\", "/").toLowerCase();
+    return normalizedLine.includes(`${normalizedWorktree}/`);
+  });
 }
 
 export function nativeTestCommand(args: string[]): string[] {
@@ -87,6 +103,64 @@ function findExecutable(name: string): string | undefined {
   const local = join(homedir(), ".local", "bin", name);
   if (existsSync(local)) return local;
   return Bun.which(name) ?? undefined;
+}
+
+function findWindowsManifestTool(): string | undefined {
+  const fromPath = Bun.which("mt.exe");
+  if (fromPath) return fromPath;
+  const programFilesX86 = process.env["ProgramFiles(x86)"];
+  if (!programFilesX86) return undefined;
+  const kitsBin = join(programFilesX86, "Windows Kits", "10", "bin");
+  if (!existsSync(kitsBin)) return undefined;
+  return readdirSync(kitsBin, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => join(kitsBin, entry.name, "x64", "mt.exe"))
+    .filter(existsSync)
+    .sort()
+    .at(-1);
+}
+
+export function mergeConfig(base: unknown, overlay: unknown): unknown {
+  if (
+    typeof base === "object" && base !== null && !Array.isArray(base)
+    && typeof overlay === "object" && overlay !== null && !Array.isArray(overlay)
+  ) {
+    const merged = { ...(base as Record<string, unknown>) };
+    for (const [key, value] of Object.entries(overlay as Record<string, unknown>)) {
+      merged[key] = key in merged ? mergeConfig(merged[key], value) : value;
+    }
+    return merged;
+  }
+  return overlay;
+}
+
+function persistentEnterpriseConfig(): string {
+  const enterprise = JSON.parse(readFileSync(
+    join(APP_ROOT, "src-tauri", "tauri.enterprise.conf.json"),
+    "utf8",
+  ));
+  const persistence = JSON.parse(readFileSync(
+    join(APP_ROOT, "src-tauri", "tauri.enterprise-persistent.conf.json"),
+    "utf8",
+  ));
+  return JSON.stringify(mergeConfig(enterprise, persistence));
+}
+
+function unsignedEnterpriseConfig(): string {
+  const enterprise = JSON.parse(readFileSync(
+    join(APP_ROOT, "src-tauri", "tauri.enterprise.conf.json"),
+    "utf8",
+  ));
+  const windows = JSON.parse(readFileSync(
+    join(APP_ROOT, "src-tauri", "tauri.windows.conf.json"),
+    "utf8",
+  ));
+  return JSON.stringify(mergeConfig(mergeConfig(enterprise, windows), {
+    bundle: {
+      createUpdaterArtifacts: false,
+      windows: { signCommand: null },
+    },
+  }));
 }
 
 function sccacheServerIsRunning(port: string): boolean {
@@ -248,6 +322,11 @@ function modeLabel(mode: BuildMode): string {
     case "e2e": return "debug-dev E2E build";
     case "signed": return "signed debug-dev app build";
     case "test": return "queued native app tests";
+    case "persistence-test": return "Windows persistence supervisor tests";
+    case "persistence-release": return "Windows persistence supervisor release build";
+    case "persistence-package": return "Windows persistent enterprise installer build";
+    case "persistence-bundle": return "Windows persistent enterprise installer bundle";
+    case "enterprise-bundle": return "Windows ordinary enterprise test installer bundle";
     case "warmup": return "Tauri dev compile warm-up";
     case "test-hold": return "queue self-test";
   }
@@ -275,6 +354,94 @@ async function perform(mode: BuildMode, args: string[]): Promise<number> {
       const exitCode = await run(["bun", "scripts/pre_build.js"], env);
       if (exitCode !== 0) return exitCode;
       return run(nativeTestCommand(args), env);
+    }
+    case "persistence-test":
+      return run([
+        "cargo", "test", "--manifest-path", "src-tauri/Cargo.toml",
+        "--profile", "debug-dev", "-p", "screenpipe-persistence-supervisor",
+        ...args,
+      ], env);
+    case "persistence-release":
+      return run([
+        "cargo", "build", "--manifest-path", "src-tauri/Cargo.toml",
+        "--release", "-p", "screenpipe-persistence-supervisor", "--bins",
+        ...args,
+      ], env);
+    case "persistence-package": {
+      if (process.platform !== "win32") {
+        console.error("[native-build-queue] persistent installer packaging requires Windows");
+        return 2;
+      }
+      let exitCode = await run(["bun", "scripts/pre_build.js"], env);
+      if (exitCode !== 0) return exitCode;
+      const target = "x86_64-pc-windows-msvc";
+      exitCode = await run([
+        "cargo", "build", "--manifest-path", "src-tauri/Cargo.toml",
+        "--release", "-p", "screenpipe-persistence-supervisor", "--bins",
+        "--target", target,
+      ], env);
+      if (exitCode !== 0) return exitCode;
+      const manifestTool = findWindowsManifestTool();
+      if (!manifestTool) {
+        console.error("[native-build-queue] Windows SDK mt.exe is required");
+        return 2;
+      }
+      exitCode = await run([
+        manifestTool,
+        "-manifest", "src-tauri/windows/persistence-supervisor/persistence.manifest",
+        `-outputresource:src-tauri/target/${target}/release/remove-screenpipe-persistence.exe;#1`,
+      ], env);
+      if (exitCode !== 0) return exitCode;
+      Object.assign(env, {
+        CARGO_PROFILE_RELEASE_LTO: "false",
+        CARGO_PROFILE_RELEASE_OPT_LEVEL: "2",
+        CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16",
+        CARGO_INCREMENTAL: "true",
+        CARGO_PROFILE_RELEASE_STRIP: "none",
+        CARGO_PROFILE_RELEASE_PANIC: "abort",
+        CARGO_PROFILE_RELEASE_INCREMENTAL: "false",
+        RUSTFLAGS: "",
+        GGML_NATIVE: "OFF",
+        GGML_SSE42: "ON",
+        GGML_AVX: "ON",
+        GGML_AVX2: "ON",
+        GGML_BMI2: "ON",
+        GGML_AVX512: "OFF",
+        GGML_AVX512_VBMI: "OFF",
+        GGML_AVX512_VNNI: "OFF",
+        GGML_AVX512_BF16: "OFF",
+        CMAKE_ARGS: "-DGGML_NATIVE=OFF -DGGML_AVX512=OFF -DGGML_AVX512_VBMI=OFF -DGGML_AVX512_VNNI=OFF -DGGML_AVX512_BF16=OFF",
+      });
+      exitCode = await run([
+        "bun", "tauri", "build", "--no-bundle", "--target", target,
+        "--features", "enterprise-build",
+        "--config", persistentEnterpriseConfig(),
+        ...args,
+      ], env);
+      if (exitCode !== 0) return exitCode;
+      return run([
+        "bun", "tauri", "bundle", "--target", target,
+        "--features", "enterprise-build", "--bundles", "nsis",
+        "--config", persistentEnterpriseConfig(),
+      ], env);
+    }
+    case "persistence-bundle": {
+      const target = "x86_64-pc-windows-msvc";
+      return run([
+        "bun", "tauri", "bundle", "--target", target,
+        "--features", "enterprise-build", "--bundles", "nsis",
+        "--config", persistentEnterpriseConfig(),
+        ...args,
+      ], env);
+    }
+    case "enterprise-bundle": {
+      const target = "x86_64-pc-windows-msvc";
+      return run([
+        "bun", "tauri", "bundle", "--target", target,
+        "--features", "enterprise-build", "--bundles", "nsis",
+        "--config", unsignedEnterpriseConfig(),
+        ...args,
+      ], env);
     }
     case "warmup": {
       let exitCode = await run(["bun", "scripts/pre_build.js"], env);
@@ -386,11 +553,24 @@ async function main(): Promise<number> {
     env.SCREENPIPE_NATIVE_PREBUILD_COMPLETE = "1";
     return run(["bun", "tauri", "dev", "--", "--profile", "debug-dev"], env);
   }
-  if (["build", "e2e", "signed", "test", "test-hold"].includes(mode)) {
+  if ([
+    "build",
+    "e2e",
+    "signed",
+    "test",
+    "persistence-test",
+    "persistence-release",
+    "persistence-package",
+    "persistence-bundle",
+    "enterprise-bundle",
+    "test-hold",
+  ].includes(mode)) {
     return queue(mode as BuildMode, args);
   }
 
-  console.error("usage: bun scripts/native-build-queue.ts <dev|build|e2e|signed|test|status>");
+  console.error(
+    "usage: bun scripts/native-build-queue.ts <dev|build|e2e|signed|test|persistence-test|persistence-release|persistence-package|persistence-bundle|enterprise-bundle|status>",
+  );
   return 2;
 }
 

@@ -187,7 +187,7 @@ fn enterprise_updates_managed_locally(app: &tauri::AppHandle) -> bool {
     enterprise_updates_managed_locally_for(
         mode.as_deref(),
         metadata.managed,
-        crate::macos_persistence::installed(),
+        crate::enterprise_persistence::installed(),
     )
 }
 
@@ -2043,7 +2043,7 @@ mod tests {
     }
 
     #[test]
-    fn persistent_macos_package_always_uses_package_updates() {
+    fn persistent_enterprise_package_always_uses_package_updates() {
         assert!(enterprise_updates_managed_locally_for(None, false, true));
         assert!(enterprise_updates_managed_locally_for(
             Some("screenpipe"),
