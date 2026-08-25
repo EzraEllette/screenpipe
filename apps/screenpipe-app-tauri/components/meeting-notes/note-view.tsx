@@ -208,6 +208,12 @@ import {
   resolveActiveAiPreset,
   writeActiveAiPresetId,
 } from "@/lib/active-ai-preset";
+import { useAcpRolloutEnabled } from "@/lib/acp-rollout";
+import {
+  implicitSummaryPresetId,
+  summaryPresetModelLabel,
+  summaryPresetOptions,
+} from "./meeting-summary-presets";
 import {
   hostedAiAllowanceForModel,
   useUsageStatus,
@@ -454,26 +460,26 @@ export function NoteView({
   }, [oneTapSend, toast]);
 
   const summaryPipeSlug = settings.meetingSummaryPipeSlug || "meeting-summary";
-  const summaryPresets = useMemo(() => {
-    const nonAgentPresets = settings.aiPresets.filter(
-      (preset) => preset.provider !== "acp",
-    );
-    if (!isManagedDeployment) return nonAgentPresets;
-    return filterPresetsForEnterprisePolicy(
-      nonAgentPresets,
-      enterprisePolicy.aiPresetPolicy ??
-        DEFAULT_ENTERPRISE_AI_PRESET_POLICY,
-    );
-  }, [
-    enterprisePolicy.aiPresetPolicy,
-    isManagedDeployment,
-    settings.aiPresets,
-  ]);
-  const defaultSummaryPresetId = useMemo(
+  // The picker offers ACP presets behind the same rollout gate as the rest of
+  // the ACP UI, and falls back to a pipe-compatible model. Both rules live in
+  // meeting-summary-presets.ts, next to their tests.
+  const acpEnabled = useAcpRolloutEnabled();
+  const summaryPresets = useMemo(
     () =>
-      summaryPresets.find((preset) => preset.defaultPreset)?.id ??
-      summaryPresets[0]?.id ??
-      null,
+      summaryPresetOptions(settings.aiPresets, {
+        acpEnabled,
+        isManagedDeployment,
+        aiPresetPolicy: enterprisePolicy.aiPresetPolicy,
+      }),
+    [
+      acpEnabled,
+      enterprisePolicy.aiPresetPolicy,
+      isManagedDeployment,
+      settings.aiPresets,
+    ],
+  );
+  const defaultSummaryPresetId = useMemo(
+    () => implicitSummaryPresetId(summaryPresets),
     [summaryPresets],
   );
   const summaryPresetId = summaryPresetReady
@@ -2101,12 +2107,12 @@ export function NoteView({
       submenu: {
         selectedKey: summaryPresetId,
         selectedLabel: summaryPresetReady
-          ? summaryPreset?.model ?? "select"
+          ? summaryPresetModelLabel(summaryPreset) || "select"
           : "loading…",
         options: summaryPresets.map((preset) => ({
           key: preset.id,
           label: preset.id,
-          detail: preset.model,
+          detail: summaryPresetModelLabel(preset),
           onSelect: () => void handleSummaryPresetSelect(preset),
         })),
       },

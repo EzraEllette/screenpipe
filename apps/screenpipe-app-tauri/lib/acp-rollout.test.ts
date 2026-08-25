@@ -35,6 +35,8 @@ const ACP_ENTRY_POINTS = [
   "components/settings/ai-presets.tsx",
   // Rewind preset selector: a second provider picker with its own ACP button.
   "components/rewind/ai-presets-selector.tsx",
+  // Meeting summary model picker: offers ACP presets for the summary pipe.
+  "components/meeting-notes/note-view.tsx",
 ];
 
 describe("ACP rollout gate covers every entry point", () => {
