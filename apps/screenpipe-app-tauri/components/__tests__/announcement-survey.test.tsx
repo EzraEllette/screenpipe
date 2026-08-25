@@ -49,6 +49,34 @@ const ANNOUNCEMENT = parseAnnouncement({
 })!;
 
 describe("announcement survey", () => {
+  it("randomizes acquisition sources without reordering other questions", () => {
+    const random = vi.spyOn(Math, "random").mockReturnValue(0);
+
+    try {
+      render(<SurveyForm announcement={ANNOUNCEMENT} onSubmit={() => true} />);
+
+      expect(
+        screen
+          .getAllByRole("radio")
+          .map((choice) => choice.getAttribute("value")),
+      ).toEqual(["friend", "hn"]);
+      expect(
+        screen
+          .getAllByRole("checkbox")
+          .map((choice) => choice.getAttribute("value")),
+      ).toEqual(["memory", "automation"]);
+
+      fireEvent.click(screen.getByLabelText("A friend or colleague"));
+      expect(
+        screen
+          .getAllByRole("radio")
+          .map((choice) => choice.getAttribute("value")),
+      ).toEqual(["friend", "hn"]);
+    } finally {
+      random.mockRestore();
+    }
+  });
+
   it("requires configured answers and submits option ids only", () => {
     const onSubmit = vi.fn(() => true);
     render(<SurveyForm announcement={ANNOUNCEMENT} onSubmit={onSubmit} />);

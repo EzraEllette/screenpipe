@@ -37,6 +37,35 @@ function useAutoDismiss(ms: number | undefined, onDismiss: () => void) {
   }, [ms, onDismiss]);
 }
 
+function shuffle<T>(items: readonly T[]) {
+  const shuffled = [...items];
+
+  for (let index = shuffled.length - 1; index > 0; index -= 1) {
+    const randomIndex = Math.floor(Math.random() * (index + 1));
+    [shuffled[index], shuffled[randomIndex]] = [
+      shuffled[randomIndex],
+      shuffled[index],
+    ];
+  }
+
+  return shuffled;
+}
+
+function createSurveyChoiceOrder(announcement: Announcement) {
+  const randomizeAcquisitionSource = announcement.id.startsWith(
+    "acquisition-survey-",
+  );
+
+  return new Map(
+    (announcement.survey?.questions ?? []).map((question) => [
+      question.id,
+      randomizeAcquisitionSource && question.type === "single-choice"
+        ? shuffle(question.choices)
+        : question.choices,
+    ]),
+  );
+}
+
 function AnnouncementModal({
   announcement,
   onDismiss,
@@ -83,7 +112,11 @@ function AnnouncementModal({
         </DialogDescription>
         <AnnouncementBody body={announcement.body} />
         {announcement.survey && (
-          <SurveyForm announcement={announcement} onSubmit={onSubmit} />
+          <SurveyForm
+            key={announcement.id}
+            announcement={announcement}
+            onSubmit={onSubmit}
+          />
         )}
         <DialogFooter className="mt-2 gap-2 sm:justify-start">
           {cta && (
@@ -117,6 +150,9 @@ export function SurveyForm({
   const survey = announcement.survey;
   const [answers, setAnswers] = useState<SurveyAnswers>({});
   const [attempted, setAttempted] = useState(false);
+  const [choicesByQuestion] = useState(() =>
+    createSurveyChoiceOrder(announcement),
+  );
   if (!survey) return null;
 
   const complete = survey.questions.every(
@@ -135,6 +171,7 @@ export function SurveyForm({
     >
       {survey.questions.map((question) => {
         const selected = answers[question.id] ?? [];
+        const choices = choicesByQuestion.get(question.id) ?? question.choices;
         return (
           <fieldset key={question.id} className="space-y-2">
             <legend className="text-sm font-medium text-foreground">
@@ -149,7 +186,7 @@ export function SurveyForm({
               </p>
             )}
             <div className="grid gap-1.5">
-              {question.choices.map((choice) => {
+              {choices.map((choice) => {
                 const checked = selected.includes(choice.id);
                 return (
                   <label
