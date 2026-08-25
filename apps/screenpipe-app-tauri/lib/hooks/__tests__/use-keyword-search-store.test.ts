@@ -322,6 +322,43 @@ describe("useKeywordSearchStore search scheduling", () => {
 		expect(
 			requestedUrls.some((url) => url.includes("/text?persist=false")),
 		).toBe(false);
+		expect(mocks.capture).not.toHaveBeenCalledWith(
+			"search_ui_query_failed",
+			expect.anything(),
+		);
+	});
+
+	it("keeps metadata matches from accessibility-captured frames", async () => {
+		vi.mocked(localFetch).mockImplementation((input) => {
+			const url = String(input);
+			if (url.startsWith("/search/keyword?")) {
+				return Promise.resolve(jsonResponse(grouped([{
+					frame_id: 42,
+					timestamp: "2026-08-25T17:00:00.000Z",
+					text_positions: [{
+						text: "semantic button label",
+						confidence: 1,
+						bounds: { left: 0.1, top: 0.1, width: 0.2, height: 0.05 },
+					}],
+					app_name: "Google Chrome",
+					window_name: "screenpipe search",
+					confidence: 1,
+					text: "",
+					url: "https://screenpipe.com",
+					text_source: "accessibility",
+				}])));
+			}
+			if (url.startsWith("/search?")) {
+				return Promise.resolve(jsonResponse({ data: [] }));
+			}
+			throw new Error(`unexpected request: ${url}`);
+		});
+
+		await useKeywordSearchStore.getState().searchKeywords("chrome");
+
+		const [result] = useKeywordSearchStore.getState().searchResults;
+		expect(result.frame_id).toBe(42);
+		expect(result.text_positions).toEqual([]);
 	});
 
 	it("omits a semantic accessibility result with a coarse element box", async () => {
