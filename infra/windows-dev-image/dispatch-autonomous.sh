@@ -117,6 +117,7 @@ az vm create \
   --name "$vm_name" \
   --location "$location" \
   --image "$image_id" \
+  --security-type TrustedLaunch \
   --size "${AZURE_VM_SIZE:-Standard_D16s_v5}" \
   --admin-username screenpipe \
   --admin-password "$admin_password" \
