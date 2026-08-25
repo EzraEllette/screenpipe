@@ -302,6 +302,9 @@
         "src/auth_key.rs",
         "src/history_access.rs",
         "src/local_chat.rs",
+        "src/meeting_summary/extract.rs",
+        "src/meeting_summary/finalizer.rs",
+        "src/meeting_summary/notes.rs",
         "src/pipe_stream.rs",
         "src/routes/activity_summary.rs",
         "src/routes/activity_ledger.rs",
@@ -498,6 +501,7 @@
       "crate": "screenpipe-engine",
       "files": [
         "src/meeting_watcher/mod.rs",
+        "src/meeting_watcher/shared/events.rs",
         "src/meeting_watcher/shared/telemetry.rs",
         "src/meeting_watcher/audio_process/resolve.rs",
         "src/meeting_watcher/audio_process/state.rs",

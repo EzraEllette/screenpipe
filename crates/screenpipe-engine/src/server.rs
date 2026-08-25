@@ -51,8 +51,8 @@ use crate::{
             bulk_delete_meetings_handler, delete_meeting_handler, export_handler,
             get_meeting_handler, get_meeting_summary_status_handler,
             get_meeting_transcript_handler, list_meetings_handler, meeting_status_handler,
-            merge_meetings_handler, split_meeting_handler, start_meeting_handler,
-            stop_meeting_handler, update_meeting_handler,
+            merge_meetings_handler, save_meeting_summary_handler, split_meeting_handler,
+            start_meeting_handler, stop_meeting_handler, update_meeting_handler,
         },
         memories::{
             create_memory_handler, delete_memory_handler, get_memory_handler,
@@ -618,6 +618,13 @@ impl SCServer {
             std::time::Instant::now(),
         );
 
+        // Engine-owned backstop for meeting summaries: reconciles completed
+        // meeting-summary runs against the meeting record and requeues runs a
+        // restart interrupted. Spawned here because both entrypoints (engine
+        // binary and the desktop's embedded server) build their router through
+        // this path; the finalizer itself is once-per-process.
+        crate::meeting_summary::spawn_meeting_summary_finalizer(self.db.clone());
+
         if analytics_enabled {
             // Spawn periodic API usage reporter (every 5 minutes)
             let counter_clone = api_request_count.clone();
@@ -936,6 +943,7 @@ impl SCServer {
                 "/meetings/:id/summary-status",
                 get_meeting_summary_status_handler,
             )
+            .post("/meetings/:id/summary", save_meeting_summary_handler)
             .get("/meetings/:id", get_meeting_handler)
             .delete("/meetings/:id", delete_meeting_handler)
             .put("/meetings/:id", update_meeting_handler)

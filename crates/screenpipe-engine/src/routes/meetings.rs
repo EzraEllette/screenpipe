@@ -676,6 +676,52 @@ pub(crate) async fn update_meeting_handler(
     Ok(JsonResponse(meeting))
 }
 
+#[derive(OaSchema, Deserialize, Debug)]
+pub struct SaveMeetingSummaryRequest {
+    /// Finished summary markdown, without the `## Summary` heading.
+    pub summary: String,
+    /// Optional replacement title (5-8 plain words). Only sent when the
+    /// caller judged the current title missing or generic.
+    pub title: Option<String>,
+}
+
+/// POST /meetings/:id/summary
+///
+/// Append (or refresh) the `## Summary` section of a meeting note and
+/// optionally retitle the meeting. Rejects an empty summary with 400 so a
+/// caller that lost its payload fails loudly instead of "succeeding" with a
+/// no-op — the exact failure mode that silently dropped meeting summaries
+/// when the summary Pipe assembled the old read-modify-write PUT body itself.
+#[oasgen]
+pub(crate) async fn save_meeting_summary_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    axum::Json(body): axum::Json<SaveMeetingSummaryRequest>,
+) -> Result<JsonResponse<MeetingRecord>, (StatusCode, JsonResponse<Value>)> {
+    if body.summary.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            JsonResponse(json!({"error": "summary must not be empty"})),
+        ));
+    }
+    crate::meeting_summary::notes::save_meeting_summary(
+        &state.db,
+        id,
+        &body.summary,
+        body.title.as_deref(),
+    )
+    .await
+    .map(JsonResponse)
+    .map_err(|e| {
+        let status = if e.starts_with("meeting not found") {
+            StatusCode::NOT_FOUND
+        } else {
+            StatusCode::INTERNAL_SERVER_ERROR
+        };
+        (status, JsonResponse(json!({"error": e})))
+    })
+}
+
 #[oasgen]
 pub(crate) async fn bulk_delete_meetings_handler(
     State(state): State<Arc<AppState>>,
@@ -1139,13 +1185,13 @@ pub(crate) async fn stop_meeting_handler(
     }
 
     // Emit event so triggered pipes can react
-    if let Err(e) = screenpipe_events::send_event(
-        "meeting_ended",
-        serde_json::json!({
-            "meeting_id": id,
-            "meeting_end": persisted_end,
-        }),
-    ) {
+    let event_data = crate::meeting_watcher::shared::events::meeting_ended_event_data(
+        &state.db,
+        id,
+        &persisted_end,
+    )
+    .await;
+    if let Err(e) = screenpipe_events::send_event("meeting_ended", event_data) {
         tracing::warn!("failed to emit meeting_ended event: {}", e);
     }
 

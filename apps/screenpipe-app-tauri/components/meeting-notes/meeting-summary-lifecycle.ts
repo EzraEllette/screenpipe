@@ -171,7 +171,7 @@ export function latestSummaryInputAt(
 }
 
 export interface MeetingSummaryFailurePresentation {
-  kind: PipeErrorType | "auth_failed";
+  kind: PipeErrorType | "auth_failed" | "nothing_to_summarize" | "summary_not_saved";
   /** Short, explicit heading for the persistent recovery surface. */
   title: string;
   copy: string;
@@ -204,6 +204,28 @@ export function meetingSummaryFailure(
     /authentication failed|invalid api key|unauthorized/.test(
       errorMessage.toLowerCase(),
     );
+  // Engine finalizer verdicts (`meeting_summary_finalizer.rs`): terminal,
+  // factual states — not provider errors, so they get calm, specific copy.
+  if (normalizedErrorType === "nothing_to_summarize") {
+    return {
+      kind: "nothing_to_summarize",
+      title: "Nothing to summarize",
+      copy: "No speech was captured for this meeting, so there's no summary. Anything recorded stays saved on this note.",
+      upgrade: null,
+      retryable: false,
+      changeModelRecommended: false,
+    };
+  }
+  if (normalizedErrorType === "summary_not_saved") {
+    return {
+      kind: "summary_not_saved",
+      title: "Summary didn't save",
+      copy: "The summary run finished but nothing landed on this meeting. Your transcript is safe — retry to summarize again.",
+      upgrade: null,
+      retryable: true,
+      changeModelRecommended: false,
+    };
+  }
   if (authFailed) {
     return {
       kind: "auth_failed",

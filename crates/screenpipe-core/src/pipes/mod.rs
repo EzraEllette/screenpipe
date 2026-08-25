@@ -5620,6 +5620,18 @@ impl PipeManager {
                         pending_events.push(PendingEvent::broadcast(e.name, e.data));
                     }
                     while let Some(e) = meeting_end_rx.next().now_or_never().flatten() {
+                        // The emitter marks trivial meetings (seconds long, no
+                        // transcript). Lifecycle consumers still need the
+                        // event, but spending a multi-minute agent run to
+                        // conclude "nothing to summarize" is pure waste.
+                        if event_skips_pipes(&e.data) {
+                            info!(
+                                "scheduler: skipping '{}' for trivial meeting {:?}",
+                                e.name,
+                                event_identity_key(&e.data)
+                            );
+                            continue;
+                        }
                         pending_events.push(PendingEvent::broadcast(e.name, e.data));
                     }
                     while let Some(e) = meeting_summary_refresh_rx.next().now_or_never().flatten() {
@@ -6803,8 +6815,15 @@ impl PipeManager {
 
                 // Retry deferred triggers next tick, newest last so the oldest are
                 // the ones dropped if a pipe stays busy indefinitely.
+                //
+                // Dedupe first: one event that matches N busy pipes was pushed
+                // into `deferred` once per pipe, and next tick each copy would
+                // match every busy pipe again — the copies double per tick
+                // until the pipes free up and hundreds of duplicates drain
+                // through the coalesce path at once.
                 if !deferred.is_empty() {
                     carryover.extend(deferred);
+                    carryover = dedupe_pending_events(carryover);
                     if carryover.len() > MAX_CARRYOVER_EVENTS {
                         let dropped = carryover.len() - MAX_CARRYOVER_EVENTS;
                         carryover.drain(..dropped);
@@ -7432,6 +7451,32 @@ impl PendingEvent {
             .as_deref()
             .is_none_or(|target| target == pipe_name)
     }
+}
+
+/// Emitters set `skip_pipes` on events describing something too trivial to be
+/// worth an agent run (a seconds-long meeting with no transcript). Lifecycle
+/// consumers on the same topic ignore the field.
+fn event_skips_pipes(data: &serde_json::Value) -> bool {
+    data.get("skip_pipes")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// Drop exact-duplicate pending triggers, keeping first occurrence order.
+///
+/// Deferral pushes one copy of an event per busy matching pipe, so without
+/// this the deferred backlog doubles every tick a pipe stays busy.
+fn dedupe_pending_events(events: Vec<PendingEvent>) -> Vec<PendingEvent> {
+    let mut seen: std::collections::HashSet<(String, Option<String>, String)> =
+        std::collections::HashSet::new();
+    events
+        .into_iter()
+        .filter(|event| {
+            let identity = event_dedupe_key(&event.name, &event.data)
+                .unwrap_or_else(|| event.data.to_string());
+            seen.insert((event.name.clone(), event.target_pipe.clone(), identity))
+        })
+        .collect()
 }
 
 /// Read the identity of an event out of its payload.
@@ -8583,6 +8628,61 @@ mod tests {
             event_dedupe_key("workflow_event", &data).as_deref(),
             Some("abc-123")
         );
+    }
+
+    /// One event matching N busy pipes is deferred once per pipe; without
+    /// deduping, the copies double every scheduler tick until the pipes free
+    /// up and hundreds of duplicates drain through coalescing at once.
+    #[test]
+    fn deferred_duplicates_collapse_to_one_per_target() {
+        let data = serde_json::json!({
+            "meeting_id": 42,
+            "meeting_end": "2026-08-05T16:51:37.000Z"
+        });
+        let broadcast = || PendingEvent::broadcast("meeting_ended".to_string(), data.clone());
+        let targeted =
+            || PendingEvent::targeted("meeting_ended".to_string(), data.clone(), "meeting-summary");
+        let new_generation = PendingEvent::broadcast(
+            "meeting_ended".to_string(),
+            serde_json::json!({
+                "meeting_id": 42,
+                "meeting_end": "2026-08-05T17:00:00.000Z"
+            }),
+        );
+
+        let deduped = dedupe_pending_events(vec![
+            broadcast(),
+            broadcast(),
+            broadcast(),
+            targeted(),
+            targeted(),
+            new_generation,
+        ]);
+
+        // one broadcast, one targeted, one distinct newer generation.
+        assert_eq!(deduped.len(), 3);
+        assert_eq!(deduped[0].target_pipe, None);
+        assert_eq!(deduped[1].target_pipe.as_deref(), Some("meeting-summary"));
+        assert_eq!(
+            deduped[2].data.get("meeting_end").and_then(|v| v.as_str()),
+            Some("2026-08-05T17:00:00.000Z")
+        );
+    }
+
+    /// Trivial meetings (marked by the emitter) skip event-triggered pipes;
+    /// an absent or non-boolean flag never suppresses anything.
+    #[test]
+    fn skip_pipes_flag_gates_only_when_explicitly_true() {
+        assert!(event_skips_pipes(&serde_json::json!({
+            "meeting_id": 42, "skip_pipes": true
+        })));
+        assert!(!event_skips_pipes(&serde_json::json!({
+            "meeting_id": 42, "skip_pipes": false
+        })));
+        assert!(!event_skips_pipes(&serde_json::json!({ "meeting_id": 42 })));
+        assert!(!event_skips_pipes(&serde_json::json!({
+            "meeting_id": 42, "skip_pipes": "yes"
+        })));
     }
 
     #[test]

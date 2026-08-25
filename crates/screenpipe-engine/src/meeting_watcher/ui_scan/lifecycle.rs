@@ -245,13 +245,13 @@ pub(crate) async fn handle_no_apps_path(
                 // End-detection health telemetry (privacy-safe buckets only).
                 capture_meeting_outcome(db, meeting_id, "auto_timeout", *flap_count).await;
                 *flap_count = 0;
-                if let Err(e) = screenpipe_events::send_event(
-                    "meeting_ended",
-                    serde_json::json!({
-                        "meeting_id": meeting_id,
-                        "meeting_end": persisted_end,
-                    }),
-                ) {
+                let event_data = crate::meeting_watcher::shared::events::meeting_ended_event_data(
+                    db,
+                    meeting_id,
+                    &persisted_end,
+                )
+                .await;
+                if let Err(e) = screenpipe_events::send_event("meeting_ended", event_data) {
                     warn!("meeting v2: failed to emit meeting_ended event: {}", e);
                 }
                 if let Ok(status) = resolve_meeting_status_from(db, manual_meeting).await {
@@ -437,13 +437,14 @@ pub(crate) async fn apply_state_action(
                         capture_meeting_outcome(db, meeting_id, "auto_timeout", *flap_count).await;
                         *flap_count = 0;
                         // Emit event so triggered pipes can react
-                        if let Err(e) = screenpipe_events::send_event(
-                            "meeting_ended",
-                            serde_json::json!({
-                                "meeting_id": meeting_id,
-                                "meeting_end": persisted_end,
-                            }),
-                        ) {
+                        let event_data =
+                            crate::meeting_watcher::shared::events::meeting_ended_event_data(
+                                db,
+                                meeting_id,
+                                &persisted_end,
+                            )
+                            .await;
+                        if let Err(e) = screenpipe_events::send_event("meeting_ended", event_data) {
                             warn!("meeting v2: failed to emit meeting_ended event: {}", e);
                         }
                         if let Ok(status) = resolve_meeting_status_from(db, manual_meeting).await {

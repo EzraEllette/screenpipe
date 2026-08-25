@@ -87,14 +87,19 @@ step 3 — write the summary out as your own message, before you save it. this m
 
 this step is not optional and it is not the closing report. "meeting 112 was summarized and saved to its record" is a report; it does not satisfy this step. saving a summary you never printed means the user watched a placeholder for the entire run and then got nothing to read, so treat that as a failed run. keep planning, tool narration, and save confirmations out of the section after the heading — those belong in your closing message in step 4.
 
-step 3b — now save it. if your summary is worth saving, append it to the meeting note (and refresh the title in the same call) via:
+step 3b — now save it through the dedicated summary endpoint. the server merges the `## Summary` section into the note itself (user notes are preserved, a re-run replaces the old section) and rejects an empty summary with 400, so a lost payload fails loudly instead of "succeeding" as a no-op. write the summary to a file first — no shell variables into subprocesses, no hand-built JSON:
 
-  curl -s -X PUT "http://localhost:3030/meetings/<MEETING_ID>" \
+  cat > /tmp/summary.md <<'SUMMARY_EOF'
+  <YOUR_SUMMARY>
+  SUMMARY_EOF
+  jq -n --rawfile s /tmp/summary.md --arg t "<NEW_TITLE_OR_EMPTY>" \
+    '{summary: $s} + (if $t == "" then {} else {title: $t} end)' > /tmp/summary.json
+  curl -sf -X POST "http://localhost:3030/meetings/<MEETING_ID>/summary" \
     -H "Authorization: Bearer $SCREENPIPE_LOCAL_API_KEY" \
     -H "Content-Type: application/json" \
-    -d '{"title": "<NEW_TITLE_OR_OMIT>", "note": "<EXISTING_NOTE>\n\n## Summary\n<YOUR_SUMMARY>"}'
+    --data @/tmp/summary.json
 
-replace `<EXISTING_NOTE>` with the meeting's current `note` field (empty string if none) so you don't overwrite the user's work; just append your summary under a `## Summary` heading. for the title: if the current title is missing, generic ("untitled", "meeting", just the app name) or doesn't capture what actually happened, replace it with a 5-8 word plain-english title (no quotes, no "meeting about…" prefix) — otherwise omit the field so a user-set title is left alone. if there's nothing useful to summarize (empty transcript, irrelevant audio), say so out loud and skip the PUT — don't write a placeholder.
+`-f` matters: if this call fails, say so in your closing message instead of reporting success. for the title: if the current title is missing, generic ("untitled", "meeting", just the app name) or doesn't capture what actually happened, pass a 5-8 word plain-english title (no quotes, no "meeting about…" prefix) — otherwise pass the empty string so a user-set title is left alone. if there's nothing useful to summarize (empty transcript, irrelevant audio), say so out loud and skip the save — don't write a placeholder.
 
 step 4 — offer to push the summary into one of the user's connected apps (ask, never push on your own). list what's actually connected, then let them pick with one click:
 

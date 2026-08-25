@@ -1153,6 +1153,22 @@ impl DatabaseManager {
         Ok(())
     }
 
+    /// Fast existence signal for "did anything get transcribed live": counts
+    /// only `meeting_transcript_segments` rows, not the audio_transcriptions
+    /// window join that [`Self::list_meeting_transcript_segments`] performs.
+    pub async fn count_meeting_transcript_segments(
+        &self,
+        meeting_id: i64,
+    ) -> Result<i64, SqlxError> {
+        let (count,): (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM meeting_transcript_segments WHERE meeting_id = ?1",
+        )
+        .bind(meeting_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(count)
+    }
+
     pub async fn list_meeting_transcript_segments(
         &self,
         meeting_id: i64,

@@ -5,6 +5,7 @@
 //! Cross-platform meeting-detection logic, split by responsibility.
 
 pub(crate) mod calendar;
+pub(crate) mod events;
 pub(crate) mod ignore;
 pub(crate) mod profiles;
 pub(crate) mod scanner;

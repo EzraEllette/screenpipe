@@ -141,8 +141,31 @@ fn meeting_summary_swaps() -> Vec<FragmentSwap> {
             new: preset_chain,
         });
     }
+    if let Some(save_step) = meeting_summary_save_step() {
+        swaps.push(FragmentSwap {
+            why: "a run assembled the PUT body from an unexported shell variable and \
+                  the summary silently vanished behind a 200; the dedicated \
+                  /meetings/:id/summary endpoint merges the section server-side and \
+                  rejects an empty payload",
+            old: SAVE_STEP_ANCHOR,
+            new: save_step,
+        });
+    }
 
     swaps
+}
+
+/// The full step-3b save block as shipped before the dedicated summary
+/// endpoint existed (after the earlier PATCH→PUT repair).
+const SAVE_STEP_ANCHOR: &str = "step 3b — now save it. if your summary is worth saving, append it to the meeting note (and refresh the title in the same call) via:\n\n  curl -s -X PUT \"http://localhost:3030/meetings/<MEETING_ID>\" \\\n    -H \"Authorization: Bearer $SCREENPIPE_LOCAL_API_KEY\" \\\n    -H \"Content-Type: application/json\" \\\n    -d '{\"title\": \"<NEW_TITLE_OR_OMIT>\", \"note\": \"<EXISTING_NOTE>\\n\\n## Summary\\n<YOUR_SUMMARY>\"}'\n\nreplace `<EXISTING_NOTE>` with the meeting's current `note` field (empty string if none) so you don't overwrite the user's work; just append your summary under a `## Summary` heading. for the title: if the current title is missing, generic (\"untitled\", \"meeting\", just the app name) or doesn't capture what actually happened, replace it with a 5-8 word plain-english title (no quotes, no \"meeting about…\" prefix) — otherwise omit the field so a user-set title is left alone. if there's nothing useful to summarize (empty transcript, irrelevant audio), say so out loud and skip the PUT — don't write a placeholder.";
+
+/// The dedicated-endpoint save step as it appears in the shipped prompt.
+fn meeting_summary_save_step() -> Option<&'static str> {
+    section_between(
+        bundled_prompt("meeting-summary")?,
+        "step 3b — now save it through the dedicated summary endpoint",
+        "step 4 — offer to push",
+    )
 }
 
 /// The latency preamble as it appears in the shipped prompt.
@@ -307,6 +330,29 @@ mod tests {
         assert!(fixed.ends_with("step 2 — summarize it."));
 
         // idempotent: running it again is a no-op.
+        assert!(migrate_builtin_pipe_text("meeting-summary", &fixed).is_none());
+    }
+
+    /// The save step must migrate to the dedicated endpoint: the old
+    /// read-modify-write PUT let a run lose its summary behind a 200.
+    #[test]
+    fn migrate_builtin_pipe_moves_save_step_to_summary_endpoint() {
+        let save_step =
+            meeting_summary_save_step().expect("bundled prompt carries the endpoint save step");
+        assert!(bundled("meeting-summary").contains(save_step));
+        assert!(save_step.contains("/meetings/<MEETING_ID>/summary"));
+        assert!(save_step.contains("curl -sf"));
+        assert!(!save_step.contains("step 4 — offer to push"));
+
+        let stale = bundled("meeting-summary").replace(save_step, SAVE_STEP_ANCHOR);
+        assert!(
+            stale.contains(SAVE_STEP_ANCHOR),
+            "reconstructed stale prompt must contain the legacy save step"
+        );
+        let fixed = migrate_builtin_pipe_text("meeting-summary", &stale)
+            .expect("legacy PUT save step should migrate");
+        assert!(fixed.contains("/meetings/<MEETING_ID>/summary"));
+        assert!(!fixed.contains("<EXISTING_NOTE>"));
         assert!(migrate_builtin_pipe_text("meeting-summary", &fixed).is_none());
     }
 

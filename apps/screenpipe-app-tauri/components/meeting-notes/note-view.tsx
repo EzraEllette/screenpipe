@@ -1710,9 +1710,15 @@ export function NoteView({
       };
     }
     if (visibleSummaryLifecycle.kind === "failed") {
+      const failure = meetingSummaryFailure(visibleSummaryLifecycle.execution);
       return {
-        title: "summary needs attention",
-        detail: meetingSummaryFailure(visibleSummaryLifecycle.execution).copy,
+        // "Nothing to summarize" is a factual outcome, not something the user
+        // needs to fix — keep "needs attention" for actionable failures only.
+        title:
+          failure.kind === "nothing_to_summarize"
+            ? "nothing to summarize"
+            : "summary needs attention",
+        detail: failure.copy,
       };
     }
     return {

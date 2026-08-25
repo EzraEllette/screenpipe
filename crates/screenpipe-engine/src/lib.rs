@@ -68,6 +68,7 @@ pub mod local_chat;
 pub mod logging;
 pub mod mcp_servers_api;
 pub mod meeting_export;
+pub mod meeting_summary;
 pub mod meeting_watcher;
 mod oauth_result_page;
 pub mod permission_monitor;
