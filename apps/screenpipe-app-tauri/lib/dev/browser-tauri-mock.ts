@@ -480,6 +480,47 @@ export function createBrowserIpcMock(options: BrowserIpcMockOptions) {
     ...skill,
   }));
   const initialTimestamp = new Date().toISOString();
+  const chatsDir = "/Users/screenpipe/.screenpipe/chats";
+  const chatFixtures = new Map<string, string>(
+    [
+      ["browser-chat-1", "Ship Windows capture recovery", "codex", "cursor", true],
+      ["browser-chat-2", "Summarize enterprise interviews", "claude-code", "screenpipe", true],
+      ["browser-chat-3", "Investigate audio device switching", "codex", "github-copilot", false],
+      ["browser-chat-4", "Draft launch announcement", "claude-code", "terminal", false],
+      ["browser-chat-5", "Review onboarding drop-off", "codex", "cursor", false],
+      ["browser-chat-6", "Prepare customer follow-ups", "claude-code", "screenpipe", false],
+      ["browser-chat-7", "Trace duplicate chat sessions", "codex", "terminal", false],
+      ["browser-chat-8", "Analyze weekly product usage", "claude-code", "cursor", false],
+      ["browser-chat-9", "Polish the release checklist", "codex", "screenpipe", false],
+      ["browser-chat-10", "Compare transcription quality", "claude-code", "github-copilot", false],
+      ["browser-chat-11", "Plan the next design sprint", "codex", "terminal", false],
+      ["browser-chat-12", "Find unresolved support threads", "claude-code", "cursor", false],
+    ].map(([id, title, source, harness, pinned], index) => {
+      const timestamp = Date.now() - index * 7 * 60_000;
+      return [`${chatsDir}/${id}.json`, JSON.stringify({
+        id,
+        title,
+        titleSource: "ai",
+        kind: "chat",
+        pinned,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+        lastUserMessageAt: timestamp,
+        lastContentAt: timestamp,
+        lastViewedAt: timestamp,
+        importedFrom: {
+          source,
+          sourceId: `${source}-browser-dev-${index}`,
+          importedAt: timestamp,
+          harness,
+        },
+        messages: [
+          { id: `${id}-user`, role: "user", content: title, timestamp },
+          { id: `${id}-assistant`, role: "assistant", content: "Browser-dev fixture reply", timestamp: timestamp + 1 },
+        ],
+      })] as const;
+    }),
+  );
   let liveViews =
     options.scenario === "empty"
       ? []
@@ -673,11 +714,21 @@ export function createBrowserIpcMock(options: BrowserIpcMockOptions) {
       case "plugin:dialog|save":
         return null;
       case "plugin:fs|read_file":
-      case "plugin:fs|read_text_file":
+      case "plugin:fs|read_text_file": {
+        const contents = chatFixtures.get(String(input.path)) ?? "";
+        return new TextEncoder().encode(contents);
+      }
       case "plugin:fs|read_dir":
-        return [];
+        return String(input.path) === chatsDir
+          ? [...chatFixtures.keys()].map((path) => ({
+              name: path.slice(path.lastIndexOf("/") + 1),
+              isFile: true,
+              isDirectory: false,
+              isSymlink: false,
+            }))
+          : [];
       case "plugin:fs|exists":
-        return false;
+        return String(input.path) === chatsDir || chatFixtures.has(String(input.path));
       case "plugin:fs|stat":
       case "plugin:fs|lstat":
         return {
@@ -698,6 +749,8 @@ export function createBrowserIpcMock(options: BrowserIpcMockOptions) {
         };
       case "get_screenpipe_base_dir":
         return "/Users/screenpipe/.screenpipe";
+      case "get_chats_dir":
+        return chatsDir;
       case "get_cloud_token":
       case "get_enterprise_license_key":
       case "get_enterprise_team_api_token":

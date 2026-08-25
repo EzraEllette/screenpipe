@@ -195,6 +195,9 @@ export interface ChatMessage {
  *                    rather than "Recents". */
 export type ConversationKind = "chat" | "pipe-watch" | "pipe-run";
 
+/** The client surface that hosted an imported agent conversation. */
+export type AgentHarness = "terminal" | "cursor" | "github-copilot" | "screenpipe";
+
 /** Pipe-specific context attached to `pipe-watch` / `pipe-run`
  *  conversations. Drives the in-panel banner and the sidebar
  *  grouping. */
@@ -215,6 +218,8 @@ export interface ChatConversation {
 		source: "claude-code" | "codex";
 		sourceId: string;
 		importedAt: number;
+		/** Optional when the transcript exposes which client hosted the run. */
+		harness?: AgentHarness;
 	};
 	/** User pinned this conversation in the chat sidebar — keeps it at the top.
 	 *  Persists across app restarts via the on-disk conversation file. */

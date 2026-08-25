@@ -31,6 +31,7 @@
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import Image from "next/image";
 import { useInterval } from "@/lib/hooks/use-interval";
 import { useTauriEvent } from "@/lib/hooks/use-tauri-event";
 import {
@@ -46,6 +47,8 @@ import {
   Pencil,
   FolderOpen,
   Timer,
+  Terminal,
+  MoreHorizontal,
 } from "lucide-react";
 import { usePlatform } from "@/lib/hooks/use-platform";
 import { emit, listen } from "@tauri-apps/api/event";
@@ -62,6 +65,7 @@ import {
 import {
   conversationMetaFromJson,
   deleteConversationFile,
+  listConversations,
   loadConversationFile,
   saveConversationFile,
   updateConversationFlags,
@@ -73,8 +77,12 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   DropdownMenu,
+  DropdownMenuCheckboxItem,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
   DropdownMenuSeparator,
   DropdownMenuShortcut,
   DropdownMenuSub,
@@ -84,8 +92,12 @@ import {
 } from "@/components/ui/dropdown-menu";
 import {
   ContextMenu,
+  ContextMenuCheckboxItem,
   ContextMenuContent,
   ContextMenuItem,
+  ContextMenuLabel,
+  ContextMenuRadioGroup,
+  ContextMenuRadioItem,
   ContextMenuSeparator,
   ContextMenuShortcut,
   ContextMenuSub,
@@ -125,12 +137,17 @@ import {
 import { parsePipeSessionId } from "@/lib/events/types";
 import type { ChatConversation } from "@/lib/hooks/use-settings";
 import {
+  importExternalChatHistory,
+  scanExternalChatHistory,
+} from "@/lib/chat/external-chat-import";
+import type { ExternalChatSource } from "@/lib/chat/external-chat-parser";
+import {
   PIPES_SIDEBAR_COLLAPSED_EVENT,
   PIPES_SIDEBAR_COLLAPSED_KEY,
 } from "@/lib/sidebar-pipes";
 import {
   applySidebarRecentsCap,
-  buildSidebarRecentsSections,
+  buildGroupedRecents,
   latestSidebarPipeRunTimes,
   listMoveTargetGroups,
   recurringPipeGroupKeys,
@@ -143,10 +160,100 @@ import {
 } from "@/lib/utils/chat-sidebar-grouping";
 
 /** Max top-level rows shown in recents. Pipes use the authoritative inventory. */
-const SIDEBAR_CAP = 15;
+const SIDEBAR_CAP = 8;
 const PIPE_RUNS_PER_GROUP = 10;
 const PIPE_INVENTORY_PAGE_SIZE = 20;
 const DELETED_PIPE_EXECUTIONS_KEY = "screenpipe:deleted-pipe-executions";
+const RECENTS_SOURCE_FILTER_KEY = "screenpipe:recents-hidden-sources";
+const RECENTS_LAYOUT_KEY = "screenpipe:recents-layout";
+const RECENTS_SORT_KEY = "screenpipe:recents-sort";
+const EXTERNAL_CHAT_SYNC_INTERVAL_MS = 60_000;
+
+type RecentSource = "screenpipe" | ExternalChatSource;
+type RecentLayout = "source" | "list";
+type RecentSort = "priority" | "updated";
+const RECENT_SOURCE_OPTIONS: Array<{ source: RecentSource; label: string }> = [
+  { source: "screenpipe", label: "screenpipe" },
+  { source: "codex", label: "Codex" },
+  { source: "claude-code", label: "Claude" },
+];
+
+let externalChatSyncPromise: Promise<void> | null = null;
+let lastExternalChatSyncAt = 0;
+
+function recentSource(session: SessionRecord): RecentSource {
+  return session.importedFrom?.source ?? "screenpipe";
+}
+
+export function filterRecentsBySource(
+  sessions: SessionRecord[],
+  hiddenSources: ReadonlySet<RecentSource>,
+): SessionRecord[] {
+  return sessions.filter((session) => !hiddenSources.has(recentSource(session)));
+}
+
+export function sortRecents(
+  sessions: SessionRecord[],
+  sort: RecentSort,
+): SessionRecord[] {
+  if (sort === "priority") return sessions;
+  return [...sessions].sort(
+    (left, right) =>
+      right.updatedAt - left.updatedAt ||
+      right.createdAt - left.createdAt ||
+      left.id.localeCompare(right.id),
+  );
+}
+
+function readRecentLayout(): RecentLayout {
+  try {
+    return localStorage.getItem(RECENTS_LAYOUT_KEY) === "source" ? "source" : "list";
+  } catch {
+    return "list";
+  }
+}
+
+function readRecentSort(): RecentSort {
+  try {
+    return localStorage.getItem(RECENTS_SORT_KEY) === "updated" ? "updated" : "priority";
+  } catch {
+    return "priority";
+  }
+}
+
+function readHiddenRecentSources(): Set<RecentSource> {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(RECENTS_SOURCE_FILTER_KEY) ?? "[]");
+    return new Set(
+      Array.isArray(parsed)
+        ? parsed.filter((source): source is RecentSource =>
+            source === "screenpipe" || source === "codex" || source === "claude-code",
+          )
+        : [],
+    );
+  } catch {
+    return new Set();
+  }
+}
+
+function syncExternalChatsIfNeeded(force = false): Promise<void> {
+  const now = Date.now();
+  if (!force && now - lastExternalChatSyncAt < EXTERNAL_CHAT_SYNC_INTERVAL_MS) {
+    return Promise.resolve();
+  }
+  if (externalChatSyncPromise) return externalChatSyncPromise;
+  lastExternalChatSyncAt = now;
+  externalChatSyncPromise = scanExternalChatHistory()
+    .then((scan) => importExternalChatHistory(
+      scan.sources.flatMap((source) => source.candidates),
+      { skipUnchanged: true },
+    ))
+    .then(() => undefined)
+    .finally(() => {
+      externalChatSyncPromise = null;
+    });
+  return externalChatSyncPromise;
+}
 
 interface SidebarPipeInventoryItem {
   name: string;
@@ -387,6 +494,7 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
             pipeContext: meta.pipeContext,
             dedupKey: meta.dedupKey,
             branchedFrom: meta.branchedFrom,
+            importedFrom: meta.importedFrom,
             draft: false,
           });
           return;
@@ -479,10 +587,103 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
     };
   }, [actions]);
 
+  // Local Codex and Claude histories are part of the chat index, not a
+  // separate import workflow. Sync once when the sidebar mounts and again
+  // when the app regains focus after the user worked in another agent.
+  useEffect(() => {
+    // Native E2E uses isolated, deterministic chat fixtures. Never scan the
+    // developer machine's real agent history from a test build.
+    if (process.env.NEXT_PUBLIC_SCREENPIPE_E2E === "true") return;
+    let cancelled = false;
+    const sync = async () => {
+      try {
+        await syncExternalChatsIfNeeded();
+        const metas = await listConversations({ includeHidden: true });
+        if (!cancelled) actions.hydrateFromDisk(metas.map(sessionRecordFromMeta));
+      } catch (error) {
+        console.warn("[chat-sidebar] external chat sync failed", error);
+      }
+    };
+    void sync();
+    const onFocus = () => void sync();
+    window.addEventListener("focus", onFocus);
+    return () => {
+      cancelled = true;
+      window.removeEventListener("focus", onFocus);
+    };
+  }, [actions]);
+
   const { pinned, recents, pipes, archived } = useVisibleChatSections();
-  const groupedSections = useMemo(
-    () => buildSidebarRecentsSections(recents, Number.POSITIVE_INFINITY),
+  const [hiddenRecentSources, setHiddenRecentSources] = useState<Set<RecentSource>>(
+    readHiddenRecentSources,
+  );
+  const [recentLayout, setRecentLayout] = useState<RecentLayout>(readRecentLayout);
+  const [recentSort, setRecentSort] = useState<RecentSort>(readRecentSort);
+  const availableRecentSources = useMemo(
+    () => new Set(recents.map(recentSource)),
     [recents],
+  );
+  const visibleRecents = useMemo(
+    () => sortRecents(filterRecentsBySource(recents, hiddenRecentSources), recentSort),
+    [recents, hiddenRecentSources, recentSort],
+  );
+  const toggleRecentSource = useCallback((source: RecentSource) => {
+    setHiddenRecentSources((current) => {
+      const next = new Set(current);
+      if (next.has(source)) next.delete(source);
+      else next.add(source);
+      try {
+        localStorage.setItem(RECENTS_SOURCE_FILTER_KEY, JSON.stringify([...next]));
+      } catch {
+        // The in-memory filter still works for this session.
+      }
+      return next;
+    });
+  }, []);
+  const changeRecentLayout = useCallback((layout: string) => {
+    const next = layout === "source" ? "source" : "list";
+    setRecentLayout(next);
+    try {
+      localStorage.setItem(RECENTS_LAYOUT_KEY, next);
+    } catch {
+      // The in-memory preference still works for this session.
+    }
+  }, []);
+  const changeRecentSort = useCallback((sort: string) => {
+    const next = sort === "updated" ? "updated" : "priority";
+    setRecentSort(next);
+    try {
+      localStorage.setItem(RECENTS_SORT_KEY, next);
+    } catch {
+      // The in-memory preference still works for this session.
+    }
+  }, []);
+  const groupedSections = useMemo(
+    () => recentLayout === "source"
+      ? RECENT_SOURCE_OPTIONS.flatMap(({ source, label }) => {
+          const sessions = visibleRecents.filter((session) => recentSource(session) === source);
+          return sessions.length === 0
+            ? []
+            : [{
+                key: `source:${source}`,
+                title: label,
+                items: buildGroupedRecents(
+                  sessions,
+                  Number.POSITIVE_INFINITY,
+                  () => null,
+                ),
+              }];
+        })
+      : [{
+          key: "all-recents",
+          title: "",
+          items: buildGroupedRecents(
+            visibleRecents,
+            Number.POSITIVE_INFINITY,
+            () => null,
+          ),
+        }],
+    [recentLayout, visibleRecents],
   );
 
   const [pipesCollapsed, setPipesCollapsed] = useCollapsedPref(
@@ -1290,35 +1491,97 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
               collapsed={recentsCollapsed}
               onCollapsedChange={setRecentsCollapsed}
               headerAction={
-                <span
-                  role="button"
-                  tabIndex={onViewAll ? 0 : -1}
-                  className={cn(
-                    "ml-auto inline-flex items-center gap-0.5 select-none",
-                    "text-[10px] uppercase tracking-wider transition-colors",
-                    "opacity-0 group-hover/recents:opacity-100",
-                    (recentsCollapsed || !hasAnythingToView) && "hidden",
-                    onViewAll
-                      ? "sidebar-text-secondary hover:text-foreground cursor-pointer"
-                      : "text-foreground/[0.35] cursor-default"
-                  )}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    if (!onViewAll) return;
-                    onViewAll();
-                  }}
-                  onKeyDown={(e) => {
-                    if (!onViewAll) return;
-                    if (e.key === "Enter" || e.key === " ") {
-                      e.preventDefault();
-                      e.stopPropagation();
-                      onViewAll();
-                    }
-                  }}
-                  aria-disabled={!onViewAll}
-                >
-                  View all <ChevronRight className="h-3 w-3" aria-hidden />
-                </span>
+                <div className="group ml-auto flex items-center gap-1">
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <button
+                        type="button"
+                        className="inline-flex h-5 w-5 items-center justify-center rounded opacity-0 transition-opacity hover:bg-muted/40 focus-visible:opacity-100 group-hover:opacity-100"
+                        aria-label="organize recents"
+                        title="organize recents"
+                      >
+                        <MoreHorizontal className="h-3.5 w-3.5" aria-hidden />
+                      </button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent className="w-48" align="end">
+                      <DropdownMenuLabel>show in recents</DropdownMenuLabel>
+                      {RECENT_SOURCE_OPTIONS.filter(({ source }) =>
+                        availableRecentSources.has(source),
+                      ).map(({ source, label }) => (
+                        <DropdownMenuCheckboxItem
+                          key={source}
+                          checked={!hiddenRecentSources.has(source)}
+                          onCheckedChange={() => toggleRecentSource(source)}
+                          onSelect={(event) => event.preventDefault()}
+                        >
+                          {label}
+                        </DropdownMenuCheckboxItem>
+                      ))}
+                      <DropdownMenuSeparator />
+                      <DropdownMenuLabel>organize sidebar</DropdownMenuLabel>
+                      <DropdownMenuRadioGroup value={recentLayout} onValueChange={changeRecentLayout}>
+                        <DropdownMenuRadioItem value="source">By source</DropdownMenuRadioItem>
+                        <DropdownMenuRadioItem value="list">In one list</DropdownMenuRadioItem>
+                      </DropdownMenuRadioGroup>
+                      <DropdownMenuSeparator />
+                      <DropdownMenuLabel>sort chats by</DropdownMenuLabel>
+                      <DropdownMenuRadioGroup value={recentSort} onValueChange={changeRecentSort}>
+                        <DropdownMenuRadioItem value="priority">Priority</DropdownMenuRadioItem>
+                        <DropdownMenuRadioItem value="updated">Last updated</DropdownMenuRadioItem>
+                      </DropdownMenuRadioGroup>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                  <ContextMenu>
+                    <ContextMenuTrigger asChild>
+                      <button
+                        type="button"
+                        className={cn(
+                          "inline-flex items-center gap-0.5 text-[10px] uppercase tracking-wider opacity-0 transition-[color,opacity] group-hover:opacity-100 focus-visible:opacity-100",
+                          (recentsCollapsed || !hasAnythingToView) && "hidden",
+                          onViewAll
+                            ? "sidebar-text-secondary hover:text-foreground"
+                            : "text-foreground/[0.35] cursor-default"
+                        )}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          onViewAll?.();
+                        }}
+                        disabled={!onViewAll}
+                        title="view all · right-click to filter"
+                      >
+                        View all <ChevronRight className="h-3 w-3" aria-hidden />
+                      </button>
+                    </ContextMenuTrigger>
+                    <ContextMenuContent className="w-44">
+                      <ContextMenuLabel>show in recents</ContextMenuLabel>
+                      {RECENT_SOURCE_OPTIONS.filter(({ source }) =>
+                        availableRecentSources.has(source),
+                      ).map(({ source, label }) => (
+                        <ContextMenuCheckboxItem
+                          key={source}
+                          data-testid={`recents-filter-${source}`}
+                          checked={!hiddenRecentSources.has(source)}
+                          onCheckedChange={() => toggleRecentSource(source)}
+                          onSelect={(event) => event.preventDefault()}
+                        >
+                          {label}
+                        </ContextMenuCheckboxItem>
+                      ))}
+                      <ContextMenuSeparator />
+                      <ContextMenuLabel>organize sidebar</ContextMenuLabel>
+                      <ContextMenuRadioGroup value={recentLayout} onValueChange={changeRecentLayout}>
+                        <ContextMenuRadioItem value="source">By source</ContextMenuRadioItem>
+                        <ContextMenuRadioItem value="list">In one list</ContextMenuRadioItem>
+                      </ContextMenuRadioGroup>
+                      <ContextMenuSeparator />
+                      <ContextMenuLabel>sort chats by</ContextMenuLabel>
+                      <ContextMenuRadioGroup value={recentSort} onValueChange={changeRecentSort}>
+                        <ContextMenuRadioItem value="priority">Priority</ContextMenuRadioItem>
+                        <ContextMenuRadioItem value="updated">Last updated</ContextMenuRadioItem>
+                      </ContextMenuRadioGroup>
+                    </ContextMenuContent>
+                  </ContextMenu>
+                </div>
               }
               bodyClassName=""
             >
@@ -1328,9 +1591,11 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
                     <Skeleton key={i} className="h-6 w-full rounded-md" />
                   ))}
                 </div>
-              ) : recents.length === 0 ? (
+              ) : visibleRecents.length === 0 ? (
                 <div className="px-2.5 py-2 text-xs sidebar-text-secondary italic">
-                  {pinned.length === 0 && pipes.length === 0
+                  {recents.length > 0
+                    ? "no chats match filters"
+                    : pinned.length === 0 && pipes.length === 0
                     ? "no chats yet — click + to start"
                     : "no recent chats"}
                 </div>
@@ -1555,6 +1820,7 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
     </div>
   );
 }
@@ -1814,10 +2080,7 @@ function Section({
 }) {
   return (
     <div className="flex flex-col min-h-0">
-      <button
-        type="button"
-        data-testid={`sidebar-section-${title}`}
-        onClick={() => onCollapsedChange(!collapsed)}
+      <div
         className={cn(
           // Light header row — avoid the "boxed section" look.
           "group/section shrink-0 px-2.5 py-1 flex items-center gap-1 rounded-sm text-left",
@@ -1826,45 +2089,40 @@ function Section({
           "focus:outline-none",
           tone === "subtle" ? "hover:bg-muted/10" : "hover:bg-muted/15"
         )}
-        aria-expanded={!collapsed}
       >
-        <span
-          className={cn(
-            "text-[10px] uppercase tracking-wider flex-1",
-            "sidebar-text-tertiary",
-            "group-hover/section:text-foreground/[0.75] group-focus-within/section:text-foreground/[0.75]"
-          )}
+        <button
+          type="button"
+          data-testid={`sidebar-section-${title}`}
+          onClick={() => onCollapsedChange(!collapsed)}
+          className="flex min-w-0 flex-1 items-center gap-1 text-left focus:outline-none"
+          aria-expanded={!collapsed}
         >
-          <span className="inline-flex items-center gap-1">
-            <span>{title}</span>
-            <span
-              className={cn(
-                "inline-flex items-center transition-opacity",
-                // Hidden by default; appears on hover/focus of the section group.
-                "opacity-0 group-hover/section:opacity-100 group-focus-visible/section:opacity-100"
-              )}
-              aria-hidden
-            >
-              {collapsed ? (
-                <ChevronRight
-                  className={cn(
-                    "h-3 w-3",
-                    "sidebar-text-tertiary",
-                    "group-hover/section:text-foreground/[0.75] group-focus-visible/section:text-foreground/[0.75]"
-                  )}
-                />
-              ) : (
-                <ChevronDown
-                  className={cn(
-                    "h-3 w-3",
-                    "sidebar-text-tertiary",
-                    "group-hover/section:text-foreground/[0.75] group-focus-visible/section:text-foreground/[0.75]"
-                  )}
-                />
-              )}
+          <span
+            className={cn(
+              "text-[10px] uppercase tracking-wider flex-1",
+              "sidebar-text-tertiary",
+              "group-hover/section:text-foreground/[0.75] group-focus-within/section:text-foreground/[0.75]"
+            )}
+          >
+            <span className="inline-flex items-center gap-1">
+              <span>{title}</span>
+              <span
+                className={cn(
+                  "inline-flex items-center transition-opacity",
+                  // Hidden by default; appears on hover/focus of the section group.
+                  "opacity-0 group-hover/section:opacity-100 group-focus-visible/section:opacity-100"
+                )}
+                aria-hidden
+              >
+                {collapsed ? (
+                  <ChevronRight className="h-3 w-3 sidebar-text-tertiary" />
+                ) : (
+                  <ChevronDown className="h-3 w-3 sidebar-text-tertiary" />
+                )}
+              </span>
             </span>
           </span>
-        </span>
+        </button>
         {headerAction}
         {count !== undefined && (
           <span
@@ -1876,7 +2134,7 @@ function Section({
             {count}
           </span>
         )}
-      </button>
+      </div>
       <div
         className={cn(
           // overflow-hidden here ensures paint stays within the animated
@@ -2466,6 +2724,36 @@ export function SidebarChatRow({
     existingGroups,
     availableMoveGroups,
   };
+  const importedSource = session.importedFrom?.source;
+  const sourceLabel =
+    importedSource === "claude-code"
+      ? "Claude"
+      : importedSource === "codex"
+        ? "Codex"
+        : null;
+  const harness = session.importedFrom?.harness ?? (sourceLabel ? null : "screenpipe");
+  const harnessLabel =
+    harness === "github-copilot"
+      ? "GitHub Copilot"
+      : harness === "cursor"
+        ? "Cursor"
+        : harness === "screenpipe"
+          ? "screenpipe"
+          : harness === "terminal"
+            ? "Terminal"
+            : null;
+  const harnessIcon =
+    harness === "github-copilot"
+      ? "/images/acp/github-copilot-cli.svg"
+      : harness === "cursor"
+        ? "/images/cursor.png"
+        : harness === "screenpipe"
+          ? "/images/screenpipe.png"
+          : harness === "terminal"
+            ? null
+            : importedSource === "claude-code"
+              ? "/images/claude-ai.svg"
+              : "/images/codex.svg";
   // The row is both the click target and the right-click (context menu)
   // anchor. The kebab below stays as a discoverable, mouse-only entry point;
   // both menus render the same `RowMenuItems`.
@@ -2503,12 +2791,31 @@ export function SidebarChatRow({
           onSelect(session.id);
         }}
       >
+        <span
+          className="flex h-5 w-5 shrink-0 items-center justify-center"
+          aria-label={harnessLabel ? `${harnessLabel} harness` : `${sourceLabel} source`}
+          title={harnessLabel ? `${harnessLabel}${sourceLabel ? ` · ${sourceLabel}` : ""}` : sourceLabel ?? undefined}
+        >
+          {harnessIcon ? (
+            <Image
+              src={harnessIcon}
+              alt=""
+              width={17}
+              height={17}
+              className="h-[17px] w-[17px] rounded-[4px] object-contain"
+              unoptimized
+            />
+          ) : (
+            <Terminal className="h-4 w-4 sidebar-text-tertiary" aria-hidden />
+          )}
+        </span>
         {!insideGroup && (session.kind === "pipe-run" || session.kind === "pipe-watch") && (
           <Timer className="h-3 w-3 shrink-0 sidebar-text-tertiary" aria-hidden />
         )}
-        <span
-          className={cn(
-            "truncate flex-1 text-xs font-normal",
+        <span className="min-w-0 flex-1">
+          <span
+            className={cn(
+            "block truncate text-xs font-normal",
             isUnread
               ? "font-medium text-foreground"
               : isCurrent
@@ -2517,8 +2824,9 @@ export function SidebarChatRow({
                   ? "sidebar-text-tertiary"
                 : "sidebar-text-secondary"
           )}
-        >
-          {session.streamingTitle || (isInjectedTitle(session.title) ? undefined : session.title) || "untitled"}
+          >
+            {session.streamingTitle || (isInjectedTitle(session.title) ? undefined : session.title) || "untitled"}
+          </span>
         </span>
         <span className="ml-1 h-4 w-10 shrink-0 relative flex items-center justify-end">
           <span

@@ -7,7 +7,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   exists: vi.fn(),
   readDir: vi.fn(),
+  readTextFile: vi.fn(),
   stat: vi.fn(),
+  loadConversationFile: vi.fn(),
+  saveConversationFile: vi.fn(),
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({ emit: vi.fn() }));
@@ -18,18 +21,19 @@ vi.mock("@tauri-apps/api/path", () => ({
 vi.mock("@tauri-apps/plugin-fs", () => ({
   exists: mocks.exists,
   readDir: mocks.readDir,
-  readTextFile: vi.fn(),
+  readTextFile: mocks.readTextFile,
   stat: mocks.stat,
 }));
 vi.mock("@/lib/chat-storage", () => ({
-  loadConversationFile: vi.fn(),
+  loadConversationFile: mocks.loadConversationFile,
   invalidateConversationListCache: vi.fn(),
-  saveConversationFile: vi.fn(),
+  saveConversationFile: mocks.saveConversationFile,
 }));
 
 import {
   EXTERNAL_CHAT_LOOKBACK_DAYS,
   MAX_EXTERNAL_CHATS_PER_SOURCE,
+  importExternalChatHistory,
   scanExternalChatHistory,
 } from "@/lib/chat/external-chat-import";
 
@@ -98,5 +102,46 @@ describe("scanExternalChatHistory", () => {
     expect(codex?.candidates.map((candidate) => candidate.sourceId)).toEqual([
       insideWindow.replace(".jsonl", ""),
     ]);
+  });
+
+  it("skips unchanged transcripts during automatic sync", async () => {
+    const updatedAt = Date.parse("2026-08-21T12:01:00Z");
+    mocks.stat.mockResolvedValue({ size: 1024, mtime: new Date(updatedAt) });
+    mocks.readTextFile.mockResolvedValue([
+      JSON.stringify({
+        type: "session_meta",
+        timestamp: "2026-08-21T12:00:00Z",
+        payload: { id: "codex-session" },
+      }),
+      JSON.stringify({
+        type: "response_item",
+        timestamp: "2026-08-21T12:00:00Z",
+        payload: { type: "message", id: "u1", role: "user", content: [{ type: "input_text", text: "hello" }] },
+      }),
+      JSON.stringify({
+        type: "response_item",
+        timestamp: "2026-08-21T12:01:00Z",
+        payload: { type: "message", id: "a1", role: "assistant", content: [{ type: "output_text", text: "hi" }] },
+      }),
+    ].join("\n"));
+    mocks.loadConversationFile.mockResolvedValue({
+      id: "imported-codex-codex-session",
+      title: "hello",
+      kind: "chat",
+      createdAt: Date.parse("2026-08-21T12:00:00Z"),
+      updatedAt,
+      messages: [{}, {}],
+    });
+
+    const result = await importExternalChatHistory([{
+      source: "codex",
+      path: "/fixture/session.jsonl",
+      sourceId: "codex-session",
+      modifiedAt: updatedAt,
+      size: 1024,
+    }], { skipUnchanged: true });
+
+    expect(result).toMatchObject({ imported: 0, updated: 0, skipped: 1, failed: 0 });
+    expect(mocks.saveConversationFile).not.toHaveBeenCalled();
   });
 });

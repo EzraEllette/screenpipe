@@ -4,7 +4,11 @@
 
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { SidebarChatRow } from "@/components/chat-sidebar";
+import {
+  filterRecentsBySource,
+  sortRecents,
+  SidebarChatRow,
+} from "@/components/chat-sidebar";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { SessionRecord } from "@/lib/stores/chat-store";
 
@@ -94,5 +98,69 @@ describe("SidebarChatRow current conversation", () => {
     expect(unread).toHaveClass("h-1.5", "w-1.5", "rounded-full", "bg-foreground");
     expect(unread).toHaveTextContent("");
     expect(screen.queryByText("█")).toBeNull();
+  });
+
+  it("shows Codex provenance for imported local history", () => {
+    renderRow(false, "idle", {
+      importedFrom: {
+        source: "codex",
+        sourceId: "thread-1",
+        importedAt: 100,
+        harness: "terminal",
+      },
+    });
+
+    expect(screen.getByLabelText("Terminal harness")).toHaveAttribute(
+      "title",
+      "Terminal · Codex",
+    );
+  });
+});
+
+describe("Recents provider filtering", () => {
+  it("can independently hide Codex, Claude, and screenpipe chats", () => {
+    const sessions: SessionRecord[] = [
+      baseSession,
+      {
+        ...baseSession,
+        id: "codex-chat",
+        importedFrom: {
+          source: "codex",
+          sourceId: "codex-1",
+          importedAt: 100,
+        },
+      },
+      {
+        ...baseSession,
+        id: "claude-chat",
+        importedFrom: {
+          source: "claude-code",
+          sourceId: "claude-1",
+          importedAt: 100,
+        },
+      },
+    ];
+
+    expect(filterRecentsBySource(sessions, new Set(["claude-code"])).map(({ id }) => id))
+      .toEqual(["chat-focus-test", "codex-chat"]);
+    expect(filterRecentsBySource(sessions, new Set(["screenpipe", "codex"])).map(({ id }) => id))
+      .toEqual(["claude-chat"]);
+  });
+
+  it("can sort the same list by latest update without mutating priority order", () => {
+    const sessions: SessionRecord[] = [
+      { ...baseSession, id: "priority-first", updatedAt: 100 },
+      { ...baseSession, id: "updated-first", updatedAt: 300 },
+    ];
+
+    expect(sortRecents(sessions, "priority").map(({ id }) => id)).toEqual([
+      "priority-first",
+      "updated-first",
+    ]);
+    expect(sortRecents(sessions, "updated").map(({ id }) => id)).toEqual([
+      "updated-first",
+      "priority-first",
+    ]);
+    expect(sessions[0].id).toBe("priority-first");
   });
 });

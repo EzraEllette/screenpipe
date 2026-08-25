@@ -1032,6 +1032,26 @@
       "notes": "Opening the standalone Settings route mid-stream must not abort the chat: a long synthetic stream keeps running while the user round-trips to Settings, remains live in Recents, and restores the full response (early + final tokens) after the row is clicked."
     },
     {
+      "spec": "chat-agent-activity-sidebar.spec.ts",
+      "platforms": [
+        "windows",
+        "macos",
+        "linux"
+      ],
+      "layers": [
+        "chat-ai",
+        "real-ui-e2e"
+      ],
+      "features": [
+        "chat",
+        "chat-sidebar-groups"
+      ],
+      "criticality": "high",
+      "confidence": "strong",
+      "ux": "real-user-flow",
+      "notes": "Recent local Codex and Claude histories sync automatically into the same Recents stream as native screenpipe chats. The primary sidebar has no import action; right-clicking View all filters by only the sources present, while a hover-only organizer exposes the same filters plus source grouping and priority or latest-update sorting. Captures sparse, crowded mixed-provider, and Codex-heavy native UI states with one harness icon per row, expanded pinned rows, and the capped recent working set."
+    },
+    {
       "spec": "chat-sidebar-groups.spec.ts",
       "platforms": [
         "windows",

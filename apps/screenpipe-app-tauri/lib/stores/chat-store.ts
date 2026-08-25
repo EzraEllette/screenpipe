@@ -183,6 +183,8 @@ export interface SessionRecord {
   pipeContext?: PipeContext;
   /** Optional user-assigned sidebar group label (lowercase, trimmed). */
   sidebarGroup?: string;
+  /** Local agent source when this conversation was imported into screenpipe. */
+  importedFrom?: ConversationMeta["importedFrom"];
 }
 
 interface ChatStoreState {
@@ -457,6 +459,7 @@ export const useChatStore = create<ChatStore>((set) => ({
             sidebarGroup: existing.sidebarGroup ?? r.sidebarGroup,
             dedupKey: existing.dedupKey ?? r.dedupKey,
             branchedFrom: existing.branchedFrom ?? r.branchedFrom,
+            importedFrom: existing.importedFrom ?? r.importedFrom,
           };
           merged.unread = restoreUnread(existing, merged);
           next[r.id] = merged;
@@ -788,6 +791,7 @@ export function sessionRecordFromMeta(m: ConversationMeta): SessionRecord {
     dedupKey: m.dedupKey,
     branchedFrom: m.branchedFrom,
     presetId: m.presetId,
+    importedFrom: m.importedFrom,
   };
   if (typeof m.lastViewedAt === "number") {
     record.unread = isUnread(record);

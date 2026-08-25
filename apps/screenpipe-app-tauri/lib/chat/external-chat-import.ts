@@ -248,6 +248,7 @@ export async function scanExternalChatHistory(
 
 export async function importExternalChatHistory(
   candidates: ExternalChatCandidate[],
+  options: { skipUnchanged?: boolean } = {},
 ): Promise<ExternalChatImportResult> {
   const result: ExternalChatImportResult = {
     imported: 0,
@@ -277,6 +278,15 @@ export async function importExternalChatHistory(
         continue;
       }
       const existing = await loadConversationFile(conversation.id);
+      if (
+        options.skipUnchanged &&
+        existing &&
+        existing.updatedAt >= conversation.updatedAt &&
+        existing.messages.length === conversation.messages.length
+      ) {
+        result.skipped += 1;
+        continue;
+      }
       await saveConversationFile(conversation);
       if (existing) result.updated += 1;
       else result.imported += 1;

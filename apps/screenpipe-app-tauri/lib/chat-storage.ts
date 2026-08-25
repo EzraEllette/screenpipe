@@ -14,6 +14,7 @@ import {
   stat,
 } from "@tauri-apps/plugin-fs";
 import type {
+  AgentHarness,
   ChatConversation,
   ConversationKind,
   PipeContext,
@@ -360,6 +361,13 @@ export interface ConversationMeta {
   /** The AI preset ID last used in this conversation. Used to restore
    *  the model selection when switching between chats. */
   presetId?: string;
+  /** Provenance for a local Codex or Claude conversation copied into screenpipe. */
+  importedFrom?: {
+    source: "claude-code" | "codex";
+    sourceId: string;
+    importedAt: number;
+    harness?: AgentHarness;
+  };
 }
 
 interface ConversationEntry {
@@ -503,6 +511,13 @@ export function conversationMetaFromJson(conv: any): ConversationMeta | null {
     dedupKey: conversationDedupIdentity(conv) ?? undefined,
     branchedFrom: typeof conv.branchedFrom === "string" ? conv.branchedFrom : undefined,
     presetId: typeof conv.presetId === "string" ? conv.presetId : undefined,
+    importedFrom:
+      conv.importedFrom &&
+      (conv.importedFrom.source === "claude-code" || conv.importedFrom.source === "codex") &&
+      typeof conv.importedFrom.sourceId === "string" &&
+      typeof conv.importedFrom.importedAt === "number"
+        ? conv.importedFrom
+        : undefined,
   };
 }
 
