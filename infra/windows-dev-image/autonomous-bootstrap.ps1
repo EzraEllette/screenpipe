@@ -16,6 +16,9 @@ $workerRoot = 'C:\screenpipe-worker'
 $oobePolicy = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\OOBE'
 New-Item -Path $oobePolicy -Force | Out-Null
 Set-ItemProperty -Path $oobePolicy -Name DisablePrivacyExperience -Type DWord -Value 1
+$edgePolicy = 'HKLM:\SOFTWARE\Policies\Microsoft\Edge'
+New-Item -Path $edgePolicy -Force | Out-Null
+Set-ItemProperty -Path $edgePolicy -Name HideFirstRunExperience -Type DWord -Value 1
 
 function Get-ManagedIdentityToken([string] $Resource) {
   $encoded = [Uri]::EscapeDataString($Resource)

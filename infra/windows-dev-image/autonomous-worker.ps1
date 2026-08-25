@@ -119,6 +119,8 @@ function Stop-DesktopRecorder([Diagnostics.Process] $Process) {
 
 try {
   Wait-InteractiveDesktop
+  (New-Object -ComObject WScript.Shell).SendKeys('{ESC}')
+  Start-Sleep -Seconds 2
   Write-Host "SCREENPIPE AUTONOMOUS WINDOWS TASK: $($task.taskId)"
   Write-Host "Base: $($task.baseSha)"
   Write-Host "Branch: $($task.branch)"
@@ -261,8 +263,13 @@ $($task.prBody)
   }
   $prUrl = $prUrlOutput.Trim()
   Write-Host "PULL REQUEST CREATED BY VM: $prUrl"
-  Start-Process $prUrl
-  Start-Sleep -Seconds 12
+  $edge = Join-Path ${env:ProgramFiles(x86)} 'Microsoft\Edge\Application\msedge.exe'
+  if (Test-Path $edge) {
+    Start-Process $edge -ArgumentList @('--no-first-run', '--disable-features=msEdgeFirstRunExperience', $prUrl)
+  } else {
+    Start-Process $prUrl
+  }
+  Start-Sleep -Seconds 20
   $resultState = 'succeeded'
 } catch {
   $failure = $_.Exception.Message
