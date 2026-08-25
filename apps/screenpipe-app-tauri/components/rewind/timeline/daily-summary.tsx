@@ -172,7 +172,7 @@ export function TimelineDailySummary({
 	);
 
 	useEffect(() => {
-		abortRef.current?.abort();
+		abortRef.current?.abort("selection_changed_or_unmounted");
 		const cached = readCachedSummary(currentDate);
 		setSummary(cached);
 		setStatus(cached ? "complete" : "idle");
@@ -181,7 +181,8 @@ export function TimelineDailySummary({
 		setCopied(false);
 		setPanelOpen(false);
 
-		return () => abortRef.current?.abort();
+		return () =>
+			abortRef.current?.abort("selection_changed_or_unmounted");
 		// `dateId` deliberately represents the selected local calendar day.
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [dateId]);
@@ -200,7 +201,7 @@ export function TimelineDailySummary({
 				return;
 			}
 
-			abortRef.current?.abort();
+			abortRef.current?.abort("superseded");
 			const controller = new AbortController();
 			abortRef.current = controller;
 			const requestedDate = new Date(currentDate);
@@ -226,6 +227,7 @@ export function TimelineDailySummary({
 					preset: dailySummaryPreset,
 					userToken: token,
 					signal: controller.signal,
+					recoverTransientRuntimeStart: true,
 				});
 				const formatFailures = evaluateDailySummaryFormat(completedSummary);
 
@@ -247,6 +249,14 @@ export function TimelineDailySummary({
 					generationError instanceof Error &&
 					generationError.name === "AbortError"
 				) {
+					posthog.capture("timeline_daily_summary_cancelled", {
+						selected_date: dateId,
+						duration_ms: Math.round(performance.now() - startedAt),
+						reason:
+							typeof controller.signal.reason === "string"
+								? controller.signal.reason
+								: "aborted",
+					});
 					return;
 				}
 				console.error("daily summary generation failed", generationError);
@@ -348,7 +358,7 @@ export function TimelineDailySummary({
 
 	const closePanel = useCallback(() => {
 		if (isGenerating) {
-			abortRef.current?.abort();
+			abortRef.current?.abort("panel_closed");
 			setStatus("idle");
 			setSummary("");
 		}
