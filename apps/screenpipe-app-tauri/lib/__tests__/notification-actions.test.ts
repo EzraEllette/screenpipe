@@ -13,8 +13,12 @@ vi.mock("@tauri-apps/api/event", () => ({
   emit: vi.fn(async () => undefined),
 }));
 
+const tauriCommandMocks = vi.hoisted(() => ({
+  openViewerWindow: vi.fn(async () => ({ status: "ok" as const, data: null })),
+}));
+
 vi.mock("@/lib/utils/tauri", () => ({
-  commands: {},
+  commands: tauriCommandMocks,
 }));
 
 vi.mock("@/lib/api", () => ({
@@ -151,5 +155,24 @@ describe("notification deeplink routing", () => {
       "deep-link-received",
       "screenpipe://timeline",
     );
+  });
+
+  it("sends file link actions to the in-app viewer, not the browser or Main", async () => {
+    tauriCommandMocks.openViewerWindow.mockClear();
+    const { emit } = await import("@tauri-apps/api/event");
+    vi.mocked(emit).mockClear();
+
+    // `commands.showWindowActivated` is deliberately absent from the mock —
+    // reaching the show-Main path would throw, so completing at all proves
+    // the timeline overlay was never shown over the viewer.
+    await executeNotificationAction({
+      type: "link",
+      url: "file:///Users/louis/.screenpipe/pipes/time-breakdown/output/2026-08-25.md",
+    });
+
+    expect(tauriCommandMocks.openViewerWindow).toHaveBeenCalledWith(
+      "/Users/louis/.screenpipe/pipes/time-breakdown/output/2026-08-25.md",
+    );
+    expect(emit).not.toHaveBeenCalled();
   });
 });

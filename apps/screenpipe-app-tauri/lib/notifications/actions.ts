@@ -92,6 +92,44 @@ export function windowForDeeplink(url: string) {
   return "Main";
 }
 
+/**
+ * Local file a notification action points at, or null. Covers the two shapes
+ * producers use: `screenpipe://view?path=…` (what the /notify body rewriter
+ * emits) and raw `file://` URLs (what pipes tend to put in link actions).
+ *
+ * These must open the in-app viewer window directly. Routing them like a
+ * generic deeplink shows the Main timeline overlay first, which then covers
+ * the viewer — the user clicks "open report" and sees the timeline instead.
+ */
+export function viewerPathFromNotificationUrl(url: string): string | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return null;
+  }
+  if (
+    parsed.protocol === "screenpipe:" &&
+    (parsed.host === "view" || parsed.pathname === "view")
+  ) {
+    return parsed.searchParams.get("path");
+  }
+  if (parsed.protocol === "file:") {
+    let path = parsed.pathname;
+    try {
+      path = decodeURIComponent(path);
+    } catch {
+      // keep the raw path when the URL contains malformed escapes
+    }
+    // file:///C:/… parses to /C:/… — strip the artificial leading slash.
+    if (/^\/[A-Za-z]:[\\/]/.test(path)) {
+      path = path.slice(1);
+    }
+    return path || null;
+  }
+  return null;
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -102,12 +140,26 @@ export async function routeNotificationDeeplink(
     showWindowActivated?: typeof commands.showWindowActivated;
     emitEvent?: typeof emit;
     sleepMs?: (ms: number) => Promise<void>;
+    openViewerWindow?: typeof commands.openViewerWindow;
   } = {},
 ): Promise<void> {
   const showWindowActivated =
     deps.showWindowActivated ?? commands.showWindowActivated;
   const emitEvent = deps.emitEvent ?? emit;
   const sleepMs = deps.sleepMs ?? sleep;
+
+  // File links open the viewer window directly. Showing Main first would put
+  // the fullscreen timeline overlay on top of the viewer that's about to open.
+  const viewerPath = viewerPathFromNotificationUrl(url);
+  if (viewerPath) {
+    const openViewerWindow =
+      deps.openViewerWindow ?? commands.openViewerWindow;
+    const result = await openViewerWindow(viewerPath);
+    if (result.status === "error") {
+      throw new Error(result.error);
+    }
+    return;
+  }
 
   await showWindowActivated(windowForDeeplink(url));
 
@@ -259,7 +311,10 @@ export async function executeNotificationAction(
     case "link":
     case "deeplink": {
       if (action.url) {
-        if (action.url.startsWith("screenpipe://")) {
+        if (
+          action.url.startsWith("screenpipe://") ||
+          viewerPathFromNotificationUrl(action.url)
+        ) {
           await routeNotificationDeeplink(action.url);
         } else {
           // External URL — open in system browser.
@@ -289,7 +344,10 @@ export async function executeNotificationAction(
         action.deeplinkUrl ||
         ctx.sourceUrl;
       if (sourceUrl) {
-        if (sourceUrl.startsWith("screenpipe://")) {
+        if (
+          sourceUrl.startsWith("screenpipe://") ||
+          viewerPathFromNotificationUrl(sourceUrl)
+        ) {
           await routeNotificationDeeplink(sourceUrl);
         } else {
           const { open } = await import("@tauri-apps/plugin-shell");

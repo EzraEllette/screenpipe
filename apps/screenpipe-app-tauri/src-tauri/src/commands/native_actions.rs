@@ -328,6 +328,214 @@ fn emit_timeline_daily_summary(app: &tauri::AppHandle, window_label: Option<&str
     }
 }
 
+/// Local file a notification URL points at, or `None`. Covers the two shapes
+/// producers use: `screenpipe://view?path=…` (what the /notify body rewriter
+/// emits) and raw `file://` URLs (what pipes tend to put in link actions).
+///
+/// These open the in-app viewer window directly. Routing them like a generic
+/// deeplink shows the Main timeline overlay first, which then covers the
+/// viewer — the user clicks "open report" and only sees the timeline.
+fn viewer_path_from_notification_url(url: &str) -> Option<String> {
+    if let Some(query) = url
+        .strip_prefix("screenpipe://view?")
+        .or_else(|| url.strip_prefix("screenpipe://view/?"))
+    {
+        return query.split('&').find_map(|part| {
+            let value = part.strip_prefix("path=")?;
+            let decoded = urlencoding::decode(value).ok()?.into_owned();
+            (!decoded.is_empty()).then_some(decoded)
+        });
+    }
+
+    let rest = url.strip_prefix("file://")?;
+    // Drop an optional localhost authority ("file://localhost/x").
+    let rest = rest.strip_prefix("localhost").unwrap_or(rest);
+    if !rest.starts_with('/') {
+        return None;
+    }
+    let decoded = urlencoding::decode(rest).ok()?.into_owned();
+    // file:///C:/… decodes to /C:/… — strip the artificial leading slash.
+    let bytes = decoded.as_bytes();
+    if bytes.len() > 3
+        && bytes[1].is_ascii_alphabetic()
+        && bytes[2] == b':'
+        && (bytes[3] == b'/' || bytes[3] == b'\\')
+    {
+        return Some(decoded[1..].to_string());
+    }
+    Some(decoded)
+}
+
+/// Open the in-app viewer for a notification file link. Activates the app
+/// first (a notification click is explicit user intent, mirroring
+/// `show_window_activated`) so the viewer doesn't open behind the frontmost
+/// app — and deliberately does NOT show the Main timeline overlay.
+fn open_viewer_from_notification(app: &tauri::AppHandle, path: String) {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = app.run_on_main_thread(crate::window::activate_app_if_allowed);
+    }
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Err(e) = crate::viewer::open_viewer_window(app, path).await {
+            error!("failed to open viewer from notification action: {}", e);
+        }
+    });
+}
+
+/// Build the `chat-prefill` payload for a chat-opening notification action:
+/// `type=chat`, or `type=pipe` with `open_in_chat`. Mirrors
+/// `executeNotificationAction` in lib/notifications/actions.ts so a click on
+/// the native panel lands in chat exactly like a click on the webview toast.
+fn chat_prefill_payload_from_action(action: &serde_json::Value) -> Option<serde_json::Value> {
+    let action_type = action.get("type").and_then(|v| v.as_str())?;
+    let context = action.get("context").filter(|c| !c.is_null());
+    match action_type {
+        "chat" => {
+            let prompt = action.get("prompt").and_then(|v| v.as_str());
+            if prompt.is_none() && context.is_none() {
+                return None;
+            }
+            let context_str = context
+                .map(|c| {
+                    format!(
+                        "context:\n{}",
+                        serde_json::to_string_pretty(c).unwrap_or_default()
+                    )
+                })
+                .unwrap_or_default();
+            Some(serde_json::json!({
+                "context": context_str,
+                "prompt": prompt,
+                "displayLabel": action.get("label").and_then(|v| v.as_str()),
+                "autoSend": action
+                    .get("auto_send")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true),
+                "source": "notification-native",
+                "targetWindow": "chat",
+            }))
+        }
+        "pipe" => {
+            if action.get("open_in_chat").and_then(|v| v.as_bool()) != Some(true) {
+                return None;
+            }
+            let pipe = action.get("pipe").and_then(|v| v.as_str())?;
+            let context_str = context
+                .map(|c| serde_json::to_string_pretty(c).unwrap_or_default())
+                .unwrap_or_default();
+            Some(serde_json::json!({
+                "context": format!("run pipe \"{pipe}\" with this context:\n{context_str}"),
+                "prompt": format!(
+                    "run the {pipe} pipe{}",
+                    if context.is_some() { " with the provided context" } else { "" }
+                ),
+                "autoSend": true,
+                "source": "notification-native",
+                "targetWindow": "chat",
+            }))
+        }
+        _ => None,
+    }
+}
+
+/// Show the Chat window and deliver a `chat-prefill` event once its webview is
+/// ready. Rust mirror of `showChatWithPrefill` (lib/chat-utils.ts): the chat
+/// component answers "chat-ping" with "chat-ready" once mounted, so we wait
+/// for that handshake instead of emitting into a webview that is still booting
+/// — the failure mode behind "open in chat does nothing".
+fn open_chat_with_prefill(app: tauri::AppHandle, prefill: serde_json::Value) {
+    std::thread::spawn(move || {
+        use tauri::Listener;
+
+        if let Err(e) = tauri::async_runtime::block_on(crate::commands::show_window_activated(
+            app.clone(),
+            ShowRewindWindow::Chat,
+        )) {
+            error!("failed to show chat window for notification action: {}", e);
+        }
+
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let listener = app.listen("chat-ready", move |event| {
+            let ready_window = serde_json::from_str::<serde_json::Value>(event.payload())
+                .ok()
+                .and_then(|v| {
+                    v.get("windowLabel")
+                        .and_then(|w| w.as_str())
+                        .map(str::to_string)
+                });
+            // A missing label counts as ready, matching waitForChatReady.
+            if ready_window.as_deref().map_or(true, |w| w == "chat") {
+                let _ = tx.send(());
+            }
+        });
+        let mut chat_ready = false;
+        for _ in 0..3 {
+            let _ = app.emit("chat-ping", serde_json::json!({ "targetWindow": "chat" }));
+            if rx
+                .recv_timeout(std::time::Duration::from_millis(2500))
+                .is_ok()
+            {
+                chat_ready = true;
+                break;
+            }
+        }
+        app.unlisten(listener);
+        if !chat_ready {
+            warn!("chat window never reported ready; sending notification prefill anyway");
+        }
+        if let Err(e) = app.emit("chat-prefill", prefill) {
+            error!("failed to deliver notification chat prefill: {}", e);
+        }
+    });
+}
+
+/// Run a pipe in the background from a notification click, then confirm (or
+/// report failure) through the same notification surface — a background run
+/// with zero feedback reads as a dead button.
+fn run_pipe_from_notification(
+    app: tauri::AppHandle,
+    pipe: String,
+    context: Option<serde_json::Value>,
+) {
+    std::thread::spawn(move || {
+        use crate::recording::local_api_context_from_app;
+        let api = local_api_context_from_app(&app);
+        let client = reqwest::blocking::Client::new();
+        let request = api.apply_auth_blocking(
+            client
+                .post(api.url(&format!("/pipes/{}/run", urlencoding::encode(&pipe))))
+                .header("Content-Type", "application/json")
+                .body(serde_json::json!({ "notification_context": context }).to_string()),
+        );
+        let outcome = match request.send() {
+            Ok(res) if res.status().is_success() => Ok(()),
+            Ok(res) => Err(format!("HTTP {}", res.status())),
+            Err(e) => Err(e.to_string()),
+        };
+        let confirmation = match &outcome {
+            Ok(()) => serde_json::json!({
+                "title": format!("{pipe} is running"),
+                "body": "started from your notification — results arrive as a new notification.",
+                // Toast-only: a "started" echo should not earn an inbox row.
+                "transient": true,
+            }),
+            Err(e) => {
+                error!("failed to run pipe '{}' from notification action: {}", pipe, e);
+                serde_json::json!({
+                    "title": format!("couldn't run {pipe}"),
+                    "body": format!("the run request failed: {e}"),
+                })
+            }
+        };
+        let _ = client
+            .post(api.url("/notify"))
+            .header("Content-Type", "application/json")
+            .body(confirmation.to_string())
+            .send();
+    });
+}
+
 fn notification_copy_value(action: &serde_json::Value) -> Option<String> {
     action
         .get("value")
@@ -576,6 +784,11 @@ pub(crate) fn dispatch_notification_action(json: String) {
             return;
         };
 
+        if let Some(path) = viewer_path_from_notification_url(&url) {
+            open_viewer_from_notification(app, path);
+            return;
+        }
+
         let is_in_app = url.starts_with("screenpipe://");
         let app_clone = app.clone();
         std::thread::spawn(move || {
@@ -683,6 +896,14 @@ pub(crate) fn dispatch_notification_action(json: String) {
             );
             return;
         };
+
+        // File links (screenpipe://view or file://) open the in-app viewer
+        // directly. Routing them through the generic path below would show the
+        // Main timeline overlay on top of the viewer that's about to open.
+        if let Some(path) = viewer_path_from_notification_url(&url) {
+            open_viewer_from_notification(app, path);
+            return;
+        }
 
         // Guard against senders putting a browser URL into "deeplink" or a
         // screenpipe:// URL into "link". We route on actual scheme, not on
@@ -798,9 +1019,48 @@ pub(crate) fn dispatch_notification_action(json: String) {
         return;
     }
 
-    // Everything else (pipe, mute, dismiss, auto_dismiss, legacy string
-    // actions) still goes to the JS handler. The overlay window owns those
-    // because they need access to posthog / localforage / chat prefill.
+    // Chat-opening actions ("chat", and "pipe" with open_in_chat) and
+    // background pipe runs are handled in Rust for the same reason as
+    // link/deeplink above: their JS listener lives in the Main overlay
+    // webview, which is usually not mounted when a native notification is
+    // clicked — the click silently did nothing ("open in chat does nothing").
+    if action_type == Some("chat") || action_type == Some("pipe") {
+        if let Some(action) = parsed.as_ref() {
+            // Mirrors the `notification_action` capture the JS handler did
+            // when it (sometimes) received these events.
+            let track = |app: &tauri::AppHandle| {
+                track_native_overlay_event(
+                    app,
+                    "notification_action",
+                    serde_json::json!({ "action_type": action_type }),
+                );
+            };
+            if let Some(prefill) = chat_prefill_payload_from_action(action) {
+                track(app);
+                open_chat_with_prefill(app.clone(), prefill);
+                return;
+            }
+            if action_type == Some("pipe")
+                && action.get("open_in_chat").and_then(|v| v.as_bool()) != Some(true)
+            {
+                if let Some(pipe) = action.get("pipe").and_then(|v| v.as_str()) {
+                    track(app);
+                    run_pipe_from_notification(
+                        app.clone(),
+                        pipe.to_string(),
+                        action.get("context").cloned(),
+                    );
+                    return;
+                }
+            }
+        }
+        // Unusable payload (e.g. a pipe action without a pipe name) — fall
+        // through to the JS handler like before.
+    }
+
+    // Everything else (mute, dismiss, auto_dismiss, legacy string actions)
+    // still goes to the JS handler. The overlay window owns those because
+    // they need access to posthog / localforage.
     let _ = app.emit("native-notification-action", &json);
 }
 
@@ -1187,11 +1447,127 @@ fn native_shortcut_action_callback_inner(action_ptr: *const std::os::raw::c_char
 #[cfg(test)]
 mod tests {
     use super::{
-        native_overlay_meeting_note_id, notification_copy_value, notification_source_url,
-        notification_deeplink_target, parse_meeting_deeplink, parse_overlay_anchor,
-        resolve_timeline_event_target, SHORTCUT_OVERLAY_ANCHORS,
+        chat_prefill_payload_from_action, native_overlay_meeting_note_id, notification_copy_value,
+        notification_deeplink_target, notification_source_url, parse_meeting_deeplink,
+        parse_overlay_anchor, resolve_timeline_event_target, viewer_path_from_notification_url,
+        SHORTCUT_OVERLAY_ANCHORS,
     };
     use serde_json::json;
+
+    #[test]
+    fn viewer_path_parses_view_deeplinks() {
+        assert_eq!(
+            viewer_path_from_notification_url(
+                "screenpipe://view?path=%2FUsers%2Flouis%2F.screenpipe%2Fpipes%2Ftime-breakdown%2Foutput%2F2026-08-25.md"
+            ),
+            Some("/Users/louis/.screenpipe/pipes/time-breakdown/output/2026-08-25.md".to_string())
+        );
+        assert_eq!(
+            viewer_path_from_notification_url("screenpipe://view?path="),
+            None
+        );
+        assert_eq!(viewer_path_from_notification_url("screenpipe://view"), None);
+    }
+
+    #[test]
+    fn viewer_path_parses_file_urls() {
+        assert_eq!(
+            viewer_path_from_notification_url("file:///Users/louis/report%20final.md"),
+            Some("/Users/louis/report final.md".to_string())
+        );
+        assert_eq!(
+            viewer_path_from_notification_url("file://localhost/Users/louis/report.md"),
+            Some("/Users/louis/report.md".to_string())
+        );
+        // Windows drive letters lose the artificial leading slash.
+        assert_eq!(
+            viewer_path_from_notification_url("file:///C:/Users/louis/report.md"),
+            Some("C:/Users/louis/report.md".to_string())
+        );
+    }
+
+    #[test]
+    fn viewer_path_ignores_other_urls() {
+        assert_eq!(
+            viewer_path_from_notification_url("screenpipe://meeting/123"),
+            None
+        );
+        assert_eq!(
+            viewer_path_from_notification_url("https://example.com/report.md"),
+            None
+        );
+        assert_eq!(viewer_path_from_notification_url("file://host/x.md"), None);
+    }
+
+    #[test]
+    fn chat_action_builds_prefill_with_auto_send_default_true() {
+        let prefill = chat_prefill_payload_from_action(&json!({
+            "type": "chat",
+            "label": "draft Razorpay email",
+            "prompt": "Draft a short email to Razorpay.",
+        }))
+        .expect("chat action should build a prefill");
+        assert_eq!(prefill["prompt"], "Draft a short email to Razorpay.");
+        assert_eq!(prefill["displayLabel"], "draft Razorpay email");
+        assert_eq!(prefill["autoSend"], true);
+        assert_eq!(prefill["targetWindow"], "chat");
+        assert_eq!(prefill["context"], "");
+    }
+
+    #[test]
+    fn chat_action_respects_auto_send_false_and_serializes_context() {
+        let prefill = chat_prefill_payload_from_action(&json!({
+            "type": "chat",
+            "prompt": "Review the failures.",
+            "auto_send": false,
+            "context": { "run_date": "2026-08-25" },
+        }))
+        .expect("chat action should build a prefill");
+        assert_eq!(prefill["autoSend"], false);
+        let context = prefill["context"].as_str().unwrap();
+        assert!(context.starts_with("context:\n"));
+        assert!(context.contains("2026-08-25"));
+    }
+
+    #[test]
+    fn chat_action_without_prompt_or_context_is_skipped() {
+        assert!(chat_prefill_payload_from_action(&json!({ "type": "chat" })).is_none());
+    }
+
+    #[test]
+    fn open_in_chat_pipe_action_builds_run_pipe_prefill() {
+        // The exact payload the "review in chat" buttons send today.
+        let prefill = chat_prefill_payload_from_action(&json!({
+            "type": "pipe",
+            "label": "review in chat",
+            "pipe": "meeting-summary",
+            "open_in_chat": true,
+            "context": { "meeting_id": 147 },
+        }))
+        .expect("open_in_chat pipe action should build a prefill");
+        assert_eq!(prefill["prompt"], "run the meeting-summary pipe with the provided context");
+        assert_eq!(prefill["autoSend"], true);
+        assert_eq!(prefill["targetWindow"], "chat");
+        assert!(prefill["context"]
+            .as_str()
+            .unwrap()
+            .starts_with("run pipe \"meeting-summary\" with this context:"));
+    }
+
+    #[test]
+    fn background_pipe_action_is_not_a_chat_prefill() {
+        assert!(chat_prefill_payload_from_action(&json!({
+            "type": "pipe",
+            "pipe": "meeting-summary",
+        }))
+        .is_none());
+        // open_in_chat without a pipe name has nothing to run.
+        assert!(chat_prefill_payload_from_action(&json!({
+            "type": "pipe",
+            "open_in_chat": true,
+        }))
+        .is_none());
+    }
 
     #[test]
     fn accepts_every_anchor_the_overlay_can_report() {
