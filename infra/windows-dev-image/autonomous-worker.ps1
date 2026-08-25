@@ -73,16 +73,16 @@ function Wait-InteractiveDesktop {
   $sessionId = [Diagnostics.Process]::GetCurrentProcess().SessionId
   foreach ($attempt in 1..90) {
     $explorer = Get-Process -Name explorer -ErrorAction SilentlyContinue | Where-Object SessionId -EQ $sessionId
-    $oobe = Get-Process -ErrorAction SilentlyContinue | Where-Object {
-      $_.SessionId -eq $sessionId -and $_.ProcessName -match '^(CloudExperienceHost|CloudExperienceHostBroker|UserOOBEBroker|oobe|WWAHost)'
+    $oobeUi = Get-Process -ErrorAction SilentlyContinue | Where-Object {
+      $_.SessionId -eq $sessionId -and $_.ProcessName -match '^(CloudExperienceHost|CloudExperienceHostBroker|oobe|WWAHost)'
     }
-    if ($explorer -and -not $oobe) {
+    if ($explorer -and -not $oobeUi) {
       Start-Sleep -Seconds 15
       return
     }
     Start-Sleep -Seconds 2
   }
-  throw 'interactive desktop did not become ready after OOBE'
+  throw 'interactive Explorer desktop did not become ready after OOBE UI exited'
 }
 
 function Start-DesktopRecorder {
