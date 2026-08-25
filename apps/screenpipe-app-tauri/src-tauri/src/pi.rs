@@ -3084,11 +3084,37 @@ pub async fn pi_start_inner(
         {
             cmd.env("SCREENPIPE_ACP_SYSTEM_PROMPT", system_prompt);
         }
+        // A private surface (meeting chat) passes the exact read-only tools it
+        // needs. Raw Pi gets this as `--tools`; the ACP runtime uses it to scope
+        // the session — no third-party MCP servers, no shared agent context, and
+        // an out-of-contract tool refused instead of stranded on an approval
+        // card the surface cannot show.
+        cmd.env_remove(screenpipe_core::agents::acp::TOOL_ALLOWLIST_ENV);
+        let scoped_tools = provider_config
+            .as_ref()
+            .and_then(|config| config.allowed_tools.as_ref())
+            .map(|tools| {
+                tools
+                    .iter()
+                    .map(|tool| tool.trim())
+                    .filter(|tool| !tool.is_empty())
+                    .collect::<Vec<_>>()
+            });
+        if let Some(tools) = scoped_tools.as_ref() {
+            cmd.env(
+                screenpipe_core::agents::acp::TOOL_ALLOWLIST_ENV,
+                serde_json::to_string(tools).map_err(|e| e.to_string())?,
+            );
+        }
         // Forward the user's own MCP servers so the harness gets the same
-        // tool surface raw Pi gets from the mcp-bridge extension.
+        // tool surface raw Pi gets from the mcp-bridge extension. A scoped
+        // session never gets them (the runtime drops them too; not sending the
+        // resolved secret headers at all is the stronger boundary).
         cmd.env_remove("SCREENPIPE_ACP_USER_MCP_JSON");
-        if let Some(user_mcp) = resolve_user_mcp_servers_json().await {
-            cmd.env("SCREENPIPE_ACP_USER_MCP_JSON", user_mcp);
+        if scoped_tools.is_none() {
+            if let Some(user_mcp) = resolve_user_mcp_servers_json().await {
+                cmd.env("SCREENPIPE_ACP_USER_MCP_JSON", user_mcp);
+            }
         }
         // Reopen after the process was gone: reattach to the prior ACP
         // session instead of starting fresh with a glued transcript.

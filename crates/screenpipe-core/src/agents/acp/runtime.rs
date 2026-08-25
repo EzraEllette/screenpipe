@@ -76,9 +76,18 @@ const RUNTIME_ONLY_ENV: &[&str] = &[
     "SCREENPIPE_ACP_ID",
     "SCREENPIPE_ACP_RESUME_SESSION_ID",
     "SCREENPIPE_ACP_UNATTENDED",
+    TOOL_ALLOWLIST_ENV,
     super::super::chat_control::CHAT_CONTROL_ADDR_ENV,
     super::super::chat_control::CHAT_CONTROL_TOKEN_ENV,
 ];
+
+/// A private, single-purpose surface (today: the meeting chat panel) passes the
+/// exact read-only tools it needs. When this is set the session is *scoped*:
+/// third-party MCP servers are not mounted, the shared screenpipe agent context
+/// is not injected, and a permission request for a tool outside the list is
+/// refused outright instead of waiting on an approval card the surface has no UI
+/// to show. Chat and scheduled tasks never set it and are unaffected.
+pub const TOOL_ALLOWLIST_ENV: &str = "SCREENPIPE_ACP_TOOL_ALLOWLIST";
 
 /// Strip every [`RUNTIME_ONLY_ENV`] var from a child command's inherited
 /// environment. Call at every spawn site so secrets can't leak into a
@@ -197,6 +206,18 @@ struct RuntimeConfig {
     /// cards. In this mode permissions use the task's preconfigured sandbox and
     /// authentication failures return immediately with recovery instructions.
     unattended: bool,
+    /// Set by a scoped surface (see [`TOOL_ALLOWLIST_ENV`]): the only tools this
+    /// session may use, as bare screenpipe tool names. `None` is an ordinary
+    /// full-surface session.
+    tool_allowlist: Option<Vec<String>>,
+}
+
+impl RuntimeConfig {
+    /// A scoped session gets no third-party MCP servers, no shared agent
+    /// context, and no approval cards.
+    fn is_scoped(&self) -> bool {
+        self.tool_allowlist.is_some()
+    }
 }
 
 /// A user-configured MCP server forwarded to the adapter. Header values and
@@ -311,6 +332,26 @@ impl RuntimeConfig {
         } else {
             load_self_improvement_context()
         };
+        // Normalized once here so every read site compares like with like.
+        let tool_allowlist = parse_json_env::<Vec<String>>(TOOL_ALLOWLIST_ENV)?.map(|tools| {
+            tools
+                .iter()
+                .filter_map(|tool| normalized_tool_name(tool))
+                .collect::<Vec<_>>()
+        });
+        // A scoped surface carries its whole contract in the turn it sends. The
+        // shared screenpipe agent context advertises skills and tools this
+        // session is not allowed to use, which is what made a scoped agent
+        // reach for a skill and get its run killed.
+        let system_context = if tool_allowlist.is_some() {
+            env_nonempty("SCREENPIPE_ACP_SYSTEM_PROMPT")
+        } else {
+            Some(build_first_turn_context(
+                load_screenpipe_agents_context(&data_dir),
+                self_improvement_context,
+                env_nonempty("SCREENPIPE_ACP_SYSTEM_PROMPT"),
+            ))
+        };
 
         Ok(Self {
             agent_id,
@@ -322,11 +363,7 @@ impl RuntimeConfig {
             project_dir,
             bun_path,
             preferred_auth_method: env_nonempty("SCREENPIPE_ACP_AUTH_METHOD"),
-            system_context: Some(build_first_turn_context(
-                load_screenpipe_agents_context(&data_dir),
-                self_improvement_context,
-                env_nonempty("SCREENPIPE_ACP_SYSTEM_PROMPT"),
-            )),
+            system_context,
             session_defaults: parse_json_env::<SessionDefaults>(
                 "SCREENPIPE_ACP_SESSION_CONFIG_JSON",
             )?
@@ -337,6 +374,7 @@ impl RuntimeConfig {
             resume_session_id: env_nonempty("SCREENPIPE_ACP_RESUME_SESSION_ID"),
             unattended: env_nonempty("SCREENPIPE_ACP_UNATTENDED")
                 .is_some_and(|value| value != "0" && !value.eq_ignore_ascii_case("false")),
+            tool_allowlist,
         })
     }
 }
@@ -2924,13 +2962,21 @@ fn mcp_servers(config: &RuntimeConfig) -> Vec<McpServer> {
         // pi-acp runs the same isolated Pi installation and loads the package
         // natively, so mounting its portable surface again would duplicate
         // tools. Every non-Pi ACP agent receives the middleware form.
-        if config.agent_id != "pi-acp" {
+        if config.agent_id != "pi-acp" && !config.is_scoped() {
             servers.extend(
                 config
                     .extension_middleware
                     .stdio_servers(&config.bun_path, &extension_mcp_env()),
             );
         }
+    }
+    // A scoped surface answers one question from screenpipe's own read tools.
+    // Mounting the user's Notion, Slack, or Postiz servers there would widen it
+    // into an unrelated data path, and each unauthenticated one also emits a
+    // failed `mcp__<server>__startup` tool call that the surface has to reason
+    // about.
+    if config.is_scoped() {
+        return servers;
     }
     // Forward the user's own registered MCP servers so every harness sees
     // the same tool surface the native Pi mcp-bridge extension gives raw Pi.
@@ -3271,6 +3317,41 @@ fn is_screenpipe_read_tool(tool_title: &str) -> bool {
             | "mcp__screenpipe-tools__get_meeting"
             | "mcp__screenpipe-tools__health_check"
     )
+}
+
+/// The bare screenpipe tool name behind whatever an adapter puts on the wire.
+///
+/// Tool identity reaches the desktop in three shapes and they must all compare
+/// equal: raw Pi sends the bare name (`search-content`), stdio ACP agents send
+/// `mcp__screenpipe__search-content`, and http-only agents (Cursor, Copilot)
+/// send the bundled server's underscored form,
+/// `mcp__screenpipe-tools__frame_context`. Returns `None` for a human title
+/// like "Read /a/b.ts", which is a native agent step and not an MCP tool.
+fn normalized_tool_name(title: &str) -> Option<String> {
+    let title = title.trim();
+    if title.is_empty() {
+        return None;
+    }
+    let bare = match title.split_once("__") {
+        // `mcp__<server>__<tool>`; the server name itself may contain no `__`.
+        Some(("mcp", rest)) => rest.split_once("__").map(|(_, tool)| tool)?,
+        Some(_) => return None,
+        None => title,
+    };
+    let bare = bare.trim();
+    // A tool name is a single identifier. Anything with whitespace is a human
+    // title ("Read /a/b.ts", "Searching the transcript"), never a tool id.
+    if bare.is_empty() || bare.chars().any(char::is_whitespace) {
+        return None;
+    }
+    Some(bare.to_ascii_lowercase().replace('_', "-"))
+}
+
+/// Whether a scoped session may use this tool. Native agent steps (no MCP tool
+/// name) are refused too: a scoped surface answers from the evidence in its own
+/// turn, so a file read or a skill load is out of contract by construction.
+fn scoped_tool_allowed(allowlist: &[String], title: Option<&str>) -> bool {
+    normalized_tool_name(title.unwrap_or("")).is_some_and(|name| allowlist.contains(&name))
 }
 
 /// A short, readable heading for a permission prompt, from the tool's `kind`.
@@ -3788,6 +3869,7 @@ async fn run_protocol(
     let kill_terminal_state = state.clone();
     let release_terminal_state = state.clone();
     let unattended = config.unattended;
+    let scoped_tools = config.tool_allowlist.clone();
 
     Client
         .builder()
@@ -3804,6 +3886,7 @@ async fn run_protocol(
         .on_receive_request(
             async move |request: RequestPermissionRequest, responder, connection| {
                 let state = permission_state.clone();
+                let scoped_tools = scoped_tools.clone();
                 connection.spawn(async move {
                     let serialized = serde_json::to_value(&request).unwrap_or_default();
                     let tool = serialized.get("toolCall").cloned().unwrap_or_default();
@@ -3814,6 +3897,26 @@ async fn run_protocol(
                         .filter(|value| !value.is_empty());
                     let kind = tool.get("kind").and_then(Value::as_str);
                     let options = serialized.get("options").cloned().unwrap_or_else(|| json!([]));
+                    // A scoped surface (meeting chat) has no approval card to
+                    // show, so it decides here and never blocks: an allowlisted
+                    // read tool is approved, anything else is refused. Refusing
+                    // is a normal tool result the agent can answer around —
+                    // unlike waiting on a UI that will never appear, which used
+                    // to strand the turn until its timeout.
+                    if let Some(allowlist) = scoped_tools.as_deref() {
+                        if scoped_tool_allowed(allowlist, title) {
+                            if let Some(option_id) = allow_option_id(&options) {
+                                return responder.respond(RequestPermissionResponse::new(
+                                    RequestPermissionOutcome::Selected(
+                                        SelectedPermissionOutcome::new(option_id),
+                                    ),
+                                ));
+                            }
+                        }
+                        return responder.respond(RequestPermissionResponse::new(
+                            RequestPermissionOutcome::Cancelled,
+                        ));
+                    }
                     // Chat auto-approves screenpipe's read tools plus every
                     // requested tool when the user explicitly selected Full
                     // access. A scheduled task has no foreground UI, so its
@@ -4971,7 +5074,101 @@ mod tests {
             user_mcp_servers: Vec::new(),
             resume_session_id: None,
             unattended: false,
+            tool_allowlist: None,
         }
+    }
+
+    fn server_names(servers: &[McpServer]) -> Vec<String> {
+        servers
+            .iter()
+            .map(|server| match server {
+                McpServer::Stdio(stdio) => stdio.name.clone(),
+                McpServer::Http(http) => http.name.clone(),
+                other => format!("{other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn tool_names_normalize_across_every_wire_shape() {
+        // The same logical tool reaches us three ways: bare from raw Pi, stdio
+        // ACP's `mcp__screenpipe__`, and the bundled http server's underscored
+        // form. All three must compare equal or a scoped surface refuses the
+        // very tool it asked for.
+        assert_eq!(
+            normalized_tool_name("search-content").as_deref(),
+            Some("search-content")
+        );
+        assert_eq!(
+            normalized_tool_name("mcp__screenpipe__search-content").as_deref(),
+            Some("search-content")
+        );
+        assert_eq!(
+            normalized_tool_name("mcp__screenpipe-tools__frame_context").as_deref(),
+            Some("frame-context")
+        );
+
+        // Human titles are native agent steps, not MCP tools.
+        assert_eq!(normalized_tool_name("Read /a/b.ts"), None);
+        assert_eq!(normalized_tool_name("Searching the transcript"), None);
+        assert_eq!(normalized_tool_name(""), None);
+        assert_eq!(normalized_tool_name("   "), None);
+    }
+
+    #[test]
+    fn a_scoped_session_allows_only_its_own_read_tools() {
+        let allowlist = vec!["search-content".to_owned(), "get-meeting".to_owned()];
+
+        assert!(scoped_tool_allowed(
+            &allowlist,
+            Some("mcp__screenpipe__search-content")
+        ));
+        assert!(scoped_tool_allowed(
+            &allowlist,
+            Some("mcp__screenpipe-tools__get_meeting")
+        ));
+
+        // A screenpipe tool outside the list, another MCP server, a native step,
+        // and a title-less call are all refused.
+        assert!(!scoped_tool_allowed(
+            &allowlist,
+            Some("mcp__screenpipe__update-memory")
+        ));
+        assert!(!scoped_tool_allowed(
+            &allowlist,
+            Some("mcp__notion__search")
+        ));
+        assert!(!scoped_tool_allowed(&allowlist, Some("Skill")));
+        assert!(!scoped_tool_allowed(&allowlist, None));
+    }
+
+    #[test]
+    fn a_scoped_session_mounts_no_third_party_mcp_servers() {
+        let mut config = runtime_config("cursor");
+        config.user_mcp_servers = vec![UserMcpServer {
+            name: "notion".into(),
+            transport: "http".into(),
+            url: "https://mcp.notion.com/mcp".into(),
+            headers: Vec::new(),
+            command: None,
+            args: Vec::new(),
+            env: HashMap::new(),
+        }];
+
+        let unscoped = mcp_servers(&config);
+        assert!(
+            server_names(&unscoped).iter().any(|name| name == "notion"),
+            "ordinary chat still gets the user's own servers, got {:?}",
+            server_names(&unscoped)
+        );
+
+        config.tool_allowlist = Some(vec!["search-content".to_owned()]);
+        let scoped = mcp_servers(&config);
+        assert!(
+            !server_names(&scoped).iter().any(|name| name == "notion"),
+            "a scoped surface must not reach an unrelated data source, got {:?}",
+            server_names(&scoped)
+        );
     }
 
     #[test]

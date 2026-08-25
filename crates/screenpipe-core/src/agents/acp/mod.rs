@@ -24,7 +24,7 @@ pub use runtime::{
     agent_cloud_routing, agent_download_pending, agent_install_status, cloud_routing_env,
     install_agent, is_forbidden_acp_env, is_known_agent, is_process_guard_mode, is_runtime_mode,
     run_external_auth_login, run_process_guard, CloudRouting, ProviderSessionObserver,
-    CLOUD_API_KEY_ENV, RUNTIME_ARG, SCREENPIPE_MCP_PKG,
+    CLOUD_API_KEY_ENV, RUNTIME_ARG, SCREENPIPE_MCP_PKG, TOOL_ALLOWLIST_ENV,
 };
 
 use std::io::Write;

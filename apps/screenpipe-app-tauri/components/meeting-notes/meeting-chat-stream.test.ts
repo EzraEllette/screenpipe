@@ -8,6 +8,7 @@ import {
   advanceMeetingChatStream,
   emptyStreamState,
   isAllowedMeetingChatTool,
+  normalizeMeetingChatToolName,
   stopMeetingChatStream,
   type MeetingChatStreamState,
 } from "./meeting-chat-stream";
@@ -152,6 +153,84 @@ describe("tool allowlist", () => {
     expect(isAllowedMeetingChatTool(undefined)).toBe(true);
     expect(isAllowedMeetingChatTool("search-content")).toBe(true);
     expect(isAllowedMeetingChatTool("bash")).toBe(false);
+  });
+
+  // The rail was dead on every ACP preset: those agents report MCP tools as
+  // `mcp__<server>__<tool>` and underscore the bundled server's names, so even
+  // the allowlisted tool failed the check and killed the turn on its first call.
+  it("recognizes an allowed tool under every backend's spelling", () => {
+    expect(normalizeMeetingChatToolName("search-content")).toBe("search-content");
+    expect(normalizeMeetingChatToolName("mcp__screenpipe__search-content")).toBe(
+      "search-content",
+    );
+    expect(
+      normalizeMeetingChatToolName("mcp__screenpipe-tools__frame_context"),
+    ).toBe("frame-context");
+
+    expect(isAllowedMeetingChatTool("mcp__screenpipe__search-content")).toBe(true);
+    expect(isAllowedMeetingChatTool("mcp__screenpipe-tools__get_meeting")).toBe(
+      true,
+    );
+    expect(isAllowedMeetingChatTool("mcp__screenpipe-tools__keyword_search")).toBe(
+      true,
+    );
+  });
+
+  it("a screenpipe tool outside the allowlist still kills the run", () => {
+    expect(isAllowedMeetingChatTool("mcp__screenpipe__update-memory")).toBe(false);
+    expect(isAllowedMeetingChatTool("mcp__screenpipe-tools__save_artifact")).toBe(
+      false,
+    );
+  });
+
+  it("another MCP server is the scope-widening case 65 exists to stop", () => {
+    expect(isAllowedMeetingChatTool("mcp__notion__search")).toBe(false);
+    expect(isAllowedMeetingChatTool("mcp__slack__post_message")).toBe(false);
+  });
+
+  // codex-acp reports an unreachable MCP server as a failed tool call on every
+  // turn. A user with one unauthenticated server would never get an answer.
+  it("an MCP startup diagnostic is not a tool the agent chose", () => {
+    expect(isAllowedMeetingChatTool("mcp__notion__startup")).toBe(true);
+    const state = fold([
+      { type: "tool_execution_start", toolName: "mcp__notion__startup" },
+      delta("answered anyway"),
+      { type: "agent_end" },
+    ]);
+    expect(state.stoppedReason).toBeNull();
+    expect(state.text).toBe("answered anyway");
+  });
+
+  // ACP harnesses always carry native tools and cannot be told to drop them.
+  // The runtime refuses the ones that need approval, so killing the turn on a
+  // read or a plan step only throws away an answer the user can use.
+  it("a read-only native agent step does not kill the run", () => {
+    expect(isAllowedMeetingChatTool("Read /a/b.ts", "read")).toBe(true);
+    expect(isAllowedMeetingChatTool("Grep", "search")).toBe(true);
+    expect(isAllowedMeetingChatTool("TodoWrite")).toBe(true);
+    expect(isAllowedMeetingChatTool("Skill")).toBe(true);
+  });
+
+  it("a native step that acts, runs, or fetches kills the run", () => {
+    expect(isAllowedMeetingChatTool("Edit /a/b.ts", "edit")).toBe(false);
+    expect(isAllowedMeetingChatTool("rm -rf /", "execute")).toBe(false);
+    expect(isAllowedMeetingChatTool("Fetch example.com", "fetch")).toBe(false);
+    // Raw Pi and adapters that send no `kind` are matched by name instead.
+    expect(isAllowedMeetingChatTool("bash")).toBe(false);
+    expect(isAllowedMeetingChatTool("write_file")).toBe(false);
+    expect(isAllowedMeetingChatTool("apply_patch")).toBe(false);
+  });
+
+  it("kills the run on an unsafe kind even when the name looks harmless", () => {
+    const state = fold([
+      delta("partial"),
+      { type: "tool_execution_start", toolName: "Run tests", kind: "execute" },
+    ]);
+    expect(state.done).toBe(true);
+    expect(state.stoppedReason).toBe("unexpected-tool");
+    // Case 65's copy is unchanged, and the partial answer is kept.
+    expect(state.error).toBe("stopped — unexpected tool");
+    expect(state.text).toBe("partial");
   });
 });
 

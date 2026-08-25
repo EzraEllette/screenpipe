@@ -56,6 +56,9 @@ export interface AgentInnerEvent {
   };
   toolCallId?: string;
   toolName?: string;
+  /** ACP tool category (read/edit/search/execute/fetch/...), forwarded by the
+   *  ACP runtime next to the name. Absent for raw Pi tool calls. */
+  kind?: string;
   args?: Record<string, unknown>;
   result?: { content?: Array<{ text?: string }> };
   isError?: boolean;

@@ -159,7 +159,32 @@ Each is `case → decided behavior`. Numbers are stable; tests reference them.
 
 63. `piStart` fails → the turn fails immediately with the transport error, not a generic message.
 64. `piStart` succeeds but `piPrompt` fails → retry `piStart` once, mirroring `use-pi-send-transport`.
-65. The agent emits a tool call outside the read-only meeting allowlist → the run is killed, as in `generate-live-view-with-pi.ts`. The thread shows `stopped — unexpected tool`. An explicit request to check broader screenpipe history may use the allowlisted `search-content`, `get-meeting`, or `frame-context` tools; ordinary meeting questions never widen scope silently.
+65. The agent emits a tool call outside the read-only meeting allowlist → the run is killed, as in `generate-live-view-with-pi.ts`. The thread shows `stopped — unexpected tool`. An explicit request to check broader screenpipe history may use the allowlisted `search-content`/`keyword-search`, `get-meeting`, or `frame-context` tools; ordinary meeting questions never widen scope silently.
+
+    Tool identity is compared *normalized*, not literally. The same tool reaches
+    the panel under three spellings — bare (`search-content`) from raw Pi,
+    `mcp__screenpipe__search-content` from a stdio ACP agent, and
+    `mcp__screenpipe-tools__frame_context` from an http-only one (Cursor,
+    Copilot) — and matching only the bare form killed every ACP turn on its first
+    tool call, including calls to the allowlisted tool itself.
+
+    Two classes are deliberately **not** killed: an `mcp__<server>__startup`
+    diagnostic (emitted per unreachable MCP server on every turn, never a tool
+    the agent chose), and a read-only native agent step. ACP harnesses always
+    carry native tools and cannot be told to drop them, so a `read`/`search`
+    step must not cost the user an answer; native steps whose ACP `kind` is
+    `edit`, `delete`, `move`, `execute`, or `fetch` — and known action tools when
+    an adapter sends no kind — still kill the run.
+
+    Enforcement is layered, because the client gate only fires *after* a tool has
+    started. The session is spawned scoped: raw Pi gets `--tools`, and ACP gets
+    `SCREENPIPE_ACP_TOOL_ALLOWLIST`, under which the runtime mounts no
+    third-party MCP servers, injects no shared screenpipe agent context, and
+    answers a permission request for a non-allowlisted tool with a refusal
+    instead of waiting on an approval card this panel has no UI to show. Before
+    that scoping the panel inherited the user's own MCP servers and the shared
+    context that advertises skills, which is what made an agent reach for a skill
+    and lose its turn.
 66. The agent emits no text and terminates → `no answer` plus `retry`, never a blank turn.
 67. The agent streams `text_end` without `text_delta` → the renderer must fold both. Pipe agents emit `text_end` only; a delta-only reader shows nothing.
 68. Turn exceeds 90s → aborted with a timeout, matching `GENERATION_TIMEOUT_MS`.

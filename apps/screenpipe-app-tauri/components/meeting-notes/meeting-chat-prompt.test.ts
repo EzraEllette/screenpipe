@@ -60,7 +60,12 @@ describe("buildMeetingChatPrompt", () => {
       [],
     );
     expect(prompt).toContain("broader screenpipe history");
-    expect(prompt).toContain("search-content");
+    // Deliberately not a tool id: the same tool is named `search-content`,
+    // `mcp__screenpipe__search-content`, or `keyword_search` depending on the
+    // backend, and naming one spelling told ACP agents to call a tool that does
+    // not exist for them.
+    expect(prompt).toContain("read-only screenpipe search and meeting tools");
+    expect(prompt).not.toContain("search-content");
     expect(prompt).toContain("smallest relevant time range");
     expect(prompt).toContain("Never imply broader evidence was part of this meeting");
   });
