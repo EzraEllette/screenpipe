@@ -1744,6 +1744,26 @@
       "notes": "Starts a real isolated meeting, verifies bounded snapshot plus deterministic delta/final transcript frames, and proves the stream clears on the authoritative stop edge."
     },
     {
+      "spec": "meeting-replay-player.spec.ts",
+      "platforms": [
+        "windows",
+        "macos",
+        "linux"
+      ],
+      "layers": [
+        "real-ui-e2e",
+        "local-api"
+      ],
+      "features": [
+        "meeting-notes",
+        "meeting-replay"
+      ],
+      "criticality": "high",
+      "confidence": "strong",
+      "ux": "real-user-flow",
+      "notes": "Seeds four stored frames, wraps their exact timestamps in an ended meeting, reopens it from the previous-meetings list, and verifies deduped silent playback, pause stability, and a review screenshot."
+    },
+    {
       "spec": "meeting-restart-live-transcription.spec.ts",
       "platforms": [
         "windows",
