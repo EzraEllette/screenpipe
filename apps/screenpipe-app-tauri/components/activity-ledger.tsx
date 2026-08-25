@@ -306,11 +306,19 @@ export function effectiveActivityRange(
   now: Date,
   isEnterpriseBuild = false,
 ): TimeRange | null {
-  if (
-    !range ||
-    isEnterpriseBuild ||
-    !isFreeOrUnattributedUser(user)
-  ) {
+  return effectiveActivityRangeForAccess(
+    range,
+    !isEnterpriseBuild && isFreeOrUnattributedUser(user),
+    now,
+  );
+}
+
+function effectiveActivityRangeForAccess(
+  range: TimeRange | null,
+  historyAccessRestricted: boolean,
+  now: Date,
+): TimeRange | null {
+  if (!range || !historyAccessRestricted) {
     return range;
   }
   const start = new Date(
@@ -1444,20 +1452,12 @@ export function ActivityLedger({
 
   const range = useMemo(
     () =>
-      effectiveActivityRange(
+      effectiveActivityRangeForAccess(
         rangeForPreset(preset, anchor, customStart, customEnd),
-        settings.user as AppUser | null | undefined,
+        activityHistoryRestricted,
         anchor,
-        enterpriseBuild.isEnterprise,
       ),
-    [
-      anchor,
-      customEnd,
-      customStart,
-      enterpriseBuild.isEnterprise,
-      preset,
-      settings.user,
-    ],
+    [activityHistoryRestricted, anchor, customEnd, customStart, preset],
   );
   const invalidRange = !range || range.start >= range.end;
   const reviewPresets = useMemo(

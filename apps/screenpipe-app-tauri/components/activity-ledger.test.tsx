@@ -1370,6 +1370,43 @@ describe("activity history helpers", () => {
 });
 
 describe("ActivityLedger", () => {
+  it("keeps artifact icons mounted across unrelated settings refreshes", async () => {
+    const originalUser = mocks.settings.user;
+    const { rerender } = render(<ActivityLedger />);
+    await generateActivities();
+
+    const appArtifact = await screen.findByRole("link", {
+      name: /Open Arc at .* in Timeline/,
+    });
+    await waitFor(() =>
+      expect(appArtifact.querySelector("img")).toHaveAttribute(
+        "src",
+        "http://localhost:11535/app-icon?name=Arc",
+      ),
+    );
+    const appIcon = appArtifact.querySelector("img");
+    const artifactRequestCount = mocks.localFetch.mock.calls.filter(([path]) =>
+      String(path).startsWith("/activity-ledger?"),
+    ).length;
+
+    try {
+      mocks.settings.user = {
+        ...originalUser,
+        entitlement: { ...originalUser.entitlement },
+      };
+      rerender(<ActivityLedger />);
+
+      expect(appArtifact.querySelector("img")).toBe(appIcon);
+      expect(
+        mocks.localFetch.mock.calls.filter(([path]) =>
+          String(path).startsWith("/activity-ledger?"),
+        ),
+      ).toHaveLength(artifactRequestCount);
+    } finally {
+      mocks.settings.user = originalUser;
+    }
+  });
+
   it("shows a completed backend run without refreshing the page", async () => {
     render(<ActivityLedger />);
 
