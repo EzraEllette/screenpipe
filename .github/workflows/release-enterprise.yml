@@ -1160,7 +1160,7 @@ jobs:
             echo "${APP_NAME}.tar.gz passes updater archive verification"
           done
 
-      - name: Build .pkg for Intune/MDM deployment
+      - name: Build standard and persistent enterprise .pkg installers
         shell: bash
         env:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
@@ -1201,30 +1201,62 @@ jobs:
             exit 1
           fi
 
-          # Create an unsigned component package first so the package receipt
-          # keeps a stable identifier, then sign the final product archive with
-          # Developer ID Installer.
-          PKG_OUTPUT="${PKG_DIR}/screenpipe-enterprise-${VERSION}-${PACKAGE_ARCH}.pkg"
-          COMPONENT_PKG="${PKG_DIR}/screenpipe-enterprise-${VERSION}-${PACKAGE_ARCH}-component.pkg"
+          # Keep the existing component package unchanged, and additionally
+          # offer a persistent package with root-owned launchd supervision.
+          STANDARD_PKG="${PKG_DIR}/screenpipe-enterprise-${VERSION}-${PACKAGE_ARCH}.pkg"
+          STANDARD_COMPONENT="${PKG_DIR}/screenpipe-enterprise-${VERSION}-${PACKAGE_ARCH}-component.pkg"
+          PERSISTENT_PKG="${PKG_DIR}/screenpipe-enterprise-${VERSION}-${PACKAGE_ARCH}-persistent.pkg"
+          PERSISTENT_COMPONENT="${PKG_DIR}/screenpipe-enterprise-${VERSION}-${PACKAGE_ARCH}-persistent-component.pkg"
+          PERSISTENCE_DIR="apps/screenpipe-app-tauri/src-tauri/macos/persistence"
 
-          echo "Building component .pkg..."
+          echo "Building standard component .pkg..."
           pkgbuild \
             --component "$APP_PATH" \
             --install-location /Applications \
             --identifier "screenpi.pe.enterprise" \
             --version "$VERSION" \
-            "$COMPONENT_PKG"
+            "$STANDARD_COMPONENT"
 
           echo "Signing product .pkg with: $INSTALLER_IDENTITY"
           productbuild \
-            --package "$COMPONENT_PKG" \
+            --package "$STANDARD_COMPONENT" \
             --sign "$INSTALLER_IDENTITY" \
             --timestamp \
-            "$PKG_OUTPUT"
-          rm -f "$COMPONENT_PKG"
+            "$STANDARD_PKG"
 
-          echo "Distribution pkg created: $(basename "$PKG_OUTPUT")"
-          pkgutil --check-signature "$PKG_OUTPUT"
+          echo "Building persistent component .pkg..."
+          PERSISTENT_ROOT=$(mktemp -d)
+          mkdir -p "${PERSISTENT_ROOT}/Applications"
+          ditto "$APP_PATH" "${PERSISTENT_ROOT}/Applications/$(basename "$APP_PATH")"
+          ditto "${PERSISTENCE_DIR}/payload" "$PERSISTENT_ROOT"
+          chmod 755 \
+            "${PERSISTENT_ROOT}/Library/PrivilegedHelperTools/screenpipe-persistence-supervisor" \
+            "${PERSISTENT_ROOT}/Library/PrivilegedHelperTools/screenpipe-persistence-uninstall" \
+            "${PERSISTENCE_DIR}/scripts/preinstall" \
+            "${PERSISTENCE_DIR}/scripts/postinstall"
+          chmod 644 \
+            "${PERSISTENT_ROOT}/Library/LaunchAgents/screenpi.pe.enterprise.persistence.plist" \
+            "${PERSISTENT_ROOT}/Library/LaunchDaemons/screenpi.pe.enterprise.persistence-supervisor.plist"
+          pkgbuild \
+            --root "$PERSISTENT_ROOT" \
+            --scripts "${PERSISTENCE_DIR}/scripts" \
+            --ownership recommended \
+            --identifier "screenpi.pe.enterprise.persistence" \
+            --version "$VERSION" \
+            "$PERSISTENT_COMPONENT"
+          rm -rf "$PERSISTENT_ROOT"
+
+          productbuild \
+            --package "$PERSISTENT_COMPONENT" \
+            --sign "$INSTALLER_IDENTITY" \
+            --timestamp \
+            "$PERSISTENT_PKG"
+          rm -f "$STANDARD_COMPONENT" "$PERSISTENT_COMPONENT"
+
+          for package in "$STANDARD_PKG" "$PERSISTENT_PKG"; do
+            echo "Distribution pkg created: $(basename "$package")"
+            pkgutil --check-signature "$package"
+          done
 
           # Notarize the .pkg. Retry transient notary failures: Apple's service
           # occasionally fast-fails a submission (enterprise v2.5.80, build
@@ -1232,41 +1264,43 @@ jobs:
           # succeeded, so creds/agreement were fine). The `if VAR=$(...)` form
           # also keeps `set -e` from aborting at the assignment before we can
           # print the output / retry; the "status: Accepted" gate below is final.
-          echo "Notarizing .pkg..."
-          SUBMIT_OUT=""
-          for attempt in 1 2 3; do
-            if SUBMIT_OUT=$(xcrun notarytool submit "$PKG_OUTPUT" \
-              --apple-id "$APPLE_ID" \
-              --password "$APPLE_PASSWORD" \
-              --team-id "$APPLE_TEAM_ID" \
-              --wait --timeout 15m 2>&1); then :; fi
-            echo "$SUBMIT_OUT"
-            if echo "$SUBMIT_OUT" | grep -q "status: Accepted"; then
-              break
-            fi
-            echo "Notarization attempt $attempt/3 did not return Accepted."
-            [ "$attempt" -lt 3 ] && { echo "Retrying in $((attempt * 30))s..."; sleep $((attempt * 30)); }
-          done
-
-          # Extract submission ID and check result
-          SUBMISSION_ID=$(echo "$SUBMIT_OUT" | grep "id:" | head -1 | awk '{print $2}' || true)
-          if ! echo "$SUBMIT_OUT" | grep -q "status: Accepted"; then
-            echo "Notarization FAILED — fetching log for details..."
-            if [ -n "$SUBMISSION_ID" ]; then
-              xcrun notarytool log "$SUBMISSION_ID" \
+          for PKG_OUTPUT in "$STANDARD_PKG" "$PERSISTENT_PKG"; do
+            echo "Notarizing $(basename "$PKG_OUTPUT")..."
+            SUBMIT_OUT=""
+            for attempt in 1 2 3; do
+              if SUBMIT_OUT=$(xcrun notarytool submit "$PKG_OUTPUT" \
                 --apple-id "$APPLE_ID" \
                 --password "$APPLE_PASSWORD" \
-                --team-id "$APPLE_TEAM_ID" 2>&1 || true
-            fi
-            echo "ERROR: Refusing to upload an unnotarized .pkg."
-            exit 1
-          fi
+                --team-id "$APPLE_TEAM_ID" \
+                --wait --timeout 15m 2>&1); then :; fi
+              echo "$SUBMIT_OUT"
+              if echo "$SUBMIT_OUT" | grep -q "status: Accepted"; then
+                break
+              fi
+              echo "Notarization attempt $attempt/3 did not return Accepted."
+              [ "$attempt" -lt 3 ] && { echo "Retrying in $((attempt * 30))s..."; sleep $((attempt * 30)); }
+            done
 
-          echo "Stapling .pkg..."
-          xcrun stapler staple "$PKG_OUTPUT"
-          xcrun stapler validate "$PKG_OUTPUT"
-          spctl --assess --type install --verbose "$PKG_OUTPUT"
-          echo ".pkg notarized and stapled: $(basename "$PKG_OUTPUT")"
+            # Extract submission ID and check result
+            SUBMISSION_ID=$(echo "$SUBMIT_OUT" | grep "id:" | head -1 | awk '{print $2}' || true)
+            if ! echo "$SUBMIT_OUT" | grep -q "status: Accepted"; then
+              echo "Notarization FAILED — fetching log for details..."
+              if [ -n "$SUBMISSION_ID" ]; then
+                xcrun notarytool log "$SUBMISSION_ID" \
+                  --apple-id "$APPLE_ID" \
+                  --password "$APPLE_PASSWORD" \
+                  --team-id "$APPLE_TEAM_ID" 2>&1 || true
+              fi
+              echo "ERROR: Refusing to upload an unnotarized .pkg."
+              exit 1
+            fi
+
+            echo "Stapling $(basename "$PKG_OUTPUT")..."
+            xcrun stapler staple "$PKG_OUTPUT"
+            xcrun stapler validate "$PKG_OUTPUT"
+            spctl --assess --type install --verbose "$PKG_OUTPUT"
+            echo ".pkg notarized and stapled: $(basename "$PKG_OUTPUT")"
+          done
 
       - name: Upload to R2
         if: github.event.inputs.dry_run != 'true'
