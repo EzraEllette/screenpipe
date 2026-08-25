@@ -14,6 +14,60 @@ use tauri::AppHandle;
 use tauri_plugin_store::StoreBuilder;
 use tracing::{error, warn};
 
+#[cfg(windows)]
+const WINDOWS_STORE_RETRY_ATTEMPTS: usize = 6;
+#[cfg(windows)]
+const WINDOWS_STORE_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Windows scanners and sync providers can briefly open the canonical store
+/// without write/delete sharing. Retry only the Win32 errors produced by that
+/// conflict; a persistent ACL/CFA denial uses the same ACCESS_DENIED code, so
+/// it receives the same short bound and then returns the original error.
+#[cfg(windows)]
+fn is_retryable_windows_store_error(error: &(dyn std::error::Error + 'static)) -> bool {
+    let mut source = Some(error);
+    while let Some(current) = source {
+        if let Some(io_error) = current.downcast_ref::<std::io::Error>() {
+            return matches!(io_error.raw_os_error(), Some(5 | 32 | 33));
+        }
+        source = current.source();
+    }
+    false
+}
+
+fn retry_windows_store_io<T, E>(mut operation: impl FnMut() -> Result<T, E>) -> Result<T, E>
+where
+    E: std::error::Error + 'static,
+{
+    #[cfg(not(windows))]
+    {
+        operation()
+    }
+
+    #[cfg(windows)]
+    {
+        let first_error = match operation() {
+            Ok(value) => return Ok(value),
+            Err(error) if is_retryable_windows_store_error(&error) => error,
+            Err(error) => return Err(error),
+        };
+
+        for _ in 1..WINDOWS_STORE_RETRY_ATTEMPTS {
+            std::thread::sleep(WINDOWS_STORE_RETRY_DELAY);
+            match operation() {
+                Ok(value) => return Ok(value),
+                Err(error) if is_retryable_windows_store_error(&error) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Err(first_error)
+    }
+}
+
+fn read_store_file(path: &Path) -> std::io::Result<Vec<u8>> {
+    retry_windows_store_io(|| std::fs::read(path))
+}
+
 /// Process-lifetime cache for the resolved API auth key.
 ///
 /// `to_recording_config` is a sync function called many times per second
@@ -178,7 +232,7 @@ pub(crate) fn durable_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         f.write_all(bytes)?;
         f.sync_all()?; // contents + metadata to stable storage before the rename
     }
-    if let Err(e) = std::fs::rename(&tmp, path) {
+    if let Err(e) = retry_windows_store_io(|| std::fs::rename(&tmp, path)) {
         let _ = std::fs::remove_file(&tmp);
         return Err(e);
     }
@@ -202,7 +256,7 @@ pub(crate) fn durable_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 /// a post-wipe state that re-seeded default presets (and therefore looks
 /// healthy) can't destroy the only copy of the user's real settings.
 pub fn snapshot_last_good(store_path: &Path) {
-    let data = match std::fs::read(store_path) {
+    let data = match read_store_file(store_path) {
         Ok(d) => d,
         Err(_) => return,
     };
@@ -210,7 +264,7 @@ pub fn snapshot_last_good(store_path: &Path) {
         return;
     }
     let last_good = store_path.with_extension(LAST_GOOD_SUFFIX);
-    if let Ok(existing) = std::fs::read(&last_good) {
+    if let Ok(existing) = read_store_file(&last_good) {
         if existing != data && store_json_has_presets(&existing) {
             let prev = store_path.with_extension(LAST_GOOD_PREV_SUFFIX);
             if let Err(e) = durable_write(&prev, &existing) {
@@ -236,7 +290,7 @@ pub fn snapshot_last_good(store_path: &Path) {
 fn read_healthy_snapshot(store_path: &Path) -> Option<(std::path::PathBuf, Vec<u8>)> {
     for suffix in [LAST_GOOD_SUFFIX, LAST_GOOD_PREV_SUFFIX] {
         let p = store_path.with_extension(suffix);
-        if let Ok(data) = std::fs::read(&p) {
+        if let Ok(data) = read_store_file(&p) {
             if store_json_has_presets(&data) {
                 return Some((p, data));
             }
@@ -265,7 +319,7 @@ fn restore_snapshot_over(store_path: &Path, why: &str) -> bool {
     let pre_restore = store_path.with_extension(format!("bin.pre-restore-{}", ts));
     let mut pre_restore_note = String::from("no pre-restore copy (store.bin was absent)");
     if store_path.exists() {
-        if let Err(e) = std::fs::copy(store_path, &pre_restore) {
+        if let Err(e) = retry_windows_store_io(|| std::fs::copy(store_path, &pre_restore)) {
             tracing::warn!(
                 "settings recovery: failed to back up {} to {}: {} — aborting restore",
                 store_path.display(),
@@ -307,7 +361,7 @@ pub fn auto_restore_if_wiped(store_path: &Path) -> bool {
     // Only act on plain-JSON files. Encrypted files are handled by the
     // decrypt path (L2b); we don't want to restore over a blob that the
     // keychain key could still open.
-    let cur = match std::fs::read(store_path) {
+    let cur = match read_store_file(store_path) {
         Ok(d) => d,
         // Missing entirely (user/cleaner delete, chkdsk quarantining a torn
         // file to found.000 after an unclean shutdown) is the worst wipe.
@@ -352,7 +406,7 @@ enum DecryptOutcome {
 /// Decrypt store.bin in place if it's encrypted and keychain key is available.
 /// No-op if the file is already plain JSON or keychain is unavailable.
 fn decrypt_store_file(path: &Path) -> DecryptOutcome {
-    let data = match std::fs::read(path) {
+    let data = match read_store_file(path) {
         Ok(d) => d,
         Err(_) => return DecryptOutcome::PlainOrMissing,
     };
@@ -565,7 +619,7 @@ pub fn reencrypt_store(app: AppHandle) -> Result<(), String> {
 fn save_store_to_disk<R: tauri::Runtime>(
     store: &tauri_plugin_store::Store<R>,
 ) -> Result<(), String> {
-    store.save().map_err(|e| e.to_string())
+    retry_windows_store_io(|| store.save()).map_err(|e| e.to_string())
 }
 
 /// Flush the process-shared store to durable, encrypted storage before a
@@ -601,6 +655,19 @@ fn build_store_at<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     store_path: std::path::PathBuf,
 ) -> anyhow::Result<Arc<tauri_plugin_store::Store<R>>> {
+    // A Windows sharing lock can make the plugin's load look like a successful
+    // empty store because tauri-plugin-store swallows read errors. Do not let a
+    // persistently unreadable canonical file reach that wipe-primed state.
+    if store_path.exists() {
+        read_store_file(&store_path).map_err(|error| {
+            anyhow::anyhow!(
+                "settings store is not readable at {}: {}",
+                store_path.display(),
+                error
+            )
+        })?;
+    }
+
     // Decrypt store.bin before the plugin reads it (no-op if plain JSON or keychain unavailable)
     if store_path.exists() && decrypt_store_file(&store_path) == DecryptOutcome::Locked {
         // L2b — the encrypted blob is unreadable (key denied/missing or
@@ -636,7 +703,7 @@ fn build_store_at<R: tauri::Runtime>(
     // L5 precondition — note whether the disk file holds a parseable
     // `settings` key right before the plugin reads it. Compared against the
     // loaded store after build to detect silently-swallowed load failures.
-    let disk_has_settings = std::fs::read(&store_path)
+    let disk_has_settings = read_store_file(&store_path)
         .ok()
         .and_then(|d| serde_json::from_slice::<Value>(&d).ok())
         .map(|v| v.get("settings").is_some())
@@ -888,7 +955,7 @@ impl OnboardingStore {
         let mut onboarding = Self::get(app)?.unwrap_or_default();
         update(&mut onboarding);
         store.set("onboarding", json!(onboarding));
-        store.save().map_err(|e| e.to_string())?;
+        save_store_to_disk(store.as_ref())?;
         reencrypt_store_file(app);
         Ok(())
     }
@@ -899,7 +966,7 @@ impl OnboardingStore {
         };
 
         store.set("onboarding", json!(self));
-        store.save().map_err(|e| e.to_string())?;
+        save_store_to_disk(store.as_ref())?;
         reencrypt_store_file(app);
         Ok(())
     }
@@ -1791,7 +1858,7 @@ impl SettingsStore {
                 // Persist sanitized fields back to store so the migration only warns once
                 if sanitized != raw {
                     store.set("settings", sanitized.clone());
-                    let _ = store.save();
+                    let _ = save_store_to_disk(store.as_ref());
                     reencrypt_store_file(app);
                 }
                 let settings = serde_json::from_value(sanitized);
@@ -2140,7 +2207,7 @@ impl SettingsStore {
         };
 
         store.set("settings", json!(self));
-        store.save().map_err(|e| e.to_string())?;
+        save_store_to_disk(store.as_ref())?;
         reencrypt_store_file(app);
         Ok(())
     }
@@ -2454,7 +2521,7 @@ impl CloudSyncSettingsStore {
     pub fn save(&self, app: &AppHandle) -> Result<(), String> {
         let store = get_store(app, None).map_err(|e| e.to_string())?;
         store.set("cloud_sync", json!(self));
-        store.save().map_err(|e| e.to_string())?;
+        save_store_to_disk(store.as_ref())?;
         reencrypt_store_file(app);
         Ok(())
     }
@@ -2489,7 +2556,7 @@ impl CloudArchiveSettingsStore {
     pub fn save(&self, app: &AppHandle) -> Result<(), String> {
         let store = get_store(app, None).map_err(|e| e.to_string())?;
         store.set("cloud_archive", json!(self));
-        store.save().map_err(|e| e.to_string())?;
+        save_store_to_disk(store.as_ref())?;
         reencrypt_store_file(app);
         Ok(())
     }
@@ -2525,7 +2592,7 @@ impl IcsCalendarSettingsStore {
     pub fn save(&self, app: &AppHandle) -> Result<(), String> {
         let store = get_store(app, None).map_err(|e| e.to_string())?;
         store.set("ics_calendars", json!(self));
-        store.save().map_err(|e| e.to_string())?;
+        save_store_to_disk(store.as_ref())?;
         reencrypt_store_file(app);
         Ok(())
     }
@@ -3536,6 +3603,213 @@ mod tests {
             b"new",
             "shorter new content must fully replace the old file"
         );
+    }
+
+    #[cfg(windows)]
+    fn open_with_share_mode(path: &Path, share_mode: u32) -> std::fs::File {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(share_mode)
+            .open(path)
+            .unwrap()
+    }
+
+    #[cfg(windows)]
+    fn open_with_restrictive_sharing(path: &Path) -> std::fs::File {
+        open_with_share_mode(path, 1) // FILE_SHARE_READ: deny writes and replacement.
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_restrictive_sharing_identifies_open_and_replace_failure_stages() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_path = tmp.path().join("store.bin");
+        let replacement_path = tmp.path().join("replacement.tmp");
+        std::fs::write(&store_path, b"canonical-before").unwrap();
+        std::fs::write(&replacement_path, b"replacement").unwrap();
+        let _lock = open_with_restrictive_sharing(&store_path);
+
+        let open_error = std::fs::write(&store_path, b"must-not-land").unwrap_err();
+        let replace_error = std::fs::rename(&replacement_path, &store_path).unwrap_err();
+
+        eprintln!(
+            "restrictive sharing: fs::write open/truncate raw_os_error={:?}; atomic rename raw_os_error={:?}",
+            open_error.raw_os_error(),
+            replace_error.raw_os_error()
+        );
+        assert!(matches!(open_error.raw_os_error(), Some(5 | 32 | 33)));
+        assert!(matches!(replace_error.raw_os_error(), Some(5 | 32 | 33)));
+        assert_eq!(std::fs::read(&store_path).unwrap(), b"canonical-before");
+        assert_eq!(std::fs::read(&replacement_path).unwrap(), b"replacement");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn durable_write_retries_transient_windows_replacement_lock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_path = tmp.path().join("store.bin");
+        std::fs::write(&store_path, b"canonical-before").unwrap();
+
+        let lock = open_with_restrictive_sharing(&store_path);
+        let unlocker = std::thread::spawn(move || {
+            std::thread::sleep(WINDOWS_STORE_RETRY_DELAY * 2);
+            drop(lock);
+        });
+
+        durable_write(&store_path, b"canonical-after").unwrap();
+        unlocker.join().unwrap();
+        assert_eq!(std::fs::read(&store_path).unwrap(), b"canonical-after");
+        assert!(lingering_durable_temps(tmp.path()).is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn startup_recovery_retries_transient_windows_read_lock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_path = write_store(tmp.path(), &json!({"settings": {"aiPresets": []}}));
+        write_last_good(
+            tmp.path(),
+            &json!({"settings": {"aiPresets": presets_n(2)}}),
+        );
+        let lock = open_with_share_mode(&store_path, 0);
+        let unlocker = std::thread::spawn(move || {
+            std::thread::sleep(WINDOWS_STORE_RETRY_DELAY * 2);
+            drop(lock);
+        });
+
+        assert!(auto_restore_if_wiped(&store_path));
+        unlocker.join().unwrap();
+        assert!(store_json_has_presets(&std::fs::read(&store_path).unwrap()));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn startup_persistent_windows_read_denial_fails_closed() {
+        use tauri_plugin_store::StoreExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store_path = write_store(
+            tmp.path(),
+            &json!({"settings": {"aiPresets": presets_n(2)}}),
+        );
+        let snapshot_path = write_last_good(
+            tmp.path(),
+            &json!({"settings": {"aiPresets": presets_n(3)}}),
+        );
+        let canonical_before = std::fs::read(&store_path).unwrap();
+        let snapshot_before = std::fs::read(&snapshot_path).unwrap();
+        let app = tauri::test::mock_builder()
+            .plugin(tauri_plugin_store::Builder::default().build())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let _lock = open_with_share_mode(&store_path, 0);
+
+        let started = std::time::Instant::now();
+        let result = build_store_at(app.handle(), store_path.clone());
+        let elapsed = started.elapsed();
+
+        assert!(result.is_err(), "persistent denial must fail closed");
+        assert!(elapsed < std::time::Duration::from_secs(2));
+        drop(_lock);
+        assert_eq!(std::fs::read(&store_path).unwrap(), canonical_before);
+        assert_eq!(std::fs::read(&snapshot_path).unwrap(), snapshot_before);
+        assert!(app.get_store(&store_path).is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn durable_write_bounds_persistent_windows_denial_and_preserves_recovery_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_path = tmp.path().join("store.bin");
+        let snapshot_path = store_path.with_extension(LAST_GOOD_SUFFIX);
+        std::fs::write(&store_path, b"canonical-before").unwrap();
+        std::fs::write(&snapshot_path, b"snapshot-before").unwrap();
+        let _lock = open_with_restrictive_sharing(&store_path);
+
+        let started = std::time::Instant::now();
+        let error = durable_write(&store_path, b"must-not-land").unwrap_err();
+        let elapsed = started.elapsed();
+
+        assert!(matches!(error.raw_os_error(), Some(5 | 32 | 33)));
+        assert!(
+            elapsed >= WINDOWS_STORE_RETRY_DELAY * (WINDOWS_STORE_RETRY_ATTEMPTS as u32 - 1)
+                && elapsed < std::time::Duration::from_secs(2),
+            "retry bound was not respected: {elapsed:?}"
+        );
+        assert_eq!(std::fs::read(&store_path).unwrap(), b"canonical-before");
+        assert_eq!(std::fs::read(&snapshot_path).unwrap(), b"snapshot-before");
+        assert!(lingering_durable_temps(tmp.path()).is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn plugin_save_retries_transient_windows_open_lock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_path = tmp.path().join("store.bin");
+        let app = tauri::test::mock_builder()
+            .plugin(tauri_plugin_store::Builder::default().build())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let store = StoreBuilder::new(app.handle(), store_path.clone())
+            .disable_auto_save()
+            .build()
+            .unwrap();
+        store.set("value", json!("before"));
+        save_store_to_disk(store.as_ref()).unwrap();
+        store.set("value", json!("after"));
+
+        let lock = open_with_restrictive_sharing(&store_path);
+        let unlocker = std::thread::spawn(move || {
+            std::thread::sleep(WINDOWS_STORE_RETRY_DELAY * 2);
+            drop(lock);
+        });
+
+        save_store_to_disk(store.as_ref()).unwrap();
+        unlocker.join().unwrap();
+        let saved: Value = serde_json::from_slice(&std::fs::read(&store_path).unwrap()).unwrap();
+        assert_eq!(saved.get("value"), Some(&json!("after")));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn plugin_save_bounds_persistent_windows_denial_without_touching_snapshot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_path = tmp.path().join("store.bin");
+        let snapshot_path = store_path.with_extension(LAST_GOOD_SUFFIX);
+        let app = tauri::test::mock_builder()
+            .plugin(tauri_plugin_store::Builder::default().build())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let store = StoreBuilder::new(app.handle(), store_path.clone())
+            .disable_auto_save()
+            .build()
+            .unwrap();
+        store.set("value", json!("canonical-before"));
+        save_store_to_disk(store.as_ref()).unwrap();
+        std::fs::write(&snapshot_path, b"snapshot-before").unwrap();
+        store.set("value", json!("must-not-land"));
+        let _lock = open_with_restrictive_sharing(&store_path);
+
+        let started = std::time::Instant::now();
+        let error = save_store_to_disk(store.as_ref()).unwrap_err();
+        let elapsed = started.elapsed();
+
+        assert!(
+            error.contains("os error 5")
+                || error.contains("os error 32")
+                || error.contains("os error 33"),
+            "unexpected persistent-denial error: {error}"
+        );
+        assert!(
+            elapsed >= WINDOWS_STORE_RETRY_DELAY * (WINDOWS_STORE_RETRY_ATTEMPTS as u32 - 1)
+                && elapsed < std::time::Duration::from_secs(2),
+            "retry bound was not respected: {elapsed:?}"
+        );
+        let saved: Value = serde_json::from_slice(&std::fs::read(&store_path).unwrap()).unwrap();
+        assert_eq!(saved.get("value"), Some(&json!("canonical-before")));
+        assert_eq!(std::fs::read(&snapshot_path).unwrap(), b"snapshot-before");
     }
 
     #[test]
