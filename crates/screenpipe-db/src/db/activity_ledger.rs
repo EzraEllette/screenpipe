@@ -407,10 +407,11 @@ impl DatabaseManager {
         .await?;
         sqlx::query(
             "DELETE FROM activity_intervals \
-             WHERE producer = ?1 AND start_at >= ?2",
+             WHERE producer = ?1 AND start_at >= ?2 AND start_at < ?3",
         )
         .bind(producer)
         .bind(&range_start_text)
+        .bind(&range_end_text)
         .execute(&mut **tx.conn())
         .await?;
 
@@ -908,6 +909,61 @@ mod tests {
                 .unwrap(),
             Some(at("2026-08-17T09:10:00Z"))
         );
+    }
+
+    #[tokio::test]
+    async fn reconcile_only_replaces_the_requested_trailing_range() {
+        let (db, _dir) = test_db().await;
+        let mut tx = db.begin_immediate_with_retry().await.unwrap();
+        let source_id: i64 = sqlx::query_scalar(
+            "INSERT INTO ui_events (timestamp, relative_ms, event_type, app_name) \
+             VALUES ('2026-08-17T09:01:00Z', 0, 'click', 'Browser') RETURNING id",
+        )
+        .fetch_one(&mut **tx.conn())
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+
+        let (tasks, mut intervals) = drafts(source_id);
+        let mut later = intervals[0].clone();
+        later.interval_key = "later-interval".to_string();
+        later.start_at = at("2026-08-17T09:20:00Z");
+        later.end_at = at("2026-08-17T09:25:00Z");
+        later.actions.clear();
+        intervals.push(later);
+
+        db.reconcile_activity_ledger(
+            "deterministic-v1",
+            at("2026-08-17T09:00:00Z"),
+            at("2026-08-17T09:30:00Z"),
+            &tasks,
+            &intervals,
+        )
+        .await
+        .unwrap();
+
+        db.reconcile_activity_ledger(
+            "deterministic-v1",
+            at("2026-08-17T09:00:00Z"),
+            at("2026-08-17T09:10:00Z"),
+            &tasks,
+            &intervals[..1],
+        )
+        .await
+        .unwrap();
+
+        let rows = db
+            .list_activity_ledger(
+                at("2026-08-17T09:00:00Z"),
+                at("2026-08-17T09:30:00Z"),
+                false,
+                false,
+            )
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].start_at, "2026-08-17T09:00:00+00:00");
+        assert_eq!(rows[1].start_at, "2026-08-17T09:20:00+00:00");
     }
 
     #[tokio::test]

@@ -1492,6 +1492,16 @@ fn next_uncovered_start(app: &AppHandle, end: DateTime<Utc>) -> DateTime<Utc> {
         .unwrap_or_else(|| end - chrono::Duration::minutes(DEFAULT_INTERVAL_MINUTES as i64))
 }
 
+fn automatic_generation_start(
+    uncovered_start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    interval_minutes: u64,
+) -> DateTime<Utc> {
+    let latest_window_start =
+        end - chrono::Duration::minutes(interval_minutes.clamp(5, 24 * 60) as i64);
+    uncovered_start.max(latest_window_start).min(end)
+}
+
 fn set_next_run(app: &AppHandle, at: DateTime<Utc>) -> Result<(), String> {
     let store = store::get_store(app, None).map_err(|error| error.to_string())?;
     let mut settings = SettingsStore::get(app)?.ok_or("Settings are not available")?;
@@ -1529,7 +1539,8 @@ pub fn start(app: AppHandle) {
             if now < next_run {
                 continue;
             }
-            let start = next_uncovered_start(&app, now);
+            let start =
+                automatic_generation_start(next_uncovered_start(&app, now), now, interval_minutes);
             if start < now {
                 info!(%start, %now, "activity history: running scheduled generation");
                 if let Err(error) = generate(&app, state.inner(), start, now, "automatic").await {
@@ -1564,6 +1575,23 @@ mod tests {
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].start, "2026-08-19T10:00:00.000Z");
         assert_eq!(merged[0].end, "2026-08-19T10:30:00.000Z");
+    }
+
+    #[test]
+    fn automatic_generation_start_caps_stale_backfill_to_latest_window() {
+        let now = parse_time("2026-08-24T17:00:00Z").unwrap();
+        let stale = parse_time("2026-08-23T22:10:00Z").unwrap();
+        let recent = parse_time("2026-08-24T16:52:00Z").unwrap();
+
+        assert_eq!(
+            automatic_generation_start(stale, now, 15),
+            parse_time("2026-08-24T16:45:00Z").unwrap()
+        );
+        assert_eq!(automatic_generation_start(recent, now, 15), recent);
+        assert_eq!(
+            automatic_generation_start(stale, now, 24 * 60 + 1),
+            parse_time("2026-08-23T17:00:00Z").unwrap()
+        );
     }
 
     #[test]
