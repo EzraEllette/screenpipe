@@ -37,6 +37,8 @@ import {
   awaitPiStartInFlight,
   awaitPendingPiPresetSwitch,
   checkLivePiSession,
+  dispatchPiPromptWithRecovery,
+  isRecoverablePiPromptDispatchError,
 } from "../use-pi-send-transport";
 
 const runningInfo = {
@@ -184,6 +186,61 @@ describe("preset switch serialization", () => {
     expect(setPiInfo).toHaveBeenCalledWith(stoppedInfo);
     expect(runningConfigRef.current).toBeNull();
     unmount();
+  });
+});
+
+describe("prompt dispatch recovery", () => {
+  it.each([
+    "AI agent did not start responding within its startup grace period",
+    "Pi not initialized",
+    "Pi command queue dropped",
+    "stdin write failed: Broken pipe",
+    "Pi session restarted while preparing prompt",
+  ])("recognizes a pre-acceptance process failure: %s", (error) => {
+    expect(isRecoverablePiPromptDispatchError(error)).toBe(true);
+  });
+
+  it.each([
+    "429 rate limit exceeded",
+    "500 Internal server error",
+    "invalid API key",
+    "model_not_allowed",
+    "context_length_exceeded",
+    "upstream socket reported Broken pipe",
+  ])("does not recover an upstream provider failure: %s", (error) => {
+    expect(isRecoverablePiPromptDispatchError(error)).toBe(false);
+  });
+
+  it("replaces a silent process and redelivers the prompt exactly once", async () => {
+    const dispatch = vi.fn()
+      .mockResolvedValueOnce({
+        status: "error",
+        error: "AI agent did not start responding within its startup grace period",
+      })
+      .mockResolvedValueOnce({ status: "ok", data: "queue-2" });
+    const recover = vi.fn(async () => {});
+
+    await expect(dispatchPiPromptWithRecovery(dispatch, recover)).resolves.toEqual({
+      status: "ok",
+      data: "queue-2",
+    });
+    expect(recover).toHaveBeenCalledOnce();
+    expect(dispatch).toHaveBeenCalledTimes(2);
+  });
+
+  it("surfaces provider errors without restarting or redelivering", async () => {
+    const dispatch = vi.fn(async () => ({
+      status: "error" as const,
+      error: "500 Internal server error",
+    }));
+    const recover = vi.fn(async () => {});
+
+    await expect(dispatchPiPromptWithRecovery(dispatch, recover)).resolves.toEqual({
+      status: "error",
+      error: "500 Internal server error",
+    });
+    expect(recover).not.toHaveBeenCalled();
+    expect(dispatch).toHaveBeenCalledOnce();
   });
 });
 
