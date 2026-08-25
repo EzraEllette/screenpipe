@@ -33,11 +33,36 @@ EOF
 /bin/chmod 755 "$FAKE_LAUNCHCTL"
 
 run_supervisor() {
+  policy_value="${2-true}"
+  SCREENPIPE_PERSISTENCE_RUN_ONCE=1 \
+  SCREENPIPE_PERSISTENCE_TEST_CONSOLE_UID="$1" \
+  SCREENPIPE_PERSISTENCE_TEST_POLICY_VALUE="$policy_value" \
+  SCREENPIPE_PERSISTENCE_STATE_DIR="$STATE_DIR" \
+  SCREENPIPE_PERSISTENCE_LAUNCHCTL="$FAKE_LAUNCHCTL" \
+  SCREENPIPE_PERSISTENCE_TEST_LOG="$LOG" \
+  "$SUPERVISOR"
+}
+
+run_supervisor_from_policy_file() {
   SCREENPIPE_PERSISTENCE_RUN_ONCE=1 \
   SCREENPIPE_PERSISTENCE_TEST_CONSOLE_UID="$1" \
   SCREENPIPE_PERSISTENCE_STATE_DIR="$STATE_DIR" \
   SCREENPIPE_PERSISTENCE_LAUNCHCTL="$FAKE_LAUNCHCTL" \
   SCREENPIPE_PERSISTENCE_TEST_LOG="$LOG" \
+  SCREENPIPE_PERSISTENCE_POLICY_CONFIG="${TMP}/enterprise.json" \
+  SCREENPIPE_PERSISTENCE_POLICY_URL="file://${TMP}/policy.json" \
+  "$SUPERVISOR"
+}
+
+run_supervisor_from_account_policy_file() {
+  SCREENPIPE_PERSISTENCE_RUN_ONCE=1 \
+  SCREENPIPE_PERSISTENCE_TEST_CONSOLE_UID="$1" \
+  SCREENPIPE_PERSISTENCE_STATE_DIR="$STATE_DIR" \
+  SCREENPIPE_PERSISTENCE_LAUNCHCTL="$FAKE_LAUNCHCTL" \
+  SCREENPIPE_PERSISTENCE_TEST_LOG="$LOG" \
+  SCREENPIPE_PERSISTENCE_POLICY_CONFIG="${TMP}/missing-enterprise.json" \
+  SCREENPIPE_PERSISTENCE_POLICY_URL="file://${TMP}/policy.json" \
+  SCREENPIPE_PERSISTENCE_USER_HOME="${TMP}/home" \
   "$SUPERVISOR"
 }
 
@@ -53,6 +78,32 @@ run_supervisor 501
 run_supervisor 501
 [ ! -s "$LOG" ]
 /bin/rm -f "${STATE_DIR}/maintenance"
+
+: > "$LOG"
+run_supervisor 501 false
+/usr/bin/grep -q '^bootout gui/501/screenpi.pe.enterprise.persistence$' "$LOG"
+[ -e "${STATE_DIR}/policy-disabled" ]
+[ ! -e "${STATE_DIR}/active-console-uid" ]
+
+: > "$LOG"
+run_supervisor 501 true
+/usr/bin/grep -q '^bootstrap gui/501 ' "$LOG"
+[ ! -e "${STATE_DIR}/policy-disabled" ]
+
+/usr/bin/printf '{"license_key":"test-key"}\n' > "${TMP}/enterprise.json"
+/usr/bin/printf '{"lockedSettings":{"enforcePersistence":"false"}}\n' > "${TMP}/policy.json"
+: > "$LOG"
+run_supervisor_from_policy_file 501
+/usr/bin/grep -q '^bootout gui/501/screenpi.pe.enterprise.persistence$' "$LOG"
+[ -e "${STATE_DIR}/policy-disabled" ]
+
+/bin/mkdir -p "${TMP}/home/.screenpipe"
+/usr/bin/printf '{"token":"test.account.token"}\n' > "${TMP}/home/.screenpipe/auth.json"
+/usr/bin/printf '{"lockedSettings":{"enforcePersistence":"true"}}\n' > "${TMP}/policy.json"
+: > "$LOG"
+run_supervisor_from_account_policy_file 501
+/usr/bin/grep -q '^bootstrap gui/501 ' "$LOG"
+[ ! -e "${STATE_DIR}/policy-disabled" ]
 
 : > "$LOG"
 run_supervisor 0

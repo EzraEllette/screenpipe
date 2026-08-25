@@ -17,6 +17,7 @@ Screenpipe database, perform network requests, or update the application.
 - Application and signed supervisor binaries: the Screenpipe directory under
   `%ProgramFiles%`.
 - Protected opt-in marker: `%ProgramData%\screenpipe\persistence\enabled`.
+- Cached admin opt-out: `%ProgramData%\screenpipe\persistence\policy-disabled`.
 - Supervisor log: `%ProgramData%\screenpipe\persistence\supervisor.log`.
 - Administrator removal shortcut: **Remove Screenpipe Enterprise Persistence**
   in the all-users Start menu.
@@ -25,6 +26,12 @@ The installer grants full control on its protected directories to SYSTEM and
 Administrators. Standard users receive read and execute access only. The normal
 consumer and enterprise installers do not define the persistence build flag,
 install this service, or create the marker.
+
+The service refreshes the Enterprise `enforcePersistence` policy every five
+minutes. An explicit `false` stops supervised relaunches while leaving the
+service alive so a later admin `true` can resume enforcement. Missing policy or
+refresh failures retain the protected package default or the last valid admin
+decision.
 
 ## Administrator removal
 
