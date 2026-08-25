@@ -174,7 +174,11 @@ pub async fn try_resolve_quarantine(database_path: &Path) -> Result<(), SelfHeal
 ///
 /// Returns true when recording was resumed, so the caller can skip the
 /// recovery notification it would otherwise publish.
-pub async fn try_self_heal_at_launch(app: AppHandle, database_path: PathBuf) -> bool {
+pub async fn try_self_heal_at_launch(
+    app: AppHandle,
+    database_path: PathBuf,
+    notify_user: bool,
+) -> bool {
     match try_resolve_quarantine(&database_path).await {
         Ok(()) => {}
         Err(reason) => {
@@ -203,13 +207,15 @@ pub async fn try_self_heal_at_launch(app: AppHandle, database_path: PathBuf) -> 
         return false;
     }
 
-    client::send_typed_with_priority(
-        "recording resumed",
-        "screenpipe hit a temporary database error. your existing database passed a health check, so recording resumed without a rebuild.",
-        "db_recovery",
-        Some(10_000),
-        NotificationPriority::Normal,
-    );
+    if notify_user {
+        client::send_typed_with_priority(
+            "recording resumed",
+            "screenpipe hit a temporary database error. your existing database passed a health check, so recording resumed without a rebuild.",
+            "db_recovery",
+            Some(10_000),
+            NotificationPriority::Normal,
+        );
+    }
     true
 }
 

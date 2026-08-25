@@ -26,6 +26,18 @@ static RECOVERY_NOTICE_SHOWN: AtomicBool = AtomicBool::new(false);
 static RECOVERY_ACTIVE: AtomicBool = AtomicBool::new(false);
 static RECOVERY_QUIT_NOTICE_SHOWN: AtomicBool = AtomicBool::new(false);
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RecoveryInitiation {
+    UserAction,
+    HeadlessStartup,
+}
+
+impl RecoveryInitiation {
+    fn is_interactive(self) -> bool {
+        self == Self::UserAction
+    }
+}
+
 pub fn start(app: AppHandle) {
     let restart_app = app.clone();
     tauri::async_runtime::spawn(async move {
@@ -62,13 +74,7 @@ fn notify(app: &AppHandle, state: DbRecoveryState) {
         ),
     };
 
-    client::send_typed_with_priority(
-        title,
-        body,
-        "db_recovery",
-        None,
-        NotificationPriority::High,
-    );
+    client::send_typed_with_priority(title, body, "db_recovery", None, NotificationPriority::High);
 }
 
 fn recovery_action(label: &str) -> serde_json::Value {
@@ -119,41 +125,64 @@ pub fn notify_quarantined_database(data_dir: PathBuf) {
 /// immediately so the notification panel can close while work continues.
 pub fn start_quarantined_database_recovery(app: AppHandle) -> Result<(), String> {
     let data_dir = screenpipe_core::paths::default_screenpipe_data_dir();
+    start_quarantined_database_recovery_inner(app, data_dir, RecoveryInitiation::UserAction)
+}
+
+/// Headless launches have no UI in which to accept a recovery offer. Start the
+/// same protected offline recovery automatically and keep progress in logs.
+pub fn start_headless_quarantined_database_recovery(
+    app: AppHandle,
+    data_dir: PathBuf,
+) -> Result<(), String> {
+    start_quarantined_database_recovery_inner(app, data_dir, RecoveryInitiation::HeadlessStartup)
+}
+
+fn start_quarantined_database_recovery_inner(
+    app: AppHandle,
+    data_dir: PathBuf,
+    initiation: RecoveryInitiation,
+) -> Result<(), String> {
     let live = data_dir.join("db.sqlite");
     if !screenpipe_db::sqlite_quarantine_exists(&live) {
         return Err("the database no longer needs recovery".to_string());
     }
     if RECOVERY_ACTIVE.swap(true, Ordering::SeqCst) {
-        client::send_typed_with_priority(
-            "database repair already running",
-            "keep screenpipe open while it builds and verifies a fresh database.",
-            "db_recovery",
-            Some(8_000),
-            NotificationPriority::High,
-        );
+        if initiation.is_interactive() {
+            client::send_typed_with_priority(
+                "database repair already running",
+                "keep screenpipe open while it builds and verifies a fresh database.",
+                "db_recovery",
+                Some(8_000),
+                NotificationPriority::High,
+            );
+        }
         return Ok(());
     }
 
     RECOVERY_QUIT_NOTICE_SHOWN.store(false, Ordering::SeqCst);
-    client::send_typed_with_priority(
-        "repairing your database",
-        "your original data is protected. screenpipe is building and verifying a fresh copy. keep screenpipe open.",
-        "db_recovery",
-        Some(0),
-        NotificationPriority::High,
-    );
+    if initiation.is_interactive() {
+        client::send_typed_with_priority(
+            "repairing your database",
+            "your original data is protected. screenpipe is building and verifying a fresh copy. keep screenpipe open.",
+            "db_recovery",
+            Some(0),
+            NotificationPriority::High,
+        );
+    }
 
     tauri::async_runtime::spawn(async move {
         match screenpipe_engine::cli::db::recover_quarantined_database(&data_dir).await {
             Ok(()) => {
                 RECOVERY_ACTIVE.store(false, Ordering::SeqCst);
-                client::send_typed_with_priority(
-                    "database repaired",
-                    "your original database was preserved. screenpipe is reopening and checking recording.",
-                    "db_recovery",
-                    Some(0),
-                    NotificationPriority::High,
-                );
+                if initiation.is_interactive() {
+                    client::send_typed_with_priority(
+                        "database repaired",
+                        "your original database was preserved. screenpipe is reopening and checking recording.",
+                        "db_recovery",
+                        Some(0),
+                        NotificationPriority::High,
+                    );
+                }
                 crate::process_exit::request_app_relaunch(
                     app,
                     "database recovery complete",
@@ -163,19 +192,21 @@ pub fn start_quarantined_database_recovery(app: AppHandle) -> Result<(), String>
             Err(recovery_error) => {
                 RECOVERY_ACTIVE.store(false, Ordering::SeqCst);
                 error!("protected database recovery failed: {recovery_error:#}");
-                client::send_typed_with_actions_and_priority(
-                    "database repair paused",
-                    "your original data is still protected. screenpipe couldn't finish the repair. check free disk space, then retry. technical details were saved to the logs.",
-                    "db_recovery",
-                    Some(0),
-                    vec![recovery_action("retry repair"), dismiss_action()],
-                    NotificationPriority::High,
-                );
+                if initiation.is_interactive() {
+                    client::send_typed_with_actions_and_priority(
+                        "database repair paused",
+                        "your original data is still protected. screenpipe couldn't finish the repair. check free disk space, then retry. technical details were saved to the logs.",
+                        "db_recovery",
+                        Some(0),
+                        vec![recovery_action("retry repair"), dismiss_action()],
+                        NotificationPriority::High,
+                    );
+                }
             }
         }
     });
 
-    info!("protected database recovery requested from /notify");
+    info!(?initiation, "protected database recovery started");
     Ok(())
 }
 
@@ -230,5 +261,11 @@ mod tests {
         assert_eq!(action["type"], "dismiss");
         assert_eq!(action["label"], "not now");
         assert!(action.get("primary").is_none());
+    }
+
+    #[test]
+    fn headless_recovery_does_not_use_interactive_notifications() {
+        assert!(RecoveryInitiation::UserAction.is_interactive());
+        assert!(!RecoveryInitiation::HeadlessStartup.is_interactive());
     }
 }
