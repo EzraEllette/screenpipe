@@ -432,6 +432,76 @@ describe("ConnectedShareDialog", () => {
     );
   });
 
+  // The mode toggle describes how a snapshot is processed, not where it goes.
+  // It used to blank the destination on the side it left, so a person who
+  // looked at "send unchanged" and came back found Obsidian gone and the send
+  // button back to "choose a destination" — two clicks on a toggle silently
+  // discarded the connection.
+  it("keeps each mode's connection when the toggle moves between them", async () => {
+    mocks.localFetch.mockImplementation(async (path: string) => {
+      if (path === "/connections") {
+        return jsonResponse({
+          data: [
+            { id: "slack", connected: true },
+            { id: "notion", connected: true, mcp: true },
+            { id: "obsidian", connected: true, mcp: true },
+          ],
+        });
+      }
+      if (path === "/connections/slack/instances") {
+        return jsonResponse({ instances: [] });
+      }
+      if (path.startsWith("/connections/slack/conversations")) {
+        return jsonResponse({ channels: [] });
+      }
+      throw new Error(`unexpected request: ${path}`);
+    });
+
+    render(
+      <ConnectedShareDialog open onOpenChange={vi.fn()} artifact={artifact} />,
+    );
+
+    const unchanged = await screen.findByTestId(
+      "connected-share-mode-unchanged",
+    );
+    const chat = screen.getByTestId("connected-share-mode-chat");
+    const destination = screen.getByTestId("connected-share-destination");
+    const confirm = screen.getByTestId("connected-share-confirm");
+
+    // Chat has two apps, so it opens unanswered until the person picks one.
+    fireEvent.click(chat);
+    await waitFor(() => expect(chat).toHaveAttribute("aria-pressed", "true"));
+    expect(destination).toHaveTextContent("choose where this goes");
+    await openDestinations();
+    fireEvent.click(
+      await screen.findByTestId("connected-share-destination-chat-obsidian"),
+    );
+    await waitFor(() => expect(destination).toHaveTextContent("Obsidian"));
+
+    // Obsidian cannot receive a frozen copy directly, so unchanged shows the
+    // one app that can. That is a different question, not a lost answer.
+    fireEvent.click(unchanged);
+    await waitFor(() =>
+      expect(unchanged).toHaveAttribute("aria-pressed", "true"),
+    );
+    expect(destination).toHaveTextContent("Slack");
+    expect(confirm).toHaveTextContent("send to Slack");
+
+    fireEvent.click(chat);
+    await waitFor(() => expect(chat).toHaveAttribute("aria-pressed", "true"));
+    expect(destination).toHaveTextContent("Obsidian");
+    expect(destination).not.toHaveTextContent("choose where this goes");
+    expect(confirm).toHaveTextContent("prepare Obsidian in Chat");
+    expect(confirm).not.toBeDisabled();
+
+    // And back again: the unchanged side kept its own answer too.
+    fireEvent.click(unchanged);
+    await waitFor(() =>
+      expect(unchanged).toHaveAttribute("aria-pressed", "true"),
+    );
+    expect(destination).toHaveTextContent("Slack");
+  });
+
   // A failed check used to resolve to the clipboard, so the dialog quietly
   // offered a local write under a button that says send. It now says it could
   // not check and offers retry, and nothing is sendable until it succeeds.

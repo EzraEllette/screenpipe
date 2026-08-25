@@ -269,6 +269,28 @@ export function ConnectedShareDialog({
   const pendingRecallRef = useRef<RememberedShare | null>(null);
 
   /**
+   * The last destination each mode held, so the toggle is not destructive.
+   *
+   * Switching mode used to blank the destination whenever the chosen app had
+   * no counterpart on the other side — Obsidian can only be prepared in Chat —
+   * and switching back did not bring it back. Two clicks on a toggle that
+   * describes *how* a snapshot is processed silently discarded *where* it was
+   * going, so the send button fell back to "choose a destination".
+   */
+  const modeDestinationRef = useRef<
+    Record<ShareMode, ConnectedShareDestination | null>
+  >({ unchanged: null, chat: null });
+
+  /** Record a destination against its own mode, for a later switch back. */
+  const rememberModeDestination = useCallback(
+    (next: ConnectedShareDestination | null) => {
+      if (!next) return;
+      modeDestinationRef.current[shareModeForDestination(next)] = next;
+    },
+    [],
+  );
+
+  /**
    * Claim the remembered target for a destination, once.
    *
    * Gated on the destination matching because `target` holds a Slack channel or
@@ -314,6 +336,7 @@ export function ConnectedShareDialog({
   useEffect(() => {
     if (!open) return;
     pendingRecallRef.current = null;
+    modeDestinationRef.current = { unchanged: null, chat: null };
     resetPreview(allSectionIds);
     setLinearTitle(artifact.title);
     // Stays null until the connection check says what is actually reachable.
@@ -394,6 +417,7 @@ export function ConnectedShareDialog({
               connected,
             ) as ConnectedShareDestination | null);
         setDestination(nextDestination);
+        rememberModeDestination(nextDestination);
         // Make the data-processing choice visible before the destination menu.
         // When both are possible, unchanged is the lower-authority default;
         // the destination remains unanswered until the person chooses one.
@@ -443,7 +467,13 @@ export function ConnectedShareDialog({
       clearTimeout(timeoutId);
       controller.abort();
     };
-  }, [artifact.surface, connectionsRefresh, initialDestination, open]);
+  }, [
+    artifact.surface,
+    connectionsRefresh,
+    initialDestination,
+    open,
+    rememberModeDestination,
+  ]);
 
   useEffect(() => {
     if (!open || !availability.direct.slack) return;
@@ -661,6 +691,7 @@ export function ConnectedShareDialog({
 
   const selectDestination = (next: ConnectedShareDestination) => {
     setDestination(next);
+    rememberModeDestination(next);
     setShareMode(shareModeForDestination(next));
     setReceipt(null);
     setActionError(null);
@@ -886,16 +917,26 @@ export function ConnectedShareDialog({
 
   const selectShareMode = (nextMode: ShareMode) => {
     const nextOptions = nextMode === "chat" ? chatOptions : directOptions;
-    const currentStillFits =
-      destination !== null &&
-      shareModeForDestination(destination) === nextMode &&
-      nextOptions.some((option) => option.value === destination);
+    // Hold the connection this mode is leaving, so coming back is a switch and
+    // not a re-pick. Every app belongs to exactly one mode — Slack only sends
+    // unchanged, Obsidian and Notion only prepare in Chat, and Linear is one
+    // or the other depending on whether it arrived over MCP — so the toggle
+    // cannot carry an app across. What it can do is stop destroying the choice
+    // on the side it left.
+    rememberModeDestination(destination);
+    const remembered = modeDestinationRef.current[nextMode];
+    const rememberedStillFits =
+      remembered && nextOptions.some((option) => option.value === remembered)
+        ? remembered
+        : null;
+    // Choosing a mode is not permission to choose among several external
+    // targets. Auto-select only when the mode has exactly one possible app.
+    const nextDestination =
+      rememberedStillFits ??
+      (nextOptions.length === 1 ? nextOptions[0].value : null);
     setShareMode(nextMode);
-    if (!currentStillFits) {
-      // Choosing a mode is not permission to choose among several external
-      // targets. Auto-select only when the mode has exactly one possible app.
-      setDestination(nextOptions.length === 1 ? nextOptions[0].value : null);
-    }
+    setDestination(nextDestination);
+    rememberModeDestination(nextDestination);
     setReceipt(null);
     setActionError(null);
     posthog.capture("connected_share_mode_selected", {
