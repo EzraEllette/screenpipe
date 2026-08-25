@@ -112,6 +112,17 @@ vi.mock("@/lib/hooks/use-settings", () => ({
 vi.mock("@/lib/hooks/use-platform", () => ({
 	usePlatform: () => ({ isMac: true }),
 }));
+vi.mock("@/lib/hooks/use-is-enterprise-build", () => ({
+	useEnterpriseBuildStatus: () => ({
+		isEnterprise: true,
+		resolved: true,
+		error: false,
+	}),
+}));
+vi.mock("@/lib/hooks/use-timeline-cache", () => ({
+	shouldRestrictTimelineHistory: () => false,
+	useAuthoritativeTimelineHistoryAccess: () => false,
+}));
 vi.mock("@/lib/hooks/use-pipes", () => ({
 	usePipes: () => ({ promptPipes: [], templatePipes: [] }),
 }));
