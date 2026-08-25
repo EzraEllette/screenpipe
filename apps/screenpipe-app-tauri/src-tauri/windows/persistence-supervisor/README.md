@@ -7,7 +7,9 @@
 The optional persistent enterprise installer adds the visible Windows service
 `ScreenpipeEnterprisePersistence` (`Screenpipe Enterprise Persistence`). The
 service runs as LocalSystem, but launches `screenpipe-app.exe --autostart` only
-in the active interactive user session. It does not capture data, access the
+in an active interactive user session discovered through Windows session
+enumeration. The physical console is preferred when it is active; virtual or
+remote active sessions remain eligible. It does not capture data, access the
 Screenpipe database, perform network requests, or update the application.
 
 ## Installed state
@@ -35,4 +37,6 @@ service before removing application files.
 During a persistent upgrade, the installer first removes the marker and stops
 and deletes the service. It performs the existing Screenpipe process and locked
 file cleanup next, then recreates the marker and service only after all package
-files have been installed successfully.
+files have been installed successfully. Installation fails and rolls the
+service and marker back if the service does not reach `Running` or does not
+produce an exact-path app process in an active user session.

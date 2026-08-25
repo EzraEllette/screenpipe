@@ -58,6 +58,12 @@ pub fn launch_decision(
     }
 }
 
+pub fn select_active_session(console_session: Option<u32>, active_sessions: &[u32]) -> Option<u32> {
+    console_session
+        .filter(|session| active_sessions.contains(session))
+        .or_else(|| active_sessions.iter().copied().min())
+}
+
 pub fn state_dir(program_data: &Path) -> PathBuf {
     program_data.join("screenpipe").join("persistence")
 }
@@ -101,6 +107,14 @@ mod tests {
             launch_decision(true, None, &[]),
             LaunchDecision::NoActiveUser
         );
+    }
+
+    #[test]
+    fn active_session_prefers_console_but_supports_virtual_sessions() {
+        assert_eq!(select_active_session(Some(7), &[3, 7]), Some(7));
+        assert_eq!(select_active_session(Some(7), &[3, 9]), Some(3));
+        assert_eq!(select_active_session(None, &[9, 3]), Some(3));
+        assert_eq!(select_active_session(Some(7), &[]), None);
     }
 
     #[test]

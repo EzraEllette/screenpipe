@@ -24,7 +24,8 @@ use windows::Win32::System::Diagnostics::ToolHelp::{
 };
 use windows::Win32::System::Environment::{CreateEnvironmentBlock, DestroyEnvironmentBlock};
 use windows::Win32::System::RemoteDesktop::{
-    ProcessIdToSessionId, WTSGetActiveConsoleSessionId, WTSQueryUserToken,
+    ProcessIdToSessionId, WTSActive, WTSEnumerateSessionsW, WTSFreeMemory,
+    WTSGetActiveConsoleSessionId, WTSQueryUserToken, WTS_CURRENT_SERVER_HANDLE, WTS_SESSION_INFOW,
 };
 use windows::Win32::System::Threading::{
     CreateProcessAsUserW, OpenProcess, QueryFullProcessImageNameW, CREATE_NEW_PROCESS_GROUP,
@@ -42,14 +43,17 @@ use windows_service::service_dispatcher;
 use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 
 use crate::{
-    is_path_within, launch_decision, log_path, marker_path, path_eq, state_dir, LaunchDecision,
-    APP_EXE, RECHECK_SECONDS, SERVICE_DISPLAY_NAME, SERVICE_NAME, SUPERVISOR_EXE,
+    is_path_within, launch_decision, log_path, marker_path, path_eq, select_active_session,
+    state_dir, LaunchDecision, APP_EXE, RECHECK_SECONDS, SERVICE_DISPLAY_NAME, SERVICE_NAME,
+    SUPERVISOR_EXE,
 };
 
 type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 
 const ERROR_SERVICE_DOES_NOT_EXIST: i32 = 1060;
 const STOP_WAIT_SECONDS: u64 = 20;
+const START_WAIT_SECONDS: u64 = 15;
+const APP_LAUNCH_WAIT_SECONDS: u64 = 20;
 
 define_windows_service!(ffi_service_main, service_main);
 
@@ -147,7 +151,13 @@ fn service_status(current_state: ServiceState) -> ServiceStatus {
 
 fn supervise_once(app_path: &Path) {
     let enabled = marker_matches_app(app_path);
-    let active_session = active_console_session();
+    let active_session = match active_interactive_session() {
+        Ok(session) => session,
+        Err(error) => {
+            log_event("warn", "session_scan_failed", &error.to_string());
+            return;
+        }
+    };
     let matching_sessions = match matching_process_sessions(app_path) {
         Ok(sessions) => sessions,
         Err(error) => {
@@ -183,9 +193,37 @@ fn marker_matches_app(app_path: &Path) -> bool {
     path_eq(Path::new(marker.trim()), app_path)
 }
 
-fn active_console_session() -> Option<u32> {
-    let session = unsafe { WTSGetActiveConsoleSessionId() };
-    (session != u32::MAX).then_some(session)
+fn active_interactive_session() -> Result<Option<u32>> {
+    let console = unsafe { WTSGetActiveConsoleSessionId() };
+    let console = (console != u32::MAX).then_some(console);
+
+    let mut sessions = ptr::null_mut::<WTS_SESSION_INFOW>();
+    let mut count = 0;
+    unsafe { WTSEnumerateSessionsW(WTS_CURRENT_SERVER_HANDLE, 0, 1, &mut sessions, &mut count) }?;
+    let sessions_guard = WtsMemory(sessions.cast());
+    let active_sessions = if sessions.is_null() || count == 0 {
+        &[][..]
+    } else {
+        unsafe { std::slice::from_raw_parts(sessions, count as usize) }
+    };
+    let active_sessions = active_sessions
+        .iter()
+        .filter(|session| session.State == WTSActive)
+        .map(|session| session.SessionId)
+        .collect::<Vec<_>>();
+    drop(sessions_guard);
+
+    Ok(select_active_session(console, &active_sessions))
+}
+
+struct WtsMemory(*mut std::ffi::c_void);
+
+impl Drop for WtsMemory {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe { WTSFreeMemory(self.0) };
+        }
+    }
 }
 
 fn matching_process_sessions(app_path: &Path) -> Result<Vec<u32>> {
@@ -334,8 +372,11 @@ fn install_persistence() -> Result<()> {
         app_path.as_os_str().to_string_lossy().as_bytes(),
     )?;
 
-    if let Err(error) = create_and_start_service(&supervisor) {
+    if let Err(error) =
+        create_and_start_service(&supervisor).and_then(|_| wait_for_supervised_app(&app_path))
+    {
         let _ = fs::remove_file(marker_path(Path::new(&program_data)));
+        let _ = remove_service();
         return Err(error);
     }
     log_event(
@@ -392,7 +433,44 @@ fn create_and_start_service(supervisor: &Path) -> Result<()> {
     })?;
     service.set_failure_actions_on_non_crash_failures(true)?;
     service.start::<&str>(&[])?;
+    let deadline = Instant::now() + Duration::from_secs(START_WAIT_SECONDS);
+    loop {
+        let status = service.query_status()?;
+        if status.current_state == ServiceState::Running {
+            break;
+        }
+        if status.current_state == ServiceState::Stopped {
+            return Err(format!(
+                "persistence service stopped during startup (exit={:?})",
+                status.exit_code
+            )
+            .into());
+        }
+        if Instant::now() >= deadline {
+            return Err("timed out waiting for persistence service to start".into());
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
     Ok(())
+}
+
+fn wait_for_supervised_app(app_path: &Path) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(APP_LAUNCH_WAIT_SECONDS);
+    loop {
+        if let Some(session_id) = active_interactive_session()? {
+            if matching_process_sessions(app_path)?.contains(&session_id) {
+                return Ok(());
+            }
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "persistence service did not launch {} in an active user session within {APP_LAUNCH_WAIT_SECONDS}s",
+                app_path.display()
+            )
+            .into());
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
 }
 
 fn prepare_upgrade() -> Result<()> {
