@@ -1769,6 +1769,27 @@ describe("ActivityLedger", () => {
     ).toBeNull();
   });
 
+  it("shows a coding agent's own failure instead of a generic one", async () => {
+    mocks.settings.enhancedAI = false;
+    mocks.runDailySummaryWithPi.mockRejectedValue(
+      new Error(
+        "activity_agent_error:authentication required: cursor is not signed in. Open Chat, select this coding-agent preset, and sign in first.",
+      ),
+    );
+
+    render(<ActivityLedger />);
+
+    await generateActivities();
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "authentication required: cursor is not signed in. Open Chat, select this coding-agent preset, and sign in first.",
+    );
+    expect(document.body.textContent).not.toContain("activity_agent_error:");
+    expect(
+      screen.queryByText("History could not be updated. Try again."),
+    ).toBeNull();
+  });
+
   it("shows the exhausted AI preset instead of a generic failure", async () => {
     mocks.settings.enhancedAI = false;
     mocks.runDailySummaryWithPi.mockRejectedValue(

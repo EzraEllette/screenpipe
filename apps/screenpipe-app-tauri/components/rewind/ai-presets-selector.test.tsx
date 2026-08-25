@@ -390,3 +390,45 @@ describe("AIPresetsSelector controlled preset creation", () => {
     expect(trigger).not.toHaveTextContent("recommended");
   });
 });
+
+describe("AIPresetsSelector agent presets", () => {
+  const agentPreset: AIPreset = {
+    ...originalPreset,
+    id: "cursor",
+    provider: "acp",
+    model: "cursor",
+    acpAgent: { id: "cursor" },
+    defaultPreset: false,
+  } as AIPreset;
+
+  beforeEach(() => {
+    mocks.settings.current = {
+      aiPresets: [originalPreset, agentPreset],
+      user: { token: "test-token" },
+    };
+    mocks.settings.listeners.clear();
+    mocks.updateSettings.mockClear();
+    mocks.controlledSelect.mockClear();
+    mocks.acpEnabled.current = true;
+  });
+
+  it("lists and selects agent presets on every surface", () => {
+    render(
+      <AIPresetsSelector
+        compact
+        showModelOnly
+        controlledPresetId={originalPreset.id}
+        onControlledSelect={mocks.controlledSelect}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("combobox"));
+    const option = screen.getByTestId("ai-preset-option-cursor");
+    expect(option).not.toHaveAttribute("data-disabled");
+
+    fireEvent.click(option);
+    expect(mocks.controlledSelect).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "cursor", provider: "acp" }),
+    );
+  });
+});

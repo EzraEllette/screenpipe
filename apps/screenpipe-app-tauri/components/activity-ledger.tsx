@@ -1461,10 +1461,7 @@ export function ActivityLedger({
   );
   const invalidRange = !range || range.start >= range.end;
   const reviewPresets = useMemo(
-    () =>
-      ((settings?.aiPresets ?? []) as AIPreset[]).filter(
-        (candidate) => candidate.provider !== "acp",
-      ),
+    () => (settings?.aiPresets ?? []) as AIPreset[],
     [settings?.aiPresets],
   );
   const selectableReviewPresets = useMemo(
@@ -1744,6 +1741,12 @@ export function ActivityLedger({
           reason instanceof Error ? reason.message : String(reason);
         const noDataStatus = rawError.match(/activity_no_data:([a-z_]+)/)?.[1];
         const qualityFailure = rawError.includes("activity_quality_failed:");
+        // A coding agent preset fails for reasons only the user can fix — not
+        // signed in, CLI missing. The backend writes those for a person, so
+        // show them instead of the generic retry line.
+        const agentFailure = rawError
+          .split("activity_agent_error:")[1]
+          ?.trim();
         const quota = presentQuotaError(rawError);
         setHistoryError(
           noDataStatus
@@ -1754,7 +1757,9 @@ export function ActivityLedger({
                 ? "This AI preset has no usage left. Choose a different AI preset, then try again."
                 : quota.kind !== "none"
                   ? quota.message
-                  : "History could not be updated. Try again.",
+                  : agentFailure
+                    ? agentFailure
+                    : "History could not be updated. Try again.",
         );
         if (noDataStatus) {
           posthog.capture("activity_generation_completed", {
@@ -1979,10 +1984,9 @@ Re-query Screenpipe only inside the cited time range and use the cited frames an
                 <AIPresetsSelector
                   compact
                   showModelOnly
-                  includeAgentPresets={false}
                   triggerAriaLabel="AI preset"
                   containerClassName="w-[190px] max-w-[36vw] min-w-[132px] shrink-0 gap-0"
-                  triggerClassName="h-9 rounded-none border-border text-xs"
+                  triggerClassName="h-9 rounded-md border border-transparent bg-transparent px-2 text-xs text-muted-foreground shadow-none transition-colors duration-150 hover:border-border hover:bg-muted/50 hover:text-foreground focus-visible:ring-1 focus-visible:ring-signal focus-visible:ring-offset-1 motion-reduce:transition-none"
                   controlledPresetId={reviewPreset.id}
                   onControlledSelect={(nextPreset) => {
                     if (!nextPreset) return;

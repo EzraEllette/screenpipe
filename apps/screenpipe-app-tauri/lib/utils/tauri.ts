@@ -3310,7 +3310,14 @@ allowedTools?: string[] | null;
  * session, set only when reopening a conversation whose agent process
  * is gone. Ignored by the native Pi backend.
  */
-resumeSessionId?: string | null }
+resumeSessionId?: string | null;
+/**
+ * Headless surfaces (activity generation) have no approval card to show,
+ * so their ACP sessions run unattended: the runtime takes the adapter's
+ * allow option instead of stranding the run on a prompt nobody can see,
+ * and chat control is disabled. Ignored by the native Pi backend.
+ */
+unattended?: boolean }
 /**
  * A user prompt that's been enqueued but not yet written to Pi's stdin.
  * Surfaced to the UI so the chat can render "queued" cards while a prior

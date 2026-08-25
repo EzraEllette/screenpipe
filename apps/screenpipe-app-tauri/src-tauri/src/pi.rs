@@ -1951,6 +1951,12 @@ pub struct PiProviderConfig {
     /// is gone. Ignored by the native Pi backend.
     #[serde(default)]
     pub resume_session_id: Option<String>,
+    /// Headless surfaces (activity generation) have no approval card to show,
+    /// so their ACP sessions run unattended: the runtime takes the adapter's
+    /// allow option instead of stranding the run on a prompt nobody can see,
+    /// and chat control is disabled. Ignored by the native Pi backend.
+    #[serde(default)]
+    pub unattended: bool,
 }
 
 fn uses_acp_backend(config: Option<&PiProviderConfig>) -> bool {
@@ -3076,7 +3082,18 @@ pub async fn pi_start_inner(
             )
             .env_remove("SCREENPIPE_ACP_COMMAND")
             .env_remove("SCREENPIPE_ACP_AUTH_METHOD")
-            .env_remove("SCREENPIPE_ACP_SYSTEM_PROMPT");
+            .env_remove("SCREENPIPE_ACP_SYSTEM_PROMPT")
+            .env_remove("SCREENPIPE_ACP_UNATTENDED");
+        // A headless run (activity generation) has no approval card. Unattended
+        // mode makes the runtime answer permission requests itself, the same
+        // way a scheduled task does, so the turn cannot hang on a prompt that
+        // will never be shown.
+        if provider_config
+            .as_ref()
+            .is_some_and(|config| config.unattended)
+        {
+            cmd.env("SCREENPIPE_ACP_UNATTENDED", "1");
+        }
         if let Some(command) = acp
             .command
             .as_deref()
@@ -4561,11 +4578,6 @@ pub async fn pi_acp_set_config_option(
     queue.send_immediate_awaited("set_config_option", cmd).await
 }
 
-/// Probe an ACP adapter for its advertised model/mode selectors without a
-/// chat: spawn the hidden runtime, let it initialize and create a session,
-/// capture the acp_session_config event, and tear everything down. Returns
-/// the raw event JSON. Fails soft with the adapter's error message (e.g.
-/// sign-in required) so the preset editor can show it as a hint.
 fn is_acp_preset_setup_progress(event: &Value) -> bool {
     event.get("type").and_then(Value::as_str) == Some("acp_status")
         && matches!(
@@ -4574,6 +4586,11 @@ fn is_acp_preset_setup_progress(event: &Value) -> bool {
         )
 }
 
+/// Probe an ACP adapter for its advertised model/mode selectors without a
+/// chat: spawn the hidden runtime, let it initialize and create a session,
+/// capture the acp_session_config event, and tear everything down. Returns
+/// the raw event JSON. Fails soft with the adapter's error message (e.g.
+/// sign-in required) so the preset editor can show it as a hint.
 #[tauri::command]
 #[specta::specta]
 pub async fn pi_acp_probe_agent(app: AppHandle, agent: AcpAgentConfig) -> Result<String, String> {
@@ -5875,6 +5892,7 @@ mod tests {
             system_prompt: Some("system context".to_string()),
             allowed_tools: None,
             resume_session_id: None,
+            unattended: false,
         };
         let first = super::pi_launch_fingerprint("/tmp/pi-chat", Some("token"), Some(&config));
         let duplicate = super::pi_launch_fingerprint("/tmp/pi-chat", Some("token"), Some(&config));
@@ -7213,6 +7231,7 @@ error: InstallFailed extracting tarball"#;
             system_prompt: None,
             allowed_tools: None,
             resume_session_id: None,
+            unattended: false,
         }
     }
 

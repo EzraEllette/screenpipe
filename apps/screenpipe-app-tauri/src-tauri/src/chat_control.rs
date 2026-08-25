@@ -109,6 +109,9 @@ fn provider_config_for_chat(
                 .get("acpSessionId")
                 .and_then(Value::as_str)
                 .map(str::to_string),
+            // Chat is the attended surface: its approval cards are visible, so
+            // the runtime must keep asking rather than deciding for the user.
+            unattended: false,
         },
         token,
     ))

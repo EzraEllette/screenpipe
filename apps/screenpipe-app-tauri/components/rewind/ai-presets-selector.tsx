@@ -1348,8 +1348,6 @@ interface AIPresetsSelectorProps {
   onOpenChange?: (open: boolean) => void;
   /** Optional controls that belong with model selection in the same popover. */
   popoverFooter?: ReactNode;
-  /** Scheduled pipes still run through raw Pi and cannot execute ACP adapters. */
-  includeAgentPresets?: boolean;
 }
 
 export const AIPresetDialog = ({
@@ -1449,7 +1447,6 @@ export const AIPresetsSelector = ({
   providerIconOnly = false,
   onOpenChange,
   popoverFooter,
-  includeAgentPresets = true,
 }: AIPresetsSelectorProps) => {
   const { settings, updateSettings } = useSettings();
   const [open, setOpen] = useState(false);
@@ -1475,13 +1472,10 @@ export const AIPresetsSelector = ({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const aiPresets = useMemo(() => {
     const presets = (settings?.aiPresets || []) as AIPreset[];
-    const policyPresets = isManagedDeployment
+    return isManagedDeployment
       ? filterPresetsForEnterprisePolicy(presets, aiPresetPolicy)
       : presets;
-    return includeAgentPresets
-      ? policyPresets
-      : policyPresets.filter((preset) => preset.provider !== "acp");
-  }, [settings?.aiPresets, isManagedDeployment, aiPresetPolicy, includeAgentPresets]);
+  }, [settings?.aiPresets, isManagedDeployment, aiPresetPolicy]);
 
   const selectedPreset = useMemo(() => {
     if (isControlled) {
@@ -1689,11 +1683,7 @@ export const AIPresetsSelector = ({
     // A newly created preset belongs to the controlled surface that created
     // it. Pass the full value so the host can activate it immediately without
     // waiting for the settings store to publish the updated preset list.
-    if (
-      isControlled &&
-      createdPreset &&
-      (includeAgentPresets || createdPreset.provider !== "acp")
-    ) {
+    if (isControlled && createdPreset) {
       onControlledSelect(createdPreset);
     }
 
@@ -2131,6 +2121,7 @@ export const AIPresetsSelector = ({
                         handleOpenChange(false);
                       }}
                       className="flex py-2"
+                      data-testid={`ai-preset-option-${preset.id}`}
                     >
                       <div className="flex w-full items-center justify-between gap-2 overflow-hidden">
                         <div className="flex items-center gap-2 min-w-0">

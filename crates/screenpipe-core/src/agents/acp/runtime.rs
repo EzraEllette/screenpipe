@@ -3496,7 +3496,7 @@ async fn authenticate(
 ) -> Result<(), String> {
     if config.unattended {
         return Err(format!(
-            "authentication required: {} is not signed in. Open Chat, select this coding-agent preset, and sign in before using it in a scheduled task.",
+            "authentication required: {} is not signed in. Open Chat, select this coding-agent preset, and sign in first.",
             config.agent_id
         ));
     }
