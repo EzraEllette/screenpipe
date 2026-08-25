@@ -4,7 +4,7 @@
 
 import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { AcpInstallGate } from "./acp-install-gate";
 
 const installStatus = vi.fn();
@@ -41,26 +41,47 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("Cursor ACP installation", () => {
-  it("installs in the app instead of opening the website", async () => {
-    installAgent.mockResolvedValue({
-      status: "ok",
-      data: { ...missingCursor, installed: true },
-    });
+  it("shows shared progress while installing in the app", async () => {
+    let finishInstall:
+      | ((result: {
+          status: "ok";
+          data: typeof missingCursor & { installed: boolean };
+        }) => void)
+      | undefined;
+    installAgent.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finishInstall = resolve;
+        }),
+    );
     const onBlockedChange = vi.fn();
+    const onInstalled = vi.fn();
 
     render(
       <AcpInstallGate
         agentId="cursor"
         agentName="Cursor"
         onBlockedChange={onBlockedChange}
+        onInstalled={onInstalled}
       />,
     );
     fireEvent.click(await screen.findByRole("button", { name: /install cursor/i }));
 
     await waitFor(() => expect(installAgent).toHaveBeenCalledWith("cursor"));
+    const progress = screen.getByTestId("acp-setup-progress");
+    expect(progress).toHaveTextContent("Installing Cursor");
+    expect(progress).toHaveTextContent("step 1 of 3");
+
+    await act(async () =>
+      finishInstall?.({
+        status: "ok",
+        data: { ...missingCursor, installed: true },
+      }),
+    );
     await waitFor(() => expect(screen.queryByTestId("acp-install-gate")).not.toBeInTheDocument());
     expect(openUrl).not.toHaveBeenCalled();
     expect(onBlockedChange).toHaveBeenLastCalledWith(false);
+    expect(onInstalled).toHaveBeenCalledTimes(1);
   });
 
   it("keeps the official website as a fallback after an install failure", async () => {

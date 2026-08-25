@@ -978,6 +978,19 @@ pub fn agent_download_pending(id: &str) -> bool {
         })
 }
 
+/// Translate bun's package-manager stderr into honest startup phases. ACP has
+/// no progress protocol before the adapter starts, so these are deliberately
+/// coarse lifecycle steps rather than a fabricated percentage.
+fn acp_boot_phase_from_stderr(line: &str) -> Option<&'static str> {
+    if line.contains("downloaded and extracted") || line.contains("Resolved, downloaded") {
+        Some("starting")
+    } else if line.contains("Resolving dependencies") {
+        Some("downloading")
+    } else {
+        None
+    }
+}
+
 /// Best-effort check that `command` resolves to an executable on PATH.
 ///
 /// GUI apps capture PATH at launch (fix_path_env in main), so a CLI the user
@@ -4040,6 +4053,13 @@ async fn run_protocol(
                 )
                 .block_task()
                 .await?;
+            // The adapter answered the protocol handshake. Session restore or
+            // creation is the final bounded step before a preset can use it.
+            state.output.send(json!({
+                "type": "acp_status",
+                "phase": "connecting",
+                "agentId": config.agent_id,
+            }));
             if init.protocol_version != ProtocolVersion::V1 {
                 return Err(acp_invalid_params(format!(
                     "unsupported ACP protocol version {:?}",
@@ -4695,18 +4715,19 @@ pub(super) async fn run_from_env_with_observer(
     } else {
         Vec::new()
     };
-    // A first-run npx install is a slow, silent-looking wait. Announce it out
-    // of band (ACP has no install-progress concept; the agent isn't up yet),
-    // so the UI can show "Installing <agent>…" instead of a bare spinner.
-    // Cleared at acp_ready; also re-announced from bun's stderr (below) in case
-    // the cache heuristic missed.
-    if agent_download_pending(&config.agent_id) {
-        output.send(json!({
-            "type": "acp_status",
-            "phase": "downloading",
-            "agentId": config.agent_id,
-        }));
-    }
+    // Every adapter reports the same startup lifecycle. A cold npx launch adds
+    // install before start/connect; binary and cached adapters begin at start.
+    // Cleared at acp_ready. stderr below corrects the best-effort cache guess.
+    let initial_boot_phase = if agent_download_pending(&config.agent_id) {
+        "downloading"
+    } else {
+        "starting"
+    };
+    output.send(json!({
+        "type": "acp_status",
+        "phase": initial_boot_phase,
+        "agentId": config.agent_id,
+    }));
     let (command_tx, command_rx) = mpsc::unbounded_channel();
     let (parent_closed_tx, mut parent_closed_rx) = oneshot::channel();
     let parent_state = state.clone();
@@ -4759,23 +4780,22 @@ pub(super) async fn run_from_env_with_observer(
     let stderr_output = output.clone();
     tokio::spawn(async move {
         let mut reader = tokio::io::BufReader::new(stderr);
-        let mut announced_download = false;
+        let mut announced_phase: Option<&'static str> = None;
         while let Ok(Some((line, _truncated))) =
             read_capped_line(&mut reader, ACP_STDERR_LINE_CAP).await
         {
-            // bun prints these to stderr while fetching a package on first run;
-            // announce it (once) so the UI can explain the wait.
-            if !announced_download
-                && (line.contains("Resolving dependencies")
-                    || line.contains("downloaded and extracted")
-                    || line.contains("Resolved, downloaded"))
-            {
-                announced_download = true;
-                stderr_output.send(json!({
-                    "type": "acp_status",
-                    "phase": "downloading",
-                    "agentId": agent_id_for_stderr,
-                }));
+            // bun reports dependency resolution and extraction on stderr. Move
+            // from install to start when extraction completes, and dedupe noisy
+            // repeated lines from the package manager.
+            if let Some(phase) = acp_boot_phase_from_stderr(&line) {
+                if announced_phase != Some(phase) {
+                    announced_phase = Some(phase);
+                    stderr_output.send(json!({
+                        "type": "acp_status",
+                        "phase": phase,
+                        "agentId": agent_id_for_stderr,
+                    }));
+                }
             }
             eprintln!("[acp:{agent_id_for_stderr}] {line}");
         }
@@ -5131,6 +5151,19 @@ mod tests {
         assert!(truncated);
         let (next, _) = read_capped_line(&mut reader, 16).await.unwrap().unwrap();
         assert_eq!(next, "next");
+    }
+
+    #[test]
+    fn bun_stderr_advances_install_to_start_without_fake_percentages() {
+        assert_eq!(
+            acp_boot_phase_from_stderr("Resolving dependencies"),
+            Some("downloading")
+        );
+        assert_eq!(
+            acp_boot_phase_from_stderr("Resolved, downloaded and extracted [384]"),
+            Some("starting")
+        );
+        assert_eq!(acp_boot_phase_from_stderr("mock ACP agent ready"), None);
     }
 
     #[test]

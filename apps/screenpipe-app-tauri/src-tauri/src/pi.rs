@@ -4526,9 +4526,17 @@ pub async fn pi_acp_set_config_option(
 /// capture the acp_session_config event, and tear everything down. Returns
 /// the raw event JSON. Fails soft with the adapter's error message (e.g.
 /// sign-in required) so the preset editor can show it as a hint.
+fn is_acp_preset_setup_progress(event: &Value) -> bool {
+    event.get("type").and_then(Value::as_str) == Some("acp_status")
+        && matches!(
+            event.get("phase").and_then(Value::as_str),
+            Some("downloading" | "starting" | "connecting" | "ready")
+        )
+}
+
 #[tauri::command]
 #[specta::specta]
-pub async fn pi_acp_probe_agent(agent: AcpAgentConfig) -> Result<String, String> {
+pub async fn pi_acp_probe_agent(app: AppHandle, agent: AcpAgentConfig) -> Result<String, String> {
     let bun_path = find_bun_executable().ok_or("bun executable not found")?;
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let project_dir = dirs::home_dir().unwrap_or_else(std::env::temp_dir);
@@ -4572,7 +4580,9 @@ pub async fn pi_acp_probe_agent(agent: AcpAgentConfig) -> Result<String, String>
         cmd.env("SCREENPIPE_ACP_COMMAND", command);
     }
 
-    let mut child = cmd.spawn().map_err(|e| format!("probe spawn failed: {e}"))?;
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("probe spawn failed: {e}"))?;
     let stdout = child.stdout.take().ok_or("probe stdout unavailable")?;
     use tokio::io::AsyncBufReadExt as _;
     let mut lines = tokio::io::BufReader::new(stdout).lines();
@@ -4582,6 +4592,14 @@ pub async fn pi_acp_probe_agent(agent: AcpAgentConfig) -> Result<String, String>
             let Ok(event) = serde_json::from_str::<serde_json::Value>(&line) else {
                 continue;
             };
+            // The preset editor is waiting on this command, so the normal chat
+            // event stream is not mounted. Forward only the lifecycle events
+            // its progress surface understands.
+            if is_acp_preset_setup_progress(&event) {
+                if let Err(error) = app.emit("acp_preset_setup_progress", &event) {
+                    debug!("failed to emit ACP preset setup progress: {error}");
+                }
+            }
             match event.get("type").and_then(|t| t.as_str()) {
                 Some("acp_session_config") => return Ok(line),
                 Some("acp_fatal") => {
@@ -5720,6 +5738,25 @@ mod tests {
     fn managed_pi_installs_disable_dependency_lifecycle_scripts() {
         assert!(super::PI_INSTALL_ARGS.contains(&"--ignore-scripts"));
         assert!(super::NPM_INSTALL_ARGS.contains(&"--ignore-scripts"));
+    }
+
+    #[test]
+    fn acp_probe_forwards_only_preset_setup_progress() {
+        for phase in ["downloading", "starting", "connecting", "ready"] {
+            assert!(super::is_acp_preset_setup_progress(&json!({
+                "type": "acp_status",
+                "phase": phase,
+                "agentId": "claude-acp",
+            })));
+        }
+        assert!(!super::is_acp_preset_setup_progress(&json!({
+            "type": "acp_status",
+            "phase": "unknown",
+        })));
+        assert!(!super::is_acp_preset_setup_progress(&json!({
+            "type": "acp_ready",
+            "phase": "ready",
+        })));
     }
 
     #[test]
