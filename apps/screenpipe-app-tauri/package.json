@@ -71,6 +71,11 @@
     "build:tauri:e2e": "bun scripts/native-build-queue.ts e2e",
     "build:tauri:status": "bun scripts/native-build-queue.ts status",
     "test:tauri": "bun scripts/native-build-queue.ts test",
+    "test:persistence-supervisor": "bun scripts/native-build-queue.ts persistence-test",
+    "build:persistence-supervisor": "bun scripts/native-build-queue.ts persistence-release",
+    "build:persistence-installer": "bun scripts/native-build-queue.ts persistence-package",
+    "bundle:persistence-installer": "bun scripts/native-build-queue.ts persistence-bundle",
+    "bundle:enterprise-test-installer": "bun scripts/native-build-queue.ts enterprise-bundle",
     "tauri:build": "bun scripts/native-build-queue.ts signed",
     "clean": "rm -rf out && cargo clean --manifest-path src-tauri/Cargo.toml && rm -rf src-tauri/{screenpipe-*,tesseract-*,ffmpeg*,openblas*,bun*,ollama*,ui_monitor*} node_modules"
   },
