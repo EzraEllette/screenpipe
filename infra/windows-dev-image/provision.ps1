@@ -46,10 +46,25 @@ if (-not (Get-Command choco.exe -ErrorAction SilentlyContinue)) {
 }
 $env:Path = 'C:\ProgramData\chocolatey\bin;' + [Environment]::GetEnvironmentVariable('Path', 'Machine')
 choco feature enable -n allowGlobalConfirmation | Out-Null
-Invoke-Checked 'choco.exe' @(
-  'install', 'git', 'git-lfs', '7zip', 'jq', 'cmake', 'ninja',
-  'powershell-core', 'llvm', 'ffmpeg', 'gh', 'azure-cli', '--no-progress'
+$chocolateyPackages = @(
+  'git', 'git-lfs', '7zip', 'jq', 'cmake', 'ninja',
+  'powershell-core', 'llvm', 'ffmpeg', 'gh', 'azure-cli'
 )
+$chocolateyCommands = @(
+  'git.exe', 'git-lfs.exe', '7z.exe', 'jq.exe', 'cmake.exe', 'ninja.exe',
+  'pwsh.exe', 'clang.exe', 'ffmpeg.exe', 'gh.exe', 'az.cmd'
+)
+for ($attempt = 1; $attempt -le 5; $attempt++) {
+  & choco.exe install @chocolateyPackages --no-progress
+  $env:Path = 'C:\ProgramData\chocolatey\bin;' + [Environment]::GetEnvironmentVariable('Path', 'Machine')
+  $missingCommands = @($chocolateyCommands | Where-Object { -not (Get-Command $_ -ErrorAction SilentlyContinue) })
+  if ($missingCommands.Count -eq 0) { break }
+  if ($attempt -eq 5) {
+    throw "Chocolatey packages are incomplete after $attempt attempts; missing commands: $($missingCommands -join ', ')"
+  }
+  Write-Warning "Chocolatey attempt $attempt was incomplete; retrying missing tools after a transient-source delay: $($missingCommands -join ', ')"
+  Start-Sleep -Seconds (30 * $attempt)
+}
 
 $nodeMsi = Join-Path $env:TEMP "node-v$nodeVersion-x64.msi"
 if (-not (Test-Path 'C:\Program Files\nodejs\node.exe')) {
