@@ -37,7 +37,11 @@ describe("pi foreground event helpers", () => {
   });
 
   it("turns a silent prompt-start timeout into an actionable retry", () => {
-    expect(isPiPromptStartTimeout("AI agent did not start responding within 15 seconds")).toBe(true);
+    expect(
+      isPiPromptStartTimeout(
+        "AI agent did not start responding within its startup grace period",
+      ),
+    ).toBe(true);
     expect(isPiPromptStartTimeout("rate limited")).toBe(false);
     expect(piPromptStartTimeoutMessage()).toBe(
       "The AI did not start responding, so screenpipe restarted it. Retry your message.",
