@@ -91,7 +91,10 @@ pub async fn surface_manual_recovery(reason: &str) {
 /// Report a durable quarantine found at launch through the existing Sentry
 /// tracing layer. Only bounded marker metadata is attached: never its path,
 /// file identity, or free-form reason.
-pub async fn surface_quarantined_recovery_at_launch(database_path: &Path) {
+pub async fn surface_quarantined_recovery_at_launch(
+    database_path: &Path,
+    publish_recovery_event: bool,
+) {
     if GAVE_UP_NOTIFIED.swap(true, Ordering::SeqCst) {
         return;
     }
@@ -107,14 +110,20 @@ pub async fn surface_quarantined_recovery_at_launch(database_path: &Path) {
 
     error!(
         sqlite_quarantine_state = "active_at_launch",
-        sqlite_marker_metadata = if marker.is_some() { "readable" } else { "unreadable" },
+        sqlite_marker_metadata = if marker.is_some() {
+            "readable"
+        } else {
+            "unreadable"
+        },
         sqlite_extended_code = sqlite_code.unwrap_or(-1),
         sqlite_primary_code = sqlite_code.map(|code| code & 0xff).unwrap_or(-1),
         sqlite_marker_age = marker_age,
         "db recovery: durable SQLite quarantine was present at app launch"
     );
-    let evt = screenpipe_events::DbRecoveryEvent::needs_recovery();
-    let _ = screenpipe_events::send_event(evt.event_name(), evt);
+    if publish_recovery_event {
+        let evt = screenpipe_events::DbRecoveryEvent::needs_recovery();
+        let _ = screenpipe_events::send_event(evt.event_name(), evt);
+    }
 }
 
 fn quarantine_age_bucket(detected_at_unix_ms: u64) -> &'static str {

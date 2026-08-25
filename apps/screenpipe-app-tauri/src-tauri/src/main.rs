@@ -2235,19 +2235,33 @@ async fn main() {
                 let self_heal_app = app_handle.clone();
                 let self_heal_db_path = launch_db_path.clone();
                 let notify_data_dir = data_dir.clone();
-                let surface_recovery = !app_ui_hidden && !headless_startup;
+                let recovery_app = app_handle.clone();
+                let automatic_recovery = headless_startup;
                 tauri::async_runtime::spawn(async move {
                     if crate::db_self_heal::try_self_heal_at_launch(
                         self_heal_app,
                         self_heal_db_path,
+                        !automatic_recovery,
                     )
                     .await
                     {
                         return;
                     }
-                    crate::db_relaunch::surface_quarantined_recovery_at_launch(&launch_db_path)
-                        .await;
-                    if surface_recovery {
+                    crate::db_relaunch::surface_quarantined_recovery_at_launch(
+                        &launch_db_path,
+                        !automatic_recovery,
+                    )
+                    .await;
+                    if automatic_recovery {
+                        let recovery = crate::db_recovery_notifications::
+                            start_headless_quarantined_database_recovery(
+                                recovery_app,
+                                notify_data_dir,
+                            );
+                        if let Err(error) = recovery {
+                            error!("failed to start automatic protected database recovery: {error}");
+                        }
+                    } else {
                         crate::db_recovery_notifications::notify_quarantined_database(
                             notify_data_dir,
                         );
