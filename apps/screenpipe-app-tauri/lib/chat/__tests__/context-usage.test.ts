@@ -46,6 +46,31 @@ describe("context usage event parser", () => {
     ).toBeNull();
   });
 
+  it("reads the field names pi's RPC mode actually emits", () => {
+    // Verbatim shape from pi 0.84.1 `dist/modes/rpc/rpc-mode.js`: setStatus
+    // serializes its two arguments as statusKey/statusText, not key/text.
+    // Reading only key/text matched nothing, so native Pi published a snapshot
+    // every turn and the panel still showed its pre-first-turn placeholder.
+    expect(
+      parseContextUsageEvent({
+        type: "extension_ui_request",
+        id: "0f1d0f3f-6f5d-4c0e-9a6f-1b2c3d4e5f60",
+        method: "setStatus",
+        statusKey: CONTEXT_USAGE_STATUS_KEY,
+        statusText: JSON.stringify(snapshot),
+      }),
+    ).toEqual(snapshot);
+    // Another extension's status must still be ignored under either spelling.
+    expect(
+      parseContextUsageEvent({
+        type: "extension_ui_request",
+        method: "setStatus",
+        statusKey: "some-other-extension",
+        statusText: JSON.stringify(snapshot),
+      }),
+    ).toBeNull();
+  });
+
   it("rejects partial or malformed snapshots", () => {
     expect(
       parseContextUsageSnapshot({

@@ -721,6 +721,27 @@
       "notes": "QUARANTINED (#4689): connections-context wrapper stripping regression. The synthetic background-router event path never persists deterministically on Linux/macOS CI; re-enable once it drives a deterministic persisted session."
     },
     {
+      "spec": "chat-context-usage-providers.spec.ts",
+      "platforms": [
+        "macos"
+      ],
+      "layers": [
+        "chat-ai",
+        "real-ui-e2e",
+        "tauri-command"
+      ],
+      "features": [
+        "chat",
+        "context-usage",
+        "acp-backend",
+        "agent-streaming"
+      ],
+      "criticality": "medium",
+      "confidence": "strong",
+      "ux": "real-user-flow",
+      "notes": "The composer's context reading, once per harness class that can report one. Native Pi answers a real OpenAI-compatible turn whose stream carries usage, and the project-local context-usage extension publishes a per-category breakdown that must sum to the model's own total and must keep non-empty rules/skills buckets, which is what guards the classifier's coupling to pi's prompt section markers. A deterministic stdio ACP adapter reports only the protocol usage_update pair and must render one bar plus the line saying no breakdown is available. Also covers the pre-first-turn state, where the panel says nothing rather than estimating."
+    },
+    {
       "spec": "chat-cost-limit-upgrade.spec.ts",
       "platforms": [
         "macos"

@@ -17,12 +17,15 @@ type JsonRpcMessage = {
   error?: unknown;
 };
 
-type Scenario = "normal" | "malformed" | "exit" | "auth" | "mcp" | "tree" | "terminal" | "subagent" | "metadata" | "repeated-tools" | "resume";
+type Scenario = "normal" | "malformed" | "exit" | "auth" | "mcp" | "tree" | "terminal" | "subagent" | "metadata" | "repeated-tools" | "resume" | "usage";
 
 const scenarioArg = process.argv.find((arg) => arg.startsWith("--scenario="));
 const scenario = (scenarioArg?.slice("--scenario=".length) ?? "normal") as Scenario;
 const sessionId = "mock-acp-session";
 const permissionRequestId = "mock-permission-1";
+/** Kept in sync with the context-usage spec's expected 26% reading. */
+const ACP_USAGE_USED_TOKENS = 52_000;
+const ACP_USAGE_CONTEXT_WINDOW = 200_000;
 const processMarkerPrefix = process.env.SCREENPIPE_MOCK_PROCESS_MARKER_PREFIX;
 const processMarkerToken = process.env.SCREENPIPE_MOCK_PROCESS_MARKER_TOKEN;
 const forbiddenCloudToken = process.env.SCREENPIPE_API_KEY;
@@ -304,6 +307,25 @@ function emitPromptPrelude(): void {
     content: { type: "text", text: "First streamed chunk. " },
     messageId: "mock-message-1",
   });
+}
+
+/** The protocol-standard context reading. Adapters that own their own prompt
+ *  assembly (Claude Code, Codex, Cursor) report only this used/size pair — no
+ *  per-category breakdown — so this is the whole contract desktop can render
+ *  for them. */
+function emitUsageFlow(requestId: JsonRpcId): void {
+  update({
+    sessionUpdate: "usage_update",
+    used: ACP_USAGE_USED_TOKENS,
+    size: ACP_USAGE_CONTEXT_WINDOW,
+  });
+  update({
+    sessionUpdate: "agent_message_chunk",
+    content: { type: "text", text: "Mock ACP usage turn complete." },
+    messageId: "mock-usage-final",
+  });
+  respond(requestId, { stopReason: "end_turn" });
+  activePromptRequestId = undefined;
 }
 
 function emitMetadataRefinementFlow(requestId: JsonRpcId): void {
@@ -706,6 +728,10 @@ async function handleRequest(message: JsonRpcMessage): Promise<void> {
       }
       if (scenario === "subagent") {
         emitSubagentFlow(message.id);
+        return;
+      }
+      if (scenario === "usage") {
+        emitUsageFlow(message.id);
         return;
       }
       if (scenario === "metadata") {

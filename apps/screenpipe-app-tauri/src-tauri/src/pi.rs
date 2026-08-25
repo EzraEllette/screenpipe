@@ -1644,7 +1644,7 @@ fn ensure_chat_control_extension(project_dir: &str) -> Result<(), String> {
         .map_err(|e| format!("Failed to install chat-control extension: {}", e))
 }
 
-/// Emit privacy-safe context-usage counts from native Pi's exact model payload.
+/// Emit privacy-safe context-usage counts from Pi's exact model payload.
 /// Other ACP agents own their prompt assembly and do not load Pi extensions.
 fn ensure_context_usage_extension(project_dir: &str) -> Result<(), String> {
     let ext_dir = std::path::Path::new(project_dir)
@@ -1656,6 +1656,43 @@ fn ensure_context_usage_extension(project_dir: &str) -> Result<(), String> {
     std::fs::write(ext_dir.join("context-usage.ts"), ext_content)
         .map_err(|e| format!("Failed to install context-usage extension: {}", e))
 }
+
+/// Every extension both Pi harnesses must load. Native Pi and pi-acp run the
+/// SAME pi binary against the same project dir, so an extension seeded on one
+/// path and not the other is always a bug — and the two lists drifted once
+/// already: pi-acp shipped without `context-usage.ts` and silently lost its
+/// context breakdown while native Pi had it. Seeding from one list is what
+/// makes that class of drift impossible; only the deliberately different
+/// web-search variant stays per-branch.
+fn ensure_shared_pi_extensions(project_dir: &str) -> Result<(), String> {
+    ensure_self_improvement_extension(project_dir)?;
+    ensure_chat_control_extension(project_dir)?;
+    ensure_context_usage_extension(project_dir)?;
+    // MCP bridge: lets the agent reach user-registered MCP servers.
+    ensure_mcp_bridge_extension(project_dir)?;
+    // Save artifact: lets the agent register deliverables in the Artifacts library.
+    ensure_save_artifact_extension(project_dir)?;
+    // Live Views: lazy read/edit access for normal chat and focused composers.
+    // pi-acp is pi but can't consume the bundled MCP server, so it needs the
+    // extension for the same reason native pi does.
+    ensure_live_views_extension(project_dir)?;
+    // Connection gate: lets Pi block on inline app authorization before
+    // continuing app-dependent tasks.
+    ensure_connection_gate_extension(project_dir)?;
+    Ok(())
+}
+
+/// The files [`ensure_shared_pi_extensions`] writes, for the parity assertion.
+#[cfg(test)]
+const SHARED_PI_EXTENSION_FILES: &[&str] = &[
+    "self-improvement.ts",
+    "chat-control.ts",
+    "context-usage.ts",
+    "mcp-bridge.ts",
+    "save-artifact.ts",
+    "live-views.ts",
+    "connection-gate.ts",
+];
 
 /// Stage the Enterprise-only team skill outside Pi's auto-discovery tree.
 /// Consumer builds return `None` without touching this path; the Enterprise
@@ -2670,25 +2707,10 @@ pub async fn pi_start_inner(
     // extensions and packages must not be installed or required there — except
     // pi-acp, which is pi and can't consume the MCP servers.
     if !use_acp {
-        ensure_self_improvement_extension(&project_dir)?;
-        ensure_chat_control_extension(&project_dir)?;
-        ensure_context_usage_extension(&project_dir)?;
+        ensure_shared_pi_extensions(&project_dir)?;
 
         // Install web-search extension only for screenpipe-cloud presets
         ensure_web_search_extension(&project_dir, provider_config.as_ref())?;
-
-        // MCP bridge: lets the agent reach user-registered MCP servers.
-        ensure_mcp_bridge_extension(&project_dir)?;
-
-        // Save artifact: lets the agent register deliverables in the Artifacts library.
-        ensure_save_artifact_extension(&project_dir)?;
-
-        // Live Views: lazy read/edit access for normal chat and focused composers.
-        ensure_live_views_extension(&project_dir)?;
-
-        // Connection gate: lets Pi block on inline app authorization before
-        // continuing app-dependent tasks.
-        ensure_connection_gate_extension(&project_dir)?;
 
         // Ensure Pi is configured with the user's provider
         ensure_pi_config(user_token.as_deref(), provider_config.as_ref()).await?;
@@ -2696,23 +2718,15 @@ pub async fn pi_start_inner(
             ensure_required_pi_extension_package().await?;
         }
     } else if is_pi_acp {
-        ensure_self_improvement_extension(&project_dir)?;
-        ensure_chat_control_extension(&project_dir)?;
+        // Same pi as native, so the same shared extension set.
+        ensure_shared_pi_extensions(&project_dir)?;
 
-        // Same pi as native — seed the project-local extensions so its tools
-        // reach the model. web-search uses the LOCAL-proxy variant: the cloud
-        // extension needs the screenpipe-cloud JWT (which ACP sessions never
-        // receive), but the local engine proxy at /v1/web-search injects the JWT
-        // server-side, so pi-acp keeps web search with only the local API key.
+        // web-search is the one deliberate difference: pi-acp uses the
+        // LOCAL-proxy variant because the cloud extension needs the
+        // screenpipe-cloud JWT (which ACP sessions never receive), while the
+        // local engine proxy at /v1/web-search injects the JWT server-side, so
+        // pi-acp keeps web search with only the local API key.
         ensure_web_search_local_extension(&project_dir)?;
-        ensure_mcp_bridge_extension(&project_dir)?;
-        ensure_save_artifact_extension(&project_dir)?;
-        // Live Views: pi-acp is pi but can't consume the bundled MCP server, so
-        // it needs the extension (native pi seeds it above). Without this,
-        // pi-acp is the only ACP harness missing Live Views. Local file write,
-        // and its env (SCREENPIPE_LOCAL_API_*) is already set on this path.
-        ensure_live_views_extension(&project_dir)?;
-        ensure_connection_gate_extension(&project_dir)?;
 
         // pi-acp can't pass pi's `--approve`, so rpc-mode pi would silently skip
         // the project's .pi/extensions and .pi/skills (untrusted-by-default).
@@ -7789,6 +7803,31 @@ error: InstallFailed extracting tarball"#;
                 .iter()
                 .any(|p| p.as_str() == Some(super::REQUIRED_PI_EXTENSION_PACKAGE)),
             "pi-subagents must be registered as a required package"
+        );
+    }
+
+    /// Native Pi and pi-acp run the same pi binary, so both must load the same
+    /// extensions. They are seeded from one list precisely because the lists
+    /// drifted once: pi-acp shipped without `context-usage.ts` and lost the
+    /// context breakdown that native Pi rendered. This asserts the shared
+    /// seeder writes every file in that list, `context-usage.ts` included.
+    #[test]
+    fn shared_pi_extensions_cover_every_pi_harness() {
+        let project = tempfile::tempdir().expect("project dir");
+        let project_dir = project.path().to_str().expect("utf8 path");
+
+        super::ensure_shared_pi_extensions(project_dir).expect("seed shared extensions");
+
+        let ext_dir = project.path().join(".pi").join("extensions");
+        for file in super::SHARED_PI_EXTENSION_FILES {
+            assert!(
+                ext_dir.join(file).is_file(),
+                "{file} must be seeded for every Pi harness, native and pi-acp"
+            );
+        }
+        assert!(
+            super::SHARED_PI_EXTENSION_FILES.contains(&"context-usage.ts"),
+            "context-usage must stay in the shared set so pi-acp keeps the breakdown"
         );
     }
 }

@@ -13,7 +13,10 @@ import {
 } from "@/components/ui/popover";
 import { UsageLimitsPanel } from "@/components/usage/usage-limits-panel";
 import { UsageRing } from "@/components/usage/usage-meter";
-import { presetUsesHostedAllowance } from "@/lib/chat/model-allowance-cost";
+import {
+  presetAllowanceExemption,
+  presetUsesHostedAllowance,
+} from "@/lib/chat/model-allowance-cost";
 import { quotaPlanLabel } from "@/lib/chat/quota-errors";
 import {
   formatUsagePercent,
@@ -42,16 +45,24 @@ export function UsagePopover({
   const [open, setOpen] = useState(false);
   const usesCloudAllowance = presetUsesHostedAllowance(activePreset);
   // BYOK, local, and own-account ACP chats never start a composer-only cloud
-  // usage poll. Other mounted account surfaces still share their own query.
-  const query = useUsageStatusQuery(usesCloudAllowance);
+  // usage poll in the background. They still need the account's plan the moment
+  // someone opens this panel to check it, so opening is itself a reason to
+  // fetch: the cost is one request while a panel the user deliberately opened
+  // is on screen, and the alternative is a plan line that appears only when
+  // some other surface happened to poll.
+  const query = useUsageStatusQuery(usesCloudAllowance || open);
   const context = useContextUsage(sessionId);
   const contextPercent = contextUsagePercent(context);
   const { usage } = query;
   const hosted = usage?.hosted_ai;
   const allowances = hosted?.allowances ?? [];
   const tightest = tightestHostedAiAllowance(allowances);
-  const cloudManaged =
-    usesCloudAllowance && hosted?.allowance_managed_by === "cloudflare";
+  // Two different questions. Whether the ACCOUNT is on a Cloudflare-managed
+  // allowance decides if there is a plan to report at all; whether this PRESET
+  // spends it decides if there are meters to draw.
+  const accountOnCloudAllowance = hosted?.allowance_managed_by === "cloudflare";
+  const cloudManaged = usesCloudAllowance && accountOnCloudAllowance;
+  const allowanceExemption = presetAllowanceExemption(activePreset);
   const plan = hosted ? quotaPlanLabel(hosted.plan) : null;
   const cloudPercent = tightest
     ? formatUsagePercent(tightest.used_percent)
@@ -81,7 +92,7 @@ export function UsagePopover({
   const unavailableMessage =
     hosted?.plan === "unknown"
       ? "sign in to view your usage limits."
-      : "usage data is unavailable. try refreshing.";
+      : (allowanceExemption ?? "usage data is unavailable. try refreshing.");
 
   return (
     // Click, not hover: this panel is something you go and read, and a chip
@@ -119,11 +130,15 @@ export function UsagePopover({
       >
         <div className="space-y-3.5">
           <ContextUsagePanel snapshot={context} />
-          {cloudManaged && (
+          {accountOnCloudAllowance && hosted && (
             <div className="border-t border-border pt-3.5">
               <UsageLimitsPanel
                 planLabel={plan}
-                allowances={allowances}
+                // Meters only for a preset that actually spends the allowance.
+                // On any other preset the panel still names the plan and says
+                // where this one bills instead, rather than disappearing and
+                // reading as a lost subscription.
+                allowances={cloudManaged ? allowances : []}
                 updatedLabel={formatUsageUpdatedAt(hosted.usage_as_of)}
                 unavailableMessage={unavailableMessage}
                 isRefreshing={query.isRefreshing}
