@@ -732,7 +732,16 @@ mod imp {
     }
     const HIDDEN_UI_POLICY_POLL_INTERVAL: std::time::Duration =
         std::time::Duration::from_secs(5 * 60);
+    const NATIVE_POLICY_STARTUP_DELAY: std::time::Duration = std::time::Duration::from_secs(15);
     const RECORDING_DISABLED_BY_ADMIN_CODE: &str = "recording_disabled_by_admin";
+
+    fn native_policy_startup_delay(persistent_install: bool) -> std::time::Duration {
+        if persistent_install {
+            std::time::Duration::ZERO
+        } else {
+            NATIVE_POLICY_STARTUP_DELAY
+        }
+    }
 
     fn default_recording_allowed() -> bool {
         true
@@ -1168,10 +1177,17 @@ mod imp {
                 .build()
                 .expect("enterprise policy HTTP client builds");
 
-            // Let startup finish before the first control-plane request. This
-            // still recovers a persisted hidden app far sooner than the normal
-            // five-minute frontend polling cadence.
-            tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+            // Ordinary installs retain the startup grace that keeps their
+            // control-plane request off the critical boot path. A protected
+            // persistent relaunch cannot wait here: Enterprise authorization
+            // is process-local, so the app otherwise advertises itself as
+            // paused for at least fifteen seconds after every supervised
+            // restart. Revalidate the saved credential immediately instead.
+            let startup_delay =
+                native_policy_startup_delay(crate::enterprise_persistence::installed());
+            if !startup_delay.is_zero() {
+                tokio::time::sleep(startup_delay).await;
+            }
             loop {
                 let was_hidden = crate::enterprise_policy::is_app_ui_hidden();
                 let device_id = settings_device_id(&app).unwrap_or_else(|| "unknown".to_string());
@@ -1526,9 +1542,9 @@ mod imp {
         use super::{
             choose_device_id, classify_failed_enterprise_response, credential_authorizes_policy,
             enterprise_license_hash, exact_frame_url, explicitly_rejects_authorization,
-            image_uploads_allowed, locked_setting_enforces_auto_start, sibling_heartbeat_url,
-            EnterprisePolicyCredentialKind, HiddenUiPolicyResponse, NativePolicyFetchError,
-            RECORDING_DISABLED_BY_ADMIN_CODE,
+            image_uploads_allowed, locked_setting_enforces_auto_start, native_policy_startup_delay,
+            sibling_heartbeat_url, EnterprisePolicyCredentialKind, HiddenUiPolicyResponse,
+            NativePolicyFetchError, NATIVE_POLICY_STARTUP_DELAY, RECORDING_DISABLED_BY_ADMIN_CODE,
         };
         use std::collections::HashMap;
 
@@ -1539,6 +1555,15 @@ mod imp {
             assert_eq!(
                 choose_device_id(Some("11112222-aaaa"), Some("dev-legacy")).as_deref(),
                 Some("11112222-aaaa")
+            );
+        }
+
+        #[test]
+        fn persistent_relaunch_revalidates_without_the_normal_startup_delay() {
+            assert_eq!(native_policy_startup_delay(true), std::time::Duration::ZERO);
+            assert_eq!(
+                native_policy_startup_delay(false),
+                NATIVE_POLICY_STARTUP_DELAY
             );
         }
 
