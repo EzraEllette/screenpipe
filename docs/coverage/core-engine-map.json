@@ -300,6 +300,7 @@
         "src/agent_profile.rs",
         "src/agent_skills.rs",
         "src/auth_key.rs",
+        "src/history_access.rs",
         "src/local_chat.rs",
         "src/pipe_stream.rs",
         "src/routes/activity_summary.rs",

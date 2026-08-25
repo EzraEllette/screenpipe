@@ -1001,6 +1001,12 @@ export function presentToolActivity(toolCall: PresentableToolCall): ToolActivity
   const mcpCommand = mcpScreenpipeCommand(rawName, args);
   if (mcpCommand) return commandActivity(mcpCommand);
 
+  // Claude's native screenpipe bridge uses this legacy tool title instead of
+  // the MCP-prefixed name. Present the user job, not the adapter's method.
+  if (toolName === "query_recordings" || toolName === "query-recordings") {
+    return activity("Searching recordings", "Searched recordings", "search");
+  }
+
   if (toolName === "bash" || toolName === "shell" || toolName === "exec" || toolName === "exec_command") {
     return commandActivity(String(args.command ?? args.cmd ?? ""));
   }

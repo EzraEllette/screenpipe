@@ -337,13 +337,14 @@
         "agent-cancellation",
         "agent-terminal",
         "agent-tool-metadata",
+        "agent-tool-compaction",
         "mcp-registration",
         "process-supervision"
       ],
       "criticality": "high",
       "confidence": "partial",
       "ux": "mixed",
-      "notes": "Official Rust ACP SDK runtime and inline UI E2E with a deterministic stdio agent: initialization, session close, streaming, background permissions, cancellation, localized auth/cancel, malformed stdout, exact adapter/descendant reaping, terminal lifecycle/output draining, late tool metadata/error propagation with a provider fallback, and a real authenticated local API MCP health call. Curated third-party adapters remain manual smoke coverage."
+      "notes": "Official Rust ACP SDK runtime and inline UI E2E with a deterministic stdio agent: initialization, session close, streaming, background permissions, cancellation, localized auth/cancel, malformed stdout, exact adapter/descendant reaping, terminal lifecycle/output draining, late tool metadata/error propagation with a provider fallback, progressive compaction of repeated Claude tool calls with drill-down access, and a real authenticated local API MCP health call. Curated third-party adapters remain manual smoke coverage."
     },
     {
       "spec": "acp-onboarding-ux.spec.ts",

@@ -4704,7 +4704,12 @@ pub(super) async fn run_from_env_with_observer(
     // until process exit: dropping it here would terminate this process before
     // main can flush the final ACP error/result and choose its exit code. The
     // OS closes the handle immediately when the hidden runtime exits.
-    let config = RuntimeConfig::from_env()?;
+    // RuntimeConfig loads the optional self-improvement context through a
+    // short-lived blocking HTTP client. Build it off the async runtime so
+    // reqwest can create and drop its internal runtime safely.
+    let config = tokio::task::spawn_blocking(RuntimeConfig::from_env)
+        .await
+        .map_err(|error| format!("failed to load ACP runtime config: {error}"))??;
     let output = ParentOutput::new();
     let state = Arc::new(RuntimeState::new(output.clone(), &config, observer));
     // Agents that ignore client stdio MCP servers (Cursor) get screenpipe's

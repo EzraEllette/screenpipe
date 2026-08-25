@@ -440,6 +440,21 @@ describe("presentToolActivity — ACP tool calls", () => {
     ).toBe("Checked available automations");
   });
 
+  it("describes Claude recording queries as a user-facing search", () => {
+    expect(
+      presentToolActivity({
+        toolName: "query_recordings",
+        agentId: "claude-acp",
+        kind: "other",
+        args: {},
+      }),
+    ).toMatchObject({
+      runningLabel: "Searching recordings",
+      completedLabel: "Searched recordings",
+      icon: "search",
+    });
+  });
+
   it("falls back to the ACP kind for native tools whose title isn't a known name", () => {
     expect(
       presentToolActivity({ toolName: "Read /repo/a.ts", kind: "read", args: {} }).completedLabel,

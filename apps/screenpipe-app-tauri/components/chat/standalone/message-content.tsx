@@ -370,10 +370,108 @@ function RunningToolStatus({ toolCall }: { toolCall: ToolCall }) {
   );
 }
 
+const MIN_COMPACTED_TOOL_CALLS = 3;
+
+type ToolActivityRailEntry = {
+  toolCall: ToolCall;
+  groupedToolCalls?: ToolCall[];
+  childToolCalls: ToolCall[];
+};
+
+function toolActivityCompactionKey(
+  toolCall: ToolCall,
+  errorRecovered: boolean,
+  waitingForUser: boolean,
+): string | null {
+  if (toolCall.subagent || isAskUserToolCall(toolCall)) return null;
+
+  const presentation = presentToolActivity(toolCall);
+  const showError = Boolean(toolCall.isError && !errorRecovered);
+  const state = toolCall.isRunning && waitingForUser
+    ? "waiting"
+    : toolCall.isRunning
+      ? "running"
+      : showError
+        ? "error"
+        : "completed";
+  const label = toolCall.isRunning || showError
+    ? presentation.runningLabel
+    : presentation.completedLabel;
+  const target = extractConnectionIconFromToolCall(toolCall)
+    ?? extractWebTargetFromToolCall(toolCall)?.domain
+    ?? extractAppFromToolCall(toolCall)
+    ?? "";
+
+  return JSON.stringify([
+    toolCall.agentId ?? "",
+    toolCall.toolName.toLowerCase(),
+    presentation.icon,
+    state,
+    label,
+    target,
+  ]);
+}
+
+function compactToolActivityRows(
+  toolCalls: ToolCall[],
+  childrenByParent: Map<string, ToolCall[]>,
+  errorRecovered: boolean,
+  waitingForUser: boolean,
+): ToolActivityRailEntry[] {
+  const entries: ToolActivityRailEntry[] = [];
+  let run: ToolCall[] = [];
+  let runKey: string | null = null;
+
+  const flushRun = () => {
+    if (run.length >= MIN_COMPACTED_TOOL_CALLS) {
+      entries.push({
+        toolCall: run[0],
+        groupedToolCalls: [...run],
+        childToolCalls: [],
+      });
+    } else {
+      for (const toolCall of run) {
+        entries.push({
+          toolCall,
+          childToolCalls: childrenByParent.get(toolCall.id) ?? [],
+        });
+      }
+    }
+    run = [];
+    runKey = null;
+  };
+
+  for (const toolCall of toolCalls) {
+    const childToolCalls = childrenByParent.get(toolCall.id) ?? [];
+    const key = childToolCalls.length === 0
+      ? toolActivityCompactionKey(toolCall, errorRecovered, waitingForUser)
+      : null;
+    if (key && key === runKey) {
+      run.push(toolCall);
+      continue;
+    }
+    flushRun();
+    if (key) {
+      run = [toolCall];
+      runKey = key;
+    } else {
+      entries.push({ toolCall, childToolCalls });
+    }
+  }
+  flushRun();
+  return entries;
+}
+
+function compactedToolCountLabel(toolCall: ToolCall, count: number): string {
+  const noun = toolCall.toolName.toLowerCase().includes("query") ? "queries" : "steps";
+  return `${count} ${noun}`;
+}
+
 function ToolCallRailItem({
   toolCall,
   isLast,
   childToolCalls,
+  groupedToolCalls,
   errorRecovered = false,
   waitingForUser = false,
   onAskUserReply,
@@ -384,25 +482,40 @@ function ToolCallRailItem({
   // expand so clicking the container toggles its whole subtree, rather than
   // leaving the children as always-on siblings that clutter the rail.
   childToolCalls?: ToolCall[];
+  // Adjacent equivalent calls are one high-level row. The individual calls
+  // remain available behind a second disclosure click.
+  groupedToolCalls?: ToolCall[];
   errorRecovered?: boolean;
   waitingForUser?: boolean;
   onAskUserReply?: (reply: string, displayLabel: string) => void | Promise<void>;
 }) {
   const [expanded, setExpanded] = useState(false);
   const reduceMotion = useReducedMotion();
-  const hasChildren = (childToolCalls?.length ?? 0) > 0;
-  const presentation = presentToolActivity(toolCall);
-  const showError = Boolean(toolCall.isError && !errorRecovered);
-  const label = toolCall.isRunning || showError
+  const compactedCalls = groupedToolCalls && groupedToolCalls.length > 1
+    ? groupedToolCalls
+    : null;
+  const statusToolCall = compactedCalls?.find((call) => call.isRunning)
+    ?? compactedCalls?.find((call) => call.isError && !errorRecovered)
+    ?? compactedCalls?.[compactedCalls.length - 1]
+    ?? toolCall;
+  const hasChildren = Boolean(compactedCalls) || (childToolCalls?.length ?? 0) > 0;
+  const presentation = presentToolActivity(statusToolCall);
+  const showError = compactedCalls
+    ? compactedCalls.some((call) => call.isError && !errorRecovered)
+    : Boolean(toolCall.isError && !errorRecovered);
+  const isRunning = compactedCalls
+    ? compactedCalls.some((call) => call.isRunning)
+    : toolCall.isRunning;
+  const label = isRunning || showError
     ? presentation.runningLabel
     : presentation.completedLabel;
-  const appName = extractAppFromToolCall(toolCall);
-  const connectionIconName = extractConnectionIconFromToolCall(toolCall);
-  const webTarget = extractWebTargetFromToolCall(toolCall);
-  const isAskUser = isAskUserToolCall(toolCall);
-  const state: ActivityIconState = toolCall.isRunning && (waitingForUser || isAskUser)
+  const appName = extractAppFromToolCall(statusToolCall);
+  const connectionIconName = extractConnectionIconFromToolCall(statusToolCall);
+  const webTarget = extractWebTargetFromToolCall(statusToolCall);
+  const isAskUser = isAskUserToolCall(statusToolCall);
+  const state: ActivityIconState = isRunning && (waitingForUser || isAskUser)
     ? "waiting"
-    : toolCall.isRunning
+    : isRunning
       ? "running"
       : showError
         ? "error"
@@ -416,7 +529,11 @@ function ToolCallRailItem({
   ) : undefined;
 
   return (
-    <div className="relative flex min-w-0" data-activity-state={state}>
+    <div
+      className="relative flex min-w-0"
+      data-activity-state={state}
+      data-tool-call-count={compactedCalls?.length ?? 1}
+    >
       {/* Vertical rail line */}
       <div className="flex w-6 flex-shrink-0 flex-col items-center">
         <div className="relative flex h-5 w-6 items-center justify-center">
@@ -446,14 +563,20 @@ function ToolCallRailItem({
             </span>
             {showError && (
               <span className="shrink-0 border border-destructive/40 px-1 font-mono text-[9px] uppercase tracking-wide text-destructive">
-                failed
+                {compactedCalls
+                  ? `${compactedCalls.filter((call) => call.isError).length} failed`
+                  : "failed"}
               </span>
             )}
-            {hasChildren && !expanded && (
+            {compactedCalls && !expanded ? (
+              <span className="flex-shrink-0 text-[11px] text-foreground/30">
+                {compactedToolCountLabel(statusToolCall, compactedCalls.length)}
+              </span>
+            ) : hasChildren && !expanded ? (
               <span className="flex-shrink-0 text-[11px] text-foreground/30">
                 {childToolCalls!.length} {childToolCalls!.length === 1 ? "step" : "steps"}
               </span>
-            )}
+            ) : null}
             {expanded ? (
               <ChevronDown className="h-3 w-3 flex-shrink-0 text-foreground/30 group-hover:text-foreground/60 transition-colors duration-150" />
             ) : (
@@ -461,22 +584,25 @@ function ToolCallRailItem({
             )}
           </button>
         )}
-        {!isAskUser && <RunningToolStatus toolCall={toolCall} />}
+        {!isAskUser && !compactedCalls && <RunningToolStatus toolCall={toolCall} />}
         <AnimatePresence>
           {!isAskUser && expanded && (
             <motion.div
-              initial={{ height: 0, opacity: 0 }}
-              animate={{ height: "auto", opacity: 1 }}
-              exit={{ height: 0, opacity: 0 }}
+              // Nested disclosures can be opened after the parent rail has
+              // already animated. Starting another entrance animation here can
+              // leave WebKit at opacity 0, so keep the live details in normal
+              // document flow and only animate their exit.
+              initial={false}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
               transition={{ duration: reduceMotion ? 0 : 0.15 }}
-              className="overflow-hidden"
             >
               <div className="border-l border-border ml-0 pl-3 mt-1 mb-1">
-                <FriendlyToolDetails toolCall={toolCall} />
+                {!compactedCalls && <FriendlyToolDetails toolCall={toolCall} />}
                 {/* Streamed output: live while running, and kept after the tool
                     finishes so what streamed doesn't vanish. Only for bash once
                     done, since other tools already show their full result below. */}
-                {toolCall.progress && (toolCall.isRunning || toolCall.toolName === "bash" || toolCall.subagent) && (
+                {!compactedCalls && toolCall.progress && (toolCall.isRunning || toolCall.toolName === "bash" || toolCall.subagent) && (
                   <div className="mt-1 pt-1 border-t border-border/50">
                     <pre className="whitespace-pre-wrap break-words max-h-[200px] overflow-y-auto overflow-x-hidden max-w-full text-xs font-mono text-foreground/50">
                       {toolCall.progress}
@@ -488,7 +614,7 @@ function ToolCallRailItem({
                     ... agentId ... output_file ..."), meant for the model, not the
                     user. Its real content is the nested transcript above, so
                     suppress the launch boilerplate. */}
-                {toolCall.result !== undefined && toolCall.toolName !== "bash" && !toolCall.subagent && (
+                {!compactedCalls && toolCall.result !== undefined && toolCall.toolName !== "bash" && !toolCall.subagent && (
                   <div className="mt-1 pt-1 border-t border-border/50">
                     <pre className={cn(
                       "whitespace-pre-wrap break-words max-h-[300px] overflow-y-auto overflow-x-hidden max-w-full text-xs font-mono",
@@ -501,7 +627,20 @@ function ToolCallRailItem({
                 {/* A subagent's own tools nest inside its expand, so clicking
                     the subagent row reveals or hides its whole subtree instead
                     of leaving the children always on. */}
-                {hasChildren && (
+                {compactedCalls ? (
+                  <div className="mt-1" data-testid="tool-activity-group-details">
+                    {compactedCalls.map((call, index) => (
+                      <ToolCallRailItem
+                        key={toolCallRenderKey(call, index)}
+                        toolCall={call}
+                        isLast={index === compactedCalls.length - 1}
+                        errorRecovered={errorRecovered}
+                        waitingForUser={waitingForUser}
+                        onAskUserReply={onAskUserReply}
+                      />
+                    ))}
+                  </div>
+                ) : hasChildren ? (
                   <div className="mt-1">
                     {childToolCalls!.map((child, j) => (
                       <ToolCallRailItem
@@ -514,7 +653,7 @@ function ToolCallRailItem({
                       />
                     ))}
                   </div>
-                )}
+                ) : null}
               </div>
             </motion.div>
           )}
@@ -1446,11 +1585,10 @@ function ToolActivityGroup({
       <AnimatePresence>
         {isExpanded && (
           <motion.div
-            initial={e2eForceExpanded ? false : { height: 0, opacity: 0 }}
-            animate={{ height: "auto", opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
+            initial={reduceMotion || e2eForceExpanded ? false : { opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
             transition={{ duration: reduceMotion || e2eForceExpanded ? 0 : 0.15 }}
-            className="overflow-hidden"
           >
             <div
               className={cn(
@@ -1486,12 +1624,17 @@ function ToolActivityGroup({
                     topLevel.push(tc);
                   }
                 }
-                return topLevel.map((tc, i) => {
-                  const children = childrenByParent.get(tc.id) ?? [];
-                  const isLastTop = i === topLevel.length - 1;
+                const railEntries = compactToolActivityRows(
+                  topLevel,
+                  childrenByParent,
+                  recoveredWithAnswer,
+                  waitingForUser,
+                );
+                return railEntries.map((entry, i) => {
+                  const isLastTop = i === railEntries.length - 1;
                   return (
                     <motion.div
-                      key={toolCallRenderKey(tc, i)}
+                      key={toolCallRenderKey(entry.toolCall, i)}
                       initial={reduceMotion || e2eForceExpanded ? false : { opacity: 0, x: -8 }}
                       animate={{ opacity: 1, x: 0 }}
                       transition={{
@@ -1500,9 +1643,10 @@ function ToolActivityGroup({
                       }}
                     >
                       <ToolCallRailItem
-                        toolCall={tc}
+                        toolCall={entry.toolCall}
                         isLast={isLastTop}
-                        childToolCalls={children}
+                        childToolCalls={entry.childToolCalls}
+                        groupedToolCalls={entry.groupedToolCalls}
                         errorRecovered={recoveredWithAnswer}
                         waitingForUser={waitingForUser}
                         onAskUserReply={onAskUserReply}
