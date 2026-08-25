@@ -177,6 +177,12 @@ pub fn get_or_create_key() -> Option<[u8; 32]> {
     let b64 = B64.encode(key);
 
     if !set_password_in_keychain(&b64) {
+        // Another Screenpipe process may have won the create-only race.
+        // Re-read its key instead of replacing it: overwriting a key that has
+        // already encrypted a row would make that persisted secret unrecoverable.
+        if let KeyResult::Found(existing) = get_key() {
+            return Some(existing);
+        }
         warn!("keychain: failed to store encryption key");
         set_cached_key(None);
         return None;
@@ -251,15 +257,9 @@ fn get_password_from_keychain() -> KeychainLookup {
 }
 
 #[cfg(target_os = "macos")]
-fn set_password_in_keychain(password: &str) -> bool {
-    // Delete existing entry first (add-generic-password fails if it exists)
-    let _ = std::process::Command::new("security")
-        .args(["delete-generic-password", "-s", SERVICE, "-a", KEY_NAME])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
-
-    let status = std::process::Command::new("security")
+fn macos_add_password_command(password: &str) -> std::process::Command {
+    let mut command = std::process::Command::new("security");
+    command
         .args([
             "add-generic-password",
             "-s",
@@ -268,12 +268,23 @@ fn set_password_in_keychain(password: &str) -> bool {
             KEY_NAME,
             "-w",
             password,
+            // Every macOS reader goes through this stable system executable.
+            // `security` explicitly documents `-T ""` as removing the
+            // creator's default access; that old spelling made the key usable
+            // only from the process cache and unreadable after restart.
             "-T",
-            "", // allow access from any application (no per-app ACL)
+            "/usr/bin/security",
         ])
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
+        .stderr(std::process::Stdio::null());
+    command
+}
+
+#[cfg(target_os = "macos")]
+fn set_password_in_keychain(password: &str) -> bool {
+    // Create only. Never delete or update an existing encryption key: another
+    // process may already have used it to seal persisted secrets.
+    let status = macos_add_password_command(password).status();
 
     match status {
         Ok(s) => s.success(),
@@ -304,4 +315,26 @@ fn set_password_in_keychain(password: &str) -> bool {
         Err(_) => return false,
     };
     entry.set_password(password).is_ok()
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_key_trusts_security_cli_without_opening_access_to_every_app() {
+        let command = macos_add_password_command("test-key");
+        let args: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["-T", "/usr/bin/security"]));
+        assert!(!args.windows(2).any(|pair| pair == ["-T", ""]));
+        assert!(!args.iter().any(|arg| arg == "-A"));
+        assert!(!args.iter().any(|arg| arg == "-U"));
+        assert!(!args.iter().any(|arg| arg == "delete-generic-password"));
+    }
 }
