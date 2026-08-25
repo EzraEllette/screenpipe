@@ -74,9 +74,14 @@ describe("NotificationFeedback", () => {
         "include project names",
       );
     });
+    expect(await screen.findByText("feedback sent")).toBeInTheDocument();
     expect(
-      await screen.findByText("saved for the next run"),
-    ).toBeInTheDocument();
+      screen.queryByRole("group", { name: "notification feedback options" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "send feedback" }),
+    ).not.toBeInTheDocument();
     expect(capture).toHaveBeenCalledWith(
       "notification_feedback_submitted",
       expect.objectContaining({
@@ -111,6 +116,10 @@ describe("NotificationFeedback", () => {
         undefined,
       );
     });
+    expect(await screen.findByText("feedback sent")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("group", { name: "notification feedback options" }),
+    ).not.toBeInTheDocument();
     expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
     expect(capture).toHaveBeenCalledWith(
       "notification_feedback_submitted",
