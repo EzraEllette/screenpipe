@@ -216,9 +216,13 @@ describe("meeting summary surface", () => {
     expect(screen.getByTestId("meeting-summary-reading-column")).toHaveClass(
       "select-text",
     );
-    // The shell, not the reading column, bounds the selectable width now.
-    // Selection must still have a width-limited container to paint inside so
-    // it never renders as a full-window horizontal band.
+    const summaryProse = screen
+      .getByTestId("meeting-summary-reading-column")
+      .querySelector(".prose");
+    expect(summaryProse).toHaveClass("flex", "flex-col", "items-start");
+    // The shell bounds the overall reading width while the flex prose root
+    // shrink-wraps each text block. Both are required to keep selection paint
+    // from becoming a full-window horizontal band.
     expect(
       screen
         .getByTestId("meeting-summary-reading-column")

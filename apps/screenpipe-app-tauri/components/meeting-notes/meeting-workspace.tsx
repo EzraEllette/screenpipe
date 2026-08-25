@@ -382,7 +382,7 @@ export function MeetingSummarySurface({
         >
           {summary ? (
             <div aria-busy={isStreaming}>
-              <MemoizedReactMarkdown className="prose prose-sm max-w-none break-words text-foreground dark:prose-invert prose-headings:font-mono prose-headings:text-xs prose-headings:uppercase prose-headings:tracking-[0.12em] prose-p:leading-7 prose-li:leading-7 [&>*:first-child]:mt-0">
+              <MemoizedReactMarkdown className="prose prose-sm max-w-none flex flex-col items-start break-words text-foreground dark:prose-invert prose-headings:font-mono prose-headings:text-xs prose-headings:uppercase prose-headings:tracking-[0.12em] prose-p:leading-7 prose-li:leading-7 [&>*:first-child]:mt-0">
                 {summary}
               </MemoizedReactMarkdown>
               {isStreaming && (
