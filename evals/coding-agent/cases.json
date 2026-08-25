@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "suite": "screenpipe-app-coding-agent-regressions",
-  "dataset_version": "2026-08-24.1",
+  "dataset_version": "2026-08-25.1",
   "suite_type": "regression",
   "owner": "screenpipe engineering",
   "policy": {
@@ -566,6 +566,35 @@
           { "source_path": "crates/screenpipe-db/tests/sqlite_architecture_invariants_test.rs" }
         ],
         "command": "CARGO_TARGET_DIR=${SCREENPIPE_EVAL_CARGO_TARGET_DIR:-target} cargo test -p screenpipe-db --test eval_sqlite_process_ownership --test sqlite_architecture_invariants_test"
+      }
+    },
+    {
+      "id": "app-chat-unicode-context-pruning",
+      "name": "Keep trimmed chat context valid Unicode",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "5c9a0831b0f7e0e6b39e916d0c9bfbd481e2db97",
+        "pull_request": "https://github.com/screenpipe/screenpipe/pull/6563"
+      },
+      "base_ref": "aff38b0634d41b2f7c2cda9e65a3c77b354b15fc",
+      "oracle_ref": "5c9a0831b0f7e0e6b39e916d0c9bfbd481e2db97",
+      "gate": "advisory",
+      "trigger_paths": [
+        "crates/screenpipe-core/assets/extensions/context-pruning.ts",
+        "apps/screenpipe-app-tauri/lib/__tests__/context-pruning.test.ts"
+      ],
+      "tags": ["regression", "escaped-failure", "chat", "unicode", "context-pruning", "cross-platform"],
+      "prompt": "Long chat context can fail before reaching the model when trimming cuts an emoji or another supplementary Unicode character in half, leaving malformed serialized text. Make every history-tail and generic head/tail trim boundary produce valid Unicode without exceeding its existing character budget. Preserve the newest conversation history, the complete current question, both ends of generic oversized content, and unchanged behavior for text already within budget.",
+      "agent_timeout_seconds": 1200,
+      "grader_dependency_links": [
+        { "source_path": "apps/screenpipe-app-tauri/node_modules", "destination_path": "apps/screenpipe-app-tauri/node_modules" }
+      ],
+      "grader": {
+        "timeout_seconds": 420,
+        "fixtures": [
+          { "source_path": "apps/screenpipe-app-tauri/lib/__tests__/context-pruning.test.ts" }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && bun x vitest run --config vitest.config.ts lib/__tests__/context-pruning.test.ts"
       }
     }
   ]
