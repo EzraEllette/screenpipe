@@ -15,7 +15,10 @@ import {
   chatResponseValueActionProperties,
   chatTelemetryContextForResponse,
 } from "@/lib/chat/response-feedback";
-import { qualifiedValue } from "@/lib/analytics/qualified-value";
+import {
+  isQualifiedChatCopy,
+  qualifiedValue,
+} from "@/lib/analytics/qualified-value";
 import { MessageContent } from "@/components/chat/standalone/message-content";
 import { TurnStatus } from "@/components/chat/standalone/turn-status";
 import type { TurnSignals } from "@/lib/chat/turn-phase";
@@ -491,7 +494,9 @@ export function ChatMessageList({
                                     ),
                                   ),
                                 );
-                                qualifiedValue.chatResponseCopied();
+                                if (isQualifiedChatCopy(message)) {
+                                  qualifiedValue.chatResponseCopied();
+                                }
                               }
                             }}
                             className="p-1 rounded-md hover:bg-muted text-muted-foreground hover:text-foreground"

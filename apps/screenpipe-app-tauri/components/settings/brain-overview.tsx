@@ -1050,7 +1050,7 @@ export function BrainOverview({
         onboarding_goal_category:
           onboardingActivation?.goalCategory ?? "unknown",
       });
-      qualifiedValue.artifactOpened(false);
+      qualifiedValue.liveViewResultRendered();
     };
 
     captureVisibleResult();

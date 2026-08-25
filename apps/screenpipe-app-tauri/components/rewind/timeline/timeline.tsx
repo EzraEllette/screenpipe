@@ -20,6 +20,7 @@ import { AppContextPopover } from "./app-context-popover";
 import { TimelineTagToolbar } from "./timeline-tag-toolbar";
 import { extractDomain, FaviconImg } from "./favicon-utils";
 import { localFetch } from "@/lib/api";
+import { qualifiedValue } from "@/lib/analytics/qualified-value";
 import { getFrameThumbnailSources } from "@/lib/frame-thumbnails";
 
 // Global cache: preloads app-icon images so they render instantly on scroll.
@@ -1087,6 +1088,7 @@ export const TimelineSlider = ({
 			posthog.capture("timeline_selection_made", {
 				frames_selected: selectedIndices.size,
 			});
+			qualifiedValue.timelineRangeSelected();
 
 			// Compute bounding rect of selected frames for toolbar positioning
 			const container = containerRef.current;

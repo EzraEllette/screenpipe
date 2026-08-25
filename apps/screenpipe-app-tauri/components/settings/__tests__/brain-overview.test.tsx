@@ -1883,6 +1883,7 @@ describe("BrainOverview", () => {
     );
     expect(mocks.capture).toHaveBeenCalledWith("qualified_value_event", {
       metric_version: "repeat_value_d7_v1",
+      emitter_version: 2,
       surface: "app",
       action: "artifact",
       value_strength: "accepted",
@@ -2016,6 +2017,7 @@ describe("BrainOverview", () => {
     });
     expect(mocks.capture).toHaveBeenCalledWith("qualified_value_event", {
       metric_version: "repeat_value_d7_v1",
+      emitter_version: 2,
       surface: "app",
       action: "artifact",
       value_strength: "accepted",

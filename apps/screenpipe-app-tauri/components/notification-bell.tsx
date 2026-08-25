@@ -30,6 +30,7 @@ import {
   notificationAnalyticsProperties,
 } from "@/lib/notification-analytics";
 import { NotificationFeedback } from "@/components/notification-feedback";
+import { qualifiedValue } from "@/lib/analytics/qualified-value";
 import {
   isHighPriorityNotification,
   type NotificationPriority,
@@ -554,6 +555,9 @@ export function NotificationInboxPanel({
                             ...notificationAnalyticsProperties(entry, "bell"),
                             surface,
                           });
+                          if (entry.pipe_name) {
+                            qualifiedValue.pipeOutputCopied();
+                          }
                         }}
                         className="flex items-center gap-1 text-[10px] text-muted-foreground hover:text-foreground transition-colors"
                       >
