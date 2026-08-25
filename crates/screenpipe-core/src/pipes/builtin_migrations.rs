@@ -60,6 +60,10 @@ const FAST_PATH_END: &str = "step 1 — pull everything";
 const FAST_PATH_ANCHOR: &str =
     "read the screenpipe skill first so you know the meetings + search endpoints.";
 
+/// The previous bundled frontmatter before meeting-summary appended the
+/// configured-preset wildcard to its existing fallback chain.
+const PRESET_CHAIN_ANCHOR: &str = "preset:\n  - screenpipe-cloud\ntimeout: 600";
+
 /// Swaps for `meeting-summary`, oldest defect first.
 fn meeting_summary_swaps() -> Vec<FragmentSwap> {
     let mut swaps = vec![
@@ -129,6 +133,14 @@ fn meeting_summary_swaps() -> Vec<FragmentSwap> {
             new: fast_path,
         });
     }
+    if let Some(preset_chain) = meeting_summary_preset_chain() {
+        swaps.push(FragmentSwap {
+            why: "append the user's configured AI presets to meeting-summary's existing \
+                  fallback chain",
+            old: PRESET_CHAIN_ANCHOR,
+            new: preset_chain,
+        });
+    }
 
     swaps
 }
@@ -140,6 +152,12 @@ fn meeting_summary_fast_path() -> Option<&'static str> {
         FAST_PATH_START,
         FAST_PATH_END,
     )
+}
+
+/// The preset chain as shipped in meeting-summary frontmatter. It stops before
+/// `trigger`, preserving any installed trigger customization outside the span.
+fn meeting_summary_preset_chain() -> Option<&'static str> {
+    section_between(bundled_prompt("meeting-summary")?, "preset:", "trigger:")
 }
 
 /// Apply every known repair for `name` to an installed prompt.
@@ -230,6 +248,19 @@ mod tests {
         assert!(fast_path.contains("these are the exact response shapes"));
         // it stops before the step it precedes.
         assert!(!fast_path.contains(FAST_PATH_END));
+    }
+
+    #[test]
+    fn migrate_builtin_pipe_appends_configured_presets_to_meeting_summary() {
+        let preset_chain =
+            meeting_summary_preset_chain().expect("bundled Pipe carries a preset chain");
+        let stale = bundled("meeting-summary").replace(preset_chain, PRESET_CHAIN_ANCHOR);
+
+        let fixed = migrate_builtin_pipe_text("meeting-summary", &stale)
+            .expect("old meeting-summary frontmatter should gain the wildcard");
+        let (config, _) = parse_frontmatter(&fixed).expect("migrated Pipe should parse");
+        assert_eq!(config.preset, ["screenpipe-cloud", "*"]);
+        assert!(migrate_builtin_pipe_text("meeting-summary", &fixed).is_none());
     }
 
     #[test]
@@ -360,6 +391,7 @@ mod tests {
         assert!(migrate_builtin_pipe_text("meeting-summary", bundled).is_none());
         let (config, body) = parse_frontmatter(bundled).expect("bundled prompt should parse");
         assert_eq!(config.timeout, Some(600));
+        assert_eq!(config.preset, ["screenpipe-cloud", "*"]);
         assert!(!body.contains("buildMeetingSummarizeInstructions"));
         assert!(body.contains("screenpipe API search is required"));
         assert!(body.contains("never run recursive `find` or `grep`"));
