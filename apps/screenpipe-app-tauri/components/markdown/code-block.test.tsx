@@ -24,16 +24,23 @@ vi.mock("@/lib/utils/tauri", () => ({
   commands: { copyTextToClipboard: copyToClipboard },
 }));
 
-vi.mock("react-syntax-highlighter", () => ({
-  PrismAsyncLight: (props: Record<string, unknown>) => {
-    record.props = props;
-    return React.createElement(
-      "pre",
-      { "data-testid": "syntax-highlighter" },
-      props.children as React.ReactNode,
-    );
-  },
-}));
+vi.mock("react-syntax-highlighter", () => {
+  const PrismLight = Object.assign(
+    (props: Record<string, unknown>) => {
+      record.props = props;
+      return React.createElement(
+        "pre",
+        { "data-testid": "syntax-highlighter" },
+        props.children as React.ReactNode,
+      );
+    },
+    {
+      registerLanguage: vi.fn(),
+      alias: vi.fn(),
+    },
+  );
+  return { PrismLight };
+});
 
 import {
   MarkdownCodeBlock,
@@ -115,6 +122,11 @@ describe("createCodeMarkdownComponents", () => {
   it("renders a fenced block (language hint) as the shared code block", () => {
     const el = code({ className: "language-ts", children: "const x = 1;" });
     expect(el.type).toBe(MarkdownCodeBlock);
+  });
+
+  it("lowercases the fence language so ```Rust matches the rust grammar", () => {
+    const el = code({ className: "language-Rust", children: "fn main() {}" });
+    expect(el.props.language).toBe("rust");
   });
 
   it("treats a multi-line fence without a language as a block, not an inline chip", () => {

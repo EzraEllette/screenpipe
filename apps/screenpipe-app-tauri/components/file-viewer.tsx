@@ -6,7 +6,6 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { open as openUrl } from "@tauri-apps/plugin-shell";
-import { PrismAsyncLight as SyntaxHighlighter } from "react-syntax-highlighter";
 import remarkGfm from "remark-gfm";
 import { commands } from "@/lib/utils/tauri";
 import { cn } from "@/lib/utils";
@@ -17,6 +16,7 @@ import {
   viewerUrlTransform,
 } from "@/components/markdown";
 import {
+  SyntaxHighlighter,
   createCodeMarkdownComponents,
   useSyntaxTheme,
 } from "@/components/markdown/code-block";
