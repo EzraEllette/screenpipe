@@ -133,6 +133,8 @@ export interface ChatPrefillData {
   source?: string;
   /** Open the Home window chat instead of the Chat overlay. */
   useHomeChat?: boolean;
+  /** Show this local artifact beside the editable composer. */
+  filePreviewPath?: string;
 }
 
 export type ChatTargetWindow = "home" | "chat";
