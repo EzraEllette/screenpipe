@@ -1237,6 +1237,10 @@ impl SCServer {
             let pipe_routes = Router::new()
                 .route("/", axum::routing::get(crate::pipes_api::list_pipes))
                 .route(
+                    "/bundled/:id/install",
+                    axum::routing::post(crate::pipes_api::install_bundled_pipe),
+                )
+                .route(
                     "/install",
                     axum::routing::post(crate::pipes_api::install_pipe),
                 )

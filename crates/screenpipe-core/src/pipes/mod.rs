@@ -89,6 +89,10 @@ const BUNDLED_BUILTIN_PIPES: &[(&str, &str)] = &[
         include_str!("../../assets/pipes/meeting-summary/pipe.md"),
     ),
     (
+        "speaker-reconciliation",
+        include_str!("../../assets/pipes/speaker-reconciliation/pipe.md"),
+    ),
+    (
         "commitments",
         include_str!("../../assets/pipes/commitments/pipe.md"),
     ),
@@ -2464,6 +2468,7 @@ async fn setup_pipe_permissions(
     pipe_dir: &Path,
     config: &PipeConfig,
     token_registry: Option<&Arc<dyn permissions::PipeTokenRegistry>>,
+    read_only: bool,
 ) -> Option<String> {
     if let Err(e) = PiExecutor::ensure_permissions_extension(pipe_dir, config) {
         warn!("failed to install permissions extension: {}", e);
@@ -2488,6 +2493,9 @@ async fn setup_pipe_permissions(
     }
 
     let mut perms = permissions::PipePermissions::from_config(config);
+    if read_only {
+        restrict_api_permissions_to_read_only(&mut perms);
+    }
     perms.pipe_dir = Some(pipe_dir.to_string_lossy().to_string());
 
     // Always write permissions JSON when filesystem sandbox is active.
@@ -2522,6 +2530,23 @@ async fn setup_pipe_permissions(
         // No restrictions — clean up any stale permissions file
         let _ = std::fs::remove_file(pipe_dir.join(".screenpipe-permissions.json"));
         None
+    }
+}
+
+fn event_runs_are_read_only(config: &PipeConfig) -> bool {
+    config
+        .config
+        .get("event_read_only")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn restrict_api_permissions_to_read_only(perms: &mut permissions::PipePermissions) {
+    for method in ["POST", "PUT", "PATCH", "DELETE"] {
+        perms.deny_rules.push(permissions::PermissionRule::Api {
+            method: method.to_string(),
+            path: "/*".to_string(),
+        });
     }
 }
 
@@ -3848,8 +3873,13 @@ impl PipeManager {
             }
         }
         if matches!(run_agent.as_str(), "pi" | "acp") {
-            pipe_token =
-                setup_pipe_permissions(&pipe_dir, &config, self.token_registry.as_ref()).await;
+            pipe_token = setup_pipe_permissions(
+                &pipe_dir,
+                &config,
+                self.token_registry.as_ref(),
+                trigger == "event" && event_runs_are_read_only(&config),
+            )
+            .await;
         }
         let token_registry_ref = self.token_registry.clone();
 
@@ -4502,6 +4532,7 @@ impl PipeManager {
                     &self.pipes_dir.join(name),
                     &config,
                     self.token_registry.as_ref(),
+                    trigger == "event" && event_runs_are_read_only(&config),
                 )
                 .await;
             }
@@ -6191,6 +6222,7 @@ impl PipeManager {
                             &pipes_dir.join(name),
                             config,
                             token_registry.as_ref(),
+                            triggered_by_event && event_runs_are_read_only(config),
                         )
                         .await;
                     }
@@ -8875,6 +8907,72 @@ mod tests {
         assert!(dir.path().join("time-breakdown/pipe.md").exists());
         assert!(!install_bundled_pipe(dir.path(), "time-breakdown").unwrap());
         assert!(install_bundled_pipe(dir.path(), "not-a-builtin").is_err());
+    }
+
+    #[test]
+    fn speaker_reconciliation_bundle_is_preview_only_by_default() {
+        let source = BUNDLED_BUILTIN_PIPES
+            .iter()
+            .find_map(|(name, source)| (*name == "speaker-reconciliation").then_some(*source))
+            .expect("speaker reconciliation should be bundled");
+        let (config, body) = parse_frontmatter(source).expect("pipe frontmatter should parse");
+
+        assert!(!config.enabled);
+        assert_eq!(
+            config.config.get("template"),
+            Some(&serde_json::json!(true))
+        );
+        assert_eq!(
+            config.preset,
+            vec!["screenpipe-cloud".to_string(), "*".to_string()]
+        );
+        assert!(event_runs_are_read_only(&config));
+        assert!(config
+            .trigger
+            .as_ref()
+            .is_some_and(|trigger| trigger.events.iter().any(|event| event == "meeting_ended")));
+        assert!(body.contains("Automatic event runs are always preview-only"));
+        assert!(body.contains("APPROVE SPEAKER <numeric_id> AS <display name> FROM <proposal_id>"));
+        assert!(body.contains("GET /meetings/<id>/transcript"));
+        assert!(body.contains("no more than 5 minutes before this run began"));
+        assert!(body.contains("duration of at least 2\n   minutes"));
+        assert!(body.contains("Meeting-local mappings"));
+        assert!(body.contains("must never\nemit an `APPROVE SPEAKER` command"));
+        assert!(body.contains("Never call `/feedback`, send a\nnotification, or call port 11435"));
+        assert!(body.contains("content_type=accessibility&on_screen=true"));
+        assert!(body.contains("content_type=parsed"));
+        assert!(body.contains("Never call `content_type=ocr`"));
+        let permissions = permissions::PipePermissions::from_config(&config);
+        assert!(permissions.is_endpoint_allowed("GET", "/meetings/42"));
+        assert!(permissions.is_endpoint_allowed("GET", "/meetings/42/transcript"));
+        assert!(permissions.is_endpoint_allowed("GET", "/search"));
+        assert!(permissions.is_endpoint_allowed("POST", "/speakers/update"));
+        assert!(permissions.is_content_type_allowed("audio"));
+        assert!(permissions.is_content_type_allowed("accessibility"));
+        assert!(permissions.is_content_type_allowed("parsed"));
+        assert!(!permissions.is_content_type_allowed("ocr"));
+        assert!(!permissions.is_content_type_allowed("input"));
+        assert!(!permissions.is_endpoint_allowed("POST", "/speakers/reassign"));
+        assert!(!permissions.is_endpoint_allowed("POST", "/speakers/merge"));
+        assert!(!permissions.is_endpoint_allowed("POST", "/raw_sql"));
+        assert!(!permissions.is_endpoint_allowed("PUT", "/meetings/42"));
+        let mut event_permissions = permissions.clone();
+        restrict_api_permissions_to_read_only(&mut event_permissions);
+        assert!(event_permissions.is_endpoint_allowed("GET", "/search"));
+        assert!(!event_permissions.is_endpoint_allowed("POST", "/speakers/update"));
+        assert!(source.contains("Api(POST /speakers/update)"));
+        for forbidden in [
+            "Api(POST /speakers/reassign)",
+            "Api(POST /speakers/undo-reassign)",
+            "Api(POST /speakers/merge)",
+            "Api(POST /speakers/delete)",
+            "Api(POST /raw_sql)",
+            "Api(GET /feedback)",
+            "Api(POST /notify)",
+            "Content(input, ocr)",
+        ] {
+            assert!(source.contains(forbidden), "missing deny rule: {forbidden}");
+        }
     }
 
     #[test]
