@@ -62,7 +62,10 @@ function seed(record: Partial<SessionRecord> & Pick<SessionRecord, "id">) {
     title: record.title ?? record.id,
     preview: "",
     status: "idle",
-    messageCount: 0,
+    // Seeded rows stand in for real conversations. The switcher only lists
+    // chats that exist (isEmptyChatShell), so they need a message count —
+    // a zero-message row is an empty shell and is filtered out.
+    messageCount: 2,
     createdAt: record.createdAt ?? 1_000,
     updatedAt: record.updatedAt ?? record.createdAt ?? 1_000,
     pinned: record.pinned ?? false,

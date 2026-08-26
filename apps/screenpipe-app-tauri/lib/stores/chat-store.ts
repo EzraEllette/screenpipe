@@ -436,6 +436,11 @@ export const useChatStore = create<ChatStore>((set) => ({
             messageCount: r.messageCount,
             pinned: existing.pinned || r.pinned,
             hidden: existing.hidden ?? r.hidden ?? false,
+            // Disk decides emptiness. A router row lazy-created before
+            // hydration is born `draft: true` (it has no proof of content
+            // yet); once the file says otherwise, the flag must not keep a
+            // real conversation out of RECENTS.
+            draft: r.messageCount > 0 ? undefined : (r.draft ?? existing.draft),
             // updatedAt: take the larger so memory doesn't get clobbered
             updatedAt: Math.max(existing.updatedAt, r.updatedAt),
             lastUserMessageAt: Math.max(
@@ -1034,6 +1039,24 @@ export function dedupeSessionRecords(records: SessionRecord[]): SessionRecord[] 
   return kept;
 }
 
+/**
+ * True when a chat row has nothing a user could open: no messages in memory,
+ * none persisted, and no user turn ever sent.
+ *
+ * The `draft` boolean is bookkeeping — every creator of a blank session has to
+ * remember to set it, and any path that forgets (the event router's
+ * lazy-create did, for prewarmed / auto-restarted Pi processes) leaks an empty
+ * "untitled" row into RECENTS. This predicate is the derived backstop: the
+ * sidebar renders a chat only when a chat exists. Pipe rows are exempt — a
+ * finished run is history even with an empty in-memory message array.
+ */
+export function isEmptyChatShell(s: SessionRecord): boolean {
+  if (s.kind === "pipe-run" || s.kind === "pipe-watch") return false;
+  if (s.messageCount > 0) return false;
+  if ((s.messages?.length ?? 0) > 0) return false;
+  return !s.lastUserMessageAt;
+}
+
 export function selectOrderedSessions(state: ChatSessionsState): SessionRecord[] {
   const all = dedupeSessionRecords(Object.values(state.sessions));
   const pinned = all.filter((s) => s.pinned).sort(compareForSidebar);
@@ -1046,6 +1069,7 @@ export function selectRecentSwitcherSessions(state: ChatSessionsState): SessionR
   const isEligibleSwitcherSession = (session: SessionRecord) =>
     !session.hidden &&
     !session.draft &&
+    !isEmptyChatShell(session) &&
     session.kind !== "pipe-watch" &&
     session.kind !== "pipe-run";
   return ordered

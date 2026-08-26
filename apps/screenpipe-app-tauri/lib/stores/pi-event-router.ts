@@ -263,6 +263,17 @@ export async function handlePiEvent(envelope: AgentEventEnvelope) {
       updatedAt: now,
       pinned: false,
       unread: false,
+      // Born hidden, exactly like the "+ new chat" row. A Pi process exists
+      // for plenty of session ids that are not a conversation yet: the chat
+      // panel spawns one for its mount-time uuid, each window (home + the
+      // pre-created chat panel) prewarms its own, and crashes auto-restart
+      // them. Those processes emit startup/state/lifecycle events, and
+      // lazy-creating a *visible* row for them is what put an empty
+      // "untitled" chat in RECENTS every time the user opened a new chat.
+      // The row is revealed by the paths that prove real content exists:
+      // `applyEventToSessionContent` on a user `message_start`, and
+      // `persistBackgroundSession` after the first save.
+      draft: true,
       // Set lastContentAt on first touch only when there's actual content.
       // isUnread() in the store will compute the correct unread boolean.
       ...(snippet ? { lastContentAt: now } : {}),
@@ -286,6 +297,13 @@ export async function handlePiEvent(envelope: AgentEventEnvelope) {
   // Status mirroring below still runs for both Pi and Pipe sessions.
   if (envelope.source === "pi") {
     applyEventToSessionContent(sid, inner);
+    // Content is the proof a draft row was waiting for. Reveal it as soon as
+    // the session actually holds a message — a backgrounded reply must show
+    // up in RECENTS while it streams, not only after the agent_end save.
+    const afterContent = useChatStore.getState().sessions[sid];
+    if (afterContent?.draft && (afterContent.messages?.length ?? 0) > 0) {
+      store.actions.patch(sid, { draft: false });
+    }
   }
 
   // Decide whether to write a preview update — throttled per session.

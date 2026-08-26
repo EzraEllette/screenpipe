@@ -58,6 +58,7 @@ import {
   useChatStore,
   useChatActions,
   useOrderedSessions,
+  isEmptyChatShell,
   selectDisplayedChatId,
   sessionRecordFromMeta,
   type SessionRecord,
@@ -347,8 +348,11 @@ function useVisibleChatSections(): {
     const archived: SessionRecord[] = [];
     for (const s of sessions) {
       // Hide drafts (no user message sent yet)
-      // Once a message is sent, draft is cleared and the chat becomes visible
-      if (s.draft) continue;
+      // Once a message is sent, draft is cleared and the chat becomes visible.
+      // `isEmptyChatShell` is the derived backstop for rows whose creator
+      // never set the flag (prewarmed / auto-restarted Pi sessions used to
+      // land here as empty "untitled" rows).
+      if (s.draft || isEmptyChatShell(s)) continue;
       if (s.hidden) {
         archived.push(s);
         continue;

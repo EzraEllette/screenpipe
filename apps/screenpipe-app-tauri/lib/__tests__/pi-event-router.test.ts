@@ -1217,3 +1217,58 @@ describe("pi-event-router: user echo does not duplicate the optimistic bubble", 
     expect(session.messages?.filter((m) => m.role === "user")).toHaveLength(2);
   });
 });
+
+describe("pi-event-router: lazy-created rows stay hidden until they are real", () => {
+  beforeEach(reset);
+
+  /**
+   * A Pi process exists for plenty of session ids that are not conversations:
+   * the chat panel spawns one for its mount-time uuid, home and the
+   * pre-created chat window each prewarm their own, and a crash auto-restarts
+   * them. Those processes emit lifecycle / state events, and the router used
+   * to lazy-create a *visible* row for them — which is how an empty "untitled"
+   * chat kept appearing in RECENTS beside the real ones.
+   */
+  it("marks a lazy-created row draft so an orphan Pi session never shows up", async () => {
+    await handlePiEvent(piEvt("orphan", { type: "agent_start" }));
+
+    const session = useChatStore.getState().sessions.orphan;
+    expect(session).toBeDefined();
+    expect(session.draft).toBe(true);
+    expect(session.messageCount).toBe(0);
+  });
+
+  it("keeps the row hidden across a whole content-free lifecycle", async () => {
+    await handlePiEvent(piEvt("orphan", { type: "agent_start" }));
+    await handlePiEvent(piEvt("orphan", { type: "agent_end" } as AgentInnerEvent));
+
+    expect(useChatStore.getState().sessions.orphan.draft).toBe(true);
+  });
+
+  it("reveals the row as soon as a user turn lands on it", async () => {
+    await handlePiEvent(piEvt("orphan", { type: "agent_start" }));
+    await handlePiEvent(
+      piEvt("orphan", {
+        type: "message_start",
+        message: { role: "user", content: "hello from a queued follow-up" },
+      } as AgentInnerEvent),
+    );
+
+    const session = useChatStore.getState().sessions.orphan;
+    expect(session.draft).toBe(false);
+    expect(session.messages?.some((m: any) => m.role === "user")).toBe(true);
+  });
+
+  it("reveals the row while a backgrounded assistant reply is still streaming", async () => {
+    await handlePiEvent(
+      piEvt("orphan", {
+        type: "message_start",
+        message: { role: "assistant" },
+      } as AgentInnerEvent),
+    );
+
+    const session = useChatStore.getState().sessions.orphan;
+    expect(session.draft).toBe(false);
+    expect(session.messages?.length).toBeGreaterThan(0);
+  });
+});
