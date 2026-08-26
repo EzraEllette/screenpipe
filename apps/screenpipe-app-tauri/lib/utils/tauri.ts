@@ -269,6 +269,22 @@ async closeWindow(window: ShowRewindWindow) : Promise<Result<null, string>> {
     else return { status: "error", error: e  as any };
 }
 },
+async codingWorkspaceCreate(conversationId: string, repositoryPath: string) : Promise<Result<CodingWorkspace, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("coding_workspace_create", { conversationId, repositoryPath }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async codingWorkspaceGet(conversationId: string) : Promise<Result<CodingWorkspace | null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("coding_workspace_get", { conversationId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async completeOnboarding() : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("complete_onboarding") };
@@ -3098,6 +3114,7 @@ export type ChatGptOAuthStatus = { logged_in: boolean;
  * keychain failure, timeout, etc.).
  */
 error: string | null }
+export type CodingWorkspace = { version: number; conversationId: string; repoRoot: string; gitCommonDir: string; worktreePath: string; branch: string; baseCommit: string; sourceDirty: boolean; createdAt: string }
 export type Credits = { amount: number }
 /**
  * A skill folder discovered somewhere on the user's device.

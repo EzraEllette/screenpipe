@@ -189,6 +189,7 @@ impl ScreenpipeChatHost for DesktopChatHost {
             .join("pi-chat")
             .to_string_lossy()
             .to_string();
+        let coding_workspace = crate::coding_workspace::launch_for_session(&request.id)?;
         let started = pi::pi_start_inner(
             self.app.clone(),
             state.inner(),
@@ -196,6 +197,7 @@ impl ScreenpipeChatHost for DesktopChatHost {
             project_dir,
             token,
             Some(provider_config),
+            coding_workspace,
         )
         .await?;
         if !started.running {

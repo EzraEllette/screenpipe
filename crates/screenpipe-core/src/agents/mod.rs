@@ -17,6 +17,7 @@ pub mod cli_runtime;
 pub mod cloud;
 mod cloud_context;
 pub mod pi;
+pub mod worktree;
 
 use anyhow::Result;
 use std::path::Path;

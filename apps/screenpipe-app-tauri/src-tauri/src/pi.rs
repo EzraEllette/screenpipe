@@ -255,6 +255,52 @@ fn apply_pi_extension_safe_mode(command: &mut Command, project_dir: &str) {
     }
 }
 
+/// Load Screenpipe-managed Pi resources explicitly when cwd is a user
+/// worktree. Never `--approve` that checkout — its `.pi` tree is untrusted.
+fn coding_workspace_resource_args(project_dir: &Path) -> Result<Vec<String>, String> {
+    let mut args = vec!["--no-approve".to_string()];
+    let extensions_dir = project_dir.join(".pi").join("extensions");
+    let mut extension_names = MANAGED_PI_EXTENSION_FILES
+        .iter()
+        .copied()
+        .chain([
+            "self-improvement.ts",
+            "chat-control.ts",
+            "context-usage.ts",
+        ])
+        .collect::<Vec<_>>();
+    extension_names.sort();
+    extension_names.dedup();
+    for name in extension_names {
+        let path = extensions_dir.join(name);
+        if path.is_file() {
+            args.push("--extension".to_string());
+            args.push(path.to_string_lossy().into_owned());
+        }
+    }
+
+    let skills_dir = project_dir.join(".pi").join("skills");
+    let mut skill_files = std::fs::read_dir(&skills_dir)
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| entry.path().join("SKILL.md"))
+                .filter(|path| path.is_file())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    skill_files.sort();
+    for path in skill_files {
+        args.push("--skill".to_string());
+        args.push(path.to_string_lossy().into_owned());
+    }
+
+    if args.len() == 1 {
+        return Err("Screenpipe coding resources were not installed".to_string());
+    }
+    Ok(args)
+}
+
 /// Captures the last bun-install error so `pi_start` can surface it to the UI
 /// when the install silently failed (e.g. Windows EPERM on bun's atomic rename).
 /// Without this, the user only sees the downstream "Pi exited with code 1" and
@@ -2425,7 +2471,17 @@ pub async fn pi_start(
     provider_config: Option<PiProviderConfig>,
 ) -> Result<PiInfo, String> {
     let sid = session_id.unwrap_or_else(|| "chat".to_string());
-    pi_start_inner(app, &state, &sid, project_dir, user_token, provider_config).await
+    let coding_workspace = crate::coding_workspace::launch_for_session(&sid)?;
+    pi_start_inner(
+        app,
+        &state,
+        &sid,
+        project_dir,
+        user_token,
+        provider_config,
+        coding_workspace,
+    )
+    .await
 }
 
 /// Start a private Pi session and submit its first prompt as one operation.
@@ -2442,6 +2498,7 @@ pub async fn pi_start_and_prompt(
     provider_config: Option<PiProviderConfig>,
     message: String,
 ) -> Result<String, String> {
+    let coding_workspace = crate::coding_workspace::launch_for_session(&session_id)?;
     let started = pi_start_inner(
         app.clone(),
         state.inner(),
@@ -2449,6 +2506,7 @@ pub async fn pi_start_and_prompt(
         project_dir,
         user_token,
         provider_config,
+        coding_workspace,
     )
     .await?;
     if !started.running {
@@ -2629,13 +2687,19 @@ pub async fn pi_start_inner(
     project_dir: String,
     user_token: Option<String>,
     provider_config: Option<PiProviderConfig>,
+    coding_workspace: Option<crate::coding_workspace::CodingWorkspaceLaunch>,
 ) -> Result<PiInfo, String> {
     let project_dir = project_dir.trim().to_string();
     if project_dir.is_empty() {
         return Err("Project directory is required".to_string());
     }
+    let launch_dir = coding_workspace
+        .as_ref()
+        .map(|workspace| workspace.path().to_path_buf())
+        .unwrap_or_else(|| PathBuf::from(&project_dir));
+    let launch_dir_key = screenpipe_core::agents::worktree::portable_path(&launch_dir);
     let launch_fingerprint = pi_launch_fingerprint(
-        &project_dir,
+        &launch_dir_key,
         user_token.as_deref(),
         provider_config.as_ref(),
     );
@@ -2912,7 +2976,7 @@ pub async fn pi_start_inner(
         } else {
             &pi_path
         },
-        project_dir,
+        launch_dir.display(),
         pi_provider,
         pi_model,
         bun_path
@@ -2931,19 +2995,21 @@ pub async fn pi_start_inner(
         command
     } else {
         let mut command = build_command_for_path(&pi_path);
-        command.args([
-            "--mode",
-            "rpc",
+        command.args(["--mode", "rpc"]);
+        if coding_workspace.is_some() {
+            // Never trust executable .pi resources from the selected repository.
+            // Screenpipe-managed resources live in the separate runtime directory
+            // and are loaded explicitly so changing cwd cannot change this trust
+            // decision.
+            command.args(coding_workspace_resource_args(Path::new(&project_dir))?);
+        } else {
             // pi 0.80 gates project-dir .pi/extensions behind a trust prompt that
             // rpc mode can never answer — without --approve, mcp-bridge and
             // connection-gate silently don't load. The project dir is created and
             // populated exclusively by screenpipe, so it is trusted by definition.
-            "--approve",
-            "--provider",
-            &pi_provider,
-            "--model",
-            &pi_model,
-        ]);
+            command.arg("--approve");
+        }
+        command.args(["--provider", &pi_provider, "--model", &pi_model]);
         if let Some(skill_path) = enterprise_team_skill.as_ref() {
             command.arg("--skill").arg(skill_path);
             info!(
@@ -2961,7 +3027,10 @@ pub async fn pi_start_inner(
         apply_pi_tool_allowlist(&mut command, provider_config.as_ref());
         command
     };
-    cmd.current_dir(&project_dir);
+    if let Some(workspace) = &coding_workspace {
+        workspace.revalidate()?;
+    }
+    cmd.current_dir(&launch_dir);
     if !use_acp && extension_safe_mode {
         warn!(
             "Starting Pi in extension safe mode for '{}'; third-party extension packages are disabled",
@@ -3061,7 +3130,7 @@ pub async fn pi_start_inner(
             resolved_env.insert("ANTHROPIC_API_KEY".to_string(), String::new());
         }
         cmd.env("SCREENPIPE_ACP_ID", agent_id)
-            .env("SCREENPIPE_ACP_CWD", &project_dir)
+            .env("SCREENPIPE_ACP_CWD", &launch_dir)
             .env("SCREENPIPE_BUN_PATH", &bun_path)
             .env(
                 "SCREENPIPE_ACP_ARGS_JSON",
@@ -3257,6 +3326,11 @@ pub async fn pi_start_inner(
         cmd.args(["--append-system-prompt", api_hint]);
     }
 
+    if coding_workspace.is_some() {
+        let workspace_hint = "You are running inside a conversation-owned Git worktree. Make code changes only in the current worktree, keep its existing branch, and do not modify, move, or remove the source checkout or worktree metadata.";
+        cmd.args(["--append-system-prompt", workspace_hint]);
+    }
+
     // Append the user's AI preset system prompt (enables Anthropic prompt caching —
     // Pi's built-in system prompt + this text form the cached prefix, reducing
     // input costs by 90% on subsequent messages in the same conversation)
@@ -3431,7 +3505,7 @@ pub async fn pi_start_inner(
         m.child = Some(child);
         m.stdin = None; // stdin is now owned by the queue
         m.is_acp = use_acp;
-        m.project_dir = Some(project_dir.clone());
+        m.project_dir = Some(screenpipe_core::agents::worktree::portable_path(&launch_dir));
         m.launch_fingerprint = Some(launch_fingerprint);
         m.last_activity = std::time::Instant::now();
         // Fresh flag for this session — old reader threads keep their own Arc
@@ -5437,6 +5511,7 @@ pub async fn pi_update_config(
         .to_string();
 
     // Restart Pi for the "chat" session with the new provider/model
+    let coding_workspace = crate::coding_workspace::launch_for_session("chat")?;
     pi_start_inner(
         app,
         &state,
@@ -5444,6 +5519,7 @@ pub async fn pi_update_config(
         project_dir,
         user_token,
         provider_config,
+        coding_workspace,
     )
     .await?;
 
@@ -7399,6 +7475,30 @@ error: InstallFailed extracting tarball"#;
         assert!(args.iter().any(|arg| arg.ends_with("mcp-bridge.ts")));
         assert!(args.iter().any(|arg| arg.ends_with("live-views.ts")));
         assert!(!args.iter().any(|arg| arg.ends_with("third-party.ts")));
+    }
+
+    #[test]
+    fn coding_workspace_loads_only_explicit_screenpipe_project_resources() {
+        let temp = tempfile::tempdir().unwrap();
+        let extensions = temp.path().join(".pi").join("extensions");
+        let skills = temp.path().join(".pi").join("skills");
+        std::fs::create_dir_all(&extensions).unwrap();
+        std::fs::create_dir_all(skills.join("screenpipe-api")).unwrap();
+        std::fs::create_dir_all(skills.join("user-imported")).unwrap();
+        std::fs::write(extensions.join("mcp-bridge.ts"), "export default {};").unwrap();
+        std::fs::write(extensions.join("repo-injected.ts"), "throw new Error();").unwrap();
+        std::fs::write(skills.join("screenpipe-api").join("SKILL.md"), "api").unwrap();
+        std::fs::write(skills.join("user-imported").join("SKILL.md"), "user").unwrap();
+
+        let args = super::coding_workspace_resource_args(temp.path()).unwrap();
+        let joined = args.join("\n");
+
+        assert_eq!(args.first().map(String::as_str), Some("--no-approve"));
+        assert!(!args.iter().any(|arg| arg == "--approve"));
+        assert!(joined.contains("mcp-bridge.ts"));
+        assert!(!joined.contains("repo-injected.ts"));
+        assert!(joined.contains("screenpipe-api"));
+        assert!(joined.contains("user-imported"));
     }
 
     #[test]

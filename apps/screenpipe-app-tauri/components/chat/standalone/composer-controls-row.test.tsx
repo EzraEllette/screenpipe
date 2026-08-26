@@ -68,6 +68,14 @@ vi.mock("@/components/usage/usage-popover", () => ({
 
 import { ComposerControlsRow } from "./composer-controls-row";
 
+const idleCodingWorkspace = {
+  workspace: null,
+  isLoading: false,
+  error: null,
+  disabled: false,
+  onToggle: vi.fn(),
+};
+
 describe("ComposerControlsRow", () => {
   it("uses an upward arrow for the send action", () => {
     render(
@@ -91,6 +99,7 @@ describe("ComposerControlsRow", () => {
           onSelectPreset: vi.fn(),
           onPresetSaved: vi.fn(),
         }}
+        codingWorkspace={idleCodingWorkspace}
         isStreaming={false}
         sendButton={{
           isStopMode: false,
@@ -142,6 +151,7 @@ describe("ComposerControlsRow", () => {
           onSelectPreset,
           onPresetSaved,
         }}
+        codingWorkspace={idleCodingWorkspace}
         isStreaming={false}
         sendButton={{
           isStopMode: false,
@@ -171,6 +181,7 @@ describe("ComposerControlsRow", () => {
         appFilterOpen: false,
         onFilterMenuOpenChange: vi.fn(),
       } as any,
+      codingWorkspace: idleCodingWorkspace,
       isStreaming: false,
       sendButton: {
         isStopMode: false,
@@ -200,6 +211,11 @@ describe("ComposerControlsRow", () => {
 
     expect(screen.getByTestId("mock-acp-permission")).toHaveTextContent(
       "codex-acp",
+    );
+    const permission = screen.getByTestId("mock-acp-permission");
+    const worktree = screen.getByTestId("coding-workspace-row");
+    expect(permission.compareDocumentPosition(worktree)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
     );
     expect(screen.getByTestId("mock-acp-config")).toHaveTextContent(
       "codex-acp",
