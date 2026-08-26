@@ -9,8 +9,10 @@ import {
   handleMenuShortcut,
   hiddenRecentSourcesFromStoredValue,
   isMachineOnlyImportedConversation,
+  RecentsSourceFilterLabel,
   sortRecents,
   SidebarChatRow,
+  visibleRecentSourceOptions,
 } from "@/components/chat-sidebar";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { SessionRecord } from "@/lib/stores/chat-store";
@@ -121,15 +123,36 @@ describe("SidebarChatRow current conversation", () => {
 });
 
 describe("Recents provider filtering", () => {
-  it("shows only screenpipe chats until source preferences are saved", () => {
-    expect([...hiddenRecentSourcesFromStoredValue(null)]).toEqual([
+  it("shows Codex and Claude chats until the user hides them", () => {
+    expect([...hiddenRecentSourcesFromStoredValue(null)]).toEqual([]);
+  });
+
+  it("preserves an explicit preference to show external chats", () => {
+    expect([...hiddenRecentSourcesFromStoredValue("[]")]).toEqual([]);
+  });
+
+  it("fails open when the saved source preference is malformed", () => {
+    expect([...hiddenRecentSourcesFromStoredValue("not-json")]).toEqual([]);
+  });
+
+  it("keeps every source available even when it has no current recents", () => {
+    expect(visibleRecentSourceOptions().map(({ source }) => source)).toEqual([
+      "screenpipe",
       "codex",
       "claude-code",
     ]);
   });
 
-  it("preserves an explicit preference to show external chats", () => {
-    expect([...hiddenRecentSourcesFromStoredValue("[]")]).toEqual([]);
+  it.each([
+    ["codex", "Codex", "/images/codex.svg"],
+    ["claude-code", "Claude", "/images/claude-ai.svg"],
+  ] as const)("shows the %s mark in the source picker", (source, label, icon) => {
+    const { container } = render(
+      <RecentsSourceFilterLabel source={source} label={label} />,
+    );
+
+    expect(screen.getByText(label)).toBeVisible();
+    expect(container.querySelector("img")).toHaveAttribute("src", icon);
   });
 
   it("can independently hide Codex, Claude, and screenpipe chats", () => {

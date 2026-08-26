@@ -179,6 +179,11 @@ const RECENT_SOURCE_OPTIONS: Array<{ source: RecentSource; label: string }> = [
   { source: "codex", label: "Codex" },
   { source: "claude-code", label: "Claude" },
 ];
+const RECENT_SOURCE_ICONS: Record<RecentSource, string> = {
+  screenpipe: "/images/screenpipe.png",
+  codex: "/images/codex.svg",
+  "claude-code": "/images/claude-ai.svg",
+};
 const RECENT_SOURCE_SHORTCUTS = {
   screenpipe: "s",
   codex: "c",
@@ -188,6 +193,32 @@ const RECENTS_MENU_SHORTCUT_KEYS = ["s", "c", "l", "b", "i", "p", "u"] as const;
 
 function recentSource(session: SessionRecord): RecentSource {
   return session.importedFrom?.source ?? "screenpipe";
+}
+
+export function visibleRecentSourceOptions(): typeof RECENT_SOURCE_OPTIONS {
+  return RECENT_SOURCE_OPTIONS;
+}
+
+export function RecentsSourceFilterLabel({
+  source,
+  label,
+}: {
+  source: RecentSource;
+  label: string;
+}) {
+  return (
+    <span className="flex min-w-0 flex-1 items-center gap-2">
+      <Image
+        src={RECENT_SOURCE_ICONS[source]}
+        alt=""
+        width={16}
+        height={16}
+        className="h-4 w-4 shrink-0 rounded-[4px] object-contain"
+        unoptimized
+      />
+      <span className="truncate">{label}</span>
+    </span>
+  );
 }
 
 export function isMachineOnlyImportedConversation(
@@ -249,7 +280,7 @@ function readRecentSort(): RecentSort {
 export function hiddenRecentSourcesFromStoredValue(
   stored: string | null,
 ): Set<RecentSource> {
-  if (stored === null) return new Set(["codex", "claude-code"]);
+  if (stored === null) return new Set();
 
   try {
     const parsed = JSON.parse(stored);
@@ -261,7 +292,7 @@ export function hiddenRecentSourcesFromStoredValue(
         : [],
     );
   } catch {
-    return new Set(["codex", "claude-code"]);
+    return new Set();
   }
 }
 
@@ -647,10 +678,6 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
   );
   const [recentLayout, setRecentLayout] = useState<RecentLayout>(readRecentLayout);
   const [recentSort, setRecentSort] = useState<RecentSort>(readRecentSort);
-  const availableRecentSources = useMemo(
-    () => new Set(recents.map(recentSource)),
-    [recents],
-  );
   const visibleRecents = useMemo(
     () => sortRecents(filterRecentsBySource(recents, hiddenRecentSources), recentSort),
     [recents, hiddenRecentSources, recentSort],
@@ -1550,14 +1577,12 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
                       </button>
                     </DropdownMenuTrigger>
                     <DropdownMenuContent
-                      className="w-48"
+                      className="w-52"
                       align="end"
                       onKeyDown={handleRecentsMenuShortcut}
                     >
                       <DropdownMenuLabel>show in recents</DropdownMenuLabel>
-                      {RECENT_SOURCE_OPTIONS.filter(({ source }) =>
-                        availableRecentSources.has(source),
-                      ).map(({ source, label }) => (
+                      {visibleRecentSourceOptions().map(({ source, label }) => (
                         <DropdownMenuCheckboxItem
                           key={source}
                           data-shortcut={RECENT_SOURCE_SHORTCUTS[source]}
@@ -1566,7 +1591,7 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
                           onCheckedChange={() => toggleRecentSource(source)}
                           onSelect={(event) => event.preventDefault()}
                         >
-                          {label}
+                          <RecentsSourceFilterLabel source={source} label={label} />
                           <DropdownMenuShortcut className="text-[10px] tracking-normal text-muted-foreground/55">
                             {RECENT_SOURCE_SHORTCUTS[source].toUpperCase()}
                           </DropdownMenuShortcut>
@@ -1627,11 +1652,9 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
                         View all <ChevronRight className="h-3 w-3" aria-hidden />
                       </button>
                     </ContextMenuTrigger>
-                    <ContextMenuContent className="w-44" onKeyDown={handleRecentsMenuShortcut}>
+                    <ContextMenuContent className="w-52" onKeyDown={handleRecentsMenuShortcut}>
                       <ContextMenuLabel>show in recents</ContextMenuLabel>
-                      {RECENT_SOURCE_OPTIONS.filter(({ source }) =>
-                        availableRecentSources.has(source),
-                      ).map(({ source, label }) => (
+                      {visibleRecentSourceOptions().map(({ source, label }) => (
                         <ContextMenuCheckboxItem
                           key={source}
                           data-testid={`recents-filter-${source}`}
@@ -1641,7 +1664,7 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
                           onCheckedChange={() => toggleRecentSource(source)}
                           onSelect={(event) => event.preventDefault()}
                         >
-                          {label}
+                          <RecentsSourceFilterLabel source={source} label={label} />
                           <ContextMenuShortcut className="text-[10px] tracking-normal text-muted-foreground/55">
                             {RECENT_SOURCE_SHORTCUTS[source].toUpperCase()}
                           </ContextMenuShortcut>
