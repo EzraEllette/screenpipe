@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "suite": "screenpipe-app-coding-agent-regressions",
-  "dataset_version": "2026-08-25.1",
+  "dataset_version": "2026-08-26.1",
   "suite_type": "regression",
   "owner": "screenpipe engineering",
   "policy": {
@@ -595,6 +595,35 @@
           { "source_path": "apps/screenpipe-app-tauri/lib/__tests__/context-pruning.test.ts" }
         ],
         "command": "cd apps/screenpipe-app-tauri && bun x vitest run --config vitest.config.ts lib/__tests__/context-pruning.test.ts"
+      }
+    },
+    {
+      "id": "app-search-accessibility-metadata-match",
+      "name": "Keep visible metadata matches from accessibility-captured frames",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "656a05c68163a4e554f7958a2f0dc690f366412b",
+        "pull_request": "https://github.com/screenpipe/screenpipe/pull/6647"
+      },
+      "base_ref": "845dc283e938bee87cd5ed8e21a4891145ac348e",
+      "oracle_ref": "656a05c68163a4e554f7958a2f0dc690f366412b",
+      "gate": "advisory",
+      "trigger_paths": [
+        "apps/screenpipe-app-tauri/lib/hooks/use-keyword-search-store.tsx",
+        "apps/screenpipe-app-tauri/lib/hooks/__tests__/use-keyword-search-store.test.ts"
+      ],
+      "tags": ["regression", "escaped-failure", "search", "accessibility", "metadata", "false-empty"],
+      "prompt": "Desktop keyword search can receive a backend-authoritative result from an accessibility-captured frame, then erase it and show no results even when the query matches visible app, window, or URL metadata. Keep those metadata matches without presenting accessibility element bounds as precise text highlights. Continue to omit accessibility-only semantic-label matches, preserve OCR, hybrid, legacy, and fuzzy-prefix results, and do not add fallback screenshot OCR. The filter path must settle normally rather than reporting a query failure.",
+      "agent_timeout_seconds": 900,
+      "grader_dependency_links": [
+        { "source_path": "apps/screenpipe-app-tauri/node_modules", "destination_path": "apps/screenpipe-app-tauri/node_modules" }
+      ],
+      "grader": {
+        "timeout_seconds": 300,
+        "fixtures": [
+          { "source_path": "apps/screenpipe-app-tauri/lib/hooks/__tests__/use-keyword-search-store.test.ts" }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && bun x vitest run --config vitest.config.ts lib/hooks/__tests__/use-keyword-search-store.test.ts"
       }
     }
   ]
