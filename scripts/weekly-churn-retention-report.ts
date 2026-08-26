@@ -25,23 +25,27 @@ const API_KEY = process.env.POSTHOG_API_KEY;
 
 // Governed insight registry (metric contract v2026-08-25.v2). Definitions,
 // exclusions, and maturity rules live in the insight descriptions and the
-// contract notebook — not here.
-const INSIGHTS: { shortId: string; section: string; title: string }[] = [
-  { shortId: "Jt4DoOe7", section: "Paid — realized", title: "Weekly realized paid-logo & gross-MRR churn (snapshot v1)" },
-  { shortId: "k6yMdOrR", section: "Paid — realized", title: "Monthly realized paid-logo & gross-MRR churn (snapshot v1)" },
-  { shortId: "KY5cwmmr", section: "Paid — realized", title: "Stripe MRR by month (snapshot v1)" },
-  { shortId: "100T5OxM", section: "Paid — intent", title: "Cancellation-request rate vs opening paid base" },
-  { shortId: "OkjnqlLu", section: "Paid — intent", title: "Cancellation requests by reason (voluntary vs payment failure)" },
-  { shortId: "qWMbbFXl", section: "Paid — intent", title: "Scheduled vs immediate cancellation requests and MRR" },
-  { shortId: "X8TukXk7", section: "Paid — flows", title: "Trials, conversions, payment failures & saves" },
-  { shortId: "dPi8SrQV", section: "Paid — cohorts", title: "Paid cohort survival (invoice coverage, monthly plans)" },
-  { shortId: "VQljRmHE", section: "Paid — dimensions", title: "Cancellation dimensions (tier × interval × origin, 30d)" },
-  { shortId: "daver80K", section: "Product — lifecycle", title: "App-launch clock — fixed weekly cohorts H1–D90" },
-  { shortId: "0BXIB88C", section: "Product — lifecycle", title: "Intentional-use clock — fixed weekly cohorts" },
-  { shortId: "fvLTMaIy", section: "Product — lifecycle", title: "Healthy-capture clock — fixed weekly cohorts" },
-  { shortId: "cC7nHRVL", section: "Product — value", title: "H1–D7 canonical repeat-value scorecard" },
-  { shortId: "vnXwmE77", section: "Product — value", title: "Result-state funnel — humans vs agents (30d)" },
-  { shortId: "hJll39fC", section: "Product — reliability", title: "Healthy capture, stalls, permission loss (weekly)" },
+// contract notebook — not here. expectedName pins each insight's name as of
+// the contract version: a rename in the PostHog UI usually accompanies a
+// definition edit, so a mismatch is surfaced as a drift warning instead of
+// silently reporting numbers under a changed definition.
+const CONTRACT_VERSION = "v2026-08-25.v2";
+const INSIGHTS: { shortId: string; section: string; title: string; expectedName: string }[] = [
+  { shortId: "Jt4DoOe7", section: "Paid — realized", title: "Weekly realized paid-logo & gross-MRR churn (snapshot v1)", expectedName: "Weekly billing churn: paid logos vs gross MRR" },
+  { shortId: "k6yMdOrR", section: "Paid — realized", title: "Monthly realized paid-logo & gross-MRR churn (snapshot v1)", expectedName: "Monthly billing churn: paid logos vs gross MRR" },
+  { shortId: "KY5cwmmr", section: "Paid — realized", title: "Stripe MRR by month (snapshot v1)", expectedName: "Stripe MRR by month (6 complete months)" },
+  { shortId: "100T5OxM", section: "Paid — intent", title: "Cancellation-request rate vs opening paid base", expectedName: "[CR v2] Cancellation-request rate vs opening paid base (weekly)" },
+  { shortId: "OkjnqlLu", section: "Paid — intent", title: "Cancellation requests by reason (voluntary vs payment failure)", expectedName: "[CR v2] Cancellation requests by reason (weekly)" },
+  { shortId: "qWMbbFXl", section: "Paid — intent", title: "Scheduled vs immediate cancellation requests and MRR", expectedName: "[CR v2] Cancellation requests — scheduled vs immediate MRR (weekly)" },
+  { shortId: "X8TukXk7", section: "Paid — flows", title: "Trials, conversions, payment failures & saves", expectedName: "[CR v2] Trials, conversions, payment failures & saves (weekly)" },
+  { shortId: "dPi8SrQV", section: "Paid — cohorts", title: "Paid cohort survival (invoice coverage, monthly plans)", expectedName: "[CR v2] Paid cohort survival — invoice coverage (monthly plans)" },
+  { shortId: "VQljRmHE", section: "Paid — dimensions", title: "Cancellation dimensions (tier × interval × origin, 30d)", expectedName: "[CR v2] Cancellation dimensions — tier × interval × origin (30d)" },
+  { shortId: "daver80K", section: "Product — lifecycle", title: "App-launch clock — fixed weekly cohorts H1–D90", expectedName: "[CR v2] App-launch clock — fixed weekly cohorts H1–D90" },
+  { shortId: "0BXIB88C", section: "Product — lifecycle", title: "Intentional-use clock — fixed weekly cohorts", expectedName: "[CR v2] Intentional-use clock — fixed weekly cohorts" },
+  { shortId: "fvLTMaIy", section: "Product — lifecycle", title: "Healthy-capture clock — fixed weekly cohorts", expectedName: "[CR v2] Capture clock — first healthy capture cohorts" },
+  { shortId: "cC7nHRVL", section: "Product — value", title: "H1–D7 canonical repeat-value scorecard", expectedName: "[Retention] H1–D7 canonical scorecard" },
+  { shortId: "vnXwmE77", section: "Product — value", title: "Result-state funnel — humans vs agents (30d)", expectedName: "[CR v2] Result-state funnel — humans vs agents (30d)" },
+  { shortId: "hJll39fC", section: "Product — reliability", title: "Healthy capture, stalls, permission loss (weekly)", expectedName: "[CR v2] Reliability — healthy capture, stalls, permission loss (weekly)" },
 ];
 
 // Weekly cohorts starting on/after this LA Monday belong to the current
@@ -167,6 +171,7 @@ async function main(): Promise<void> {
   const sections = new Map<string, string[]>();
   const movements: string[] = [];
   const warnings: string[] = [];
+  const drift: string[] = [];
 
   for (const spec of INSIGHTS) {
     const insight = await fetchInsight(spec.shortId);
@@ -174,6 +179,12 @@ async function main(): Promise<void> {
     if (!insight) {
       chunk.push(`_Failed to load insight ${spec.shortId}._`, "");
     } else {
+      if (insight.name !== spec.expectedName) {
+        drift.push(`- ${spec.shortId}: name changed from "${spec.expectedName}" to "${insight.name}" — the definition may have been edited since ${CONTRACT_VERSION}; re-verify against the contract notebook before trusting this section.`);
+      }
+      if (spec.expectedName.startsWith("[CR v2]") && !(insight.description ?? "").includes(CONTRACT_VERSION)) {
+        drift.push(`- ${spec.shortId}: description no longer carries ${CONTRACT_VERSION} — the governed description was edited; re-verify against the contract notebook.`);
+      }
       chunk.push(`Insight [${spec.shortId}](${HOST}/project/${PROJECT_ID}/insights/${spec.shortId}).`);
       if (insight.description) chunk.push("", `> ${insight.description}`);
       chunk.push("");
@@ -190,6 +201,9 @@ async function main(): Promise<void> {
   }
 
   const body: string[] = [...header];
+  if (drift.length > 0) {
+    body.push("## ⚠ Definition drift detected", "", ...drift, "");
+  }
   body.push("## Top movements (latest vs previous complete period)", "");
   body.push(...(movements.length > 0 ? movements : ["- No series moved beyond the movement thresholds this week."]), "");
   if (warnings.length > 0) {
