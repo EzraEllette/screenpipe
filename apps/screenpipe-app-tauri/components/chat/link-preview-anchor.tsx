@@ -127,13 +127,16 @@ function PreviewBody({
 function StateLabel({ state }: { state: PreviewState }) {
   if (state.status !== "ready" || !state.preview.state) return null;
   return (
-    <span className="border border-border px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wide text-muted-foreground">
+    <span
+      data-preview-state={state.preview.state}
+      className="border border-border px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wide text-muted-foreground"
+    >
       {state.preview.state}
     </span>
   );
 }
 
-function LinkPreviewCardContent({
+function LinkPreviewCard({
   link,
   state,
 }: {
@@ -325,7 +328,7 @@ export function LinkPreviewAnchor({
             "data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=open]:fade-in-0 data-[state=closed]:fade-out-0",
           )}
         >
-          <LinkPreviewCardContent link={link} state={displayState} />
+          <LinkPreviewCard link={link} state={displayState} />
         </PopoverPrimitive.Content>
       </PopoverPrimitive.Portal>
     </PopoverPrimitive.Root>
