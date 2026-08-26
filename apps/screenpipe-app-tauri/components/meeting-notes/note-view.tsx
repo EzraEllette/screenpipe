@@ -180,6 +180,7 @@ import {
   MEETING_SHELL_CLASS,
   MeetingSummarySurface,
   MeetingWorkspaceTabs,
+  stopMeetingAndOpenSummary,
   type MeetingWorkspaceTab,
 } from "./meeting-workspace";
 import { meetingRetranscribeSuccessCopy } from "./transcript-recovery-copy";
@@ -1270,7 +1271,7 @@ export function NoteView({
           });
         }
       }
-      await onStop();
+      await stopMeetingAndOpenSummary(onStop, setActiveTab);
     } catch (err) {
       console.error("failed to stop meeting", err);
       toast({

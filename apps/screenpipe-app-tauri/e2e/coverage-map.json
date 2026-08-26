@@ -1914,7 +1914,7 @@
       "criticality": "high",
       "confidence": "strong",
       "ux": "real-user-flow",
-      "notes": "Seeds a completed meeting with notes and summary, proves it reopens on the saved summary rather than the raw transcript, switches persistent tabs, resizes to 640x560, checks footer separation and horizontal overflow, then captures a review screenshot."
+      "notes": "Seeds a live meeting with notes and summary, proves the saved summary is the preferred outcome view, switches persistent tabs, resizes to 640x560, checks footer separation and horizontal overflow, captures a review screenshot, then stops from the transcript and verifies the Summary tab opens."
     },
     {
       "spec": "meeting-chat-panel.spec.ts",
