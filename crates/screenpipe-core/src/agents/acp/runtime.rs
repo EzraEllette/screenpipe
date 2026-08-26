@@ -1286,6 +1286,9 @@ struct TurnState {
     thought_open: bool,
     prompt_in_flight: bool,
     assistant_text: String,
+    /// A skills-budget warning was stripped from the head of this turn's
+    /// assistant message; the next delta may carry its leftover blank line.
+    skills_warning_stripped: bool,
     active_tools: HashMap<String, Value>,
 }
 
@@ -1776,6 +1779,7 @@ impl RuntimeState {
         if let Ok(mut turn) = self.turn.lock() {
             turn.prompt_in_flight = true;
             turn.assistant_text.clear();
+            turn.skills_warning_stripped = false;
             // Emit the user bubble before opening the assistant turn, mirroring
             // raw Pi. Without it a turn that runs entirely while the chat is
             // backgrounded persists an assistant-only transcript (the desktop
@@ -1903,11 +1907,35 @@ impl RuntimeState {
                     self.close_thought_locked(&mut turn);
                     self.ensure_turn_locked(&mut turn);
                     if let Some(delta) = content_text(update.get("content")) {
-                        turn.assistant_text.push_str(&delta);
-                        self.output.send(json!({
-                            "type": "message_update",
-                            "assistantMessageEvent": { "type": "text_delta", "delta": delta }
-                        }));
+                        // Codex's skills extension prepends operational warnings
+                        // to the first assistant text of a turn ("Warning:
+                        // Exceeded skills context budget of 2%. ..."). That is
+                        // runtime telemetry aimed at a terminal user, not part
+                        // of the answer — keep it out of the chat transcript
+                        // (and out of scheduled-task outputs built from this
+                        // stream) and log it to stderr instead.
+                        let delta = if turn.assistant_text.is_empty() {
+                            let stripped = strip_skills_budget_warning(&delta);
+                            if stripped != delta {
+                                turn.skills_warning_stripped = true;
+                            }
+                            if turn.skills_warning_stripped {
+                                // Also swallow the warning's leftover blank
+                                // line when the reply arrives as a later delta.
+                                stripped.trim_start().to_owned()
+                            } else {
+                                stripped
+                            }
+                        } else {
+                            delta
+                        };
+                        if !delta.is_empty() {
+                            turn.assistant_text.push_str(&delta);
+                            self.output.send(json!({
+                                "type": "message_update",
+                                "assistantMessageEvent": { "type": "text_delta", "delta": delta }
+                            }));
+                        }
                     }
                 }
             }
@@ -3281,6 +3309,51 @@ fn model_access_guidance(text: &str, agent_id: &str) -> Option<String> {
     Some(format!(
         "The selected model is not included in this {agent_name} account. Choose a different {agent_name} model or update the account's plan. Screenpipe Cloud cannot provide models to {agent_name} because this agent manages its own model access."
     ))
+}
+
+/// Openers of the skills-budget warnings Codex's skills extension prepends to
+/// the first assistant message of a turn when the installed skills overflow its
+/// context budget (`codex ext/skills/src/render.rs`). Matched with an optional
+/// leading "Warning:".
+const SKILLS_BUDGET_WARNING_OPENERS: &[&str] = &[
+    "Exceeded skills context budget",
+    "Skill descriptions were shortened to fit the skills context budget",
+    "Host skills are available but omitted from the model-visible skills list",
+];
+
+fn starts_with_skills_budget_warning(text: &str) -> bool {
+    let text = text
+        .strip_prefix("Warning:")
+        .map(str::trim_start)
+        .unwrap_or(text);
+    SKILLS_BUDGET_WARNING_OPENERS
+        .iter()
+        .any(|opener| text.starts_with(opener))
+}
+
+/// Strip agent-runtime skills-budget warnings from the start of an assistant
+/// message. The warning is a complete paragraph the runtime prepends before the
+/// model's actual reply; it reads as the assistant's own prose in the chat and
+/// leaks into scheduled-task outputs. Only applied to the first delta of a
+/// message, and only when it begins with a known warning opener, so ordinary
+/// answers that merely mention the phrase are never rewritten.
+fn strip_skills_budget_warning(delta: &str) -> String {
+    if !starts_with_skills_budget_warning(delta.trim_start()) {
+        return delta.to_owned();
+    }
+    let mut rest = delta.trim_start();
+    while starts_with_skills_budget_warning(rest) {
+        // The warning is separated from the reply by a blank line. Without
+        // one, the chunk is the warning alone (the reply arrives in a later
+        // delta), so drop the whole chunk.
+        let (warning, remainder) = match rest.find("\n\n") {
+            Some(index) => rest.split_at(index),
+            None => (rest, ""),
+        };
+        eprintln!("[acp-runtime] suppressed agent runtime warning from chat: {warning}");
+        rest = remainder.trim_start();
+    }
+    rest.to_owned()
 }
 
 /// Screenpipe's own local, read-only screen-data tools (the `screenpipe` MCP
@@ -6082,6 +6155,108 @@ mod tests {
                 && e["assistantMessageEvent"]["delta"] == json!("here is the summary")
         }));
         assert!(events_of_type(&events, "tool_execution_progress").is_empty());
+    }
+
+    #[test]
+    fn skills_budget_warning_is_kept_out_of_the_assistant_message() {
+        let output = ParentOutput::buffer();
+        let state = test_state(&output);
+        // Codex prepends the warning to the first assistant text of the turn.
+        state.handle_update(json!({
+            "sessionUpdate": "agent_message_chunk",
+            "content": {
+                "type": "text",
+                "text": "Warning: Exceeded skills context budget of 2%. All skill descriptions were removed and 112 additional skills were not included in the model-visible skills list.\n\nHere is your week in charts."
+            }
+        }));
+        let events = output.drain();
+        let deltas: Vec<&Value> = events_of_type(&events, "message_update")
+            .into_iter()
+            .filter(|e| e["assistantMessageEvent"]["type"] == json!("text_delta"))
+            .collect();
+        assert_eq!(deltas.len(), 1);
+        assert_eq!(
+            deltas[0]["assistantMessageEvent"]["delta"],
+            json!("Here is your week in charts.")
+        );
+
+        // Later deltas in the same message are never rewritten, even if they
+        // happen to contain the phrase.
+        state.handle_update(json!({
+            "sessionUpdate": "agent_message_chunk",
+            "content": { "type": "text", "text": " Exceeded skills context budget is a Codex message." }
+        }));
+        let events = output.drain();
+        assert!(events_of_type(&events, "message_update").iter().any(|e| {
+            e["assistantMessageEvent"]["delta"]
+                == json!(" Exceeded skills context budget is a Codex message.")
+        }));
+    }
+
+    #[test]
+    fn skills_budget_warning_alone_in_the_first_delta_is_dropped_entirely() {
+        let output = ParentOutput::buffer();
+        let state = test_state(&output);
+        state.handle_update(json!({
+            "sessionUpdate": "agent_message_chunk",
+            "content": {
+                "type": "text",
+                "text": "Warning: Exceeded skills context budget of 2%. All skill descriptions were removed and 112 additional skills were not included in the model-visible skills list."
+            }
+        }));
+        let events = output.drain();
+        assert!(
+            !events_of_type(&events, "message_update")
+                .iter()
+                .any(|e| e["assistantMessageEvent"]["type"] == json!("text_delta")),
+            "a warning-only delta must not reach the chat"
+        );
+
+        // The reply arriving as the next delta sheds the warning's leftover
+        // blank line.
+        state.handle_update(json!({
+            "sessionUpdate": "agent_message_chunk",
+            "content": { "type": "text", "text": "\n\nHere is your week in charts." }
+        }));
+        let events = output.drain();
+        assert!(events_of_type(&events, "message_update").iter().any(|e| {
+            e["assistantMessageEvent"]["delta"] == json!("Here is your week in charts.")
+        }));
+    }
+
+    #[test]
+    fn strip_skills_budget_warning_handles_every_codex_variant() {
+        // All three warning shapes Codex renders, with and without "Warning:".
+        for warning in [
+            "Warning: Exceeded skills context budget of 2%. All skill descriptions were removed and 112 additional skills were not included in the model-visible skills list.",
+            "Exceeded skills context budget. All skill descriptions were removed and 3 additional skills were not included in the model-visible skills list.",
+            "Skill descriptions were shortened to fit the skills context budget. Codex can still see every skill, but some descriptions are shorter. Disable unused skills or plugins to leave more room for the rest.",
+            "Host skills are available but omitted from the model-visible skills list because the skills context budget was exceeded.",
+        ] {
+            assert_eq!(
+                strip_skills_budget_warning(&format!("{warning}\n\nreal reply")),
+                "real reply",
+                "failed to strip: {warning}"
+            );
+            assert_eq!(strip_skills_budget_warning(warning), "");
+        }
+        // Two stacked warnings are both removed.
+        assert_eq!(
+            strip_skills_budget_warning(
+                "Warning: Exceeded skills context budget of 2%. Details.\n\nSkill descriptions were shortened to fit the skills context budget. Details.\n\nreal reply"
+            ),
+            "real reply"
+        );
+        // Ordinary text is untouched, including leading whitespace and text
+        // that merely mentions the phrase later on.
+        assert_eq!(
+            strip_skills_budget_warning("  indented reply"),
+            "  indented reply"
+        );
+        assert_eq!(
+            strip_skills_budget_warning("The agent said: Exceeded skills context budget."),
+            "The agent said: Exceeded skills context budget."
+        );
     }
 
     #[test]
