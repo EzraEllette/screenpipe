@@ -297,8 +297,10 @@ export type Settings = SettingsStore & {
 	dataSyncEnabled?: boolean;
 	/** Friendly name used to partition this device's synced data. */
 	dataSyncDeviceName?: string;
-	/** Start boundary for the current opt-in period. Prevents historical backfill. */
+	/** Start boundary for this device's current explicit opt-in. */
 	dataSyncEnabledAt?: string;
+	/** Account that explicitly enabled Data Sync on this device. */
+	dataSyncAccountId?: string;
 	/** Enable automatic Activities generation. Default false. */
 	activitiesEnabled?: boolean;
 	/** Native Activity generation cadence in minutes. Default 15. */

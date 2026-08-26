@@ -4,11 +4,12 @@
 
 //! Account-scoped consumer data sync.
 //!
-//! The settings UI owns consent. This native worker reads that persisted
-//! consent every five minutes, pulls only records created after the current
-//! opt-in boundary, and uploads Enterprise-compatible JSONL with the signed-in
-//! account token. The website resolves the token to the user's bucket; no user
-//! or bucket identifier is accepted from this client.
+//! The settings UI records device consent, while the website is authoritative
+//! for the current device opt-in window. Before every page this worker checks
+//! the server, reads only records after its stable enable boundary, and uploads
+//! Enterprise-compatible JSONL with the signed-in account token. The website
+//! resolves the token to the user's bucket; no user or bucket identifier is
+//! accepted from this client.
 
 mod imp {
     use chrono::{DateTime, Utc};
@@ -32,10 +33,17 @@ mod imp {
         token: String,
         device_id: String,
         device_label: String,
-        enabled_at: Option<DateTime<Utc>>,
+        device_enabled_at: Option<DateTime<Utc>>,
         cursor_path: PathBuf,
+        status_url: String,
         ingest_url: String,
         app_version: String,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct ServerSyncStatus {
+        enabled: bool,
+        enabled_at: Option<String>,
     }
 
     #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -75,6 +83,15 @@ mod imp {
             let raw = serde_json::to_vec(self).map_err(|error| error.to_string())?;
             std::fs::write(&temporary, raw).map_err(|error| error.to_string())?;
             std::fs::rename(temporary, path).map_err(|error| error.to_string())
+        }
+
+        fn nullify(&mut self, path: &std::path::Path) -> Result<(), String> {
+            *self = Self::default();
+            match std::fs::remove_file(path) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(error.to_string()),
+            }
         }
 
         fn clamp_to(&mut self, configured_enabled_at: Option<DateTime<Utc>>) {
@@ -122,6 +139,12 @@ mod imp {
         }
     }
 
+    fn device_consent_matches(account_id: Option<&str>, consent_account_id: Option<&str>) -> bool {
+        let account_id = account_id.map(str::trim).unwrap_or_default();
+        let consent_account_id = consent_account_id.map(str::trim).unwrap_or_default();
+        !account_id.is_empty() && account_id == consent_account_id
+    }
+
     fn current_config(app: &tauri::AppHandle) -> Option<SyncConfig> {
         let settings = crate::store::SettingsStore::get(app).ok().flatten()?;
         if settings
@@ -162,6 +185,13 @@ mod imp {
         }
 
         let token = crate::commands::get_cloud_token()?;
+        let consent_account_id = settings
+            .extra
+            .get("dataSyncAccountId")
+            .and_then(serde_json::Value::as_str);
+        if !device_consent_matches(settings.user.id.as_deref(), consent_account_id) {
+            return None;
+        }
         let device_label = settings
             .extra
             .get("dataSyncDeviceName")
@@ -176,7 +206,7 @@ mod imp {
                     .filter(|value| !value.trim().is_empty())
             })
             .unwrap_or_else(|| "This device".to_string());
-        let enabled_at = settings
+        let device_enabled_at = settings
             .extra
             .get("dataSyncEnabledAt")
             .and_then(serde_json::Value::as_str)
@@ -188,8 +218,9 @@ mod imp {
             token,
             device_id: settings.device_id,
             device_label,
-            enabled_at,
+            device_enabled_at,
             cursor_path,
+            status_url: crate::web_base::screenpipe_web_url("/api/user/data-sync/ingest"),
             ingest_url: crate::web_base::screenpipe_web_url("/api/user/data-sync/ingest"),
             app_version: app.package_info().version.to_string(),
         })
@@ -397,6 +428,49 @@ mod imp {
         format!("{}…", &value[..end])
     }
 
+    fn enabled_at_from_status(status: ServerSyncStatus) -> Result<Option<DateTime<Utc>>, String> {
+        if !status.enabled {
+            return Ok(None);
+        }
+        let raw = status
+            .enabled_at
+            .ok_or_else(|| "enabled data sync response omitted enabled_at".to_string())?;
+        DateTime::parse_from_rfc3339(&raw)
+            .map(|value| Some(value.with_timezone(&Utc)))
+            .map_err(|error| format!("invalid data sync enabled_at: {error}"))
+    }
+
+    async fn server_enabled_at(
+        config: &SyncConfig,
+        http: &reqwest::Client,
+    ) -> Result<Option<DateTime<Utc>>, String> {
+        let response = http
+            .get(&config.status_url)
+            .bearer_auth(&config.token)
+            .header("X-Screenpipe-Device-Id", &config.device_id)
+            .header("X-Screenpipe-Device-Label", &config.device_label)
+            .send()
+            .await
+            .map_err(|error| format!("data sync status request failed: {error}"))?;
+        if !response.status().is_success() {
+            return Err(format!("data sync status returned {}", response.status()));
+        }
+        let status = response
+            .json::<ServerSyncStatus>()
+            .await
+            .map_err(|error| format!("data sync status decode failed: {error}"))?;
+        enabled_at_from_status(status)
+    }
+
+    fn effective_enabled_at(
+        server_enabled_at: DateTime<Utc>,
+        device_enabled_at: Option<DateTime<Utc>>,
+    ) -> DateTime<Utc> {
+        device_enabled_at
+            .filter(|device_enabled_at| *device_enabled_at > server_enabled_at)
+            .unwrap_or(server_enabled_at)
+    }
+
     #[derive(Debug, Deserialize)]
     struct LocalSearchResponse {
         data: Vec<LocalSearchItem>,
@@ -475,7 +549,13 @@ mod imp {
         local: &LocalClient,
         http: &reqwest::Client,
     ) -> Result<bool, String> {
-        cursor.clamp_to(config.enabled_at);
+        let Some(server_enabled_at) = server_enabled_at(config, http).await? else {
+            cursor.nullify(&config.cursor_path)?;
+            info!("data sync disabled by server; cursor cleared");
+            return Ok(false);
+        };
+        let enabled_at = effective_enabled_at(server_enabled_at, config.device_enabled_at);
+        cursor.clamp_to(Some(enabled_at));
         cursor.save(&config.cursor_path)?;
 
         let frames = local
@@ -599,7 +679,10 @@ mod imp {
         // Re-read consent between pages so disabling the toggle stops a large
         // catch-up burst immediately.
         Ok(may_have_more
-            && current_config(app).is_some_and(|current| current.enabled_at == config.enabled_at))
+            && current_config(app).is_some_and(|current| {
+                current.token == config.token
+                    && current.device_enabled_at == config.device_enabled_at
+            }))
     }
 
     fn optional_rows<T>(stream: &str, result: Result<Vec<T>, String>) -> Vec<T> {
@@ -658,6 +741,12 @@ mod imp {
 
     async fn sync_once(app: &tauri::AppHandle, local: &LocalClient, http: &reqwest::Client) {
         let Some(config) = current_config(app) else {
+            if let Ok(path) = app.path().app_data_dir() {
+                let mut cursor = Cursor::load(&path.join(CURSOR_FILENAME));
+                if let Err(error) = cursor.nullify(&path.join(CURSOR_FILENAME)) {
+                    warn!("failed to clear disabled data sync cursor: {error}");
+                }
+            }
             return;
         };
         let mut cursor = Cursor::load(&config.cursor_path);
@@ -690,6 +779,81 @@ mod imp {
                 tokio::time::sleep(SYNC_INTERVAL).await;
             }
         });
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn disabled_server_status_has_no_upload_boundary() {
+            assert!(enabled_at_from_status(ServerSyncStatus {
+                enabled: false,
+                enabled_at: Some("2026-08-26T05:00:00Z".to_string()),
+            })
+            .unwrap()
+            .is_none());
+        }
+
+        #[test]
+        fn enabled_server_status_requires_a_valid_boundary() {
+            assert!(enabled_at_from_status(ServerSyncStatus {
+                enabled: true,
+                enabled_at: None,
+            })
+            .is_err());
+            assert!(enabled_at_from_status(ServerSyncStatus {
+                enabled: true,
+                enabled_at: Some("invalid".to_string()),
+            })
+            .is_err());
+        }
+
+        #[test]
+        fn device_consent_is_bound_to_the_current_account() {
+            assert!(device_consent_matches(Some("account-a"), Some("account-a")));
+            assert!(!device_consent_matches(
+                Some("account-b"),
+                Some("account-a")
+            ));
+            assert!(!device_consent_matches(Some("account-a"), None));
+        }
+
+        #[test]
+        fn later_device_consent_prevents_account_level_backfill() {
+            let server_enabled_at = DateTime::parse_from_rfc3339("2026-08-26T05:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc);
+            let device_enabled_at = DateTime::parse_from_rfc3339("2026-08-26T06:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc);
+
+            assert_eq!(
+                effective_enabled_at(server_enabled_at, Some(device_enabled_at)),
+                device_enabled_at
+            );
+        }
+
+        #[test]
+        fn nullify_removes_the_persisted_cursor() {
+            let path = std::env::temp_dir().join(format!(
+                "screenpipe-data-sync-cursor-{}-{}.json",
+                std::process::id(),
+                Utc::now().timestamp_nanos_opt().unwrap_or_default()
+            ));
+            let mut cursor = Cursor {
+                enabled_at: Some("2026-08-26T05:00:00Z".to_string()),
+                last_frame_ts: Some("2026-08-26T05:01:00Z".to_string()),
+                ..Cursor::default()
+            };
+            cursor.save(&path).unwrap();
+
+            cursor.nullify(&path).unwrap();
+
+            assert!(!path.exists());
+            assert!(cursor.enabled_at.is_none());
+            assert!(cursor.last_frame_ts.is_none());
+        }
     }
 }
 

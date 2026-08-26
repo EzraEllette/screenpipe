@@ -188,28 +188,54 @@ export function AccountSection() {
     try {
       const token = await commands.getCloudToken();
       if (!token) throw new Error("sign in again to change data sync");
-
-      const response = await tauriFetchWithDeadline(DATA_SYNC_URL, {
-        method: "PATCH",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ allow_data_sync: checked }),
-      });
-      if (!response.ok) {
-        const body = await response.json().catch(() => null);
-        throw new Error(body?.error || "could not update data sync");
+      const accountId = settings.user?.id;
+      if (checked && !accountId) {
+        throw new Error("sign in again to enable data sync on this device");
       }
 
       const deviceName = checked
         ? settings.dataSyncDeviceName?.trim() ||
           (await hostname().catch(() => null))?.trim() ||
           "This device"
-        : settings.dataSyncDeviceName;
+        : settings.dataSyncDeviceName?.trim() || "This device";
+
+      if (checked) {
+        const accountResponse = await tauriFetchWithDeadline(DATA_SYNC_URL, {
+          method: "PATCH",
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ allow_data_sync: true }),
+        });
+        if (!accountResponse.ok) {
+          const body = await accountResponse.json().catch(() => null);
+          throw new Error(body?.error || "could not enable data sync");
+        }
+      }
+
+      const deviceResponse = await tauriFetchWithDeadline(
+        `${DATA_SYNC_URL}/ingest`,
+        {
+          method: "PATCH",
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json",
+            "X-Screenpipe-Device-Id": settings.deviceId,
+            "X-Screenpipe-Device-Label": deviceName,
+          },
+          body: JSON.stringify({ enabled: checked }),
+        },
+      );
+      if (!deviceResponse.ok) {
+        const body = await deviceResponse.json().catch(() => null);
+        throw new Error(body?.error || "could not update this device");
+      }
+
       await updateSettings({
         dataSyncEnabled: checked,
         dataSyncDeviceName: deviceName,
+        dataSyncAccountId: checked ? accountId : "",
         ...(checked ? { dataSyncEnabledAt: new Date().toISOString() } : {}),
       });
     } catch (error) {
