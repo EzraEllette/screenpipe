@@ -27,6 +27,14 @@ const DEFAULT_LIMIT: usize = 20;
 const MAX_LIMIT: usize = 50;
 const MAX_MESSAGE_BYTES: usize = 20_000;
 const MAX_EXTERNAL_FILES: usize = 1_000;
+/// Transcript text kept per chat so a query can match what was actually
+/// discussed instead of only the title and the first user line.
+const MAX_SEARCH_BODY_CHARS: usize = 60_000;
+/// Transcript lines read per chat while collecting that text.
+const MAX_BODY_LINES: usize = 5_000;
+/// Chats whose transcript is read from disk for one search. Files are visited
+/// newest first, and hitting this bound is reported as a search warning.
+const MAX_BODY_SCAN_FILES: usize = 250;
 const MAX_BROKER_REQUEST_BYTES: usize = 64 * 1024;
 
 pub const CHAT_CONTROL_ADDR_ENV: &str = "SCREENPIPE_CHAT_CONTROL_ADDR";
@@ -39,11 +47,18 @@ pub enum ChatSource {
     Codex,
     Claude,
     Cursor,
+    Gemini,
 }
 
 impl ChatSource {
-    pub fn all() -> [Self; 4] {
-        [Self::Screenpipe, Self::Codex, Self::Claude, Self::Cursor]
+    pub fn all() -> [Self; 5] {
+        [
+            Self::Screenpipe,
+            Self::Codex,
+            Self::Claude,
+            Self::Cursor,
+            Self::Gemini,
+        ]
     }
 
     pub fn label(self) -> &'static str {
@@ -52,7 +67,15 @@ impl ChatSource {
             Self::Codex => "codex",
             Self::Claude => "claude",
             Self::Cursor => "cursor",
+            Self::Gemini => "gemini",
         }
+    }
+
+    /// Gemini CLI has no non-interactive resume, so its chats are searchable
+    /// but cannot be steered. Everything else has a documented queue/resume
+    /// entry point.
+    pub fn supports_send(self) -> bool {
+        !matches!(self, Self::Gemini)
     }
 }
 
@@ -111,6 +134,14 @@ pub struct ChatSendResponse {
     pub title: String,
     pub delivery_id: Option<String>,
     pub detail: String,
+}
+
+/// One local source's slice of a search, plus whether the transcript scan
+/// stopped before every chat was read.
+#[derive(Debug, Default)]
+struct SourceSearch {
+    results: Vec<ChatSearchResult>,
+    truncated: bool,
 }
 
 fn home_dir() -> Result<PathBuf, String> {
@@ -183,6 +214,63 @@ fn value_message_text(value: &Value) -> String {
         })
         .map(message_text)
         .unwrap_or_default()
+}
+
+/// Appends transcript text to a bounded searchable buffer. Returns false once
+/// the buffer is full so callers can stop reading a very long transcript.
+fn append_searchable(buffer: &mut String, text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return buffer.len() < MAX_SEARCH_BODY_CHARS;
+    }
+    let remaining = MAX_SEARCH_BODY_CHARS.saturating_sub(buffer.len());
+    if remaining == 0 {
+        return false;
+    }
+    if !buffer.is_empty() {
+        buffer.push('\n');
+    }
+    if trimmed.len() <= remaining {
+        buffer.push_str(trimmed);
+        return buffer.len() < MAX_SEARCH_BODY_CHARS;
+    }
+    let mut end = remaining;
+    while end > 0 && !trimmed.is_char_boundary(end) {
+        end -= 1;
+    }
+    buffer.push_str(&trimmed[..end]);
+    false
+}
+
+/// True when a message is nothing but a harness directive: it opens with a bare
+/// `<tag>` and closes it later. Every runtime injects these (environment blocks,
+/// available-plugin lists, hook output, session context), and the same block
+/// appears in thousands of chats, so indexing one would make it match every
+/// query and titling a chat with one would hide what the user actually asked.
+fn is_wrapped_directive(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    let Some(rest) = trimmed.strip_prefix('<') else {
+        return false;
+    };
+    let Some(tag_end) = rest.find('>') else {
+        return false;
+    };
+    let tag = &rest[..tag_end];
+    if tag.is_empty()
+        || !tag.chars().all(|character| {
+            character.is_ascii_alphanumeric() || character == '_' || character == '-'
+        })
+    {
+        return false;
+    }
+    trimmed.contains(&format!("</{tag}>"))
+}
+
+fn truncated_scan_warning(source: ChatSource) -> String {
+    format!(
+        "{}: read the {MAX_BODY_SCAN_FILES} most recent transcripts; older chats were not searched",
+        source.label()
+    )
 }
 
 fn query_matches(result: &ChatSearchResult, query: &str, extra: &str) -> bool {
@@ -311,7 +399,41 @@ fn parse_screenpipe_chat(path: &Path) -> Result<(ChatSearchResult, Value, String
     ))
 }
 
-fn search_screenpipe(query: &str, limit: usize) -> Result<Vec<ChatSearchResult>, String> {
+/// Scans one runtime's on-disk transcripts newest first, matching the query
+/// against both chat metadata and a bounded slice of the conversation itself.
+fn search_local_transcripts(
+    files: Vec<PathBuf>,
+    query: &str,
+    limit: usize,
+    is_transcript: fn(&Path) -> bool,
+    parse: fn(&Path) -> Result<(ChatSearchResult, String), String>,
+) -> Result<SourceSearch, String> {
+    let mut search = SourceSearch::default();
+    let mut scanned = 0usize;
+    for path in files {
+        if !is_transcript(&path) {
+            continue;
+        }
+        if scanned >= MAX_BODY_SCAN_FILES {
+            search.truncated = true;
+            break;
+        }
+        scanned += 1;
+        let Ok((result, body)) = parse(&path) else {
+            continue;
+        };
+        if query_matches(&result, query, &body) {
+            search.results.push(result);
+            if search.results.len() >= limit {
+                search.truncated = false;
+                break;
+            }
+        }
+    }
+    Ok(search)
+}
+
+fn search_screenpipe(query: &str, limit: usize) -> Result<SourceSearch, String> {
     let chats_dir = crate::paths::default_screenpipe_data_dir().join("chats");
     let entries = fs::read_dir(&chats_dir).map_err(|error| error.to_string())?;
     let mut files = entries
@@ -327,22 +449,29 @@ fn search_screenpipe(query: &str, limit: usize) -> Result<Vec<ChatSearchResult>,
         .collect::<Vec<_>>();
     files.sort_by_key(|path| std::cmp::Reverse(modified_ms(path)));
 
-    let mut results = Vec::new();
+    let mut search = SourceSearch::default();
     for path in files {
         let Ok((result, _value, searchable)) = parse_screenpipe_chat(&path) else {
             continue;
         };
         if query_matches(&result, query, &searchable) {
-            results.push(result);
-            if results.len() >= limit {
+            search.results.push(result);
+            if search.results.len() >= limit {
                 break;
             }
         }
     }
-    Ok(results)
+    Ok(search)
 }
 
-fn parse_claude_chat(path: &Path) -> Result<ChatSearchResult, String> {
+/// Harness bookkeeping the user never wrote: tool results, hook output, and
+/// system reminders. It must not become a chat's preview or a search hit.
+fn is_claude_bookkeeping(value: &Value) -> bool {
+    value.get("isMeta").and_then(Value::as_bool) == Some(true)
+        || value.get("toolUseResult").is_some()
+}
+
+fn parse_claude_chat(path: &Path) -> Result<(ChatSearchResult, String), String> {
     let file = File::open(path).map_err(|error| error.to_string())?;
     let reader = BufReader::new(file);
     let fallback_id = path
@@ -353,10 +482,11 @@ fn parse_claude_chat(path: &Path) -> Result<ChatSearchResult, String> {
     let mut id = fallback_id;
     let mut title = String::new();
     let mut preview = String::new();
+    let mut body = String::new();
     let mut workspace = None;
     let mut updated_at = modified_ms(path);
 
-    for line in reader.lines().take(2_000).flatten() {
+    for line in reader.lines().take(MAX_BODY_LINES).flatten() {
         let Ok(value) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
@@ -377,11 +507,19 @@ fn parse_claude_chat(path: &Path) -> Result<ChatSearchResult, String> {
                 title = compact_text(ai_title, 120);
             }
         }
-        if preview.is_empty() && value.get("type").and_then(Value::as_str) == Some("user") {
-            let text = value_message_text(&value);
-            if !text.trim().is_empty() {
-                preview = compact_text(&text, 180);
-            }
+        let role = value.get("type").and_then(Value::as_str);
+        if (role != Some("user") && role != Some("assistant")) || is_claude_bookkeeping(&value) {
+            continue;
+        }
+        let text = value_message_text(&value);
+        if text.trim().is_empty() || is_wrapped_directive(&text) {
+            continue;
+        }
+        if preview.is_empty() && role == Some("user") {
+            preview = compact_text(&text, 180);
+        }
+        if !append_searchable(&mut body, &text) {
+            break;
         }
     }
     if id.is_empty() {
@@ -394,36 +532,60 @@ fn parse_claude_chat(path: &Path) -> Result<ChatSearchResult, String> {
             compact_text(&preview, 80)
         };
     }
-    Ok(ChatSearchResult {
-        source: ChatSource::Claude,
-        id,
-        title,
-        preview,
-        updated_at,
-        workspace,
-        state: "resumable".to_string(),
-        can_send: true,
-    })
+    Ok((
+        ChatSearchResult {
+            source: ChatSource::Claude,
+            id,
+            title,
+            preview,
+            updated_at,
+            workspace,
+            state: "resumable".to_string(),
+            can_send: ChatSource::Claude.supports_send(),
+        },
+        body,
+    ))
 }
 
-fn search_claude(query: &str, limit: usize) -> Result<Vec<ChatSearchResult>, String> {
+fn search_claude(query: &str, limit: usize) -> Result<SourceSearch, String> {
     let root = home_dir()?.join(".claude").join("projects");
-    let mut results = Vec::new();
-    for path in collect_jsonl_files(&root) {
-        let Ok(result) = parse_claude_chat(&path) else {
-            continue;
-        };
-        if query_matches(&result, query, "") {
-            results.push(result);
-            if results.len() >= limit {
-                break;
-            }
+    // Subagent transcripts live in nested directories, but they are still real
+    // chats worth finding, so no path filter is applied here.
+    search_local_transcripts(
+        collect_jsonl_files(&root),
+        query,
+        limit,
+        |_| true,
+        parse_claude_chat,
+    )
+}
+
+/// Returns the inner text of the first `<tag>…</tag>` pair, if present.
+fn inner_tag_text(text: &str, tag: &str) -> Option<String> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = text.find(&open)? + open.len();
+    let end = text[start..].find(&close)? + start;
+    Some(text[start..end].trim().to_string())
+}
+
+/// Cursor wraps every user turn in `<timestamp>` and `<user_query>` tags. The
+/// envelope is identical in every chat, so keeping it would make each title
+/// unreadable and make the markup itself match every query.
+fn unwrap_cursor_text(text: &str) -> String {
+    if let Some(query) = inner_tag_text(text, "user_query") {
+        return query;
+    }
+    let trimmed = text.trim();
+    if let Some(rest) = trimmed.strip_prefix("<timestamp>") {
+        if let Some((_stamp, tail)) = rest.split_once("</timestamp>") {
+            return tail.trim().to_string();
         }
     }
-    Ok(results)
+    trimmed.to_string()
 }
 
-fn parse_cursor_chat(path: &Path) -> Result<ChatSearchResult, String> {
+fn parse_cursor_chat(path: &Path) -> Result<(ChatSearchResult, String), String> {
     let id = path
         .file_stem()
         .and_then(|stem| stem.to_str())
@@ -433,16 +595,23 @@ fn parse_cursor_chat(path: &Path) -> Result<ChatSearchResult, String> {
     let file = File::open(path).map_err(|error| error.to_string())?;
     let reader = BufReader::new(file);
     let mut preview = String::new();
-    for line in reader.lines().take(500).flatten() {
+    let mut body = String::new();
+    for line in reader.lines().take(MAX_BODY_LINES).flatten() {
         let Ok(value) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
-        if value.get("role").and_then(Value::as_str) != Some("user") {
+        let role = value.get("role").and_then(Value::as_str);
+        if role != Some("user") && role != Some("assistant") {
             continue;
         }
-        let text = value_message_text(&value);
-        if !text.trim().is_empty() {
+        let text = unwrap_cursor_text(&value_message_text(&value));
+        if text.trim().is_empty() {
+            continue;
+        }
+        if preview.is_empty() && role == Some("user") {
             preview = compact_text(&text, 180);
+        }
+        if !append_searchable(&mut body, &text) {
             break;
         }
     }
@@ -460,39 +629,394 @@ fn parse_cursor_chat(path: &Path) -> Result<ChatSearchResult, String> {
     } else {
         compact_text(&preview, 80)
     };
-    Ok(ChatSearchResult {
-        source: ChatSource::Cursor,
-        id,
-        title,
-        preview,
-        updated_at: modified_ms(path),
-        workspace,
-        state: "resumable".to_string(),
-        can_send: true,
-    })
+    Ok((
+        ChatSearchResult {
+            source: ChatSource::Cursor,
+            id,
+            title,
+            preview,
+            updated_at: modified_ms(path),
+            workspace,
+            state: "resumable".to_string(),
+            can_send: ChatSource::Cursor.supports_send(),
+        },
+        body,
+    ))
 }
 
-fn search_cursor(query: &str, limit: usize) -> Result<Vec<ChatSearchResult>, String> {
+fn search_cursor(query: &str, limit: usize) -> Result<SourceSearch, String> {
     let root = home_dir()?.join(".cursor").join("projects");
-    let mut results = Vec::new();
-    for path in collect_jsonl_files(&root) {
-        if !path.to_string_lossy().contains("agent-transcripts") {
-            continue;
-        }
-        let Ok(result) = parse_cursor_chat(&path) else {
+    search_local_transcripts(
+        collect_jsonl_files(&root),
+        query,
+        limit,
+        |path| path.to_string_lossy().contains("agent-transcripts"),
+        parse_cursor_chat,
+    )
+}
+
+/// Gemini CLI keeps one snapshot per turn, so message parts carry a bare
+/// `text` field instead of the typed blocks the other runtimes emit.
+fn gemini_message_text(message: &Value) -> String {
+    match message.get("content") {
+        Some(Value::String(text)) => text.clone(),
+        Some(Value::Array(parts)) => parts
+            .iter()
+            .filter_map(|part| {
+                part.get("text")
+                    .and_then(Value::as_str)
+                    .or_else(|| part.as_str())
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
+}
+
+fn parse_gemini_chat(path: &Path) -> Result<(ChatSearchResult, String), String> {
+    let file = File::open(path).map_err(|error| error.to_string())?;
+    let reader = BufReader::new(file);
+    let mut id = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or_default()
+        .to_string();
+    let mut updated_at = modified_ms(path);
+    let mut messages: Vec<Value> = Vec::new();
+
+    for line in reader.lines().take(MAX_BODY_LINES).flatten() {
+        let Ok(value) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
-        if query_matches(&result, query, "") {
-            results.push(result);
-            if results.len() >= limit {
-                break;
+        if let Some(session_id) = value.get("sessionId").and_then(Value::as_str) {
+            id = session_id.to_string();
+        }
+        // Each turn appends a full snapshot under `$set`, so the newest
+        // snapshot is the whole conversation and earlier ones are prefixes.
+        let update = value.get("$set").unwrap_or(&value);
+        if let Some(timestamp) = parse_timestamp_ms(update.get("lastUpdated")) {
+            updated_at = updated_at.max(timestamp);
+        }
+        if let Some(list) = update.get("messages").and_then(Value::as_array) {
+            messages = list.clone();
+        }
+    }
+    if id.is_empty() {
+        return Err("missing Gemini session id".to_string());
+    }
+
+    let mut preview = String::new();
+    let mut body = String::new();
+    for message in &messages {
+        let kind = message
+            .get("type")
+            .and_then(Value::as_str)
+            .or_else(|| message.get("role").and_then(Value::as_str))
+            .unwrap_or_default();
+        let text = gemini_message_text(message);
+        if text.trim().is_empty() || is_wrapped_directive(&text) {
+            continue;
+        }
+        if preview.is_empty() && kind == "user" {
+            preview = compact_text(&text, 180);
+        }
+        if !append_searchable(&mut body, &text) {
+            break;
+        }
+    }
+    if preview.is_empty() && body.is_empty() {
+        return Err("Gemini session has no user visible messages".to_string());
+    }
+
+    let workspace = path
+        .parent()
+        .and_then(|chats| chats.parent())
+        .and_then(|project| project.file_name())
+        .and_then(|name| name.to_str())
+        .map(str::to_string);
+    let title = if preview.is_empty() {
+        "untitled Gemini chat".to_string()
+    } else {
+        compact_text(&preview, 80)
+    };
+    Ok((
+        ChatSearchResult {
+            source: ChatSource::Gemini,
+            id,
+            title,
+            preview,
+            updated_at,
+            workspace,
+            state: "read-only".to_string(),
+            can_send: ChatSource::Gemini.supports_send(),
+        },
+        body,
+    ))
+}
+
+fn search_gemini(query: &str, limit: usize) -> Result<SourceSearch, String> {
+    let root = home_dir()?.join(".gemini").join("tmp");
+    search_local_transcripts(
+        collect_jsonl_files(&root),
+        query,
+        limit,
+        |path| {
+            path.parent()
+                .and_then(|parent| parent.file_name())
+                .is_some_and(|name| name == "chats")
+        },
+        parse_gemini_chat,
+    )
+}
+
+/// Codex harness preamble that is injected into every thread, so matching it
+/// would return every chat rather than the one the user means. Most blocks are
+/// caught generically; these two are not well-formed tags.
+fn is_codex_harness_context(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    is_wrapped_directive(text)
+        || trimmed.starts_with("<permissions instructions>")
+        || trimmed.starts_with("# AGENTS.md instructions")
+}
+
+fn codex_payload_text(payload: &Value) -> String {
+    payload
+        .get("content")
+        .and_then(Value::as_array)
+        .map(|parts| {
+            parts
+                .iter()
+                .filter_map(|part| part.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default()
+}
+
+fn descending_subdirectories(path: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(path) else {
+        return Vec::new();
+    };
+    let mut directories = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .collect::<Vec<_>>();
+    directories.sort_by(|left, right| right.file_name().cmp(&left.file_name()));
+    directories
+}
+
+/// Codex writes rollouts into `~/.codex/sessions/<year>/<month>/<day>`, and a
+/// heavy user accumulates tens of thousands of them. A generic recursive walk
+/// exhausts its file budget on old sessions long before it reaches today, so
+/// descend the date partitions newest first and stop once the budget is full.
+fn codex_session_files() -> Vec<PathBuf> {
+    let Ok(home) = home_dir() else {
+        return Vec::new();
+    };
+    let root = home.join(".codex").join("sessions");
+    let mut files = Vec::new();
+    for year in descending_subdirectories(&root) {
+        for month in descending_subdirectories(&year) {
+            for day in descending_subdirectories(&month) {
+                let Ok(entries) = fs::read_dir(&day) else {
+                    continue;
+                };
+                let mut in_day = entries
+                    .flatten()
+                    .map(|entry| entry.path())
+                    .filter(|path| {
+                        path.extension().and_then(|extension| extension.to_str()) == Some("jsonl")
+                    })
+                    .collect::<Vec<_>>();
+                in_day.sort_by(|left, right| right.file_name().cmp(&left.file_name()));
+                files.append(&mut in_day);
+                if files.len() >= MAX_EXTERNAL_FILES {
+                    files.truncate(MAX_EXTERNAL_FILES);
+                    return files;
+                }
             }
         }
     }
-    Ok(results)
+    files
 }
 
-async fn search_codex(query: &str, limit: usize) -> Result<Vec<ChatSearchResult>, String> {
+#[derive(Debug, Default)]
+struct CodexTranscript {
+    body: String,
+    first_user_text: Option<String>,
+}
+
+/// A thread whose first message is an injected preamble: the Codex app server
+/// derives both its name and its preview from that message, so the chat shows
+/// up as harness markup instead of as what the user asked for.
+fn is_injected_summary(text: &str) -> bool {
+    text.trim_start().starts_with('<') || is_codex_harness_context(text)
+}
+
+/// The Codex app server only exposes thread metadata, so the transcript itself
+/// is read from the rollout file whose name carries the thread id.
+fn read_codex_transcript(files: &[PathBuf], id: &str) -> CodexTranscript {
+    let mut transcript = CodexTranscript::default();
+    let Some(path) = files.iter().find(|path| {
+        path.file_stem()
+            .and_then(|stem| stem.to_str())
+            .is_some_and(|stem| stem.contains(id))
+    }) else {
+        return transcript;
+    };
+    let Ok(file) = File::open(path) else {
+        return transcript;
+    };
+    for line in BufReader::new(file).lines().take(MAX_BODY_LINES).flatten() {
+        let Ok(value) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        let Some(payload) = value.get("payload") else {
+            continue;
+        };
+        if !accumulate_codex_message(payload, &mut transcript) {
+            break;
+        }
+    }
+    transcript
+}
+
+/// Folds one rollout record into a transcript. Returns false when the bounded
+/// searchable body is full.
+fn accumulate_codex_message(payload: &Value, transcript: &mut CodexTranscript) -> bool {
+    if payload.get("type").and_then(Value::as_str) != Some("message") {
+        return true;
+    }
+    let role = payload.get("role").and_then(Value::as_str);
+    if role != Some("user") && role != Some("assistant") {
+        return true;
+    }
+    let text = codex_payload_text(payload);
+    if text.trim().is_empty() || is_codex_harness_context(&text) {
+        return true;
+    }
+    if role == Some("user") && transcript.first_user_text.is_none() {
+        transcript.first_user_text = Some(text.clone());
+    }
+    append_searchable(&mut transcript.body, &text)
+}
+
+/// Codex names each rollout `rollout-<timestamp>-<thread-uuid>.jsonl`, so the
+/// trailing uuid is the thread id when a rollout has no `session_meta` record.
+fn codex_id_from_file_name(path: &Path) -> Option<String> {
+    let stem = path.file_stem()?.to_str()?;
+    let candidate = stem.get(stem.len().checked_sub(36)?..)?;
+    let uuid_shaped = candidate
+        .chars()
+        .enumerate()
+        .all(|(index, character)| match index {
+            8 | 13 | 18 | 23 => character == '-',
+            _ => character.is_ascii_hexdigit(),
+        });
+    uuid_shaped.then(|| candidate.to_string())
+}
+
+/// Parses a Codex rollout file into the same shape the app server reports, so a
+/// text query can be answered from disk. The app server needs seconds to page
+/// through a large session history and only ever exposes thread metadata, so it
+/// is reserved for the recents list where its status and names are worth it.
+fn parse_codex_chat(path: &Path) -> Result<(ChatSearchResult, String), String> {
+    let file = File::open(path).map_err(|error| error.to_string())?;
+    let mut id = String::new();
+    let mut workspace = None;
+    let mut updated_at = modified_ms(path);
+    let mut transcript = CodexTranscript::default();
+
+    for line in BufReader::new(file).lines().take(MAX_BODY_LINES).flatten() {
+        let Ok(value) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        let Some(payload) = value.get("payload") else {
+            continue;
+        };
+        if value.get("type").and_then(Value::as_str) == Some("session_meta") {
+            id = payload
+                .get("id")
+                .or_else(|| payload.get("session_id"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            workspace = payload
+                .get("cwd")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            continue;
+        }
+        if let Some(timestamp) = parse_timestamp_ms(value.get("timestamp")) {
+            updated_at = updated_at.max(timestamp);
+        }
+        if !accumulate_codex_message(payload, &mut transcript) {
+            break;
+        }
+    }
+
+    let id = if id.is_empty() {
+        codex_id_from_file_name(path).ok_or_else(|| "missing Codex thread id".to_string())?
+    } else {
+        id
+    };
+    // Scheduled pipe runs have no user prose at all; they are not conversations.
+    let Some(first_user_text) = transcript.first_user_text.clone() else {
+        return Err("Codex thread has no user messages".to_string());
+    };
+    Ok((
+        ChatSearchResult {
+            source: ChatSource::Codex,
+            id,
+            title: compact_text(&first_user_text, 80),
+            preview: compact_text(&first_user_text, 180),
+            updated_at,
+            workspace,
+            state: "resumable".to_string(),
+            can_send: ChatSource::Codex.supports_send(),
+        },
+        transcript.body,
+    ))
+}
+
+/// Replaces a harness-derived name and preview with the first real user turn.
+/// Returns false when the thread turns out to hold no user prose at all, which
+/// is how screenpipe's own scheduled pipe runs appear: every user turn is an
+/// injected instruction, so the thread is not a conversation anyone can resume
+/// into. An unreadable transcript (empty body) is never judged this way.
+fn recover_codex_summary(result: &mut ChatSearchResult, transcript: &CodexTranscript) -> bool {
+    let Some(text) = transcript.first_user_text.as_deref() else {
+        return transcript.body.is_empty() || !is_injected_summary(&result.title);
+    };
+    if is_injected_summary(&result.preview) {
+        result.preview = compact_text(text, 180);
+    }
+    if is_injected_summary(&result.title) {
+        result.title = compact_text(text, 80);
+    }
+    true
+}
+
+async fn search_codex(query: &str, limit: usize) -> Result<SourceSearch, String> {
+    if !query.is_empty() {
+        let query = query.to_string();
+        return tokio::task::spawn_blocking(move || {
+            search_local_transcripts(
+                codex_session_files(),
+                &query,
+                limit,
+                |_| true,
+                parse_codex_chat,
+            )
+        })
+        .await
+        .map_err(|error| format!("codex transcript search failed: {error}"))?;
+    }
+    search_codex_recents(limit).await
+}
+
+async fn search_codex_recents(limit: usize) -> Result<SourceSearch, String> {
     let mut child = Command::new("codex")
         .args(["app-server", "--stdio"])
         .stdin(Stdio::piped())
@@ -509,14 +1033,6 @@ async fn search_codex(query: &str, limit: usize) -> Result<Vec<ChatSearchResult>
         .stdout
         .take()
         .ok_or("Codex app server stdout unavailable")?;
-    // Codex's server-side searchTerm only covers its extracted title. Fetch a
-    // bounded recent page and filter locally so exact ids, previews, and cwd
-    // behave like the other chat sources.
-    let fetch_limit = if query.is_empty() {
-        limit
-    } else {
-        MAX_EXTERNAL_FILES
-    };
     let requests = [
         json!({
             "id": 1,
@@ -528,7 +1044,7 @@ async fn search_codex(query: &str, limit: usize) -> Result<Vec<ChatSearchResult>
             "method": "thread/list",
             "params": {
                 "archived": false,
-                "limit": fetch_limit,
+                "limit": limit,
                 "searchTerm": null,
                 "sortKey": "updated_at",
                 "sortDirection": "desc"
@@ -568,7 +1084,7 @@ async fn search_codex(query: &str, limit: usize) -> Result<Vec<ChatSearchResult>
         .pointer("/result/data")
         .and_then(Value::as_array)
         .ok_or_else(|| "Codex thread/list returned no data".to_string())?;
-    let results = data
+    let candidates = data
         .iter()
         .filter_map(|thread| {
             let id = thread.get("id")?.as_str()?.to_string();
@@ -615,13 +1131,32 @@ async fn search_codex(query: &str, limit: usize) -> Result<Vec<ChatSearchResult>
                     })
                     .unwrap_or("resumable")
                     .to_string(),
-                can_send: true,
+                can_send: ChatSource::Codex.supports_send(),
             })
         })
-        .filter(|result| query_matches(result, query, ""))
-        .take(limit)
-        .collect();
-    Ok(results)
+        .collect::<Vec<_>>();
+
+    tokio::task::spawn_blocking(move || {
+        let files = codex_session_files();
+        let mut search = SourceSearch::default();
+        for mut candidate in candidates {
+            let transcript = if is_injected_summary(&candidate.title) {
+                read_codex_transcript(&files, &candidate.id)
+            } else {
+                CodexTranscript::default()
+            };
+            if !recover_codex_summary(&mut candidate, &transcript) {
+                continue;
+            }
+            search.results.push(candidate);
+            if search.results.len() >= limit {
+                break;
+            }
+        }
+        search
+    })
+    .await
+    .map_err(|error| format!("codex recents failed: {error}"))
 }
 
 pub async fn search(
@@ -645,6 +1180,7 @@ pub async fn search(
             ChatSource::Screenpipe,
             ChatSource::Claude,
             ChatSource::Cursor,
+            ChatSource::Gemini,
         ] {
             if !local_sources.contains(&source) {
                 continue;
@@ -653,10 +1189,16 @@ pub async fn search(
                 ChatSource::Screenpipe => search_screenpipe(&query_for_local, limit),
                 ChatSource::Claude => search_claude(&query_for_local, limit),
                 ChatSource::Cursor => search_cursor(&query_for_local, limit),
+                ChatSource::Gemini => search_gemini(&query_for_local, limit),
                 ChatSource::Codex => unreachable!(),
             };
             match found {
-                Ok(mut found) => results.append(&mut found),
+                Ok(mut found) => {
+                    if found.truncated {
+                        warnings.push(truncated_scan_warning(source));
+                    }
+                    results.append(&mut found.results);
+                }
                 Err(error) => warnings.push(format!("{}: {error}", source.label())),
             }
         }
@@ -679,7 +1221,12 @@ pub async fn search(
         codex
     );
     match codex_result {
-        Ok(Some(mut found)) => results.append(&mut found),
+        Ok(Some(mut found)) => {
+            if found.truncated {
+                warnings.push(truncated_scan_warning(ChatSource::Codex));
+            }
+            results.append(&mut found.results);
+        }
         Ok(None) => {}
         Err(error) => warnings.push(format!("codex: {error}")),
     }
@@ -797,6 +1344,9 @@ fn external_command_spec(
             ],
             background: true,
         }),
+        ChatSource::Gemini => {
+            Err("Gemini CLI chats are search-only; it has no non-interactive resume".to_string())
+        }
         ChatSource::Screenpipe => Err("screenpipe uses the native Pi queue".to_string()),
     }
 }
@@ -858,26 +1408,46 @@ async fn send_external(
             },
         )),
         ChatSource::Cursor => unreachable!("background Cursor command returned above"),
-        ChatSource::Screenpipe => unreachable!(),
+        ChatSource::Gemini | ChatSource::Screenpipe => {
+            unreachable!("unsendable sources are rejected before delivery")
+        }
     }
 }
 
 async fn resolve_external_target(source: ChatSource, id: &str) -> Result<ChatSearchResult, String> {
     let found = match source {
-        ChatSource::Codex => search_codex("", 1_000).await?,
+        ChatSource::Codex => {
+            let id = id.to_string();
+            tokio::task::spawn_blocking(move || {
+                search_local_transcripts(
+                    codex_session_files(),
+                    &id,
+                    MAX_LIMIT,
+                    |_| true,
+                    parse_codex_chat,
+                )
+            })
+            .await
+            .map_err(|error| error.to_string())??
+            .results
+        }
         ChatSource::Claude => {
             let id = id.to_string();
             tokio::task::spawn_blocking(move || search_claude(&id, MAX_LIMIT))
                 .await
                 .map_err(|error| error.to_string())??
+                .results
         }
         ChatSource::Cursor => {
             let id = id.to_string();
             tokio::task::spawn_blocking(move || search_cursor(&id, MAX_LIMIT))
                 .await
                 .map_err(|error| error.to_string())??
+                .results
         }
-        ChatSource::Screenpipe => unreachable!(),
+        ChatSource::Gemini | ChatSource::Screenpipe => {
+            return Err(format!("{} chats cannot be resumed", source.label()))
+        }
     };
     found
         .into_iter()
@@ -977,6 +1547,12 @@ pub async fn send<H: ScreenpipeChatHost + ?Sized>(
             detail: delivery.detail,
         }
     } else {
+        if !request.source.supports_send() {
+            return Err(format!(
+                "{} chats are search-only in screenpipe; continue them in their own CLI",
+                request.source.label()
+            ));
+        }
         if matches!(request.mode, DeliveryMode::Steer) {
             return Err("steer mode is only available for a running screenpipe chat".to_string());
         }
@@ -1218,10 +1794,31 @@ mod tests {
         writeln!(file, "{}", json!({"type":"ai-title","aiTitle":"Fix the exporter","sessionId":"11111111-1111-1111-1111-111111111111"})).unwrap();
         writeln!(file, "{}", json!({"type":"user","sessionId":"11111111-1111-1111-1111-111111111111","cwd":"/tmp/project","timestamp":"2026-08-21T12:00:00Z","message":{"role":"user","content":"please fix export retries"}})).unwrap();
 
-        let parsed = parse_claude_chat(&path).unwrap();
+        let (parsed, body) = parse_claude_chat(&path).unwrap();
         assert_eq!(parsed.title, "Fix the exporter");
         assert_eq!(parsed.preview, "please fix export retries");
         assert_eq!(parsed.workspace.as_deref(), Some("/tmp/project"));
+        assert!(body.contains("please fix export retries"));
+    }
+
+    #[test]
+    fn claude_search_reaches_words_only_spoken_mid_conversation() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp
+            .path()
+            .join("33333333-3333-3333-3333-333333333333.jsonl");
+        let mut file = File::create(&path).unwrap();
+        writeln!(file, "{}", json!({"type":"user","sessionId":"33333333-3333-3333-3333-333333333333","message":{"role":"user","content":"start the release"}})).unwrap();
+        writeln!(file, "{}", json!({"type":"assistant","sessionId":"33333333-3333-3333-3333-333333333333","message":{"role":"assistant","content":[{"type":"text","text":"the notarization ticket was stapled"}]}})).unwrap();
+        writeln!(file, "{}", json!({"type":"user","isMeta":true,"sessionId":"33333333-3333-3333-3333-333333333333","message":{"role":"user","content":"<bash-stdout>secret-token</bash-stdout>"}})).unwrap();
+
+        let (result, body) = parse_claude_chat(&path).unwrap();
+        // The title and preview never mention notarization, so the old
+        // metadata-only match could not find this chat.
+        assert!(!query_matches(&result, "notarization", ""));
+        assert!(query_matches(&result, "notarization", &body));
+        // Hook and tool bookkeeping is not the user's conversation.
+        assert!(!body.contains("secret-token"));
     }
 
     #[test]
@@ -1244,9 +1841,166 @@ mod tests {
         )
         .unwrap();
 
-        let parsed = parse_cursor_chat(&path).unwrap();
+        let (parsed, body) = parse_cursor_chat(&path).unwrap();
         assert_eq!(parsed.id, "22222222-2222-2222-2222-222222222222");
         assert_eq!(parsed.preview, "trace the login regression");
+        assert!(query_matches(&parsed, "inspect it", &body));
+        assert!(!query_matches(&parsed, "inspect it", ""));
+    }
+
+    #[test]
+    fn parses_gemini_snapshot_transcript_and_skips_harness_context() {
+        let temp = tempfile::tempdir().unwrap();
+        let chats = temp.path().join("my-project").join("chats");
+        fs::create_dir_all(&chats).unwrap();
+        let path = chats.join("session-2026-08-25T10-00-abcd1234.jsonl");
+        let mut file = File::create(&path).unwrap();
+        writeln!(file, "{}", json!({"sessionId":"44444444-4444-4444-4444-444444444444","kind":"main","lastUpdated":"2026-08-25T10:00:00Z"})).unwrap();
+        writeln!(file, "{}", json!({"$set":{"lastUpdated":"2026-08-25T10:05:00Z","messages":[
+            {"type":"user","content":[{"text":"<session_context>\nboilerplate\n</session_context>"}]},
+            {"type":"user","content":[{"text":"why does the uploader stall"}]},
+            {"type":"gemini","content":[{"text":"the retry budget is exhausted"}]}
+        ]}})).unwrap();
+
+        let (parsed, body) = parse_gemini_chat(&path).unwrap();
+        assert_eq!(parsed.id, "44444444-4444-4444-4444-444444444444");
+        assert_eq!(parsed.source, ChatSource::Gemini);
+        assert_eq!(parsed.preview, "why does the uploader stall");
+        assert_eq!(parsed.workspace.as_deref(), Some("my-project"));
+        assert!(!parsed.can_send);
+        assert!(!body.contains("boilerplate"));
+        assert!(query_matches(&parsed, "retry budget", &body));
+    }
+
+    #[test]
+    fn codex_transcript_body_skips_the_injected_harness_preamble() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp
+            .path()
+            .join("rollout-2026-08-25T10-00-00-55555555-5555-5555-5555-555555555555.jsonl");
+        let mut file = File::create(&path).unwrap();
+        writeln!(file, "{}", json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>\ncwd\n</environment_context>"}]}})).unwrap();
+        writeln!(file, "{}", json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"the WAL wedge is back"}]}})).unwrap();
+        writeln!(file, "{}", json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"checkpointing the journal"}]}})).unwrap();
+
+        let files = vec![path];
+        let transcript = read_codex_transcript(&files, "55555555-5555-5555-5555-555555555555");
+        assert!(transcript.body.contains("the WAL wedge is back"));
+        assert!(transcript.body.contains("checkpointing the journal"));
+        assert!(!transcript.body.contains("environment_context"));
+        assert_eq!(
+            transcript.first_user_text.as_deref(),
+            Some("the WAL wedge is back")
+        );
+        assert!(read_codex_transcript(&files, "unrelated-thread")
+            .body
+            .is_empty());
+        assert_eq!(
+            codex_id_from_file_name(&files[0]).as_deref(),
+            Some("55555555-5555-5555-5555-555555555555")
+        );
+        assert_eq!(
+            codex_id_from_file_name(Path::new("rollout-nope.jsonl")),
+            None
+        );
+    }
+
+    #[test]
+    fn codex_threads_opened_with_an_injected_preamble_recover_a_real_title() {
+        let mut result = ChatSearchResult {
+            source: ChatSource::Codex,
+            id: "thread".to_string(),
+            // What the Codex app server reports for a screenpipe-spawned thread.
+            title: "<screenpipe-system-context> You are running inside screenpipe…".to_string(),
+            preview: "<screenpipe-system-context> You are running inside screenpipe…".to_string(),
+            updated_at: 0,
+            workspace: None,
+            state: "resumable".to_string(),
+            can_send: true,
+        };
+        let transcript = CodexTranscript {
+            body: String::new(),
+            first_user_text: Some("add speaker reconciliation to the pipe".to_string()),
+        };
+        assert!(recover_codex_summary(&mut result, &transcript));
+        assert_eq!(result.title, "add speaker reconciliation to the pipe");
+        assert_eq!(result.preview, "add speaker reconciliation to the pipe");
+
+        // A real title is never overwritten.
+        let mut real = ChatSearchResult {
+            title: "sentry solver".to_string(),
+            preview: "fix the sentry issue".to_string(),
+            ..result.clone()
+        };
+        assert!(recover_codex_summary(&mut real, &transcript));
+        assert_eq!(real.title, "sentry solver");
+        assert_eq!(real.preview, "fix the sentry issue");
+
+        // A scheduled pipe run: read in full, yet every user turn was injected.
+        let mut scheduled = result.clone();
+        scheduled.title = "<screenpipe-system-context> do the work above".to_string();
+        let machine_only = CodexTranscript {
+            body: "assistant: submitted the dashboard values".to_string(),
+            first_user_text: None,
+        };
+        assert!(!recover_codex_summary(&mut scheduled, &machine_only));
+
+        // An unreadable transcript must never drop a real thread.
+        let mut unread = scheduled.clone();
+        assert!(recover_codex_summary(
+            &mut unread,
+            &CodexTranscript::default()
+        ));
+    }
+
+    #[test]
+    fn injected_directive_blocks_never_become_titles_or_search_hits() {
+        // Blocks every runtime injects into thousands of chats.
+        for injected in [
+            "<environment_context>\ncwd=/tmp\n</environment_context>",
+            "<screenpipe-system-context>\nprefer MCP\n</screenpipe-system-context>",
+            "<recommended_plugins>\nplugin list\n</recommended_plugins>",
+            "<session_context>\nThis is the Gemini CLI.\n</session_context>",
+            "  <user_instructions>\nbe terse\n</user_instructions>",
+        ] {
+            assert!(is_wrapped_directive(injected), "missed: {injected}");
+        }
+        // Real user prose, including prose that merely mentions a tag.
+        for prose in [
+            "why does the uploader stall",
+            "the <Timeline> component renders twice",
+            "fix <div> alignment",
+            "<not closed",
+        ] {
+            assert!(!is_wrapped_directive(prose), "false positive: {prose}");
+        }
+        // Codex's two malformed preambles still need explicit handling.
+        assert!(is_codex_harness_context("<permissions instructions> ..."));
+        assert!(is_codex_harness_context("# AGENTS.md instructions\n\n..."));
+    }
+
+    #[test]
+    fn cursor_titles_drop_the_repeated_harness_envelope() {
+        let wrapped = "<timestamp>Thursday, Aug 20, 2026, 6:41 AM (UTC-7)</timestamp>\n<user_query>\nwhat did i do in the last 5 minutes\n</user_query>";
+        assert_eq!(
+            unwrap_cursor_text(wrapped),
+            "what did i do in the last 5 minutes"
+        );
+        assert_eq!(
+            unwrap_cursor_text("<timestamp>Aug 20</timestamp>\nplain follow up"),
+            "plain follow up"
+        );
+        assert_eq!(unwrap_cursor_text("  no envelope  "), "no envelope");
+    }
+
+    #[test]
+    fn searchable_transcript_text_stays_bounded() {
+        let mut body = String::new();
+        let long = "x".repeat(MAX_SEARCH_BODY_CHARS + 1_000);
+        assert!(!append_searchable(&mut body, &long));
+        assert_eq!(body.len(), MAX_SEARCH_BODY_CHARS);
+        assert!(!append_searchable(&mut body, "ignored"));
+        assert_eq!(body.len(), MAX_SEARCH_BODY_CHARS);
     }
 
     #[test]
@@ -1294,6 +2048,8 @@ mod tests {
                 background: false,
             }
         );
+        assert!(external_command_spec(ChatSource::Gemini, "gemini-id", "continue").is_err());
+        assert!(!ChatSource::Gemini.supports_send());
         assert_eq!(
             external_command_spec(ChatSource::Cursor, "cursor-id", "continue").unwrap(),
             ExternalCommandSpec {

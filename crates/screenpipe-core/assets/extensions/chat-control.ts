@@ -80,16 +80,18 @@ function originSessionId(): string {
   );
 }
 
-const sources = ["screenpipe", "codex", "claude", "cursor"];
+const sources = ["screenpipe", "codex", "claude", "cursor", "gemini"];
+// Gemini CLI has no non-interactive resume, so its chats are searchable only.
+const sendableSources = ["screenpipe", "codex", "claude", "cursor"];
 
 export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "search_chats",
     label: "Search Chats",
     description:
-      "Search existing local screenpipe, Codex, Claude, and Cursor chats by title, preview, working directory, or exact id. Call this before send_to_chat and use the exact source + id returned here; never guess from a fuzzy title. Read-only.",
+      "Search existing local screenpipe, Codex, Claude, Cursor, and Gemini CLI chats. Matches the conversation transcript itself as well as title, preview, working directory, and exact id, so a phrase that was only said mid-conversation still finds the chat. Call this before send_to_chat and use the exact source + id returned here; never guess from a fuzzy title. Read-only.",
     promptSnippet:
-      "Use search_chats to find an existing screenpipe, Codex, Claude, or Cursor chat before addressing it.",
+      "Use search_chats to find what was said in any local screenpipe, Codex, Claude, Cursor, or Gemini chat, and to address one before sending.",
     parameters: {
       type: "object",
       properties: {
@@ -140,13 +142,13 @@ export default function (pi: ExtensionAPI) {
     name: "send_to_chat",
     label: "Send to Chat",
     description:
-      "Send a message to one exact chat returned by search_chats. This causes another agent to act, so call only after the user explicitly asked to send/continue/steer and set confirmed=true. queue waits behind an active screenpipe turn; steer interrupts only a running screenpipe turn. Do not blindly retry errors.",
+      "Send a message to one exact chat returned by search_chats. This causes another agent to act, so call only after the user explicitly asked to send/continue/steer and set confirmed=true. queue waits behind an active screenpipe turn; steer interrupts only a running screenpipe turn. Gemini chats are search-only and cannot receive a message. Do not blindly retry errors.",
     promptSnippet:
       "Use send_to_chat only for an exact search_chats result after explicit user authorization.",
     parameters: {
       type: "object",
       properties: {
-        source: { type: "string", enum: sources },
+        source: { type: "string", enum: sendableSources },
         id: {
           type: "string",
           description: "Exact id returned by search_chats.",
