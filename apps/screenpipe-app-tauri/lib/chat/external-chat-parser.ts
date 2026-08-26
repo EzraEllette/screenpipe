@@ -63,7 +63,10 @@ function safeIdPart(value: string): string {
   return value.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 180) || "unknown";
 }
 
-function conversationId(source: ExternalChatSource, sourceId: string): string {
+export function externalChatConversationId(
+  source: ExternalChatSource,
+  sourceId: string,
+): string {
   return `imported-${source}-${safeIdPart(sourceId)}`;
 }
 
@@ -132,7 +135,7 @@ function finishConversation({
   const cleanExplicitTitle = explicitTitle?.trim();
 
   return {
-    id: conversationId(source, sourceId),
+    id: externalChatConversationId(source, sourceId),
     title: cleanExplicitTitle
       ? titleFromText(cleanExplicitTitle)
       : titleFromText(fallbackTitle ?? `${source === "claude-code" ? "Claude Code" : "Codex"} chat`),

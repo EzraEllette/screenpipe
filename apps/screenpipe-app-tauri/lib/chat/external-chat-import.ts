@@ -6,11 +6,13 @@ import { emit } from "@tauri-apps/api/event";
 import { homeDir, join } from "@tauri-apps/api/path";
 import { exists, readDir, readTextFile, stat } from "@tauri-apps/plugin-fs";
 import {
+  deleteConversationFile,
   loadConversationFile,
   invalidateConversationListCache,
   saveConversationFile,
 } from "@/lib/chat-storage";
 import {
+  externalChatConversationId,
   parseExternalChatTranscript,
   type ExternalChatSource,
 } from "@/lib/chat/external-chat-parser";
@@ -28,6 +30,7 @@ export interface ExternalChatCandidate {
   sourceId: string;
   modifiedAt: number;
   size: number;
+  maintenance?: "remove-screenpipe-background-import";
 }
 
 export interface ExternalChatSourceScan {
@@ -41,6 +44,7 @@ export interface ExternalChatSourceScan {
 
 export interface ExternalChatScanResult {
   sources: ExternalChatSourceScan[];
+  maintenanceCandidates: ExternalChatCandidate[];
   totalCandidates: number;
   lookbackDays: number;
 }
@@ -62,12 +66,20 @@ function mergeImportedMessages(
   const merged: ChatMessage[] = [];
 
   for (const message of existing) {
-    if (message.importedFrom === source) {
-      const replacement = incomingById.get(message.id);
-      if (replacement) {
+    const replacement = incomingById.get(message.id);
+    if (replacement) {
+      // Early versions of external chat import did not stamp
+      // `importedFrom` on each message. A later sync therefore treated the
+      // old source message as a local continuation and appended a second copy
+      // with the same stable id. The source transcript is authoritative for
+      // an exact id match, regardless of whether the legacy marker exists.
+      if (!consumed.has(message.id)) {
         merged.push(replacement);
         consumed.add(message.id);
       }
+      continue;
+    }
+    if (message.importedFrom === source) {
       // Source messages absent from the new parse were transport metadata.
       continue;
     }
@@ -90,8 +102,8 @@ function prepareImportedConversation(
   if (!existing) {
     return {
       ...incoming,
-      // Discovering existing history is not a notification. Only content
-      // appended after discovery should light the unread indicator.
+      // Discovering provider history is not a Screenpipe notification. The
+      // transcript does not expose the provider's real read/attention state.
       lastViewedAt: incoming.lastContentAt ?? incoming.updatedAt,
     };
   }
@@ -119,12 +131,14 @@ function prepareImportedConversation(
       existing.lastContentAt ?? 0,
       incoming.lastContentAt ?? 0,
     ) || undefined,
-    // Migrate legacy imports to "read at discovery" without swallowing a
-    // later source update: the old content watermark becomes the read point.
-    lastViewedAt:
-      existing.lastViewedAt
-      ?? existing.lastContentAt
-      ?? existing.updatedAt,
+    // JSONL transcripts do not expose Codex or Claude's real unread state, so
+    // mirror provider updates as read instead of inventing a notification from
+    // file timestamps. A newer Screenpipe-side continuation still has a later
+    // lastContentAt and therefore keeps the native unread behavior.
+    lastViewedAt: Math.max(
+      existing.lastViewedAt ?? 0,
+      incoming.lastContentAt ?? incoming.updatedAt,
+    ),
     importedFrom: incoming.importedFrom
       ? {
           ...incoming.importedFrom,
@@ -159,8 +173,8 @@ function importedConversationIsUnchanged(
       && message.id === candidate.id
       && message.role === candidate.role
       && message.content === candidate.content
-      && (message.contentBlocks?.length ?? 0)
-        === (candidate.contentBlocks?.length ?? 0);
+      && JSON.stringify(message.contentBlocks ?? [])
+        === JSON.stringify(candidate.contentBlocks ?? []);
   });
 }
 
@@ -182,7 +196,14 @@ function basenameWithoutJsonl(path: string): string {
   return (path.split(/[\\/]/).pop() ?? path).replace(/\.jsonl$/i, "");
 }
 
-async function candidateForPath(
+export function isScreenpipeBackgroundClaudeProject(projectName: string): boolean {
+  // Screenpipe runs Activity generation from ~/.screenpipe/pi-daily-summary.
+  // Claude encodes the path separator plus the leading dot as `--` in its
+  // project directory name. Do not exclude user-facing ~/.screenpipe/pi-chat.
+  return projectName.toLowerCase().endsWith("--screenpipe-pi-daily-summary");
+}
+
+export async function externalChatCandidateForPath(
   source: ExternalChatSource,
   path: string,
 ): Promise<ExternalChatCandidate | null> {
@@ -225,6 +246,9 @@ async function listClaudeCandidates(
   const candidates: ExternalChatCandidate[] = [];
   for (const project of await readDir(root)) {
     if (!project.isDirectory) continue;
+    const isScreenpipeBackgroundProject = isScreenpipeBackgroundClaudeProject(
+      project.name,
+    );
     const projectPath = await join(root, project.name);
     try {
       // Claude stores subagent transcripts below a `subagents/` directory.
@@ -232,8 +256,15 @@ async function listClaudeCandidates(
       for (const entry of await readDir(projectPath)) {
         if (entry.isDirectory || !entry.name.toLowerCase().endsWith(".jsonl")) continue;
         const path = await join(projectPath, entry.name);
-        const candidate = await candidateForPath("claude-code", path);
-        if (candidate && candidate.modifiedAt >= cutoffMs) candidates.push(candidate);
+        const candidate = await externalChatCandidateForPath("claude-code", path);
+        if (candidate && candidate.modifiedAt >= cutoffMs) {
+          candidates.push({
+            ...candidate,
+            ...(isScreenpipeBackgroundProject
+              ? { maintenance: "remove-screenpipe-background-import" as const }
+              : {}),
+          });
+        }
       }
     } catch {
       // A single unreadable project must not hide other Claude workspaces.
@@ -241,7 +272,7 @@ async function listClaudeCandidates(
   }
   return {
     candidates,
-    availableCount: candidates.length,
+    availableCount: candidates.filter((candidate) => !candidate.maintenance).length,
     omittedByLimit: 0,
   };
 }
@@ -299,7 +330,7 @@ async function listCodexCandidates(
   let inspectedCount = 0;
   for (const entry of entries) {
     const path = await join(entry.directory, entry.name);
-    const candidate = await candidateForPath("codex", path);
+    const candidate = await externalChatCandidateForPath("codex", path);
     inspectedCount += 1;
     if (!candidate || candidate.modifiedAt < cutoffMs) continue;
     candidates.push(candidate);
@@ -319,7 +350,9 @@ function summarizeSource(
   source: ExternalChatSource,
   discovery: ExternalChatDiscovery,
 ): ExternalChatSourceScan {
-  const allCandidates = discovery.candidates;
+  const allCandidates = discovery.candidates.filter(
+    (candidate) => !candidate.maintenance,
+  );
   const sorted = [...allCandidates].sort(
     (a, b) => b.modifiedAt - a.modifiedAt || b.path.localeCompare(a.path),
   );
@@ -339,9 +372,9 @@ function summarizeSource(
 }
 
 export async function scanExternalChatHistory(
-  options: { nowMs?: number } = {},
+  options: { nowMs?: number; home?: string } = {},
 ): Promise<ExternalChatScanResult> {
-  const home = await homeDir();
+  const home = options.home ?? await homeDir();
   const nowMs = options.nowMs ?? Date.now();
   const cutoffMs = nowMs - EXTERNAL_CHAT_LOOKBACK_DAYS * MS_PER_DAY;
   const [claude, codex] = await Promise.all([
@@ -354,9 +387,44 @@ export async function scanExternalChatHistory(
   ];
   return {
     sources,
+    maintenanceCandidates: [...claude.candidates, ...codex.candidates].filter(
+      (candidate) => candidate.maintenance != null,
+    ),
     totalCandidates: sources.reduce((total, source) => total + source.candidates.length, 0),
     lookbackDays: EXTERNAL_CHAT_LOOKBACK_DAYS,
   };
+}
+
+async function removeScreenpipeBackgroundImport(
+  candidate: ExternalChatCandidate,
+): Promise<"removed" | "preserved" | "missing"> {
+  const id = externalChatConversationId(candidate.source, candidate.sourceId);
+  const existing = await loadConversationFile(id);
+  if (
+    !existing
+    || existing.importedFrom?.source !== candidate.source
+    || existing.importedFrom.sourceId !== candidate.sourceId
+  ) {
+    return "missing";
+  }
+
+  const sourceMessagePrefix = `${id}-`;
+  const hasLocalContinuation = existing.messages.some(
+    (message) => message.importedFrom !== candidate.source
+      && !message.id.startsWith(sourceMessagePrefix),
+  );
+  if (existing.pinned || existing.titleSource === "user" || hasLocalContinuation) {
+    return "preserved";
+  }
+
+  await deleteConversationFile(id);
+  try {
+    await emit("chat-deleted", { id });
+  } catch {
+    // The next disk hydration still removes the stale row if this window
+    // cannot broadcast the cleanup to other views.
+  }
+  return "removed";
 }
 
 export async function importExternalChatHistory(
@@ -372,6 +440,13 @@ export async function importExternalChatHistory(
 
   for (const candidate of candidates) {
     try {
+      if (candidate.maintenance === "remove-screenpipe-background-import") {
+        const cleanup = await removeScreenpipeBackgroundImport(candidate);
+        if (cleanup === "removed") result.updated += 1;
+        else result.skipped += 1;
+        continue;
+      }
+
       // Re-check at click time: agent clients may still be appending after the
       // dialog scan. Never trust the stale size when deciding whether it is
       // safe to read the whole JSONL into the webview.

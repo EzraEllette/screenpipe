@@ -50,6 +50,10 @@ import {
 import { renderChartFence } from "@/components/chat/charts/chat-chart";
 import { PlanBlock } from "@/components/chat/standalone/plan-block";
 import { ActivityIcon, type ActivityIconState } from "@/components/chat/standalone/activity-icon";
+import {
+  parseStructuredAssistantOutput,
+  StructuredOutputBlock,
+} from "@/components/chat/standalone/structured-output";
 
 const MermaidDiagram = React.lazy(() =>
   import("@/components/rewind/mermaid-diagram").then((mod) => ({
@@ -1885,6 +1889,17 @@ export function MessageContent({
       <div className="space-y-2 min-w-0 w-full overflow-hidden">
         {displayGroups.map((group) => {
           if (group.type === "text") {
+            const structuredOutput = !isUser
+              ? parseStructuredAssistantOutput(group.text)
+              : null;
+            if (structuredOutput) {
+              return (
+                <StructuredOutputBlock
+                  key={`text-${group.key}`}
+                  output={structuredOutput}
+                />
+              );
+            }
             return (
               <MarkdownBlock
                 {...markdownOptions}
@@ -2003,6 +2018,9 @@ export function MessageContent({
   // an assistant bubble (the tool activity itself renders from contentBlocks).
   const displayText = rawText === "(tool result)" ? "" : rawText;
   const hasMeaningfulText = Boolean(displayText && displayText !== "Processing...");
+  const structuredOutput = !isUser && displayText
+    ? parseStructuredAssistantOutput(displayText)
+    : null;
 
   if (!isUser && !hasMeaningfulText && !attachmentsRow && !sourceFooter && !retryCta) {
     return null;
@@ -2011,7 +2029,9 @@ export function MessageContent({
   return (
     <div className="space-y-2 min-w-0 w-full">
       {attachmentsRow}
-      {displayText ? (
+      {structuredOutput ? (
+        <StructuredOutputBlock output={structuredOutput} />
+      ) : displayText ? (
         <MarkdownBlock
           {...markdownOptions}
           text={displayText}
