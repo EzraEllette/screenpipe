@@ -102,6 +102,15 @@ vi.mock("@/lib/http/tauri-fetch", () => ({
 vi.mock("@/lib/utils/tauri", () => ({
   commands: {
     piCheck: vi.fn(async () => ({ status: "ok", data: { available: false } })),
+    piAcpAgentInstallStatus: vi.fn(async () => ({
+      requiresInstall: false,
+      installed: true,
+    })),
+    piAcpAgentDownloadPending: vi.fn(async () => false),
+    piAcpProbeAgent: vi.fn(async () => ({
+      status: "error",
+      error: "model and mode choices unavailable",
+    })),
     chatgptOauthStatus: vi.fn(async () => ({ status: "ok", data: { logged_in: false } })),
     chatgptOauthGetToken: vi.fn(async () => ({ status: "error" })),
   },
@@ -215,6 +224,9 @@ describe("AIPresetsSelector controlled preset creation", () => {
       "GitHub Copilot",
       "Pi",
     ]);
+
+    fireEvent.click(screen.getByRole("button", { name: "Pi" }));
+    expect(screen.queryByText("how this works")).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "screenpipe" }));
     const nameInput = screen.getByLabelText("name");
@@ -357,6 +369,66 @@ describe("AIPresetsSelector controlled preset creation", () => {
     fireEvent.click(trigger);
     expect(screen.getByTestId("ai-preset-popover-footer")).toHaveTextContent(
       "effort control",
+    );
+  });
+
+  it("keeps recommendation copy out of the native model trigger", () => {
+    mocks.settings.current = {
+      aiPresets: [
+        {
+          ...originalPreset,
+          model: "screenpipe/Auto (recommended)",
+        },
+      ],
+      user: { token: "test-token" },
+    };
+
+    render(<AIPresetsSelector compact showModelOnly />);
+
+    const trigger = screen.getByRole("combobox");
+    expect(trigger).toHaveTextContent("screenpipe/Auto");
+    expect(trigger).not.toHaveTextContent("recommended");
+  });
+});
+
+describe("AIPresetsSelector agent presets", () => {
+  const agentPreset: AIPreset = {
+    ...originalPreset,
+    id: "cursor",
+    provider: "acp",
+    model: "cursor",
+    acpAgent: { id: "cursor" },
+    defaultPreset: false,
+  } as AIPreset;
+
+  beforeEach(() => {
+    mocks.settings.current = {
+      aiPresets: [originalPreset, agentPreset],
+      user: { token: "test-token" },
+    };
+    mocks.settings.listeners.clear();
+    mocks.updateSettings.mockClear();
+    mocks.controlledSelect.mockClear();
+    mocks.acpEnabled.current = true;
+  });
+
+  it("lists and selects agent presets on every surface", () => {
+    render(
+      <AIPresetsSelector
+        compact
+        showModelOnly
+        controlledPresetId={originalPreset.id}
+        onControlledSelect={mocks.controlledSelect}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("combobox"));
+    const option = screen.getByTestId("ai-preset-option-cursor");
+    expect(option).not.toHaveAttribute("data-disabled");
+
+    fireEvent.click(option);
+    expect(mocks.controlledSelect).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "cursor", provider: "acp" }),
     );
   });
 });

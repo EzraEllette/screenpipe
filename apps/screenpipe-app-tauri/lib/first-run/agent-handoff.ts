@@ -29,18 +29,38 @@
  */
 
 import type { ConnectAllToolId } from "@/lib/ai-tools-mcp";
+import type { FirstRunCapturedApp } from "@/lib/first-run/learning-window";
 
 export type AgentHandoffTarget = {
   id: ConnectAllToolId;
   /** Shown on the button. */
   label: string;
   /**
-   * Verified URL that opens the app with the prompt prefilled. Optional so a
+   * Documented URL that opens the app with the prompt prefilled. Optional so a
    * future target can explicitly degrade to clipboard-only.
    */
   deeplink?: string;
+  /**
+   * Replay the URL after this delay. Cursor can consume a prompt deeplink once
+   * its UI is ready but lose the same event while cold-starting.
+   */
+  replayAfterMs?: number;
   /** What the user should do after the handoff. */
   hint: string;
+};
+
+export type AgentHandoffOpenResult = {
+  /** The protocol handler accepted the initial open request. */
+  launched: boolean;
+  /** Every required open, including a cold-start replay, completed. */
+  prefilled: boolean;
+  /** A target-specific cold-start replay completed. */
+  replayed: boolean;
+  failedStage?: "open" | "replay";
+};
+
+export type AgentHandoffResult = AgentHandoffOpenResult & {
+  copied: boolean;
 };
 
 /**
@@ -53,6 +73,14 @@ export const HANDOFF_PROMPT =
   "Using screenpipe, summarize what I worked on in the last 5 minutes.";
 
 const ENCODED_HANDOFF_PROMPT = encodeURIComponent(HANDOFF_PROMPT);
+
+/**
+ * Measured on the desktop app, not a generic network retry: Cursor's window
+ * was ready to consume the prompt three seconds after its protocol handler
+ * started the process. Replaying sooner risks landing during its splash
+ * screen; waiting longer makes the first-run click feel broken.
+ */
+export const CURSOR_DEEPLINK_REPLAY_DELAY_MS = 3_000;
 
 /**
  * Preference order, not an alphabetical list. Every shipped target has a
@@ -72,9 +100,11 @@ const HANDOFF_TARGETS: AgentHandoffTarget[] = [
     id: "cursor",
     label: "Cursor",
     // Cursor's documented prompt deeplink opens Chat with the text prefilled
-    // and explicitly never executes it automatically.
+    // and explicitly never executes it automatically. Its macOS cold start can
+    // drop the first event, so replay once after the UI has initialized.
     deeplink: `cursor://anysphere.cursor-deeplink/prompt?text=${ENCODED_HANDOFF_PROMPT}`,
-    hint: "Question ready in Cursor. Review and send it.",
+    replayAfterMs: CURSOR_DEEPLINK_REPLAY_DELAY_MS,
+    hint: "Cursor opened. Review and send the question.",
   },
   {
     id: "codex",
@@ -85,6 +115,90 @@ const HANDOFF_TARGETS: AgentHandoffTarget[] = [
     hint: "Question ready in ChatGPT. Review and send it.",
   },
 ];
+
+const wait = (ms: number) =>
+  new Promise<void>((resolve) => globalThis.setTimeout(resolve, ms));
+
+/**
+ * Open a target's prompt route and finish any target-specific cold-start
+ * recovery before claiming the prompt is ready.
+ *
+ * `openUrl()` only proves the OS accepted the URL. It does not prove the app's
+ * composer consumed it. Cursor needs one replay after startup; keeping that
+ * rule in the registry avoids retrying Claude and Codex unnecessarily.
+ */
+export async function openAgentHandoffDeeplink(
+  target: AgentHandoffTarget,
+  openUrl: (url: string) => Promise<void>,
+  delay: (ms: number) => Promise<void> = wait,
+): Promise<AgentHandoffOpenResult> {
+  if (!target.deeplink) {
+    return { launched: false, prefilled: false, replayed: false };
+  }
+
+  try {
+    await openUrl(target.deeplink);
+  } catch {
+    return {
+      launched: false,
+      prefilled: false,
+      replayed: false,
+      failedStage: "open",
+    };
+  }
+
+  if (!target.replayAfterMs) {
+    return { launched: true, prefilled: true, replayed: false };
+  }
+
+  try {
+    await delay(target.replayAfterMs);
+    await openUrl(target.deeplink);
+    return { launched: true, prefilled: true, replayed: true };
+  } catch {
+    // The first open may still have worked on a warm app, but we cannot claim
+    // that a cold-start prompt arrived. The caller keeps the copied fallback.
+    return {
+      launched: true,
+      prefilled: false,
+      replayed: false,
+      failedStage: "replay",
+    };
+  }
+}
+
+/**
+ * Copy first, then open the verified prompt route.
+ *
+ * Both the ready card and a notification deep link use this exact operation.
+ * Keeping it below the React hook is important: native notification clicks can
+ * arrive before the ready card is mounted, and Cursor still needs its cold
+ * start replay in that case.
+ */
+export async function performAgentHandoff(
+  target: AgentHandoffTarget,
+  deps: {
+    copyText: (text: string) => Promise<void>;
+    openUrl: (url: string) => Promise<void>;
+    delay?: (ms: number) => Promise<void>;
+  },
+): Promise<AgentHandoffResult> {
+  let copied = false;
+  try {
+    await deps.copyText(HANDOFF_PROMPT);
+    copied = true;
+  } catch {
+    // The prompt is also encoded in every supported deeplink, so clipboard is
+    // recovery rather than a gate.
+  }
+
+  const opened = await openAgentHandoffDeeplink(
+    target,
+    deps.openUrl,
+    deps.delay,
+  );
+  return { ...opened, copied };
+}
 
 /**
  * Every connected target, in preference order.
@@ -110,6 +224,63 @@ export function pickHandoffTarget(
   connected: readonly ConnectAllToolId[],
 ): AgentHandoffTarget | null {
   return pickHandoffTargets(connected)[0] ?? null;
+}
+
+/** Resolve a validated target id from a notification deep link. */
+export function handoffTargetById(
+  id: string | null | undefined,
+): AgentHandoffTarget | null {
+  return HANDOFF_TARGETS.find((target) => target.id === id) ?? null;
+}
+
+const APP_MATCHERS: Partial<Record<ConnectAllToolId, readonly RegExp[]>> = {
+  claude: [/^claude(?: desktop)?$/i],
+  cursor: [/^cursor$/i],
+  codex: [/^codex$/i, /^chatgpt$/i],
+};
+
+/**
+ * Pick the connected agent the user was actually using during this bounded
+ * first-run window.
+ *
+ * App names and aggregate local duration/frame counts are enough. We never
+ * inspect window titles, prompts, snippets, or captured content. A static
+ * preference is deliberately not returned when no app matched: in that case
+ * the notification should only bring the user back to their Screenpipe result
+ * rather than guessing which external app they prefer.
+ */
+export function preferredHandoffTargetForRecentApps(
+  targets: readonly AgentHandoffTarget[],
+  apps: readonly FirstRunCapturedApp[],
+): AgentHandoffTarget | null {
+  let best: { target: AgentHandoffTarget; minutes: number; frames: number } | null =
+    null;
+
+  for (const target of targets) {
+    const matchers = APP_MATCHERS[target.id] ?? [];
+    const matches = apps.filter((app) =>
+      matchers.some((matcher) => matcher.test(app.name.trim())),
+    );
+    if (matches.length === 0) continue;
+
+    const minutes = matches.reduce(
+      (sum, app) => sum + Math.max(0, app.activeMinutes ?? 0),
+      0,
+    );
+    const frames = matches.reduce(
+      (sum, app) => sum + Math.max(0, app.frameCount),
+      0,
+    );
+    if (
+      !best ||
+      minutes > best.minutes ||
+      (minutes === best.minutes && frames > best.frames)
+    ) {
+      best = { target, minutes, frames };
+    }
+  }
+
+  return best?.target ?? null;
 }
 
 /** Exposed for tests and for callers that need the whole preference order. */

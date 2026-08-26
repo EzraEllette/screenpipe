@@ -8,11 +8,10 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import posthog from "posthog-js";
 import {
+  AudioLines,
   BrainCircuit,
-  CalendarDays,
   Check,
   Loader2,
-  Mail,
   RefreshCw,
 } from "lucide-react";
 
@@ -33,6 +32,7 @@ import { commands } from "@/lib/utils/tauri";
 
 const DAILY_EMAIL_PIPE = "daily-email-summary";
 const DIGITAL_CLONE_PIPE = "digital-clone";
+const SPEAKER_RECONCILIATION_PIPE = "speaker-reconciliation";
 const GMAIL_POLL_INTERVAL_MS = 2_000;
 const GMAIL_POLL_ATTEMPTS = 60;
 
@@ -43,6 +43,7 @@ export type FirstRunNextStepsSnapshot = {
   checked: boolean;
   dailyEmailState: PipeSetupState;
   digitalCloneState: PipeSetupState;
+  speakerReconciliationState: PipeSetupState;
   gmailConnected: SetupCheck;
   googleCalendarConnected: SetupCheck;
 };
@@ -51,6 +52,7 @@ const INITIAL_SNAPSHOT: FirstRunNextStepsSnapshot = {
   checked: false,
   dailyEmailState: null,
   digitalCloneState: null,
+  speakerReconciliationState: null,
   gmailConnected: null,
   googleCalendarConnected: null,
 };
@@ -59,19 +61,18 @@ async function checkPipeState(
   slug: string,
 ): Promise<Exclude<PipeSetupState, null>> {
   const response = await localFetch(`/pipes/${encodeURIComponent(slug)}`);
-  if (!response.ok)
-    throw new Error(`scheduled tasks API returned ${response.status}`);
+  if (!response.ok) throw new Error("Screenpipe couldn't check this setting.");
   const body = await response.json();
   if (body?.data) {
     if (typeof body.data.config?.enabled !== "boolean") {
-      throw new Error("scheduled task enabled status was unavailable");
+      throw new Error("Screenpipe couldn't check whether this is on.");
     }
     return body.data.config.enabled ? "enabled" : "disabled";
   }
   if (typeof body?.error === "string" && body.error.includes("not found")) {
     return "missing";
   }
-  throw new Error("scheduled task status was unavailable");
+  throw new Error("Screenpipe couldn't check this setting.");
 }
 
 async function enablePipe(slug: string): Promise<void> {
@@ -90,7 +91,7 @@ async function enablePipe(slug: string): Promise<void> {
     // A non-2xx response still fails below if an older engine has no body.
   }
   if (!response.ok || body?.error || body?.success === false) {
-    throw new Error(body?.error ?? "scheduled task could not be enabled");
+    throw new Error("Screenpipe couldn't turn this on.");
   }
 }
 
@@ -106,12 +107,31 @@ async function installStorePipe(slug: string): Promise<void> {
     error?: string;
   } | null;
   if (!response.ok || body?.error) {
-    throw new Error(body?.error ?? "scheduled task could not be installed");
+    throw new Error("Screenpipe couldn't add this.");
   }
 
   publishPipeInstalledReceipt({
     pipeName: body?.name || slug,
     connections: Array.isArray(body?.connections) ? body.connections : [],
+  });
+}
+
+async function installBundledPipe(slug: string): Promise<void> {
+  const response = await localFetch(
+    `/pipes/bundled/${encodeURIComponent(slug)}/install`,
+    { method: "POST" },
+  );
+  const body = (await response.json().catch(() => null)) as {
+    name?: string;
+    error?: string;
+  } | null;
+  if (!response.ok || body?.error) {
+    throw new Error("Screenpipe couldn't add this.");
+  }
+
+  publishPipeInstalledReceipt({
+    pipeName: body?.name || slug,
+    connections: [],
   });
 }
 
@@ -177,47 +197,27 @@ function StatusLabel({
   );
 }
 
-function NextStepRow({
+function SetupOutcomeRow({
   icon,
   title,
   description,
   status,
-  action,
-  actionLabel,
-  actionTestId,
   complete = false,
-  busy = false,
-  disabled = false,
-  busyLabel = "checking",
 }: {
   icon: React.ReactNode;
   title: string;
   description: string;
   status: string;
-  action: () => void;
-  actionLabel: string;
-  actionTestId: string;
   complete?: boolean;
-  busy?: boolean;
-  disabled?: boolean;
-  busyLabel?: string;
 }) {
-  const titleId = `${actionTestId}-title`;
-
   return (
-    <article
-      aria-labelledby={titleId}
-      className="grid grid-cols-[2rem_minmax(0,1fr)] gap-x-3 gap-y-2 border-t border-border px-4 py-3 sm:grid-cols-[2rem_minmax(0,1fr)_auto] sm:items-center"
-    >
-      <span className="row-span-2 flex h-8 w-8 items-center justify-center border border-border bg-muted/20">
+    <article className="grid grid-cols-[2rem_minmax(0,1fr)] gap-x-3 border-t border-border px-4 py-3">
+      <span className="flex h-8 w-8 items-center justify-center border border-border bg-background">
         {icon}
       </span>
       <div className="min-w-0">
         <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-          <h3
-            id={titleId}
-            className="font-mono text-xs font-semibold lowercase text-foreground"
-          >
+          <h3 className="font-mono text-xs font-semibold lowercase text-foreground">
             {title}
           </h3>
           <StatusLabel ready={complete}>{status}</StatusLabel>
@@ -226,25 +226,6 @@ function NextStepRow({
           {description}
         </p>
       </div>
-      <Button
-        type="button"
-        size="sm"
-        variant={complete ? "ghost" : "outline"}
-        data-testid={actionTestId}
-        className="col-start-2 h-8 w-full justify-between px-2.5 text-[10px] sm:col-start-3 sm:row-span-2 sm:row-start-1 sm:min-w-32"
-        disabled={complete || busy || disabled}
-        aria-busy={busy}
-        onClick={action}
-      >
-        <span>{busy ? busyLabel : actionLabel}</span>
-        {busy ? (
-          <Loader2 className="h-3 w-3 animate-spin" aria-hidden="true" />
-        ) : complete ? (
-          <Check className="h-3 w-3" aria-hidden="true" />
-        ) : (
-          <span aria-hidden="true">→</span>
-        )}
-      </Button>
     </article>
   );
 }
@@ -253,58 +234,48 @@ export function FirstRunNextStepsPanel({
   snapshot,
   refreshing,
   actionError,
-  dailyEmailBusyLabel,
-  digitalCloneBusyLabel,
-  calendarBusyLabel,
-  onSetupDailyEmail,
-  onSetupDigitalClone,
-  onConnectGoogleCalendar,
+  setupBusyLabel,
+  onSetupEverything,
   onRetry,
 }: {
   snapshot: FirstRunNextStepsSnapshot;
   refreshing: boolean;
   actionError?: string | null;
-  dailyEmailBusyLabel?: string | null;
-  digitalCloneBusyLabel?: string | null;
-  calendarBusyLabel?: string | null;
-  onSetupDailyEmail: () => void;
-  onSetupDigitalClone: () => void;
-  onConnectGoogleCalendar: () => void;
+  setupBusyLabel?: string | null;
+  onSetupEverything: () => void;
   onRetry: () => void;
 }) {
   const checking = !snapshot.checked || refreshing;
-  const dailyMissing = snapshot.dailyEmailState === "missing";
-  const dailyDisabled = snapshot.dailyEmailState === "disabled";
-  const dailyEnabled = snapshot.dailyEmailState === "enabled";
-  const dailyReady = dailyEnabled && snapshot.gmailConnected === true;
+  const dailyReady =
+    snapshot.dailyEmailState === "enabled" && snapshot.gmailConnected === true;
   const gmailUnknown = snapshot.checked && snapshot.gmailConnected === null;
-  const dailyNeedsGmail =
-    (dailyDisabled || dailyEnabled) && snapshot.gmailConnected === false;
-  const dailyNeedsEnable = dailyDisabled && snapshot.gmailConnected === true;
   const dailyUnknown =
     snapshot.checked &&
     (snapshot.dailyEmailState === null || snapshot.gmailConnected === null);
   const cloneReady = snapshot.digitalCloneState === "enabled";
   const cloneDisabled = snapshot.digitalCloneState === "disabled";
   const cloneUnknown = snapshot.checked && snapshot.digitalCloneState === null;
+  const speakerReady = snapshot.speakerReconciliationState === "enabled";
+  const speakerDisabled = snapshot.speakerReconciliationState === "disabled";
+  const speakerUnknown =
+    snapshot.checked && snapshot.speakerReconciliationState === null;
   const calendarReady = snapshot.googleCalendarConnected === true;
   const calendarUnknown =
     snapshot.checked && snapshot.googleCalendarConnected === null;
   const hasUnknown =
-    gmailUnknown || dailyUnknown || cloneUnknown || calendarUnknown;
-  const allReady = dailyReady && cloneReady && calendarReady;
-  const dailyBusy = checking || Boolean(dailyEmailBusyLabel);
-  const cloneBusy = checking || Boolean(digitalCloneBusyLabel);
-  const calendarBusy = checking || Boolean(calendarBusyLabel);
-  const actionInProgress = Boolean(
-    dailyEmailBusyLabel || digitalCloneBusyLabel || calendarBusyLabel,
-  );
+    gmailUnknown ||
+    dailyUnknown ||
+    cloneUnknown ||
+    speakerUnknown ||
+    calendarUnknown;
+  const allReady = dailyReady && cloneReady && speakerReady && calendarReady;
+  const setupBusy = Boolean(setupBusyLabel);
 
   const announcement = checking
-    ? "checking recommended setup status"
+    ? "checking your setup"
     : allReady
-      ? "daily setup ready. email summary and digital clone are enabled. google calendar is connected."
-      : "recommended setup status updated";
+      ? "all set. Screenpipe remembers your work, emails your daily recap, helps name people in meetings, and knows what is on your calendar."
+      : "setup checked";
 
   return (
     <section
@@ -329,12 +300,12 @@ export function FirstRunNextStepsPanel({
             id="first-run-next-steps-heading"
             className="mt-1 font-mono text-sm font-semibold lowercase text-foreground"
           >
-            make screenpipe useful every day
+            set up Screenpipe
           </h2>
         </div>
         <p className="max-w-sm text-[10px] leading-relaxed text-muted-foreground sm:text-right">
-          setup runs from here. screenpipe only asks for a connection when one
-          is missing.
+          turn everything on here. connect Gmail and Google Calendar only if
+          needed.
         </p>
       </div>
 
@@ -348,132 +319,136 @@ export function FirstRunNextStepsPanel({
           </span>
           <div>
             <p className="font-mono text-xs font-semibold lowercase text-foreground">
-              daily setup ready
+              all set
             </p>
             <p className="mt-0.5 text-[10px] leading-relaxed text-muted-foreground">
-              email summary and digital clone are enabled. google calendar is
-              connected.
+              Screenpipe remembers your work, emails your daily recap, helps
+              name people in meetings, and knows what is on your calendar.
             </p>
           </div>
         </div>
       ) : (
-        <div className="border-b border-border pb-1">
-          <NextStepRow
-            icon={<Mail className="h-4 w-4" aria-hidden="true" />}
-            title="daily email summary"
-            description="send one concise, source-backed recap to your own inbox every evening."
-            status={
-              checking
-                ? "checking"
-                : dailyEmailBusyLabel
-                  ? dailyEmailBusyLabel
-                  : dailyReady
-                    ? "ready"
-                    : dailyNeedsGmail
-                      ? dailyEnabled
-                        ? "enabled, needs gmail"
-                        : "installed, needs gmail"
-                      : dailyNeedsEnable
-                        ? "installed, not active"
-                        : dailyUnknown
-                          ? "status unavailable"
-                          : snapshot.gmailConnected === true
-                            ? "gmail connected"
-                            : gmailUnknown
-                              ? "gmail check unavailable"
-                              : "gmail needed"
-            }
-            action={dailyUnknown ? onRetry : onSetupDailyEmail}
-            actionLabel={
-              dailyReady
-                ? "ready"
-                : dailyUnknown
-                  ? "retry"
-                  : dailyMissing
-                    ? snapshot.gmailConnected === true
-                      ? "install & enable"
-                      : "install & connect"
-                    : dailyNeedsGmail
-                      ? dailyEnabled
-                        ? "connect gmail"
-                        : "connect & enable"
-                    : dailyNeedsEnable
-                      ? "enable summary"
-                      : "set up"
-            }
-            actionTestId="first-run-next-step-daily-email"
-            complete={dailyReady}
-            busy={dailyBusy}
-            disabled={actionInProgress}
-            busyLabel={
-              checking ? "checking" : (dailyEmailBusyLabel ?? "working")
-            }
-          />
+        <div className="mx-4 mb-4 overflow-hidden border border-border bg-muted/10">
+          <div className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between">
+            <div className="max-w-md">
+              <p className="font-mono text-xs font-semibold lowercase text-foreground">
+                one click sets up all of this
+              </p>
+              <p className="mt-1 text-[10px] leading-relaxed text-muted-foreground">
+                Screenpipe will turn these on, then help you connect Gmail and
+                Google Calendar.
+              </p>
+            </div>
+            <Button
+              type="button"
+              size="sm"
+              data-testid="first-run-next-step-setup-all"
+              className="h-9 min-w-40 justify-between gap-3 px-3 text-[10px]"
+              disabled={checking || setupBusy}
+              aria-busy={checking || setupBusy}
+              onClick={hasUnknown ? onRetry : onSetupEverything}
+            >
+              <span>
+                {checking
+                  ? "checking"
+                  : setupBusyLabel
+                    ? setupBusyLabel
+                    : hasUnknown
+                      ? "check again"
+                      : actionError
+                        ? "keep going"
+                        : "set up all"}
+              </span>
+              {checking || setupBusy ? (
+                <Loader2 className="h-3 w-3 animate-spin" aria-hidden="true" />
+              ) : (
+                <span aria-hidden="true">→</span>
+              )}
+            </Button>
+          </div>
 
-          <NextStepRow
+          <SetupOutcomeRow
             icon={<BrainCircuit className="h-4 w-4" aria-hidden="true" />}
-            title="digital clone"
-            description="build a structured memory of your work, meetings, and recurring people on this device."
+            title="remember my work"
+            description="remember my work, meetings, and the people I work with."
             status={
               checking
                 ? "checking"
-                : digitalCloneBusyLabel
-                  ? digitalCloneBusyLabel
-                  : cloneReady
-                    ? "ready"
-                    : cloneDisabled
-                      ? "installed, not active"
-                      : cloneUnknown
-                        ? "status unavailable"
-                        : "no connection needed"
-            }
-            action={cloneUnknown ? onRetry : onSetupDigitalClone}
-            actionLabel={
-              cloneReady
-                ? "ready"
-                : cloneUnknown
-                  ? "retry"
+                : cloneReady
+                  ? "on"
                   : cloneDisabled
-                    ? "enable"
-                    : "install & enable"
+                    ? "off"
+                    : cloneUnknown
+                      ? "couldn't check"
+                      : "ready to set up"
             }
-            actionTestId="first-run-next-step-digital-clone"
             complete={cloneReady}
-            busy={cloneBusy}
-            disabled={actionInProgress}
-            busyLabel={
-              checking ? "checking" : (digitalCloneBusyLabel ?? "working")
-            }
           />
 
-          <NextStepRow
-            icon={<CalendarDays className="h-4 w-4" aria-hidden="true" />}
-            title="google calendar"
-            description="add upcoming meeting context so calls are easier to prepare for."
+          <SetupOutcomeRow
+            icon={<AudioLines className="h-4 w-4" aria-hidden="true" />}
+            title="name people in meetings"
+            description="after each meeting, suggest who was speaking. you review every name before anything changes."
+            status={
+              checking
+                ? "checking"
+                : speakerReady
+                  ? "on"
+                  : speakerDisabled
+                    ? "off"
+                    : speakerUnknown
+                      ? "couldn't check"
+                      : "ready to set up"
+            }
+            complete={speakerReady}
+          />
+
+          <SetupOutcomeRow
+            icon={
+              <img
+                src="/images/gmail.svg"
+                alt=""
+                className="h-4 w-4"
+                data-testid="gmail-service-icon"
+              />
+            }
+            title="send my daily recap"
+            description="email me a short recap of my day each evening."
+            status={
+              checking
+                ? "checking"
+                : dailyReady
+                  ? "on"
+                  : dailyUnknown
+                    ? "couldn't check"
+                    : snapshot.gmailConnected === true
+                      ? "gmail connected"
+                      : "connect gmail"
+            }
+            complete={dailyReady}
+          />
+
+          <SetupOutcomeRow
+            icon={
+              <img
+                src="/google-calendar-icon.svg"
+                alt=""
+                className="h-4 w-4"
+                data-testid="google-calendar-service-icon"
+              />
+            }
+            title="understand my meetings"
+            description="use Google Calendar to understand what my meetings are about. Screenpipe never changes my calendar."
             status={
               checking
                 ? "checking"
                 : calendarReady
                   ? "connected"
                   : calendarUnknown
-                    ? "status unavailable"
-                    : "not connected"
+                    ? "couldn't check"
+                    : "connect calendar"
             }
-            action={calendarUnknown ? onRetry : onConnectGoogleCalendar}
-            actionLabel={
-              calendarReady
-                ? "connected"
-                : calendarUnknown
-                  ? "retry"
-                  : "connect"
-            }
-            actionTestId="first-run-next-step-google-calendar"
             complete={calendarReady}
-            busy={calendarBusy}
-            disabled={actionInProgress}
-            busyLabel={
-              checking ? "checking" : (calendarBusyLabel ?? "connecting")
-            }
           />
         </div>
       )}
@@ -485,7 +460,7 @@ export function FirstRunNextStepsPanel({
         >
           <p className="text-[10px] leading-relaxed text-muted-foreground">
             {actionError ??
-              "some setup status could not be checked. nothing changed."}
+              "Screenpipe couldn't check everything. nothing changed."}
           </p>
           <Button
             type="button"
@@ -512,36 +487,40 @@ export function FirstRunNextSteps({
     useState<FirstRunNextStepsSnapshot>(INITIAL_SNAPSHOT);
   const [refreshing, setRefreshing] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
-  const [busyAction, setBusyAction] = useState<{
-    id: "daily-email" | "digital-clone" | "google-calendar";
-    label: string;
-  } | null>(null);
+  const [setupBusyLabel, setSetupBusyLabel] = useState<string | null>(null);
   const refreshIdRef = useRef(0);
-  const busyActionRef = useRef<typeof busyAction>(null);
+  const setupBusyRef = useRef(false);
   const gmailConnectAbortRef = useRef<AbortController | null>(null);
 
   const refresh = useCallback(async () => {
     const refreshId = ++refreshIdRef.current;
     setRefreshing(true);
 
-    const [dailyEmail, digitalClone, gmail, googleCalendar] =
-      await Promise.allSettled([
-        checkPipeState(DAILY_EMAIL_PIPE),
-        checkPipeState(DIGITAL_CLONE_PIPE),
-        userToken
-          ? fetchComposioStatus(userToken).then((status) => {
-              if (!status) throw new Error("gmail status unavailable");
-              return status.gmail?.connected === true;
-            })
-          : Promise.resolve(null),
-        checkGoogleCalendarConnected(),
-      ]);
+    const [
+      dailyEmail,
+      digitalClone,
+      speakerReconciliation,
+      gmail,
+      googleCalendar,
+    ] = await Promise.allSettled([
+      checkPipeState(DAILY_EMAIL_PIPE),
+      checkPipeState(DIGITAL_CLONE_PIPE),
+      checkPipeState(SPEAKER_RECONCILIATION_PIPE),
+      userToken
+        ? fetchComposioStatus(userToken).then((status) => {
+            if (!status) throw new Error("gmail status unavailable");
+            return status.gmail?.connected === true;
+          })
+        : Promise.resolve(null),
+      checkGoogleCalendarConnected(),
+    ]);
 
     if (refreshId !== refreshIdRef.current) return;
     setSnapshot({
       checked: true,
       dailyEmailState: settledValue(dailyEmail),
       digitalCloneState: settledValue(digitalClone),
+      speakerReconciliationState: settledValue(speakerReconciliation),
       gmailConnected: settledValue(gmail),
       googleCalendarConnected: settledValue(googleCalendar),
     });
@@ -568,16 +547,6 @@ export function FirstRunNextSteps({
     };
   }, [refresh]);
 
-  const setActionLabel = useCallback(
-    (
-      id: "daily-email" | "digital-clone" | "google-calendar",
-      label: string,
-    ) => {
-      setBusyAction({ id, label });
-    },
-    [],
-  );
-
   const connectGmail = useCallback(async () => {
     if (!userToken) {
       throw new Error("sign in to connect gmail, then try again.");
@@ -603,113 +572,86 @@ export function FirstRunNextSteps({
     });
   }, [userToken]);
 
-  const setupDailyEmail = useCallback(async () => {
-    if (busyActionRef.current) return;
-    busyActionRef.current = { id: "daily-email", label: "starting" };
-    setActionLabel("daily-email", "starting");
+  const connectGoogleCalendar = useCallback(async () => {
+    const result = await commands.oauthConnect("google-calendar", null, null);
+    if (result.status === "error") throw new Error(result.error);
+    if (!result.data.connected) {
+      throw new Error("google calendar connection was not completed.");
+    }
+    notifyConnectionsUpdated();
+    posthog.capture("google_calendar_connected", {
+      source: "first_run_next_steps",
+    });
+  }, []);
+
+  const setupEverything = useCallback(async () => {
+    if (setupBusyRef.current) return;
+    setupBusyRef.current = true;
+    setSetupBusyLabel("getting ready");
     setActionError(null);
     posthog.capture("first_run_next_step_selected", {
-      step: DAILY_EMAIL_PIPE,
-      state: snapshot.dailyEmailState,
+      step: "recommended-setup-bundle",
+      daily_email_state: snapshot.dailyEmailState,
+      digital_clone_state: snapshot.digitalCloneState,
+      speaker_reconciliation_state: snapshot.speakerReconciliationState,
       gmail_connected: snapshot.gmailConnected,
+      google_calendar_connected: snapshot.googleCalendarConnected,
     });
+
     try {
       if (snapshot.dailyEmailState === "missing") {
-        setActionLabel("daily-email", "installing");
+        setSetupBusyLabel("setting up daily recap");
         await installStorePipe(DAILY_EMAIL_PIPE);
       }
-      if (snapshot.gmailConnected !== true) {
-        setActionLabel("daily-email", "connecting gmail");
-        await connectGmail();
-      }
-      if (snapshot.dailyEmailState !== "enabled") {
-        setActionLabel("daily-email", "enabling");
-        await enablePipe(DAILY_EMAIL_PIPE);
-      }
-      await refresh();
-    } catch (error) {
-      if (!(error instanceof DOMException && error.name === "AbortError")) {
-        await refresh();
-        setActionError(
-          error instanceof Error
-            ? error.message
-            : "could not finish the daily email setup. try again.",
-        );
-      }
-    } finally {
-      busyActionRef.current = null;
-      setBusyAction(null);
-    }
-  }, [connectGmail, refresh, setActionLabel, snapshot]);
 
-  const setupDigitalClone = useCallback(async () => {
-    if (busyActionRef.current) return;
-    busyActionRef.current = { id: "digital-clone", label: "starting" };
-    setActionLabel("digital-clone", "starting");
-    setActionError(null);
-    posthog.capture("first_run_next_step_selected", {
-      step: DIGITAL_CLONE_PIPE,
-      state: snapshot.digitalCloneState,
-    });
-    try {
       if (snapshot.digitalCloneState === "missing") {
-        setActionLabel("digital-clone", "installing");
+        setSetupBusyLabel("setting up work history");
         await installStorePipe(DIGITAL_CLONE_PIPE);
       }
       if (snapshot.digitalCloneState !== "enabled") {
-        setActionLabel("digital-clone", "enabling");
+        setSetupBusyLabel("turning on work history");
         await enablePipe(DIGITAL_CLONE_PIPE);
       }
-      await refresh();
-    } catch (error) {
-      await refresh();
-      setActionError(
-        error instanceof Error
-          ? error.message
-          : "could not finish the digital clone setup. try again.",
-      );
-    } finally {
-      busyActionRef.current = null;
-      setBusyAction(null);
-    }
-  }, [refresh, setActionLabel, snapshot.digitalCloneState]);
 
-  const connectGoogleCalendar = useCallback(async () => {
-    if (busyActionRef.current) return;
-    busyActionRef.current = { id: "google-calendar", label: "connecting" };
-    setActionLabel("google-calendar", "connecting");
-    setActionError(null);
-    posthog.capture("first_run_next_step_selected", {
-      step: "google-calendar",
-      state: "not_connected",
-    });
-    try {
-      const result = await commands.oauthConnect(
-        "google-calendar",
-        null,
-        null,
-      );
-      if (result.status === "error") throw new Error(result.error);
-      if (!result.data.connected) {
-        throw new Error("google calendar connection was not completed.");
+      if (snapshot.speakerReconciliationState === "missing") {
+        setSetupBusyLabel("setting up meeting names");
+        await installBundledPipe(SPEAKER_RECONCILIATION_PIPE);
       }
-      notifyConnectionsUpdated();
-      posthog.capture("google_calendar_connected", {
-        source: "first_run_next_steps",
-      });
+      if (snapshot.speakerReconciliationState !== "enabled") {
+        setSetupBusyLabel("turning on meeting names");
+        await enablePipe(SPEAKER_RECONCILIATION_PIPE);
+      }
+
+      if (snapshot.gmailConnected !== true) {
+        setSetupBusyLabel("connect gmail");
+        await connectGmail();
+      }
+      if (snapshot.dailyEmailState !== "enabled") {
+        setSetupBusyLabel("turning on daily recap");
+        await enablePipe(DAILY_EMAIL_PIPE);
+      }
+
+      if (snapshot.googleCalendarConnected !== true) {
+        setSetupBusyLabel("connect calendar");
+        await connectGoogleCalendar();
+      }
+
+      setSetupBusyLabel("almost done");
       await refresh();
+      posthog.capture("first_run_setup_bundle_completed");
     } catch (error) {
-      await refresh();
-      setActionError(
-        error instanceof Error
-          ? error.message
-          : "could not connect google calendar. try again.",
-      );
+      if (!(error instanceof DOMException && error.name === "AbortError")) {
+        await refresh();
+        setActionError("Screenpipe couldn't finish setup. try again.");
+        posthog.capture("first_run_setup_bundle_failed", {
+          message: error instanceof Error ? error.message : "unknown error",
+        });
+      }
     } finally {
-      busyActionRef.current = null;
-      setBusyAction(null);
+      setupBusyRef.current = false;
+      setSetupBusyLabel(null);
     }
-  }, [refresh, setActionLabel]);
+  }, [connectGmail, connectGoogleCalendar, refresh, snapshot]);
 
   const retry = useCallback(() => {
     setActionError(null);
@@ -721,18 +663,8 @@ export function FirstRunNextSteps({
       snapshot={snapshot}
       refreshing={refreshing}
       actionError={actionError}
-      dailyEmailBusyLabel={
-        busyAction?.id === "daily-email" ? busyAction.label : null
-      }
-      digitalCloneBusyLabel={
-        busyAction?.id === "digital-clone" ? busyAction.label : null
-      }
-      calendarBusyLabel={
-        busyAction?.id === "google-calendar" ? busyAction.label : null
-      }
-      onSetupDailyEmail={() => void setupDailyEmail()}
-      onSetupDigitalClone={() => void setupDigitalClone()}
-      onConnectGoogleCalendar={() => void connectGoogleCalendar()}
+      setupBusyLabel={setupBusyLabel}
+      onSetupEverything={() => void setupEverything()}
       onRetry={retry}
     />
   );

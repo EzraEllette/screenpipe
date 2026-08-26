@@ -46,12 +46,10 @@ pub fn set_fd_limit() {
                 let new_soft = std::cmp::min(desired_limit, current_hard);
                 rlim.rlim_cur = new_soft;
 
-                if libc::setrlimit(libc::RLIMIT_NOFILE, &rlim) == 0 {
-                    eprintln!(
-                        "increased file descriptor limit from {} to {} (hard limit: {})",
-                        current_soft, new_soft, current_hard
-                    );
-                } else {
+                // Successful setup is intentionally silent. This runs before
+                // CLI dispatch, so printing here would add noise to every
+                // read-only command such as `status` and `search`.
+                if libc::setrlimit(libc::RLIMIT_NOFILE, &rlim) != 0 {
                     eprintln!(
                         "warning: failed to increase file descriptor limit (current: {}, requested: {})",
                         current_soft, new_soft

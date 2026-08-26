@@ -37,8 +37,18 @@ use tracing::{debug, error, info, warn};
 /// timeout. The desktop keys its fresh-process recovery off the exact error
 /// below (see `await_prompt_start` in pi.rs).
 pub const PROMPT_START_TIMEOUT: Duration = Duration::from_secs(15);
+
+// Windows can spend tens of seconds loading Bun, Pi, and its extension tree on
+// the first prompt (especially while Defender scans a freshly updated install).
+// Once the process has accepted one prompt, the normal watchdog is enough and
+// keeps later wedges actionable instead of making every failure wait longer.
+#[cfg(windows)]
+const FIRST_PROMPT_START_TIMEOUT: Duration = Duration::from_secs(45);
+#[cfg(not(windows))]
+const FIRST_PROMPT_START_TIMEOUT: Duration = PROMPT_START_TIMEOUT;
+
 pub const PROMPT_START_TIMEOUT_ERROR: &str =
-    "AI agent did not start responding within 15 seconds";
+    "AI agent did not start responding within its startup grace period";
 
 fn is_already_processing_rejection(error: &str) -> bool {
     error.to_ascii_lowercase().contains("already processing")
@@ -795,15 +805,38 @@ pub fn spawn_queue(
     state: Arc<PiQueueState>,
     request_id_start: u64,
 ) -> (PiQueueHandle, tokio::task::JoinHandle<()>) {
-    spawn_queue_with_prompt_start_timeout(stdin, state, request_id_start, PROMPT_START_TIMEOUT)
+    spawn_queue_with_prompt_start_timeouts(
+        stdin,
+        state,
+        request_id_start,
+        FIRST_PROMPT_START_TIMEOUT,
+        PROMPT_START_TIMEOUT,
+    )
 }
 
 /// Like [`spawn_queue`] but with an explicit prompt-start watchdog timeout, so
-/// tests can drive the watchdog on a short clock instead of the 15s default.
+/// tests can drive the watchdog on a short clock instead of the production
+/// defaults.
 pub(crate) fn spawn_queue_with_prompt_start_timeout(
     stdin: Arc<Mutex<ChildStdin>>,
     state: Arc<PiQueueState>,
     request_id_start: u64,
+    prompt_start_timeout: Duration,
+) -> (PiQueueHandle, tokio::task::JoinHandle<()>) {
+    spawn_queue_with_prompt_start_timeouts(
+        stdin,
+        state,
+        request_id_start,
+        prompt_start_timeout,
+        prompt_start_timeout,
+    )
+}
+
+fn spawn_queue_with_prompt_start_timeouts(
+    stdin: Arc<Mutex<ChildStdin>>,
+    state: Arc<PiQueueState>,
+    request_id_start: u64,
+    first_prompt_start_timeout: Duration,
     prompt_start_timeout: Duration,
 ) -> (PiQueueHandle, tokio::task::JoinHandle<()>) {
     let (tx, mut rx) = mpsc::channel::<QueueMessage>(32);
@@ -815,6 +848,7 @@ pub(crate) fn spawn_queue_with_prompt_start_timeout(
 
     let join = tokio::spawn(async move {
         let mut request_id = request_id_start;
+        let mut prompt_attempts = 0usize;
         let mut alive_rx = state.alive.subscribe();
 
         info!("pi_command_queue: drain loop started");
@@ -1036,12 +1070,18 @@ pub(crate) fn spawn_queue_with_prompt_start_timeout(
                             if let Some(pid) = &prompt_id {
                                 state.dequeue_prompt(pid);
                             }
+                            let start_timeout = if prompt_attempts == 0 {
+                                first_prompt_start_timeout
+                            } else {
+                                prompt_start_timeout
+                            };
+                            prompt_attempts = prompt_attempts.saturating_add(1);
                             let (accepted, remaining_response) = wait_for_prompt_acceptance(
                                 &state,
                                 &mut alive_rx,
                                 &cmd_type,
                                 response_rx,
-                                prompt_start_timeout,
+                                start_timeout,
                             )
                             .await;
                             let rejected = accepted.is_err();
@@ -1382,6 +1422,17 @@ async fn wait_for_response_or_terminated(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_first_prompt_start_timeout_platform_policy() {
+        #[cfg(windows)]
+        assert_eq!(
+            FIRST_PROMPT_START_TIMEOUT,
+            std::time::Duration::from_secs(45)
+        );
+        #[cfg(not(windows))]
+        assert_eq!(FIRST_PROMPT_START_TIMEOUT, PROMPT_START_TIMEOUT);
+    }
 
     async fn wait_for_response_id(state: &PiQueueState) -> String {
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
@@ -2318,6 +2369,80 @@ mod tests {
             !state.has_active_turn_work(),
             "start timeout must release the pending-turn reservation"
         );
+
+        state.signal_terminated();
+        drop(handle);
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), join).await;
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_only_first_prompt_gets_cold_start_grace() {
+        use std::process::{Command as StdCommand, Stdio};
+
+        let mut child = StdCommand::new("cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn fake pi");
+        let stdin = Arc::new(Mutex::new(child.stdin.take().expect("fake pi stdin")));
+        let state = PiQueueState::new();
+        let (handle, join) = spawn_queue_with_prompt_start_timeouts(
+            stdin,
+            state.clone(),
+            0,
+            std::time::Duration::from_millis(250),
+            std::time::Duration::from_millis(50),
+        );
+
+        let (_, first_reply) = handle
+            .send_prompt(
+                json!({ "type": "prompt", "message": "slow cold start" }),
+                WaitMode::Prompt,
+                "slow cold start".into(),
+                true,
+            )
+            .await
+            .expect("enqueue first prompt");
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !state.is_prompt_pending() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("first prompt should become pending");
+
+        // This acknowledgement arrives after the steady-state watchdog would
+        // fire, but inside the first-prompt grace period.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        state.mark_agent_active();
+        let first_result = tokio::time::timeout(std::time::Duration::from_secs(2), first_reply)
+            .await
+            .expect("cold-start grace should keep the first prompt alive")
+            .expect("first reply channel open");
+        assert_eq!(first_result, Ok(()));
+
+        state.mark_agent_idle();
+        state.signal_done();
+
+        let (_, second_reply) = handle
+            .send_prompt(
+                json!({ "type": "prompt", "message": "steady-state wedge" }),
+                WaitMode::Prompt,
+                "steady-state wedge".into(),
+                true,
+            )
+            .await
+            .expect("enqueue second prompt");
+        let second_result = tokio::time::timeout(std::time::Duration::from_secs(2), second_reply)
+            .await
+            .expect("steady watchdog should still fire promptly")
+            .expect("second reply channel open");
+        assert_eq!(second_result, Err(PROMPT_START_TIMEOUT_ERROR.to_string()));
 
         state.signal_terminated();
         drop(handle);

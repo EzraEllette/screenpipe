@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("@/lib/chat/external-chat-import", () => ({
+  EXTERNAL_CHAT_LOOKBACK_DAYS: 7,
   scanExternalChatHistory: mocks.scanExternalChatHistory,
   importExternalChatHistory: mocks.importExternalChatHistory,
 }));
@@ -24,6 +25,7 @@ describe("ImportChatsDialog", () => {
     vi.clearAllMocks();
     mocks.scanExternalChatHistory.mockResolvedValue({
       totalCandidates: 3,
+      lookbackDays: 7,
       sources: [
         {
           source: "claude-code",
@@ -69,7 +71,7 @@ describe("ImportChatsDialog", () => {
 
     expect(await screen.findByText("Claude Code")).toBeInTheDocument();
     expect(screen.getByText("Codex")).toBeInTheDocument();
-    expect(screen.getByText("showing the 2 most recent of 3")).toBeInTheDocument();
+    expect(screen.getByText("showing the 2 most recent from the past 7 days")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "import 3" }));
 

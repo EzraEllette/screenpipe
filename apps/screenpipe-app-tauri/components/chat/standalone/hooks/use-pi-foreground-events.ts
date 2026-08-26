@@ -491,6 +491,7 @@ export function usePiForegroundEvents({
           if (piMessageIdRef.current) {
             const msgId = piMessageIdRef.current;
             const parentToolCallId = stringValue(data.parentToolCallId);
+            const agentId = stringValue(data.agentId);
             const toolKind = stringValue(data.kind);
             const toolCall: ToolCall = {
               id: stringValue(data.toolCallId, Date.now().toString()),
@@ -498,6 +499,7 @@ export function usePiForegroundEvents({
               args: isRecord(data.args) ? data.args : {},
               isRunning: true,
               startedAtMs: Date.now(),
+              ...(agentId ? { agentId } : {}),
               ...(toolKind ? { kind: toolKind } : {}),
               ...(parentToolCallId ? { parentToolCallId } : {}),
               ...(data.subagent === true ? { subagent: true } : {}),
@@ -543,6 +545,11 @@ export function usePiForegroundEvents({
               if (data.retry !== undefined) block.toolCall.retry = data.retry;
               const title = stringValue(data.title);
               if (title) block.toolCall.toolName = title;
+              const agentId = stringValue(data.agentId);
+              if (agentId) block.toolCall.agentId = agentId;
+              const kind = stringValue(data.kind);
+              if (kind) block.toolCall.kind = kind;
+              if (isRecord(data.args)) block.toolCall.args = data.args;
               const outputDelta = stringValue(data.outputDelta);
               if (outputDelta) {
                 const combined = `${block.toolCall.progress ?? ""}${outputDelta}`;
@@ -566,6 +573,13 @@ export function usePiForegroundEvents({
             // Update the tool block in-place
             for (const block of piContentBlocksRef.current) {
               if (block.type === "tool" && block.toolCall.id === toolCallId) {
+                const toolName = stringValue(data.toolName);
+                if (toolName) block.toolCall.toolName = toolName;
+                const agentId = stringValue(data.agentId);
+                if (agentId) block.toolCall.agentId = agentId;
+                const kind = stringValue(data.kind);
+                if (kind) block.toolCall.kind = kind;
+                if (isRecord(data.args)) block.toolCall.args = data.args;
                 block.toolCall.isRunning = false;
                 block.toolCall.result = truncated;
                 block.toolCall.isError = data.isError === true;

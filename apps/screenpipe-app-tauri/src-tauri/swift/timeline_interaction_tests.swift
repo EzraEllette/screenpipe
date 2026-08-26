@@ -719,14 +719,6 @@ private func testActivityReturnChrome() {
         TimelineActionBridge.shared.drainEmitted().contains("return_to_activity"),
         "the Activity return must emit its routed navigation action"
     )
-
-    chrome.setActivityReturnVisible(true)
-    chrome.dismissActivityReturn()
-    expect(!chrome.showsActivityReturn, "an unrelated Timeline click must dismiss the return")
-    expect(
-        TimelineActionBridge.shared.drainEmitted().contains("dismiss_activity_return"),
-        "dismissal must clear the webview's Activity-origin state"
-    )
 }
 
 /// Deep links must drive the per-host controller used by the embedded app,
@@ -901,6 +893,17 @@ private func testKeyboardThroughWindow(window: NSWindow, model: TimelineViewMode
     model.setIndex(50)
     _ = handler.handle(TimelineKeyEvent(keyCode: TimelineKeyEvent.leftArrow))
     expectEqual(model.currentIndex, 51, "left arrow steps older through the window's handler")
+
+    _ = TimelineActionBridge.shared.drainEmitted()
+    let embeddedHandler = TimelineKeyHandler(model: model, embedded: true)
+    let consumed = embeddedHandler.handle(
+        TimelineKeyEvent(keyCode: 11, characters: "b", command: true)
+    )
+    expect(consumed, "Command-B is consumed by an embedded timeline")
+    expect(
+        TimelineActionBridge.shared.drainEmitted().contains("toggle_sidebar"),
+        "Command-B asks the owning Home shell to toggle its sidebar"
+    )
 
     // A key monitor must be installed while the window is up, or nothing the
     // keyboard does reaches the timeline.

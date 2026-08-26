@@ -126,16 +126,18 @@ function policyResponse(overrides: Record<string, unknown> = {}) {
   );
 }
 
-function heartbeatResponse(status = 200) {
-  return new Response(JSON.stringify(status === 200 ? { ok: true } : { error: "x" }), {
-    status,
-  });
+function heartbeatResponse(status = 200, code?: string) {
+  return new Response(
+    JSON.stringify(status === 200 ? { ok: true } : { error: "x", code }),
+    { status },
+  );
 }
 
 function mockEnterpriseApi(opts: {
   policyStatus?: number;
   policy?: Record<string, unknown>;
   heartbeatStatus?: number;
+  heartbeatCode?: string;
 }) {
   mocks.tauriFetch.mockImplementation(async (url: string) => {
     if (url.includes("/api/enterprise/policy")) {
@@ -147,7 +149,7 @@ function mockEnterpriseApi(opts: {
       return policyResponse(opts.policy);
     }
     if (url.includes("/api/enterprise/heartbeat")) {
-      return heartbeatResponse(opts.heartbeatStatus ?? 200);
+      return heartbeatResponse(opts.heartbeatStatus ?? 200, opts.heartbeatCode);
     }
     throw new Error(`unexpected fetch ${url}`);
   });
@@ -358,6 +360,31 @@ describe("enterprise policy runtime manual activation", () => {
     );
   });
 
+  it("keeps an admin-paused seat authenticated while native recording stays revoked", async () => {
+    mocks.commands.getEnterpriseLicenseKey.mockResolvedValue(KEY);
+    mockEnterpriseApi({
+      policy: { recordingAllowed: false },
+      heartbeatStatus: 403,
+      heartbeatCode: "recording_disabled_by_admin",
+    });
+
+    const { result } = await renderEnterprisePolicy();
+
+    await waitFor(() => expect(result.current.isEnterpriseAuthenticated).toBe(true));
+    expect(result.current.policy.recordingAllowed).toBe(false);
+    expect(result.current.authenticationError).toBeNull();
+    expect(mocks.commands.setEnterpriseRecordingAuthorized).toHaveBeenCalledWith(
+      false,
+      null,
+      null,
+    );
+    expect(mocks.commands.setEnterpriseRecordingAuthorized).not.toHaveBeenCalledWith(
+      true,
+      "license_key",
+      KEY,
+    );
+  });
+
   it("pushes explicit startup enforcement to Rust and applies it live", async () => {
     mocks.commands.getEnterpriseLicenseKey.mockResolvedValue(KEY);
     Object.assign(mocks.settings, { autoStartEnabled: false });
@@ -535,6 +562,30 @@ describe("enterprise policy runtime manual activation", () => {
     expect(result.current.policy.orgName).toBe("Bungalow");
   });
 
+  it("saves a valid key for a paused seat without misreporting a seat-limit error", async () => {
+    mockEnterpriseApi({
+      policy: { recordingAllowed: false },
+      heartbeatStatus: 403,
+      heartbeatCode: "recording_disabled_by_admin",
+    });
+    const { result } = await renderEnterprisePolicy();
+
+    let activation!: Awaited<ReturnType<typeof result.current.submitLicenseKey>>;
+    await act(async () => {
+      activation = await result.current.submitLicenseKey(KEY);
+    });
+
+    expect(activation).toEqual({ ok: true });
+    expect(mocks.commands.saveEnterpriseLicenseKey).toHaveBeenCalledWith(KEY);
+    expect(result.current.isEnterpriseAuthenticated).toBe(true);
+    expect(result.current.policy.recordingAllowed).toBe(false);
+    expect(mocks.commands.setEnterpriseRecordingAuthorized).not.toHaveBeenCalledWith(
+      true,
+      "license_key",
+      KEY,
+    );
+  });
+
   it("does not publish authenticated state when the native recording grant fails", async () => {
     mockEnterpriseApi({});
     const { result } = await renderEnterprisePolicy();
@@ -706,7 +757,9 @@ describe("enterprise policy runtime manual activation", () => {
   });
 
   it("refuses key activation when the org requires account sign-in", async () => {
-    mockEnterpriseApi({ policy: { requireAccountLogin: true } });
+    mockEnterpriseApi({
+      policy: { requireAccountLogin: true, recordingAllowed: false },
+    });
     const { result } = await renderEnterprisePolicy();
 
     let activation!: Awaited<ReturnType<typeof result.current.submitLicenseKey>>;
@@ -725,7 +778,9 @@ describe("enterprise policy runtime manual activation", () => {
 
   it("does not authenticate a saved key when the org requires account sign-in", async () => {
     mocks.commands.getEnterpriseLicenseKey.mockResolvedValue(KEY);
-    mockEnterpriseApi({ policy: { requireAccountLogin: true } });
+    mockEnterpriseApi({
+      policy: { requireAccountLogin: true, recordingAllowed: false },
+    });
 
     const { result } = await renderEnterprisePolicy();
 
@@ -738,7 +793,9 @@ describe("enterprise policy runtime manual activation", () => {
   it("falls back to the signed-in account when the saved key is refused by policy", async () => {
     mocks.commands.getEnterpriseLicenseKey.mockResolvedValue(KEY);
     Object.assign(mocks.settings, { user: { token: "account-token" } });
-    mockEnterpriseApi({ policy: { requireAccountLogin: true } });
+    mockEnterpriseApi({
+      policy: { requireAccountLogin: true, recordingAllowed: false },
+    });
 
     const { result } = await renderEnterprisePolicy();
 
@@ -750,6 +807,12 @@ describe("enterprise policy runtime manual activation", () => {
         init?.headers?.["X-License-Key"] === KEY
     );
     expect(accountPolicyCall).toBeDefined();
+    expect(result.current.policy.recordingAllowed).toBe(false);
+    expect(mocks.commands.setEnterpriseRecordingAuthorized).toHaveBeenLastCalledWith(
+      false,
+      null,
+      null,
+    );
   });
 
   it("recovers a rotated saved key through the signed-in account", async () => {
@@ -807,9 +870,11 @@ describe("enterprise policy runtime manual activation", () => {
     await act(async () => {});
     expect(result.current.isEnterpriseAuthenticated).toBe(true);
 
-    // Admin flips the org to sign-in-required; the next 5-minute policy poll
-    // must end the license-key session immediately.
-    mockEnterpriseApi({ policy: { requireAccountLogin: true } });
+    // Account sign-in remains authoritative even if the admin pauses capture
+    // in the same policy update.
+    mockEnterpriseApi({
+      policy: { requireAccountLogin: true, recordingAllowed: false },
+    });
     await act(async () => {
       await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
     });
@@ -817,6 +882,34 @@ describe("enterprise policy runtime manual activation", () => {
     expect(result.current.authenticationState).toBe("account");
     expect(result.current.isEnterpriseAuthenticated).toBe(false);
     expect(result.current.authenticationError).toMatch(/requires signing in/i);
+    expect(mocks.commands.setEnterpriseRecordingAuthorized).toHaveBeenLastCalledWith(
+      false,
+      null,
+      null,
+    );
+  }, 20_000);
+
+  it("revokes recording without signing out when an admin pauses the seat", async () => {
+    vi.useFakeTimers();
+    mocks.commands.getEnterpriseLicenseKey.mockResolvedValue(KEY);
+    mockEnterpriseApi({});
+
+    const { result } = await renderEnterprisePolicy();
+    await act(async () => {});
+    expect(result.current.isEnterpriseAuthenticated).toBe(true);
+
+    mockEnterpriseApi({
+      policy: { recordingAllowed: false },
+      heartbeatStatus: 403,
+      heartbeatCode: "recording_disabled_by_admin",
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+    });
+
+    expect(result.current.authenticationState).toBe("authenticated");
+    expect(result.current.policy.recordingAllowed).toBe(false);
+    expect(result.current.authenticationError).toBeNull();
     expect(mocks.commands.setEnterpriseRecordingAuthorized).toHaveBeenLastCalledWith(
       false,
       null,

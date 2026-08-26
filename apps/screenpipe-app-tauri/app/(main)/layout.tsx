@@ -16,7 +16,11 @@
 import { AppSidebarLayout, SidebarProvider } from "@/components/app-sidebar";
 import { CardAskProvider } from "@/components/card-ask-provider";
 
-export default function MainLayout({ children }: { children: React.ReactNode }) {
+export default function MainLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
   return (
     <SidebarProvider>
       <AppSidebarLayout>{children}</AppSidebarLayout>

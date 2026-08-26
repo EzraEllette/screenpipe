@@ -10,6 +10,11 @@ import { Button } from "@/components/ui/button";
 import { commands } from "@/lib/utils/tauri";
 import { acpAdapterInfo } from "@/lib/utils/preset-appearance";
 import { dedupedModes, useAcpSessionConfig } from "@/lib/stores/acp-session-config";
+import { useTauriEvent } from "@/lib/hooks/use-tauri-event";
+import {
+  AcpSetupProgress,
+  type AcpSetupPhase,
+} from "@/components/settings/acp-setup-progress";
 import { cn } from "@/lib/utils";
 
 export interface AcpPresetDefaultsChange {
@@ -33,6 +38,13 @@ const probesInFlight = new Set<string>();
  *  an explicit "retry" clears this so the agent is checked again. */
 const probeVerdicts = new Map<string, string>();
 
+export const ACP_PRESET_SETUP_PROGRESS_EVENT = "acp_preset_setup_progress";
+
+interface AcpPresetSetupProgressPayload {
+  agentId?: string;
+  phase?: string;
+}
+
 /** The no-override choice, named after what the agent will actually use. */
 const defaultChoiceLabel = (name?: string) =>
   name ? `default (${name})` : "agent default";
@@ -49,6 +61,7 @@ export function AcpPresetDefaults({
   onChange,
   compact = false,
   onConnectedChange,
+  installedInEditor = false,
 }: {
   agent: AcpPresetAgent;
   config: Record<string, string> | undefined;
@@ -59,6 +72,9 @@ export function AcpPresetDefaults({
    *  signed in. The parent uses it to hold back advanced settings that are
    *  noise until the agent actually works. */
   onConnectedChange?: (connected: boolean) => void;
+  /** A binary installer just completed in this editor. Keep Install as the
+   *  completed first step while the shared probe starts and connects it. */
+  installedInEditor?: boolean;
 }) {
   const agentId = agent.id;
   const advertised = useAcpSessionConfig((state) => state.byAgent[agentId]);
@@ -76,6 +92,9 @@ export function AcpPresetDefaults({
   // Set once the user explicitly asks for the download. Until then an
   // uninstalled agent shows an install button instead of installing itself.
   const [installApproved, setInstallApproved] = useState(false);
+  const [setupPhase, setSetupPhase] = useState<AcpSetupPhase | null>(null);
+  const [setupIncludesInstall, setSetupIncludesInstall] =
+    useState(installedInEditor);
   // Holds the retry button's "checking…" spinner for a minimum window. The
   // re-probe is event-driven and often near-instant, so without this the
   // spinner would flash imperceptibly and retry would feel dead.
@@ -86,6 +105,25 @@ export function AcpPresetDefaults({
   // re-showing the same thing. Mirrors AcpSignInDialog's destructive line.
   const [retryFailed, setRetryFailed] = useState(false);
   const wasRetryRef = useRef(false);
+
+  useTauriEvent<AcpPresetSetupProgressPayload>(
+    ACP_PRESET_SETUP_PROGRESS_EVENT,
+    (event) => {
+      const payload = event.payload;
+      if (payload.agentId !== agentId) return;
+      if (payload.phase === "downloading") {
+        setSetupIncludesInstall(true);
+        setSetupPhase("downloading");
+      } else if (
+        payload.phase === "starting" ||
+        payload.phase === "connecting" ||
+        payload.phase === "ready"
+      ) {
+        setSetupPhase(payload.phase);
+      }
+    },
+    [agentId],
+  );
   const beginRetry = () => {
     probeVerdicts.delete(agentId);
     wasRetryRef.current = true;
@@ -125,13 +163,15 @@ export function AcpPresetDefaults({
     setProbeError(null);
     setDownloadPending(null);
     setInstallApproved(false);
+    setSetupPhase(null);
+    setSetupIncludesInstall(installedInEditor);
     setRetryPending(false);
     setRetryFailed(false);
     setSignInPending(false);
     setSignInError(null);
     wasRetryRef.current = false;
     if (retryTimerRef.current != null) window.clearTimeout(retryTimerRef.current);
-  }, [agentId]);
+  }, [agentId, installedInEditor]);
 
   // Resolve "does this need downloading?" first, so the probe effect below can
   // hold off rather than discovering it mid-install.
@@ -167,6 +207,8 @@ export function AcpPresetDefaults({
       return;
     }
     probesInFlight.add(agentId);
+    setSetupIncludesInstall(Boolean(downloadPending || installedInEditor));
+    setSetupPhase(downloadPending ? "downloading" : "starting");
     setProbing(true);
     let cancelled = false;
     void (async () => {
@@ -214,7 +256,15 @@ export function AcpPresetDefaults({
     };
     // Probing keys off the adapter identity, not the callback identities.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [agentId, advertised, probeable, probeNonce, downloadPending, installApproved]);
+  }, [
+    agentId,
+    advertised,
+    probeable,
+    probeNonce,
+    downloadPending,
+    installApproved,
+    installedInEditor,
+  ]);
 
   // "Connected" is the agent having answered with its choices. Anything else
   // (needs install, needs sign-in, probe failed) is not connected.
@@ -265,8 +315,8 @@ export function AcpPresetDefaults({
     // Retry keeps its "checking…" spinner up for a visible beat (retryPending)
     // even when the re-probe returns instantly, so it never feels dead.
     const busy = probing || retryPending || signInPending;
-    // First probe (no card yet): show a loading line, or a pulsing install
-    // label for a not-yet-cached npx agent (Zed's pattern: no spinner, no %).
+    // First probe (no card yet): show the shared lifecycle card. It advances
+    // only on real runtime boundaries and never guesses a download percentage.
     // Needs downloading and nobody asked for it yet: offer the download as an
     // action instead of starting it. Clicking an agent in a list is a choice
     // about which agent, not consent to fetch a package.
@@ -284,26 +334,40 @@ export function AcpPresetDefaults({
             Screenpipe can download it for you. It runs on this computer as its
             own program, and signs in with its own account.
           </p>
-          <Button type="button" size="sm" onClick={() => setInstallApproved(true)}>
+          <Button
+            type="button"
+            size="sm"
+            onClick={() => {
+              setSetupIncludesInstall(true);
+              setSetupPhase("downloading");
+              setInstallApproved(true);
+            }}
+          >
             <Download className="mr-1.5 h-3.5 w-3.5" /> Install {name}
           </Button>
         </div>
       );
     }
-    if (busy && !authErr) {
-      if (downloadPending) {
-        const name = acpAdapterInfo(agentId).name;
-        return (
-          <p className={cn(hintClass, "animate-pulse")}>
-            {compact ? `installing ${name}…` : `Installing ${name}…`}
-          </p>
-        );
-      }
+    if (downloadPending === null && !probeError) {
       return (
-        <p className={cn(hintClass, "flex items-center gap-1.5")}>
-          <Loader2 className="h-3 w-3 animate-spin" />
-          {compact ? "loading model and mode choices…" : "Loading model and mode choices from the agent…"}
-        </p>
+        <AcpSetupProgress
+          agentName={acpAdapterInfo(agentId).name}
+          phase="checking"
+          includesInstall={setupIncludesInstall}
+          installKind={installedInEditor ? "install" : "download"}
+          compact={compact}
+        />
+      );
+    }
+    if (busy && !authErr) {
+      return (
+        <AcpSetupProgress
+          agentName={acpAdapterInfo(agentId).name}
+          phase={setupPhase ?? (downloadPending ? "downloading" : "starting")}
+          includesInstall={setupIncludesInstall}
+          installKind={installedInEditor ? "install" : "download"}
+          compact={compact}
+        />
       );
     }
     if (authErr) {

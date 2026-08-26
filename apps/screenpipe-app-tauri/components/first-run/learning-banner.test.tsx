@@ -7,17 +7,23 @@ import React from "react";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { FirstRunLearningBanner } from "./learning-banner";
+import { FIRST_RUN_SEARCH_SHORTCUT_STORAGE_KEY } from "./search-shortcut-practice";
 import type { LearningWindowView } from "@/lib/first-run/use-learning-window";
 
 const mocks = vi.hoisted(() => ({
   view: {} as LearningWindowView,
   emit: vi.fn().mockResolvedValue(undefined),
+  sendNotification: vi.fn().mockResolvedValue(undefined),
   handoff: {
     targets: [],
+    resolved: false,
+    preferredTarget: null,
     hint: null,
     askAgent: vi.fn().mockResolvedValue(undefined),
   } as {
     targets: { id: string; label: string; deeplink?: string; hint: string }[];
+    resolved: boolean;
+    preferredTarget: { id: string; label: string; deeplink?: string; hint: string } | null;
     hint: string | null;
     askAgent: ReturnType<typeof vi.fn>;
   },
@@ -27,16 +33,34 @@ vi.mock("@/lib/first-run/use-learning-window", () => ({
   useLearningWindow: () => mocks.view,
 }));
 
-vi.mock("@tauri-apps/api/event", () => ({ emit: mocks.emit }));
+vi.mock("@tauri-apps/api/event", () => ({
+  emit: mocks.emit,
+  listen: vi.fn(async () => () => {}),
+}));
 
 vi.mock("@/lib/first-run/use-agent-handoff", () => ({
   useAgentHandoff: () => mocks.handoff,
+}));
+
+vi.mock("@/lib/first-run/summary-notification", () => ({
+  sendFirstRunSummaryNotification: mocks.sendNotification,
 }));
 
 vi.mock("@/components/first-run/next-steps", () => ({
   FirstRunNextSteps: () => (
     <div data-testid="first-run-next-steps">next steps</div>
   ),
+}));
+
+vi.mock("@/lib/hooks/use-settings", () => ({
+  useSettings: () => ({
+    isSettingsLoaded: true,
+    settings: {
+      searchShortcut: "Control+Super+K",
+      disabledShortcuts: [],
+      platform: "macos",
+    },
+  }),
 }));
 
 function view(over: Partial<LearningWindowView> = {}): LearningWindowView {
@@ -47,10 +71,12 @@ function view(over: Partial<LearningWindowView> = {}): LearningWindowView {
     seededAt: null,
     chatId: null,
     summaryOpenedAt: null,
+    notificationSentAt: null,
     emptyReason: null,
     capturedApps: [],
     remainingMs: 5 * 60 * 1_000,
     markSummaryOpened: vi.fn(),
+    markNotificationSent: vi.fn(),
     dismiss: vi.fn(),
     ...over,
   } as LearningWindowView;
@@ -58,16 +84,68 @@ function view(over: Partial<LearningWindowView> = {}): LearningWindowView {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  window.localStorage.clear();
   // Default: no connected agent. Every handoff assertion opts in explicitly so
   // the fallback path is what the other tests exercise.
   mocks.handoff = {
     targets: [],
+    resolved: false,
+    preferredTarget: null,
     hint: null,
     askAgent: vi.fn().mockResolvedValue(undefined),
   };
 });
 
 describe("first-run learning banner", () => {
+  it("sends the ready notification once after agent detection settles", async () => {
+    const markNotificationSent = vi.fn();
+    mocks.view = view({
+      phase: "ready",
+      chatId: "private-chat-id",
+      markNotificationSent,
+    });
+    mocks.handoff.resolved = true;
+    render(<FirstRunLearningBanner />);
+
+    await waitFor(() => expect(mocks.sendNotification).toHaveBeenCalledWith(null));
+    expect(markNotificationSent).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not notify again after delivery or after the summary opened", () => {
+    mocks.handoff.resolved = true;
+    for (const state of [
+      view({
+        phase: "ready",
+        chatId: "private-chat-id",
+        notificationSentAt: "2026-08-23T00:00:00.000Z",
+      }),
+      view({
+        phase: "ready",
+        chatId: "private-chat-id",
+        summaryOpenedAt: "2026-08-23T00:00:00.000Z",
+      }),
+    ]) {
+      mocks.view = state;
+      const rendered = render(<FirstRunLearningBanner />);
+      rendered.unmount();
+    }
+    expect(mocks.sendNotification).not.toHaveBeenCalled();
+  });
+
+  it("retries later when /notify rejects instead of spending the latch", async () => {
+    const markNotificationSent = vi.fn();
+    mocks.sendNotification.mockRejectedValueOnce(new Error("offline"));
+    mocks.handoff.resolved = true;
+    mocks.view = view({
+      phase: "ready",
+      chatId: "private-chat-id",
+      markNotificationSent,
+    });
+    render(<FirstRunLearningBanner />);
+    await waitFor(() => expect(mocks.sendNotification).toHaveBeenCalledTimes(1));
+    expect(markNotificationSent).not.toHaveBeenCalled();
+  });
+
   it("renders nothing outside the window so it is safe to mount always", () => {
     mocks.view = view({ phase: "idle" });
     const { container } = render(<FirstRunLearningBanner />);
@@ -157,7 +235,7 @@ describe("first-run learning banner", () => {
     expect(dismiss).not.toHaveBeenCalled();
   });
 
-  it("keeps a compact expandable setup dock over the opened summary", () => {
+  it("keeps a compact expandable setup dock over the opened summary", async () => {
     const dismiss = vi.fn();
     mocks.view = view({
       phase: "ready",
@@ -166,6 +244,12 @@ describe("first-run learning banner", () => {
       dismiss,
     });
     render(<FirstRunLearningBanner />);
+
+    await waitFor(() =>
+      expect(
+        screen.getByTestId("first-run-search-shortcut-start"),
+      ).toBeEnabled(),
+    );
 
     expect(screen.getByTestId("first-run-setup-dock")).toBeInTheDocument();
     expect(
@@ -180,6 +264,12 @@ describe("first-run learning banner", () => {
 
     fireEvent.click(screen.getByTestId("first-run-hide-setup"));
     expect(dismiss).toHaveBeenCalledTimes(1);
+    expect(
+      JSON.parse(
+        window.localStorage.getItem(FIRST_RUN_SEARCH_SHORTCUT_STORAGE_KEY) ||
+          "{}",
+      ),
+    ).toMatchObject({ status: "dismissed" });
   });
 
   it("offers the state-aware daily setup after learning resolves", () => {

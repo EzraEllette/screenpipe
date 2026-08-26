@@ -26,6 +26,7 @@ import {
   matchesInAppShortcut,
   type InAppShortcutSection,
 } from "@/lib/shortcuts";
+import { useExperimentalFeaturesEnabled } from "@/lib/experimental-features";
 
 const SECTION_LABELS: Record<InAppShortcutSection, string> = {
   chat: "chat",
@@ -36,6 +37,12 @@ const SECTION_LABELS: Record<InAppShortcutSection, string> = {
 interface ShortcutGuideProps {
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
+}
+
+export function ExperimentalShortcutGuide(props: ShortcutGuideProps = {}) {
+  const enabled = useExperimentalFeaturesEnabled();
+  if (!enabled) return null;
+  return <ShortcutGuide {...props} />;
 }
 
 export function ShortcutGuide({

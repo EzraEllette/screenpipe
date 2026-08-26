@@ -13,6 +13,9 @@ use super::extensions::AcpExtensionMiddleware;
 use super::schedule_extension::{
     advertised_capability, ScheduleMutationRequest, ScheduleOperation,
 };
+use super::steering_extension::{
+    advertised as steering_advertised, SteeringOutcome, SteeringRequest, SteeringResponse,
+};
 use agent_client_protocol::schema::v1::{
     AuthCapabilities, AuthMethod, AuthenticateRequest, BooleanConfigOptionCapabilities,
     CancelNotification, ClientCapabilities, ClientSessionCapabilities, CloseSessionRequest,
@@ -53,7 +56,8 @@ pub const SCREENPIPE_MCP_PKG: &str = "screenpipe-mcp@latest";
 /// runtime alone and must never be inherited by any child it spawns — neither
 /// the agent adapter nor a client-requested terminal. These blobs hold resolved
 /// provider API keys (`SCREENPIPE_ACP_ENV_JSON`), third-party MCP secret headers
-/// (`SCREENPIPE_ACP_USER_MCP_JSON`), the system prompt, and session config.
+/// (`SCREENPIPE_ACP_USER_MCP_JSON`), the system prompt, session config, and
+/// the private chat-control broker capability.
 /// Children receive what they legitimately need through CLI args, the resolved
 /// per-process `env`, and the structured ACP protocol — never as raw inherited
 /// env. A single list keeps the two spawn sites from drifting (a terminal that
@@ -72,7 +76,18 @@ const RUNTIME_ONLY_ENV: &[&str] = &[
     "SCREENPIPE_ACP_ID",
     "SCREENPIPE_ACP_RESUME_SESSION_ID",
     "SCREENPIPE_ACP_UNATTENDED",
+    TOOL_ALLOWLIST_ENV,
+    super::super::chat_control::CHAT_CONTROL_ADDR_ENV,
+    super::super::chat_control::CHAT_CONTROL_TOKEN_ENV,
 ];
+
+/// A private, single-purpose surface (today: the meeting chat panel) passes the
+/// exact read-only tools it needs. When this is set the session is *scoped*:
+/// third-party MCP servers are not mounted, the shared screenpipe agent context
+/// is not injected, and a permission request for a tool outside the list is
+/// refused outright instead of waiting on an approval card the surface has no UI
+/// to show. Chat and scheduled tasks never set it and are unaffected.
+pub const TOOL_ALLOWLIST_ENV: &str = "SCREENPIPE_ACP_TOOL_ALLOWLIST";
 
 /// Strip every [`RUNTIME_ONLY_ENV`] var from a child command's inherited
 /// environment. Call at every spawn site so secrets can't leak into a
@@ -191,6 +206,18 @@ struct RuntimeConfig {
     /// cards. In this mode permissions use the task's preconfigured sandbox and
     /// authentication failures return immediately with recovery instructions.
     unattended: bool,
+    /// Set by a scoped surface (see [`TOOL_ALLOWLIST_ENV`]): the only tools this
+    /// session may use, as bare screenpipe tool names. `None` is an ordinary
+    /// full-surface session.
+    tool_allowlist: Option<Vec<String>>,
+}
+
+impl RuntimeConfig {
+    /// A scoped session gets no third-party MCP servers, no shared agent
+    /// context, and no approval cards.
+    fn is_scoped(&self) -> bool {
+        self.tool_allowlist.is_some()
+    }
 }
 
 /// A user-configured MCP server forwarded to the adapter. Header values and
@@ -305,6 +332,26 @@ impl RuntimeConfig {
         } else {
             load_self_improvement_context()
         };
+        // Normalized once here so every read site compares like with like.
+        let tool_allowlist = parse_json_env::<Vec<String>>(TOOL_ALLOWLIST_ENV)?.map(|tools| {
+            tools
+                .iter()
+                .filter_map(|tool| normalized_tool_name(tool))
+                .collect::<Vec<_>>()
+        });
+        // A scoped surface carries its whole contract in the turn it sends. The
+        // shared screenpipe agent context advertises skills and tools this
+        // session is not allowed to use, which is what made a scoped agent
+        // reach for a skill and get its run killed.
+        let system_context = if tool_allowlist.is_some() {
+            env_nonempty("SCREENPIPE_ACP_SYSTEM_PROMPT")
+        } else {
+            Some(build_first_turn_context(
+                load_screenpipe_agents_context(&data_dir),
+                self_improvement_context,
+                env_nonempty("SCREENPIPE_ACP_SYSTEM_PROMPT"),
+            ))
+        };
 
         Ok(Self {
             agent_id,
@@ -316,11 +363,7 @@ impl RuntimeConfig {
             project_dir,
             bun_path,
             preferred_auth_method: env_nonempty("SCREENPIPE_ACP_AUTH_METHOD"),
-            system_context: Some(build_first_turn_context(
-                load_screenpipe_agents_context(&data_dir),
-                self_improvement_context,
-                env_nonempty("SCREENPIPE_ACP_SYSTEM_PROMPT"),
-            )),
+            system_context,
             session_defaults: parse_json_env::<SessionDefaults>(
                 "SCREENPIPE_ACP_SESSION_CONFIG_JSON",
             )?
@@ -331,6 +374,7 @@ impl RuntimeConfig {
             resume_session_id: env_nonempty("SCREENPIPE_ACP_RESUME_SESSION_ID"),
             unattended: env_nonempty("SCREENPIPE_ACP_UNATTENDED")
                 .is_some_and(|value| value != "0" && !value.eq_ignore_ascii_case("false")),
+            tool_allowlist,
         })
     }
 }
@@ -349,6 +393,7 @@ You are running inside screenpipe. Prefer its MCP tools over shell/curl (this is
   - `search-content` for specific lookups; filter by content_type, app_name, window_name, and a time range.
   - `update-memory` (and search with content_type=memory) to persist and recall facts across sessions.
 - `user_profile` and `skill_manage` provide self-improvement capabilities; follow their tool descriptions and the shared session guidance.
+- `search_chats` finds exact existing screenpipe, Codex, Claude, and Cursor chat targets. `send_to_chat` delivers to one returned source + id only after the user explicitly authorizes that exact send. Read `.pi/skills/screenpipe-chats/SKILL.md` for the search, disambiguation, and delivery workflow.
 - `list_connections` shows the user's connected apps; `screenpipe_connect_app` connects one and waits for the user when a task needs it.
 - for a connection returned with mcp=true (Linear, Notion, Stripe, Sentry, Jira, Gmail, Zoom, Drive), use `sp_mcp_list_tools` then `sp_mcp_call` (with its `mcp_server_id`) to actually use it — not the connection proxy.
 - `sp_web_search` searches the public web; `save_artifact` saves a finished, user-facing deliverable (text or, with encoding=base64, an image) to the Artifacts library.
@@ -971,6 +1016,19 @@ pub fn agent_download_pending(id: &str) -> bool {
         })
 }
 
+/// Translate bun's package-manager stderr into honest startup phases. ACP has
+/// no progress protocol before the adapter starts, so these are deliberately
+/// coarse lifecycle steps rather than a fabricated percentage.
+fn acp_boot_phase_from_stderr(line: &str) -> Option<&'static str> {
+    if line.contains("downloaded and extracted") || line.contains("Resolved, downloaded") {
+        Some("starting")
+    } else if line.contains("Resolving dependencies") {
+        Some("downloading")
+    } else {
+        None
+    }
+}
+
 /// Best-effort check that `command` resolves to an executable on PATH.
 ///
 /// GUI apps capture PATH at launch (fix_path_env in main), so a CLI the user
@@ -1228,6 +1286,9 @@ struct TurnState {
     thought_open: bool,
     prompt_in_flight: bool,
     assistant_text: String,
+    /// A skills-budget warning was stripped from the head of this turn's
+    /// assistant message; the next delta may carry its leftover blank line.
+    skills_warning_stripped: bool,
     active_tools: HashMap<String, Value>,
 }
 
@@ -1718,6 +1779,7 @@ impl RuntimeState {
         if let Ok(mut turn) = self.turn.lock() {
             turn.prompt_in_flight = true;
             turn.assistant_text.clear();
+            turn.skills_warning_stripped = false;
             // Emit the user bubble before opening the assistant turn, mirroring
             // raw Pi. Without it a turn that runs entirely while the chat is
             // backgrounded persists an assistant-only transcript (the desktop
@@ -1776,12 +1838,19 @@ impl RuntimeState {
             self.output.send(json!({
                 "type": "tool_execution_end",
                 "toolCallId": tool_call_id,
+                "agentId": self.agent_id,
                 "toolName": tool_name(&tool),
+                "kind": tool_kind(&tool),
+                "args": tool_args(&tool),
                 "result": result,
                 "isError": is_error
             }));
         }
+        // Foreground chat assembles text deltas, while headless consumers read
+        // the terminal payload. Preserve the same complete answer for both.
+        let mut terminal_message = None;
         if turn.message_open {
+            let mut terminal_text = turn.assistant_text.clone();
             if let Some(guidance) = model_access_guidance(&turn.assistant_text, &self.agent_id) {
                 self.output.send(json!({
                     "type": "message_update",
@@ -1795,15 +1864,36 @@ impl RuntimeState {
                     "agentId": self.agent_id,
                     "guidance": guidance
                 }));
+                if !terminal_text.trim().is_empty() {
+                    terminal_text.push_str("\n\n");
+                }
+                terminal_text.push_str(&guidance);
             }
+            let has_terminal_text = !terminal_text.trim().is_empty();
+            let content = if has_terminal_text {
+                json!([{ "type": "text", "text": terminal_text }])
+            } else {
+                json!([])
+            };
+            let message = json!({
+                "role": "assistant",
+                "content": content,
+                "stopReason": stop_reason
+            });
             self.output.send(json!({
                 "type": "message_end",
-                "message": { "role": "assistant", "stopReason": stop_reason }
+                "message": message.clone()
             }));
+            if has_terminal_text {
+                terminal_message = Some(message);
+            }
         }
         if turn.turn_open {
-            self.output
-                .send(json!({ "type": "agent_end", "authPending": auth_pending }));
+            let mut event = json!({ "type": "agent_end", "authPending": auth_pending });
+            if let Some(message) = terminal_message {
+                event["messages"] = json!([message]);
+            }
+            self.output.send(event);
         }
         turn.turn_open = false;
         turn.message_open = false;
@@ -1842,11 +1932,35 @@ impl RuntimeState {
                     self.close_thought_locked(&mut turn);
                     self.ensure_turn_locked(&mut turn);
                     if let Some(delta) = content_text(update.get("content")) {
-                        turn.assistant_text.push_str(&delta);
-                        self.output.send(json!({
-                            "type": "message_update",
-                            "assistantMessageEvent": { "type": "text_delta", "delta": delta }
-                        }));
+                        // Codex's skills extension prepends operational warnings
+                        // to the first assistant text of a turn ("Warning:
+                        // Exceeded skills context budget of 2%. ..."). That is
+                        // runtime telemetry aimed at a terminal user, not part
+                        // of the answer — keep it out of the chat transcript
+                        // (and out of scheduled-task outputs built from this
+                        // stream) and log it to stderr instead.
+                        let delta = if turn.assistant_text.is_empty() {
+                            let stripped = strip_skills_budget_warning(&delta);
+                            if stripped != delta {
+                                turn.skills_warning_stripped = true;
+                            }
+                            if turn.skills_warning_stripped {
+                                // Also swallow the warning's leftover blank
+                                // line when the reply arrives as a later delta.
+                                stripped.trim_start().to_owned()
+                            } else {
+                                stripped
+                            }
+                        } else {
+                            delta
+                        };
+                        if !delta.is_empty() {
+                            turn.assistant_text.push_str(&delta);
+                            self.output.send(json!({
+                                "type": "message_update",
+                                "assistantMessageEvent": { "type": "text_delta", "delta": delta }
+                            }));
+                        }
                     }
                 }
             }
@@ -1910,6 +2024,7 @@ impl RuntimeState {
                 let mut start = json!({
                     "type": "tool_execution_start",
                     "toolCallId": id,
+                    "agentId": self.agent_id,
                     "toolName": tool_name(&update),
                     // The ACP category (read/edit/execute/fetch/search/...) lets
                     // the desktop label native agent tools whose human title
@@ -1929,7 +2044,7 @@ impl RuntimeState {
                 self.output.send(start);
                 if update_status_finished(&update) {
                     self.observe_provider_schedule(&update);
-                    finish_tool(&self.output, &id, &update);
+                    finish_tool(&self.output, &self.agent_id, &id, &update);
                     turn.active_tools.remove(&id);
                 }
             }
@@ -1956,6 +2071,7 @@ impl RuntimeState {
                     let mut start = json!({
                         "type": "tool_execution_start",
                         "toolCallId": id,
+                        "agentId": self.agent_id,
                         "toolName": tool_name(&merged),
                         "kind": tool_kind(&merged),
                         "args": tool_args(&merged),
@@ -1968,12 +2084,13 @@ impl RuntimeState {
                 }
                 if update_status_finished(&merged) {
                     self.observe_provider_schedule(&merged);
-                    finish_tool(&self.output, &id, &merged);
+                    finish_tool(&self.output, &self.agent_id, &id, &merged);
                     turn.active_tools.remove(&id);
                 } else if let Some(progress) = tool_progress(&update) {
                     let mut event = json!({
                         "type": "tool_execution_progress",
                         "toolCallId": id,
+                        "agentId": self.agent_id,
                     });
                     // Carry the parent so a subagent heartbeat nests under its
                     // Task row even when linkage only appears on updates.
@@ -2301,6 +2418,12 @@ fn tool_progress(update: &Value) -> Option<Value> {
     {
         fields.insert("title".into(), json!(title));
     }
+    if let Some(kind) = tool_kind(update) {
+        fields.insert("kind".into(), json!(kind));
+    }
+    if let Some(args) = tool_args_if_present(update) {
+        fields.insert("args".into(), args);
+    }
     if fields.is_empty() {
         None
     } else {
@@ -2384,12 +2507,16 @@ fn tool_kind(update: &Value) -> Option<String> {
 // adapters omit it and carry the invocation under `input`/`arguments`. Falling
 // back keeps the desktop tool card (and its citations) from rendering empty.
 fn tool_args(update: &Value) -> Value {
+    tool_args_if_present(update).unwrap_or_else(|| json!({}))
+}
+
+fn tool_args_if_present(update: &Value) -> Option<Value> {
     for key in ["rawInput", "input", "arguments"] {
         if let Some(object) = update.get(key).filter(|value| value.is_object()) {
-            return object.clone();
+            return Some(object.clone());
         }
     }
-    json!({})
+    None
 }
 
 fn update_status_finished(update: &Value) -> bool {
@@ -2408,8 +2535,44 @@ fn tool_result_text(update: &Value) -> String {
         .unwrap_or_default()
 }
 
-fn finish_tool(output: &ParentOutput, id: &str, update: &Value) {
-    let is_error = update.get("status").and_then(Value::as_str) == Some("failed");
+fn tool_result_is_error(update: &Value) -> bool {
+    if update.get("status").and_then(Value::as_str) == Some("failed") {
+        return true;
+    }
+
+    fn explicit_error(value: &Value) -> bool {
+        let parsed;
+        let value = if let Some(text) = value.as_str() {
+            parsed = match serde_json::from_str::<Value>(text.trim()) {
+                Ok(value) => value,
+                Err(_) => return false,
+            };
+            &parsed
+        } else {
+            value
+        };
+        let Some(object) = value.as_object() else {
+            return false;
+        };
+        if object.get("success").and_then(Value::as_bool) == Some(true) {
+            return false;
+        }
+        match object.get("error") {
+            Some(Value::Null | Value::Bool(false)) | None => false,
+            Some(Value::String(message)) => !message.trim().is_empty(),
+            Some(_) => true,
+        }
+    }
+
+    update.get("rawOutput").is_some_and(explicit_error)
+        || update
+            .get("content")
+            .and_then(|content| content_text(Some(content)))
+            .is_some_and(|text| explicit_error(&Value::String(text)))
+}
+
+fn finish_tool(output: &ParentOutput, agent_id: &str, id: &str, update: &Value) {
+    let is_error = tool_result_is_error(update);
     let mut result = tool_result_text(update);
     if result.trim().is_empty() {
         // Some adapters report completion with neither content nor rawOutput; a
@@ -2422,7 +2585,10 @@ fn finish_tool(output: &ParentOutput, id: &str, update: &Value) {
     output.send(json!({
         "type": "tool_execution_end",
         "toolCallId": id,
+        "agentId": agent_id,
         "toolName": tool_name(update),
+        "kind": tool_kind(update),
+        "args": tool_args(update),
         // The desktop event router reads the raw-Pi result shape
         // ({content: [{text}]}), not a bare string.
         "result": { "content": [{ "type": "text", "text": result }] },
@@ -2821,6 +2987,21 @@ fn mcp_servers(config: &RuntimeConfig) -> Vec<McpServer> {
             if let Some(chat_id) = env_nonempty("SCREENPIPE_CHAT_SESSION_ID") {
                 tools_env.push(EnvVariable::new("SCREENPIPE_CHAT_SESSION_ID", chat_id));
             }
+            if let Some(addr) = env_nonempty(super::super::chat_control::CHAT_CONTROL_ADDR_ENV) {
+                tools_env.push(EnvVariable::new(
+                    super::super::chat_control::CHAT_CONTROL_ADDR_ENV,
+                    addr,
+                ));
+            }
+            if let Some(token) = env_nonempty(super::super::chat_control::CHAT_CONTROL_TOKEN_ENV) {
+                tools_env.push(EnvVariable::new(
+                    super::super::chat_control::CHAT_CONTROL_TOKEN_ENV,
+                    token,
+                ));
+            }
+            if config.unattended {
+                tools_env.push(EnvVariable::new("SCREENPIPE_CHAT_CONTROL_DISABLED", "1"));
+            }
             servers.push(McpServer::Stdio(
                 McpServerStdio::new("screenpipe-tools", &config.bun_path)
                     .args(vec![tools_server.to_string_lossy().into_owned()])
@@ -2834,13 +3015,21 @@ fn mcp_servers(config: &RuntimeConfig) -> Vec<McpServer> {
         // pi-acp runs the same isolated Pi installation and loads the package
         // natively, so mounting its portable surface again would duplicate
         // tools. Every non-Pi ACP agent receives the middleware form.
-        if config.agent_id != "pi-acp" {
+        if config.agent_id != "pi-acp" && !config.is_scoped() {
             servers.extend(
                 config
                     .extension_middleware
                     .stdio_servers(&config.bun_path, &extension_mcp_env()),
             );
         }
+    }
+    // A scoped surface answers one question from screenpipe's own read tools.
+    // Mounting the user's Notion, Slack, or Postiz servers there would widen it
+    // into an unrelated data path, and each unauthenticated one also emits a
+    // failed `mcp__<server>__startup` tool call that the surface has to reason
+    // about.
+    if config.is_scoped() {
+        return servers;
     }
     // Forward the user's own registered MCP servers so every harness sees
     // the same tool surface the native Pi mcp-bridge extension gives raw Pi.
@@ -2902,7 +3091,7 @@ fn wait_port_ready(port: u16, timeout: std::time::Duration) {
 /// the runtime's process group, so desktop teardown kills them too). Best
 /// effort: a server that can't spawn is simply omitted.
 fn spawn_http_mcp_servers(config: &RuntimeConfig) -> Vec<std::process::Child> {
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
     let mut children = Vec::new();
     let mut urls: Vec<(String, String)> = Vec::new();
     let engine_url = engine_api_url();
@@ -2912,12 +3101,15 @@ fn spawn_http_mcp_servers(config: &RuntimeConfig) -> Vec<std::process::Child> {
     // below so it is listening before session/new.
     if let (Some(tools_path), Some(port)) = (ensure_tools_mcp_server(config), free_loopback_port())
     {
-        let mut cmd = Command::new(&config.bun_path);
+        let mut cmd = crate::no_window_command(&config.bun_path);
         cmd.arg(&tools_path)
             .env("SCREENPIPE_TOOLS_HTTP_PORT", port.to_string())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::inherit());
+        if config.unattended {
+            cmd.env("SCREENPIPE_CHAT_CONTROL_DISABLED", "1");
+        }
         if let Some(url) = &engine_url {
             cmd.env("SCREENPIPE_API_URL", url);
         }
@@ -2926,6 +3118,12 @@ fn spawn_http_mcp_servers(config: &RuntimeConfig) -> Vec<std::process::Child> {
         }
         if let Some(chat_id) = env_nonempty("SCREENPIPE_CHAT_SESSION_ID") {
             cmd.env("SCREENPIPE_CHAT_SESSION_ID", chat_id);
+        }
+        if let Some(addr) = env_nonempty(super::super::chat_control::CHAT_CONTROL_ADDR_ENV) {
+            cmd.env(super::super::chat_control::CHAT_CONTROL_ADDR_ENV, addr);
+        }
+        if let Some(token) = env_nonempty(super::super::chat_control::CHAT_CONTROL_TOKEN_ENV) {
+            cmd.env(super::super::chat_control::CHAT_CONTROL_TOKEN_ENV, token);
         }
         match cmd.spawn() {
             Ok(child) => {
@@ -2945,7 +3143,7 @@ fn spawn_http_mcp_servers(config: &RuntimeConfig) -> Vec<std::process::Child> {
     // only that mode). Best-effort: `bun x` may fetch it on first run, so it can
     // lag; we still advertise it (the agent retries) rather than block on it.
     if let Some(port) = free_loopback_port() {
-        let mut cmd = Command::new(&config.bun_path);
+        let mut cmd = crate::no_window_command(&config.bun_path);
         cmd.arg("x")
             .arg(SCREENPIPE_MCP_PKG)
             .arg("--http")
@@ -3138,6 +3336,51 @@ fn model_access_guidance(text: &str, agent_id: &str) -> Option<String> {
     ))
 }
 
+/// Openers of the skills-budget warnings Codex's skills extension prepends to
+/// the first assistant message of a turn when the installed skills overflow its
+/// context budget (`codex ext/skills/src/render.rs`). Matched with an optional
+/// leading "Warning:".
+const SKILLS_BUDGET_WARNING_OPENERS: &[&str] = &[
+    "Exceeded skills context budget",
+    "Skill descriptions were shortened to fit the skills context budget",
+    "Host skills are available but omitted from the model-visible skills list",
+];
+
+fn starts_with_skills_budget_warning(text: &str) -> bool {
+    let text = text
+        .strip_prefix("Warning:")
+        .map(str::trim_start)
+        .unwrap_or(text);
+    SKILLS_BUDGET_WARNING_OPENERS
+        .iter()
+        .any(|opener| text.starts_with(opener))
+}
+
+/// Strip agent-runtime skills-budget warnings from the start of an assistant
+/// message. The warning is a complete paragraph the runtime prepends before the
+/// model's actual reply; it reads as the assistant's own prose in the chat and
+/// leaks into scheduled-task outputs. Only applied to the first delta of a
+/// message, and only when it begins with a known warning opener, so ordinary
+/// answers that merely mention the phrase are never rewritten.
+fn strip_skills_budget_warning(delta: &str) -> String {
+    if !starts_with_skills_budget_warning(delta.trim_start()) {
+        return delta.to_owned();
+    }
+    let mut rest = delta.trim_start();
+    while starts_with_skills_budget_warning(rest) {
+        // The warning is separated from the reply by a blank line. Without
+        // one, the chunk is the warning alone (the reply arrives in a later
+        // delta), so drop the whole chunk.
+        let (warning, remainder) = match rest.find("\n\n") {
+            Some(index) => rest.split_at(index),
+            None => (rest, ""),
+        };
+        eprintln!("[acp-runtime] suppressed agent runtime warning from chat: {warning}");
+        rest = remainder.trim_start();
+    }
+    rest.to_owned()
+}
+
 /// Screenpipe's own local, read-only screen-data tools (the `screenpipe` MCP
 /// server: search-content, activity-summary, ...). Reading the user's own
 /// recordings is the product's core purpose, so these are auto-approved rather
@@ -3156,11 +3399,13 @@ fn is_screenpipe_read_tool(tool_title: &str) -> bool {
     // http-only agents (Cursor, Copilot) — all plain GETs of the user's own
     // recordings, so auto-approved exactly like their mcp__screenpipe__*
     // equivalents on stdio. The write/bridge tools (save_artifact, sp_mcp_call,
-    // screenpipe_connect_app, live_view, sp_web_search) stay NOT auto-approved.
+    // screenpipe_connect_app, live_view, sp_web_search, send_to_chat) stay NOT
+    // auto-approved. `search_chats` is local and read-only.
     matches!(
         tool_title,
         "mcp__screenpipe-tools__query_recordings"
             | "mcp__screenpipe-tools__list_connections"
+            | "mcp__screenpipe-tools__search_chats"
             | "mcp__screenpipe-tools__activity_summary"
             | "mcp__screenpipe-tools__keyword_search"
             | "mcp__screenpipe-tools__search_elements"
@@ -3170,6 +3415,41 @@ fn is_screenpipe_read_tool(tool_title: &str) -> bool {
             | "mcp__screenpipe-tools__get_meeting"
             | "mcp__screenpipe-tools__health_check"
     )
+}
+
+/// The bare screenpipe tool name behind whatever an adapter puts on the wire.
+///
+/// Tool identity reaches the desktop in three shapes and they must all compare
+/// equal: raw Pi sends the bare name (`search-content`), stdio ACP agents send
+/// `mcp__screenpipe__search-content`, and http-only agents (Cursor, Copilot)
+/// send the bundled server's underscored form,
+/// `mcp__screenpipe-tools__frame_context`. Returns `None` for a human title
+/// like "Read /a/b.ts", which is a native agent step and not an MCP tool.
+fn normalized_tool_name(title: &str) -> Option<String> {
+    let title = title.trim();
+    if title.is_empty() {
+        return None;
+    }
+    let bare = match title.split_once("__") {
+        // `mcp__<server>__<tool>`; the server name itself may contain no `__`.
+        Some(("mcp", rest)) => rest.split_once("__").map(|(_, tool)| tool)?,
+        Some(_) => return None,
+        None => title,
+    };
+    let bare = bare.trim();
+    // A tool name is a single identifier. Anything with whitespace is a human
+    // title ("Read /a/b.ts", "Searching the transcript"), never a tool id.
+    if bare.is_empty() || bare.chars().any(char::is_whitespace) {
+        return None;
+    }
+    Some(bare.to_ascii_lowercase().replace('_', "-"))
+}
+
+/// Whether a scoped session may use this tool. Native agent steps (no MCP tool
+/// name) are refused too: a scoped surface answers from the evidence in its own
+/// turn, so a file read or a skill load is out of contract by construction.
+fn scoped_tool_allowed(allowlist: &[String], title: Option<&str>) -> bool {
+    normalized_tool_name(title.unwrap_or("")).is_some_and(|name| allowlist.contains(&name))
 }
 
 /// A short, readable heading for a permission prompt, from the tool's `kind`.
@@ -3314,7 +3594,7 @@ async fn authenticate(
 ) -> Result<(), String> {
     if config.unattended {
         return Err(format!(
-            "authentication required: {} is not signed in. Open Chat, select this coding-agent preset, and sign in before using it in a scheduled task.",
+            "authentication required: {} is not signed in. Open Chat, select this coding-agent preset, and sign in first.",
             config.agent_id
         ));
     }
@@ -3519,30 +3799,17 @@ struct PromptDispatch<'a> {
     completed: &'a mpsc::UnboundedSender<(String, String, Result<StopReason, Error>)>,
 }
 
-fn start_prompt(dispatch: &PromptDispatch<'_>, command: Value) -> Result<(), String> {
-    let &PromptDispatch {
-        connection,
-        state,
-        session_id,
-        image_supported,
-        completed,
-    } = dispatch;
-    let command_type = command
-        .get("type")
-        .and_then(Value::as_str)
-        .unwrap_or("prompt")
-        .to_owned();
-    let command_id = command
-        .get("id")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+fn prompt_content(
+    command: &Value,
+    image_supported: bool,
+    system_context: Option<String>,
+) -> Vec<ContentBlock> {
     let mut message = command
         .get("message")
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_owned();
-    if let Some(context) = state.take_system_context() {
+    if let Some(context) = system_context {
         message = format!(
             "<screenpipe-system-context>\n{context}\n</screenpipe-system-context>\n\n{message}"
         );
@@ -3577,6 +3844,28 @@ fn start_prompt(dispatch: &PromptDispatch<'_>, command: Value) -> Result<(), Str
             }
         }
     }
+    content
+}
+
+fn start_prompt(dispatch: &PromptDispatch<'_>, command: Value) -> Result<(), String> {
+    let &PromptDispatch {
+        connection,
+        state,
+        session_id,
+        image_supported,
+        completed,
+    } = dispatch;
+    let command_type = command
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("prompt")
+        .to_owned();
+    let command_id = command
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let content = prompt_content(&command, image_supported, state.take_system_context());
     state.begin_prompt(command.get("displayPreview").and_then(Value::as_str));
     let connection = connection.clone();
     let session_id = session_id.clone();
@@ -3593,6 +3882,48 @@ fn start_prompt(dispatch: &PromptDispatch<'_>, command: Value) -> Result<(), Str
             Ok(())
         })
         .map_err(|error| error.to_string())
+}
+
+/// Dispatch a capability-negotiated steer without disturbing the active
+/// `session/prompt` request. The adapter response is routed back through the
+/// runtime loop so raced-idle responses can fall back to a client-owned prompt.
+fn start_native_steer(
+    connection: &ConnectionTo<Agent>,
+    session_id: &SessionId,
+    image_supported: bool,
+    completed: &mpsc::UnboundedSender<(Value, Result<SteeringResponse, Error>)>,
+    command: Value,
+) -> Result<(), String> {
+    let request = SteeringRequest::new(
+        session_id.clone(),
+        prompt_content(&command, image_supported, None),
+    );
+    let connection = connection.clone();
+    let completed = completed.clone();
+    connection
+        .clone()
+        .spawn(async move {
+            let result = connection.send_request(request).block_task().await;
+            let _ = completed.send((command, result));
+            Ok(())
+        })
+        .map_err(|error| error.to_string())
+}
+
+fn native_steer_resolved(output: &ParentOutput, accepted: bool) {
+    // The desktop command queue sets a short-lived steer guard before writing
+    // to this runtime. Native ACP injection does not open another assistant
+    // message, so it needs a private acknowledgement to clear that guard.
+    output.send(json!({
+        "type": "acp_native_steer_resolved",
+        "accepted": accepted,
+    }));
+}
+
+fn native_steer_failed(output: &ParentOutput, command_id: &str, message: &str) {
+    native_steer_resolved(output, false);
+    command_error(output, message);
+    parent_response(output, "steer", command_id, Some(message));
 }
 
 async fn parent_commands(state: Arc<RuntimeState>, tx: mpsc::UnboundedSender<Value>) {
@@ -3636,6 +3967,7 @@ async fn run_protocol(
     let kill_terminal_state = state.clone();
     let release_terminal_state = state.clone();
     let unattended = config.unattended;
+    let scoped_tools = config.tool_allowlist.clone();
 
     Client
         .builder()
@@ -3652,6 +3984,7 @@ async fn run_protocol(
         .on_receive_request(
             async move |request: RequestPermissionRequest, responder, connection| {
                 let state = permission_state.clone();
+                let scoped_tools = scoped_tools.clone();
                 connection.spawn(async move {
                     let serialized = serde_json::to_value(&request).unwrap_or_default();
                     let tool = serialized.get("toolCall").cloned().unwrap_or_default();
@@ -3662,6 +3995,26 @@ async fn run_protocol(
                         .filter(|value| !value.is_empty());
                     let kind = tool.get("kind").and_then(Value::as_str);
                     let options = serialized.get("options").cloned().unwrap_or_else(|| json!([]));
+                    // A scoped surface (meeting chat) has no approval card to
+                    // show, so it decides here and never blocks: an allowlisted
+                    // read tool is approved, anything else is refused. Refusing
+                    // is a normal tool result the agent can answer around —
+                    // unlike waiting on a UI that will never appear, which used
+                    // to strand the turn until its timeout.
+                    if let Some(allowlist) = scoped_tools.as_deref() {
+                        if scoped_tool_allowed(allowlist, title) {
+                            if let Some(option_id) = allow_option_id(&options) {
+                                return responder.respond(RequestPermissionResponse::new(
+                                    RequestPermissionOutcome::Selected(
+                                        SelectedPermissionOutcome::new(option_id),
+                                    ),
+                                ));
+                            }
+                        }
+                        return responder.respond(RequestPermissionResponse::new(
+                            RequestPermissionOutcome::Cancelled,
+                        ));
+                    }
                     // Chat auto-approves screenpipe's read tools plus every
                     // requested tool when the user explicitly selected Full
                     // access. A scheduled task has no foreground UI, so its
@@ -3901,6 +4254,13 @@ async fn run_protocol(
                 )
                 .block_task()
                 .await?;
+            // The adapter answered the protocol handshake. Session restore or
+            // creation is the final bounded step before a preset can use it.
+            state.output.send(json!({
+                "type": "acp_status",
+                "phase": "connecting",
+                "agentId": config.agent_id,
+            }));
             if init.protocol_version != ProtocolVersion::V1 {
                 return Err(acp_invalid_params(format!(
                     "unsupported ACP protocol version {:?}",
@@ -3952,7 +4312,9 @@ async fn run_protocol(
 
             let image_supported = init.agent_capabilities.prompt_capabilities.image;
             let close_supported = init.agent_capabilities.session_capabilities.close.is_some();
+            let native_steering = steering_advertised(&init);
             let (completed_tx, mut completed_rx) = mpsc::unbounded_channel();
+            let (native_steer_tx, mut native_steer_rx) = mpsc::unbounded_channel();
             let mut active = false;
             let mut cancel_requested = false;
             let mut pending_aborts: Vec<String> = Vec::new();
@@ -3993,6 +4355,25 @@ async fn run_protocol(
                                 let message = "ACP agent is already processing a prompt";
                                 command_error(&state.output, message);
                                 parent_response(&state.output, "prompt", &id, Some(message));
+                            }
+                            "steer" if active && native_steering && !cancel_requested => {
+                                if !pending_aborts.is_empty() {
+                                    let message = "ACP abort is already in progress";
+                                    parent_response(&state.output, "steer", &id, Some(message));
+                                    continue;
+                                }
+                                // Steering supersedes a permission card just as the
+                                // legacy cancel-and-reprompt path did. The adapter's
+                                // native request then redirects the same live turn.
+                                state.cancel_permission_selections();
+                                start_native_steer(
+                                    &connection,
+                                    &session.session_id,
+                                    image_supported,
+                                    &native_steer_tx,
+                                    command,
+                                )
+                                .map_err(acp_invalid_params)?;
                             }
                             "steer" if active => {
                                 if !pending_aborts.is_empty() {
@@ -4307,6 +4688,79 @@ async fn run_protocol(
                             _ => parent_response(&state.output, command_type, &id, None),
                         }
                     }
+                    native_steer = native_steer_rx.recv() => {
+                        let Some((steer, result)) = native_steer else {
+                            return Err(Error::internal_error().data(json!("ACP native steering channel closed")));
+                        };
+                        let steer_id = steer
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned();
+                        if cancel_requested || !pending_aborts.is_empty() {
+                            native_steer_resolved(&state.output, false);
+                            parent_response(
+                                &state.output,
+                                "steer",
+                                &steer_id,
+                                Some("steer cancelled by abort"),
+                            );
+                            continue;
+                        }
+                        match result {
+                            Ok(response) => match response.outcome {
+                                SteeringOutcome::Injected | SteeringOutcome::StartedNewTurn => {
+                                    native_steer_resolved(&state.output, true);
+                                    parent_response(&state.output, "steer", &steer_id, None);
+                                }
+                                SteeringOutcome::PromptRequired => {
+                                    // Claude can notice that the active turn ended
+                                    // between the host's check and its extension
+                                    // request. Keep the content client-owned and
+                                    // submit it normally once our completion arrives.
+                                    if active {
+                                        if let Some(previous) = pending_steer.replace(steer) {
+                                            let previous_id = previous
+                                                .get("id")
+                                                .and_then(Value::as_str)
+                                                .unwrap_or_default();
+                                            parent_response(
+                                                &state.output,
+                                                "steer",
+                                                previous_id,
+                                                Some("superseded by a newer steer command"),
+                                            );
+                                        }
+                                    } else {
+                                        start_prompt(
+                                            &PromptDispatch {
+                                                connection: &connection,
+                                                state: &state,
+                                                session_id: &session.session_id,
+                                                image_supported,
+                                                completed: &completed_tx,
+                                            },
+                                            steer,
+                                        )
+                                        .map_err(acp_invalid_params)?;
+                                        active = true;
+                                        cancel_requested = false;
+                                    }
+                                }
+                                SteeringOutcome::Failed => {
+                                    let message = response
+                                        .reason
+                                        .as_deref()
+                                        .unwrap_or("ACP adapter could not apply the steer");
+                                    native_steer_failed(&state.output, &steer_id, message);
+                                }
+                            },
+                            Err(error) => {
+                                let message = format!("ACP native steering failed: {error}");
+                                native_steer_failed(&state.output, &steer_id, &message);
+                            }
+                        }
+                    }
                     completed = completed_rx.recv(), if active => {
                         let Some((command_type, command_id, result)) = completed else {
                             return Err(Error::internal_error().data(json!("ACP prompt completion channel closed")));
@@ -4451,7 +4905,12 @@ pub(super) async fn run_from_env_with_observer(
     // until process exit: dropping it here would terminate this process before
     // main can flush the final ACP error/result and choose its exit code. The
     // OS closes the handle immediately when the hidden runtime exits.
-    let config = RuntimeConfig::from_env()?;
+    // RuntimeConfig loads the optional self-improvement context through a
+    // short-lived blocking HTTP client. Build it off the async runtime so
+    // reqwest can create and drop its internal runtime safely.
+    let config = tokio::task::spawn_blocking(RuntimeConfig::from_env)
+        .await
+        .map_err(|error| format!("failed to load ACP runtime config: {error}"))??;
     let output = ParentOutput::new();
     let state = Arc::new(RuntimeState::new(output.clone(), &config, observer));
     // Agents that ignore client stdio MCP servers (Cursor) get screenpipe's
@@ -4462,18 +4921,19 @@ pub(super) async fn run_from_env_with_observer(
     } else {
         Vec::new()
     };
-    // A first-run npx install is a slow, silent-looking wait. Announce it out
-    // of band (ACP has no install-progress concept; the agent isn't up yet),
-    // so the UI can show "Installing <agent>…" instead of a bare spinner.
-    // Cleared at acp_ready; also re-announced from bun's stderr (below) in case
-    // the cache heuristic missed.
-    if agent_download_pending(&config.agent_id) {
-        output.send(json!({
-            "type": "acp_status",
-            "phase": "downloading",
-            "agentId": config.agent_id,
-        }));
-    }
+    // Every adapter reports the same startup lifecycle. A cold npx launch adds
+    // install before start/connect; binary and cached adapters begin at start.
+    // Cleared at acp_ready. stderr below corrects the best-effort cache guess.
+    let initial_boot_phase = if agent_download_pending(&config.agent_id) {
+        "downloading"
+    } else {
+        "starting"
+    };
+    output.send(json!({
+        "type": "acp_status",
+        "phase": initial_boot_phase,
+        "agentId": config.agent_id,
+    }));
     let (command_tx, command_rx) = mpsc::unbounded_channel();
     let (parent_closed_tx, mut parent_closed_rx) = oneshot::channel();
     let parent_state = state.clone();
@@ -4526,23 +4986,22 @@ pub(super) async fn run_from_env_with_observer(
     let stderr_output = output.clone();
     tokio::spawn(async move {
         let mut reader = tokio::io::BufReader::new(stderr);
-        let mut announced_download = false;
+        let mut announced_phase: Option<&'static str> = None;
         while let Ok(Some((line, _truncated))) =
             read_capped_line(&mut reader, ACP_STDERR_LINE_CAP).await
         {
-            // bun prints these to stderr while fetching a package on first run;
-            // announce it (once) so the UI can explain the wait.
-            if !announced_download
-                && (line.contains("Resolving dependencies")
-                    || line.contains("downloaded and extracted")
-                    || line.contains("Resolved, downloaded"))
-            {
-                announced_download = true;
-                stderr_output.send(json!({
-                    "type": "acp_status",
-                    "phase": "downloading",
-                    "agentId": agent_id_for_stderr,
-                }));
+            // bun reports dependency resolution and extraction on stderr. Move
+            // from install to start when extraction completes, and dedupe noisy
+            // repeated lines from the package manager.
+            if let Some(phase) = acp_boot_phase_from_stderr(&line) {
+                if announced_phase != Some(phase) {
+                    announced_phase = Some(phase);
+                    stderr_output.send(json!({
+                        "type": "acp_status",
+                        "phase": phase,
+                        "agentId": agent_id_for_stderr,
+                    }));
+                }
             }
             eprintln!("[acp:{agent_id_for_stderr}] {line}");
         }
@@ -4713,7 +5172,101 @@ mod tests {
             user_mcp_servers: Vec::new(),
             resume_session_id: None,
             unattended: false,
+            tool_allowlist: None,
         }
+    }
+
+    fn server_names(servers: &[McpServer]) -> Vec<String> {
+        servers
+            .iter()
+            .map(|server| match server {
+                McpServer::Stdio(stdio) => stdio.name.clone(),
+                McpServer::Http(http) => http.name.clone(),
+                other => format!("{other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn tool_names_normalize_across_every_wire_shape() {
+        // The same logical tool reaches us three ways: bare from raw Pi, stdio
+        // ACP's `mcp__screenpipe__`, and the bundled http server's underscored
+        // form. All three must compare equal or a scoped surface refuses the
+        // very tool it asked for.
+        assert_eq!(
+            normalized_tool_name("search-content").as_deref(),
+            Some("search-content")
+        );
+        assert_eq!(
+            normalized_tool_name("mcp__screenpipe__search-content").as_deref(),
+            Some("search-content")
+        );
+        assert_eq!(
+            normalized_tool_name("mcp__screenpipe-tools__frame_context").as_deref(),
+            Some("frame-context")
+        );
+
+        // Human titles are native agent steps, not MCP tools.
+        assert_eq!(normalized_tool_name("Read /a/b.ts"), None);
+        assert_eq!(normalized_tool_name("Searching the transcript"), None);
+        assert_eq!(normalized_tool_name(""), None);
+        assert_eq!(normalized_tool_name("   "), None);
+    }
+
+    #[test]
+    fn a_scoped_session_allows_only_its_own_read_tools() {
+        let allowlist = vec!["search-content".to_owned(), "get-meeting".to_owned()];
+
+        assert!(scoped_tool_allowed(
+            &allowlist,
+            Some("mcp__screenpipe__search-content")
+        ));
+        assert!(scoped_tool_allowed(
+            &allowlist,
+            Some("mcp__screenpipe-tools__get_meeting")
+        ));
+
+        // A screenpipe tool outside the list, another MCP server, a native step,
+        // and a title-less call are all refused.
+        assert!(!scoped_tool_allowed(
+            &allowlist,
+            Some("mcp__screenpipe__update-memory")
+        ));
+        assert!(!scoped_tool_allowed(
+            &allowlist,
+            Some("mcp__notion__search")
+        ));
+        assert!(!scoped_tool_allowed(&allowlist, Some("Skill")));
+        assert!(!scoped_tool_allowed(&allowlist, None));
+    }
+
+    #[test]
+    fn a_scoped_session_mounts_no_third_party_mcp_servers() {
+        let mut config = runtime_config("cursor");
+        config.user_mcp_servers = vec![UserMcpServer {
+            name: "notion".into(),
+            transport: "http".into(),
+            url: "https://mcp.notion.com/mcp".into(),
+            headers: Vec::new(),
+            command: None,
+            args: Vec::new(),
+            env: HashMap::new(),
+        }];
+
+        let unscoped = mcp_servers(&config);
+        assert!(
+            server_names(&unscoped).iter().any(|name| name == "notion"),
+            "ordinary chat still gets the user's own servers, got {:?}",
+            server_names(&unscoped)
+        );
+
+        config.tool_allowlist = Some(vec!["search-content".to_owned()]);
+        let scoped = mcp_servers(&config);
+        assert!(
+            !server_names(&scoped).iter().any(|name| name == "notion"),
+            "a scoped surface must not reach an unrelated data source, got {:?}",
+            server_names(&scoped)
+        );
     }
 
     #[test]
@@ -4898,6 +5451,19 @@ mod tests {
         assert!(truncated);
         let (next, _) = read_capped_line(&mut reader, 16).await.unwrap().unwrap();
         assert_eq!(next, "next");
+    }
+
+    #[test]
+    fn bun_stderr_advances_install_to_start_without_fake_percentages() {
+        assert_eq!(
+            acp_boot_phase_from_stderr("Resolving dependencies"),
+            Some("downloading")
+        );
+        assert_eq!(
+            acp_boot_phase_from_stderr("Resolved, downloaded and extracted [384]"),
+            Some("starting")
+        );
+        assert_eq!(acp_boot_phase_from_stderr("mock ACP agent ready"), None);
     }
 
     #[test]
@@ -5118,6 +5684,19 @@ mod tests {
             .join(".screenpipe")
             .join("screenpipe-tools.mjs")
             .exists());
+
+        config.unattended = true;
+        let unattended = mcp_servers(&config);
+        let tools = unattended
+            .iter()
+            .find_map(|server| match server {
+                McpServer::Stdio(stdio) if stdio.name == "screenpipe-tools" => Some(stdio),
+                _ => None,
+            })
+            .expect("unattended screenpipe-tools server");
+        assert!(tools.env.iter().any(|variable| {
+            variable.name == "SCREENPIPE_CHAT_CONTROL_DISABLED" && variable.value == "1"
+        }));
     }
 
     #[test]
@@ -5168,6 +5747,9 @@ mod tests {
         assert!(none.contains("save_artifact"));
         assert!(none.contains("user_profile"));
         assert!(none.contains("skill_manage"));
+        assert!(none.contains("search_chats"));
+        assert!(none.contains("send_to_chat"));
+        assert!(none.contains(".pi/skills/screenpipe-chats/SKILL.md"));
         assert!(none.contains(".pi/skills/*/SKILL.md"));
         assert!(
             none.contains("today\" is the user's local calendar day starting at local midnight")
@@ -5339,6 +5921,17 @@ mod tests {
         .expect("output progress");
         assert_eq!(progress["outputDelta"], json!("compiling...\n"));
 
+        // Late ACP metadata must be visible to the desktop before completion.
+        let progress = tool_progress(&json!({
+            "title": "mcp__screenpipe__search-content",
+            "kind": "search",
+            "rawInput": { "query": "late metadata" }
+        }))
+        .expect("metadata progress");
+        assert_eq!(progress["title"], json!("mcp__screenpipe__search-content"));
+        assert_eq!(progress["kind"], json!("search"));
+        assert_eq!(progress["args"], json!({ "query": "late metadata" }));
+
         // A bare status merge carries nothing renderable.
         assert_eq!(tool_progress(&json!({ "status": "in_progress" })), None);
     }
@@ -5489,6 +6082,50 @@ mod tests {
     }
 
     #[test]
+    fn terminal_tool_update_keeps_metadata_and_error_payload() {
+        let output = ParentOutput::buffer();
+        let state = test_state(&output);
+        state.handle_update(json!({
+            "sessionUpdate": "tool_call",
+            "toolCallId": "late-tool",
+            "title": "MCP: tool",
+            "status": "in_progress",
+            "rawInput": {}
+        }));
+        output.drain();
+
+        state.handle_update(json!({
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "late-tool",
+            "title": "mcp__screenpipe__search-content",
+            "kind": "search",
+            "status": "completed",
+            "rawInput": { "query": "late ACP metadata" },
+            "rawOutput": { "error": "Tool execution error" }
+        }));
+        let events = output.drain();
+        let ends = events_of_type(&events, "tool_execution_end");
+        assert_eq!(ends.len(), 1);
+        assert_eq!(ends[0]["agentId"], json!("test-agent"));
+        assert_eq!(
+            ends[0]["toolName"],
+            json!("mcp__screenpipe__search-content")
+        );
+        assert_eq!(ends[0]["kind"], json!("search"));
+        assert_eq!(ends[0]["args"], json!({ "query": "late ACP metadata" }));
+        assert_eq!(ends[0]["isError"], json!(true));
+
+        assert!(!tool_result_is_error(&json!({
+            "status": "completed",
+            "rawOutput": { "success": true, "error": "diagnostic field" }
+        })));
+        assert!(!tool_result_is_error(&json!({
+            "status": "completed",
+            "rawOutput": { "error": null }
+        })));
+    }
+
+    #[test]
     fn advertises_and_detects_the_subagent_transcript_capability() {
         let meta = subagent_transcript_capability();
         assert_eq!(meta.get("subagent-transcript"), Some(&json!(true)));
@@ -5543,6 +6180,140 @@ mod tests {
                 && e["assistantMessageEvent"]["delta"] == json!("here is the summary")
         }));
         assert!(events_of_type(&events, "tool_execution_progress").is_empty());
+    }
+
+    #[test]
+    fn completed_turn_keeps_streamed_text_in_terminal_events() {
+        let output = ParentOutput::buffer();
+        let state = test_state(&output);
+        state.handle_update(json!({
+            "sessionUpdate": "agent_message_chunk",
+            "content": { "type": "text", "text": "{\"entries\":[" }
+        }));
+        state.handle_update(json!({
+            "sessionUpdate": "agent_message_chunk",
+            "content": { "type": "text", "text": "]}" }
+        }));
+        output.drain();
+
+        state.close_turn("end_turn");
+        let events = output.drain();
+        let message_end = events_of_type(&events, "message_end");
+        let agent_end = events_of_type(&events, "agent_end");
+
+        assert_eq!(message_end.len(), 1);
+        assert_eq!(
+            message_end[0]["message"]["content"][0]["text"],
+            json!("{\"entries\":[]}")
+        );
+        assert_eq!(agent_end.len(), 1);
+        assert_eq!(
+            agent_end[0]["messages"][0]["content"][0]["text"],
+            json!("{\"entries\":[]}")
+        );
+        assert_eq!(agent_end[0]["messages"][0]["stopReason"], json!("end_turn"));
+    }
+
+    #[test]
+    fn skills_budget_warning_is_kept_out_of_the_assistant_message() {
+        let output = ParentOutput::buffer();
+        let state = test_state(&output);
+        // Codex prepends the warning to the first assistant text of the turn.
+        state.handle_update(json!({
+            "sessionUpdate": "agent_message_chunk",
+            "content": {
+                "type": "text",
+                "text": "Warning: Exceeded skills context budget of 2%. All skill descriptions were removed and 112 additional skills were not included in the model-visible skills list.\n\nHere is your week in charts."
+            }
+        }));
+        let events = output.drain();
+        let deltas: Vec<&Value> = events_of_type(&events, "message_update")
+            .into_iter()
+            .filter(|e| e["assistantMessageEvent"]["type"] == json!("text_delta"))
+            .collect();
+        assert_eq!(deltas.len(), 1);
+        assert_eq!(
+            deltas[0]["assistantMessageEvent"]["delta"],
+            json!("Here is your week in charts.")
+        );
+
+        // Later deltas in the same message are never rewritten, even if they
+        // happen to contain the phrase.
+        state.handle_update(json!({
+            "sessionUpdate": "agent_message_chunk",
+            "content": { "type": "text", "text": " Exceeded skills context budget is a Codex message." }
+        }));
+        let events = output.drain();
+        assert!(events_of_type(&events, "message_update").iter().any(|e| {
+            e["assistantMessageEvent"]["delta"]
+                == json!(" Exceeded skills context budget is a Codex message.")
+        }));
+    }
+
+    #[test]
+    fn skills_budget_warning_alone_in_the_first_delta_is_dropped_entirely() {
+        let output = ParentOutput::buffer();
+        let state = test_state(&output);
+        state.handle_update(json!({
+            "sessionUpdate": "agent_message_chunk",
+            "content": {
+                "type": "text",
+                "text": "Warning: Exceeded skills context budget of 2%. All skill descriptions were removed and 112 additional skills were not included in the model-visible skills list."
+            }
+        }));
+        let events = output.drain();
+        assert!(
+            !events_of_type(&events, "message_update")
+                .iter()
+                .any(|e| e["assistantMessageEvent"]["type"] == json!("text_delta")),
+            "a warning-only delta must not reach the chat"
+        );
+
+        // The reply arriving as the next delta sheds the warning's leftover
+        // blank line.
+        state.handle_update(json!({
+            "sessionUpdate": "agent_message_chunk",
+            "content": { "type": "text", "text": "\n\nHere is your week in charts." }
+        }));
+        let events = output.drain();
+        assert!(events_of_type(&events, "message_update").iter().any(|e| {
+            e["assistantMessageEvent"]["delta"] == json!("Here is your week in charts.")
+        }));
+    }
+
+    #[test]
+    fn strip_skills_budget_warning_handles_every_codex_variant() {
+        // All three warning shapes Codex renders, with and without "Warning:".
+        for warning in [
+            "Warning: Exceeded skills context budget of 2%. All skill descriptions were removed and 112 additional skills were not included in the model-visible skills list.",
+            "Exceeded skills context budget. All skill descriptions were removed and 3 additional skills were not included in the model-visible skills list.",
+            "Skill descriptions were shortened to fit the skills context budget. Codex can still see every skill, but some descriptions are shorter. Disable unused skills or plugins to leave more room for the rest.",
+            "Host skills are available but omitted from the model-visible skills list because the skills context budget was exceeded.",
+        ] {
+            assert_eq!(
+                strip_skills_budget_warning(&format!("{warning}\n\nreal reply")),
+                "real reply",
+                "failed to strip: {warning}"
+            );
+            assert_eq!(strip_skills_budget_warning(warning), "");
+        }
+        // Two stacked warnings are both removed.
+        assert_eq!(
+            strip_skills_budget_warning(
+                "Warning: Exceeded skills context budget of 2%. Details.\n\nSkill descriptions were shortened to fit the skills context budget. Details.\n\nreal reply"
+            ),
+            "real reply"
+        );
+        // Ordinary text is untouched, including leading whitespace and text
+        // that merely mentions the phrase later on.
+        assert_eq!(
+            strip_skills_budget_warning("  indented reply"),
+            "  indented reply"
+        );
+        assert_eq!(
+            strip_skills_budget_warning("The agent said: Exceeded skills context budget."),
+            "The agent said: Exceeded skills context budget."
+        );
     }
 
     #[test]
@@ -5715,6 +6486,9 @@ mod tests {
         assert!(is_screenpipe_read_tool(
             "mcp__screenpipe-tools__list_connections"
         ));
+        assert!(is_screenpipe_read_tool(
+            "mcp__screenpipe-tools__search_chats"
+        ));
         // Core read tools mirrored on screenpipe-tools for http-only agents.
         assert!(is_screenpipe_read_tool(
             "mcp__screenpipe-tools__activity_summary"
@@ -5733,6 +6507,9 @@ mod tests {
         ));
         assert!(!is_screenpipe_read_tool(
             "mcp__screenpipe-tools__save_artifact"
+        ));
+        assert!(!is_screenpipe_read_tool(
+            "mcp__screenpipe-tools__send_to_chat"
         ));
         assert!(!is_screenpipe_read_tool("bash"));
 

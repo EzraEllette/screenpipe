@@ -473,14 +473,14 @@ private let kRestingOpacity: Double = 0.50
 private let kAnimDur: Double = 0.2
 private let kDockControls = ["search", "chat", "timeline", "audio", "brand"]
 
-/// Convert configured shortcuts to one stable, readable macOS order.
+/// Convert configured shortcuts to one stable, compact macOS glyph order.
 /// Settings historically stored both `Super+Control+…` and
-/// `Control+Super+…`; the overlay should always read `Cmd+Ctrl+…`.
+/// `Control+Super+…`; the overlay should always read `⌘⌃…`.
 func prettifyShortcut(_ raw: String) -> String {
     let normalized = raw
-        .replacingOccurrences(of: "⌘", with: "Cmd+")
-        .replacingOccurrences(of: "⌃", with: "Ctrl+")
-        .replacingOccurrences(of: "⌥", with: "Opt+")
+        .replacingOccurrences(of: "⌘", with: "Command+")
+        .replacingOccurrences(of: "⌃", with: "Control+")
+        .replacingOccurrences(of: "⌥", with: "Option+")
         .replacingOccurrences(of: "⇧", with: "Shift+")
 
     var modifiers = Set<String>()
@@ -488,10 +488,10 @@ func prettifyShortcut(_ raw: String) -> String {
     for part in normalized.split(separator: "+", omittingEmptySubsequences: true) {
         let trimmed = part.trimmingCharacters(in: .whitespaces)
         switch trimmed.lowercased() {
-        case "super", "cmd", "command", "meta": modifiers.insert("Cmd")
-        case "ctrl", "control": modifiers.insert("Ctrl")
-        case "alt", "option", "opt": modifiers.insert("Opt")
-        case "shift": modifiers.insert("Shift")
+        case "super", "cmd", "command", "meta": modifiers.insert("⌘")
+        case "ctrl", "control": modifiers.insert("⌃")
+        case "alt", "option", "opt": modifiers.insert("⌥")
+        case "shift": modifiers.insert("⇧")
         default:
             if !trimmed.isEmpty {
                 keys.append(trimmed.uppercased())
@@ -499,8 +499,8 @@ func prettifyShortcut(_ raw: String) -> String {
         }
     }
 
-    let canonicalModifiers = ["Cmd", "Ctrl", "Opt", "Shift"].filter(modifiers.contains)
-    return (canonicalModifiers + keys).joined(separator: "+")
+    let canonicalModifiers = ["⌘", "⌃", "⌥", "⇧"].filter(modifiers.contains)
+    return (canonicalModifiers + keys).joined()
 }
 
 /// Which side of the panel the pill and its dock hug. The panel stays a fixed
@@ -1566,9 +1566,9 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
     private var hoverHideWorkItem: DispatchWorkItem?
     private var meetingStopTimeoutWorkItem: DispatchWorkItem?
 
-    private var overlayShortcut = "Cmd+Ctrl+S"
-    private var chatShortcut = "Cmd+Ctrl+L"
-    private var searchShortcut = "Cmd+Ctrl+K"
+    private var overlayShortcut = "⌘⌃S"
+    private var chatShortcut = "⌘⌃L"
+    private var searchShortcut = "⌘⌃K"
     private var metrics = OverlayMetrics()
     private var wsTask: URLSessionWebSocketTask?
     private var wsRetryTimer: Timer?

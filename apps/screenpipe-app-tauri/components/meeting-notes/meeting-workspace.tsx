@@ -6,7 +6,14 @@
 import React from "react";
 import { MemoizedReactMarkdown } from "@/components/markdown";
 import { cn } from "@/lib/utils";
-import { Loader2 } from "lucide-react";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { AlertTriangle, Check, ChevronDown, Loader2 } from "lucide-react";
 
 export type MeetingWorkspaceTab = "notes" | "transcript" | "summary";
 
@@ -156,6 +163,47 @@ export function extractMeetingSummary(markdown: string): string | null {
   return body || null;
 }
 
+/**
+ * A completed meeting should reopen on its outcome, not its raw capture.
+ * Notes remain the useful fallback when no saved summary exists; Transcript is
+ * still available as an explicit tab, deep link, or source jump.
+ */
+export function preferredMeetingWorkspaceTab(
+  note: string | null | undefined,
+): Exclude<MeetingWorkspaceTab, "transcript"> {
+  return extractMeetingSummary(note ?? "") ? "summary" : "notes";
+}
+
+export async function stopMeetingAndOpenSummary(
+  onStop: () => void | Promise<void>,
+  onValueChange: (value: MeetingWorkspaceTab) => void,
+): Promise<void> {
+  await onStop();
+  onValueChange("summary");
+}
+
+export interface MeetingSummaryRecovery {
+  title: string;
+  detail: string;
+  retryable: boolean;
+  upgrade?: {
+    label: string;
+    onSelect: () => void;
+  };
+  model?: {
+    selectedId: string | null;
+    selectedLabel: string;
+    saving: boolean;
+    options: Array<{
+      id: string;
+      label: string;
+      detail: string;
+      onSelect: () => void;
+    }>;
+    onManage: () => void;
+  };
+}
+
 export function MeetingSummarySurface({
   note,
   state,
@@ -163,6 +211,7 @@ export function MeetingSummarySurface({
   streamedSummary,
   onGenerate,
   canGenerate,
+  recovery,
   activity,
 }: {
   note: string;
@@ -171,6 +220,7 @@ export function MeetingSummarySurface({
   streamedSummary?: string;
   onGenerate: () => void;
   canGenerate: boolean;
+  recovery?: MeetingSummaryRecovery;
   // Replay scrubber and the "related during this meeting" list. They are
   // evidence for the summary — what was on screen and open while it was
   // written — so they belong under it. Under the note editor they sat below a
@@ -180,6 +230,7 @@ export function MeetingSummarySurface({
   const savedSummary = extractMeetingSummary(note);
   const isStreaming = state === "working" && Boolean(streamedSummary?.trim());
   const summary = isStreaming ? streamedSummary! : savedSummary;
+  const attention = state === "attention" ? recovery : undefined;
 
   return (
     <section
@@ -204,11 +255,17 @@ export function MeetingSummarySurface({
                 />
               )}
               <span>
-                {state === "working" ? "writing summary" : "meeting summary"}
+                {state === "working"
+                  ? "writing summary"
+                  : "meeting summary"}
               </span>
             </div>
             <p className="mt-2 text-sm leading-6 text-muted-foreground">
-              {detail}
+              {attention
+                ? savedSummary
+                  ? "The existing summary is unchanged."
+                  : "Generation stopped before a summary was written."
+                : detail}
             </p>
           </div>
           <div className="flex shrink-0 items-center gap-2">
@@ -216,8 +273,8 @@ export function MeetingSummarySurface({
                 the tab rule above. This header keeps only the action that is
                 unique to the summary tab: producing one. */}
             {(state === "idle" ||
-              state === "attention" ||
-              state === "ready") && (
+              state === "ready" ||
+              (state === "attention" && attention?.retryable)) && (
               <button
                 type="button"
                 onClick={onGenerate}
@@ -234,13 +291,106 @@ export function MeetingSummarySurface({
           </div>
         </div>
 
+        {attention && (
+          <div
+            role="alert"
+            data-testid="meeting-summary-recovery"
+            className="mb-8 border border-border bg-muted/30 p-5"
+          >
+            <div className="flex items-start gap-3">
+              <AlertTriangle
+                className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-300"
+                aria-hidden="true"
+              />
+              <div className="min-w-0 flex-1">
+                <h2 className="font-mono text-xs uppercase tracking-[0.12em] text-foreground">
+                  {attention.title}
+                </h2>
+                <p className="mt-2 max-w-xl text-sm leading-6 text-muted-foreground">
+                  {attention.detail}
+                </p>
+                <div className="mt-4 flex flex-wrap items-center gap-2">
+                  {attention.upgrade && (
+                    <button
+                      type="button"
+                      data-testid="meeting-summary-upgrade-button"
+                      onClick={attention.upgrade.onSelect}
+                      className="h-9 border border-foreground bg-foreground px-3 font-mono text-[10px] uppercase tracking-[0.12em] text-background transition-colors hover:bg-background hover:text-foreground"
+                    >
+                      {attention.upgrade.label}
+                    </button>
+                  )}
+                  {attention.model && (
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <button
+                          type="button"
+                          data-testid="meeting-summary-change-model"
+                          disabled={attention.model.saving}
+                          className="flex h-9 items-center gap-2 border border-border bg-background px-3 font-mono text-[10px] uppercase tracking-[0.12em] text-foreground transition-colors hover:border-foreground disabled:text-muted-foreground"
+                        >
+                          {attention.model.saving
+                            ? "changing model"
+                            : "change summary model"}
+                          <ChevronDown className="h-3 w-3" aria-hidden="true" />
+                        </button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent
+                        align="start"
+                        className="w-72 rounded-none"
+                      >
+                        <div className="border-b border-border px-2 py-2">
+                          <p className="font-mono text-[9px] uppercase tracking-[0.12em] text-muted-foreground">
+                            current summary model
+                          </p>
+                          <p className="mt-1 truncate text-xs text-foreground">
+                            {attention.model.selectedLabel}
+                          </p>
+                        </div>
+                        {attention.model.options.map((option) => (
+                          <DropdownMenuItem
+                            key={option.id}
+                            onSelect={option.onSelect}
+                            className="rounded-none"
+                          >
+                            <span className="flex min-w-0 flex-1 items-center gap-2">
+                              <span className="min-w-0 flex-1">
+                                <span className="block truncate text-xs">
+                                  {option.label}
+                                </span>
+                                <span className="block truncate text-[10px] text-muted-foreground">
+                                  {option.detail}
+                                </span>
+                              </span>
+                              {option.id === attention.model?.selectedId && (
+                                <Check className="h-3.5 w-3.5" aria-hidden="true" />
+                              )}
+                            </span>
+                          </DropdownMenuItem>
+                        ))}
+                        <DropdownMenuSeparator />
+                        <DropdownMenuItem
+                          onSelect={attention.model.onManage}
+                          className="rounded-none font-mono text-[10px] uppercase tracking-[0.1em]"
+                        >
+                          manage models &amp; keys
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
         <div
           data-testid="meeting-summary-reading-column"
           className={cn(MEETING_READING_COLUMN_CLASS, "select-text")}
         >
           {summary ? (
             <div aria-busy={isStreaming}>
-              <MemoizedReactMarkdown className="prose prose-sm max-w-none break-words text-foreground dark:prose-invert prose-headings:font-mono prose-headings:text-xs prose-headings:uppercase prose-headings:tracking-[0.12em] prose-p:leading-7 prose-li:leading-7 [&>*:first-child]:mt-0">
+              <MemoizedReactMarkdown className="prose prose-sm max-w-none flex flex-col items-start break-words text-foreground dark:prose-invert prose-headings:font-mono prose-headings:text-xs prose-headings:uppercase prose-headings:tracking-[0.12em] prose-p:leading-7 prose-li:leading-7 [&>*:first-child]:mt-0">
                 {summary}
               </MemoizedReactMarkdown>
               {isStreaming && (
@@ -263,7 +413,7 @@ export function MeetingSummarySurface({
                 The first section replaces this message as soon as it is ready.
               </p>
             </div>
-          ) : (
+          ) : state === "attention" ? null : (
             <div className="border-l border-border py-2 pl-5">
               <p className="text-sm font-medium text-foreground">
                 no summary yet

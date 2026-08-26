@@ -59,6 +59,47 @@ describe("browser development runtime", () => {
     });
   });
 
+  it("provides imported skills for composer design review", () => {
+    const invoke = createBrowserIpcMock({ mode: "mock", apiPort: 3030 });
+
+    expect(invoke("list_imported_skills")).toEqual([
+      expect.objectContaining({
+        name: "PDF tools",
+        path: "/Users/screenpipe/.screenpipe/skills/pdf-tools",
+      }),
+      expect.objectContaining({ name: "Meeting follow-up" }),
+      expect.objectContaining({ name: "Customer discovery" }),
+    ]);
+    expect(invoke("scan_device_skills")).toEqual([]);
+    expect(invoke("list_managed_team_skills")).toEqual([]);
+  });
+
+  it("installs provider skills into the browser skills store", () => {
+    const invoke = createBrowserIpcMock({ mode: "mock", apiPort: 3030 });
+    const registry = invoke("fetch_skills_registry") as Array<{
+      name: string;
+      imported?: boolean;
+    }>;
+
+    expect(registry.map((skill) => skill.name)).toEqual([
+      "PDF",
+      "MCP Builder",
+      "Transcribe",
+      "Playwright",
+    ]);
+
+    invoke("install_registry_skill", { name: "PDF" });
+
+    expect(invoke("fetch_skills_registry")).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: "PDF", imported: true }),
+      ]),
+    );
+    expect(invoke("list_imported_skills")).toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: "PDF" })]),
+    );
+  });
+
   it("provides stateful Live View fixtures", () => {
     const invoke = createBrowserIpcMock({ mode: "mock", apiPort: 3030 });
     const [view] = invoke("list_brain_views") as BrainViewDefinition[];
@@ -130,6 +171,19 @@ describe("browser development runtime", () => {
     expect(tasks[2].executionScope).toBe("session");
   });
 
+  it("supports toggling extensions during browser design review", () => {
+    const invoke = createBrowserIpcMock({ mode: "mock", apiPort: 3030 });
+
+    expect(invoke("pi_list_extension_packages")).toEqual([]);
+    expect(invoke("pi_install_extension_package", { source: "npm:@demo/tool" })).toEqual([
+      expect.objectContaining({ source: "npm:@demo/tool", installed: true }),
+    ]);
+    expect(invoke("pi_list_extension_packages")).toEqual([
+      expect.objectContaining({ source: "npm:@demo/tool", installed: true }),
+    ]);
+    expect(invoke("pi_remove_extension_package", { source: "npm:@demo/tool" })).toEqual([]);
+  });
+
   it("returns useful empty engine responses", async () => {
     const health = mockLocalApiResponse(
       new URL("http://localhost:3030/health"),
@@ -146,6 +200,16 @@ describe("browser development runtime", () => {
       undefined,
       "ready",
     );
+    const artifacts = mockLocalApiResponse(
+      new URL("http://localhost:3030/artifacts?limit=1000"),
+      undefined,
+      "ready",
+    );
+    const missingArtifact = mockLocalApiResponse(
+      new URL("http://localhost:3030/artifacts?id=999999&limit=1"),
+      undefined,
+      "ready",
+    );
 
     expect(health.status).toBe(200);
     expect((await health.json()).status).toBe("healthy");
@@ -154,6 +218,20 @@ describe("browser development runtime", () => {
       pagination: { total: 0 },
     });
     expect(await memories.json()).toMatchObject({
+      data: [],
+      pagination: { total: 0 },
+    });
+    expect(await artifacts.json()).toMatchObject({
+      data: [
+        {
+          id: 4242,
+          title: "sync-summary.md",
+          source: "imessage-sync",
+        },
+      ],
+      pagination: { total: 1 },
+    });
+    expect(await missingArtifact.json()).toMatchObject({
       data: [],
       pagination: { total: 0 },
     });

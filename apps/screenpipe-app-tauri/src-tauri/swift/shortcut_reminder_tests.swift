@@ -390,6 +390,23 @@ private func testWireContract() {
     expect(actual == expected, "anchor raw values drifted: \(actual)")
 }
 
+/// The native overlay must use the same compact key notation as the webview
+/// fallback. Word labels made a two-modifier shortcut wider than its action.
+private func testShortcutGlyphs() {
+    expect(
+        prettifyShortcut("Control+Super+s") == "⌘⌃S",
+        "shortcut should render Command and Control as glyphs"
+    )
+    expect(
+        prettifyShortcut("Shift+Option+Command+k") == "⌘⌥⇧K",
+        "shortcut should keep a stable macOS glyph order"
+    )
+    expect(
+        prettifyShortcut("⌘⌃S") == "⌘⌃S",
+        "shortcut glyph input should be idempotent"
+    )
+}
+
 /// A drag inside a display must be left exactly alone. The clamp is a fence at
 /// the edge of the desktop, not a magnet, so ordinary dragging still tracks the
 /// cursor pixel for pixel.
@@ -514,6 +531,7 @@ struct ShortcutReminderTests {
         testAttachmentStacking()
         testAttachmentStaysOnScreen()
         testWireContract()
+        testShortcutGlyphs()
         testClampLeavesOnScreenDragsAlone()
         testClampKeepsPillOnDesktop()
         testClampPicksNearestDisplay()

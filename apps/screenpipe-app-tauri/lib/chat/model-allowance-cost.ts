@@ -83,6 +83,43 @@ export function presetUsesHostedAllowance(
     && acpAdapterInfo(agent.id).supportsCloudRouting === true;
 }
 
+/** Display names for the providers a preset can pay through itself. */
+const OWN_ACCOUNT_PROVIDER_NAMES: Record<string, string> = {
+  openai: "OpenAI",
+  "openai-chatgpt": "ChatGPT",
+  anthropic: "Anthropic",
+  custom: "custom provider",
+};
+
+/**
+ * Why this preset's next message will not draw on the Screenpipe Cloud
+ * allowance, or `null` when it will.
+ *
+ * The plan a user is on is an account fact and stays true whatever preset the
+ * composer happens to have selected; only who pays for the next request
+ * changes. Hiding the plan and the allowance together is what made an ordinary
+ * ACP preset read as "my subscription broke", so the caller keeps the plan
+ * visible and renders this in place of the meters.
+ */
+export function presetAllowanceExemption(
+  preset: Pick<AIPreset, "provider" | "acpAgent"> | null | undefined,
+): string | null {
+  if (presetUsesHostedAllowance(preset)) return null;
+
+  const provider = String(preset?.provider ?? "").trim().toLowerCase();
+  if (provider === "acp") {
+    // True whether the agent cannot route to the cloud at all (Cursor, Copilot)
+    // or simply is not set to; either way the bill lands on their account.
+    return `this agent bills to your ${acpAdapterInfo(preset?.acpAgent?.id).name} account.`;
+  }
+  if (provider === "native-ollama") {
+    return "this model runs on your machine, so it costs nothing.";
+  }
+  const name = OWN_ACCOUNT_PROVIDER_NAMES[provider];
+  if (name) return `this preset uses your own ${name} key.`;
+  return "this preset does not use Screenpipe Cloud.";
+}
+
 export type ModelAllowanceNotice = {
   tier: Exclude<ModelAllowanceTier, "standard">;
   /** Short enough to sit inline next to the model name. */

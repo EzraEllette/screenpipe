@@ -11,7 +11,8 @@ use axum::http::StatusCode;
 use axum::Json;
 use screenpipe_connect::{connections, mcp_servers};
 use screenpipe_core::pipes::{
-    describe_schedule_config, next_occurrences, PipeManager, ScheduleConfig,
+    describe_schedule_config, install_bundled_pipe as install_bundled_pipe_asset, next_occurrences,
+    PipeManager, ScheduleConfig,
 };
 use screenpipe_secrets::SecretStore;
 use serde::Deserialize;
@@ -500,6 +501,25 @@ pub async fn preview_schedule(Json(cfg): Json<ScheduleConfig>) -> (StatusCode, J
     )
 }
 
+/// POST /pipes/bundled/:id/install — restore a trusted Pipe shipped with the app.
+pub async fn install_bundled_pipe(
+    State(pm): State<SharedPipeManager>,
+    Path(id): Path<String>,
+) -> Json<Value> {
+    let mgr = pm.lock().await;
+    let installed = match install_bundled_pipe_asset(mgr.pipes_dir(), &id) {
+        Ok(installed) => installed,
+        Err(error) => return Json(json!({ "error": error.to_string() })),
+    };
+    if let Err(error) = mgr.load_pipes().await {
+        return Json(json!({
+            "error": format!("bundled Pipe was copied but could not be loaded: {error}")
+        }));
+    }
+
+    Json(json!({ "success": true, "name": id, "installed": installed }))
+}
+
 /// POST /pipes/install — install a pipe from URL or local path.
 pub async fn install_pipe(
     State(pm): State<SharedPipeManager>,
@@ -608,6 +628,29 @@ mod tests {
         assert_eq!(run_trigger_type(Some(&onboarding)), "onboarding");
         assert_eq!(run_trigger_type(Some(&untrusted)), "manual");
         assert_eq!(run_trigger_type(None), "manual");
+    }
+
+    #[tokio::test]
+    async fn installs_a_trusted_bundled_pipe_without_the_remote_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = PipeManager::new(dir.path().join("pipes"), HashMap::new(), None, 3030);
+        let state = Arc::new(Mutex::new(manager));
+
+        let Json(body) = install_bundled_pipe(
+            State(state.clone()),
+            Path("speaker-reconciliation".to_string()),
+        )
+        .await;
+
+        assert_eq!(body["success"], true);
+        assert_eq!(body["name"], "speaker-reconciliation");
+        assert_eq!(body["installed"], true);
+        assert!(state
+            .lock()
+            .await
+            .get_pipe("speaker-reconciliation")
+            .await
+            .is_some());
     }
 
     #[test]

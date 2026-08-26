@@ -52,7 +52,7 @@ type HistoryTab = "chats" | "pipes" | "archived" | "all";
 const HISTORY_PAGE_SIZE = 30;
 const TABS: ReadonlyArray<{ value: HistoryTab; label: string }> = [
   { value: "chats", label: "Chats" },
-  { value: "pipes", label: "Scheduled" },
+  { value: "pipes", label: "Automations" },
   { value: "archived", label: "Archived" },
   { value: "all", label: "All" },
 ];

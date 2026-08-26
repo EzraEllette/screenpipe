@@ -53,6 +53,44 @@ async fn history_swipe_navigation_enabled(
     crate::window::history_swipe_navigation_enabled(&window).await
 }
 
+/// E2E helper: emit the same native-scroll payload shape as a physical
+/// horizontal trackpad gesture. The production indicator owns the rendering;
+/// this only holds or dismisses the transient state for a screenshot.
+#[command]
+fn preview_history_swipe(
+    app_handle: tauri::AppHandle,
+    label: String,
+    direction: String,
+) -> Result<(), String> {
+    let window = app_handle
+        .get_webview_window(&label)
+        .ok_or_else(|| format!("webview window not found: {label}"))?;
+    let (delta_x, dismiss) = match direction.as_str() {
+        "back" => (84.0, false),
+        "forward" => (-84.0, false),
+        "dismiss" => (0.0, true),
+        _ => return Err(format!("unsupported history swipe direction: {direction}")),
+    };
+
+    window
+        .emit(
+            "native-scroll",
+            serde_json::json!({
+                "deltaX": delta_x,
+                "deltaY": 0.0,
+                "phase": 1,
+                "momentumPhase": 0,
+                "ctrlKey": false,
+                "metaKey": false,
+                "e2ePreview": true,
+                "e2ePreviewDismiss": dismiss,
+            }),
+        )
+        .map_err(|error| error.to_string())?;
+
+    Ok(())
+}
+
 /// E2E helper: backdate the recorded setup completion.
 ///
 /// The first-run window keys off how long ago setup finished, and the two
@@ -240,6 +278,39 @@ async fn open_auto_meeting(
         .map_err(|error| error.to_string())
 }
 
+/// E2E helper: reproduce a detector start with competing calendar events.
+///
+/// The real matcher and DB write run inside screenpipe-engine. The harness only
+/// supplies deterministic private-data-free inputs so CI and PR recordings do
+/// not depend on a reviewer's calendar account or a live third-party call.
+#[command]
+async fn simulate_calendar_meeting_match(
+    state: State<'_, RecordingState>,
+    observed_meeting_url: String,
+    events: serde_json::Value,
+    now: String,
+) -> Result<i64, String> {
+    let now = chrono::DateTime::parse_from_rfc3339(&now)
+        .map_err(|error| error.to_string())?
+        .with_timezone(&chrono::Utc);
+    let events_json = serde_json::to_string(&events).map_err(|error| error.to_string())?;
+    let db = {
+        let server_guard = state.server.lock().await;
+        server_guard
+            .as_ref()
+            .ok_or_else(|| "server not running".to_string())?
+            .db
+            .clone()
+    };
+    screenpipe_engine::meeting_watcher::e2e_start_calendar_matched_meeting(
+        &db,
+        &observed_meeting_url,
+        &events_json,
+        now,
+    )
+    .await
+}
+
 /// E2E helper: report the currently open meeting, if any.
 ///
 /// Mirrors the "is a meeting still in progress?" question the streaming
@@ -263,8 +334,8 @@ async fn active_meeting_id(state: State<'_, RecordingState>) -> Result<Option<i6
 /// Returns `None` off macOS and whenever the native panel is unavailable, so a
 /// spec can tell "not this platform" apart from "card is hidden".
 #[command]
-fn native_meeting_overlay_state() -> Option<crate::native_shortcut_reminder::MeetingOverlayPanelState>
-{
+fn native_meeting_overlay_state(
+) -> Option<crate::native_shortcut_reminder::MeetingOverlayPanelState> {
     crate::native_shortcut_reminder::meeting_overlay_state()
 }
 
@@ -698,6 +769,7 @@ async fn capture_pi_start_error(
         project_dir,
         None,
         provider_config,
+        None,
     )
     .await
     {
@@ -726,6 +798,7 @@ pub(super) fn plugin() -> TauriPlugin<Wry> {
         .invoke_handler(tauri::generate_handler![
             main_overlay_visible,
             history_swipe_navigation_enabled,
+            preview_history_swipe,
             mark_capture_intended,
             emit_disk_space_low,
             emit_disk_space_recovered,
@@ -740,6 +813,7 @@ pub(super) fn plugin() -> TauriPlugin<Wry> {
             installed_tray_recording_status,
             shortcut_reminder_visible,
             open_auto_meeting,
+            simulate_calendar_meeting_match,
             active_meeting_id,
             native_meeting_overlay_state,
             native_timeline_search_state,

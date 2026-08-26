@@ -652,7 +652,8 @@ fn enumerate_sck_monitors_for_lookup() -> std::result::Result<Vec<SafeMonitor>, 
 /// [`monitor_lookup_timeout`], those calls time out, leak a wedged worker
 /// apiece, and saturate the shared cap so real capture is refused.
 ///
-/// Only the *lookup* path reads this cache. `list_monitors_detailed` always
+/// Only capture lookups apply this TTL and validity bit. Focus resolution may
+/// read the stored last-known geometry, but `list_monitors_detailed` always
 /// enumerates fresh and overwrites it, so display connect/disconnect detection
 /// in the monitor watcher keeps its existing accuracy.
 const MONITOR_LOOKUP_CACHE_TTL: Duration = Duration::from_secs(10);
@@ -660,6 +661,7 @@ const MONITOR_LOOKUP_CACHE_TTL: Duration = Duration::from_secs(10);
 struct CachedMonitorList {
     monitors: Vec<SafeMonitor>,
     captured_at: Instant,
+    valid_for_lookup: bool,
 }
 
 static MONITOR_LOOKUP_CACHE: Lazy<RwLock<Option<CachedMonitorList>>> =
@@ -673,36 +675,15 @@ fn store_monitor_lookup_cache(monitors: &[SafeMonitor]) {
     *guard = Some(CachedMonitorList {
         monitors: monitors.to_vec(),
         captured_at: Instant::now(),
+        valid_for_lookup: true,
     });
 }
 
-/// How long a successful enumeration may answer reads that only need the set
-/// of displays and their geometry, rather than connect/disconnect detection.
+/// Run `f` against a valid cached enumeration when it is younger than `ttl`.
 ///
-/// The macOS focus tracker calls [`list_monitors`] from a 5s safety-net poll
-/// and again from every `didActivateApplication` / `activeSpaceDidChange`
-/// notification, purely to resolve which display the cursor sits on. That is
-/// upwards of 720 `SCShareableContent` round-trips an hour before a single app
-/// switch is counted, and every one of them can strand a worker: sck-rs
-/// charges a live-call slot before the call and a hung completion handler
-/// never releases it, so six unlucky calls across the whole process lifetime
-/// saturate the cap and refuse capture until relaunch. Serving these reads
-/// from the last enumeration removes the traffic.
-///
-/// Sized to the monitor watcher's own 60s backstop, which keeps calling
-/// [`list_monitors_detailed`] and refreshing this cache. Connect/disconnect
-/// detection is unchanged — it runs on that fresh path, never this one — and
-/// in steady state the watcher keeps the entry warm so focus resolution costs
-/// no SCK calls at all.
-const MONITOR_TOPOLOGY_CACHE_TTL: Duration = Duration::from_secs(60);
-
-/// Run `f` against the cached enumeration when it is younger than `ttl`.
-///
-/// Two read paths share one cache with different freshness needs: a lookup
-/// wants one display's geometry, a topology read wants the whole set. Taking
-/// the TTL as an argument keeps both explicit about how stale an answer they
-/// accept, without a second cache to keep in sync. `f` runs under the read
-/// lock so the by-id path still clones a single monitor rather than the list.
+/// Capture lookups use this path and must reject explicitly invalidated or
+/// expired geometry. The focus tracker reads the same stored geometry through
+/// [`last_known_monitor_list`] without treating itself as a topology owner.
 fn with_fresh_monitor_cache<T>(
     now: Instant,
     ttl: Duration,
@@ -712,7 +693,7 @@ fn with_fresh_monitor_cache<T>(
         .read()
         .unwrap_or_else(|e| e.into_inner());
     let cached = guard.as_ref()?;
-    if now.duration_since(cached.captured_at) >= ttl {
+    if !cached.valid_for_lookup || now.duration_since(cached.captured_at) >= ttl {
         return None;
     }
     Some(f(&cached.monitors))
@@ -726,20 +707,39 @@ fn cached_monitor_by_id(id: u32, now: Instant) -> Option<SafeMonitor> {
     .flatten()
 }
 
-/// Read the whole cached enumeration when it is younger than `ttl`.
-fn cached_monitor_list(now: Instant, ttl: Duration) -> Option<Vec<SafeMonitor>> {
-    with_fresh_monitor_cache(now, ttl, <[SafeMonitor]>::to_vec)
+/// Return the last monitor geometry supplied by the topology owner.
+///
+/// Unlike capture lookups, focus resolution may use stale geometry while a
+/// display reconfiguration is being reconciled. It must never initiate an SCK
+/// enumeration: a failed lock/wake enumeration would otherwise leave this hot
+/// path retrying `SCShareableContent` every five seconds and on every app or
+/// Space switch.
+fn last_known_monitor_list() -> Vec<SafeMonitor> {
+    MONITOR_LOOKUP_CACHE
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .map(|cached| cached.monitors.clone())
+        .unwrap_or_default()
 }
 
-/// Drop the cached enumeration.
+/// Mark the cached enumeration stale for capture lookups.
 ///
-/// Call this the moment the display topology is known to have changed, rather
-/// than waiting for a TTL to lapse. `sleep_monitor` already owns the two
-/// authoritative signals — the CoreGraphics display-reconfiguration callback,
-/// and wake/unlock — and both are exactly when a cached list stops describing
-/// reality. Wiring them here means the TTLs are only a backstop for changes
-/// nobody told us about, not the primary correctness mechanism.
+/// Capture lookups must re-enumerate after a display change, but the focus
+/// tracker retains the last-known geometry until the monitor watcher replaces
+/// it with fresh topology. Clearing the geometry here would make the focus
+/// tracker's five-second safety poll become an independent SCK retry loop.
 pub fn invalidate_monitor_lookup_cache() {
+    let mut guard = MONITOR_LOOKUP_CACHE
+        .write()
+        .unwrap_or_else(|e| e.into_inner());
+    if let Some(cached) = guard.as_mut() {
+        cached.valid_for_lookup = false;
+    }
+}
+
+#[cfg(test)]
+fn clear_monitor_lookup_cache() {
     *MONITOR_LOOKUP_CACHE
         .write()
         .unwrap_or_else(|e| e.into_inner()) = None;
@@ -900,20 +900,14 @@ pub async fn list_monitors() -> Vec<SafeMonitor> {
 
 /// List monitors for callers that only need the current display geometry.
 ///
-/// Answers from the last enumeration while it is younger than
-/// [`MONITOR_TOPOLOGY_CACHE_TTL`], falling back to a fresh [`list_monitors`]
-/// (which refreshes the cache) on a miss. Use this for cursor-to-display
-/// resolution and other geometry reads on a hot path; use
-/// [`list_monitors_detailed`] when the caller is responsible for noticing that
-/// a display appeared or disappeared.
-///
-/// Only errors are uncached, so a miss after a failed enumeration re-attempts
-/// rather than serving an empty list as truth.
+/// Returns only the last topology supplied by [`list_monitors_detailed`]. It
+/// deliberately never enumerates: the macOS focus tracker calls this every
+/// five seconds and on app/Space changes, so a miss must not turn it into an
+/// independent `SCShareableContent` retry loop while the screen is locked or
+/// replayd is unhealthy. The monitor watcher remains the fresh topology owner.
+/// Before its first successful enumeration this returns an empty list.
 pub async fn list_monitors_cached() -> Vec<SafeMonitor> {
-    if let Some(monitors) = cached_monitor_list(Instant::now(), MONITOR_TOPOLOGY_CACHE_TTL) {
-        return monitors;
-    }
-    list_monitors().await
+    last_known_monitor_list()
 }
 
 pub async fn get_default_monitor() -> Option<SafeMonitor> {
@@ -1086,13 +1080,20 @@ mod tests {
         }
     }
 
+    fn read_focus_monitor_cache() -> Vec<SafeMonitor> {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("test runtime")
+            .block_on(list_monitors_cached())
+    }
+
     /// The production failure this cache exists for: a caller asking for the
     /// same display several times a second must not produce one
     /// `SCShareableContent` round-trip per call.
     #[test]
     fn monitor_lookup_is_served_from_a_recent_enumeration() {
         let _guard = lock_lookup_cache_tests();
-        invalidate_monitor_lookup_cache();
+        clear_monitor_lookup_cache();
         let now = Instant::now();
         assert!(cached_monitor_by_id(1, now).is_none());
 
@@ -1110,7 +1111,7 @@ mod tests {
         // caller re-enumerates rather than silently failing.
         assert!(cached_monitor_by_id(99, Instant::now()).is_none());
 
-        invalidate_monitor_lookup_cache();
+        clear_monitor_lookup_cache();
     }
 
     /// The production failure this path exists for: the focus tracker polls
@@ -1118,77 +1119,66 @@ mod tests {
     /// each of those was an `SCShareableContent` round-trip that could strand
     /// a worker for the life of the process.
     #[test]
-    fn topology_reads_are_served_from_a_recent_enumeration() {
+    fn focus_reads_are_served_from_the_last_enumeration() {
         let _guard = lock_lookup_cache_tests();
-        invalidate_monitor_lookup_cache();
-        assert!(cached_monitor_list(Instant::now(), MONITOR_TOPOLOGY_CACHE_TTL).is_none());
+        clear_monitor_lookup_cache();
+        assert!(last_known_monitor_list().is_empty());
 
         store_monitor_lookup_cache(&[cache_test_monitor(1), cache_test_monitor(2)]);
-        let stored_at = Instant::now();
-
-        let served = cached_monitor_list(stored_at, MONITOR_TOPOLOGY_CACHE_TTL)
-            .expect("a fresh enumeration must answer topology reads");
+        let served = read_focus_monitor_cache();
         assert_eq!(
             served.iter().map(|m| m.id()).collect::<Vec<_>>(),
             vec![1, 2],
-            "the cached read must return the whole set, not just one display"
+            "focus resolution must receive the whole last-known display set"
         );
 
-        invalidate_monitor_lookup_cache();
+        clear_monitor_lookup_cache();
     }
 
-    /// Topology reads accept a staler answer than lookups, but both must
-    /// eventually miss so a disconnected display stops being handed out.
+    /// Focus resolution must not become an SCK retry owner when the capture
+    /// lookup TTL expires. The monitor watcher replaces this geometry after a
+    /// successful fresh enumeration.
     #[test]
-    fn topology_cache_outlives_the_lookup_ttl_then_expires() {
+    fn focus_reads_survive_capture_lookup_expiration() {
         let _guard = lock_lookup_cache_tests();
-        invalidate_monitor_lookup_cache();
+        clear_monitor_lookup_cache();
         store_monitor_lookup_cache(&[cache_test_monitor(3)]);
         let stored_at = Instant::now();
 
-        // Past the lookup TTL the by-id path re-enumerates while the topology
-        // path is still happy — that difference is the whole point of the
-        // separate TTL, so pin it.
-        assert!(MONITOR_TOPOLOGY_CACHE_TTL > MONITOR_LOOKUP_CACHE_TTL);
         assert!(cached_monitor_by_id(3, stored_at + MONITOR_LOOKUP_CACHE_TTL).is_none());
-        assert!(cached_monitor_list(
-            stored_at + MONITOR_LOOKUP_CACHE_TTL,
-            MONITOR_TOPOLOGY_CACHE_TTL
-        )
-        .is_some());
+        assert_eq!(
+            read_focus_monitor_cache()
+                .iter()
+                .map(|monitor| monitor.id())
+                .collect::<Vec<_>>(),
+            vec![3]
+        );
 
-        assert!(cached_monitor_list(
-            stored_at + MONITOR_TOPOLOGY_CACHE_TTL,
-            MONITOR_TOPOLOGY_CACHE_TTL
-        )
-        .is_none());
-        assert!(cached_monitor_list(
-            stored_at + MONITOR_TOPOLOGY_CACHE_TTL * 2,
-            MONITOR_TOPOLOGY_CACHE_TTL
-        )
-        .is_none());
-
-        invalidate_monitor_lookup_cache();
+        clear_monitor_lookup_cache();
     }
 
-    /// A display reconfiguration or wake must drop the cache immediately
-    /// rather than let a stale layout answer until the TTL lapses.
-    /// `sleep_monitor` wires the CoreGraphics reconfiguration callback and the
-    /// wake/unlock transitions to this, so the TTL is only a backstop.
+    /// Wake and display changes invalidate capture lookups immediately, while
+    /// focus resolution keeps using the last-known geometry instead of issuing
+    /// its own SCK request during reconciliation.
     #[test]
-    fn topology_reads_miss_after_an_explicit_invalidation() {
+    fn focus_reads_survive_lookup_invalidation() {
         let _guard = lock_lookup_cache_tests();
-        invalidate_monitor_lookup_cache();
+        clear_monitor_lookup_cache();
         store_monitor_lookup_cache(&[cache_test_monitor(1), cache_test_monitor(2)]);
-        assert!(cached_monitor_list(Instant::now(), MONITOR_TOPOLOGY_CACHE_TTL).is_some());
 
         invalidate_monitor_lookup_cache();
 
-        assert!(
-            cached_monitor_list(Instant::now(), MONITOR_TOPOLOGY_CACHE_TTL).is_none(),
-            "a display change must force the next read to re-enumerate"
+        assert_eq!(
+            read_focus_monitor_cache()
+                .iter()
+                .map(|monitor| monitor.id())
+                .collect::<Vec<_>>(),
+            vec![1, 2],
+            "focus resolution must not re-enumerate while topology reconciles"
         );
         assert!(cached_monitor_by_id(1, Instant::now()).is_none());
+
+        clear_monitor_lookup_cache();
     }
 
     /// The watcher's fresh enumeration is what keeps the topology cache warm,
@@ -1196,25 +1186,24 @@ mod tests {
     #[test]
     fn newer_enumeration_replaces_the_cached_topology() {
         let _guard = lock_lookup_cache_tests();
-        invalidate_monitor_lookup_cache();
+        clear_monitor_lookup_cache();
         store_monitor_lookup_cache(&[cache_test_monitor(1), cache_test_monitor(2)]);
         store_monitor_lookup_cache(&[cache_test_monitor(1)]);
 
-        let served = cached_monitor_list(Instant::now(), MONITOR_TOPOLOGY_CACHE_TTL)
-            .expect("the newer enumeration must answer");
+        let served = last_known_monitor_list();
         assert_eq!(
             served.iter().map(|m| m.id()).collect::<Vec<_>>(),
             vec![1],
             "a display that disappeared must stop being served"
         );
 
-        invalidate_monitor_lookup_cache();
+        clear_monitor_lookup_cache();
     }
 
     #[test]
     fn monitor_lookup_cache_expires_and_can_be_invalidated() {
         let _guard = lock_lookup_cache_tests();
-        invalidate_monitor_lookup_cache();
+        clear_monitor_lookup_cache();
         store_monitor_lookup_cache(&[cache_test_monitor(7)]);
         let stored_at = Instant::now();
 
@@ -1229,6 +1218,7 @@ mod tests {
         assert!(cached_monitor_by_id(7, Instant::now()).is_some());
         invalidate_monitor_lookup_cache();
         assert!(cached_monitor_by_id(7, Instant::now()).is_none());
+        clear_monitor_lookup_cache();
     }
 
     /// A later enumeration is authoritative: a display that disappeared must
@@ -1236,14 +1226,14 @@ mod tests {
     #[test]
     fn newer_enumeration_replaces_the_cached_set() {
         let _guard = lock_lookup_cache_tests();
-        invalidate_monitor_lookup_cache();
+        clear_monitor_lookup_cache();
         store_monitor_lookup_cache(&[cache_test_monitor(1), cache_test_monitor(2)]);
         store_monitor_lookup_cache(&[cache_test_monitor(1)]);
 
         assert!(cached_monitor_by_id(1, Instant::now()).is_some());
         assert!(cached_monitor_by_id(2, Instant::now()).is_none());
 
-        invalidate_monitor_lookup_cache();
+        clear_monitor_lookup_cache();
     }
 
     #[test]

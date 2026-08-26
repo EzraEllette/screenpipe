@@ -16,7 +16,6 @@ import {
   Search,
   Plug,
   CalendarClock,
-  Keyboard,
   ListTree,
   ArrowLeft,
 } from "lucide-react";
@@ -73,6 +72,7 @@ import Timeline from "@/components/rewind/timeline";
 import {
   NativeTimeline,
   NativeTimelineBridge,
+  shouldClearActivityReturn,
 } from "@/components/rewind/native-timeline";
 import { useQueryState } from "nuqs";
 import { listen } from "@tauri-apps/api/event";
@@ -112,8 +112,9 @@ import type { AppUser } from "@/lib/app-entitlement";
 import { ONBOARDING_BRAIN_HANDOFF_EVENT } from "@/lib/live-views/onboarding-activation";
 import { ActivityLedger } from "@/components/activity-ledger";
 import { ShortcutKeycap } from "@/components/shortcut-keycap";
-import { ShortcutGuide } from "@/components/shortcut-guide";
+import { ExperimentalShortcutGuide } from "@/components/shortcut-guide";
 import { commandPalette as commandPaletteAnalytics } from "@/lib/analytics/command-palette";
+import { useExperimentalFeaturesEnabled } from "@/lib/experimental-features";
 import {
   dispatchChatShortcutAction,
   inAppShortcutLabel,
@@ -146,6 +147,7 @@ const isSettingsRoute = (value: string) => resolveSettingsSection(value) !== nul
 function HomeContent() {
   const router = useRouter();
   const { isMac } = usePlatform();
+  const experimentalFeaturesEnabled = useExperimentalFeaturesEnabled();
   const [shortcutGuideOpen, setShortcutGuideOpen] = useState(false);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   // In fullscreen, macOS hides the traffic lights — collapse the
@@ -154,6 +156,10 @@ function HomeContent() {
   const reserveTrafficLights = isMac && !isFullscreen;
   const [activeSection, setActiveSection] = useQueryState("section", {
     defaultValue: "home",
+    // Sidebar sections are navigation, not disposable filter state. Keeping
+    // each user-visible section in browser history lets the native trackpad
+    // gesture preview and restore the UI the user actually came from.
+    history: "push",
     parse: (value) => {
       if (value === "feedback") return "help"; // backwards compat
       if (value === "memories") return "brain"; // backwards compat — renamed to brain
@@ -165,32 +171,21 @@ function HomeContent() {
     serialize: (value) => value,
   });
   const [activityReturnVisible, setActivityReturnVisible] = useState(false);
-  const activityReturnButtonRef = useRef<HTMLButtonElement | null>(null);
+  const previousSectionRef = useRef(activeSection);
   const returnToActivity = useCallback(() => {
     setActivityReturnVisible(false);
     router.push("/home?section=activity");
   }, [router]);
-  const dismissActivityReturn = useCallback(() => {
-    setActivityReturnVisible(false);
-  }, []);
 
   useEffect(() => {
+    const previousSection = previousSectionRef.current;
+    previousSectionRef.current = activeSection;
     if (
-      !activityReturnVisible ||
-      (activeSection !== "meetings" && activeSection !== "timeline")
+      activityReturnVisible &&
+      shouldClearActivityReturn(previousSection, activeSection)
     ) {
-      return;
-    }
-    const dismiss = (event: PointerEvent) => {
-      if (
-        activityReturnButtonRef.current?.contains(event.target as Node)
-      ) {
-        return;
-      }
       setActivityReturnVisible(false);
-    };
-    document.addEventListener("pointerdown", dismiss, true);
-    return () => document.removeEventListener("pointerdown", dismiss, true);
+    }
   }, [activeSection, activityReturnVisible]);
   const [connectionFocusRequest, setConnectionFocusRequest] = useState<ConnectionFocusRequest | null>(null);
 
@@ -324,14 +319,14 @@ function HomeContent() {
   useEffect(() => {
     if (!isSectionHidden(activeSection)) return;
     const fallback = ["home", "timeline", "pipes"].find((s) => !isSectionHidden(s));
-    setActiveSection(fallback ?? "home");
+    setActiveSection(fallback ?? "home", { history: "replace" });
   }, [activeSection, isSectionHidden, setActiveSection]);
 
   // Timeline can be turned off in Display settings. When it is, the nav item is
   // gone, so bounce out of the (now unreachable) timeline section to chat.
   useEffect(() => {
     if ((settings.disableTimeline ?? false) && activeSection === "timeline") {
-      setActiveSection("home");
+      setActiveSection("home", { history: "replace" });
     }
   }, [settings.disableTimeline, activeSection, setActiveSection]);
 
@@ -553,14 +548,17 @@ function HomeContent() {
         setCommandPaletteOpen(!commandPaletteOpen);
         return;
       }
-      if (matchesInAppShortcut(event, "shortcut_guide", isMac)) {
+      if (
+        experimentalFeaturesEnabled &&
+        matchesInAppShortcut(event, "shortcut_guide", isMac)
+      ) {
         event.preventDefault();
         setShortcutGuideOpen((open) => !open);
       }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [commandPaletteOpen, isMac]);
+  }, [commandPaletteOpen, experimentalFeaturesEnabled, isMac]);
   // Fetch actual recording devices. Audio comes from /audio/device/status so
   // user-paused devices stay visible and can be resumed from the same control.
   interface AudioDeviceStatus {
@@ -1076,7 +1074,7 @@ function HomeContent() {
     timeline: { label: "Timeline", icon: <MonitorPlay className="h-3.5 w-3.5" /> },
     activity: { label: "Activity", icon: <ListTree className="h-3.5 w-3.5" /> },
     brain: { label: "Library", icon: <Brain className="h-3.5 w-3.5" /> },
-    pipes: { label: "Scheduled", icon: <TimerReset className="h-3.5 w-3.5" /> },
+    pipes: { label: "Automations", icon: <TimerReset className="h-3.5 w-3.5" /> },
     connections: { label: "Connections", icon: <Plug className="h-3.5 w-3.5" /> },
   };
 
@@ -1160,7 +1158,7 @@ function HomeContent() {
     if (!section) return;
     const settingsSection = resolveSettingsSection(section);
     if (settingsSection) {
-      router.push(`/settings?section=${settingsSection}`);
+      openSettings(settingsSection);
     } else {
       const mapped = section === "feedback" ? "help" : section;
       if (ALL_SECTIONS.includes(mapped)) {
@@ -1186,7 +1184,7 @@ function HomeContent() {
   // content (portaled into the shell by AppSidebar) and the content column.
   return (
     <>
-      <ShortcutGuide
+      <ExperimentalShortcutGuide
         open={shortcutGuideOpen}
         onOpenChange={setShortcutGuideOpen}
       />
@@ -1200,12 +1198,13 @@ function HomeContent() {
       {/* Routes actions the native timeline window cannot perform itself. */}
       <NativeTimelineBridge
         onReturnToActivity={returnToActivity}
-        onDismissActivityReturn={dismissActivityReturn}
+        onToggleSidebar={toggleSidebar}
       />
 
       <CommandPalette
         open={commandPaletteOpen}
         onOpenChange={setCommandPaletteOpen}
+        experimentalFeaturesEnabled={experimentalFeaturesEnabled}
         deps={{
           openSearch: () => {
             void commands.showWindow({ Search: { query: null } });
@@ -1301,7 +1300,7 @@ function HomeContent() {
               </TooltipContent>
             </Tooltip>
 
-            {!sidebarCollapsed && (
+            {!sidebarCollapsed && experimentalFeaturesEnabled && (
               <Tooltip>
                 <TooltipTrigger asChild>
                   <button
@@ -1327,39 +1326,6 @@ function HomeContent() {
                       {formatShortcutDisplay(settings.searchShortcut, isMac)}
                     </ShortcutKeycap>
                     ) : null}
-                  </span>
-                </TooltipContent>
-              </Tooltip>
-            )}
-
-            {!sidebarCollapsed && (
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <button
-                    type="button"
-                    onClick={() => setShortcutGuideOpen(true)}
-                    aria-label="keyboard shortcuts"
-                    data-testid="shortcut-guide-button"
-                    className={cn(
-                      "rounded-md p-1 transition-colors",
-                      isTranslucent
-                        ? "vibrant-nav-item"
-                        : "text-muted-foreground hover:bg-muted/50 hover:text-foreground",
-                    )}
-                  >
-                    <Keyboard className="h-3.5 w-3.5" />
-                  </button>
-                </TooltipTrigger>
-                <TooltipContent
-                  side="bottom"
-                  className="text-xs"
-                  data-testid="shortcut-guide-button-tooltip"
-                >
-                  <span className="flex items-center gap-2">
-                    keyboard shortcuts
-                    <ShortcutKeycap>
-                      {inAppShortcutLabel("shortcut_guide", isMac)}
-                    </ShortcutKeycap>
                   </span>
                 </TooltipContent>
               </Tooltip>
@@ -1413,7 +1379,7 @@ function HomeContent() {
               isTranslucent={isTranslucent}
               floatingOverMedia={sidebarCollapsed && activeSection === "timeline"}
               allCaptureDisabled={!!(settings.disableAudio && settings.disableVision)}
-              onOpenRecordingSettings={() => router.push("/settings?section=recording")}
+              onOpenRecordingSettings={() => openSettings("recording")}
             />
           </div>
 
@@ -1619,7 +1585,6 @@ function HomeContent() {
             {activityReturnVisible &&
               (activeSection === "meetings" || activeSection === "timeline") && (
                 <button
-                  ref={activityReturnButtonRef}
                   type="button"
                   onClick={returnToActivity}
                   aria-label="back to activity"

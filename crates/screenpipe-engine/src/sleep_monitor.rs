@@ -455,8 +455,9 @@ pub fn start_sleep_monitor() {
             // and audio streams (CoreAudio can go silent after display changes)
             #[cfg(target_os = "macos")]
             screenpipe_screen::stream_invalidation::request();
-            // Authoritative topology change: drop the cached monitor list so
-            // geometry reads re-enumerate instead of serving the old layout.
+            // Authoritative topology change: invalidate capture lookups so
+            // they re-enumerate. Focus resolution keeps the last-known layout
+            // until the monitor watcher completes its fresh scan below.
             #[cfg(target_os = "macos")]
             screenpipe_screen::monitor::invalidate_monitor_lookup_cache();
             screenpipe_audio::stream_invalidation::request();

@@ -19,7 +19,7 @@
  */
 
 import React from "react";
-import { render, screen, cleanup } from "@testing-library/react";
+import { act, render, screen, cleanup, fireEvent, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const DISCORD_URL = "discord.com/channels/1120795297094832337";
@@ -60,10 +60,13 @@ const store = vi.hoisted(() => ({
 	error: null as unknown,
 	message: null as string | null,
 	frameStatus: "disabled",
+	hasCachedData: false,
 }));
 
 // Hoisted alongside the mocks — vi.mock factories run before module scope.
 const noop = vi.hoisted(() => () => {});
+const posthogCapture = vi.hoisted(() => vi.fn());
+const tauriEventListeners = vi.hoisted(() => new Map<string, Array<(event: { payload: unknown }) => void>>());
 
 vi.mock("@/lib/hooks/use-timeline-store", () => ({
 	useTimelineStore: Object.assign(
@@ -80,6 +83,7 @@ vi.mock("@/lib/hooks/use-timeline-store", () => ({
 			clearFramesForNavigation: noop,
 			pendingNavigation: null,
 			setPendingNavigation: noop,
+			hasCachedData: store.hasCachedData,
 		}),
 		{
 			getState: () => ({ currentDate: new Date("2026-08-05T12:00:00+05:30") }),
@@ -111,6 +115,17 @@ vi.mock("@/lib/hooks/use-settings", () => ({
 }));
 vi.mock("@/lib/hooks/use-platform", () => ({
 	usePlatform: () => ({ isMac: true }),
+}));
+vi.mock("@/lib/hooks/use-is-enterprise-build", () => ({
+	useEnterpriseBuildStatus: () => ({
+		isEnterprise: true,
+		resolved: true,
+		error: false,
+	}),
+}));
+vi.mock("@/lib/hooks/use-timeline-cache", () => ({
+	shouldRestrictTimelineHistory: () => false,
+	useAuthoritativeTimelineHistoryAccess: () => false,
 }));
 vi.mock("@/lib/hooks/use-pipes", () => ({
 	usePipes: () => ({ promptPipes: [], templatePipes: [] }),
@@ -197,7 +212,16 @@ vi.mock("@/components/rewind/hooks/use-timeline-keyboard", () => ({
 // Child components are not under test — render nothing so the assertions can
 // only be satisfied by Timeline's own markup.
 vi.mock("@/components/rewind/current-frame-timeline", () => ({
-	CurrentFrameTimeline: () => <div data-testid="frame-canvas" />,
+	CurrentFrameTimeline: ({ onFrameLoadSuccess }: { onFrameLoadSuccess?: (details: { frameId: string; mode: "snapshot_direct" }) => void }) => (
+		<div data-testid="frame-canvas">
+			<button
+				type="button"
+				onClick={() => onFrameLoadSuccess?.({ frameId: "567", mode: "snapshot_direct" })}
+			>
+				finish frame load
+			</button>
+		</div>
+	),
 }));
 vi.mock("@/components/rewind/timeline/timeline", () => ({ TimelineSlider: () => null }));
 vi.mock("@/components/rewind/timeline/timeline-controls", () => ({
@@ -213,8 +237,20 @@ vi.mock("@/components/rewind/search-result-strip", () => ({
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({
-	listen: async () => () => {},
+	listen: async (eventName: string, callback: (event: { payload: unknown }) => void) => {
+		const listeners = tauriEventListeners.get(eventName) ?? [];
+		listeners.push(callback);
+		tauriEventListeners.set(eventName, listeners);
+		return () => {
+			tauriEventListeners.set(eventName, listeners.filter((listener) => listener !== callback));
+		};
+	},
 	emit: async () => {},
+}));
+vi.mock("@tauri-apps/api/window", () => ({
+	getCurrentWindow: () => ({ isFocused: async () => false }),
+	currentMonitor: async () => null,
+	cursorPosition: async () => ({ x: 0, y: 0 }),
 }));
 vi.mock("@/lib/utils/tauri", () => ({ commands: { showWindow: vi.fn() } }));
 vi.mock("@/lib/api", () => ({ localFetch: async () => ({ ok: true, json: async () => ({}) }) }));
@@ -229,7 +265,7 @@ vi.mock("@/lib/chat-utils", () => ({
 	formatShortcutDisplay: (s: string) => s,
 }));
 vi.mock("@/components/ui/use-toast", () => ({ toast: vi.fn() }));
-vi.mock("posthog-js", () => ({ default: { capture: vi.fn() } }));
+vi.mock("posthog-js", () => ({ default: { capture: posthogCapture } }));
 
 import Timeline from "@/components/rewind/timeline";
 
@@ -259,12 +295,73 @@ beforeEach(() => {
 		error: null,
 		message: null,
 		frameStatus: "disabled",
+		hasCachedData: false,
 	});
+	posthogCapture.mockClear();
+	tauriEventListeners.clear();
 });
 
 afterEach(cleanup);
 
 describe("Timeline empty state (mounted)", () => {
+	it("measures a real displayed frame and uses the cache source instead of frame count", () => {
+		let now = 1_000;
+		const nowSpy = vi.spyOn(performance, "now").mockImplementation(() => now);
+		setStore({ frames: [aug5Frame()], hasCachedData: true });
+
+		render(<Timeline embedded />);
+		expect(
+			posthogCapture.mock.calls.some(([event]) => event === "timeline_time_to_first_frame"),
+		).toBe(false);
+
+		now = 1_125;
+		fireEvent.click(screen.getByRole("button", { name: "finish frame load" }));
+
+		expect(posthogCapture).toHaveBeenCalledWith("timeline_time_to_first_frame", {
+			measurement_version: 2,
+			duration_ms: 125,
+			had_cache: true,
+			frames_count: 1,
+			frame_id: "567",
+			load_mode: "snapshot_direct",
+			surface: "home",
+		});
+		nowSpy.mockRestore();
+	});
+
+	it("excludes time while the overlay window is hidden", async () => {
+		let now = 10_000;
+		const nowSpy = vi.spyOn(performance, "now").mockImplementation(() => now);
+		setStore({ frames: [aug5Frame()], hasCachedData: false });
+
+		render(<Timeline />);
+		now = 610_000;
+		fireEvent.click(screen.getByRole("button", { name: "finish frame load" }));
+		expect(
+			posthogCapture.mock.calls.some(([event]) => event === "timeline_time_to_first_frame"),
+		).toBe(false);
+
+		await waitFor(() => {
+			expect(tauriEventListeners.get("window-focused")?.length).toBeGreaterThan(0);
+		});
+		act(() => {
+			for (const listener of tauriEventListeners.get("window-focused") ?? []) {
+				listener({ payload: true });
+			}
+		});
+
+		expect(posthogCapture).toHaveBeenCalledWith("timeline_time_to_first_frame", {
+			measurement_version: 2,
+			duration_ms: 0,
+			had_cache: false,
+			frames_count: 1,
+			frame_id: "567",
+			load_mode: "snapshot_direct",
+			surface: "overlay",
+		});
+		nowSpy.mockRestore();
+	});
+
 	/**
 	 * The reported journey. Visit 2 is the one that used to paint a blank
 	 * canvas: the component remounts while the store still holds Aug 5, so

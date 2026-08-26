@@ -64,6 +64,22 @@ describe("ChatChart actions", () => {
     ).toBeInTheDocument();
   });
 
+  it("keeps the action wrapper stretched to the full message width", () => {
+    const spec = specFrom({
+      type: "bar",
+      items: [{ label: "Chrome", value: 92 }],
+    });
+    render(<ChatChart spec={spec} onSendPrompt={vi.fn()} />);
+
+    const frame = screen.getByTestId("chat-chart");
+    expect(frame.parentElement).toHaveClass(
+      "w-full",
+      "min-w-0",
+      "max-w-full",
+      "self-stretch",
+    );
+  });
+
   it("sends the validated chart spec back through chat for Live View conversion", () => {
     const onSendPrompt = vi.fn();
     const spec = specFrom({
@@ -145,6 +161,61 @@ describe("ChatChart — bar", () => {
     );
     expect(screen.getByText(/showing first 20 of 25 points/)).toBeInTheDocument();
   });
+
+  it("uses one shared diverging scale for signed values", () => {
+    const { container } = render(
+      <ChatChart
+        spec={specFrom({
+          type: "bar",
+          items: [
+            { label: "gain", value: 10 },
+            { label: "loss", value: -10 },
+          ],
+        })}
+      />,
+    );
+    const fills = Array.from(
+      container.querySelectorAll<HTMLElement>("[data-chart-bar-fill]"),
+    );
+    expect(fills).toHaveLength(2);
+    expect(fills[0].style.left).toBe("50%");
+    expect(fills[1].style.left).toBe("0%");
+    expect(fills[0].style.width).toBe(fills[1].style.width);
+    expect(container.querySelectorAll("[data-chart-zero-line]")).toHaveLength(
+      2,
+    );
+  });
+
+  it("highlights the bar under the pointer", () => {
+    const { container } = render(
+      <ChatChart
+        spec={specFrom({
+          type: "bar",
+          items: [
+            { label: "first", value: 10 },
+            { label: "second", value: 5 },
+          ],
+        })}
+      />,
+    );
+    const rows = container.querySelectorAll<HTMLElement>(
+      "[data-chart-bar-row]",
+    );
+    fireEvent(
+      rows[0],
+      new MouseEvent("pointermove", {
+        bubbles: true,
+        clientX: 8,
+        clientY: 8,
+      }),
+    );
+    const fills = container.querySelectorAll<HTMLElement>(
+      "[data-chart-bar-fill]",
+    );
+    expect(fills[0].style.backgroundColor).not.toBe(
+      fills[1].style.backgroundColor,
+    );
+  });
 });
 
 describe("ChatChart — stacked_bar", () => {
@@ -188,6 +259,23 @@ describe("ChatChart — line", () => {
       />,
     );
     expect(screen.getByText("2 h – 5 h")).toBeInTheDocument();
+  });
+
+  it("centers and paints a single point instead of leaving a blank plot", () => {
+    const { container } = render(
+      <ChatChart
+        spec={specFrom({
+          type: "line",
+          items: [{ label: "now", value: 7 }],
+        })}
+      />,
+    );
+    const point = container.querySelector<HTMLElement>(
+      "[data-chart-line-point]",
+    );
+    expect(point).not.toBeNull();
+    expect(point?.style.left).toBe("50%");
+    expect(point?.style.top).toBe("50%");
   });
 });
 
@@ -404,6 +492,25 @@ describe("ChatChart — new mark types", () => {
     expect(screen.getAllByText("last week").length).toBeGreaterThan(0);
   });
 
+  it("renders grouped negative values on the opposite side of zero", () => {
+    const { container } = render(
+      <ChatChart
+        spec={specFrom({
+          type: "grouped_bar",
+          categories: ["change"],
+          series: [
+            { name: "gain", values: [4] },
+            { name: "loss", values: [-4] },
+          ],
+        })}
+      />,
+    );
+    const fills = Array.from(
+      container.querySelectorAll<HTMLElement>("[data-chart-grouped-fill]"),
+    );
+    expect(fills.map((fill) => fill.style.left)).toEqual(["50%", "0%"]);
+  });
+
   it("renders a calendar grid with its date span", () => {
     render(
       <ChatChart
@@ -480,6 +587,26 @@ describe("ChatChart — new mark types", () => {
     expect(screen.getAllByText("31 min")).toHaveLength(2);
   });
 
+  it("centers a flat range domain", () => {
+    const { container } = render(
+      <ChatChart
+        spec={specFrom({
+          type: "range",
+          items: [{ label: "fixed", min: 4, mid: 4, max: 4 }],
+        })}
+      />,
+    );
+    for (const selector of [
+      "[data-chart-range-start]",
+      "[data-chart-range-end]",
+      "[data-chart-range-mid]",
+    ]) {
+      expect(container.querySelector<HTMLElement>(selector)?.style.left).toBe(
+        "50%",
+      );
+    }
+  });
+
   it("renders scatter axes and every labeled point in the data table", () => {
     render(
       <ChatChart
@@ -499,5 +626,25 @@ describe("ChatChart — new mark types", () => {
     expect(screen.getAllByText("support")).toHaveLength(2);
     expect(screen.getByText("4 h · 9")).toBeInTheDocument();
     expect(screen.getByText("2 points")).toBeInTheDocument();
+  });
+
+  it("separates coincident scatter markers around the truthful coordinate", () => {
+    const { container } = render(
+      <ChatChart
+        spec={specFrom({
+          type: "scatter",
+          items: [
+            { label: "one", x: 5, y: 5 },
+            { label: "two", x: 5, y: 5 },
+            { label: "three", x: 5, y: 5 },
+          ],
+        })}
+      />,
+    );
+    const positions = Array.from(
+      container.querySelectorAll<HTMLElement>("[data-chart-scatter-point]"),
+      (point) => `${point.style.left}/${point.style.top}`,
+    );
+    expect(new Set(positions).size).toBe(3);
   });
 });

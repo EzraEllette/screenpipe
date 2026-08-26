@@ -341,6 +341,116 @@ describe("LiveViewCanvas", () => {
     }
   });
 
+  it.each(["pane", "Block", "toolbar"])(
+    "cancels proposal focus before a %s click can look like zoom",
+    (targetKind) => {
+      vi.stubGlobal(
+        "matchMedia",
+        vi.fn(() => ({ matches: false })),
+      );
+      vi.useFakeTimers();
+      try {
+        const cancelAnimationFrame = vi.fn();
+        vi.stubGlobal(
+          "requestAnimationFrame",
+          vi.fn(() => 77),
+        );
+        vi.stubGlobal("cancelAnimationFrame", cancelAnimationFrame);
+        const initialDocument = createCanvasDocument(view);
+        const focusDocument = {
+          ...initialDocument,
+          blocks: initialDocument.blocks.map((block) =>
+            block.slotId === "focus-time"
+              ? { ...block, width: 1_800, height: 1_000 }
+              : block,
+          ),
+        };
+        const result = render(
+          <CanvasHarness initialDocument={focusDocument} />,
+        );
+
+        result.rerender(
+          <CanvasHarness
+            initialDocument={focusDocument}
+            focusSlotId="focus-time"
+          />,
+        );
+        expect(cancelAnimationFrame).not.toHaveBeenCalledWith(77);
+
+        const surface = screen.getByTestId("live-view-canvas-surface");
+        const target =
+          targetKind === "Block"
+            ? screen.getByTestId("canvas-block-focus-time")
+            : targetKind === "toolbar"
+              ? screen.getByTestId("canvas-tools-toggle")
+              : surface.querySelector<HTMLElement>(".react-flow__pane");
+        expect(target).toBeTruthy();
+        fireEvent.pointerDown(target!);
+
+        expect(cancelAnimationFrame).toHaveBeenCalledWith(77);
+        act(() => vi.advanceTimersByTime(360));
+        openCanvasTools();
+        expect(screen.getByText("100%")).toBeTruthy();
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each(["accessibility click", "keyboard input"])(
+    "cancels proposal focus before %s can look like zoom",
+    (interaction) => {
+      vi.stubGlobal(
+        "matchMedia",
+        vi.fn(() => ({ matches: false })),
+      );
+      vi.useFakeTimers();
+      try {
+        const cancelAnimationFrame = vi.fn();
+        vi.stubGlobal(
+          "requestAnimationFrame",
+          vi.fn(() => 91),
+        );
+        vi.stubGlobal("cancelAnimationFrame", cancelAnimationFrame);
+        const result = render(<CanvasHarness />);
+
+        result.rerender(<CanvasHarness focusSlotId="focus-time" />);
+        expect(cancelAnimationFrame).not.toHaveBeenCalledWith(91);
+
+        if (interaction === "accessibility click") {
+          // fireEvent.click has no preceding pointer event, matching keyboard
+          // or assistive-technology button activation.
+          fireEvent.click(screen.getByTestId("canvas-tools-toggle"));
+        } else {
+          fireEvent.keyDown(screen.getByTestId("live-view-canvas-surface"), {
+            key: "Shift",
+          });
+        }
+
+        expect(cancelAnimationFrame).toHaveBeenCalledWith(91);
+        act(() => vi.advanceTimersByTime(360));
+        if (interaction === "keyboard input") openCanvasTools();
+        expect(screen.getByText("100%")).toBeTruthy();
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it("keeps ordinary pane and Block clicks at the same zoom", () => {
+    render(<CanvasHarness />);
+    const surface = screen.getByTestId("live-view-canvas-surface");
+    const pane = surface.querySelector<HTMLElement>(".react-flow__pane");
+    expect(pane).toBeTruthy();
+
+    fireEvent.click(pane!);
+    fireEvent.doubleClick(pane!);
+    fireEvent.click(screen.getByTestId("canvas-block-focus-time"));
+
+    openCanvasTools();
+    expect(screen.getByText("100%")).toBeTruthy();
+  });
+
   it("keeps the source-backed Live View cards interactive inside the canvas", () => {
     render(<CanvasHarness />);
 
@@ -828,7 +938,7 @@ describe("LiveViewCanvas", () => {
     expect(onPersist).not.toHaveBeenCalled();
   });
 
-  it("ignores app-wide native pinches outside the focused canvas", async () => {
+  it("accepts a window-scoped pinch without DOM focus but still requires hover", async () => {
     vi.spyOn(document, "hasFocus").mockReturnValue(false);
     render(<CanvasHarness />);
     const surface = screen.getByTestId("live-view-canvas-surface");
@@ -841,13 +951,12 @@ describe("LiveViewCanvas", () => {
     act(() => {
       eventMocks.listeners.get("native-magnify")?.({ payload: 0.1 });
     });
-    expect(screen.getByText("100%")).toBeTruthy();
+    expect(screen.getByText("110%")).toBeTruthy();
 
-    vi.mocked(document.hasFocus).mockReturnValue(true);
     fireEvent.pointerLeave(surface);
     act(() => {
       eventMocks.listeners.get("native-magnify")?.({ payload: 0.1 });
     });
-    expect(screen.getByText("100%")).toBeTruthy();
+    expect(screen.getByText("110%")).toBeTruthy();
   });
 });

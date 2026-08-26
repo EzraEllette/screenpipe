@@ -52,8 +52,11 @@ function seedSession(options: unknown[], modes: unknown = null) {
   });
 }
 
-function presetWith(config: Record<string, string>): AIPreset {
-  return { acpAgent: { id: "claude-acp", config } } as unknown as AIPreset;
+function presetWith(
+  config: Record<string, string>,
+  id = "claude-acp",
+): AIPreset {
+  return { acpAgent: { id, config } } as unknown as AIPreset;
 }
 
 afterEach(() => {
@@ -106,6 +109,34 @@ describe("ACP config trigger", () => {
     expect(screen.getByText(/currently resolves to Opus 5/)).toBeInTheDocument();
   });
 
+  it("keeps recommendation copy in the list but out of the composer bar", () => {
+    seedSession([
+      {
+        id: "model",
+        name: "Model",
+        type: "select",
+        currentValue: "screenpipe/auto",
+        values: [
+          {
+            value: "screenpipe/auto",
+            name: "screenpipe/Auto (recommended)",
+          },
+        ],
+      },
+    ]);
+
+    render(<AcpConfigSelector sessionId={SESSION} agentId="pi-acp" />);
+
+    const trigger = screen.getByTestId("acp-config-trigger");
+    expect(trigger).toHaveTextContent("screenpipe/Auto");
+    expect(trigger).not.toHaveTextContent("recommended");
+
+    fireEvent.click(trigger);
+    expect(screen.getByRole("option")).toHaveTextContent(
+      "screenpipe/Auto (recommended)",
+    );
+  });
+
   it("trims a context suffix from a directly advertised model name", () => {
     seedSession([
       {
@@ -144,6 +175,39 @@ describe("ACP config trigger", () => {
     expect(screen.getByTestId("acp-config-trigger")).toHaveTextContent("Opus 4.1");
   });
 
+  it("persists a model choice before a private session exists", () => {
+    const onPersistDefault = vi.fn();
+    useAcpSessionConfig.setState({
+      sessions: {},
+      byAgent: {
+        "claude-acp": {
+          options: [modelOption("sonnet")],
+          modes: null,
+        } as never,
+      },
+    });
+
+    render(
+      <AcpConfigSelector
+        sessionId={null}
+        agentId="claude-acp"
+        activePreset={presetWith({ model: "sonnet" })}
+        onPersistDefault={onPersistDefault}
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId("acp-config-trigger"));
+    fireEvent.change(screen.getByLabelText("Model"), {
+      target: { value: "opus" },
+    });
+
+    expect(onPersistDefault).toHaveBeenCalledWith({
+      optionId: "model",
+      value: "opus",
+    });
+    expect(mocks.setConfigOption).not.toHaveBeenCalled();
+  });
+
   it("falls back to the mode when the adapter advertises no selects", () => {
     seedSession([], {
       currentModeId: "plan",
@@ -158,7 +222,7 @@ describe("ACP config trigger", () => {
     expect(screen.getByTestId("acp-config-trigger")).toHaveTextContent("Plan");
   });
 
-  it("keeps the generic label for a non-model select rather than naming it", () => {
+  it("falls back to the adapter name for a non-model select", () => {
     // "high" off a reasoning-effort control would read as a model name.
     seedSession([
       {
@@ -176,11 +240,31 @@ describe("ACP config trigger", () => {
     render(<AcpConfigSelector sessionId={SESSION} agentId="claude-acp" />);
 
     const trigger = screen.getByTestId("acp-config-trigger");
-    expect(trigger).toHaveTextContent("config");
+    expect(trigger).toHaveTextContent("Claude Code");
     expect(trigger).not.toHaveTextContent("High");
   });
 
-  it("keeps the generic label when only re-authenticate is available", () => {
+  it("uses the saved model on a fresh profile before an advertisement arrives", () => {
+    seedSession([]);
+
+    render(
+      <AcpConfigSelector
+        sessionId={SESSION}
+        agentId="pi-acp"
+        activePreset={presetWith(
+          { model: "screenpipe/Auto (recommended)" },
+          "pi-acp",
+        )}
+        onReauthenticate={() => {}}
+      />,
+    );
+
+    const trigger = screen.getByTestId("acp-config-trigger");
+    expect(trigger).toHaveTextContent("screenpipe/Auto");
+    expect(trigger).not.toHaveTextContent("recommended");
+  });
+
+  it("uses the adapter name when only re-authenticate is available", () => {
     seedSession([]);
 
     render(
@@ -191,7 +275,9 @@ describe("ACP config trigger", () => {
       />,
     );
 
-    expect(screen.getByTestId("acp-config-trigger")).toHaveTextContent("config");
+    expect(screen.getByTestId("acp-config-trigger")).toHaveTextContent(
+      "Claude Code",
+    );
   });
 
   it("can move the mode axis into a dedicated composer control", () => {

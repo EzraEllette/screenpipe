@@ -179,6 +179,14 @@ describe("parseChartSpec — stacked_bar", () => {
       parseChartSpec('{"type":"stacked_bar","categories":["a"],"series":[]}'),
     ).toBeNull();
   });
+
+  it("rejects negative values that cannot be represented as parts of a whole", () => {
+    expect(
+      parseChartSpec(
+        '{"type":"stacked_bar","categories":["mon"],"series":[{"name":"work","values":[-1]}]}',
+      ),
+    ).toBeNull();
+  });
 });
 
 describe("parseChartSpec — heatmap", () => {
@@ -348,6 +356,13 @@ describe("parseChartSpec — grouped_bar", () => {
       ),
     ).toBeNull();
   });
+
+  it("keeps signed values for diverging comparisons", () => {
+    const spec = parseChartSpec(
+      '{"type":"grouped_bar","categories":["change"],"series":[{"name":"current","values":[-2]},{"name":"previous","values":[3]}]}',
+    );
+    expect(spec?.type).toBe("grouped_bar");
+  });
 });
 
 describe("parseChartSpec — calendar", () => {
@@ -376,6 +391,19 @@ describe("parseChartSpec — calendar", () => {
     expect(
       parseChartSpec(
         '{"type":"calendar","items":[{"date":"2026-08-01","value":-1}]}',
+      ),
+    ).toBeNull();
+  });
+
+  it("rejects sparse inputs spanning more days than the renderer can bound", () => {
+    expect(
+      parseChartSpec(
+        '{"type":"calendar","items":[{"date":"2026-01-01","value":1},{"date":"2026-03-25","value":1}]}',
+      ),
+    ).not.toBeNull();
+    expect(
+      parseChartSpec(
+        '{"type":"calendar","items":[{"date":"2026-01-01","value":1},{"date":"2026-03-26","value":1}]}',
       ),
     ).toBeNull();
   });

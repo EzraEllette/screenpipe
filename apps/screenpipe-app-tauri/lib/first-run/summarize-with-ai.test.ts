@@ -91,6 +91,25 @@ describe("buildActivityFacts", () => {
     expect(facts).toContain("[heard] Or what are the conditions");
   });
 
+  it("marks parsed excerpts distinctly from accessibility fallback", () => {
+    const facts = buildActivityFacts(
+      {
+        ...activity,
+        snippets: [
+          {
+            source: "parsed",
+            text: "Message from Ada about the Atlas launch checklist",
+            app_name: "Slack",
+          },
+        ],
+      },
+      3 * 60_000,
+    );
+    expect(facts).toContain(
+      "[parsed, Slack] Message from Ada about the Atlas launch checklist",
+    );
+  });
+
   it("names the page when the container is a browser", () => {
     const facts = buildActivityFacts(
       {

@@ -20,6 +20,17 @@ import {
   setCachedBrowserState,
 } from "../browser-state-cache";
 
+const routerCommandMocks = vi.hoisted(() => ({
+  piStopIfIdle: vi.fn(async () => ({
+    status: "ok" as const,
+    data: { running: false, busy: false },
+  })),
+}));
+
+vi.mock("@/lib/utils/tauri", () => ({
+  commands: { piStopIfIdle: routerCommandMocks.piStopIfIdle },
+}));
+
 vi.mock("@/lib/chat-storage", () => ({
   listConversations: vi.fn(async () => []),
   loadConversationFile: vi.fn(async () => null),
@@ -172,12 +183,17 @@ describe("pi-event-router: status mirroring for backgrounded sessions", () => {
     useChatStore.setState({ currentId: "B" });
     await handlePiEvent(piEvt("A", { type: "agent_end" }));
     expect(useChatStore.getState().sessions.A.status).toBe("idle");
+    await vi.waitFor(() => {
+      expect(routerCommandMocks.piStopIfIdle).toHaveBeenCalledWith("A");
+    });
   });
 
   it("stays streaming while agent_end is followed by an automatic retry", async () => {
     seed("A", { status: "streaming" });
     useChatStore.setState({ currentId: "B" });
     await handlePiEvent(piEvt("A", { type: "agent_end", willRetry: true }));
+    await Promise.resolve();
+    expect(routerCommandMocks.piStopIfIdle).not.toHaveBeenCalled();
     expect(useChatStore.getState().sessions.A.status).toBe("streaming");
 
     await handlePiEvent(piEvt("A", {
@@ -937,6 +953,48 @@ describe("pi-event-router: subagent tool progress", () => {
     ).toolCall;
     expect(cmd.progress.length).toBe(4000);
   });
+
+  it("keeps late ACP metadata on a completed background tool", async () => {
+    seed("A");
+    useChatStore.setState({ currentId: "B" });
+    await handlePiEvent(
+      piEvt("A", { type: "message_start", message: { role: "assistant" } }),
+    );
+    await handlePiEvent(
+      piEvt("A", {
+        type: "tool_execution_start",
+        toolCallId: "late-metadata",
+        toolName: "MCP: tool",
+        agentId: "cursor",
+        args: {},
+      } as unknown as AgentInnerEvent),
+    );
+    await handlePiEvent(
+      piEvt("A", {
+        type: "tool_execution_end",
+        toolCallId: "late-metadata",
+        toolName: "mcp__screenpipe__search-content",
+        agentId: "cursor",
+        kind: "search",
+        args: { query: "late ACP metadata" },
+        result: { content: [{ type: "text", text: '{"error":"Tool execution error"}' }] },
+        isError: true,
+      } as unknown as AgentInnerEvent),
+    );
+
+    const session = useChatStore.getState().sessions.A;
+    const tool = (session.contentBlocks as any[]).find(
+      (block) => block.type === "tool" && block.toolCall.id === "late-metadata",
+    ).toolCall;
+    expect(tool).toMatchObject({
+      toolName: "mcp__screenpipe__search-content",
+      agentId: "cursor",
+      kind: "search",
+      args: { query: "late ACP metadata" },
+      isRunning: false,
+      isError: true,
+    });
+  });
 });
 
 describe("pi-event-router: honest interruption on quit/crash", () => {
@@ -1157,5 +1215,60 @@ describe("pi-event-router: user echo does not duplicate the optimistic bubble", 
     const session = useChatStore.getState().sessions.A;
     expect(session.messages).toHaveLength(4);
     expect(session.messages?.filter((m) => m.role === "user")).toHaveLength(2);
+  });
+});
+
+describe("pi-event-router: lazy-created rows stay hidden until they are real", () => {
+  beforeEach(reset);
+
+  /**
+   * A Pi process exists for plenty of session ids that are not conversations:
+   * the chat panel spawns one for its mount-time uuid, home and the
+   * pre-created chat window each prewarm their own, and a crash auto-restarts
+   * them. Those processes emit lifecycle / state events, and the router used
+   * to lazy-create a *visible* row for them — which is how an empty "untitled"
+   * chat kept appearing in RECENTS beside the real ones.
+   */
+  it("marks a lazy-created row draft so an orphan Pi session never shows up", async () => {
+    await handlePiEvent(piEvt("orphan", { type: "agent_start" }));
+
+    const session = useChatStore.getState().sessions.orphan;
+    expect(session).toBeDefined();
+    expect(session.draft).toBe(true);
+    expect(session.messageCount).toBe(0);
+  });
+
+  it("keeps the row hidden across a whole content-free lifecycle", async () => {
+    await handlePiEvent(piEvt("orphan", { type: "agent_start" }));
+    await handlePiEvent(piEvt("orphan", { type: "agent_end" } as AgentInnerEvent));
+
+    expect(useChatStore.getState().sessions.orphan.draft).toBe(true);
+  });
+
+  it("reveals the row as soon as a user turn lands on it", async () => {
+    await handlePiEvent(piEvt("orphan", { type: "agent_start" }));
+    await handlePiEvent(
+      piEvt("orphan", {
+        type: "message_start",
+        message: { role: "user", content: "hello from a queued follow-up" },
+      } as AgentInnerEvent),
+    );
+
+    const session = useChatStore.getState().sessions.orphan;
+    expect(session.draft).toBe(false);
+    expect(session.messages?.some((m: any) => m.role === "user")).toBe(true);
+  });
+
+  it("reveals the row while a backgrounded assistant reply is still streaming", async () => {
+    await handlePiEvent(
+      piEvt("orphan", {
+        type: "message_start",
+        message: { role: "assistant" },
+      } as AgentInnerEvent),
+    );
+
+    const session = useChatStore.getState().sessions.orphan;
+    expect(session.draft).toBe(false);
+    expect(session.messages?.length).toBeGreaterThan(0);
   });
 });

@@ -169,10 +169,10 @@ pub struct TimelineExportSelection {
 pub enum TimelineAction {
     CloseWindow,
     ReturnToActivity,
-    DismissActivityReturn,
     OpenSearch,
     OpenDailySummary { date: String },
     OpenChat,
+    ToggleSidebar,
     OpenRecordingSettings,
     CopyFrame { frame_id: String },
     CopyText,
@@ -228,12 +228,12 @@ impl TimelineAction {
         match (name, argument) {
             ("close_window", _) => Self::CloseWindow,
             ("return_to_activity", _) => Self::ReturnToActivity,
-            ("dismiss_activity_return", _) => Self::DismissActivityReturn,
             ("open_search", _) => Self::OpenSearch,
             ("open_daily_summary", Some(date)) => Self::OpenDailySummary {
                 date: date.to_string(),
             },
             ("open_chat", _) => Self::OpenChat,
+            ("toggle_sidebar", _) => Self::ToggleSidebar,
             ("open_recording_settings", _) => Self::OpenRecordingSettings,
             ("copy_frame", Some(id)) => Self::CopyFrame {
                 frame_id: id.to_string(),
@@ -505,12 +505,12 @@ mod tests {
             TimelineAction::parse("return_to_activity"),
             TimelineAction::ReturnToActivity
         );
-        assert_eq!(
-            TimelineAction::parse("dismiss_activity_return"),
-            TimelineAction::DismissActivityReturn
-        );
         assert_eq!(TimelineAction::parse("open_search"), TimelineAction::OpenSearch);
         assert_eq!(TimelineAction::parse("open_chat"), TimelineAction::OpenChat);
+        assert_eq!(
+            TimelineAction::parse("toggle_sidebar"),
+            TimelineAction::ToggleSidebar
+        );
         assert_eq!(
             TimelineAction::parse("open_recording_settings"),
             TimelineAction::OpenRecordingSettings

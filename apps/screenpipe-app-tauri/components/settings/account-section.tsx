@@ -13,6 +13,8 @@ export const searchIndex: SettingsField[] = [
   { label: "Sign in to Screenpipe", keywords: ["login", "log in", "sign in"] },
   { label: "Logout", keywords: ["signout", "sign out", "log out"] },
   { label: "Screenpipe Business", keywords: ["subscription", "billing", "plan", "pro", "business", "max", "ultra", "upgrade", "manage"] },
+  { label: "Data Sync", keywords: ["allow data sync", "cloud", "account"] },
+  { label: "Device name", keywords: ["data sync", "hostname", "computer"] },
   { label: "sync scheduled tasks across devices", keywords: ["scheduled sync", "pipe sync", "sync"] },
   { label: "memories sync across devices", keywords: ["memories sync", "sync", "facts"] },
   { label: "connection sync across devices", keywords: ["connection sync", "sync", "slack", "notion"] },
@@ -33,11 +35,13 @@ import { commands } from "@/lib/utils/tauri";
 import { openExternalUrl } from "@/lib/open-external-url";
 import {
   planDisplayName,
+  canUseDataSync,
   isSignedInCloudSubscriber,
   type AppUser,
 } from "@/lib/app-entitlement";
 import { useManagedPolicy } from "@/lib/hooks/use-managed-policy";
 import { Card } from "../ui/card";
+import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { onOpenUrl } from "@tauri-apps/plugin-deep-link";
@@ -47,6 +51,8 @@ import { useHealthCheck } from "@/lib/hooks/use-health-check";
 import posthog from "posthog-js";
 import { describeDeepLinkForLog } from "@/lib/utils/deep-link-log";
 import { screenpipeWebUrl } from "@/lib/web-url";
+import { tauriFetchWithDeadline } from "@/lib/http/tauri-fetch";
+import { hostname } from "@tauri-apps/plugin-os";
 import {
   getUserPlanExpiration,
   PlanExpirationNotice,
@@ -82,6 +88,17 @@ const CLOUD_SUBSCRIPTION_STATUS_URL = screenpipeWebUrl(
   "/api/cloud-sync/subscription",
   "https://screenpipe.com",
 );
+const DATA_SYNC_URL = screenpipeWebUrl(
+  "/api/user/data-sync",
+  "https://screenpipe.com",
+);
+
+type SyncedDevice = {
+  device_id: string;
+  device_name: string;
+  platform: string | null;
+  last_synced_at: string;
+};
 
 function hasExistingStripeSubscriptionPlan(plan: string | null | undefined): boolean {
   if (!plan) return false;
@@ -146,8 +163,11 @@ export function AccountSection() {
   const [connectionsSyncing, setConnectionsSyncing] = useState(false);
   const [showSyncKeyRecovery, setShowSyncKeyRecovery] = useState(false);
   const [checkoutBusy, setCheckoutBusy] = useState(false);
+  const [dataSyncSaving, setDataSyncSaving] = useState(false);
+  const [syncedDevices, setSyncedDevices] = useState<SyncedDevice[]>([]);
   const [upgradeSource, setUpgradeSource] = useState("app-account-section");
   const upgradeCardRef = useRef<HTMLDivElement>(null);
+  const dataSyncDeviceNameInitRef = useRef(false);
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const checkoutHandlerRef = useRef<
     (selection: BusinessUpgradeSelection) => Promise<void>
@@ -162,6 +182,123 @@ export function AccountSection() {
   const hasExistingSubscription =
     hasExistingStripeSubscriptionPlan(subscriptionPlan) &&
     !hasExpiringProfilePlan;
+
+  const setDataSyncEnabled = async (checked: boolean) => {
+    setDataSyncSaving(true);
+    try {
+      const token = await commands.getCloudToken();
+      if (!token) throw new Error("sign in again to change data sync");
+      const accountId = settings.user?.id;
+      if (checked && !accountId) {
+        throw new Error("sign in again to enable data sync on this device");
+      }
+      let deviceId = settings.deviceId;
+      if (!deviceId) {
+        deviceId = crypto.randomUUID();
+        await updateSettings({ deviceId });
+      }
+
+      const deviceName = checked
+        ? settings.dataSyncDeviceName?.trim() ||
+          (await hostname().catch(() => null))?.trim() ||
+          "This device"
+        : settings.dataSyncDeviceName?.trim() || "This device";
+
+      if (checked) {
+        const accountResponse = await tauriFetchWithDeadline(DATA_SYNC_URL, {
+          method: "PATCH",
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ allow_data_sync: true }),
+        });
+        if (!accountResponse.ok) {
+          const body = await accountResponse.json().catch(() => null);
+          throw new Error(body?.error || "could not enable data sync");
+        }
+      }
+
+      const deviceResponse = await tauriFetchWithDeadline(
+        `${DATA_SYNC_URL}/ingest`,
+        {
+          method: "PATCH",
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json",
+            "X-Screenpipe-Device-Id": deviceId,
+            "X-Screenpipe-Device-Label": deviceName,
+          },
+          body: JSON.stringify({ enabled: checked }),
+        },
+      );
+      if (!deviceResponse.ok) {
+        const body = await deviceResponse.json().catch(() => null);
+        throw new Error(body?.error || "could not update this device");
+      }
+
+      await updateSettings({
+        dataSyncEnabled: checked,
+        dataSyncDeviceName: deviceName,
+        dataSyncAccountId: checked ? accountId! : "",
+        ...(checked ? { dataSyncEnabledAt: new Date().toISOString() } : {}),
+      });
+    } catch (error) {
+      toast({
+        title: "Data sync was not changed",
+        description: error instanceof Error ? error.message : String(error),
+        variant: "destructive",
+      });
+    } finally {
+      setDataSyncSaving(false);
+    }
+  };
+
+  useEffect(() => {
+    if (
+      !settings.dataSyncEnabled ||
+      settings.dataSyncDeviceName?.trim() ||
+      dataSyncDeviceNameInitRef.current
+    ) {
+      return;
+    }
+
+    dataSyncDeviceNameInitRef.current = true;
+    void hostname()
+      .catch(() => null)
+      .then((name) =>
+        updateSettings({
+          dataSyncDeviceName: name?.trim() || "This device",
+        }),
+      )
+      .finally(() => {
+        dataSyncDeviceNameInitRef.current = false;
+      });
+  }, [settings.dataSyncEnabled, settings.dataSyncDeviceName, updateSettings]);
+
+  useEffect(() => {
+    if (!settings.dataSyncEnabled) {
+      setSyncedDevices([]);
+      return;
+    }
+
+    let cancelled = false;
+    void commands.getCloudToken().then(async (token) => {
+      if (!token) return;
+      const response = await tauriFetchWithDeadline(`${DATA_SYNC_URL}/devices`, {
+        headers: { Authorization: `Bearer ${token}` },
+      }).catch(() => null);
+      if (!response?.ok || cancelled) return;
+      const body = await response.json().catch(() => null);
+      if (!cancelled && Array.isArray(body?.devices)) {
+        setSyncedDevices(body.devices);
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [settings.dataSyncEnabled]);
   /** Capacity levels change an existing subscription, so they are proration on
    *  the web billing page rather than a new in-app checkout. */
   const openCapacityBilling = async (
@@ -959,6 +1096,69 @@ export function AccountSection() {
           )}
 
         </>
+      )}
+
+      {canUseDataSync(appUser) && (
+        <Card className="p-4" data-testid="account-data-sync-setting">
+          <div className="space-y-4">
+            <div className="flex items-center justify-between gap-6">
+              <div>
+                <p className="text-sm font-medium">Data Sync</p>
+                <p className="text-xs text-muted-foreground">
+                  Sync screenpipe data from this device to your account
+                </p>
+              </div>
+              <Switch
+                id="data-sync-toggle"
+                aria-label="Data Sync"
+                checked={settings.dataSyncEnabled ?? false}
+                disabled={dataSyncSaving}
+                onCheckedChange={(checked) => void setDataSyncEnabled(checked)}
+              />
+            </div>
+
+            {settings.dataSyncEnabled && (
+              <div className="space-y-2 border-t border-border/50 pt-4">
+                <Label htmlFor="data-sync-device-name">Device name</Label>
+                <Input
+                  id="data-sync-device-name"
+                  aria-label="Device name"
+                  maxLength={96}
+                  value={settings.dataSyncDeviceName ?? ""}
+                  onChange={(event) =>
+                    void updateSettings({
+                      dataSyncDeviceName: event.currentTarget.value,
+                    })
+                  }
+                />
+                <p className="text-xs text-muted-foreground">
+                  Synced data will be grouped under this name
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  Ask Screenpipe: “What was I doing on {settings.dataSyncDeviceName || "this device"} this morning?”
+                </p>
+                <div className="space-y-1 pt-2">
+                  <p className="text-xs font-medium">Synced devices</p>
+                  {syncedDevices.length === 0 ? (
+                    <p className="text-xs text-muted-foreground">
+                      This device will appear after its first upload
+                    </p>
+                  ) : (
+                    syncedDevices.map((device) => (
+                      <p
+                        className="text-xs text-muted-foreground"
+                        key={device.device_id}
+                      >
+                        {device.device_name} · last synced{" "}
+                        {new Date(device.last_synced_at).toLocaleString()}
+                      </p>
+                    ))
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        </Card>
       )}
     </div>
   );

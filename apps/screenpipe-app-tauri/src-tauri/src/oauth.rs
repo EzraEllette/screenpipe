@@ -551,9 +551,10 @@ pub async fn oauth_connect(
     // provider coexist — connecting a second Google account must not clobber
     // the first.
     // We only fall back to the default slot (None) when the provider hands us
-    // no identity to key on (e.g. Notion/QuickBooks/Jira, which key on
-    // workspace metadata instead and stay single-account here).
-    let effective_instance = derive_effective_instance(instance, &token_data);
+    // no stable identity to key on. Most multi-account providers use email;
+    // Slack uses its stable team id so separate workspaces cannot overwrite
+    // each other.
+    let effective_instance = derive_effective_instance(&integration_id, instance, &token_data);
     let store_instance = effective_instance.as_deref();
 
     oauth::write_oauth_token_instance(store.as_ref(), &integration_id, store_instance, &token_data)
@@ -749,10 +750,12 @@ fn extract_email_from_jwt(jwt: &str) -> Option<String> {
 }
 
 fn derive_effective_instance(
+    integration_id: &str,
     explicit_instance: Option<String>,
     token_data: &serde_json::Value,
 ) -> Option<String> {
-    explicit_instance.or_else(|| token_data["email"].as_str().map(String::from))
+    explicit_instance
+        .or_else(|| oauth::oauth_instance_identity(integration_id, token_data).map(String::from))
 }
 
 #[cfg(test)]
@@ -769,8 +772,23 @@ mod tests {
         });
 
         assert_eq!(
-            derive_effective_instance(None, &token_data).as_deref(),
+            derive_effective_instance("zoom", None, &token_data).as_deref(),
             Some("zoom-user@example.com")
+        );
+    }
+
+    #[test]
+    fn effective_instance_uses_slack_workspace_identity() {
+        let token_data = json!({
+            "authed_user": { "access_token": "xoxp-test" },
+            "team": { "id": "T012345", "name": "Acme" },
+            "team_id": "T012345",
+            "workspace_name": "Acme",
+        });
+
+        assert_eq!(
+            derive_effective_instance("slack", None, &token_data).as_deref(),
+            Some("T012345")
         );
     }
 
@@ -781,7 +799,7 @@ mod tests {
             "workspace_name": "Acme Workspace",
         });
 
-        assert_eq!(derive_effective_instance(None, &token_data), None);
+        assert_eq!(derive_effective_instance("notion", None, &token_data), None);
     }
 
     /// Canceled flow (#5092): oauth_cancel drops the pending sender, which

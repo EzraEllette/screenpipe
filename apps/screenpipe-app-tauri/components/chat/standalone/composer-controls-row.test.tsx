@@ -68,7 +68,55 @@ vi.mock("@/components/usage/usage-popover", () => ({
 
 import { ComposerControlsRow } from "./composer-controls-row";
 
-describe("ComposerControlsRow preset selection", () => {
+const idleCodingWorkspace = {
+  workspace: null,
+  isLoading: false,
+  error: null,
+  disabled: false,
+  onToggle: vi.fn(),
+};
+
+describe("ComposerControlsRow", () => {
+  it("uses an upward arrow for the send action", () => {
+    render(
+      <ComposerControlsRow
+        canChat
+        filters={
+          {
+            activeFilterCount: 0,
+            activeFilters: [],
+            activeFilterLabels: [],
+            hasActiveFilters: false,
+            appFilterOpen: false,
+            onFilterMenuOpenChange: vi.fn(),
+          } as any
+        }
+        modelControls={{
+          settings: { aiPresets: [] },
+          activePreset: null,
+          activePipeExecution: null,
+          currentQueueSessionId: null,
+          onSelectPreset: vi.fn(),
+          onPresetSaved: vi.fn(),
+        }}
+        codingWorkspace={idleCodingWorkspace}
+        isStreaming={false}
+        sendButton={{
+          isStopMode: false,
+          hasPendingDocs: false,
+          sendDisabled: false,
+          onStop: vi.fn(),
+        }}
+      />,
+    );
+
+    expect(
+      screen
+        .getByRole("button", { name: "send message" })
+        .querySelector(".lucide-arrow-up"),
+    ).toBeInTheDocument();
+  });
+
   it("activates and restarts with a newly created preset absent from the stale settings list", () => {
     const onSelectPreset = vi.fn();
     const onPresetSaved = vi.fn();
@@ -103,6 +151,7 @@ describe("ComposerControlsRow preset selection", () => {
           onSelectPreset,
           onPresetSaved,
         }}
+        codingWorkspace={idleCodingWorkspace}
         isStreaming={false}
         sendButton={{
           isStopMode: false,
@@ -132,6 +181,7 @@ describe("ComposerControlsRow preset selection", () => {
         appFilterOpen: false,
         onFilterMenuOpenChange: vi.fn(),
       } as any,
+      codingWorkspace: idleCodingWorkspace,
       isStreaming: false,
       sendButton: {
         isStopMode: false,
@@ -161,6 +211,11 @@ describe("ComposerControlsRow preset selection", () => {
 
     expect(screen.getByTestId("mock-acp-permission")).toHaveTextContent(
       "codex-acp",
+    );
+    const permission = screen.getByTestId("mock-acp-permission");
+    const worktree = screen.getByTestId("coding-workspace-row");
+    expect(permission.compareDocumentPosition(worktree)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
     );
     expect(screen.getByTestId("mock-acp-config")).toHaveTextContent(
       "codex-acp",

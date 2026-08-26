@@ -22,8 +22,8 @@ export function ComposerInputBox({
   return (
     <div
       className={cn(
-        "flex flex-col rounded-lg border bg-input ring-offset-background transition-colors duration-150 focus-within:border-signal focus-within:ring-signal/15 focus-within:ring-1",
-        "bg-surface/95 border-border/60 shadow-lg",
+        "flex flex-col rounded-lg border bg-input ring-offset-background transition-colors duration-150 focus-within:border-signal focus-within:ring-signal/15 focus-within:ring-1 motion-reduce:transition-none",
+        "border-border bg-surface shadow-[0_4px_18px_rgba(0,0,0,0.08)] dark:shadow-[0_4px_18px_rgba(0,0,0,0.28)]",
         input.disabledReason && "border-muted-foreground/30",
       )}
     >
@@ -67,12 +67,7 @@ export function ComposerInputBox({
           placeholder={
             input.disabledReason
               ? input.disabledReason
-              : input.isLoading || input.isStreaming
-                ? "Message will be queued..."
-                : // Kept to the same rendered width as the previous legend so it
-                  // still fits the 600px minimum chat window on one line. `~`
-                  // and `#` stay live and are taught by the palette itself.
-                  "Ask about your screen... (/ for commands, @ chats, $ skills)"
+              : input.placeholder ?? "Ask a question or describe a task"
           }
           disabled={!input.canChat}
           spellCheck={false}

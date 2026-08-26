@@ -56,7 +56,7 @@ import { ActivitiesSettings, searchIndex as activitiesSearchIndex } from "@/comp
 import { searchIndex as powerSearchIndex } from "@/components/settings/battery-saver-section";
 import { ReferralCard } from "@/components/settings/referral-card";
 import { SettingsSearchInput, SettingsSearchPopover, searchSettingsNav, scrollToSettingsField, type IndexedSettingsField, type SettingsField } from "@/components/settings/settings-search";
-import { ShortcutGuide } from "@/components/shortcut-guide";
+import { ExperimentalShortcutGuide } from "@/components/shortcut-guide";
 
 // Settings search index for the inline ReferralSection defined further down in
 // this file. Lives here because the section itself lives here; same co-location
@@ -395,7 +395,15 @@ function SettingsContent() {
               if (chatId) {
                 localStorage.setItem("pending-chat-conversation", chatId);
               }
-              router.push(section ? `/home?section=${section}` : "/home");
+              // Settings is pushed from the Home shell. Consume that entry so
+              // the next native back gesture continues through the user's UI
+              // history instead of bouncing straight back into Settings.
+              if (fromSection) {
+                router.back();
+              } else {
+                // Direct settings deep links have no known in-app predecessor.
+                router.replace(section ? `/home?section=${section}` : "/home");
+              }
             }}
             className={cn(
               "flex items-center space-x-1.5 text-sm transition-colors w-full",
@@ -514,7 +522,7 @@ function SettingsContent() {
 export default function SettingsPage() {
   return (
     <>
-      <ShortcutGuide />
+      <ExperimentalShortcutGuide />
       <Suspense fallback={
         <div className="flex-1 min-w-0 h-full bg-background flex items-center justify-center">
           <div className="text-muted-foreground text-sm">Loading...</div>

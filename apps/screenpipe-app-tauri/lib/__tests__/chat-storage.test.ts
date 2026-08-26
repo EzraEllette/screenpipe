@@ -300,6 +300,29 @@ describe("chat-storage bounded history", () => {
     expect(meta?.lastContentAt).toBe(200);
   });
 
+  it("preserves imported agent provenance in conversation metadata", () => {
+    const meta = conversationMetaFromJson({
+      id: "imported-codex-thread",
+      title: "agent task",
+      createdAt: 100,
+      updatedAt: 200,
+      messages: [{ id: "u1", role: "user", content: "hello", timestamp: 100 }],
+      importedFrom: {
+        source: "codex",
+        sourceId: "thread-1",
+        importedAt: 300,
+        harness: "cursor",
+      },
+    });
+
+    expect(meta?.importedFrom).toEqual({
+      source: "codex",
+      sourceId: "thread-1",
+      importedAt: 300,
+      harness: "cursor",
+    });
+  });
+
   it("re-throws and reports when the disk write fails (forbidden path, #5306)", async () => {
     const { writeTextFile } = await import("@tauri-apps/plugin-fs");
     vi.mocked(writeTextFile).mockRejectedValueOnce(

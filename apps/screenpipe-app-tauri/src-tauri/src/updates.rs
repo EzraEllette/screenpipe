@@ -11,6 +11,8 @@ use dark_light::Mode;
 use log::{debug, error, info, warn};
 use semver::Version;
 use serde_json;
+#[cfg(any(target_os = "macos", test))]
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,6 +26,19 @@ use tauri_plugin_updater::UpdaterExt;
 use tokio::sync::oneshot;
 use tokio::sync::Mutex;
 use tokio::time::interval;
+
+fn consumer_update_channel(settings: Option<&SettingsStore>) -> &'static str {
+    match settings.map(|settings| settings.update_channel.as_str()) {
+        Some("pre-release") => "pre-release",
+        _ => "stable",
+    }
+}
+
+fn consumer_update_endpoint(channel: &str) -> String {
+    format!(
+        "https://screenpipe.com/api/app-update/{channel}/{{{{target}}}}-{{{{arch}}}}/{{{{current_version}}}}"
+    )
+}
 
 // ---------------------------------------------------------------------------
 // Rollback: download a specific older version from R2 via the website API
@@ -145,17 +160,35 @@ fn enterprise_update_mode(app: &tauri::AppHandle) -> Option<String> {
         .map(|mode| mode.to_lowercase())
 }
 
-fn enterprise_updates_managed_locally(app: &tauri::AppHandle) -> bool {
-    let metadata = crate::enterprise_install_metadata::get_enterprise_install_metadata();
-    match enterprise_update_mode(app).as_deref() {
+fn enterprise_updates_managed_locally_for(
+    mode: Option<&str>,
+    metadata_managed: bool,
+    persistence_installed: bool,
+) -> bool {
+    // The persistent package's root supervisor would immediately relaunch the
+    // app during an in-app bundle replacement. Persistent installations are
+    // therefore updated only by installing a newer persistent package, even
+    // if an old dashboard policy explicitly selected the Screenpipe updater.
+    if persistence_installed {
+        return true;
+    }
+
+    match mode {
         Some("screenpipe") => false,
-        Some("auto_detect") => metadata.managed,
+        Some("auto_detect") => metadata_managed,
         Some("mdm") | Some("manual") => true,
-        // Missing/unknown policy → behave like a new org with the consumer
-        // banner flow. Existing orgs are explicitly pinned to "manual" via
-        // the website migration so they hit the arm above, not this one.
         _ => false,
     }
+}
+
+fn enterprise_updates_managed_locally(app: &tauri::AppHandle) -> bool {
+    let metadata = crate::enterprise_install_metadata::get_enterprise_install_metadata();
+    let mode = enterprise_update_mode(app);
+    enterprise_updates_managed_locally_for(
+        mode.as_deref(),
+        metadata.managed,
+        crate::enterprise_persistence::installed(),
+    )
 }
 
 /// Snapshot of a pending update, exposed to the frontend via
@@ -244,7 +277,8 @@ const BANNER_GATE_TIMEOUT_SECS: u64 = 60;
 /// inflated the `app_downloaded` metric ~12x. While a version is in cooldown
 /// we still hit the cheap CHECK endpoint but skip the binary download until
 /// the window elapses, a newer version ships, or the user retries manually
-/// (which passes `force=true`). In-memory only — a restart re-attempts once.
+/// (which passes `force=true`). A durable failed-install marker carries the
+/// cooldown across the relaunch that discovered the failure.
 const UPDATE_FAILURE_COOLDOWN: Duration = Duration::from_secs(6 * 60 * 60);
 
 /// Wait for boot to reach a settled state, with timeout. Logs the
@@ -537,7 +571,7 @@ pub async fn trigger_update_now(app: tauri::AppHandle) {
     let manager = app.state::<Arc<UpdatesManager>>().inner().clone();
     if manager.has_update_installed().await {
         // Immediate feedback in the menu itself: the install + relaunch can
-        // take a few seconds even on the rename fast path.
+        // take several seconds while the verified installer extracts the update.
         manager.set_menu_installing();
         match restart_for_update(app.clone(), None).await {
             Ok(outcome) if outcome == "proceed" => {
@@ -584,6 +618,27 @@ fn failed_version_in_cooldown(
     cooldown: Duration,
 ) -> bool {
     matches!(last_failed, Some((v, elapsed)) if v == version && elapsed < cooldown)
+}
+
+/// Carry a failed exit-path install into the existing per-version cooldown.
+/// Without this bridge, the durable marker added in #6147 reports the failure
+/// but the boot check immediately downloads, restarts, and fails again.
+fn cooldown_from_failed_attempt(
+    failed_attempt: Option<&UpdateAttempt>,
+) -> Option<(String, std::time::Instant)> {
+    failed_attempt.map(|attempt| (attempt.to_version.clone(), std::time::Instant::now()))
+}
+
+/// The Tauri updater replaces the bundle containing its configured executable.
+/// Gatekeeper App Translocation and mounted disk images are read-only launch
+/// locations, so attempting an in-place update there can only relaunch the old
+/// version. macOS requires the user to move the app to an install location.
+#[cfg(any(target_os = "macos", test))]
+fn macos_update_location_is_protected(executable: &Path) -> bool {
+    executable
+        .components()
+        .any(|component| component.as_os_str() == "AppTranslocation")
+        || executable.starts_with("/Volumes")
 }
 
 /// Whether `candidate` is a strictly higher semantic version than `current`.
@@ -791,6 +846,7 @@ impl UpdatesManager {
 
         // Did the previous process quit to apply an update that never landed?
         let failed_attempt = consume_update_attempt_marker(app);
+        let last_failed_update = cooldown_from_failed_attempt(failed_attempt.as_ref());
 
         let update_menu_item = if is_enterprise_build(app) {
             None
@@ -819,7 +875,7 @@ impl UpdatesManager {
             app: app.clone(),
             update_menu_item,
             is_checking: AtomicBool::new(false),
-            last_failed_update: Arc::new(Mutex::new(None)),
+            last_failed_update: Arc::new(Mutex::new(last_failed_update)),
         })
     }
 
@@ -878,6 +934,31 @@ impl UpdatesManager {
             return Result::Ok(false);
         }
 
+        #[cfg(target_os = "macos")]
+        if let Ok(executable) = std::env::current_exe() {
+            if macos_update_location_is_protected(&executable) {
+                warn!(
+                    "updater disabled: app is running from protected macOS location {}",
+                    executable.display()
+                );
+                if let Some(ref item) = self.update_menu_item {
+                    item.set_enabled(true)?;
+                    item.set_text("Move screenpipe to Applications to update")?;
+                }
+                if show_dialog {
+                    self.app
+                        .dialog()
+                        .message(
+                            "Quit screenpipe, move screenpipe.app to Applications, then reopen it. macOS prevents apps launched from Downloads or a disk image from updating themselves.",
+                        )
+                        .title("Move screenpipe to Applications")
+                        .buttons(MessageDialogButtons::Ok)
+                        .show(|_| {});
+                }
+                return Result::Ok(false);
+            }
+        }
+
         if let Err(err) = self.app.emit("update-all-pipes", ()) {
             error!("Failed to update all pipes: {}", err);
         }
@@ -892,6 +973,12 @@ impl UpdatesManager {
         );
         // Build updater with auth header so paid users can download from R2
         let mut builder = self.app.updater_builder();
+        let settings = SettingsStore::get(&self.app).ok().flatten();
+        let is_beta_build = self.app.config().identifier.contains("beta");
+        if !is_enterprise_build(&self.app) && !is_beta_build {
+            let channel = consumer_update_channel(settings.as_ref());
+            builder = builder.endpoints(vec![consumer_update_endpoint(channel).parse()?])?;
+        }
         if is_enterprise_build(&self.app) {
             if let Some(license_key) = crate::commands::get_enterprise_license_key() {
                 builder = builder.header("X-License-Key", license_key)?;
@@ -899,7 +986,7 @@ impl UpdatesManager {
             if let Some(token) = crate::commands::get_cloud_token() {
                 builder = builder.header("Authorization", format!("Bearer {token}"))?;
             }
-        } else if let Ok(Some(settings)) = SettingsStore::get(&self.app) {
+        } else if let Some(settings) = settings {
             if let Some(token) = settings
                 .user
                 .token
@@ -1152,8 +1239,8 @@ impl UpdatesManager {
                     // the running bundle into a temp dir, which breaks TCC
                     // attribution for the live process (ScreenCaptureKit -3801)
                     // until relaunch. Download + stage only; the install runs
-                    // on the exit path (see staged_update.rs). stage() now also
-                    // pre-extracts the ~160 MB archive (seconds of gunzip), so
+                    // on the exit path (see staged_update.rs). Persisting the
+                    // ~160 MB archive includes blocking file I/O and fsync, so
                     // it runs on the blocking pool, not an async worker.
                     #[cfg(target_os = "macos")]
                     let result = match update.download(on_chunk, || {}).await {
@@ -1782,6 +1869,43 @@ mod tests {
     }
 
     #[test]
+    fn failed_install_marker_arms_the_existing_cooldown_on_boot() {
+        let attempt = UpdateAttempt {
+            from_version: "2.6.77".into(),
+            to_version: "2.6.81".into(),
+            ts_epoch_secs: 0,
+        };
+        let cooldown = cooldown_from_failed_attempt(Some(&attempt));
+        assert!(failed_version_in_cooldown(
+            cooldown
+                .as_ref()
+                .map(|(version, started)| (version.as_str(), started.elapsed())),
+            "2.6.81",
+            UPDATE_FAILURE_COOLDOWN,
+        ));
+    }
+
+    #[test]
+    fn protected_macos_launch_locations_cannot_self_update() {
+        assert!(macos_update_location_is_protected(Path::new(
+            "/private/var/folders/xx/T/AppTranslocation/UUID/d/screenpipe.app/Contents/MacOS/screenpipe-app"
+        )));
+        assert!(macos_update_location_is_protected(Path::new(
+            "/Volumes/screenpipe/screenpipe.app/Contents/MacOS/screenpipe-app"
+        )));
+    }
+
+    #[test]
+    fn installed_macos_launch_locations_remain_updateable() {
+        assert!(!macos_update_location_is_protected(Path::new(
+            "/Applications/screenpipe.app/Contents/MacOS/screenpipe-app"
+        )));
+        assert!(!macos_update_location_is_protected(Path::new(
+            "/Users/ezra/Applications/screenpipe.app/Contents/MacOS/screenpipe-app"
+        )));
+    }
+
+    #[test]
     fn version_newer_rejects_equal() {
         assert!(!version_is_newer("2.5.165", "2.5.165"));
     }
@@ -1863,6 +1987,25 @@ mod tests {
     }
 
     #[test]
+    fn old_settings_use_stable_update_channel() {
+        assert_eq!(consumer_update_channel(None), "stable");
+        assert!(consumer_update_endpoint(consumer_update_channel(None))
+            .contains("/app-update/stable/"));
+    }
+
+    #[test]
+    fn selected_pre_release_changes_only_the_channel_path() {
+        let mut settings = SettingsStore::default();
+        settings.update_channel = "pre-release".to_string();
+
+        assert_eq!(consumer_update_channel(Some(&settings)), "pre-release");
+        assert_eq!(
+            consumer_update_endpoint("pre-release"),
+            "https://screenpipe.com/api/app-update/pre-release/{{target}}-{{arch}}/{{current_version}}"
+        );
+    }
+
+    #[test]
     fn auto_update_setting_respects_true() {
         let mut settings = SettingsStore::default();
         settings.auto_update = true;
@@ -1897,6 +2040,36 @@ mod tests {
         assert!(!resolve_auto_update_enabled(false, true, true));
         // and an explicitly-on setting is still honored
         assert!(resolve_auto_update_enabled(true, true, true));
+    }
+
+    #[test]
+    fn persistent_enterprise_package_always_uses_package_updates() {
+        assert!(enterprise_updates_managed_locally_for(None, false, true));
+        assert!(enterprise_updates_managed_locally_for(
+            Some("screenpipe"),
+            false,
+            true
+        ));
+    }
+
+    #[test]
+    fn ordinary_enterprise_update_policy_is_unchanged() {
+        assert!(!enterprise_updates_managed_locally_for(None, false, false));
+        assert!(!enterprise_updates_managed_locally_for(
+            Some("screenpipe"),
+            true,
+            false
+        ));
+        assert!(enterprise_updates_managed_locally_for(
+            Some("auto_detect"),
+            true,
+            false
+        ));
+        assert!(enterprise_updates_managed_locally_for(
+            Some("manual"),
+            false,
+            false
+        ));
     }
 
     #[test]

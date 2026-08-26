@@ -32,7 +32,40 @@ function InspectorHarness({ onOpenFile }: { onOpenFile: (path: string) => void }
   );
 }
 
+function EmptyInspectorCommandHarness() {
+  const [open, setOpen] = useState(false);
+
+  return (
+    <>
+      <button type="button" onClick={() => setOpen(true)}>
+        Run /inspector
+      </button>
+      <ChatInspectorPopover
+        open={open}
+        onOpenChange={setOpen}
+        outputs={[]}
+        sources={[]}
+        onOpenFile={vi.fn()}
+      />
+    </>
+  );
+}
+
 describe("ChatInspectorPopover", () => {
+  it("opens from /inspector before the chat has outputs or sources", () => {
+    render(<EmptyInspectorCommandHarness />);
+
+    expect(
+      screen.queryByRole("button", { name: "Toggle pinned summary" }),
+    ).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Run /inspector" }));
+
+    expect(screen.getByRole("region", { name: "Pinned summary" })).toBeTruthy();
+    expect(screen.getByText("No outputs yet")).toBeTruthy();
+    expect(screen.getByText("No sources yet")).toBeTruthy();
+  });
+
   it("toggles a pinned summary from the toolbar control", () => {
     render(<InspectorHarness onOpenFile={vi.fn()} />);
 

@@ -29,7 +29,7 @@ use serde::Deserialize;
 use std::collections::HashSet;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 
 const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
 const PORTABLE_MCP_ARG: &str = "--screenpipe-portable-mcp";
@@ -157,7 +157,7 @@ impl AcpExtensionMiddleware {
             let Some(port) = free_port() else {
                 continue;
             };
-            let mut command = Command::new(bun_path);
+            let mut command = crate::no_window_command(bun_path);
             command
                 .arg(&extension.entrypoint)
                 .current_dir(&extension.package_root)
@@ -246,7 +246,7 @@ pub fn run_portable_mcp_mode() -> Result<i32, String> {
         return Err("portable MCP entrypoint escapes its installed package".into());
     }
 
-    let status = Command::new(bun_path)
+    let status = crate::no_window_command(bun_path)
         .arg(entrypoint)
         .current_dir(root)
         .env_clear()

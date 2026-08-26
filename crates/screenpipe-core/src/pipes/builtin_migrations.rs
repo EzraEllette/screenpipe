@@ -60,6 +60,90 @@ const FAST_PATH_END: &str = "step 1 — pull everything";
 const FAST_PATH_ANCHOR: &str =
     "read the screenpipe skill first so you know the meetings + search endpoints.";
 
+/// The previous bundled frontmatter before meeting-summary appended the
+/// configured-preset wildcard to its existing fallback chain.
+const PRESET_CHAIN_ANCHOR: &str = "preset:\n  - screenpipe-cloud\ntimeout: 600";
+
+const MEETING_SEARCH_SHAPE_START: &str = "- `GET /search?...`";
+const MEETING_SEARCH_SHAPE_END: &str = "- `GET /speakers/unnamed";
+const MEETING_SCREEN_FETCH_START: &str = "  # screen evidence priority:";
+const MEETING_SCREEN_FETCH_END: &str = "  tail -40 ./memory.md";
+const MEETING_RENDER_START: &str = "step 2 — render the transcript";
+const MEETING_RENDER_END: &str = "step 2c — skip this step";
+const MEETING_MEDIA_START: &str = "step 2c — skip this step";
+const MEETING_MEDIA_END: &str = "step 2d — name the speakers";
+const MEETING_NAMING_START: &str = "step 2d — name the speakers";
+const MEETING_NAMING_END: &str = "step 3 — write the summary";
+const MEETING_EVIDENCE_START: &str = "step 1 — pull everything";
+
+const LEGACY_MEETING_SEARCH_SHAPE: &str = r#"- `GET /search?...` → `{"data": [{"type": "Audio"|"OCR", "content": {…}}], "pagination": {…}}`
+  - audio `content`: `transcription`, `speaker`, `timestamp` (`text` duplicates `transcription`)
+  - ocr `content`: `text`, `frame_id`, `app_name`, `window_name`, `timestamp`"#;
+
+const LEGACY_MEETING_SCREEN_FETCH: &str = r#"  # the four fetches below are independent — run them in parallel, not one per turn
+  curl -s -G -H "$A" --data-urlencode "start_time=$S" --data-urlencode "end_time=$E" \
+    -d content_type=audio -d limit=500 "http://localhost:3030/search" -o /tmp/audio.json &
+  curl -s -G -H "$A" --data-urlencode "start_time=$S" --data-urlencode "end_time=$E" \
+    -d content_type=ocr -d limit=150 "http://localhost:3030/search" -o /tmp/ocr.json &
+  curl -s -H "$A" "http://localhost:3030/speakers/unnamed?limit=20&offset=0" -o /tmp/spk.json &
+  curl -s -H "$A" "http://localhost:3030/connections" -o /tmp/conn.json &
+  wait"#;
+
+const LEGACY_MEETING_RENDER: &str = r#"step 2 — render the transcript and screen text compactly in ONE more command, then summarize from that output. deduplicate as you print (a single pass, not one pass per attempt):
+
+  jq -r '.data[].content | select(.transcription != "") | "\(.speaker // "?"): \(.transcription)"' /tmp/audio.json | awk '!seen[$0]++'
+  jq -r '.data[].content | .text' /tmp/ocr.json | tr -s "[:space:]" " " | awk '!seen[$0]++' | head -60
+
+summarize what happened: key topics, decisions, action items. fold in anything the screen shows that the transcript does not — shared slides, docs, code, demos — and use the on-screen name tags video-call apps render on each tile to fill in attendees who never spoke."#;
+
+const LEGACY_MEETING_MEDIA: &str = r#"step 2c — skip this step by default; it costs several round trips. only when the transcript and screen text leave a *specific* visual question unanswered, use the cloud media (video/audio) model for that question — diagrams, charts, whiteboards, slide figures, UI demos, or screen-shared video. choose up to 4 representative `frame_id` values already returned by the bounded OCR search, fetch those still images with `GET /frames/<frame_id>`, and send them as `image_url[]` to `POST /v1/chat/completions` with `"model": "gemma4-e4b"`. NEVER call `POST /export` or run ffmpeg for a routine meeting summary; a full media export requires an explicit user request. if the cloud-media block is absent or returns `503 cloud_token_missing`, skip visual analysis and summarize from transcript + OCR."#;
+
+const LEGACY_MEETING_NAMING: &str = r#"step 2d — name the speakers from the screen (do this every run, don't ask first): video-call apps render each participant's name on their tile, and that text is already in the `content_type=ocr` rows you fetched in step 1. for every speaker still unnamed or generic ("speaker 1", "unknown", "") in the transcript, line up when they were talking with the on-screen name tag showing at that moment and rename them:
+
+  # speakers with no name yet — already fetched to /tmp/spk.json in step 1, reuse it
+  #   (if you must re-fetch: offset is required, omitting it returns 400)
+  #   curl -s -H "$A" "http://localhost:3030/speakers/unnamed?limit=20&offset=0"
+  # apply a confident match
+  curl -s -X POST "http://localhost:3030/speakers/update" \
+    -H "Authorization: Bearer $SCREENPIPE_LOCAL_API_KEY" \
+    -H "Content-Type: application/json" \
+    -d '{"id": <SPEAKER_ID>, "name": "<NAME_FROM_SCREEN>"}'
+
+only rename when the on-screen evidence is unambiguous — never guess from voice alone. note which speakers you renamed (and which you left as-is) in your final message."#;
+
+const LEGACY_SIMPLE_MEETING_EVIDENCE: &str = r#"step 1 — find the meeting that just ended. when the scheduler woke you for an event it wrote `./.trigger-context.json` in this pipe's folder; read it first and use the meeting id it names:
+
+  cat ./.trigger-context.json   # {"event": "meeting_ended", "key": "<MEETING_ID>", ...}
+
+  curl -s -H "Authorization: Bearer $SCREENPIPE_LOCAL_API_KEY" \
+    "http://localhost:3030/meetings/<MEETING_ID>"
+
+only if that file is missing (a manual run) fall back to the most recent row:
+
+  curl -s -H "Authorization: Bearer $SCREENPIPE_LOCAL_API_KEY" \
+    "http://localhost:3030/meetings?limit=1"
+
+either way, capture the meeting's `id`, `meeting_start`, `meeting_end`, `title`, `note`, `meeting_app`, and `attendees`.
+
+step 2 — search screenpipe for what happened during this meeting and summarize it: key topics, decisions, action items. scope your searches to the meeting's `meeting_start`/`meeting_end` window. prefer `content_type=audio` for transcripts.
+
+step 2b — also query the screen for what was *shown*: `content_type=ocr` over the same window (this returns the frame's on-screen text — accessibility tree + OCR merged, not just OCR) — shared slides, docs, code, demos, and the on-screen name tags video-call apps render for participants. fold anything useful into the summary, and use on-screen names to fill in attendees who never spoke.
+
+step 2c — *if available*, use the cloud media (video/audio) model only for a concrete visual question that transcript and OCR cannot answer — diagrams, charts, whiteboards, slide figures, UI demos, or screen-shared video. choose up to 4 representative `frame_id` values already returned by the bounded OCR search, fetch those still images with `GET /frames/<frame_id>`, and send them as `image_url[]` to `POST /v1/chat/completions` with `"model": "gemma4-e4b"`. NEVER call `POST /export` or run ffmpeg for a routine meeting summary; a full media export requires an explicit user request. if the cloud-media block is absent or returns `503 cloud_token_missing`, skip visual analysis and summarize from transcript + OCR.
+
+step 2d — name the speakers from the screen (do this every run, don't ask first): video-call apps render each participant's name on their tile, and that text is already in the `content_type=ocr` frames from step 2b. for every speaker still unnamed or generic ("speaker 1", "unknown", "") in the transcript, line up when they were talking with the on-screen name tag showing at that moment and rename them:
+
+  # speakers with no name yet
+  curl -s -H "Authorization: Bearer $SCREENPIPE_LOCAL_API_KEY" \
+    "http://localhost:3030/speakers/unnamed?limit=20&offset=0"
+  # apply a confident match
+  curl -s -X POST "http://localhost:3030/speakers/update" \
+    -H "Authorization: Bearer $SCREENPIPE_LOCAL_API_KEY" \
+    -H "Content-Type: application/json" \
+    -d '{"id": <SPEAKER_ID>, "name": "<NAME_FROM_SCREEN>"}'
+
+only rename when the on-screen evidence is unambiguous — never guess from voice alone. note which speakers you renamed (and which you left as-is) in your final message."#;
+
 /// Swaps for `meeting-summary`, oldest defect first.
 fn meeting_summary_swaps() -> Vec<FragmentSwap> {
     let mut swaps = vec![
@@ -129,8 +213,77 @@ fn meeting_summary_swaps() -> Vec<FragmentSwap> {
             new: fast_path,
         });
     }
+    if let Some(preset_chain) = meeting_summary_preset_chain() {
+        swaps.push(FragmentSwap {
+            why: "append the user's configured AI presets to meeting-summary's existing \
+                  fallback chain",
+            old: PRESET_CHAIN_ANCHOR,
+            new: preset_chain,
+        });
+    }
+    if let Some(save_step) = meeting_summary_save_step() {
+        swaps.push(FragmentSwap {
+            why: "a run assembled the PUT body from an unexported shell variable and \
+                  the summary silently vanished behind a 200; the dedicated \
+                  /meetings/:id/summary endpoint merges the section server-side and \
+                  rejects an empty payload",
+            old: SAVE_STEP_ANCHOR,
+            new: save_step,
+        });
+    }
+    if let Some(evidence_steps) = meeting_summary_evidence_steps() {
+        swaps.push(FragmentSwap {
+            why: "upgrade the older unbatched meeting-summary flow to accessibility and parsed data with OCR fallback",
+            old: LEGACY_SIMPLE_MEETING_EVIDENCE,
+            new: evidence_steps,
+        });
+    }
+    for (why, old, replacement) in [
+        (
+            "prefer accessibility and parsed meeting data, with OCR only when both are unavailable",
+            LEGACY_MEETING_SEARCH_SHAPE,
+            meeting_summary_search_shape(),
+        ),
+        (
+            "fetch accessibility and parsed meeting data before conditionally falling back to OCR",
+            LEGACY_MEETING_SCREEN_FETCH,
+            meeting_summary_screen_fetch(),
+        ),
+        (
+            "render preferred screen data instead of treating OCR as the default source",
+            LEGACY_MEETING_RENDER,
+            meeting_summary_render_step(),
+        ),
+        (
+            "select optional visual frames from preferred data before the OCR fallback",
+            LEGACY_MEETING_MEDIA,
+            meeting_summary_media_step(),
+        ),
+        (
+            "name speakers from time-aligned accessibility and parsed data before OCR",
+            LEGACY_MEETING_NAMING,
+            meeting_summary_naming_step(),
+        ),
+    ] {
+        if let Some(new) = replacement {
+            swaps.push(FragmentSwap { why, old, new });
+        }
+    }
 
     swaps
+}
+
+/// The full step-3b save block as shipped before the dedicated summary
+/// endpoint existed (after the earlier PATCH→PUT repair).
+const SAVE_STEP_ANCHOR: &str = "step 3b — now save it. if your summary is worth saving, append it to the meeting note (and refresh the title in the same call) via:\n\n  curl -s -X PUT \"http://localhost:3030/meetings/<MEETING_ID>\" \\\n    -H \"Authorization: Bearer $SCREENPIPE_LOCAL_API_KEY\" \\\n    -H \"Content-Type: application/json\" \\\n    -d '{\"title\": \"<NEW_TITLE_OR_OMIT>\", \"note\": \"<EXISTING_NOTE>\\n\\n## Summary\\n<YOUR_SUMMARY>\"}'\n\nreplace `<EXISTING_NOTE>` with the meeting's current `note` field (empty string if none) so you don't overwrite the user's work; just append your summary under a `## Summary` heading. for the title: if the current title is missing, generic (\"untitled\", \"meeting\", just the app name) or doesn't capture what actually happened, replace it with a 5-8 word plain-english title (no quotes, no \"meeting about…\" prefix) — otherwise omit the field so a user-set title is left alone. if there's nothing useful to summarize (empty transcript, irrelevant audio), say so out loud and skip the PUT — don't write a placeholder.";
+
+/// The dedicated-endpoint save step as it appears in the shipped prompt.
+fn meeting_summary_save_step() -> Option<&'static str> {
+    section_between(
+        bundled_prompt("meeting-summary")?,
+        "step 3b — now save it through the dedicated summary endpoint",
+        "step 4 — offer to push",
+    )
 }
 
 /// The latency preamble as it appears in the shipped prompt.
@@ -139,6 +292,60 @@ fn meeting_summary_fast_path() -> Option<&'static str> {
         bundled_prompt("meeting-summary")?,
         FAST_PATH_START,
         FAST_PATH_END,
+    )
+}
+
+/// The preset chain as shipped in meeting-summary frontmatter. It stops before
+/// `trigger`, preserving any installed trigger customization outside the span.
+fn meeting_summary_preset_chain() -> Option<&'static str> {
+    section_between(bundled_prompt("meeting-summary")?, "preset:", "trigger:")
+}
+
+fn meeting_summary_search_shape() -> Option<&'static str> {
+    section_between(
+        bundled_prompt("meeting-summary")?,
+        MEETING_SEARCH_SHAPE_START,
+        MEETING_SEARCH_SHAPE_END,
+    )
+}
+
+fn meeting_summary_screen_fetch() -> Option<&'static str> {
+    section_between(
+        bundled_prompt("meeting-summary")?,
+        MEETING_SCREEN_FETCH_START,
+        MEETING_SCREEN_FETCH_END,
+    )
+}
+
+fn meeting_summary_render_step() -> Option<&'static str> {
+    section_between(
+        bundled_prompt("meeting-summary")?,
+        MEETING_RENDER_START,
+        MEETING_RENDER_END,
+    )
+}
+
+fn meeting_summary_media_step() -> Option<&'static str> {
+    section_between(
+        bundled_prompt("meeting-summary")?,
+        MEETING_MEDIA_START,
+        MEETING_MEDIA_END,
+    )
+}
+
+fn meeting_summary_naming_step() -> Option<&'static str> {
+    section_between(
+        bundled_prompt("meeting-summary")?,
+        MEETING_NAMING_START,
+        MEETING_NAMING_END,
+    )
+}
+
+fn meeting_summary_evidence_steps() -> Option<&'static str> {
+    section_between(
+        bundled_prompt("meeting-summary")?,
+        MEETING_EVIDENCE_START,
+        MEETING_NAMING_END,
     )
 }
 
@@ -233,6 +440,19 @@ mod tests {
     }
 
     #[test]
+    fn migrate_builtin_pipe_appends_configured_presets_to_meeting_summary() {
+        let preset_chain =
+            meeting_summary_preset_chain().expect("bundled Pipe carries a preset chain");
+        let stale = bundled("meeting-summary").replace(preset_chain, PRESET_CHAIN_ANCHOR);
+
+        let fixed = migrate_builtin_pipe_text("meeting-summary", &stale)
+            .expect("old meeting-summary frontmatter should gain the wildcard");
+        let (config, _) = parse_frontmatter(&fixed).expect("migrated Pipe should parse");
+        assert_eq!(config.preset, ["screenpipe-cloud", "*"]);
+        assert!(migrate_builtin_pipe_text("meeting-summary", &fixed).is_none());
+    }
+
+    #[test]
     fn migrate_builtin_pipe_fixes_stale_patch_verb() {
         let stale = "  curl -s -X PATCH \"http://localhost:3030/meetings/<MEETING_ID>\" \\\n";
 
@@ -279,6 +499,29 @@ mod tests {
         assert!(migrate_builtin_pipe_text("meeting-summary", &fixed).is_none());
     }
 
+    /// The save step must migrate to the dedicated endpoint: the old
+    /// read-modify-write PUT let a run lose its summary behind a 200.
+    #[test]
+    fn migrate_builtin_pipe_moves_save_step_to_summary_endpoint() {
+        let save_step =
+            meeting_summary_save_step().expect("bundled prompt carries the endpoint save step");
+        assert!(bundled("meeting-summary").contains(save_step));
+        assert!(save_step.contains("/meetings/<MEETING_ID>/summary"));
+        assert!(save_step.contains("curl -sf"));
+        assert!(!save_step.contains("step 4 — offer to push"));
+
+        let stale = bundled("meeting-summary").replace(save_step, SAVE_STEP_ANCHOR);
+        assert!(
+            stale.contains(SAVE_STEP_ANCHOR),
+            "reconstructed stale prompt must contain the legacy save step"
+        );
+        let fixed = migrate_builtin_pipe_text("meeting-summary", &stale)
+            .expect("legacy PUT save step should migrate");
+        assert!(fixed.contains("/meetings/<MEETING_ID>/summary"));
+        assert!(!fixed.contains("<EXISTING_NOTE>"));
+        assert!(migrate_builtin_pipe_text("meeting-summary", &fixed).is_none());
+    }
+
     #[test]
     fn migrate_builtin_pipe_removes_source_search_instruction() {
         let stale = concat!(
@@ -316,6 +559,62 @@ mod tests {
         // the user's surrounding prose is untouched.
         assert!(fixed.ends_with("only rename when the evidence is unambiguous.\n"));
         assert!(migrate_builtin_pipe_text("meeting-summary", &fixed).is_none());
+    }
+
+    #[test]
+    fn migrate_builtin_pipe_prefers_accessibility_and_parsed_before_ocr() {
+        let replacements = [
+            (
+                meeting_summary_search_shape().expect("bundled search shape"),
+                LEGACY_MEETING_SEARCH_SHAPE,
+            ),
+            (
+                meeting_summary_screen_fetch().expect("bundled screen fetch"),
+                LEGACY_MEETING_SCREEN_FETCH,
+            ),
+            (
+                meeting_summary_render_step().expect("bundled render step"),
+                LEGACY_MEETING_RENDER,
+            ),
+            (
+                meeting_summary_media_step().expect("bundled media step"),
+                LEGACY_MEETING_MEDIA,
+            ),
+            (
+                meeting_summary_naming_step().expect("bundled naming step"),
+                LEGACY_MEETING_NAMING,
+            ),
+        ];
+        let mut stale = bundled("meeting-summary").to_string();
+        for (current, legacy) in replacements {
+            assert!(stale.contains(current));
+            stale = stale.replace(current, legacy);
+        }
+
+        let fixed = migrate_builtin_pipe_text("meeting-summary", &stale)
+            .expect("OCR-first meeting summary should migrate");
+        assert!(fixed.contains("content_type=accessibility"));
+        assert!(fixed.contains("content_type=parsed"));
+        assert!(fixed.contains("OCR only if neither has useful rows"));
+        assert!(fixed.contains("3. OCR fallback:"));
+        assert!(!fixed.contains("the four fetches below are independent"));
+        assert!(!fixed.contains("bounded OCR search"));
+        assert!(migrate_builtin_pipe_text("meeting-summary", &fixed).is_none());
+
+        let current_evidence = meeting_summary_evidence_steps().expect("bundled evidence steps");
+        let stale_simple = bundled("meeting-summary")
+            .replace(current_evidence, LEGACY_SIMPLE_MEETING_EVIDENCE)
+            .replace(
+                meeting_summary_search_shape().expect("bundled search shape"),
+                LEGACY_MEETING_SEARCH_SHAPE,
+            );
+        let fixed_simple = migrate_builtin_pipe_text("meeting-summary", &stale_simple)
+            .expect("older unbatched meeting summary should migrate");
+        assert!(fixed_simple.contains("screen evidence priority:"));
+        assert!(fixed_simple.contains("content_type=accessibility"));
+        assert!(fixed_simple.contains("content_type=parsed"));
+        assert!(!fixed_simple.contains("step 2b — also query the screen"));
+        assert!(migrate_builtin_pipe_text("meeting-summary", &fixed_simple).is_none());
     }
 
     /// Latency: the shipped prompt sent the agent to read skill files and left it
@@ -360,6 +659,7 @@ mod tests {
         assert!(migrate_builtin_pipe_text("meeting-summary", bundled).is_none());
         let (config, body) = parse_frontmatter(bundled).expect("bundled prompt should parse");
         assert_eq!(config.timeout, Some(600));
+        assert_eq!(config.preset, ["screenpipe-cloud", "*"]);
         assert!(!body.contains("buildMeetingSummarizeInstructions"));
         assert!(body.contains("screenpipe API search is required"));
         assert!(body.contains("never run recursive `find` or `grep`"));
@@ -371,11 +671,23 @@ mod tests {
     fn bundled_meeting_summary_batches_its_fetches() {
         let (_, body) = parse_frontmatter(bundled("meeting-summary")).expect("prompt should parse");
 
-        // one batched fetch, backgrounded and joined.
+        // Primary reads are batched, backgrounded, and joined.
         assert!(body.contains("pull everything the summary needs in ONE command"));
         assert!(body.contains("-o /tmp/audio.json &"));
-        assert!(body.contains("-o /tmp/ocr.json &"));
+        assert!(body.contains("content_type=accessibility"));
+        assert!(body.contains("content_type=parsed"));
+        assert!(body.contains("> /tmp/a11.json) &"));
+        assert!(body.contains("> /tmp/parsed.json) &"));
         assert!(body.contains("\n  wait\n"));
+
+        // OCR is fetched later only if both preferred sources are empty.
+        let accessibility = body.find("content_type=accessibility").unwrap();
+        let parsed = body.find("content_type=parsed").unwrap();
+        let ocr = body.find("content_type=ocr").unwrap();
+        assert!(accessibility < ocr);
+        assert!(parsed < ocr);
+        assert!(body.contains("if [ \"$A11_ROWS\" -eq 0 ] && [ \"$PARSED_ROWS\" -eq 0 ]; then"));
+        assert!(!body.contains("-o /tmp/ocr.json &"));
 
         // bounded up front, so there is no "too big, fetch again" round trip.
         assert!(body.contains("do not fetch unbounded and then re-fetch smaller"));

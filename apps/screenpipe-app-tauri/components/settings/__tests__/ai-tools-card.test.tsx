@@ -141,7 +141,7 @@ describe("AiToolsCard", () => {
 
     render(<AiToolsCard />);
 
-    expect(await screen.findByText(/2 tools found on this Mac/i)).toBeTruthy();
+    expect(await screen.findByText("2 found. Connect them in one click.")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: /connect all/i }));
 
     expect(await screen.findByText("Claude")).toBeTruthy();
@@ -193,14 +193,15 @@ describe("AiToolsCard", () => {
     expect(await screen.findByText(/enable Settings > Workspace > Local MCP Servers/i)).toBeTruthy();
   });
 
-  it("shows detected Gemini CLI with MCP and skills", async () => {
+  it("describes detected AI apps by what they can access", async () => {
     libMocks.detectAiTools.mockResolvedValue(["gemini"]);
 
     render(<AiToolsCard />);
     fireEvent.click(await screen.findByRole("button", { name: /connect all/i }));
 
     expect(await screen.findByText("Gemini CLI")).toBeTruthy();
-    expect(screen.getByText("MCP + skills")).toBeTruthy();
+    expect(screen.getByText("screen and audio history")).toBeTruthy();
+    expect(screen.queryByText("MCP + skills")).toBeNull();
     await waitFor(() => expect(libMocks.connectAiToolTargets).toHaveBeenCalledWith(["gemini"]));
   });
 });

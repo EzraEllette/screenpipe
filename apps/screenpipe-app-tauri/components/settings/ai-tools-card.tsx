@@ -4,12 +4,11 @@
 
 "use client";
 
-// "AI tools" block — 4th sibling to MCP servers / Agent extensions / Skills in
-// Settings > Connections. One place to see every AI tool detected on this
-// machine, connect them all in one click, connect/remove a single tool, or
-// disconnect everything (two-step confirm). Connect always leads; disconnect
-// never headlines. First-run setup runs in native Rust; this card remains the
-// visible repair, explicit connect, and explicit removal surface.
+// "AI apps" keeps detected apps ready to connect in one click. Protocol and
+// config details stay out of the default surface while per-app removal and the
+// two-step disconnect-all remain available.
+// First-run setup runs in native Rust; this card remains the visible repair,
+// explicit connect, and explicit removal surface.
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Bot, Check, Loader2, Plus, RotateCw } from "lucide-react";
@@ -21,7 +20,6 @@ import { platform } from "@tauri-apps/plugin-os";
 import {
   CONNECT_ALL_TOOL_NAMES,
   type ConnectAllToolId,
-  SKILLS_TARGET,
   connectAiToolTargets,
   disconnectAiToolTargets,
   detectAiTools,
@@ -279,9 +277,9 @@ export function AiToolsCard({ onChanged }: { onChanged?: () => void }) {
   if (detected.length === 0) return null;
 
   const summary = noneConnected
-    ? `${rows.length} tool${rows.length === 1 ? "" : "s"} found on this Mac — add screenpipe to ${rows.length === 1 ? "it" : "all of them"} in one click`
+    ? `${rows.length} found. Connect ${rows.length === 1 ? "it" : "them"} in one click.`
     : allConnected
-    ? `All ${rows.length} tools connected`
+    ? `All ${rows.length} connected`
     : `${connectedCount} of ${rows.length} connected`;
 
   return (
@@ -297,7 +295,7 @@ export function AiToolsCard({ onChanged }: { onChanged?: () => void }) {
           </div>
           <div className="min-w-0">
             <div className="flex items-center gap-2">
-              <h3 className="text-sm font-medium text-foreground">AI tools</h3>
+              <h3 className="text-sm font-medium text-foreground">AI apps</h3>
               {connectedCount > 0 && <span className="h-2 w-2 rounded-full bg-foreground" />}
             </div>
             <p className="text-xs text-muted-foreground">{summary}</p>
@@ -337,9 +335,7 @@ export function AiToolsCard({ onChanged }: { onChanged?: () => void }) {
       {expanded && (
         <div className="mt-3 border-t border-border">
           <p className="text-xs text-muted-foreground pt-3 pb-1">
-            screenpipe adds its MCP server{" "}
-            <span className="text-muted-foreground/70">+ skills</span> to each tool&apos;s own
-            config — remove any time.
+            Connected apps can search your screen and audio history. Remove access any time.
           </p>
           <div>
             {rows.map((row) => {
@@ -356,7 +352,7 @@ export function AiToolsCard({ onChanged }: { onChanged?: () => void }) {
                   <div className="min-w-0 flex-1">
                     <span className="text-[13px] text-foreground">{DISPLAY_NAMES[id]}</span>
                     <span className="ml-2 text-xs text-muted-foreground">
-                      {SKILLS_TARGET[id] ? "MCP + skills" : "MCP"}
+                      screen and audio history
                     </span>
                     {err && (
                       <p className="text-[11px] mt-1 flex items-center gap-1.5 flex-wrap">

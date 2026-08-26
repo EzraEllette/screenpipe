@@ -111,6 +111,7 @@ export function buildPaletteEntries(
   deps: CommandPaletteDeps,
   settings: ShortcutHintSettings,
   isMac: boolean,
+  experimentalFeaturesEnabled = false,
 ): PaletteEntry[] {
   // In-app chords (handled by webview listeners, not the OS): fixed bindings,
   // so the hint is a plain platform ternary like settings-search's ⌘K badge.
@@ -164,24 +165,28 @@ export function buildPaletteEntries(
       icon: Play,
       run: deps.resumeRecording,
     },
-    {
-      id: "next_recent_chat",
-      label: "switch recent chat",
-      keywords: "conversation previous recent mru cycle",
-      group: "navigation",
-      hint: inAppShortcutLabel("next_recent_chat", isMac),
-      icon: History,
-      run: () => deps.switchRecentChat(1),
-    },
-    {
-      id: "previous_recent_chat",
-      label: "switch recent chat backward",
-      keywords: "conversation previous recent mru reverse",
-      group: "navigation",
-      hint: inAppShortcutLabel("previous_recent_chat", isMac),
-      icon: History,
-      run: () => deps.switchRecentChat(-1),
-    },
+    ...(experimentalFeaturesEnabled
+      ? [
+          {
+            id: "next_recent_chat" as const,
+            label: "switch recent chat",
+            keywords: "conversation previous recent mru cycle",
+            group: "navigation" as const,
+            hint: inAppShortcutLabel("next_recent_chat", isMac),
+            icon: History,
+            run: () => deps.switchRecentChat(1),
+          },
+          {
+            id: "previous_recent_chat" as const,
+            label: "switch recent chat backward",
+            keywords: "conversation previous recent mru reverse",
+            group: "navigation" as const,
+            hint: inAppShortcutLabel("previous_recent_chat", isMac),
+            icon: History,
+            run: () => deps.switchRecentChat(-1),
+          },
+        ]
+      : []),
     ...deps.sections.map((section) => ({
       id: SECTION_ACTION_IDS[section.id],
       label: section.label,
@@ -210,15 +215,19 @@ export function buildPaletteEntries(
       // No section: "open settings" means the panel, not the General page.
       run: () => deps.openSettings(),
     },
-    {
-      id: "open_shortcut_guide",
-      label: "keyboard shortcut guide",
-      keywords: "hotkeys keybindings reference help",
-      group: "settings",
-      hint: inAppShortcutLabel("shortcut_guide", isMac),
-      icon: Keyboard,
-      run: deps.openShortcutGuide,
-    },
+    ...(experimentalFeaturesEnabled
+      ? [
+          {
+            id: "open_shortcut_guide" as const,
+            label: "keyboard shortcut guide",
+            keywords: "hotkeys keybindings reference help",
+            group: "settings" as const,
+            hint: inAppShortcutLabel("shortcut_guide", isMac),
+            icon: Keyboard,
+            run: deps.openShortcutGuide,
+          },
+        ]
+      : []),
     {
       id: "open_shortcut_settings",
       label: "edit global shortcuts",
@@ -243,12 +252,14 @@ interface CommandPaletteProps {
   deps: CommandPaletteDeps;
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
+  experimentalFeaturesEnabled?: boolean;
 }
 
 export function CommandPalette({
   deps,
   open: controlledOpen,
   onOpenChange,
+  experimentalFeaturesEnabled = false,
 }: CommandPaletteProps) {
   const [internalOpen, setInternalOpen] = useState(false);
   const open = controlledOpen ?? internalOpen;
@@ -272,7 +283,12 @@ export function CommandPalette({
     setOpen(true);
   });
 
-  const entries = buildPaletteEntries(deps, settings, isMac);
+  const entries = buildPaletteEntries(
+    deps,
+    settings,
+    isMac,
+    experimentalFeaturesEnabled,
+  );
 
   const runEntry = (entry: PaletteEntry) => {
     setOpen(false);

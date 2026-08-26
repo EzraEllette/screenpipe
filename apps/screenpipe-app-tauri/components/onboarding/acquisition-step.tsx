@@ -8,6 +8,7 @@ import React, { useState } from "react";
 import { motion } from "framer-motion";
 import posthog from "posthog-js";
 import { useSettings } from "@/lib/hooks/use-settings";
+import { commands, type Attribution } from "@/lib/utils/tauri";
 
 interface AcquisitionStepProps {
   handleNextSlide: () => void;
@@ -42,6 +43,29 @@ export const ACQUISITION_SOURCES = [
 
 export type AcquisitionSource = (typeof ACQUISITION_SOURCES)[number]["value"];
 
+export function buildAcquisitionAnalyticsProperties(
+  source: AcquisitionSource | null,
+  attribution: Attribution | null,
+) {
+  const acquisitionSource = source ?? "skipped";
+
+  return {
+    // Keep `source` while existing PostHog insights migrate to the canonical
+    // property name used on the person profile.
+    source: acquisitionSource,
+    acquisition_source: acquisitionSource,
+    answered: Boolean(source),
+    attribution_available: Boolean(attribution),
+    ...(attribution?.utmSource && { utm_source: attribution.utmSource }),
+    ...(attribution?.utmMedium && { utm_medium: attribution.utmMedium }),
+    ...(attribution?.utmCampaign && {
+      utm_campaign: attribution.utmCampaign,
+    }),
+    ...(attribution?.utmContent && { utm_content: attribution.utmContent }),
+    ...(attribution?.utmTerm && { utm_term: attribution.utmTerm }),
+  };
+}
+
 const AcquisitionStep: React.FC<AcquisitionStepProps> = ({
   handleNextSlide,
 }) => {
@@ -56,16 +80,34 @@ const AcquisitionStep: React.FC<AcquisitionStepProps> = ({
       if (source) {
         // Persist locally so a later reinstall or support conversation can see
         // it, and set it as a person property so cohorts can be built on it.
-        await updateSettings({ acquisitionSource: source });
-        posthog.people?.set?.({ acquisition_source: source });
+        try {
+          await updateSettings({ acquisitionSource: source });
+        } catch (error) {
+          console.warn("[onboarding] failed to persist acquisition source", error);
+        }
+        try {
+          posthog.people?.set?.({ acquisition_source: source });
+        } catch (error) {
+          console.warn("[onboarding] failed to set acquisition person property", error);
+        }
       }
-      posthog.capture("onboarding_acquisition_answered", {
-        source: source ?? "skipped",
-        answered: Boolean(source),
-      });
-    } catch (error) {
-      // A missing attribution answer must never block setup.
-      console.warn("[onboarding] failed to record acquisition source", error);
+
+      let attribution: Attribution | null = null;
+      try {
+        attribution = await commands.getOnboardingAttribution();
+      } catch (error) {
+        console.warn("[onboarding] failed to read website attribution", error);
+      }
+
+      try {
+        posthog.capture(
+          "onboarding_acquisition_answered",
+          buildAcquisitionAnalyticsProperties(source, attribution),
+        );
+      } catch (error) {
+        // A missing attribution event must never block setup.
+        console.warn("[onboarding] failed to record acquisition source", error);
+      }
     } finally {
       setSaving(false);
       handleNextSlide();

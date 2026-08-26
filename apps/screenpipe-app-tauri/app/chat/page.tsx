@@ -5,12 +5,12 @@
 "use client";
 
 import { StandaloneChat } from "@/components/standalone-chat";
-import { ShortcutGuide } from "@/components/shortcut-guide";
+import { ExperimentalShortcutGuide } from "@/components/shortcut-guide";
 
 export default function ChatPage() {
 	return (
 		<>
-			<ShortcutGuide />
+			<ExperimentalShortcutGuide />
 			<StandaloneChat />
 		</>
 	);

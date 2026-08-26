@@ -39,16 +39,21 @@ Scope test runs; the workspace is ~490k lines. `cargo test -p <crate>`, or
 `cd apps/screenpipe-app-tauri && bun run test`.
 
 `src-tauri` is excluded from the workspace and has no CI test job, so root
-`cargo test` never compiles it. Test it explicitly with `--manifest-path`, after
-`bun scripts/pre_build.js` (its `build.rs` panics without the sidecars). That
-build also rewrites tracked `src-tauri/gen/schemas/`; `git checkout --` it.
+`cargo test` never compiles it. From `apps/screenpipe-app-tauri`, test it with
+`bun run test:tauri <cargo-test-args>`. This command runs `pre_build.js`, uses
+the `debug-dev` profile, and holds the machine-wide native build queue for the
+entire test. It can rewrite tracked `src-tauri/gen/schemas/`; restore only that
+generated noise afterward.
 
 For native app development, use only the scripts in
-`apps/screenpipe-app-tauri`: `bun run dev:tauri` for the normal live loop and
-`bun run build:tauri:dev` for a one-shot test binary. Both select the
-`debug-dev` Cargo profile through Tauri and use the machine-wide native build
-queue/cache automatically. Do not bypass them with raw Tauri/Cargo commands,
-`cargo clean`, target-directory overrides, or ad hoc profile/cache settings.
+`apps/screenpipe-app-tauri`: `bun run dev:tauri` for the normal live loop,
+`bun run build:tauri:dev` for a one-shot test binary, and `bun run test:tauri`
+for native tests. They select the `debug-dev` Cargo profile and use the
+machine-wide native build queue/cache automatically. Never run raw
+Tauri/Cargo commands for `src-tauri`, even for one focused test. If the queue
+or sccache is unavailable, stop and report the native check as blocked; never
+accept or continue a local-compilation fallback. Do not use `cargo clean`,
+target-directory overrides, or ad hoc profile/cache settings.
 See `docs/macos-dev-builds.md` for the exact commands and for the separate
 signed `.app` path used only when persistent macOS TCC identity is required.
 
@@ -77,6 +82,10 @@ for UI validation. Drive the real app only when the change crosses a native
 boundary listed there. Put before/after visuals in every issue and PR body:
 screen recording, screenshots, HTML mockup screenshot, or ASCII.
 
+Before opening or updating a PR, run every eval relevant to the changed behavior
+locally and put the exact commands and results in the PR body. CI is a second
+signal, not a substitute.
+
 ## git
 
 Many agents work this repo in parallel. Never `git reset`, never delete local
@@ -90,3 +99,9 @@ versioned artifacts. Agents must never publish: no writes to `latest.json`,
 tags or GitHub releases; no `app-publication` approvals; no calls to the admin
 publication endpoint; and never weaken the `Human-only app publication tags`
 ruleset. Publication is a human click in the admin releases UI.
+
+## PR
+
+Don't mention any Screenpipe private secret method you used to implement feature based on inspiration from other product research in PR bodies or GH issues
+
+

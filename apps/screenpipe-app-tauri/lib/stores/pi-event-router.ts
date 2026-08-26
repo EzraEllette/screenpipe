@@ -43,6 +43,7 @@
 import {
   mountAgentEventBus,
   registerDefault,
+  hasForegroundHandler,
   onTerminated,
   onEvicted,
   type Unregister,
@@ -90,6 +91,7 @@ import {
 import { connectionActionFromToolResult } from "@/components/chat/standalone/hooks/pi-event-handlers";
 import { normalizePlanEntries, upsertPlanBlock } from "@/lib/chat/acp-plan";
 import type { ContentBlock } from "@/lib/chat/types";
+import { commands } from "@/lib/utils/tauri";
 
 // Module-level state — the router is a singleton process-wide.
 let mounted = false;
@@ -261,6 +263,17 @@ export async function handlePiEvent(envelope: AgentEventEnvelope) {
       updatedAt: now,
       pinned: false,
       unread: false,
+      // Born hidden, exactly like the "+ new chat" row. A Pi process exists
+      // for plenty of session ids that are not a conversation yet: the chat
+      // panel spawns one for its mount-time uuid, each window (home + the
+      // pre-created chat panel) prewarms its own, and crashes auto-restart
+      // them. Those processes emit startup/state/lifecycle events, and
+      // lazy-creating a *visible* row for them is what put an empty
+      // "untitled" chat in RECENTS every time the user opened a new chat.
+      // The row is revealed by the paths that prove real content exists:
+      // `applyEventToSessionContent` on a user `message_start`, and
+      // `persistBackgroundSession` after the first save.
+      draft: true,
       // Set lastContentAt on first touch only when there's actual content.
       // isUnread() in the store will compute the correct unread boolean.
       ...(snippet ? { lastContentAt: now } : {}),
@@ -284,6 +297,13 @@ export async function handlePiEvent(envelope: AgentEventEnvelope) {
   // Status mirroring below still runs for both Pi and Pipe sessions.
   if (envelope.source === "pi") {
     applyEventToSessionContent(sid, inner);
+    // Content is the proof a draft row was waiting for. Reveal it as soon as
+    // the session actually holds a message — a backgrounded reply must show
+    // up in RECENTS while it streams, not only after the agent_end save.
+    const afterContent = useChatStore.getState().sessions[sid];
+    if (afterContent?.draft && (afterContent.messages?.length ?? 0) > 0) {
+      store.actions.patch(sid, { draft: false });
+    }
   }
 
   // Decide whether to write a preview update — throttled per session.
@@ -754,15 +774,20 @@ function applyEventToSessionContent(sid: string, payload: PiInnerEvent) {
     if (!cur?.streamingMessageId) return;
     const msgId = cur.streamingMessageId;
     const parentToolCallId = (payload as any).parentToolCallId;
+    const agentId = (payload as any).agentId;
+    const toolKind = (payload as any).kind;
     const tool = {
       id: (payload as any).toolCallId || `${Date.now()}`,
       toolName: (payload as any).toolName || "unknown",
       args: (payload as any).args || {},
       isRunning: true,
       startedAtMs: Date.now(),
+      ...(typeof agentId === "string" && agentId ? { agentId } : {}),
+      ...(typeof toolKind === "string" && toolKind ? { kind: toolKind } : {}),
       ...(typeof parentToolCallId === "string" && parentToolCallId
         ? { parentToolCallId }
         : {}),
+      ...((payload as any).subagent === true ? { subagent: true } : {}),
     };
     const blocks = [...((cur.contentBlocks as any[]) ?? []), { type: "tool", toolCall: tool }];
     store.actions.setStreaming(sid, { contentBlocks: blocks });
@@ -815,6 +840,9 @@ function applyEventToSessionContent(sid: string, payload: PiInnerEvent) {
       if (typeof p.subagentType === "string") next.subagentType = p.subagentType;
       if (p.retry !== undefined) next.retry = p.retry;
       if (typeof p.title === "string" && p.title) next.toolName = p.title;
+      if (typeof p.agentId === "string" && p.agentId) next.agentId = p.agentId;
+      if (typeof p.kind === "string" && p.kind) next.kind = p.kind;
+      if (p.args && typeof p.args === "object" && !Array.isArray(p.args)) next.args = p.args;
       if (typeof p.outputDelta === "string" && p.outputDelta) {
         const combined = `${next.progress ?? ""}${p.outputDelta}`;
         next.progress = combined.length > 4000 ? combined.slice(-4000) : combined;
@@ -848,6 +876,12 @@ function applyEventToSessionContent(sid: string, payload: PiInnerEvent) {
             ...b,
             toolCall: {
               ...b.toolCall,
+              ...((payload as any).toolName ? { toolName: (payload as any).toolName } : {}),
+              ...((payload as any).agentId ? { agentId: (payload as any).agentId } : {}),
+              ...((payload as any).kind ? { kind: (payload as any).kind } : {}),
+              ...((payload as any).args && typeof (payload as any).args === "object"
+                ? { args: (payload as any).args }
+                : {}),
               isRunning: false,
               result: truncated,
               isError: (payload as any).isError,
@@ -893,7 +927,18 @@ function applyEventToSessionContent(sid: string, payload: PiInnerEvent) {
   // ends up on disk and survives a restart.
   if (t === "agent_end") {
     store.actions.endTurn(sid);
-    void persistBackgroundSession(sid);
+    const willRetry = (payload as { willRetry?: boolean }).willRetry === true;
+    void persistBackgroundSession(sid).finally(() => {
+      // A hidden conversation may finish after its panel's unmount cleanup saw
+      // it as busy. Re-check atomically once its transcript is durable, then
+      // reap the heavyweight agent tree. Foreground chats stay warm for the
+      // next prompt, and automatic retries keep their live process.
+      if (!willRetry && !hasForegroundHandler(sid)) {
+        void commands.piStopIfIdle(sid).catch((error) => {
+          console.warn("[router] failed to release idle background session:", error);
+        });
+      }
+    });
     return;
   }
 }

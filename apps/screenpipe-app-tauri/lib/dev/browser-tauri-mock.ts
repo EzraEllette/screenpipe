@@ -7,7 +7,10 @@ import type {
   BrainViewCanvasDocument,
   BrainViewDefinition,
   BrainViewTemplateKit,
+  ImportedSkill,
+  PiExtensionPackage,
   ProviderAutomation,
+  RegistrySkill,
   SaveBrainViewCanvasRequest,
   SaveBrainViewRequest,
 } from "@/lib/utils/tauri";
@@ -156,6 +159,7 @@ const NOOP_COMMANDS = new Set([
   "confirm_browser_cookie_access_for_session",
   "ensure_webview_focus",
   "open_login_window",
+  "open_viewer_window",
   "open_permission_settings",
   "owned_browser_hide",
   "reencrypt_store",
@@ -173,6 +177,65 @@ const NOOP_COMMANDS = new Set([
   "write_browser_log",
   "write_browser_logs",
 ]);
+
+const BROWSER_DEV_IMPORTED_SKILLS: ImportedSkill[] = [
+  {
+    name: "PDF tools",
+    description: "read, create, and edit PDF documents",
+    path: "/Users/screenpipe/.screenpipe/skills/pdf-tools",
+  },
+  {
+    name: "Meeting follow-up",
+    description: "turn a meeting into decisions and next steps",
+    path: "/Users/screenpipe/.screenpipe/skills/meeting-follow-up",
+  },
+  {
+    name: "Customer discovery",
+    description: "prepare and synthesize customer interviews",
+    path: "/Users/screenpipe/.screenpipe/skills/customer-discovery",
+  },
+];
+
+const BROWSER_DEV_PROVIDER_SKILLS: RegistrySkill[] = [
+  {
+    name: "PDF",
+    description: "Fill, merge, split, and extract text or tables from PDF files.",
+    repo: "anthropics/skills",
+    git_ref: "main",
+    path: "skills/pdf",
+    source: "anthropic",
+    featured: true,
+    imported: false,
+  },
+  {
+    name: "MCP Builder",
+    description: "Scaffold MCP servers that expose tools to AI agents.",
+    repo: "anthropics/skills",
+    git_ref: "main",
+    path: "skills/mcp-builder",
+    source: "anthropic",
+    imported: false,
+  },
+  {
+    name: "Transcribe",
+    description: "Transcribe audio with optional diarization and speaker hints.",
+    repo: "openai/skills",
+    git_ref: "main",
+    path: "skills/.curated/transcribe",
+    source: "openai",
+    featured: true,
+    imported: false,
+  },
+  {
+    name: "Playwright",
+    description: "Automate browsers for navigation, forms, and screenshots.",
+    repo: "openai/skills",
+    git_ref: "main",
+    path: "skills/.curated/playwright",
+    source: "openai",
+    imported: false,
+  },
+];
 
 const GRANTED_PERMISSION_COMMANDS = new Set([
   "check_accessibility_permission_cmd",
@@ -412,7 +475,53 @@ export function createBrowserIpcMock(options: BrowserIpcMockOptions) {
   const storePaths = new Map<string, number>();
   const warned = new Set<string>();
   let nextResourceId = 1;
+  let piExtensionPackages: PiExtensionPackage[] = [];
+  let importedSkills = BROWSER_DEV_IMPORTED_SKILLS.map((skill) => ({ ...skill }));
+  const providerSkills = BROWSER_DEV_PROVIDER_SKILLS.map((skill) => ({
+    ...skill,
+  }));
   const initialTimestamp = new Date().toISOString();
+  const chatsDir = "/Users/screenpipe/.screenpipe/chats";
+  const chatFixtures = new Map<string, string>(
+    [
+      ["browser-chat-1", "Ship Windows capture recovery", "codex", "cursor", true],
+      ["browser-chat-2", "Summarize enterprise interviews", "claude-code", "screenpipe", true],
+      ["browser-chat-3", "Investigate audio device switching", "codex", "github-copilot", false],
+      ["browser-chat-4", "Draft launch announcement", "claude-code", "terminal", false],
+      ["browser-chat-5", "Review onboarding drop-off", "codex", "cursor", false],
+      ["browser-chat-6", "Prepare customer follow-ups", "claude-code", "screenpipe", false],
+      ["browser-chat-7", "Trace duplicate chat sessions", "codex", "terminal", false],
+      ["browser-chat-8", "Analyze weekly product usage", "claude-code", "cursor", false],
+      ["browser-chat-9", "Polish the release checklist", "codex", "screenpipe", false],
+      ["browser-chat-10", "Compare transcription quality", "claude-code", "github-copilot", false],
+      ["browser-chat-11", "Plan the next design sprint", "codex", "terminal", false],
+      ["browser-chat-12", "Find unresolved support threads", "claude-code", "cursor", false],
+    ].map(([id, title, source, harness, pinned], index) => {
+      const timestamp = Date.now() - index * 7 * 60_000;
+      return [`${chatsDir}/${id}.json`, JSON.stringify({
+        id,
+        title,
+        titleSource: "ai",
+        kind: "chat",
+        pinned,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+        lastUserMessageAt: timestamp,
+        lastContentAt: timestamp,
+        lastViewedAt: timestamp,
+        importedFrom: {
+          source,
+          sourceId: `${source}-browser-dev-${index}`,
+          importedAt: timestamp,
+          harness,
+        },
+        messages: [
+          { id: `${id}-user`, role: "user", content: title, timestamp },
+          { id: `${id}-assistant`, role: "assistant", content: "Browser-dev fixture reply", timestamp: timestamp + 1 },
+        ],
+      })] as const;
+    }),
+  );
   let liveViews =
     options.scenario === "empty"
       ? []
@@ -606,11 +715,21 @@ export function createBrowserIpcMock(options: BrowserIpcMockOptions) {
       case "plugin:dialog|save":
         return null;
       case "plugin:fs|read_file":
-      case "plugin:fs|read_text_file":
+      case "plugin:fs|read_text_file": {
+        const contents = chatFixtures.get(String(input.path)) ?? "";
+        return new TextEncoder().encode(contents);
+      }
       case "plugin:fs|read_dir":
-        return [];
+        return String(input.path) === chatsDir
+          ? [...chatFixtures.keys()].map((path) => ({
+              name: path.slice(path.lastIndexOf("/") + 1),
+              isFile: true,
+              isDirectory: false,
+              isSymlink: false,
+            }))
+          : [];
       case "plugin:fs|exists":
-        return false;
+        return String(input.path) === chatsDir || chatFixtures.has(String(input.path));
       case "plugin:fs|stat":
       case "plugin:fs|lstat":
         return {
@@ -631,6 +750,31 @@ export function createBrowserIpcMock(options: BrowserIpcMockOptions) {
         };
       case "get_screenpipe_base_dir":
         return "/Users/screenpipe/.screenpipe";
+      case "get_chats_dir":
+        return chatsDir;
+      case "read_viewer_file": {
+        const path = String(input.path ?? "");
+        if (!path.endsWith("/imessage-sync/output/sync-summary.md")) {
+          return { kind: "error", message: "mock file not found", path };
+        }
+        const text = [
+          "# iMessage Sync",
+          "",
+          "**Run:** 2026-08-26 (Pacific)  **Status:** 5 conversations stored",
+          "",
+          "Fetched 5 new text messages since checkpoint `last_rowid` 14958. Grouped them into 5 conversations and stored all 5 as Screenpipe memories (0 errors). Memory IDs: 2998–3002.",
+          "",
+          "Checkpoint now: `last_rowid` 14969, **565** conversations stored, last ingest `2026-08-26T18:01:54.359Z`.",
+        ].join("\n");
+        return {
+          kind: "text",
+          text,
+          name: "sync-summary.md",
+          path,
+          truncated: false,
+          total_bytes: new TextEncoder().encode(text).byteLength,
+        };
+      }
       case "get_cloud_token":
       case "get_enterprise_license_key":
       case "get_enterprise_team_api_token":
@@ -640,6 +784,31 @@ export function createBrowserIpcMock(options: BrowserIpcMockOptions) {
       case "get_missing_permissions":
       case "pi_pending":
         return [];
+      case "pi_list_extension_packages":
+        return piExtensionPackages.map((pkg) => ({ ...pkg }));
+      case "pi_install_extension_package": {
+        const source = String(input.source ?? "");
+        if (!source) return piExtensionPackages.map((pkg) => ({ ...pkg }));
+        const existing = piExtensionPackages.find((pkg) => pkg.source === source);
+        if (existing) {
+          existing.filtered = false;
+          existing.installed = true;
+        } else {
+          piExtensionPackages.push({
+            source,
+            scope: "user",
+            filtered: false,
+            installed: true,
+            acpCompatible: false,
+          });
+        }
+        return piExtensionPackages.map((pkg) => ({ ...pkg }));
+      }
+      case "pi_remove_extension_package": {
+        const source = String(input.source ?? "");
+        piExtensionPackages = piExtensionPackages.filter((pkg) => pkg.source !== source);
+        return piExtensionPackages.map((pkg) => ({ ...pkg }));
+      }
       case "list_brain_views":
         return liveViews;
       case "list_brain_view_template_kits":
@@ -649,6 +818,29 @@ export function createBrowserIpcMock(options: BrowserIpcMockOptions) {
           ...task,
           availableActions: [...(task.availableActions ?? [])],
         }));
+      case "list_imported_skills":
+        return importedSkills.map((skill) => ({ ...skill }));
+      case "fetch_skills_registry":
+        return providerSkills.map((skill) => ({ ...skill }));
+      case "install_registry_skill": {
+        const name = String(input.name ?? "");
+        const skill = providerSkills.find((candidate) => candidate.name === name);
+        if (!skill) throw new Error("skill is no longer available");
+        skill.imported = true;
+        const installed = {
+          name: skill.name,
+          description: skill.description ?? "",
+          path: `/Users/screenpipe/.screenpipe/skills/${skill.path.split("/").at(-1)}`,
+        };
+        importedSkills = [
+          ...importedSkills.filter((candidate) => candidate.name !== skill.name),
+          installed,
+        ];
+        return { ...installed };
+      }
+      case "scan_device_skills":
+      case "list_managed_team_skills":
+        return [];
       case "manage_provider_automation": {
         const key = String(input.key ?? "");
         const action = String(input.action ?? "");

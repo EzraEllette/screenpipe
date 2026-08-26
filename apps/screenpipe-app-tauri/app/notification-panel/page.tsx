@@ -426,6 +426,7 @@ export default function NotificationPanelPage() {
 
   return (
     <div
+      className="group/notif"
       style={{ width: "100%", height: "100%", background: "transparent" }}
       onMouseEnter={() => {
         hoveredRef.current = true;

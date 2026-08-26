@@ -161,11 +161,16 @@ fn finish_employee_disable(
     any(target_os = "macos", target_os = "windows")
 ))]
 pub fn spawn(app: &AppHandle) {
-    if crate::dev_isolation::is_active() {
-        debug!("enterprise: dev isolation active, skipping startup enrollment enforcement");
+    let dev_isolation = crate::dev_isolation::is_active();
+    let persistent_install = crate::enterprise_persistence::installed();
+    if !should_spawn_reconciler(dev_isolation, persistent_install) {
+        if persistent_install {
+            debug!("enterprise: persistent package owns startup enrollment");
+        } else {
+            debug!("enterprise: dev isolation active, skipping startup enrollment enforcement");
+        }
         return;
     }
-
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         let mut last_status = None;
@@ -226,6 +231,10 @@ pub fn spawn(app: &AppHandle) {
             tokio::time::sleep(RECONCILE_INTERVAL).await;
         }
     });
+}
+
+fn should_spawn_reconciler(dev_isolation: bool, persistent_install: bool) -> bool {
+    !dev_isolation && !persistent_install
 }
 
 fn enrollment_status(app: &AppHandle) -> Result<EnrollmentState, String> {
@@ -787,6 +796,13 @@ mod tests {
         assert_eq!(FAILURE_RETRY_INTERVAL, Duration::from_secs(10));
         assert_eq!(status_from_plugin_enabled(false), EnrollmentStatus::Missing);
         assert_eq!(status_from_plugin_enabled(true), EnrollmentStatus::Enabled);
+    }
+
+    #[test]
+    fn ordinary_install_reconciler_behavior_is_unchanged() {
+        assert!(should_spawn_reconciler(false, false));
+        assert!(!should_spawn_reconciler(true, false));
+        assert!(!should_spawn_reconciler(false, true));
     }
 
     #[test]

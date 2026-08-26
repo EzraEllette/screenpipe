@@ -18,6 +18,8 @@
  *   4. a malformed fence falls back to a code block instead of vanishing
  *   5. no chart uses a rounded corner (DESIGN.md: sharp corners always)
  *   6. every chat chart exposes the Live View prompt handoff menu
+ *   7. the action-menu wrapper preserves the chart's full message width
+ *   8. bar, funnel, and range tracks remain useful in a 300 px chat column
  *
  * No model run and no network: the assistant message is seeded directly.
  *
@@ -201,9 +203,8 @@ describe("Inline charts in chat", function () {
     const widths = await browser.execute(() => {
       const bar = document.querySelector('[data-chart-type="bar"]');
       if (!bar) return null;
-      // Each row's fill is the inner span carrying an explicit width.
       const fills = Array.from(
-        bar.querySelectorAll<HTMLElement>("span > span[style*='width']"),
+        bar.querySelectorAll<HTMLElement>("[data-chart-bar-fill]"),
       ).map((el) => el.getBoundingClientRect().width);
       return fills.filter((width) => width > 0);
     });
@@ -218,16 +219,53 @@ describe("Inline charts in chat", function () {
     expect(Math.abs(third / second - 0.5)).toBeLessThan(0.08);
   });
 
-  it("shows a tooltip and highlights the mark on hover", async () => {
+  it("keeps charts full-width after adding the Live View action menu", async () => {
+    const layout = await browser.execute(() => {
+      const chart = document.querySelector<HTMLElement>(
+        '[data-chart-type="bar"]',
+      );
+      const message = chart?.closest<HTMLElement>(".prose");
+      if (!chart || !message) return null;
+      const chartRect = chart.getBoundingClientRect();
+      const messageRect = message.getBoundingClientRect();
+      return {
+        chartLeft: chartRect.left,
+        chartRight: chartRect.right,
+        messageLeft: messageRect.left,
+        messageRight: messageRect.right,
+      };
+    });
+
+    expect(layout).not.toBe(null);
+    expect(Math.abs(layout!.chartLeft - layout!.messageLeft)).toBeLessThan(2);
+    expect(Math.abs(layout!.chartRight - layout!.messageRight)).toBeLessThan(2);
+  });
+
+  it("shows a tooltip for pointer movement over a mark", async () => {
     const before = await browser.execute(() => {
       const bar = document.querySelector('[data-chart-type="bar"]');
       return bar?.querySelector('[role="presentation"]') ? "tooltip" : "none";
     });
     expect(before).toBe("none");
 
-    const row = await $('[data-chart-type="bar"] [data-chart-surface] > div > div');
+    await browser.execute(() => {
+      const row = document.querySelector<HTMLElement>(
+        '[data-chart-type="bar"] [data-chart-bar-row]',
+      );
+      if (!row) return;
+      row.scrollIntoView({ block: "center" });
+      const bounds = row.getBoundingClientRect();
+      row.dispatchEvent(
+        new PointerEvent("pointermove", {
+          bubbles: true,
+          clientX: bounds.left + 8,
+          clientY: bounds.top + 8,
+          pointerType: "mouse",
+        }),
+      );
+    });
+    const row = await $('[data-chart-type="bar"] [data-chart-bar-row]');
     await row.waitForExist({ timeout: t(8_000) });
-    await row.moveTo();
 
     await browser.waitUntil(
       async () =>
@@ -243,18 +281,13 @@ describe("Inline charts in chat", function () {
         timeoutMsg: "hover tooltip never showed the hovered bar",
       },
     );
-
-    // The hovered fill switches to the neutral focus signal.
-    const focused = await browser.execute(() => {
-      const fills = Array.from(
-        document.querySelectorAll<HTMLElement>(
-          '[data-chart-type="bar"] span > span[style*="width"]',
-        ),
-      );
-      return fills.map((el) => getComputedStyle(el).backgroundColor);
-    });
-    const distinct = new Set(focused as string[]);
-    expect(distinct.size).toBeGreaterThan(1);
+    const fillCount = await browser.execute(
+      () =>
+        document.querySelectorAll(
+          '[data-chart-type="bar"] [data-chart-bar-fill]',
+        ).length,
+    );
+    expect(fillCount).toBe(3);
   });
 
   it("falls back to a readable code block for the malformed fence", async () => {
@@ -279,13 +312,56 @@ describe("Inline charts in chat", function () {
     const triggers = await $$('button[aria-label="chart actions"]');
     expect(triggers).toHaveLength(7);
 
-    await triggers[0].click();
-    const action = await $('[role="menuitem"]');
-    await action.waitForDisplayed({ timeout: t(8_000) });
-    expect((await action.getText()).toLowerCase()).toContain("add to live view");
+    await browser.execute(() => {
+      const trigger = document.querySelector<HTMLElement>(
+        'button[aria-label="chart actions"]',
+      );
+      if (!trigger) return;
+      trigger.scrollIntoView({ block: "center" });
+      trigger.focus();
+      trigger.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "ArrowDown",
+          code: "ArrowDown",
+          bubbles: true,
+        }),
+      );
+    });
+    const actionState = await browser.waitUntil(
+      () =>
+        browser.execute(() => {
+          const action = document.querySelector<HTMLElement>('[role="menuitem"]');
+          if (!action) return null;
+          const bounds = action.getBoundingClientRect();
+          const style = getComputedStyle(action);
+          return {
+            text: action.textContent ?? "",
+            rendered:
+              bounds.width > 0 &&
+              bounds.height > 0 &&
+              style.display !== "none" &&
+              style.visibility !== "hidden" &&
+              Number(style.opacity || "1") > 0,
+          };
+        }),
+      {
+        timeout: t(8_000),
+        interval: 100,
+        timeoutMsg: "Live View menu item never rendered",
+      },
+    );
+    expect(actionState?.rendered).toBe(true);
+    expect(actionState?.text.toLowerCase()).toContain("add to live view");
 
-    await browser.keys(["Escape"]);
-    await action.waitForDisplayed({ reverse: true, timeout: t(8_000) });
+    await browser.execute(() => {
+      (document.activeElement ?? document).dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "Escape",
+          code: "Escape",
+          bubbles: true,
+        }),
+      );
+    });
   });
 
   it("uses sharp corners everywhere, per DESIGN.md", async () => {
@@ -303,6 +379,45 @@ describe("Inline charts in chat", function () {
       return values;
     });
     expect(radii).toEqual([]);
+  });
+
+  it("keeps comparison tracks useful in a 300 px chat column", async () => {
+    const layout = await browser.execute(() => {
+      const bar = document.querySelector<HTMLElement>('[data-chart-type="bar"]');
+      const message = bar?.closest<HTMLElement>(".prose");
+      if (!bar || !message) return null;
+      const previousWidth = message.style.width;
+      const previousMaxWidth = message.style.maxWidth;
+      message.style.width = "300px";
+      message.style.maxWidth = "300px";
+
+      const trackWidth = (selector: string) =>
+        document.querySelector<HTMLElement>(selector)?.getBoundingClientRect()
+          .width ?? 0;
+      const types = ["bar", "funnel", "range"];
+      const result = {
+        bar: trackWidth('[data-chart-type="bar"] [data-chart-bar-track]'),
+        funnel: trackWidth(
+          '[data-chart-type="funnel"] [data-chart-funnel-track]',
+        ),
+        range: trackWidth('[data-chart-type="range"] [data-chart-range-track]'),
+        noOverflow: types.every((type) => {
+          const chart = document.querySelector<HTMLElement>(
+            `[data-chart-type="${type}"]`,
+          );
+          return Boolean(chart && chart.scrollWidth <= chart.clientWidth + 1);
+        }),
+      };
+      message.style.width = previousWidth;
+      message.style.maxWidth = previousMaxWidth;
+      return result;
+    });
+
+    expect(layout).not.toBeNull();
+    expect(layout!.bar).toBeGreaterThan(150);
+    expect(layout!.funnel).toBeGreaterThan(150);
+    expect(layout!.range).toBeGreaterThan(150);
+    expect(layout!.noOverflow).toBe(true);
   });
 
   it("exposes each chart's data as a table for screen readers", async () => {

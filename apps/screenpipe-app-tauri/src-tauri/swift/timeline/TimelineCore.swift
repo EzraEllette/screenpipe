@@ -1651,12 +1651,22 @@ enum TimelineDateNavigation {
     static let focusDebounce: TimeInterval = 0.5
 
     /// The next/previous day button target, clamped to today.
-    static func jumpDay(from date: Date, delta: Int) -> Date {
+    static func jumpDay(
+        from date: Date,
+        delta: Int,
+        historyAccessRestricted: Bool = false,
+        now: Date = Date()
+    ) -> Date {
         let cal = Calendar.current
         let base = cal.startOfDay(for: date)
         guard let target = cal.date(byAdding: .day, value: delta, to: base) else { return base }
-        let today = cal.startOfDay(for: Date())
-        return target > today ? today : target
+        let today = cal.startOfDay(for: now)
+        let latest = min(target, today)
+        let earliest = earliestAccessibleDay(
+            historyAccessRestricted: historyAccessRestricted,
+            now: now
+        )
+        return max(latest, earliest)
     }
 
     static func isAtToday(_ date: Date, now: Date = Date()) -> Bool {
@@ -1665,13 +1675,49 @@ enum TimelineDateNavigation {
 
     /// "Previous day" is disabled once the day before `date` precedes the
     /// earliest recording.
-    static func isAtEarliest(_ date: Date, earliest: Date?) -> Bool {
-        guard let earliest else { return false }
+    static func isAtEarliest(
+        _ date: Date,
+        earliest: Date?,
+        historyAccessRestricted: Bool = false,
+        now: Date = Date()
+    ) -> Bool {
         let cal = Calendar.current
+        let accessStart = earliestAccessibleDay(
+            historyAccessRestricted: historyAccessRestricted,
+            now: now
+        )
+        let effectiveEarliest = earliest.map {
+            max(cal.startOfDay(for: $0), accessStart)
+        } ?? (historyAccessRestricted ? accessStart : nil)
+        guard let effectiveEarliest else { return false }
         guard let previous = cal.date(byAdding: .day, value: -1, to: cal.startOfDay(for: date)) else {
             return true
         }
-        return cal.startOfDay(for: earliest) > previous
+        return effectiveEarliest > previous
+    }
+
+    static func earliestAccessibleDay(
+        historyAccessRestricted: Bool,
+        now: Date = Date()
+    ) -> Date {
+        let cal = Calendar.current
+        let today = cal.startOfDay(for: now)
+        guard historyAccessRestricted else { return .distantPast }
+        return cal.date(byAdding: .day, value: -1, to: today) ?? today
+    }
+
+    static func isCalendarDateAllowed(
+        _ date: Date,
+        historyAccessRestricted: Bool,
+        now: Date = Date()
+    ) -> Bool {
+        let day = Calendar.current.startOfDay(for: date)
+        let today = Calendar.current.startOfDay(for: now)
+        guard day <= today else { return false }
+        return day >= earliestAccessibleDay(
+            historyAccessRestricted: historyAccessRestricted,
+            now: now
+        )
     }
 
     /// The range a day request covers: local midnight to 23:59:59.999.

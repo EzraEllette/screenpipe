@@ -190,13 +190,14 @@ export function createMediaAwareMarkdownComponents(
     },
     img({ src, alt, ...props }) {
       if (!src) return null;
-      if (isMediaFilePath(src)) {
-        return <MediaComponent filePath={src} className="my-2" />;
-      }
 
       const CustomImage = base.img;
       if (CustomImage) {
         return <CustomImage src={src} alt={alt} {...props} />;
+      }
+
+      if (isMediaFilePath(src)) {
+        return <MediaComponent filePath={src} className="my-2" />;
       }
 
       const localPath = resolveLocalPathFromMarkdownUrl(src);

@@ -195,6 +195,28 @@ fn default_limit() -> u32 {
     20
 }
 
+fn require_meeting_history_access(
+    state: &AppState,
+    meeting: &MeetingRecord,
+) -> Result<(), (StatusCode, JsonResponse<Value>)> {
+    if !state.history_access.is_restricted() {
+        return Ok(());
+    }
+    let start = DateTime::parse_from_rfc3339(&meeting.meeting_start)
+        .ok()
+        .map(|timestamp| timestamp.with_timezone(&Utc));
+    if start.is_some_and(|start| state.history_access.allows(start, Utc::now())) {
+        return Ok(());
+    }
+    Err((
+        StatusCode::FORBIDDEN,
+        JsonResponse(json!({
+            "error": "this meeting is outside the available 24-hour history",
+            "code": "history_access_limited"
+        })),
+    ))
+}
+
 #[derive(OaSchema, Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct MeetingStatusResponse {
@@ -300,7 +322,10 @@ pub(crate) async fn list_meetings_handler(
     State(state): State<Arc<AppState>>,
     Query(request): Query<ListMeetingsRequest>,
 ) -> Result<JsonResponse<Vec<MeetingRecord>>, (StatusCode, JsonResponse<Value>)> {
-    let start_time_str = request.start_time.map(|dt| dt.to_rfc3339());
+    let start_time_str = state
+        .history_access
+        .clamp_start(request.start_time, Utc::now())
+        .map(|dt| dt.to_rfc3339());
     let end_time_str = request.end_time.map(|dt| dt.to_rfc3339());
     let query_str = request
         .q
@@ -339,6 +364,7 @@ pub(crate) async fn get_meeting_handler(
             JsonResponse(json!({"error": format!("meeting not found: {}", e)})),
         )
     })?;
+    require_meeting_history_access(&state, &meeting)?;
 
     Ok(JsonResponse(meeting))
 }
@@ -502,6 +528,7 @@ pub(crate) async fn get_meeting_summary_status_handler(
             JsonResponse(json!({"error": format!("meeting not found: {}", e)})),
         )
     })?;
+    require_meeting_history_access(&state, &meeting)?;
 
     let pipe = params
         .pipe
@@ -563,12 +590,13 @@ pub(crate) async fn get_meeting_transcript_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<i64>,
 ) -> Result<JsonResponse<Vec<MeetingTranscriptSegment>>, (StatusCode, JsonResponse<Value>)> {
-    state.db.get_meeting_by_id(id).await.map_err(|e| {
+    let meeting = state.db.get_meeting_by_id(id).await.map_err(|e| {
         (
             StatusCode::NOT_FOUND,
             JsonResponse(json!({"error": format!("meeting not found: {}", e)})),
         )
     })?;
+    require_meeting_history_access(&state, &meeting)?;
 
     let segments = state
         .db
@@ -646,6 +674,52 @@ pub(crate) async fn update_meeting_handler(
     })?;
 
     Ok(JsonResponse(meeting))
+}
+
+#[derive(OaSchema, Deserialize, Debug)]
+pub struct SaveMeetingSummaryRequest {
+    /// Finished summary markdown, without the `## Summary` heading.
+    pub summary: String,
+    /// Optional replacement title (5-8 plain words). Only sent when the
+    /// caller judged the current title missing or generic.
+    pub title: Option<String>,
+}
+
+/// POST /meetings/:id/summary
+///
+/// Append (or refresh) the `## Summary` section of a meeting note and
+/// optionally retitle the meeting. Rejects an empty summary with 400 so a
+/// caller that lost its payload fails loudly instead of "succeeding" with a
+/// no-op — the exact failure mode that silently dropped meeting summaries
+/// when the summary Pipe assembled the old read-modify-write PUT body itself.
+#[oasgen]
+pub(crate) async fn save_meeting_summary_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    axum::Json(body): axum::Json<SaveMeetingSummaryRequest>,
+) -> Result<JsonResponse<MeetingRecord>, (StatusCode, JsonResponse<Value>)> {
+    if body.summary.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            JsonResponse(json!({"error": "summary must not be empty"})),
+        ));
+    }
+    crate::meeting_summary::notes::save_meeting_summary(
+        &state.db,
+        id,
+        &body.summary,
+        body.title.as_deref(),
+    )
+    .await
+    .map(JsonResponse)
+    .map_err(|e| {
+        let status = if e.starts_with("meeting not found") {
+            StatusCode::NOT_FOUND
+        } else {
+            StatusCode::INTERNAL_SERVER_ERROR
+        };
+        (status, JsonResponse(json!({"error": e})))
+    })
 }
 
 #[oasgen]
@@ -1111,13 +1185,13 @@ pub(crate) async fn stop_meeting_handler(
     }
 
     // Emit event so triggered pipes can react
-    if let Err(e) = screenpipe_events::send_event(
-        "meeting_ended",
-        serde_json::json!({
-            "meeting_id": id,
-            "meeting_end": persisted_end,
-        }),
-    ) {
+    let event_data = crate::meeting_watcher::shared::events::meeting_ended_event_data(
+        &state.db,
+        id,
+        &persisted_end,
+    )
+    .await;
+    if let Err(e) = screenpipe_events::send_event("meeting_ended", event_data) {
         tracing::warn!("failed to emit meeting_ended event: {}", e);
     }
 
@@ -1214,6 +1288,12 @@ pub(crate) async fn export_handler(
     // meeting_id XOR start/end, same contract as the `screenpipe export` CLI.
     let summary = match (body.meeting_id, body.start.is_some() || body.end.is_some()) {
         (Some(id), _) => {
+            let meeting = state
+                .db
+                .get_meeting_by_id(id)
+                .await
+                .map_err(|e| bad_request(format!("meeting not found: {e}")))?;
+            require_meeting_history_access(&state, &meeting)?;
             let output = explicit_output.unwrap_or_else(|| default_output(format!("meeting_{id}")));
             if body.include_audio {
                 crate::meeting_export::export_meeting_to_mp4(&state.db, id, &output).await
@@ -1227,13 +1307,26 @@ pub(crate) async fn export_handler(
             let start_raw = body.start.as_deref().ok_or_else(|| {
                 bad_request("end requires start (give the range a beginning)".to_string())
             })?;
-            let start = crate::routes::time::parse_flexible_datetime(start_raw)
+            let requested_start = crate::routes::time::parse_flexible_datetime(start_raw)
                 .map_err(|e| bad_request(format!("start: {e}")))?;
             let end = match body.end.as_deref() {
                 Some(s) => crate::routes::time::parse_flexible_datetime(s)
                     .map_err(|e| bad_request(format!("end: {e}")))?,
                 None => Utc::now(),
             };
+            let start = state
+                .history_access
+                .clamp_start(Some(requested_start), Utc::now())
+                .unwrap_or(requested_start);
+            if start >= end {
+                return Err((
+                    StatusCode::FORBIDDEN,
+                    JsonResponse(json!({
+                        "error": "the requested export is outside the available 24-hour history",
+                        "code": "history_access_limited"
+                    })),
+                ));
+            }
             let output = explicit_output.unwrap_or_else(|| default_output("export".to_string()));
             if body.include_audio {
                 crate::meeting_export::export_range_to_mp4(&state.db, start, end, &output).await

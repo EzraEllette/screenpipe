@@ -44,9 +44,12 @@ import {
   isConversationHistorySyncPrompt,
   isInjectedTitleSourcePrompt,
   normalizeComposerMentionsForModel,
-  type ComposerCommandId,
   type ComposerSkillReference,
 } from "@/lib/chat-utils";
+import {
+  runComposerCommand,
+  type ComposerCommandId,
+} from "@/lib/composer-commands";
 import {
   useAutoSuggestions,
   type Suggestion,
@@ -90,6 +93,7 @@ import { useChatTurnIntents } from "@/components/chat/standalone/hooks/use-chat-
 import { usePiSteeringRefs } from "@/components/chat/standalone/hooks/use-pi-steering-transport";
 import { useNextTurnAttachments } from "@/components/chat/standalone/hooks/use-next-turn-attachments";
 import { useChatComposerDraftSync } from "@/components/chat/standalone/hooks/use-chat-composer-draft-sync";
+import { useCodingWorkspace } from "@/components/chat/standalone/hooks/use-coding-workspace";
 import { usePipeWatchSession } from "@/components/chat/standalone/hooks/use-pipe-watch-session";
 import { useChatTemplateSettings } from "@/components/chat/standalone/hooks/use-chat-template-settings";
 import { useTryInChatEvent } from "@/components/chat/standalone/hooks/use-try-in-chat-event";
@@ -107,7 +111,10 @@ import {
   parseAgentActionRequest,
   stripAgentActionBlocks,
 } from "@/lib/chat/agent-action-card";
-import { useChatStore } from "@/lib/stores/chat-store";
+import {
+  ensureBlankChatSession,
+  useChatStore,
+} from "@/lib/stores/chat-store";
 import { AGENT_TOPICS, type AgentEventEnvelope } from "@/lib/events/types";
 import { listenTyped, TAURI_EVENTS } from "@/lib/events/tauri-events";
 import { localFetch } from "@/lib/api";
@@ -259,6 +266,8 @@ export function StandaloneChat({
     setChipScrollTop,
     clearConnectionChip,
   } = useChatComposerShell();
+  const [homeCardPromptPreview, setHomeCardPromptPreview] =
+    useState<string | null>(null);
   // Holds the exact text a contextual starter put in the composer, so the send
   // can tell "sent the starter as-is" from "reworked it into their own
   // question". The second is the outcome the experiment is actually testing —
@@ -266,6 +275,7 @@ export function StandaloneChat({
   const pendingContextualHomeSuggestionRef = useRef<string | null>(null);
   const fillContextualHomeSuggestion = useCallback(
     (text: string) => {
+      setHomeCardPromptPreview(null);
       pendingContextualHomeSuggestionRef.current = text;
       setInput(text);
       requestAnimationFrame(() => {
@@ -276,7 +286,11 @@ export function StandaloneChat({
     [inputRef, setInput],
   );
   useEffect(() => {
-    if (!input.trim()) pendingContextualHomeSuggestionRef.current = null;
+    if (!input.trim()) {
+      pendingContextualHomeSuggestionRef.current = null;
+      return;
+    }
+    setHomeCardPromptPreview(null);
   }, [input]);
   useTryInChatEvent({
     startNewRef: tryInChatStartNewRef,
@@ -694,6 +708,7 @@ export function StandaloneChat({
   useEffect(() => {
     const store = useChatStore.getState();
     if (!store.currentId) {
+      ensureBlankChatSession(store, initialSessionIdRef.current);
       store.actions.setCurrent(initialSessionIdRef.current);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -925,6 +940,7 @@ export function StandaloneChat({
     setIsStreaming,
     setMessages,
     setConversationId,
+    openFilePreview,
   });
   useChatConversationRoutingEvents({
     loadConversation,
@@ -942,10 +958,12 @@ export function StandaloneChat({
     piStreamingTextRef,
     piMessageIdRef,
     piContentBlocksRef,
+    piStartInFlightRef,
     forceQueueModeRef,
     sendDispatchInFlightRef,
     setIsLoading,
     setIsStreaming,
+    setPiStarting,
   });
   useChatWindowSyncEvents({
     aiPresets: settings?.aiPresets,
@@ -1000,7 +1018,6 @@ export function StandaloneChat({
     appItems,
     allConnectionItems,
     connections,
-    piStarting,
     piInfo,
     setPiInfo,
     isStreaming,
@@ -1055,7 +1072,13 @@ export function StandaloneChat({
     canChat &&
     !activePipeExecution &&
     !continuousPipeChat?.replyDisabledReason;
-  const composerDisabledReason = activePipeExecution
+  const codingWorkspace = useCodingWorkspace({
+    conversationId,
+    locked: messages.length > 0,
+  });
+  const composerDisabledReason = codingWorkspace.isLoading
+    ? "preparing isolated worktree..."
+    : activePipeExecution
     ? `${activePipeExecution.name} is running. Reply after this run finishes.`
     : continuousPipeChat?.replyDisabledReason || disabledReason;
 
@@ -1209,23 +1232,15 @@ export function StandaloneChat({
 
   // Render assignment, matching openMentionConversationRef above: every handler
   // a `/` command needs is defined by this point.
-  runComposerCommandRef.current = async (commandId: ComposerCommandId) => {
-    switch (commandId) {
-      case "new-chat":
-        await startNewConversationRef.current?.();
-        return;
-      case "stop":
-        await handleStop();
-        return;
-      case "inspector":
-        toggleInspector();
-        return;
-      case "pipes":
+  runComposerCommandRef.current = (commandId: ComposerCommandId) =>
+    runComposerCommand(commandId, {
+      startNewChat: () => startNewConversationRef.current?.(),
+      stopResponse: handleStop,
+      toggleInspector,
+      openScheduledTasks: async () => {
         await commands.showWindow({ Home: { page: "pipes" } });
-        return;
-    }
-  };
-
+      },
+    });
 
   const answerPiExtensionUiRequest = useCallback(async (
     requestId: string | undefined,
@@ -1983,7 +1998,9 @@ export function StandaloneChat({
         isMac={isMac}
         isFullscreen={isFullscreen}
         hideInlineHistory={hideInlineHistory}
-        hasRightActions={inspectorHasContent || sidePanelHasContent}
+        hasRightActions={
+          inspectorHasContent || inspectorOpen || sidePanelHasContent
+        }
         showHistory={showHistory}
         settings={settings}
         reloadStore={reloadStore}
@@ -2027,17 +2044,15 @@ export function StandaloneChat({
 
       <div className="flex-1 flex min-h-0" data-browser-panel-host>
       <div className="relative flex-1 flex flex-col min-w-0" data-firstrun-target="messages">
-      {inspectorHasContent ? (
-        <div className="absolute -top-8 right-2 z-30">
-          <ChatInspectorPopover
-            open={inspectorOpen}
-            onOpenChange={setInspectorOpen}
-            outputs={inspectorOutputs}
-            sources={inspectorSources}
-            onOpenFile={openFilePreview}
-          />
-        </div>
-      ) : null}
+      <div className="absolute -top-8 right-2 z-30">
+        <ChatInspectorPopover
+          open={inspectorOpen}
+          onOpenChange={setInspectorOpen}
+          outputs={inspectorOutputs}
+          sources={inspectorSources}
+          onOpenFile={openFilePreview}
+        />
+      </div>
       <ChatMainPane
         firstRunLearningEnabled={firstRunLearningEnabled}
         firstRunAiPreset={firstRunAiPreset}
@@ -2078,10 +2093,11 @@ export function StandaloneChat({
           await commands.showWindow({ Home: { page: "pipes" } });
         }}
         summaryCardsProps={{
+          onPreviewPrompt: setHomeCardPromptPreview,
           onSendMessage: (message, displayLabel, entrySource, entryCard) => {
             pendingContextualHomeSuggestionRef.current = null;
-            // Control cards send their prompt on click without ever showing it,
-            // so the user authored nothing.
+            // Control cards may preview their prompt as placeholder text, but
+            // never place it in the editable value, so the user authored nothing.
             return sendMessage(message, displayLabel, undefined, {
               entrySource,
               entryCard,
@@ -2120,11 +2136,15 @@ export function StandaloneChat({
           onRefresh: refreshVisibleSuggestions,
         }}
         messageListProps={messageListProps}
-        isUserScrolledUp={isUserScrolledUp}
-        scrollToBottom={scrollToBottom}
       />
 
       <ChatComposer
+        jumpToLatest={{
+          hasMessages: messages.length > 0,
+          scrolledUp: isUserScrolledUp,
+          live: isLoading || isStreaming,
+          onJump: scrollToBottom,
+        }}
         prefill={{
           context: prefillContext,
           frameId: prefillFrameId,
@@ -2167,7 +2187,8 @@ export function StandaloneChat({
           inputRef,
           value: input,
           disabledReason: composerDisabledReason,
-          canChat: Boolean(canSendChatMessage),
+          placeholder: homeCardPromptPreview ?? undefined,
+          canChat: Boolean(canSendChatMessage) && !codingWorkspace.isLoading,
           isLoading,
           isStreaming,
           isEmbedded,
@@ -2177,6 +2198,7 @@ export function StandaloneChat({
           chipPrefixWidth,
           chipScrollTop,
           onClearConnectionChip: () => setConnectionChip(null),
+          onValueChange: setInput,
           onChange: handleMentionInputChange,
           onCompositionStart: () => setIsComposing(true),
           onCompositionEnd: () => setIsComposing(false),
@@ -2241,6 +2263,13 @@ export function StandaloneChat({
           onSelectPreset: handleSetActivePreset,
           onAcpConfigDefault: handleAcpConfigDefault,
           onReauthenticate: handleReauthenticate,
+        }}
+        codingWorkspace={{
+          workspace: codingWorkspace.workspace,
+          isLoading: codingWorkspace.isLoading,
+          error: codingWorkspace.error,
+          disabled: messages.length > 0 && !codingWorkspace.workspace,
+          onToggle: codingWorkspace.toggleWorktree,
         }}
         connectBanner={{
           show: showConnectBanner,

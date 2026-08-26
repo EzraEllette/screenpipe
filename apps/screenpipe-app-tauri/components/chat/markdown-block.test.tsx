@@ -67,6 +67,23 @@ describe("MarkdownBlock", () => {
     expect(openViewerWindowMock).not.toHaveBeenCalled();
   });
 
+  it("shows a compact preview when an external link receives keyboard focus", () => {
+    render(
+      <MarkdownBlock
+        text="[screenpipe repository](https://github.com/screenpipe/screenpipe)"
+        isUser={false}
+      />,
+    );
+
+    fireEvent.focus(
+      screen.getByRole("link", { name: "screenpipe repository" }),
+    );
+
+    expect(screen.getByRole("tooltip")).toHaveTextContent(
+      "screenpipe/screenpipe",
+    );
+  });
+
   it.each([
     ["same-day", "2026-07-21T18:18:46.214586+00:00"],
     ["cross-day", "2026-07-20T23:58:04.120000+00:00"],

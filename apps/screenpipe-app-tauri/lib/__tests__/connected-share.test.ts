@@ -8,6 +8,7 @@ import {
   createLiveViewShareArtifact,
   createMeetingShareArtifact,
   directShareConnections,
+  rankedShareSuggestions,
   renderConnectedShareArtifact,
   shareConnectionAvailability,
 } from "@/lib/connected-share";
@@ -98,11 +99,38 @@ describe("connected share artifacts", () => {
         { id: "slack", connected: true },
         { id: "linear", connected: true, mcp: true },
         { id: "notion", connected: true, mcp: true },
+        { id: "obsidian", connected: true },
       ]),
     ).toEqual({
       direct: { slack: true, linear: false },
-      chat: { linear: true, notion: true },
+      chat: { linear: true, notion: true, obsidian: true },
     });
+  });
+
+  it("ranks connected apps seen during the meeting without exposing evidence", () => {
+    const suggestions = rankedShareSuggestions(
+      [
+        { id: "slack", connected: true },
+        { id: "linear", connected: true, mcp: true },
+        { id: "notion", connected: true, mcp: true },
+        { id: "obsidian", connected: true },
+      ],
+      ["Arc · notion.so/roadmap", "Obsidian · product notes"],
+    );
+
+    expect(suggestions.map(({ app }) => app)).toEqual([
+      "notion",
+      "obsidian",
+      "slack",
+      "linear",
+    ]);
+    expect(suggestions.map(({ destination }) => destination)).toEqual([
+      "chat-notion",
+      "chat-obsidian",
+      "slack",
+      "chat-linear",
+    ]);
+    expect(JSON.stringify(suggestions)).not.toContain("product notes");
   });
 
   it("builds a draft-only Chat handoff with an explicit confirmation boundary", () => {
@@ -119,5 +147,14 @@ describe("connected share artifacts", () => {
     expect(prompt).toContain("nothing was created");
     expect(prompt).toContain("ask for approval exactly once");
     expect(prompt).toContain("snapshot attached as context");
+  });
+
+  it("keeps Obsidian as an approval-gated Chat handoff", () => {
+    const prompt = buildConnectedShareChatPrompt("obsidian");
+
+    expect(prompt).toContain("Do not create, overwrite, append, or send");
+    expect(prompt).toContain("exact vault-relative path");
+    expect(prompt).toContain("ask for approval exactly once");
+    expect(prompt).toContain("Never include the absolute vault path");
   });
 });

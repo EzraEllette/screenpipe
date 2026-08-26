@@ -25,6 +25,7 @@ import {
   useAcpSessionConfig,
   type AcpConfigOption,
 } from "@/lib/stores/acp-session-config";
+import { acpAdapterInfo } from "@/lib/utils/preset-appearance";
 import { cn } from "@/lib/utils";
 import { compactModelLabel } from "@/lib/utils/model-label";
 
@@ -210,12 +211,18 @@ export function AcpConfigSelector({
   const visibleModeValue = visibleModeOption
     ? selectedValue(visibleModeOption)
     : "";
+  // A fresh device has no prior localStorage advertisement cache. Keep the
+  // same text-first composer shape by using the saved preset value, then the
+  // adapter name, until the live adapter advertises its full model list.
+  const fallbackLabel =
+    compactModelLabel(presetConfig.model ?? "") ||
+    (agentId ? acpAdapterInfo(agentId).name : "config");
   const triggerLabel =
     (modelOption && acpConfigValueLabel(modelOption, modelValue)) ||
     visibleModeOption?.values.find((value) => value.value === visibleModeValue)
       ?.name ||
     modes?.availableModes.find((mode) => mode.value === selectedModeId)?.name ||
-    "config";
+    fallbackLabel;
   const resolvedAliasHint =
     modelOption &&
     advertisedModelValue &&
@@ -224,8 +231,8 @@ export function AcpConfigSelector({
       : undefined;
   // Re-authenticate is offered for every ACP agent (as Zed does): it re-runs the
   // agent's own auth flow, which re-shows whatever sign-in methods it has.
-  const canReauth = !!onReauthenticate;
-  if (!sessionId || (selects.length === 0 && toggles.length === 0 && !modes && !canReauth))
+  const canReauth = !!sessionId && !!onReauthenticate;
+  if (selects.length === 0 && toggles.length === 0 && !modes && !canReauth)
     return null;
 
   const run = async (key: string, action: () => Promise<void>, label: string) => {
@@ -248,14 +255,18 @@ export function AcpConfigSelector({
   const applyChange = (
     key: string,
     persist: AcpConfigDefaultChange,
-    live: () => Promise<{ status: string; error?: string }>,
+    live: (activeSessionId: string) => Promise<{ status: string; error?: string }>,
     label: string,
   ) => {
     onPersistDefault?.(persist);
+    // Some focused surfaces start a fresh private session per turn. They still
+    // need to choose the adapter-advertised model before that session exists;
+    // the persisted default is applied by the ACP runtime when the turn starts.
+    if (!sessionId) return;
     void run(
       key,
       async () => {
-        const result = await live();
+        const result = await live(sessionId);
         if (result.status === "error" && result.error && !isAgentNotRunning(result.error)) {
           throw new Error(result.error);
         }
@@ -290,7 +301,8 @@ export function AcpConfigSelector({
             applyChange(
               "__mode",
               { modeId },
-              () => commands.piAcpSetMode(sessionId, modeId),
+              (activeSessionId) =>
+                commands.piAcpSetMode(activeSessionId, modeId),
               "mode",
             )
           }
@@ -301,7 +313,13 @@ export function AcpConfigSelector({
           applyChange(
             option.id,
             { optionId: option.id, value },
-            () => commands.piAcpSetConfigOption(sessionId, option.id, value, null),
+            (activeSessionId) =>
+              commands.piAcpSetConfigOption(
+                activeSessionId,
+                option.id,
+                value,
+                null,
+              ),
             option.name,
           );
         // An adapter's reasoning effort is the same axis as Pi's thinking
@@ -354,9 +372,9 @@ export function AcpConfigSelector({
                 applyChange(
                   option.id,
                   { optionId: option.id, value: next ? "true" : "false" },
-                  () =>
+                  (activeSessionId) =>
                     commands.piAcpSetConfigOption(
-                      sessionId,
+                      activeSessionId,
                       option.id,
                       next ? "true" : "false",
                       true,

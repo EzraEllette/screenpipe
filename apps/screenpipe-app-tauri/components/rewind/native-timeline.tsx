@@ -134,6 +134,16 @@ export function parseTimelineDailySummaryRequest(
   return parseTimelineDay(payload.date);
 }
 
+export function shouldClearActivityReturn(
+  previousSection: string,
+  activeSection: string,
+): boolean {
+  return (
+    (previousSection === "meetings" || previousSection === "timeline") &&
+    activeSection !== previousSection
+  );
+}
+
 /**
  * Routes the actions the Swift window cannot perform on its own. Mount once,
  * high enough that it outlives navigation.
@@ -144,10 +154,10 @@ export function parseTimelineDailySummaryRequest(
  */
 export function NativeTimelineBridge({
   onReturnToActivity,
-  onDismissActivityReturn,
+  onToggleSidebar,
 }: {
   onReturnToActivity?: () => void;
-  onDismissActivityReturn?: () => void;
+  onToggleSidebar?: () => void;
 } = {}) {
   const [dailySummaryRequest, setDailySummaryRequest] = useState<{
     date: Date;
@@ -163,11 +173,11 @@ export function NativeTimelineBridge({
       listen("timeline-open-chat", () => {
         void commands.showWindow("Chat");
       }),
+      listen("timeline-toggle-sidebar", () => {
+        onToggleSidebar?.();
+      }),
       listen("timeline-return-to-activity", () => {
         onReturnToActivity?.();
-      }),
-      listen("timeline-dismiss-activity-return", () => {
-        onDismissActivityReturn?.();
       }),
       listen<string | NativeTimelineDailySummaryRequest>(
         "timeline-open-daily-summary",
@@ -264,7 +274,7 @@ export function NativeTimelineBridge({
         void subscription.then((unlisten) => unlisten());
       }
     };
-  }, [onDismissActivityReturn, onReturnToActivity]);
+  }, [onReturnToActivity, onToggleSidebar]);
 
   if (!dailySummaryRequest) return null;
 

@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 
+use serde::Serialize;
 use tauri::AppHandle;
 use tauri::Emitter;
 use tauri::Manager;
@@ -17,6 +18,38 @@ use tracing::{error, info};
 use crate::commands::{hide_main_window, show_main_window};
 use crate::store::{get_store, SettingsStore};
 use crate::window::ShowRewindWindow;
+
+#[derive(Clone, Serialize)]
+struct SearchShortcutOutcome {
+    success: bool,
+}
+
+fn search_transition_succeeded(visible: bool, focused: bool) -> bool {
+    visible && focused
+}
+
+fn emit_search_shortcut_outcome_after_settle(app: &AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
+        let app_for_check = app.clone();
+        if let Err(error) = app.run_on_main_thread(move || {
+            let (visible, focused) = app_for_check
+                .get_webview_window("search")
+                .map(|window| {
+                    (
+                        window.is_visible().unwrap_or(false),
+                        window.is_focused().unwrap_or(false),
+                    )
+                })
+                .unwrap_or((false, false));
+            let success = search_transition_succeeded(visible, focused);
+            let _ = app_for_check.emit("shortcut-show-search", SearchShortcutOutcome { success });
+        }) {
+            error!("failed to verify search shortcut outcome: {}", error);
+        }
+    });
+}
 
 /// Record a physical global-shortcut press once, before any app-wide events
 /// are broadcast to webviews. This avoids duplicate analytics from multiple
@@ -334,7 +367,10 @@ async fn apply_shortcuts(app: &AppHandle, config: &ShortcutConfig) -> Result<(),
             let app = &app_for_closure;
             info!("search shortcut triggered");
             hide_main_window(app.clone());
-            let _ = ShowRewindWindow::Search { query: None }.show(app);
+            if let Err(error) = (ShowRewindWindow::Search { query: None }).show(app) {
+                error!("failed to show search from shortcut: {}", error);
+            }
+            emit_search_shortcut_outcome_after_settle(app);
         });
     })
     .await?;
@@ -437,4 +473,17 @@ pub fn parse_shortcut(shortcut_str: &str) -> Result<Shortcut, String> {
     };
 
     Ok(Shortcut::new(Some(modifiers), code))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::search_transition_succeeded;
+
+    #[test]
+    fn search_shortcut_outcome_requires_visible_focused_search() {
+        assert!(search_transition_succeeded(true, true));
+        assert!(!search_transition_succeeded(true, false));
+        assert!(!search_transition_succeeded(false, true));
+        assert!(!search_transition_succeeded(false, false));
+    }
 }

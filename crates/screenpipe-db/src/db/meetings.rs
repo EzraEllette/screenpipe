@@ -1153,6 +1153,22 @@ impl DatabaseManager {
         Ok(())
     }
 
+    /// Fast existence signal for "did anything get transcribed live": counts
+    /// only `meeting_transcript_segments` rows, not the audio_transcriptions
+    /// window join that [`Self::list_meeting_transcript_segments`] performs.
+    pub async fn count_meeting_transcript_segments(
+        &self,
+        meeting_id: i64,
+    ) -> Result<i64, SqlxError> {
+        let (count,): (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM meeting_transcript_segments WHERE meeting_id = ?1",
+        )
+        .bind(meeting_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(count)
+    }
+
     pub async fn list_meeting_transcript_segments(
         &self,
         meeting_id: i64,
@@ -1184,15 +1200,11 @@ impl DatabaseManager {
                     NULL AS audio_chunk_id,
                     NULL AS audio_file_path,
                     mts.speaker_id AS speaker_id,
-                    -- Prefer the resolved global speaker's name; output rows fall
-                    -- back to the free-text Deepgram label until backfilled / if
-                    -- the speaker is unnamed (NULLIF treats '' as "no name yet").
-                    -- Input (mic) rows get NULL instead of the raw label so the
-                    -- client can render "me" until the user assigns someone.
-                    CASE
-                        WHEN mts.device_type = 'input' THEN NULLIF(s.name, '')
-                        ELSE COALESCE(NULLIF(s.name, ''), mts.speaker_name)
-                    END AS speaker_name,
+                    -- Prefer the resolved global speaker's name, then preserve
+                    -- Deepgram's stream-local label until voice backfill gives it
+                    -- a durable identity. A mic is a capture source, not proof
+                    -- that every voice on it belongs to the local user.
+                    COALESCE(NULLIF(s.name, ''), mts.speaker_name) AS speaker_name,
                     mts.transcript,
                     mts.captured_at,
                     mts.created_at

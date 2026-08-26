@@ -64,6 +64,7 @@ function ScanGlyph({ live, phase }: { live: boolean; phase: TurnPhase }) {
   return (
     <span
       aria-hidden="true"
+      data-testid="chat-turn-scan-glyph"
       className="grid shrink-0"
       style={{
         gridTemplateColumns: `repeat(${COLS}, 3px)`,
@@ -75,8 +76,10 @@ function ScanGlyph({ live, phase }: { live: boolean; phase: TurnPhase }) {
         <span
           key={i}
           className={cn(
-            "block transition-colors duration-150",
-            on ? "bg-phosphor" : "bg-border/40",
+            "block",
+            on
+              ? "bg-phosphor ring-1 ring-inset ring-phosphor-ink/60"
+              : "bg-trace/45",
           )}
           style={{ width: 3, height: 3 }}
         />
@@ -207,8 +210,8 @@ export function TurnStatus({
           <ChevronRight
             aria-hidden="true"
             className={cn(
-              "h-3 w-3 shrink-0 text-muted-foreground/50 transition-transform duration-150",
-              "group-hover:text-muted-foreground",
+              "h-3 w-3 shrink-0 text-muted-foreground transition-colors duration-150",
+              "group-hover:text-foreground",
               expanded && "rotate-90",
             )}
           />

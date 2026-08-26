@@ -63,7 +63,10 @@ function safeIdPart(value: string): string {
   return value.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 180) || "unknown";
 }
 
-function conversationId(source: ExternalChatSource, sourceId: string): string {
+export function externalChatConversationId(
+  source: ExternalChatSource,
+  sourceId: string,
+): string {
   return `imported-${source}-${safeIdPart(sourceId)}`;
 }
 
@@ -77,7 +80,14 @@ function messageId(
 }
 
 function titleFromText(text: string): string {
-  const compact = text.replace(/\s+/g, " ").trim();
+  const withoutAttachmentMarkup = text.replace(
+    /\n\s*<image\s+name=\[Image #[^\n]*(?:\s*<\/image>)?\s*$/i,
+    "",
+  );
+  const compact = withoutAttachmentMarkup
+    .replace(/(?:&#x20;|&#32;|&nbsp;)/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
   if (!compact) return "imported chat";
   return compact.length <= MAX_TITLE_CHARS
     ? compact
@@ -125,7 +135,7 @@ function finishConversation({
   const cleanExplicitTitle = explicitTitle?.trim();
 
   return {
-    id: conversationId(source, sourceId),
+    id: externalChatConversationId(source, sourceId),
     title: cleanExplicitTitle
       ? titleFromText(cleanExplicitTitle)
       : titleFromText(fallbackTitle ?? `${source === "claude-code" ? "Claude Code" : "Codex"} chat`),
@@ -368,6 +378,45 @@ function isCodexHarnessContext(text: string): boolean {
     || trimmed.startsWith("<permissions instructions>");
 }
 
+const SCREENPIPE_SYSTEM_CONTEXT_OPEN = "<screenpipe-system-context>";
+const SCREENPIPE_SYSTEM_CONTEXT_CLOSE = "</screenpipe-system-context>";
+const CODEX_FILES_SECTION = "# Files mentioned by the user:";
+const CODEX_REQUEST_HEADING = /^## My request:\s*$/m;
+
+/**
+ * Recover the text the person actually submitted from Codex's user item.
+ *
+ * Screenpipe's ACP runtime prepends a system-context envelope, while Codex's
+ * attachment handoff prepends a file inventory and puts the typed request
+ * below `## My request:`. Both are transport metadata: keeping them in the
+ * imported transcript makes machine instructions look like user messages and
+ * lets them become the visible sidebar title.
+ */
+function cleanCodexUserText(text: string): string {
+  let clean = text.trim();
+  if (!clean || isCodexHarnessContext(clean)) return "";
+
+  if (clean.startsWith(SCREENPIPE_SYSTEM_CONTEXT_OPEN)) {
+    const closeIndex = clean.indexOf(SCREENPIPE_SYSTEM_CONTEXT_CLOSE);
+    if (closeIndex === -1) return "";
+    clean = clean
+      .slice(closeIndex + SCREENPIPE_SYSTEM_CONTEXT_CLOSE.length)
+      .trim();
+  }
+
+  if (clean.startsWith(CODEX_FILES_SECTION)) {
+    const requestHeading = CODEX_REQUEST_HEADING.exec(clean);
+    if (requestHeading) {
+      clean = clean.slice(requestHeading.index + requestHeading[0].length).trim();
+    }
+  }
+
+  return clean
+    .replace(/(?:&#x20;|&#32;|&nbsp;)/gi, " ")
+    .replace(/[ \t]+\n/g, "\n")
+    .trim();
+}
+
 export function parseCodexTranscript(
   jsonl: string,
   options: ExternalChatParseOptions,
@@ -423,11 +472,12 @@ export function parseCodexTranscript(
       const text = textBlocks(payload.content, allowed).join("\n\n").trim();
       if (role === "user") {
         flushPendingAssistant();
-        if (!text || isCodexHarnessContext(text)) continue;
+        const userText = cleanCodexUserText(text);
+        if (!userText) continue;
         messages.push({
           id: messageId("codex", sessionId, asString(payload.id), index),
           role: "user",
-          content: text,
+          content: userText,
           timestamp,
           provider: "codex",
           importedFrom: "codex",

@@ -151,9 +151,17 @@ describe("buildPaletteEntries", () => {
     expect(entries.find((e) => e.id === "toggle_sidebar")?.hint).toBe("Ctrl+B");
   });
 
-  it("exposes recent-chat and shortcut-guide commands without tab actions", () => {
+  it("hides recent-chat and shortcut-guide commands by default", () => {
+    const entries = buildPaletteEntries(makeDeps(), mocks.settings, true);
+
+    expect(entries.some((entry) => entry.id === "next_recent_chat")).toBe(false);
+    expect(entries.some((entry) => entry.id === "previous_recent_chat")).toBe(false);
+    expect(entries.some((entry) => entry.id === "open_shortcut_guide")).toBe(false);
+  });
+
+  it("exposes recent-chat and shortcut-guide commands for experimental users", () => {
     const deps = makeDeps();
-    const entries = buildPaletteEntries(deps, mocks.settings, true);
+    const entries = buildPaletteEntries(deps, mocks.settings, true, true);
 
     entries.find((entry) => entry.id === "next_recent_chat")?.run();
     entries.find((entry) => entry.id === "open_shortcut_guide")?.run();

@@ -68,6 +68,13 @@ pub(crate) fn apply_settings(app: &AppHandle, store: &mut SettingsStore) {
         store.recording.disable_audio = true;
         info!("E2E seed: audio disabled");
     }
+    if e2e_flags.iter().any(|f| f == "pii-text-redaction") {
+        store.recording.async_pii_redaction = true;
+        store.recording.async_image_pii_redaction = false;
+        store.recording.pii_backend = "local".to_string();
+        store.recording.pii_redaction_labels = vec!["secret".to_string()];
+        info!("E2E seed: local async text-PII reconciliation enabled");
+    }
     if e2e_flags.iter().any(|f| f == "sck-capture-hang-once") {
         // The CoreGraphics recovery path cannot enforce SCK window-id
         // exclusions. This isolated lane deliberately removes filters
@@ -173,6 +180,9 @@ const DB_HARD_FAULT_CHECKPOINT_ATTEMPTS: usize = 10;
 /// - 1 accessibility frame whose snapshot carries REAL rendered text and no
 ///   stored boxes, so platform OCR must read the word off the pixels and the
 ///   highlight is placed from OCR-derived bounds.
+/// - 4 tightly spaced, visually distinct frames for the historical meeting
+///   replay journey. Each is indexed through OCR and accessibility so the UI
+///   must dedupe merged search results before playback.
 ///
 /// `insert_snapshot_frame_with_ocr` writes `full_text` (FTS-indexed by the
 /// `frames_ai` trigger → searchable) and `text_json` (per-word boxes →
@@ -433,10 +443,67 @@ async fn seed_search_fixture(db: &DatabaseManager) {
         warn!("e2e search-fixture: failed to insert missing-thumbnail frame: {error}");
     }
 
+    let replay_json = r#"[
+        {"text":"meeting","conf":"99","left":"0.10","top":"0.10","width":"0.12","height":"0.04"},
+        {"text":"replay","conf":"99","left":"0.24","top":"0.10","width":"0.10","height":"0.04"},
+        {"text":"fixture","conf":"99","left":"0.36","top":"0.10","width":"0.11","height":"0.04"}
+    ]"#;
+    let replay_colors = [
+        [28_u8, 34_u8, 46_u8],
+        [50_u8, 45_u8, 38_u8],
+        [34_u8, 50_u8, 44_u8],
+        [48_u8, 38_u8, 52_u8],
+    ];
+    for (index, color) in replay_colors.into_iter().enumerate() {
+        let replay_path = fixture_dir.join(format!("screenpipe-e2e-meeting-replay-{index}.jpg"));
+        let replay_image = ImageBuffer::from_fn(1600, 1000, |x, y| {
+            if (160..1440).contains(&x) && (180..820).contains(&y) {
+                Rgb([
+                    color[0].saturating_add(28),
+                    color[1].saturating_add(28),
+                    color[2].saturating_add(28),
+                ])
+            } else {
+                Rgb(color)
+            }
+        });
+        if let Err(error) = replay_image.save(&replay_path) {
+            warn!("e2e search-fixture: failed to create replay frame {index}: {error}");
+            continue;
+        }
+
+        let text = format!("meeting replay fixture frame {index}");
+        let window_name = format!("historical meeting replay frame {index}");
+        let timestamp = now - Duration::seconds(8 - index as i64 * 2);
+        if let Err(error) = db
+            .insert_snapshot_frame_with_ocr(
+                "e2e-meeting-replay",
+                timestamp,
+                &replay_path.to_string_lossy(),
+                Some("e2e replay"),
+                Some(&window_name),
+                None,
+                None,
+                true,
+                None,
+                Some(&text),
+                Some("accessibility"),
+                None,
+                None,
+                None,
+                Some((text.as_str(), replay_json, "e2e")),
+                None,
+            )
+            .await
+        {
+            warn!("e2e search-fixture: failed to insert replay frame {index}: {error}");
+        }
+    }
+
     info!(
         "e2e search-fixture: seeded searchable frames \
          (vector x12 + highlight + visibility x5 + real ocr + unstored ocr \
-          + missing thumbnail)"
+          + missing thumbnail + meeting replay x4)"
     );
 }
 

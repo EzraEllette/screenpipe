@@ -123,14 +123,31 @@ export function parseContextUsageSnapshot(
   };
 }
 
+/**
+ * Pi's RPC mode serializes `ui.setStatus(key, text)` as `statusKey`/`statusText`
+ * (`dist/modes/rpc/rpc-mode.js`), while its own extension API names the
+ * arguments `key`/`text`. Read both: the shipped pinned pi uses the `status*`
+ * pair, and a build that ever emits the bare names still resolves. Getting this
+ * wrong is silent, not loud — the event simply stops matching and the panel
+ * falls back to its "no breakdown" state, which is exactly how native Pi lost
+ * its breakdown once already.
+ */
+function statusFields(event: AgentInnerEvent): { key: unknown; text: unknown } {
+  return {
+    key: event.statusKey ?? event.key,
+    text: event.statusText ?? event.text,
+  };
+}
+
 export function parseContextUsageEvent(
   event: AgentInnerEvent,
 ): ContextUsageSnapshot | null {
+  const status = statusFields(event);
   if (
     event.type !== "extension_ui_request" ||
     event.method !== "setStatus" ||
-    event.key !== CONTEXT_USAGE_STATUS_KEY ||
-    typeof event.text !== "string"
+    status.key !== CONTEXT_USAGE_STATUS_KEY ||
+    typeof status.text !== "string"
   ) {
     if (event.type !== "acp_update") return null;
     const update = event.update;
@@ -153,7 +170,7 @@ export function parseContextUsageEvent(
     };
   }
   try {
-    return parseContextUsageSnapshot(JSON.parse(event.text));
+    return parseContextUsageSnapshot(JSON.parse(status.text));
   } catch {
     return null;
   }

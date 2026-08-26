@@ -183,6 +183,8 @@ export interface SessionRecord {
   pipeContext?: PipeContext;
   /** Optional user-assigned sidebar group label (lowercase, trimmed). */
   sidebarGroup?: string;
+  /** Local agent source when this conversation was imported into screenpipe. */
+  importedFrom?: ConversationMeta["importedFrom"];
 }
 
 interface ChatStoreState {
@@ -333,12 +335,14 @@ export interface ChatSessionActivityPayload {
   unreadHint?: boolean;
 }
 
-/** Merge a `chat-session-activity` event into the sidebar store.
+/** Patch a canonical session with a `chat-session-activity` event.
  *
- * Extracted verbatim from the home page's listener so the upsert-vs-patch,
- * staleness (`existing.updatedAt > updatedAt`), title/preview/status merge,
- * and unread-hint branches are unit-testable in isolation. `now` is injected
- * so the `lastContentAt` write is deterministic under test.
+ * Activity is a lightweight, status-only mirror and cannot prove a
+ * conversation exists. Unknown ids are therefore ignored until disk hydration
+ * or `chat-conversation-saved` supplies canonical content. This prevents a
+ * stale or foreign process pulse from creating an empty "untitled" sidebar
+ * row. `now` is injected so the `lastContentAt` write is deterministic under
+ * test.
  */
 export function applyChatSessionActivity(
   store: Pick<ChatStore, "sessions" | "currentId" | "panelSessionId" | "actions">,
@@ -349,46 +353,31 @@ export function applyChatSessionActivity(
     payload ?? ({} as Partial<ChatSessionActivityPayload>);
   if (!id || !updatedAt) return;
   const existing = store.sessions[id];
-  if (!existing) {
-    store.actions.upsert({
-      id,
-      title: title?.trim() || "untitled",
-      preview: preview ?? "",
-      status: status ?? "idle",
-      lastError,
-      messageCount: 0,
-      createdAt: updatedAt,
-      updatedAt,
-      pinned: false,
-      hidden: false,
-      unread: false,
-    });
-  } else {
-    if (existing.updatedAt > updatedAt) return;
-    const nextTitle = title?.trim() || existing.title;
-    const nextPreview = preview ?? existing.preview;
-    const nextStatus = status ?? existing.status;
-    const nextLastError =
-      lastError !== undefined
-        ? lastError || undefined
-        : nextStatus === "error"
-          ? existing.lastError
-          : undefined;
-    if (
-      existing.title === nextTitle &&
-      existing.preview === nextPreview &&
-      existing.status === nextStatus &&
-      existing.lastError === nextLastError &&
-      existing.updatedAt === updatedAt
-    ) return;
-    store.actions.patch(id, {
-      title: nextTitle,
-      preview: nextPreview,
-      status: nextStatus,
-      lastError: nextLastError,
-      updatedAt,
-    });
-  }
+  if (!existing) return;
+  if (existing.updatedAt > updatedAt) return;
+  const nextTitle = title?.trim() || existing.title;
+  const nextPreview = preview ?? existing.preview;
+  const nextStatus = status ?? existing.status;
+  const nextLastError =
+    lastError !== undefined
+      ? lastError || undefined
+      : nextStatus === "error"
+        ? existing.lastError
+        : undefined;
+  if (
+    existing.title === nextTitle &&
+    existing.preview === nextPreview &&
+    existing.status === nextStatus &&
+    existing.lastError === nextLastError &&
+    existing.updatedAt === updatedAt
+  ) return;
+  store.actions.patch(id, {
+    title: nextTitle,
+    preview: nextPreview,
+    status: nextStatus,
+    lastError: nextLastError,
+    updatedAt,
+  });
   if (unreadHint && !isSessionForeground(store, id)) {
     store.actions.patch(id, { lastContentAt: now });
   }
@@ -447,6 +436,11 @@ export const useChatStore = create<ChatStore>((set) => ({
             messageCount: r.messageCount,
             pinned: existing.pinned || r.pinned,
             hidden: existing.hidden ?? r.hidden ?? false,
+            // Disk decides emptiness. A router row lazy-created before
+            // hydration is born `draft: true` (it has no proof of content
+            // yet); once the file says otherwise, the flag must not keep a
+            // real conversation out of RECENTS.
+            draft: r.messageCount > 0 ? undefined : (r.draft ?? existing.draft),
             // updatedAt: take the larger so memory doesn't get clobbered
             updatedAt: Math.max(existing.updatedAt, r.updatedAt),
             lastUserMessageAt: Math.max(
@@ -470,6 +464,7 @@ export const useChatStore = create<ChatStore>((set) => ({
             sidebarGroup: existing.sidebarGroup ?? r.sidebarGroup,
             dedupKey: existing.dedupKey ?? r.dedupKey,
             branchedFrom: existing.branchedFrom ?? r.branchedFrom,
+            importedFrom: existing.importedFrom ?? r.importedFrom,
           };
           merged.unread = restoreUnread(existing, merged);
           next[r.id] = merged;
@@ -788,6 +783,7 @@ export function sessionRecordFromMeta(m: ConversationMeta): SessionRecord {
     createdAt: m.createdAt,
     updatedAt: m.updatedAt,
     pinned: m.pinned,
+    hidden: m.hidden,
     unread: false,
     // Empty persisted chat files are abandoned drafts, not durable history.
     // Mark them here so a restart cannot resurrect stray "untitled" rows.
@@ -801,6 +797,7 @@ export function sessionRecordFromMeta(m: ConversationMeta): SessionRecord {
     dedupKey: m.dedupKey,
     branchedFrom: m.branchedFrom,
     presetId: m.presetId,
+    importedFrom: m.importedFrom,
   };
   if (typeof m.lastViewedAt === "number") {
     record.unread = isUnread(record);
@@ -841,6 +838,39 @@ export function isReusableBlankChatSession(s: SessionRecord): boolean {
   if (s.messageCount > 0) return false;
   const msgs = (s.messages as Array<{ role?: string }> | undefined) ?? [];
   return !msgs.some((m) => m?.role === "user");
+}
+
+/** Ensure a panel-owned session id has a real, sidebar-hidden draft record.
+ *
+ * The standalone panel mints its initial id before any conversation has been
+ * saved. Keeping that id only in `currentId` leaves activity listeners unable
+ * to distinguish the real blank panel from an unrelated status-only pulse.
+ * This idempotent seed makes the ownership explicit without persisting an
+ * empty conversation to disk.
+ */
+export function ensureBlankChatSession(
+  store: Pick<ChatStore, "sessions" | "actions">,
+  id: string,
+  now: number = Date.now(),
+): SessionRecord {
+  const existing = store.sessions[id];
+  if (existing) return existing;
+
+  const draft: SessionRecord = {
+    id,
+    title: "untitled",
+    preview: "",
+    status: "idle",
+    messageCount: 0,
+    createdAt: now,
+    updatedAt: now,
+    pinned: false,
+    unread: false,
+    draft: true,
+    messages: [],
+  };
+  store.actions.upsert(draft);
+  return draft;
 }
 
 export function getOrCreateEmptyChatId(): { id: string; isNew: boolean } {
@@ -1010,6 +1040,24 @@ export function dedupeSessionRecords(records: SessionRecord[]): SessionRecord[] 
   return kept;
 }
 
+/**
+ * True when a chat row has nothing a user could open: no messages in memory,
+ * none persisted, and no user turn ever sent.
+ *
+ * The `draft` boolean is bookkeeping — every creator of a blank session has to
+ * remember to set it, and any path that forgets (the event router's
+ * lazy-create did, for prewarmed / auto-restarted Pi processes) leaks an empty
+ * "untitled" row into RECENTS. This predicate is the derived backstop: the
+ * sidebar renders a chat only when a chat exists. Pipe rows are exempt — a
+ * finished run is history even with an empty in-memory message array.
+ */
+export function isEmptyChatShell(s: SessionRecord): boolean {
+  if (s.kind === "pipe-run" || s.kind === "pipe-watch") return false;
+  if (s.messageCount > 0) return false;
+  if ((s.messages?.length ?? 0) > 0) return false;
+  return !s.lastUserMessageAt;
+}
+
 export function selectOrderedSessions(state: ChatSessionsState): SessionRecord[] {
   const all = dedupeSessionRecords(Object.values(state.sessions));
   const pinned = all.filter((s) => s.pinned).sort(compareForSidebar);
@@ -1022,6 +1070,7 @@ export function selectRecentSwitcherSessions(state: ChatSessionsState): SessionR
   const isEligibleSwitcherSession = (session: SessionRecord) =>
     !session.hidden &&
     !session.draft &&
+    !isEmptyChatShell(session) &&
     session.kind !== "pipe-watch" &&
     session.kind !== "pipe-run";
   return ordered

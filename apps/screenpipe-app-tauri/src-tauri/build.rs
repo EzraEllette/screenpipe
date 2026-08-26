@@ -515,6 +515,7 @@ fn generate_and_validate_tauri_commands() {
 const E2E_COMMANDS: &[&str] = &[
     "main_overlay_visible",
     "history_swipe_navigation_enabled",
+    "preview_history_swipe",
     "mark_capture_intended",
     "emit_disk_space_low",
     "emit_disk_space_recovered",
@@ -529,6 +530,7 @@ const E2E_COMMANDS: &[&str] = &[
     "installed_tray_recording_status",
     "shortcut_reminder_visible",
     "open_auto_meeting",
+    "simulate_calendar_meeting_match",
     "active_meeting_id",
     "native_meeting_overlay_state",
     "native_timeline_search_state",

@@ -332,9 +332,18 @@ mod runtime {
     use ndarray::{Array, Axis};
     use ort::session::{builder::GraphOptimizationLevel, Session};
     use ort::value::TensorRef;
-    use std::collections::HashMap;
+    use std::collections::{BTreeMap, HashMap};
     use std::sync::Mutex;
     use tokenizers::Tokenizer;
+
+    const ONNX_INFERENCE_BATCH_SIZE: usize = 16;
+
+    struct EncodedInput {
+        output_index: usize,
+        ids: Vec<u32>,
+        mask: Vec<u32>,
+        offsets: Vec<(usize, usize)>,
+    }
 
     /// Loaded model + tokenizer + label vocabulary.
     pub struct OnnxRedactor {
@@ -461,28 +470,141 @@ mod runtime {
             })
         }
 
+        /// Tokenize a group of short inputs, bucket them by sequence length,
+        /// and execute each bucket as one ONNX batch. Long inputs retain the
+        /// established overlapping-window path so batching cannot reintroduce
+        /// truncation at the model context boundary.
+        fn infer_batch(&self, texts: &[String]) -> Result<Vec<RedactionOutput>, RedactError> {
+            let mut outputs: Vec<Option<RedactionOutput>> = vec![None; texts.len()];
+            let mut buckets: BTreeMap<usize, Vec<EncodedInput>> = BTreeMap::new();
+            let max_len = self.cfg.max_seq_len.max(3);
+
+            for (output_index, text) in texts.iter().enumerate() {
+                if text.is_empty() {
+                    outputs[output_index] = Some(RedactionOutput {
+                        input: String::new(),
+                        redacted: String::new(),
+                        spans: Vec::new(),
+                    });
+                    continue;
+                }
+
+                let encoding = self
+                    .tokenizer
+                    .encode(text.as_str(), true)
+                    .map_err(|error| RedactError::Runtime(format!("tokenize: {error}")))?;
+                if encoding.len() > max_len {
+                    outputs[output_index] = Some(self.infer(text)?);
+                    continue;
+                }
+
+                // Power-of-two buckets bound padding waste while still
+                // coalescing the many similarly sized accessibility strings.
+                let bucket = encoding.len().max(1).next_power_of_two();
+                buckets.entry(bucket).or_default().push(EncodedInput {
+                    output_index,
+                    ids: encoding.get_ids().to_vec(),
+                    mask: encoding.get_attention_mask().to_vec(),
+                    offsets: encoding.get_offsets().to_vec(),
+                });
+            }
+
+            for entries in buckets.values() {
+                for chunk in entries.chunks(ONNX_INFERENCE_BATCH_SIZE) {
+                    let windows: Vec<(&[u32], &[u32])> = chunk
+                        .iter()
+                        .map(|entry| (entry.ids.as_slice(), entry.mask.as_slice()))
+                        .collect();
+                    let label_batches = self.run_windows(&windows)?;
+                    for (entry, label_ids) in chunk.iter().zip(label_batches) {
+                        let text = &texts[entry.output_index];
+                        let mut spans =
+                            bio_decode(text, &label_ids, &entry.offsets, &self.id2label);
+                        merge_spans(&mut spans, text);
+                        outputs[entry.output_index] = Some(RedactionOutput {
+                            input: text.clone(),
+                            redacted: render_redacted(text, &spans),
+                            spans,
+                        });
+                    }
+                }
+            }
+
+            outputs
+                .into_iter()
+                .enumerate()
+                .map(|(index, output)| {
+                    output.ok_or_else(|| {
+                        RedactError::Unexpected(format!(
+                            "ONNX batch did not produce output at index {index}"
+                        ))
+                    })
+                })
+                .collect()
+        }
+
         /// Run one window of token ids (already `<= max_seq_len`, framed
         /// with the model's special tokens) through the session and
         /// return the per-token argmax label ids.
         fn run_window(&self, ids: &[u32], mask: &[u32]) -> Result<Vec<usize>, RedactError> {
-            let len = ids.len();
+            self.run_windows(&[(ids, mask)])?
+                .pop()
+                .ok_or_else(|| RedactError::Unexpected("empty ONNX window result".into()))
+        }
+
+        /// Run multiple token windows in one ONNX invocation. Inputs may have
+        /// different lengths; shorter rows are padded and masked within their
+        /// length bucket.
+        fn run_windows(
+            &self,
+            windows: &[(&[u32], &[u32])],
+        ) -> Result<Vec<Vec<usize>>, RedactError> {
+            if windows.is_empty() {
+                return Ok(Vec::new());
+            }
+            let width = windows
+                .iter()
+                .map(|(ids, _)| ids.len())
+                .max()
+                .ok_or_else(|| RedactError::Unexpected("empty ONNX window batch".into()))?;
+            if width == 0 {
+                return Err(RedactError::Unexpected(
+                    "ONNX window batch contains an empty token sequence".into(),
+                ));
+            }
+            let batch_size = windows.len();
+            let pad_id = self.tokenizer.token_to_id("<pad>").unwrap_or(0);
             // Vocab-pruned models: remap full-tokenizer ids → sliced rows
             // (ids outside the kept set → the pruned UNK row). Byte offsets are
             // unaffected — they index `text`, not the model vocab — so decoding
             // stays correct. Full-vocab models (remap=None) pass ids through.
-            let input_ids: Vec<i64> = match &self.remap {
-                Some(remap) => ids
-                    .iter()
-                    .map(|x| *remap.get(x).unwrap_or(&self.unk_remapped) as i64)
-                    .collect(),
-                None => ids.iter().map(|x| *x as i64).collect(),
+            let remap_id = |id: u32| -> i64 {
+                match &self.remap {
+                    Some(remap) => *remap.get(&id).unwrap_or(&self.unk_remapped) as i64,
+                    None => id as i64,
+                }
             };
-            let attention_mask: Vec<i64> = mask.iter().map(|x| *x as i64).collect();
+            let mut input_ids = vec![remap_id(pad_id); batch_size * width];
+            let mut attention_mask = vec![0i64; batch_size * width];
+            for (batch_index, (ids, mask)) in windows.iter().enumerate() {
+                if ids.len() != mask.len() {
+                    return Err(RedactError::Unexpected(format!(
+                        "ONNX ids/mask length mismatch: {} != {}",
+                        ids.len(),
+                        mask.len()
+                    )));
+                }
+                let row_start = batch_index * width;
+                for (offset, id) in ids.iter().enumerate() {
+                    input_ids[row_start + offset] = remap_id(*id);
+                    attention_mask[row_start + offset] = mask[offset] as i64;
+                }
+            }
 
-            // ndarray shapes: [batch=1, seq_len]
-            let ids_arr = Array::from_shape_vec((1, len), input_ids)
+            // ndarray shapes: [batch, padded_seq_len]
+            let ids_arr = Array::from_shape_vec((batch_size, width), input_ids)
                 .map_err(|e| RedactError::Runtime(format!("ids shape: {e}")))?;
-            let mask_arr = Array::from_shape_vec((1, len), attention_mask)
+            let mask_arr = Array::from_shape_vec((batch_size, width), attention_mask)
                 .map_err(|e| RedactError::Runtime(format!("mask shape: {e}")))?;
 
             let mut session = self
@@ -490,14 +612,22 @@ mod runtime {
                 .lock()
                 .map_err(|_| RedactError::Runtime("session mutex poisoned".into()))?;
 
+            let inference_started = std::time::Instant::now();
             let outputs = session
                 .run(ort::inputs![
                     "input_ids" => TensorRef::from_array_view(&ids_arr).map_err(|e| RedactError::Runtime(format!("ids tensor: {e}")))?,
                     "attention_mask" => TensorRef::from_array_view(&mask_arr).map_err(|e| RedactError::Runtime(format!("mask tensor: {e}")))?,
                 ])
                 .map_err(|e| RedactError::Runtime(format!("session.run: {e}")))?;
+            tracing::debug!(
+                batch_size,
+                sequence_width = width,
+                padded_tokens = batch_size.saturating_mul(width),
+                inference_ms = inference_started.elapsed().as_millis(),
+                "onnx text redaction inference"
+            );
 
-            // logits shape: [1, seq_len, num_labels]
+            // logits shape: [batch, padded_seq_len, num_labels]
             let logits = outputs
                 .get("logits")
                 .ok_or_else(|| RedactError::Runtime("no logits output".into()))?;
@@ -505,23 +635,39 @@ mod runtime {
                 .try_extract_array::<f32>()
                 .map_err(|e| RedactError::Runtime(format!("extract logits: {e}")))?;
             let logits_view = logits_view.view();
-            let logits = logits_view.index_axis(Axis(0), 0); // drop batch dim → [seq_len, num_labels]
+            if logits_view.ndim() != 3 || logits_view.len_of(Axis(0)) != batch_size {
+                return Err(RedactError::Runtime(format!(
+                    "unexpected ONNX logits shape {:?} for batch size {batch_size}",
+                    logits_view.shape()
+                )));
+            }
 
-            // Argmax per token
-            let mut label_ids = Vec::with_capacity(len);
-            for row in logits.axis_iter(Axis(0)) {
-                let mut best_i = 0usize;
-                let mut best_v = f32::NEG_INFINITY;
-                for (i, v) in row.iter().enumerate() {
-                    if *v > best_v {
-                        best_v = *v;
-                        best_i = i;
-                    }
+            let mut batches = Vec::with_capacity(batch_size);
+            for (batch_index, (ids, _)) in windows.iter().enumerate() {
+                let batch_logits = logits_view.index_axis(Axis(0), batch_index);
+                if batch_logits.len_of(Axis(0)) < ids.len() {
+                    return Err(RedactError::Runtime(format!(
+                        "ONNX logits shorter than input: {} < {}",
+                        batch_logits.len_of(Axis(0)),
+                        ids.len()
+                    )));
                 }
-                label_ids.push(best_i);
+                let mut label_ids = Vec::with_capacity(ids.len());
+                for row in batch_logits.axis_iter(Axis(0)).take(ids.len()) {
+                    let mut best_i = 0usize;
+                    let mut best_v = f32::NEG_INFINITY;
+                    for (i, value) in row.iter().enumerate() {
+                        if *value > best_v {
+                            best_v = *value;
+                            best_i = i;
+                        }
+                    }
+                    label_ids.push(best_i);
+                }
+                batches.push(label_ids);
             }
             // outputs (and the session borrow) drop here at end of block.
-            Ok(label_ids)
+            Ok(batches)
         }
 
         /// Inference for inputs longer than the model context. Slides an
@@ -585,15 +731,14 @@ mod runtime {
         fn version(&self) -> u32 {
             ONNX_REDACTOR_VERSION
         }
+        fn preferred_batch_size(&self) -> usize {
+            ONNX_INFERENCE_BATCH_SIZE
+        }
         async fn redact_batch(
             &self,
             texts: &[String],
         ) -> Result<Vec<RedactionOutput>, RedactError> {
-            let mut out = Vec::with_capacity(texts.len());
-            for t in texts {
-                out.push(self.infer(t)?);
-            }
-            Ok(out)
+            self.infer_batch(texts)
         }
     }
 

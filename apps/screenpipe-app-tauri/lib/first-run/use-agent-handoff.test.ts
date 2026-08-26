@@ -16,7 +16,7 @@ const {
   areExternalAgentSkillsInstalled,
 } = vi.hoisted(() => ({
   capture: vi.fn(),
-  copyTextToClipboard: vi.fn(async () => {}),
+  copyTextToClipboard: vi.fn(async () => ({ status: "ok", data: null })),
   detectAiTools: vi.fn(async () => [] as string[]),
   openUrl: vi.fn(async () => {}),
   getInstalledMcpVersion: vi.fn(async () => "0.19.2" as string | null),
@@ -48,7 +48,9 @@ const failed = () =>
 
 beforeEach(() => {
   capture.mockClear();
-  copyTextToClipboard.mockClear().mockResolvedValue(undefined);
+  copyTextToClipboard
+    .mockClear()
+    .mockResolvedValue({ status: "ok", data: null });
   openUrl.mockClear().mockResolvedValue(undefined);
   detectAiTools.mockReset().mockResolvedValue([]);
   getInstalledMcpVersion.mockReset().mockResolvedValue("0.19.2");
@@ -122,13 +124,27 @@ describe("useAgentHandoff — resolving a target", () => {
     // An impression for an offer that never rendered would inflate the
     // denominator and make the handoff look ignored rather than absent.
     detectAiTools.mockResolvedValue([]);
-    renderHook(() => useAgentHandoff(true));
+    const { result } = renderHook(() => useAgentHandoff(true));
     await waitFor(() => expect(detectAiTools).toHaveBeenCalled());
+    await waitFor(() => expect(result.current.resolved).toBe(true));
     expect(
       capture.mock.calls.filter(
         (c) => c[0] === "first_run_agent_handoff_shown",
       ),
     ).toHaveLength(0);
+  });
+
+  it("prefers the connected agent used most in the recent local window", async () => {
+    detectAiTools.mockResolvedValue(["claude", "cursor"]);
+    isCursorMcpInstalled.mockResolvedValue(true);
+    const { result } = renderHook(() =>
+      useAgentHandoff(true, [
+        { name: "Claude", activeMinutes: 1, frameCount: 20, lastSeenAt: 0 },
+        { name: "Cursor", activeMinutes: 3, frameCount: 4, lastSeenAt: 0 },
+      ]),
+    );
+    await waitFor(() => expect(result.current.resolved).toBe(true));
+    expect(result.current.preferredTarget?.id).toBe("cursor");
   });
 
   it("falls back to the in-app summary when the probe throws", async () => {
@@ -221,6 +237,43 @@ describe("useAgentHandoff — performing the handoff", () => {
       "open",
     ]);
     expect(clicked()).toHaveLength(0);
+  });
+
+  it("replays Cursor's deeplink after startup before claiming it is prefilled", async () => {
+    detectAiTools.mockResolvedValue(["cursor"]);
+    isCursorMcpInstalled.mockResolvedValue(true);
+    getInstalledMcpVersion.mockResolvedValue(null);
+    const { result } = renderHook(() => useAgentHandoff(true));
+    await waitFor(() => expect(result.current.targets[0]?.id).toBe("cursor"));
+
+    vi.useFakeTimers();
+    try {
+      await act(async () => {
+        const handoff = result.current.askAgent(result.current.targets[0]);
+        await vi.runAllTimersAsync();
+        await handoff;
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(openUrl).toHaveBeenCalledTimes(2);
+    expect(openUrl).toHaveBeenNthCalledWith(
+      1,
+      `cursor://anysphere.cursor-deeplink/prompt?text=${encodeURIComponent(HANDOFF_PROMPT)}`,
+    );
+    expect(openUrl).toHaveBeenNthCalledWith(
+      2,
+      `cursor://anysphere.cursor-deeplink/prompt?text=${encodeURIComponent(HANDOFF_PROMPT)}`,
+    );
+    expect(result.current.hint).toMatch(/review and send/i);
+    expect(clicked()[0]?.[1]).toMatchObject({
+      agent: "cursor",
+      opened: true,
+      prefilled: true,
+      replayed: true,
+      copy_only: false,
+    });
   });
 
   it("opens the ChatGPT/Codex desktop app with the prompt prefilled", async () => {

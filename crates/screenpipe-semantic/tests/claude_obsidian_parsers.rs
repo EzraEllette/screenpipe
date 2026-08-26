@@ -164,6 +164,194 @@ fn claude_abstains_on_an_assistant_only_accessible_heading() {
 }
 
 #[test]
+fn claude_code_extracts_new_task_draft_and_execution_context() {
+    let source = r#"{
+        "app": {
+            "platform": "macos",
+            "app_id": "com.anthropic.claudefordesktop",
+            "executable": "Claude",
+            "display_name": "Claude"
+        },
+        "nodes": [
+            { "role": "AXWindow", "text": "Claude", "depth": 0, "role_description": "standard window" },
+            { "role": "AXWebArea", "text": "Claude", "depth": 7, "role_description": "HTML content" },
+            { "role": "AXPopUpButton", "text": "Local", "depth": 16 },
+            { "role": "AXPopUpButton", "text": "screenpipe", "depth": 16 },
+            { "role": "AXComboBox", "text": "main", "depth": 16 },
+            { "role": "AXCheckBox", "text": "worktree", "depth": 16 },
+            { "role": "AXTextArea", "value": "Investigate the parser regression.", "depth": 18 },
+            { "role": "AXStaticText", "text": "Investigate the parser regression.", "depth": 20 },
+            { "role": "AXButton", "text": "Send", "depth": 18 },
+            { "role": "AXPopUpButton", "text": "Opus 4.6 · Fast", "depth": 16 },
+            { "role": "AXPopUpButton", "text": "Effort: High", "depth": 16 }
+        ]
+    }"#;
+    let items = handled(source, "app.claude.message_dom");
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0].title.as_deref(), Some("New task"));
+    assert_eq!(
+        items[0].metadata.get("project").map(String::as_str),
+        Some("screenpipe")
+    );
+    assert_eq!(
+        items[0].metadata.get("branch").map(String::as_str),
+        Some("main")
+    );
+    assert_eq!(
+        items[0].metadata.get("worktree").map(String::as_str),
+        Some("true")
+    );
+    assert_eq!(
+        items[0].metadata.get("model").map(String::as_str),
+        Some("Opus 4.6 · Fast")
+    );
+    assert_eq!(items[1].actor.as_deref(), Some("[user]"));
+    assert_eq!(items[1].status.as_deref(), Some("draft"));
+    assert_eq!(
+        items[1].body.as_deref(),
+        Some("Investigate the parser regression.")
+    );
+}
+
+#[test]
+fn claude_code_loading_turn_stops_before_unattributed_assistant_stream() {
+    let source = r#"{
+        "app": {
+            "platform": "macos",
+            "app_id": "com.anthropic.claudefordesktop",
+            "executable": "Claude",
+            "display_name": "Claude"
+        },
+        "nodes": [
+            { "role": "AXWindow", "text": "Claude", "depth": 0, "role_description": "standard window" },
+            { "role": "AXWebArea", "text": "Claude", "depth": 7, "role_description": "HTML content" },
+            { "role": "AXButton", "text": "Parser regression", "depth": 17 },
+            { "role": "AXPopUpButton", "text": "Remote Control", "depth": 17 },
+            { "role": "AXCheckBox", "text": "Terminal", "depth": 17 },
+            { "role": "AXCheckBox", "text": "Diff", "depth": 17 },
+            { "role": "AXCheckBox", "text": "Browser", "depth": 17 },
+            { "role": "AXPopUpButton", "text": "Session actions", "depth": 17 },
+            { "role": "AXStaticText", "text": "Claude is responding", "depth": 18 },
+            { "role": "AXHeading", "text": "You said: Inspect the parser", "depth": 20 },
+            { "role": "AXStaticText", "text": "You said: Inspect the parser", "depth": 21 },
+            { "role": "AXStaticText", "text": "Inspect the parser and preserve its boundaries.", "depth": 22 },
+            { "role": "AXButton", "text": "Show more", "depth": 21 },
+            { "role": "AXStaticText", "text": "I am streaming an assistant answer without an actor heading.", "depth": 22 },
+            { "role": "AXStaticText", "text": "Chat mode", "depth": 18 },
+            { "role": "AXTextArea", "value": "Type / for commands", "depth": 18 },
+            { "role": "AXButton", "text": "Stop", "depth": 18 }
+        ]
+    }"#;
+    let items = handled(source, "app.claude.message_dom");
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0].title.as_deref(), Some("Parser regression"));
+    assert_eq!(items[1].actor.as_deref(), Some("[user]"));
+    assert_eq!(
+        items[1].body.as_deref(),
+        Some("Inspect the parser and preserve its boundaries.")
+    );
+}
+
+#[test]
+fn claude_conversation_uses_page_title_and_stops_at_composer() {
+    let source = r#"{
+        "app": {
+            "platform": "macos",
+            "app_id": "com.anthropic.claudefordesktop",
+            "executable": "Claude",
+            "display_name": "Claude"
+        },
+        "nodes": [
+            { "role": "AXWindow", "text": "Claude", "depth": 0, "role_description": "standard window" },
+            { "role": "AXWebArea", "text": "", "depth": 7, "role_description": "HTML content" },
+            { "role": "AXWebArea", "text": "Parser repair - Claude", "depth": 8, "role_description": "HTML content" },
+            { "role": "AXHeading", "text": "You said: Repair it", "depth": 16 },
+            { "role": "AXStaticText", "text": "Repair the exact parser.", "depth": 20 },
+            { "role": "AXHeading", "text": "Claude responded: Done", "depth": 16 },
+            { "role": "AXStaticText", "text": "The parser is repaired.", "depth": 20 },
+            { "role": "AXStaticText", "text": "just now", "depth": 20 },
+            { "role": "AXTextArea", "value": "composer draft", "depth": 18 },
+            { "role": "AXButton", "text": "Send message", "depth": 18 },
+            { "role": "AXHeading", "text": "Settings", "depth": 5 },
+            { "role": "AXStaticText", "text": "Plugins", "depth": 6 }
+        ]
+    }"#;
+    let items = handled(source, "app.claude.message_dom");
+    assert_eq!(items.len(), 3);
+    assert_eq!(items[0].title.as_deref(), Some("Parser repair - Claude"));
+    assert_eq!(items[1].body.as_deref(), Some("Repair the exact parser."));
+    assert_eq!(items[2].body.as_deref(), Some("The parser is repaired."));
+}
+
+#[test]
+fn claude_keeps_response_text_reparented_under_a_tool_button() {
+    let source = r#"{
+        "app": {
+            "platform": "macos",
+            "app_id": "com.anthropic.claudefordesktop",
+            "executable": "Claude",
+            "display_name": "Claude"
+        },
+        "nodes": [
+            { "role": "AXWindow", "text": "Claude", "parent": null },
+            { "role": "AXWebArea", "text": "Tool result - Claude", "parent": 0 },
+            { "role": "AXHeading", "text": "You said: Connect Figma", "parent": 1 },
+            { "role": "AXStaticText", "text": "Connect Figma.", "parent": 2 },
+            { "role": "AXHeading", "text": "Claude responded: I checked the connection.", "parent": 1 },
+            { "role": "AXStaticText", "text": "Claude responded: I checked the connection.", "parent": 4 },
+            { "role": "AXButton", "text": "Searched the web, loaded tools", "parent": 4 },
+            { "role": "AXStaticText", "text": "Searched the web, loaded tools", "parent": 6 },
+            { "role": "AXStaticText", "text": "I checked the connection.", "parent": 7 },
+            { "role": "AXStaticText", "text": "Open Connectors and enable Figma.", "parent": 8 },
+            { "role": "AXStaticText", "text": "Then I can inspect the complete design.", "parent": 8 },
+            { "role": "AXTextArea", "value": "Write a message…", "parent": 1 },
+            { "role": "AXButton", "text": "Send message", "parent": 1 }
+        ]
+    }"#;
+    let items = handled(source, "app.claude.message_dom");
+    assert_eq!(items.len(), 3);
+    assert_eq!(
+        items[2].body.as_deref(),
+        Some(
+            "I checked the connection.\nOpen Connectors and enable Figma.\nThen I can inspect the complete design."
+        )
+    );
+    assert!(!items[2]
+        .body
+        .as_deref()
+        .unwrap()
+        .contains("Searched the web"));
+}
+
+#[test]
+fn claude_design_extracts_a_meaningful_draft() {
+    let source = r#"{
+        "app": {
+            "platform": "macos",
+            "app_id": "com.anthropic.claudefordesktop",
+            "executable": "Claude",
+            "display_name": "Claude"
+        },
+        "nodes": [
+            { "role": "AXWindow", "text": "Design", "depth": 0 },
+            { "role": "AXWebArea", "text": "Claude Design", "depth": 7 },
+            { "role": "AXLink", "text": "Claude Design Beta", "depth": 3 },
+            { "role": "AXHeading", "text": "What should we create?", "depth": 3 },
+            { "role": "AXTextArea", "value": "Make the dock controls easier to understand.", "depth": 6 },
+            { "role": "AXButton", "text": "Create", "depth": 5 }
+        ]
+    }"#;
+    let items = handled(source, "app.claude.message_dom");
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0].title.as_deref(), Some("Claude Design"));
+    assert_eq!(items[1].status.as_deref(), Some("draft"));
+    assert_eq!(
+        items[1].body.as_deref(),
+        Some("Make the dock controls easier to understand.")
+    );
+}
+
+#[test]
 fn obsidian_extracts_the_active_codemirror_note() {
     let items = handled(
         include_str!("fixtures/apps/obsidian_source_note.json"),

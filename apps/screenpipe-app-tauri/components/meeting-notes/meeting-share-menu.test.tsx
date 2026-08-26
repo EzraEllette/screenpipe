@@ -25,7 +25,12 @@ describe("meeting share control", () => {
     {
       label: "meeting",
       items: [
-        { key: "resume", label: "resume meeting", icon: Play, onSelect: vi.fn() },
+        {
+          key: "resume",
+          label: "resume meeting",
+          icon: Play,
+          onSelect: vi.fn(),
+        },
         {
           key: "delete",
           label: "delete meeting",
@@ -125,6 +130,49 @@ describe("meeting share control", () => {
     expect(send).toHaveAccessibleName("send to an app…");
     fireEvent.click(send);
     expect(onShare).toHaveBeenCalledWith("send");
+  });
+
+  it("fans out locally ranked connected apps and opens the chosen review", () => {
+    const onDestinationSelect = vi.fn();
+    render(
+      <MeetingShareMenu
+        canShareSummary
+        canSend
+        suggestedDestinations={[
+          {
+            app: "obsidian",
+            destination: "chat-obsidian",
+            name: "Obsidian",
+            observed: true,
+          },
+          {
+            app: "notion",
+            destination: "chat-notion",
+            name: "Notion",
+            observed: false,
+          },
+        ]}
+        onDestinationSelect={onDestinationSelect}
+        onShare={vi.fn()}
+      />,
+    );
+
+    const stack = screen.getByTestId("meeting-share-destinations");
+    expect(stack).toBeVisible();
+    const destinations = screen.getAllByRole("button", {
+      name: /review and send to/,
+    });
+    expect(
+      destinations.map((button) => button.getAttribute("aria-label")),
+    ).toEqual(["review and send to Obsidian", "review and send to Notion"]);
+    expect(screen.getByTestId("meeting-send-obsidian")).toHaveAttribute(
+      "title",
+      "Obsidian · used during this meeting",
+    );
+
+    fireEvent.click(screen.getByTestId("meeting-send-notion"));
+    expect(onDestinationSelect).toHaveBeenCalledWith("chat-notion");
+    expect(screen.queryByTestId("meeting-send-button")).not.toBeInTheDocument();
   });
 
   // The control shipped with no telemetry, so nobody could answer whether
@@ -400,9 +448,7 @@ describe("meeting share control", () => {
   });
 
   it("locks every control while a copy is in flight", () => {
-    render(
-      <MeetingShareMenu canShareSummary canSend busy onShare={vi.fn()} />,
-    );
+    render(<MeetingShareMenu canShareSummary canSend busy onShare={vi.fn()} />);
 
     for (const button of screen.getAllByRole("button")) {
       expect(button).toBeDisabled();

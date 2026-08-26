@@ -186,29 +186,56 @@ describe("UsagePopover", () => {
     });
   });
 
-  it("keeps one context circle for local, BYOK, and ACP own-account routes", () => {
-    const presets = [
-      { provider: "native-ollama" },
-      { provider: "anthropic" },
+  it("keeps the plan visible on local, BYOK, and ACP own-account routes", () => {
+    // The plan is an account fact. Dropping it along with the meters made a
+    // normal coding-agent preset look like a cancelled subscription.
+    const presets: Array<{ preset: AIPreset; billsTo: RegExp }> = [
       {
-        provider: "acp",
-        acpAgent: { id: "claude-acp", useScreenpipeCloud: false },
+        preset: { provider: "native-ollama" } as AIPreset,
+        billsTo: /runs on your machine/i,
       },
       {
-        provider: "acp",
-        acpAgent: { id: "codex-acp", useScreenpipeCloud: true },
+        preset: { provider: "anthropic" } as AIPreset,
+        billsTo: /your own Anthropic key/i,
       },
-    ] as AIPreset[];
+      {
+        preset: {
+          provider: "acp",
+          acpAgent: { id: "claude-acp", useScreenpipeCloud: false },
+        } as AIPreset,
+        billsTo: /bills to your Claude Code account/i,
+      },
+      {
+        preset: {
+          provider: "acp",
+          acpAgent: { id: "codex-acp", useScreenpipeCloud: true },
+        } as AIPreset,
+        // Opted in, but Codex has no cloud routing to opt into.
+        billsTo: /bills to your Codex account/i,
+      },
+    ];
 
-    for (const preset of presets) {
+    for (const { preset, billsTo } of presets) {
       const view = renderUsagePopover(preset);
-      expect(screen.getByTestId("usage-popover-trigger")).toBeTruthy();
       fireEvent.click(screen.getByTestId("usage-popover-trigger"));
       expect(screen.getByTestId("context-usage-panel")).toBeTruthy();
-      expect(screen.queryByTestId("usage-limits-panel")).toBeNull();
+      const panel = screen.getByTestId("usage-limits-panel");
+      expect(panel.textContent).toMatch(/Business/);
+      expect(panel.textContent).toMatch(billsTo);
+      // No meters: this preset spends none of that allowance.
+      expect(screen.queryAllByTestId("usage-limit-row")).toHaveLength(0);
       view.unmount();
     }
+  });
+
+  it("does not poll cloud usage in the background for an own-account preset", () => {
+    renderUsagePopover({ provider: "native-ollama" } as AIPreset);
     expect(mocks.queryEnabled).toHaveBeenCalledWith(false);
+
+    // Opening the panel is the user asking for the number, so fetch then.
+    mocks.queryEnabled.mockClear();
+    fireEvent.click(screen.getByTestId("usage-popover-trigger"));
+    expect(mocks.queryEnabled).toHaveBeenCalledWith(true);
   });
 
   it("shows when Claude Code routes model calls through Screenpipe Cloud", () => {
@@ -256,8 +283,12 @@ describe("UsagePopover", () => {
     expect(
       screen.getByText(/usage appears after this agent reports/i),
     ).toBeTruthy();
-    expect(screen.queryByText(/screenpipe cloud usage/i)).toBeNull();
-    expect(mocks.queryEnabled).toHaveBeenCalledWith(false);
+    // Cursor cannot route to Screenpipe Cloud at all, so the panel names the
+    // plan and says who is actually billed rather than vanishing.
+    expect(screen.getByText(/bills to your Cursor account/i)).toBeTruthy();
+    expect(screen.getByTestId("usage-limits-panel").textContent).toMatch(
+      /Business/,
+    );
   });
 });
 

@@ -791,6 +791,9 @@ pub(crate) async fn search_elements(
         .source
         .as_deref()
         .and_then(|s| s.parse::<ElementSource>().ok());
+    let start_time = state
+        .history_access
+        .clamp_start(query.start_time, Utc::now());
 
     let (elements, total) = state
         .db
@@ -799,7 +802,7 @@ pub(crate) async fn search_elements(
             query.frame_id,
             source.as_ref(),
             query.role.as_deref(),
-            query.start_time,
+            start_time,
             query.end_time,
             query.app_name.as_deref(),
             query.on_screen,
@@ -848,6 +851,25 @@ pub(crate) async fn get_frame_elements(
     Path(frame_id): Path<i64>,
     Query(query): Query<FrameElementsQuery>,
 ) -> Result<Response<Body>, (StatusCode, JsonResponse<Value>)> {
+    if state.history_access.is_restricted() {
+        if let Some(timestamp) = state.db.get_frame_timestamp(frame_id).await.map_err(|e| {
+            error!("frame history lookup failed: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                JsonResponse(json!({"error": "frame history lookup failed"})),
+            )
+        })? {
+            if !state.history_access.allows(timestamp, Utc::now()) {
+                return Err((
+                    StatusCode::FORBIDDEN,
+                    JsonResponse(json!({
+                        "error": "this content is outside the available 24-hour history",
+                        "code": "history_access_limited"
+                    })),
+                ));
+            }
+        }
+    }
     let preferred = wants_preferred(&query.format);
     let automation = wants_automation(&query.format) || (preferred && prefers_automation(&state));
     let outline = wants_outline(&query.format) || (preferred && !automation);

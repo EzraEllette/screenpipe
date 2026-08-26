@@ -10,6 +10,7 @@ mod native_actions;
 pub(crate) mod overlay_anchor;
 
 use crate::{
+    analytics::{AnalyticsManager, Attribution},
     native_notification, native_shortcut_reminder,
     store::{OnboardingStore, SettingsStore},
     updates::is_enterprise_build,
@@ -397,6 +398,17 @@ pub fn is_enterprise_build_cmd(app_handle: tauri::AppHandle) -> bool {
     is_enterprise_build(&app_handle)
 }
 
+/// Whether the running local API currently enforces the rolling history window.
+/// This is the authoritative app-wide value shared by every webview and backend
+/// route, so detached windows do not depend on duplicating account hydration.
+#[tauri::command]
+#[specta::specta]
+pub fn is_history_access_restricted(
+    state: tauri::State<'_, crate::recording::RecordingState>,
+) -> bool {
+    state.history_access.is_restricted()
+}
+
 /// Whether an automated environment has force-disabled telemetry
 /// (`SCREENPIPE_DISABLE_TELEMETRY` / `GITHUB_ACTIONS` / `CI`).
 ///
@@ -411,6 +423,18 @@ pub fn is_enterprise_build_cmd(app_handle: tauri::AppHandle) -> bool {
 #[specta::specta]
 pub fn is_telemetry_disabled_by_env() -> bool {
     screenpipe_engine::analytics::telemetry_disabled_by_env()
+}
+
+/// Return the website UTM attribution already resolved at app startup.
+///
+/// This is read-only and never triggers another network request. Analytics can
+/// be disabled before the manager is installed, so absence is a normal result.
+#[tauri::command]
+#[specta::specta]
+pub async fn get_onboarding_attribution(app_handle: tauri::AppHandle) -> Option<Attribution> {
+    let analytics = app_handle.try_state::<std::sync::Arc<AnalyticsManager>>()?;
+    let analytics = std::sync::Arc::clone(&analytics);
+    analytics.attribution_snapshot().await
 }
 
 /// Return the macOS bundle identifier of the running app
@@ -1144,6 +1168,14 @@ pub async fn set_cloud_token(
         .as_ref()
         .map(|settings| settings.restricts_paid_local_features())
         .unwrap_or(true);
+    if let Some(settings) = settings.as_ref() {
+        crate::recording::refresh_history_access_policy(&state.history_access, settings);
+    } else {
+        // Missing/corrupt settings are unattributed on consumer builds.
+        state
+            .history_access
+            .set_last_24_hours(!cfg!(feature = "enterprise-build"));
+    }
     let pipe_manager = {
         let server = state.server.lock().await;
         server.as_ref().map(|core| core.pipe_manager.clone())
@@ -4809,6 +4841,16 @@ fn dir_size(path: &std::path::Path) -> u64 {
 #[specta::specta]
 pub fn set_autostart(app_handle: tauri::AppHandle, enabled: bool) -> Result<(), String> {
     use tauri_plugin_autostart::ManagerExt as AutostartManagerExt;
+
+    #[cfg(all(feature = "enterprise-build", target_os = "windows"))]
+    if crate::enterprise_persistence::installed() {
+        // The protected service owns startup for this package. Keep the
+        // user-writable Run entry absent even if an old setting is toggled.
+        return app_handle
+            .autolaunch()
+            .disable()
+            .map_err(|error| error.to_string());
+    }
 
     #[cfg(all(feature = "enterprise-build", target_os = "macos"))]
     crate::enterprise_autostart::set_macos_employee_autostart(&app_handle, enabled)?;

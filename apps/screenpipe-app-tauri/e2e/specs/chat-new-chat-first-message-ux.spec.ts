@@ -10,14 +10,16 @@
  * before it. Measured on a cold Pi start, because the whole defect lived in the
  * preflight window:
  *
- *   1. A status row never reports work on a turn whose message is not on
+ *   1. Background runtime readiness never disables typing. An early send
+ *      waits behind the handshake and keeps the user's message visible.
+ *   2. A status row never reports work on a turn whose message is not on
  *      screen. That state used to last the entire preflight.
- *   2. The message and the cleared composer land in the SAME commit. Neither
+ *   3. The message and the cleared composer land in the SAME commit. Neither
  *      may happen without the other.
- *   3. Exactly one status element is mounted at any instant. Previously a
+ *   4. Exactly one status element is mounted at any instant. Previously a
  *      centered "Working on your message" card and a left-aligned grid loader
  *      ran together, in different places, at different sizes.
- *   4. The empty layout is left in that same commit, so there is no centered ->
+ *   5. The empty layout is left in that same commit, so there is no centered ->
  *      top snap a frame later and the status row does not teleport 289px.
  *
  * The header still mounts later with the conversation title, which shifts the
@@ -99,10 +101,21 @@ describe("New chat, first message", function () {
     await browser.pause(t(1500));
     await browser.saveScreenshot(join(SHOTS, "00-empty-new-chat.png"));
 
+    await browser.execute(() => {
+      (window as any).__e2eSetPiStartInFlight?.(true);
+    });
+    await browser.pause(t(100));
+    expect(await $("form textarea").getAttribute("placeholder")).toBe(
+      "Ask a question or describe a task",
+    );
+    await browser.saveScreenshot(join(SHOTS, "01-background-start.png"));
+
     const composer = await $("form textarea");
+    expect(await composer.isEnabled()).toBe(true);
     await composer.click();
     await composer.setValue(PROMPT);
-    await browser.saveScreenshot(join(SHOTS, "01-typed.png"));
+    expect(await composer.getValue()).toBe(PROMPT);
+    await browser.saveScreenshot(join(SHOTS, "02-typed-during-start.png"));
 
     // The harness pre-starts Pi, which is not the shape of a real first message
     // in a new chat. Stop it so the send has to cold-start Pi: that is the
@@ -192,10 +205,21 @@ describe("New chat, first message", function () {
         );
     });
 
+    const pendingMessage = await $('[data-testid="chat-pending-user-message"]');
+    await pendingMessage.waitForDisplayed({ timeout: t(5_000) });
+    await browser.pause(t(1_000));
+    expect(await pendingMessage.getText()).toContain(PROMPT);
+    expect(await $$('[data-testid="chat-message-assistant"]').length).toBe(0);
+    await browser.saveScreenshot(join(SHOTS, "03-sent-waiting-for-readiness.png"));
+
+    await browser.execute(() => {
+      (window as any).__e2eSetPiStartInFlight?.(false);
+    });
+
     // Capture on every distinct visual signature AND on a periodic tick, so
     // the PR gets a real filmstrip of the turn rather than three frames.
     const seen = new Set<string>();
-    let shot = 2;
+    let shot = 4;
     let nextTick = 0;
     const deadline = Date.now() + 60_000;
     while (Date.now() < deadline) {

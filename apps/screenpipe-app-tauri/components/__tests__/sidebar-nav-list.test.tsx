@@ -10,7 +10,7 @@ import type { SidebarNavId } from "@/lib/utils/sidebar-nav-layout";
 const ITEMS: SidebarNavItem[] = [
   { id: "home", label: "Chat", icon: <span /> },
   { id: "brain", label: "Library", icon: <span /> },
-  { id: "pipes", label: "Scheduled", icon: <span /> },
+  { id: "pipes", label: "Automations", icon: <span /> },
 ];
 
 function renderList(overrides: Partial<React.ComponentProps<typeof SidebarNavList>> = {}) {
@@ -62,6 +62,18 @@ describe("SidebarNavList", () => {
     renderList();
     expect(screen.getByTestId("nav-home")).toBeInTheDocument();
     expect(screen.getByTestId("nav-pipes")).toBeInTheDocument();
+  });
+
+  it("marks the active row with the neutral signal rail", () => {
+    renderList();
+    expect(screen.getByTestId("nav-home")).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
+    expect(screen.getByTestId("nav-home")).toHaveClass("before:bg-signal");
+    expect(screen.getByTestId("nav-brain")).not.toHaveClass(
+      "before:bg-signal",
+    );
   });
 
   it("selects a section on click", () => {

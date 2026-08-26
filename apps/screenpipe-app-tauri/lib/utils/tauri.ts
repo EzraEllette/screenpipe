@@ -269,6 +269,22 @@ async closeWindow(window: ShowRewindWindow) : Promise<Result<null, string>> {
     else return { status: "error", error: e  as any };
 }
 },
+async codingWorkspaceCreate(conversationId: string, repositoryPath: string) : Promise<Result<CodingWorkspace, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("coding_workspace_create", { conversationId, repositoryPath }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async codingWorkspaceGet(conversationId: string) : Promise<Result<CodingWorkspace | null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("coding_workspace_get", { conversationId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async completeOnboarding() : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("complete_onboarding") };
@@ -707,6 +723,15 @@ async getMonitors() : Promise<Result<MonitorDevice[], string>> {
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * Return the website UTM attribution already resolved at app startup.
+ *
+ * This is read-only and never triggers another network request. Analytics can
+ * be disabled before the manager is installed, so absence is a normal result.
+ */
+async getOnboardingAttribution() : Promise<Attribution | null> {
+    return await TAURI_INVOKE("get_onboarding_attribution");
+},
 async getOnboardingStatus() : Promise<Result<OnboardingStore, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_onboarding_status") };
@@ -919,6 +944,14 @@ async isCapturePaused() : Promise<boolean> {
 },
 async isEnterpriseBuildCmd() : Promise<boolean> {
     return await TAURI_INVOKE("is_enterprise_build_cmd");
+},
+/**
+ * Whether the running local API currently enforces the rolling history window.
+ * This is the authoritative app-wide value shared by every webview and backend
+ * route, so detached windows do not depend on duplicating account hydration.
+ */
+async isHistoryAccessRestricted() : Promise<boolean> {
+    return await TAURI_INVOKE("is_history_access_restricted");
 },
 /**
  * Check if click-through is currently enabled (Windows only)
@@ -1783,6 +1816,22 @@ async piStop(sessionId: string | null) : Promise<Result<PiInfo, string>> {
 }
 },
 /**
+ * Stop and forget an idle Pi session without interrupting in-flight work.
+ *
+ * Chat panels call this when they give up foreground ownership. Keeping every
+ * completed ACP conversation resident leaves a full Bun/Node/agent process
+ * tree behind for each chat. The busy check and removal happen under the pool
+ * lock, so a prompt cannot race between the check and teardown.
+ */
+async piStopIfIdle(sessionId: string | null) : Promise<Result<PiInfo, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("pi_stop_if_idle", { sessionId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Update Pi config and restart the chat session so the new model takes effect.
  * Without restart, Pi keeps using the provider/model from its original CLI args.
  *
@@ -2418,6 +2467,18 @@ async setEnterpriseRecordingAuthorized(authorized: boolean, credentialType: stri
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * Apply the frontend's experimental rollout decision to native history swipes.
+ * The platform implementation keeps every non-Home webview forced off.
+ */
+async setHistorySwipeNavigationEnabled(enabled: boolean) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_history_swipe_navigation_enabled", { enabled }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async setKeepAwake(enabled: boolean) : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("set_keep_awake", { enabled }) };
@@ -2944,6 +3005,7 @@ export type ActivityHistoryCoverage = { start: string; end: string }
 export type ActivityHistoryEntry = { id: string; kind: string; meeting_id: number | null; start_at: string; end_at: string; title: string; summary: string; evidence: ActivityHistoryEvidence[] }
 export type ActivityHistoryEvidence = { kind: string; at: string; frame_id: number | null; meeting_id: number | null; app_name: string | null; label: string }
 export type AecMode = "off" | "screenpipe" | "macos" | "windows"
+export type Attribution = { utmSource: string | null; utmMedium: string | null; utmCampaign: string | null; utmContent: string | null; utmTerm: string | null }
 export type AudioDeviceInfo = { name: string; isDefault: boolean;
 /**
  * True for a Bluetooth *input* device that is also a combo headset (the
@@ -3052,6 +3114,7 @@ export type ChatGptOAuthStatus = { logged_in: boolean;
  * keychain failure, timeout, etc.).
  */
 error: string | null }
+export type CodingWorkspace = { version: number; conversationId: string; repoRoot: string; gitCommonDir: string; worktreePath: string; branch: string; baseCommit: string; sourceDirty: boolean; createdAt: string }
 export type Credits = { amount: number }
 /**
  * A skill folder discovered somewhere on the user's device.
@@ -3086,6 +3149,14 @@ export type DiscoveredHost = { host: string; port: number; user: string | null; 
  * Only set when `HostName` resolves to an IP different from the alias.
  */
 alias?: string | null }
+/**
+ * One strict hostname rule used by browser capture allowlists and blocklists.
+ *
+ * `domain` is normalized by the capture policy before matching. The rule
+ * always matches the domain itself; `include_subdomains` extends the match to
+ * descendant hosts, except descendants rooted at `excluded_subdomains`.
+ */
+export type DomainRule = { domain: string; includeSubdomains?: boolean; excludedSubdomains?: string[] }
 export type EmbeddedLLM = { enabled: boolean; model: string; port: number }
 export type EngineEvent = { name: string; data: JsonValue }
 export type EnterpriseHostIdentity = { machine_id_hash: string | null; os_user_id_hash: string | null }
@@ -3264,7 +3335,14 @@ allowedTools?: string[] | null;
  * session, set only when reopening a conversation whose agent process
  * is gone. Ignored by the native Pi backend.
  */
-resumeSessionId?: string | null }
+resumeSessionId?: string | null;
+/**
+ * Headless surfaces (activity generation) have no approval card to show,
+ * so their ACP sessions run unattended: the runtime takes the adapter's
+ * allow option instead of stranding the run on a prompt nobody can see,
+ * and chat control is disabled. Ignored by the native Pi backend.
+ */
+unattended?: boolean }
 /**
  * A user prompt that's been enqueued but not yet written to Pi's stdin.
  * Surfaced to the UI so the chat can render "queued" cards while a prior
@@ -3699,9 +3777,15 @@ ignoredWindows: string[];
  */
 includedWindows: string[];
 /**
- * URLs to exclude from capture.
+ * Browser URLs to exclude from capture. Existing string entries remain
+ * supported; new entries can use explicit structured domain rules.
  */
-ignoredUrls?: string[];
+ignoredUrls?: UrlRule[];
+/**
+ * Strict browser hostname allowlist. When non-empty, native apps and
+ * browser windows without a positively detected matching URL are skipped.
+ */
+includedUrls?: DomainRule[];
 /**
  * Automatically detect and skip incognito / private browsing windows.
  */
@@ -3992,6 +4076,11 @@ deviceId?: string;
  */
 autoUpdate?: boolean;
 /**
+ * Consumer updater channel selected on this device. Older stores omit it
+ * and therefore remain on the stable channel.
+ */
+updateChannel?: string;
+/**
  * Auto-update store-installed pipes that haven't been locally modified.
  */
 autoUpdatePipes?: boolean;
@@ -4095,6 +4184,14 @@ export type SyncDeviceInfo = { id: string; deviceId: string; deviceName: string 
  * Sync status response.
  */
 export type SyncStatusResponse = { enabled: boolean; isSyncing: boolean; lastSync: string | null; lastError: string | null; storageUsed: number | null; storageLimit: number | null; deviceCount: number | null; deviceLimit: number | null; syncTier: string | null; machineId: string }
+/**
+ * A browser URL block rule.
+ *
+ * Strings are the legacy `ignoredUrls` format and keep their historical
+ * domain matching behavior. Structured rules provide explicit exact-domain,
+ * subdomain, and exception semantics without introducing a second setting.
+ */
+export type UrlRule = string | DomainRule
 export type User = { id: string | null; name: string | null; email: string | null; image: string | null; token: string | null; clerk_id: string | null; api_key: string | null; credits: Credits | null; stripe_connected: boolean | null; stripe_account_status: string | null; github_username: string | null; bio: string | null; website: string | null; contact: string | null; cloud_subscribed: boolean | null; credits_balance: number | null; app_entitled: boolean | null; subscription_plan: string | null; entitlement: JsonValue | null; enterprise_account: JsonValue | null }
 export type ViewerContent = { kind: "text"; text: string; name: string; path: string; truncated: boolean; total_bytes: number } | { kind: "image"; data_url: string; name: string; path: string } |
 /**

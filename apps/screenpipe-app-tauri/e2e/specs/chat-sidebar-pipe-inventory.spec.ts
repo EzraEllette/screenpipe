@@ -8,16 +8,18 @@
  * exposes 12 completed executions plus one running execution and verifies that:
  *
  * 1. the collapsed section loads neither inventory nor runs;
- * 2. opening Pipes loads the compact activity inventory;
+ * 2. opening Automations loads the compact activity inventory;
  * 3. expanding one pipe omits the running execution;
  * 4. the first page contains exactly 10 completed executions; and
  * 5. older executions paginate only when requested; and
- * 6. a newly completed Brain/background run invalidates an expanded group.
+ * 6. a newly completed Brain/background run invalidates an expanded group; and
+ * 7. pinning then archiving an automation stays archived after reload.
  */
 
 import { randomUUID } from "node:crypto";
 import {
   mkdirSync,
+  readFileSync,
   rmSync,
   utimesSync,
   writeFileSync,
@@ -31,9 +33,16 @@ import {
   waitForAppReady,
 } from "../helpers/test-utils.js";
 const PIPE_NAME = "e2e-sidebar-lazy-inventory";
+const ARCHIVE_PIPE_NAME = "e2e-sidebar-archive-state";
+const ARCHIVE_RUN_ID = 4242;
+const ARCHIVE_RUN_SESSION_ID = `pipe:${ARCHIVE_PIPE_NAME}:${ARCHIVE_RUN_ID}`;
 const PIPE_DIR = join(E2E_DATA_DIR, "pipes", PIPE_NAME);
 const CHATS_DIR = join(E2E_DATA_DIR, "chats");
 const GENERATED_RUN_CHAT = join(CHATS_DIR, `pipe_${PIPE_NAME}_12.json`);
+const ARCHIVE_RUN_CHAT = join(
+  CHATS_DIR,
+  `pipe_${ARCHIVE_PIPE_NAME}_${ARCHIVE_RUN_ID}.json`,
+);
 const E2E_ACCOUNT_USER_KEY = "screenpipe_e2e_account_user";
 const E2E_ACCOUNT_USER_EVENT = "screenpipe-e2e-seed-account-user";
 const createdChatFiles: string[] = [];
@@ -117,6 +126,39 @@ function writeConversation(
   createdChatFiles.push(file);
 }
 
+function writeArchiveRunConversation(updatedAt: number): void {
+  writeFileSync(ARCHIVE_RUN_CHAT, JSON.stringify({
+    id: ARCHIVE_RUN_SESSION_ID,
+    title: `${ARCHIVE_PIPE_NAME} #${ARCHIVE_RUN_ID}`,
+    titleSource: "user",
+    kind: "pipe-run",
+    pipeContext: {
+      pipeName: ARCHIVE_PIPE_NAME,
+      executionId: ARCHIVE_RUN_ID,
+    },
+    createdAt: updatedAt,
+    updatedAt,
+    lastUserMessageAt: updatedAt,
+    pinned: false,
+    hidden: false,
+    messages: [
+      {
+        id: `${ARCHIVE_RUN_SESSION_ID}-u`,
+        role: "user",
+        content: "archive fixture prompt",
+        timestamp: updatedAt,
+      },
+      {
+        id: `${ARCHIVE_RUN_SESSION_ID}-a`,
+        role: "assistant",
+        content: "archive fixture result",
+        timestamp: updatedAt + 1,
+      },
+    ],
+  }));
+  createdChatFiles.push(ARCHIVE_RUN_CHAT);
+}
+
 async function clickSection(title: string): Promise<void> {
   const clicked = await browser.execute((wanted: string) => {
     const sidebar = document.querySelector('[data-testid="chat-sidebar"]');
@@ -146,8 +188,53 @@ async function clickSection(title: string): Promise<void> {
   );
 }
 
+async function chooseRowAction(sessionId: string, action: string): Promise<void> {
+  // WebKit WebDriver neither applies Tailwind's group-hover visibility state
+  // nor sends pointerdown for element.click(). Open the real Radix trigger via
+  // its keyboard contract, which exercises the same controlled menu state.
+  const opened = await browser.execute((id: string) => {
+    const rowElement = document.querySelector(`[data-testid="chat-row-${id}"]`);
+    const button = rowElement?.querySelector<HTMLButtonElement>(
+      'button[aria-label="conversation actions"]',
+    );
+    if (!button) return false;
+    button.focus();
+    button.dispatchEvent(new KeyboardEvent("keydown", {
+      key: "ArrowDown",
+      code: "ArrowDown",
+      bubbles: true,
+      cancelable: true,
+    }));
+    return true;
+  }, sessionId);
+  expect(opened).toBe(true);
+
+  await browser.waitUntil(
+    async () => await browser.execute((wanted: string) =>
+      Array.from(document.querySelectorAll<HTMLElement>('[role="menuitem"]'))
+        .some((item) => item.textContent?.trim().toLowerCase().includes(wanted)),
+    action.toLowerCase()),
+    {
+      timeout: t(5_000),
+      interval: 100,
+      timeoutMsg: `row action '${action}' did not open`,
+    },
+  );
+
+  const selected = await browser.execute((wanted: string) => {
+    const item = Array.from(
+      document.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find((candidate) =>
+      candidate.textContent?.trim().toLowerCase().includes(wanted),
+    );
+    item?.click();
+    return Boolean(item);
+  }, action.toLowerCase());
+  expect(selected).toBe(true);
+}
+
 async function mockPipeActivityApi(): Promise<void> {
-  await browser.execute((pipeName: string) => {
+  await browser.execute((pipeName: string, archivePipeName: string) => {
     const testWindow = window as typeof window & {
       __pipeActivityFetches?: number;
       __pipeExecutionFetches?: number;
@@ -206,13 +293,22 @@ async function mockPipeActivityApi(): Promise<void> {
         testWindow.__pipeActivityFetches = (testWindow.__pipeActivityFetches ?? 0) + 1;
         const latestCompletedId = testWindow.__pipeLatestCompletedId ?? 12;
         return Promise.resolve(new Response(JSON.stringify({
-          data: [{
-            pipe_name: pipeName,
-            execution_count: latestCompletedId,
-            latest_execution_id: latestCompletedId,
-            last_run_at: new Date().toISOString(),
-            status: "completed",
-          }],
+          data: [
+            {
+              pipe_name: pipeName,
+              execution_count: latestCompletedId,
+              latest_execution_id: latestCompletedId,
+              last_run_at: new Date().toISOString(),
+              status: "completed",
+            },
+            {
+              pipe_name: archivePipeName,
+              execution_count: 1,
+              latest_execution_id: 4242,
+              last_run_at: new Date(Date.now() - 1_000).toISOString(),
+              status: "completed",
+            },
+          ],
           has_more: false,
           next_before_id: null,
         }), { status: 200, headers: { "Content-Type": "application/json" } }));
@@ -257,7 +353,7 @@ async function mockPipeActivityApi(): Promise<void> {
       }
       return originalFetch(input, init);
     };
-  }, PIPE_NAME);
+  }, PIPE_NAME, ARCHIVE_PIPE_NAME);
 }
 
 describe("chat sidebar pipe inventory", function () {
@@ -277,14 +373,17 @@ describe("chat sidebar pipe inventory", function () {
     );
 
     const base = Date.now() - 120_000;
+    writeArchiveRunConversation(base + 5_000);
     for (let i = 0; i < 60; i += 1) {
       writeConversation(randomUUID(), base + 10_000 + i, "chat", base + 10_000 + i);
     }
 
-    await browser.execute((pipeName: string) => {
+    await browser.execute((pipeName: string, archivePipeName: string) => {
       localStorage.setItem("screenpipe:pipes-collapsed", "true");
+      localStorage.setItem("screenpipe:pinned-collapsed", "false");
       localStorage.removeItem(`screenpipe:group-expanded:pipe:${pipeName}`);
-    }, PIPE_NAME);
+      localStorage.removeItem(`screenpipe:group-expanded:pipe:${archivePipeName}`);
+    }, PIPE_NAME, ARCHIVE_PIPE_NAME);
     await reloadAndWaitForHome();
     // Apply the fake entitlement only after reload. Seeding it before reload
     // lets the normal account refresh reject the deliberately fake token and
@@ -329,7 +428,7 @@ describe("chat sidebar pipe inventory", function () {
     });
     expect(fetchesWhileCollapsed).toEqual([0, 0, 0]);
 
-    await clickSection("scheduled");
+    await clickSection("automations");
     const groupSelector = `[data-testid="pipe-group-pipe:${PIPE_NAME}"]`;
     await browser.waitUntil(
       async () => await browser.execute((selector: string) =>
@@ -354,7 +453,7 @@ describe("chat sidebar pipe inventory", function () {
       },
     );
 
-    // The conversation inventory must own its vertical scroll once Scheduled
+    // The conversation inventory must own its vertical scroll once Automations
     // is expanded at the minimum supported window height. It must never
     // stretch the app or push the fixed Settings footer out of reach.
     const devicePixelRatio = (await browser.execute(
@@ -456,5 +555,94 @@ describe("chat sidebar pipe inventory", function () {
         timeoutMsg: "new terminal execution did not refresh the expanded pipe history",
       },
     );
+  });
+
+  it("keeps a pinned automation archived after reload", async () => {
+    const groupSelector = `[data-testid="pipe-group-pipe:${ARCHIVE_PIPE_NAME}"]`;
+    await browser.waitUntil(
+      async () => await browser.execute((selector: string) =>
+        Boolean(document.querySelector(selector)), groupSelector),
+      {
+        timeout: t(15_000),
+        interval: 250,
+        timeoutMsg: "archive fixture automation group did not appear",
+      },
+    );
+
+    const groupExpanded = await browser.execute((selector: string) =>
+      document.querySelector(`${selector} > button`)?.getAttribute("aria-expanded") === "true",
+    groupSelector);
+    if (!groupExpanded) {
+      await $(`${groupSelector} > button`).click();
+    }
+    await browser.waitUntil(
+      async () => await browser.execute((id: string) =>
+        Boolean(document.querySelector(`[data-testid="chat-row-${id}"]`)),
+      ARCHIVE_RUN_SESSION_ID),
+      {
+        timeout: t(15_000),
+        interval: 250,
+        timeoutMsg: "archive fixture automation run did not appear",
+      },
+    );
+
+    await chooseRowAction(ARCHIVE_RUN_SESSION_ID, "pin");
+    await browser.waitUntil(
+      async () => await browser.execute((id: string) => {
+        const row = document.querySelector(`[data-testid="chat-row-${id}"]`);
+        const pinnedHeader = document.querySelector(
+          '[data-testid="sidebar-section-pinned"]',
+        );
+        const pinnedSection = pinnedHeader?.parentElement?.parentElement;
+        return row !== null && pinnedSection?.contains(row) === true;
+      }, ARCHIVE_RUN_SESSION_ID),
+      {
+        timeout: t(10_000),
+        interval: 100,
+        timeoutMsg: "automation did not move into Pinned",
+      },
+    );
+
+    await chooseRowAction(ARCHIVE_RUN_SESSION_ID, "archive");
+    await browser.waitUntil(
+      async () => await browser.execute((id: string) =>
+        !document.querySelector(`[data-testid="chat-row-${id}"]`),
+      ARCHIVE_RUN_SESSION_ID),
+      {
+        timeout: t(10_000),
+        interval: 100,
+        timeoutMsg: "archived automation stayed visible in the sidebar",
+      },
+    );
+
+    await browser.waitUntil(
+      async () => {
+        try {
+          const persisted = JSON.parse(readFileSync(ARCHIVE_RUN_CHAT, "utf8")) as {
+            hidden?: boolean;
+            pinned?: boolean;
+          };
+          return persisted.hidden === true && persisted.pinned === false;
+        } catch {
+          return false;
+        }
+      },
+      {
+        timeout: t(10_000),
+        interval: 100,
+        timeoutMsg: "archive flags were not persisted atomically",
+      },
+    );
+
+    await reloadAndWaitForHome();
+    await seedEntitledAccount();
+    const sidebar = await $('[data-testid="chat-sidebar"]');
+    await sidebar.waitForExist({ timeout: t(10_000) });
+    await browser.pause(1_000);
+
+    const resurrected = await browser.execute((id: string) =>
+      Boolean(document.querySelector(`[data-testid="chat-row-${id}"]`)),
+    ARCHIVE_RUN_SESSION_ID);
+    expect(resurrected).toBe(false);
   });
 });

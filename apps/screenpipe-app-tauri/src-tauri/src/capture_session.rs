@@ -87,9 +87,9 @@ impl CaptureSession {
         // On macOS 15+ SCShareableContent::current() (called by list_monitors inside
         // VisionManager::start) shows Apple's native TCC padlock dialog if the app has
         // not been granted Screen Recording access yet — even before onboarding runs.
-        // check_screen_recording_tauri() skips capture_probe on macOS 15+ (avoids the
-        // native TCC dialog CGWindowListCreateImage triggers). Skip vision entirely when not granted;
-        // spawn_screenpipe is called again from onboarding after the user grants access.
+        // The app-level check compares SkyLight's cached preflight with a direct
+        // TCC preflight. Skip vision unless both say this process may capture;
+        // spawn_screenpipe is called again after the user grants access.
         //
         // This gate deliberately does NOT consult
         // `permission_monitor::screen_enumeration_denied()`, unlike the UI-facing
@@ -102,7 +102,7 @@ impl CaptureSession {
         // and lifts the verdict, or re-confirms the loss within ~15s.
         #[cfg(target_os = "macos")]
         let screen_recording_permitted =
-            screenpipe_core::permissions::check_screen_recording_tauri().is_granted();
+            crate::permissions::screen_recording_permission_usable_in_process();
         #[cfg(not(target_os = "macos"))]
         let screen_recording_permitted = true;
 
@@ -255,6 +255,8 @@ impl CaptureSession {
                 capture_trigger_tx,
                 linker_tx,
                 config.ignored_windows.clone(),
+                config.ignored_urls.clone(),
+                config.included_urls.clone(),
                 cfg!(debug_assertions), // debug: dragflow unavailable, fall back to native dialog; release: dragflow handles it
             )
             .await

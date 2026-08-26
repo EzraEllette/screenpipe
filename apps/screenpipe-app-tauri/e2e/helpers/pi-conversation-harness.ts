@@ -19,6 +19,12 @@ export interface ScriptedToolCall {
   arguments: Record<string, unknown>;
 }
 
+/** OpenAI-style streaming usage, as returned when a client asks for it. */
+export interface StreamUsage {
+  promptTokens: number;
+  completionTokens: number;
+}
+
 type InvokeResult<T> = { ok: true; value: T } | { ok: false; error: string };
 
 async function invokePi<T>(
@@ -66,6 +72,7 @@ export class PiConversationHarness {
   private scriptedToolCalls: ScriptedToolCall[] = [];
   private scriptedToolCallIndex = 0;
   private textResponse = "mock-ok";
+  private streamUsage: StreamUsage | null = null;
   private readonly requests: unknown[] = [];
 
   constructor(private readonly sessionId: string) {}
@@ -138,12 +145,19 @@ export class PiConversationHarness {
     });
   }
 
-  async restartPi(): Promise<void> {
+  /**
+   * Start Pi against `projectDir`. Specs that care about what Pi assembles
+   * into its prompt (project context files, skills) pass their own directory
+   * so the fixture they seeded is the one Pi reads.
+   */
+  async restartPi(
+    projectDir: string = join(E2E_DATA_DIR, "pi-history-wire"),
+  ): Promise<void> {
     await invokePi("pi_stop", { sessionId: this.sessionId }).catch(() => {});
     await this.clearCaptures();
     await invokePi("pi_start", {
       sessionId: this.sessionId,
-      projectDir: join(E2E_DATA_DIR, "pi-history-wire"),
+      projectDir,
       userToken: null,
       providerConfig: {
         provider: "custom",
@@ -262,6 +276,16 @@ export class PiConversationHarness {
 
   setTextResponse(value: string): void {
     this.textResponse = value;
+  }
+
+  /**
+   * Report token usage on the final stream chunk. Pi sends
+   * `stream_options: { include_usage: true }`, so real providers always answer
+   * with this; it is opt-in here only so existing specs keep their exact wire
+   * shape. Anything reading Pi's authoritative context total needs it.
+   */
+  setStreamUsage(usage: StreamUsage | null): void {
+    this.streamUsage = usage;
   }
 
   async waitForRequestCount(
@@ -474,6 +498,24 @@ export class PiConversationHarness {
             model: "screenpipe-e2e",
             choices: [{ index: 0, delta, finish_reason: finishReason }],
           });
+        // OpenAI emits usage on a trailing choice-less chunk, and Pi reads it
+        // from there to build its authoritative context total.
+        const usageChunk = this.streamUsage
+          ? `data: ${JSON.stringify({
+              id: "chatcmpl-screenpipe-e2e",
+              object: "chat.completion.chunk",
+              created: 1_785_368_640,
+              model: "screenpipe-e2e",
+              choices: [],
+              usage: {
+                prompt_tokens: this.streamUsage.promptTokens,
+                completion_tokens: this.streamUsage.completionTokens,
+                total_tokens:
+                  this.streamUsage.promptTokens +
+                  this.streamUsage.completionTokens,
+              },
+            })}\n\n`
+          : "";
         const scriptedToolCall =
           this.scriptedToolCalls[this.scriptedToolCallIndex] ?? null;
         if (scriptedToolCall) this.scriptedToolCallIndex += 1;
@@ -504,6 +546,7 @@ export class PiConversationHarness {
                   null,
                 )}\n\n` +
                 `data: ${chunk({}, "tool_calls")}\n\n` +
+                usageChunk +
                 "data: [DONE]\n\n",
             );
             return;
@@ -512,6 +555,7 @@ export class PiConversationHarness {
             `data: ${chunk({ role: "assistant", content: "" }, null)}\n\n` +
               `data: ${chunk({ content: this.textResponse }, null)}\n\n` +
               `data: ${chunk({}, "stop")}\n\n` +
+              usageChunk +
               "data: [DONE]\n\n",
           );
         }, this.responseDelayMs);

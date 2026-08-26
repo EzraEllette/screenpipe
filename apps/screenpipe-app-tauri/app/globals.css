@@ -147,8 +147,8 @@
     --shadow-md: 0 4px 10px -2px hsl(0 0% 0% / 0.1);
     --shadow-lg: 0 10px 24px -6px hsl(0 0% 0% / 0.14);
 
-    /* Sharp corners - no radius */
-    --radius: 0;
+    /* Soft industrial surfaces; rails, canvases, and measurement geometry stay sharp. */
+    --radius: 0.5rem;
 
     /* Font size scale — controlled by the font size setting */
     --font-size-base: 16px;

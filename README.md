@@ -50,17 +50,9 @@ https://github.com/user-attachments/assets/70fe94eb-6d2a-47ca-b7c3-c8ead13a5b7f
 
 ---
 
-## news
-
-- 06/10 - **we updated our license to keep screenpipe sustainable** — more funding, more shipping, better product
-- 05/29 - **we released an [alpha version of our AI PII model](https://screenpipe.github.io/screenleak/) outperforming Google, Microsoft, and OpenAI models** on computer recording data and running at 9ms on consumer device
-- 05/14 - **we joined YC S26** 
-
-
-
 ## what is this?
 
-screenpipe turns your computer into a personal AI that knows everything you've done. record. search. automate. all local, all private, all yours
+screenpipe capture all your computer work locally and power your agents
 
 ```
 ┌─────────────────────────────────────────┐
@@ -69,7 +61,7 @@ screenpipe turns your computer into a personal AI that knows everything you've d
 ```
 
 - **remember everything** - never forget what you saw, heard, or did
-- **run agents that work based on what you do** - pipes are agents triggered by your work activity
+- **run agents that work based on what you do** generate agents, skills, and automations based on what you do
 
 <img width="360" height="311" alt="image" src="https://github.com/user-attachments/assets/cfbf0fd3-84ef-4feb-8c6d-2779d67058a7" />
 
@@ -104,6 +96,23 @@ claude mcp add screenpipe -- npx -y screenpipe-mcp@latest
 ```
 
 then ask claude `what did i see in the last 5 mins?` or `summarize today conversations` or `create a pipe that updates linear every time i work on task X`
+
+<details>
+<summary>🤖 CLI-only setup for coding agents</summary>
+
+If Claude Code, Codex, Gemini CLI, Cursor, or another coding agent is working from this repository, give it this instruction:
+
+> Read the [screenpipe CLI skill](crates/screenpipe-core/assets/skills/screenpipe-cli/SKILL.md) before operating screenpipe. Set up always-on local capture, verify capture freshness and storage, then query my history without relying on the desktop app.
+
+To install the screenpipe skills and MCP configuration into every supported agent detected on your computer, run:
+
+```bash
+npx screenpipe setup
+```
+
+The skill covers the recorder-first service default, explicit API-only server mode, human and JSON status, local search, safe read-only SQLite access, pipes, and connections.
+
+</details>
 
 
 ## specs
@@ -147,6 +156,7 @@ Thanks to all contributors:
 - [Deutsch (German)](docs/translations/README-de.md)
 - [Українська (Ukrainian)](docs/translations/README-uk.md)
 - [한국어 (Korean)](docs/translations/README-ko.md)
+- [Русский (Russian)](docs/translations/README-ru.md)
 
 Want to translate screenpipe into another language? See [`docs/translations/`](docs/translations/README.md).
 

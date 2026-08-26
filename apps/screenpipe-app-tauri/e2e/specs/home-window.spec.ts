@@ -8,7 +8,7 @@ import { saveScreenshot } from '../helpers/screenshot-utils.js';
 
 const SECTIONS = [
   { id: 'home', label: 'Home', sectionTestId: 'section-home', urlMatch: /section=home|\/home(\?|$)/ },
-  { id: 'pipes', label: 'Scheduled', sectionTestId: 'section-pipes', urlMatch: /section=pipes/ },
+  { id: 'pipes', label: 'Automations', sectionTestId: 'section-pipes', urlMatch: /section=pipes/ },
   { id: 'timeline', label: 'Timeline', sectionTestId: 'section-timeline', urlMatch: /section=timeline/ },
   { id: 'help', label: 'Help', sectionTestId: 'section-help', urlMatch: /section=help/ },
   // Settings reopens whichever section was last visited

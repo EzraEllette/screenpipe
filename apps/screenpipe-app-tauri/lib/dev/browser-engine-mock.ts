@@ -19,6 +19,25 @@ interface MockCloudAgentConfig {
   context_max_items: number;
 }
 
+const MOCK_NOTIFICATION_ARTIFACT_PATH =
+  "/Users/screenpipe/.screenpipe/pipes/imessage-sync/output/sync-summary.md";
+
+const MOCK_NOTIFICATION_ARTIFACT = {
+  registered: true,
+  id: 4242,
+  source: "imessage-sync",
+  source_type: "pipe",
+  title: "sync-summary.md",
+  kind: "markdown",
+  path: MOCK_NOTIFICATION_ARTIFACT_PATH,
+  original_path: null,
+  size_bytes: 642,
+  preview:
+    "# iMessage Sync\n\n5 conversations stored with no errors. The checkpoint is ready for the next run.",
+  modified_at: "2026-08-26T18:01:54.359Z",
+  created_at: "2026-08-26T18:01:54.359Z",
+};
+
 // The ready fixture starts with Codex already authenticated, matching the
 // normal returning-user state where the CLI session survives app restarts.
 const mockCloudConnections = new Set<MockCloudAgentProvider>(["codex"]);
@@ -180,6 +199,21 @@ export function mockLocalApiResponse(
   if (url.pathname === "/health") {
     return Response.json(createMockHealth(scenario));
   }
+  // Sharing fixtures are synthetic but connected, so the meeting preview can
+  // exercise the same ranked app stack and review dialog as the desktop app.
+  if (url.pathname === "/connections") {
+    return Response.json({
+      data:
+        scenario === "empty"
+          ? []
+          : [
+              { id: "slack", name: "Slack", connected: true },
+              { id: "notion", name: "Notion", connected: true, mcp: true },
+              { id: "linear", name: "Linear", connected: true, mcp: true },
+              { id: "obsidian", name: "Obsidian", connected: true },
+            ],
+    });
+  }
   if (url.pathname === "/audio/device/status") return Response.json([]);
   if (url.pathname === "/vision/device/status") return Response.json([]);
   if (url.pathname === "/raw_sql") {
@@ -231,7 +265,33 @@ export function mockLocalApiResponse(
   }
   if (url.pathname === "/memories") return Response.json(emptyPage);
   if (url.pathname === "/artifacts") {
-    return Response.json({ ...emptyPage, sources: [] });
+    const query = url.searchParams.get("q")?.toLowerCase() ?? "";
+    const requestedId = Number(url.searchParams.get("id") ?? 0);
+    if (query.endsWith("notification-error.md")) {
+      return Response.json(
+        { error: "mock artifact index unavailable" },
+        { status: 503 },
+      );
+    }
+
+    const artifacts =
+      scenario === "empty" ||
+      (requestedId > 0 && requestedId !== MOCK_NOTIFICATION_ARTIFACT.id) ||
+      (query &&
+        ![
+          MOCK_NOTIFICATION_ARTIFACT.title,
+          MOCK_NOTIFICATION_ARTIFACT.path,
+          MOCK_NOTIFICATION_ARTIFACT.preview,
+        ].some((value) => value.toLowerCase().includes(query)))
+        ? []
+        : [MOCK_NOTIFICATION_ARTIFACT];
+    const limit = Number(url.searchParams.get("limit") ?? 100);
+    const offset = Number(url.searchParams.get("offset") ?? 0);
+    return Response.json({
+      data: artifacts.slice(offset, offset + limit),
+      pagination: { limit, offset, total: artifacts.length },
+      sources: scenario === "empty" ? [] : ["imessage-sync"],
+    });
   }
   if (url.pathname === "/pipes/activity") {
     return Response.json({ data: [], has_more: false, next_before_id: null });
@@ -450,6 +510,13 @@ function mockActivitySummary() {
         first_seen: start.toISOString(),
         last_seen: end.toISOString(),
       },
+      {
+        name: "Obsidian",
+        frame_count: 62,
+        minutes: 3,
+        first_seen: start.toISOString(),
+        last_seen: end.toISOString(),
+      },
     ],
     windows: [
       {
@@ -461,10 +528,17 @@ function mockActivitySummary() {
       },
       {
         app_name: "Google Chrome",
-        window_name: "Sample tracker — board",
-        browser_url: "https://example.com/board/sample",
+        window_name: "Sample tracker — Linear",
+        browser_url: "https://linear.app/sample/board",
         minutes: 4,
         frame_count: 120,
+      },
+      {
+        app_name: "Google Chrome",
+        window_name: "Rollout notes — Notion",
+        browser_url: "https://notion.so/sample-rollout-notes",
+        minutes: 3,
+        frame_count: 88,
       },
       {
         app_name: "Cursor",
@@ -479,6 +553,13 @@ function mockActivitySummary() {
         browser_url: "",
         minutes: 2,
         frame_count: 44,
+      },
+      {
+        app_name: "Obsidian",
+        window_name: "sample rollout notes",
+        browser_url: "",
+        minutes: 3,
+        frame_count: 62,
       },
     ],
     edited_files: [
@@ -759,9 +840,24 @@ function installMockFetch(apiPort: number, scenario: BrowserDevScenario) {
           ? input.href
           : input.url;
     const url = new URL(value, document.baseURI);
-    return isLocalEngineUrl(url, apiPort)
-      ? Promise.resolve(mockLocalApiResponse(url, init, scenario))
-      : nativeFetch(input, init);
+    if (!isLocalEngineUrl(url, apiPort)) return nativeFetch(input, init);
+
+    // A deliberate slow lane for visual and interaction testing of the
+    // notification recovery state. It is reachable only through an explicit
+    // browser-dev request and never affects normal fixture traffic.
+    if (
+      url.pathname === "/artifacts" &&
+      url.searchParams.get("q")?.endsWith("notification-loading.md")
+    ) {
+      return new Promise((resolve) => {
+        window.setTimeout(
+          () => resolve(mockLocalApiResponse(url, init, scenario)),
+          15_000,
+        );
+      });
+    }
+
+    return Promise.resolve(mockLocalApiResponse(url, init, scenario));
   };
 }
 

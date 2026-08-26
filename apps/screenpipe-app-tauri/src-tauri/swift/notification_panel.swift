@@ -325,72 +325,58 @@ private struct NativeNotificationFeedbackView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 6) {
-                Text("useful?")
+            if model.saveState == .submitted {
+                Text("feedback sent")
                     .font(Brand.swiftUIMonoFont(size: 9))
-                    .foregroundColor(.primary.opacity(0.34))
-                    .padding(.trailing, 2)
-
-                feedbackButton(systemName: "hand.thumbsup", rating: .up) {
-                    model.rating = .up
-                    model.correction = ""
-                    model.saveState = .submitted
-                    onSubmit(NotificationFeedbackRating.up.rawValue, nil)
-                    scheduleLayoutUpdate()
-                }
-
-                feedbackButton(systemName: "hand.thumbsdown", rating: .down) {
-                    model.rating = .down
-                    model.saveState = .idle
-                    scheduleLayoutUpdate()
-                }
-
-                if model.rating == .up && model.saveState == .submitted {
-                    Text("sent")
-                        .font(Brand.swiftUIMonoFont(size: 9))
-                        .foregroundColor(.primary.opacity(0.4))
-                }
-                Spacer(minLength: 0)
-            }
-
-            if model.rating == .down {
+                    .foregroundColor(.primary.opacity(0.4))
+            } else {
                 HStack(spacing: 6) {
-                    TextField("what should improve?", text: $model.correction)
-                        .textFieldStyle(.plain)
-                        .font(Brand.swiftUIMonoFont(size: 10))
-                        .padding(.horizontal, 8)
-                        .frame(height: 28)
-                        .background(Color(nsColor: .windowBackgroundColor).opacity(0.45))
-                        .overlay(Rectangle().stroke(Color.primary.opacity(0.16), lineWidth: 1))
-                        .onSubmit(sendCorrection)
-                        .onChange(of: model.correction) { value in
-                            if value.count > 500 {
-                                model.correction = String(value.prefix(500))
-                            }
-                            if model.saveState == .submitted {
-                                model.saveState = .idle
-                                scheduleLayoutUpdate()
-                            }
-                        }
-
-                    Button(action: sendCorrection) {
-                        Image(systemName: "paperplane")
-                            .font(.system(size: 11, weight: .regular))
-                            .frame(width: 28, height: 28)
-                            .foregroundColor(correctionReady ? Color(nsColor: .windowBackgroundColor) : .primary.opacity(0.22))
-                            .background(Rectangle().fill(correctionReady ? Color.primary.opacity(0.82) : Color.clear))
-                            .overlay(Rectangle().stroke(Color.primary.opacity(0.16), lineWidth: 1))
+                    feedbackButton(systemName: "hand.thumbsup", rating: .up) {
+                        model.rating = .up
+                        model.correction = ""
+                        model.saveState = .submitted
+                        onSubmit(NotificationFeedbackRating.up.rawValue, nil)
+                        scheduleLayoutUpdate()
                     }
-                    .buttonStyle(.plain)
-                    .disabled(!correctionReady)
-                    .help("send feedback")
-                    .accessibilityLabel("send feedback")
+
+                    feedbackButton(systemName: "hand.thumbsdown", rating: .down) {
+                        model.rating = .down
+                        model.saveState = .idle
+                        scheduleLayoutUpdate()
+                    }
+
+                    Spacer(minLength: 0)
                 }
 
-                if model.saveState == .submitted {
-                    Text("feedback sent")
-                        .font(Brand.swiftUIMonoFont(size: 9))
-                        .foregroundColor(.primary.opacity(0.4))
+                if model.rating == .down {
+                    HStack(spacing: 6) {
+                        TextField("what should improve?", text: $model.correction)
+                            .textFieldStyle(.plain)
+                            .font(Brand.swiftUIMonoFont(size: 10))
+                            .padding(.horizontal, 8)
+                            .frame(height: 28)
+                            .background(Color(nsColor: .windowBackgroundColor).opacity(0.45))
+                            .overlay(Rectangle().stroke(Color.primary.opacity(0.16), lineWidth: 1))
+                            .onSubmit(sendCorrection)
+                            .onChange(of: model.correction) { value in
+                                if value.count > 500 {
+                                    model.correction = String(value.prefix(500))
+                                }
+                            }
+
+                        Button(action: sendCorrection) {
+                            Image(systemName: "paperplane")
+                                .font(.system(size: 11, weight: .regular))
+                                .frame(width: 28, height: 28)
+                                .foregroundColor(correctionReady ? Color(nsColor: .windowBackgroundColor) : .primary.opacity(0.22))
+                                .background(Rectangle().fill(correctionReady ? Color.primary.opacity(0.82) : Color.clear))
+                                .overlay(Rectangle().stroke(Color.primary.opacity(0.16), lineWidth: 1))
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(!correctionReady)
+                        .help("send feedback")
+                        .accessibilityLabel("send feedback")
+                    }
                 }
             }
         }
@@ -404,8 +390,8 @@ private struct NativeNotificationFeedbackView: View {
         let selected = model.rating == rating
         return Button(action: action) {
             Image(systemName: systemName)
-                .font(.system(size: 11, weight: .regular))
-                .frame(width: 24, height: 24)
+                .font(.system(size: 9, weight: .regular))
+                .frame(width: 20, height: 20)
                 .foregroundColor(selected ? Color(nsColor: .windowBackgroundColor) : .primary.opacity(0.42))
                 .background(Rectangle().fill(selected ? Color.primary.opacity(0.82) : Color.clear))
                 .overlay(Rectangle().stroke(Color.primary.opacity(0.12), lineWidth: 1))
@@ -557,7 +543,7 @@ struct NotificationContentView: View {
                 .zIndex(1)
             }
 
-            if payload.type == "pipe" || payload.pipe_name != nil || payload.source_session_id != nil {
+            if isHovered && (payload.type == "pipe" || payload.pipe_name != nil || payload.source_session_id != nil) {
                 NativeNotificationFeedbackView(
                     model: feedback,
                     onSubmit: submitFeedback,

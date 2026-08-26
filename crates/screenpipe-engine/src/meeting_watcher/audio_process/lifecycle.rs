@@ -174,13 +174,13 @@ pub(crate) async fn emit_ended_and_status(
     meeting_id: i64,
     persisted_end: &str,
 ) {
-    if let Err(e) = screenpipe_events::send_event(
-        "meeting_ended",
-        serde_json::json!({
-            "meeting_id": meeting_id,
-            "meeting_end": persisted_end,
-        }),
-    ) {
+    let event_data = crate::meeting_watcher::shared::events::meeting_ended_event_data(
+        db,
+        meeting_id,
+        persisted_end,
+    )
+    .await;
+    if let Err(e) = screenpipe_events::send_event("meeting_ended", event_data) {
         warn!(
             "audio-process meeting detector: failed to emit meeting_ended event: {}",
             e
@@ -259,7 +259,9 @@ pub(crate) async fn apply_state_action(
             pid,
             bundle_id,
         } => {
-            let calendar = resolve_calendar_binding(db, calendar_events, Utc::now()).await;
+            let calendar =
+                resolve_calendar_binding(db, calendar_events, Utc::now(), meeting_url.as_deref())
+                    .await;
             let outcome = start_or_adopt_auto_meeting(
                 db,
                 manual_meeting,

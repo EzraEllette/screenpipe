@@ -12,8 +12,8 @@ import {
   filterMentionSuggestions,
   mentionSuggestionIdentity,
   parseMentions,
+  replaceComposerMentionAtCursor,
   resolvePinnedMentionIndex,
-  COMPOSER_COMMAND_SUGGESTIONS,
   TIME_RANGE_MENTION_SUGGESTIONS,
   type ComposerCommandId,
   type MentionSuggestion as ChatMentionSuggestion,
@@ -534,7 +534,10 @@ export function useChatMentions({
   }, [filteredMentions]);
 
   useEffect(() => {
-    if (!showMentionDropdown || mentionTrigger !== "$") return;
+    if (
+      !showMentionDropdown ||
+      (mentionTrigger !== "$" && mentionTrigger !== "/")
+    ) return;
 
     let cancelled = false;
     void commands
@@ -635,10 +638,10 @@ export function useChatMentions({
   }, [hasConnectionChip, setChipScrollTop, setInput]);
 
   const insertMention = useCallback((tag: string) => {
-    // A `/` entry is an action, not a token. Consume the typed command and run
-    // it, keeping anything the cursor was sitting in front of.
-    const command = COMPOSER_COMMAND_SUGGESTIONS.find(
-      (suggestion) => suggestion.tag === tag,
+    // Action commands consume the typed slash query. Insert commands, including
+    // skills discovered through `/`, replace that query with their normal token.
+    const command = filteredMentions.find(
+      (suggestion) => suggestion.tag === tag && suggestion.commandId,
     );
     if (command?.commandId) {
       const cursorPos = inputRef.current?.selectionStart ?? input.length;
@@ -663,25 +666,29 @@ export function useChatMentions({
     }
 
     const cursorPos = inputRef.current?.selectionStart || input.length;
-    const textBeforeCursor = input.slice(0, cursorPos);
-    const textAfterCursor = input.slice(cursorPos);
-
-    const mentionIndex = Math.max(
-      textBeforeCursor.lastIndexOf("@"),
-      textBeforeCursor.lastIndexOf("#"),
-      textBeforeCursor.lastIndexOf("$"),
-      textBeforeCursor.lastIndexOf("~"),
+    setInput(
+      replaceComposerMentionAtCursor({
+        input,
+        cursorPos,
+        trigger: mentionTrigger,
+        replacement: tag,
+      }),
     );
-    if (mentionIndex !== -1) {
-      const newValue = `${textBeforeCursor.slice(0, mentionIndex)}${tag} ${textAfterCursor}`;
-      setInput(newValue);
-    }
 
     setShowMentionDropdown(false);
     setMentionFilter("");
     setMentionTrigger("@");
     inputRef.current?.focus();
-  }, [input, inputRef, onOpenConversation, onRunCommand, recentChatSuggestions, setInput]);
+  }, [
+    filteredMentions,
+    input,
+    inputRef,
+    mentionTrigger,
+    onOpenConversation,
+    onRunCommand,
+    recentChatSuggestions,
+    setInput,
+  ]);
 
   return {
     showMentionDropdown,

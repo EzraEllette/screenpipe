@@ -35,7 +35,20 @@ const mocks = vi.hoisted(() => ({
   settings: {
     activitiesEnabled: true,
     enhancedAI: true,
-    user: { token: "test-token" },
+    user: {
+      id: "paid-user",
+      token: "test-token",
+      cloud_subscribed: false,
+      app_entitled: true,
+      subscription_plan: "lifetime",
+      entitlement: {
+        active: true,
+        plan: "lifetime",
+        source: "lifetime",
+        checked_at: "2026-08-01T00:00:00.000Z",
+        features: { app: true },
+      },
+    },
     aiPresets: [
       {
         id: "chat",
@@ -115,6 +128,13 @@ vi.mock("@/lib/hooks/use-settings", () => ({
     updateSettings: mocks.updateSettings,
   }),
 }));
+vi.mock("@/lib/hooks/use-is-enterprise-build", () => ({
+  useEnterpriseBuildStatus: () => ({
+    isEnterprise: false,
+    resolved: true,
+    error: false,
+  }),
+}));
 vi.mock("@/lib/hooks/use-timeline-store", () => ({
   useTimelineStore: (selector: (state: unknown) => unknown) =>
     selector({ setPendingNavigation: mocks.setPendingNavigation }),
@@ -159,13 +179,16 @@ vi.mock("@/components/rewind/ai-presets-selector", async () => {
 
 import {
   ActivityLedger,
+  activityCalendarStartDate,
+  activityRangePresets,
   artifactsForHistoryEntry,
   buildActivityLedgerArtifactsPath,
   buildActivityMeetingsPath,
   buildFramePreviewSamplesPath,
   buildActivitySummaryPath,
   canAddRecentActivity,
-  minimumHistoryEntryCount,
+  effectiveActivityRange,
+  isActivityCalendarDateDisabled,
   rangeForPreset,
 } from "@/components/activity-ledger";
 import {
@@ -442,6 +465,31 @@ async function generateActivities(): Promise<void> {
 }
 
 describe("activity history helpers", () => {
+  it("offers only today and 24 hours when activity history is restricted", () => {
+    expect(activityRangePresets(true)).toEqual(["today", "24h"]);
+    expect(activityRangePresets(false)).toEqual([
+      "today",
+      "24h",
+      "7d",
+      "custom",
+    ]);
+  });
+
+  it("limits the restricted activity calendar to yesterday and today", () => {
+    const now = new Date(2026, 7, 24, 12);
+    const twoDaysAgo = new Date(2026, 7, 22, 12);
+    const yesterday = new Date(2026, 7, 23, 12);
+    const today = new Date(2026, 7, 24, 8);
+    const tomorrow = new Date(2026, 7, 25, 8);
+
+    expect(activityCalendarStartDate(now)).toEqual(new Date(2026, 7, 23));
+    expect(isActivityCalendarDateDisabled(twoDaysAgo, true, now)).toBe(true);
+    expect(isActivityCalendarDateDisabled(yesterday, true, now)).toBe(false);
+    expect(isActivityCalendarDateDisabled(today, true, now)).toBe(false);
+    expect(isActivityCalendarDateDisabled(tomorrow, true, now)).toBe(true);
+    expect(isActivityCalendarDateDisabled(twoDaysAgo, false, now)).toBe(false);
+  });
+
   it("keeps the last 24 hours rolling across midnight", () => {
     const anchor = new Date("2026-08-18T08:02:00.000Z");
     const range = rangeForPreset("24h", anchor, "", "");
@@ -449,6 +497,75 @@ describe("activity history helpers", () => {
     expect(range?.start.toISOString()).toBe("2026-08-17T08:02:00.000Z");
     expect(range?.end.toISOString()).toBe("2026-08-18T08:02:00.000Z");
     expect(range!.end.getTime() - range!.start.getTime()).toBe(86_400_000);
+  });
+
+  it("limits free and unattributed activity ranges while preserving paid ranges", () => {
+    const now = new Date("2026-08-24T12:00:00.000Z");
+    const requested = {
+      start: new Date("2026-08-17T12:00:00.000Z"),
+      end: new Date("2026-08-25T12:00:00.000Z"),
+    };
+
+    expect(effectiveActivityRange(requested, null, now)).toEqual({
+      start: new Date("2026-08-23T12:00:00.000Z"),
+      end: now,
+    });
+    expect(
+      effectiveActivityRange(requested, mocks.settings.user as any, now),
+    ).toBe(requested);
+    expect(
+      effectiveActivityRange(
+        requested,
+        {
+          id: "enterprise-user",
+          subscription_plan: "enterprise",
+          app_entitled: true,
+          entitlement: {
+            active: true,
+            plan: "enterprise",
+            checked_at: "2026-08-17T19:00:00.000Z",
+            features: { app: true },
+          },
+          enterprise_account: {
+            org_name: "Acme",
+            role: "member",
+            requires_enterprise_app: true,
+          },
+        } as any,
+        now,
+      ),
+    ).toBe(requested);
+    expect(effectiveActivityRange(requested, null, now, true)).toBe(
+      requested,
+    );
+    expect(
+      effectiveActivityRange(
+        {
+          start: new Date("2026-08-17T12:00:00.000Z"),
+          end: new Date("2026-08-20T12:00:00.000Z"),
+        },
+        undefined,
+        now,
+      ),
+    ).toBeNull();
+  });
+
+  it("does not expand meeting evidence before the restricted access boundary", () => {
+    const accessStart = new Date("2026-08-23T12:00:00.000Z");
+    const meetings = new URL(
+      buildActivityMeetingsPath(
+        {
+          start: accessStart,
+          end: new Date("2026-08-24T12:00:00.000Z"),
+        },
+        accessStart,
+      ),
+      "http://localhost",
+    );
+
+    expect(meetings.searchParams.get("start_time")).toBe(
+      "2026-08-23T12:00:00.000Z",
+    );
   });
 
   it("builds a bounded summary path", () => {
@@ -485,6 +602,7 @@ describe("activity history helpers", () => {
     expect(artifacts.pathname).toBe("/activity-ledger");
     expect(artifacts.searchParams.get("depth")).toBe("task");
     expect(artifacts.searchParams.get("include_artifacts")).toBe("true");
+    expect(artifacts.searchParams.get("refresh")).toBe("false");
   });
 
   it("requires more than 10 uncovered minutes before appending", () => {
@@ -526,14 +644,6 @@ describe("activity history helpers", () => {
         },
       ]),
     ).toBe(true);
-  });
-
-  it("requires enough entries to account for a full day", () => {
-    const start = new Date("2026-08-17T07:00:00Z");
-    const end = new Date("2026-08-18T00:00:00Z");
-    expect(minimumHistoryEntryCount(45, { start, end })).toBe(2);
-    expect(minimumHistoryEntryCount(180, { start, end })).toBe(5);
-    expect(minimumHistoryEntryCount(480, { start, end })).toBe(7);
   });
 
   it("ranks a compact artifact set while preserving a real website", () => {
@@ -725,11 +835,14 @@ describe("activity history helpers", () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(200);
     });
-    await waitFor(() => expect(previewCalls().length).toBeGreaterThanOrEqual(1));
+    await waitFor(() =>
+      expect(previewCalls().length).toBeGreaterThanOrEqual(1),
+    );
     expect(
-      new URL(String(previewCalls()[0][0]), "http://localhost").searchParams.get(
-        "app_name",
-      ),
+      new URL(
+        String(previewCalls()[0][0]),
+        "http://localhost",
+      ).searchParams.get("app_name"),
     ).toBe("Cursor");
     const preview = await screen.findByTestId("activity-artifact-preview");
     expect(within(preview).getAllByText("20 min")[0]).toBeVisible();
@@ -930,7 +1043,7 @@ describe("activity history helpers", () => {
     expect(within(previews[0]).getByText("github.com")).toBeVisible();
   });
 
-  it("shows the complete icon set together before preview loading starts", async () => {
+  it("shows persisted evidence before enriching the complete icon set", async () => {
     const persisted = parseActivityHistoryResponse(HISTORY_RESPONSE, {
       start: new Date("2026-08-17T16:00:00Z"),
       end: new Date("2026-08-17T20:00:00Z"),
@@ -970,10 +1083,18 @@ describe("activity history helpers", () => {
       mocks.localFetch.mock.calls.filter(([path]) =>
         String(path).startsWith("/frames/preview-samples?"),
       );
-    await waitFor(() =>
-      expect(screen.getByTestId("activity-ledger-skeleton")).toBeVisible(),
-    );
-    expect(screen.queryByRole("link", { name: /Open Arc/ })).toBeNull();
+    expect(
+      await screen.findByRole("heading", {
+        name: "Fixed a capture reliability regression",
+      }),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("link", { name: /Open Arc .* in Timeline/ }),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("link", { name: /Open Transcript .* in Timeline/ }),
+    ).toBeVisible();
+    expect(screen.queryByTestId("activity-ledger-skeleton")).toBeNull();
     expect(previewCalls()).toHaveLength(0);
 
     await act(async () => {
@@ -1249,6 +1370,43 @@ describe("activity history helpers", () => {
 });
 
 describe("ActivityLedger", () => {
+  it("keeps artifact icons mounted across unrelated settings refreshes", async () => {
+    const originalUser = mocks.settings.user;
+    const { rerender } = render(<ActivityLedger />);
+    await generateActivities();
+
+    const appArtifact = await screen.findByRole("link", {
+      name: /Open Arc at .* in Timeline/,
+    });
+    await waitFor(() =>
+      expect(appArtifact.querySelector("img")).toHaveAttribute(
+        "src",
+        "http://localhost:11535/app-icon?name=Arc",
+      ),
+    );
+    const appIcon = appArtifact.querySelector("img");
+    const artifactRequestCount = mocks.localFetch.mock.calls.filter(([path]) =>
+      String(path).startsWith("/activity-ledger?"),
+    ).length;
+
+    try {
+      mocks.settings.user = {
+        ...originalUser,
+        entitlement: { ...originalUser.entitlement },
+      };
+      rerender(<ActivityLedger />);
+
+      expect(appArtifact.querySelector("img")).toBe(appIcon);
+      expect(
+        mocks.localFetch.mock.calls.filter(([path]) =>
+          String(path).startsWith("/activity-ledger?"),
+        ),
+      ).toHaveLength(artifactRequestCount);
+    } finally {
+      mocks.settings.user = originalUser;
+    }
+  });
+
   it("shows a completed backend run without refreshing the page", async () => {
     render(<ActivityLedger />);
 
@@ -1447,6 +1605,39 @@ describe("ActivityLedger", () => {
     expect(screen.getByLabelText("AI preset")).toBeVisible();
   });
 
+  it("coerces a restricted persisted 7-day range to 24 hours", async () => {
+    const originalUser = mocks.settings.user;
+    (mocks.settings as any).user = null;
+    window.localStorage.setItem("screenpipe:activity-history:range", "7d");
+
+    try {
+      render(<ActivityLedger />);
+
+      const timeRange = await screen.findByRole("combobox", {
+        name: "Time range: Last 24 hours",
+      });
+      fireEvent.click(timeRange);
+
+      expect(
+        await screen.findByRole("option", { name: "Today" }),
+      ).toBeVisible();
+      expect(
+        screen.getByRole("option", { name: "Last 24 hours" }),
+      ).toBeVisible();
+      expect(
+        screen.queryByRole("option", { name: "Last 7 days" }),
+      ).toBeNull();
+      expect(
+        screen.queryByRole("option", { name: "Custom range" }),
+      ).toBeNull();
+      expect(window.localStorage.getItem("screenpipe:activity-history:range")).toBe(
+        "24h",
+      );
+    } finally {
+      mocks.settings.user = originalUser;
+    }
+  });
+
   it("uses one popover trigger instead of two native custom-date inputs", async () => {
     render(<ActivityLedger />);
 
@@ -1476,20 +1667,6 @@ describe("ActivityLedger", () => {
     fireEvent.click(
       await screen.findByRole("option", { name: "Custom range" }),
     );
-    fireEvent.click(
-      screen.getByRole("button", { name: "Choose custom date range" }),
-    );
-
-    expect(
-      screen.getByRole("button", { name: "Choose custom date range" }),
-    ).toHaveAttribute("aria-expanded", "true");
-    fireEvent.click(screen.getByRole("gridcell", { name: "16", exact: true }));
-    await waitFor(() =>
-      expect(
-        screen.getByRole("button", { name: "Choose custom date range" }),
-      ).toHaveAttribute("aria-expanded", "false"),
-    );
-
     fireEvent.click(
       screen.getByRole("combobox", { name: "Time range: Custom range" }),
     );
@@ -1629,6 +1806,27 @@ describe("ActivityLedger", () => {
     ).toBeNull();
   });
 
+  it("shows a coding agent's own failure instead of a generic one", async () => {
+    mocks.settings.enhancedAI = false;
+    mocks.runDailySummaryWithPi.mockRejectedValue(
+      new Error(
+        "activity_agent_error:authentication required: cursor is not signed in. Open Chat, select this coding-agent preset, and sign in first.",
+      ),
+    );
+
+    render(<ActivityLedger />);
+
+    await generateActivities();
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "authentication required: cursor is not signed in. Open Chat, select this coding-agent preset, and sign in first.",
+    );
+    expect(document.body.textContent).not.toContain("activity_agent_error:");
+    expect(
+      screen.queryByText("History could not be updated. Try again."),
+    ).toBeNull();
+  });
+
   it("shows the exhausted AI preset instead of a generic failure", async () => {
     mocks.settings.enhancedAI = false;
     mocks.runDailySummaryWithPi.mockRejectedValue(
@@ -1690,6 +1888,20 @@ describe("ActivityLedger", () => {
     );
     expect(mocks.runDailySummaryWithPi).not.toHaveBeenCalled();
     expect(screen.getByRole("button", { name: "Try again" })).toBeVisible();
+    expect(mocks.posthogCapture).toHaveBeenCalledWith(
+      "activity_generation_completed",
+      {
+        range: "today",
+        source: "empty_state",
+        outcome: "no_activity",
+        activity_count: 0,
+        data_status: "empty_but_recording",
+      },
+    );
+    expect(mocks.posthogCapture).not.toHaveBeenCalledWith(
+      "activity_generation_failed",
+      expect.anything(),
+    );
   });
 
   it("keeps a slow backend generation running past two minutes", async () => {
@@ -1754,15 +1966,7 @@ describe("ActivityLedger", () => {
   });
 
   it("loads a completed encrypted ledger without regenerating it", async () => {
-    mocks.localFetch.mockImplementation((path: string) =>
-      path.startsWith("/activity-ledger?")
-        ? Promise.resolve({
-            ok: true,
-            status: 200,
-            json: async () => LEDGER_ARTIFACTS_RESPONSE,
-          })
-        : new Promise(() => undefined),
-    );
+    mocks.localFetch.mockImplementation(() => new Promise(() => undefined));
     mocks.loadPersistedActivityHistory.mockImplementation(
       async (_producer: string, range: { start: Date; end: Date }) => ({
         entries: parseActivityHistoryResponse(HISTORY_RESPONSE, range).entries,
@@ -1776,6 +1980,20 @@ describe("ActivityLedger", () => {
     );
 
     render(<ActivityLedger />);
+
+    expect(
+      await screen.findByText("Fixed a capture reliability regression"),
+    ).toBeVisible();
+    expect(mocks.generateActivityHistory).not.toHaveBeenCalled();
+    expect(
+      mocks.localFetch.mock.calls.some(([path]) => {
+        const url = new URL(String(path), "http://localhost");
+        return (
+          url.pathname === "/activity-ledger" &&
+          url.searchParams.get("refresh") === "false"
+        );
+      }),
+    ).toBe(true);
 
     expect(
       await screen.findByRole("heading", {
@@ -1939,6 +2157,30 @@ describe("ActivityLedger", () => {
       await screen.findByRole("heading", { name: "Recovered task 1" }),
     ).toBeVisible();
     expect(mocks.generateActivityHistory).toHaveBeenCalledOnce();
+  });
+
+  it("surfaces and tracks an unrecoverable backend quality failure", async () => {
+    mocks.generateActivityHistory.mockResolvedValue({
+      status: "error",
+      error:
+        "activity_quality_failed:parse_error=false, rejected_entries=1, rejected_evidence=0, entries=4/7, missing_observed_windows=3, missing_meetings=0",
+    });
+
+    render(<ActivityLedger />);
+    await generateActivities();
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Some recorded activity could not be validated. Your existing history was preserved; try again.",
+    );
+    expect(mocks.posthogCapture).toHaveBeenCalledWith(
+      "activity_generation_failed",
+      {
+        range: "today",
+        source: "empty_state",
+        error_kind: "quality_validation",
+      },
+    );
+    expect(mocks.reconcilePersistedActivityHistory).not.toHaveBeenCalled();
   });
 
   it("renders the valid document returned by the backend", async () => {
