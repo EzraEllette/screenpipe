@@ -138,9 +138,9 @@ import {
 import { parsePipeSessionId } from "@/lib/events/types";
 import type { ChatConversation } from "@/lib/hooks/use-settings";
 import {
-  importExternalChatHistory,
-  scanExternalChatHistory,
-} from "@/lib/chat/external-chat-import";
+  startExternalChatSync,
+  type ExternalChatSyncController,
+} from "@/lib/chat/external-chat-sync";
 import type { ExternalChatSource } from "@/lib/chat/external-chat-parser";
 import {
   PIPES_SIDEBAR_COLLAPSED_EVENT,
@@ -170,7 +170,6 @@ const DELETED_PIPE_EXECUTIONS_KEY = "screenpipe:deleted-pipe-executions";
 const RECENTS_SOURCE_FILTER_KEY = "screenpipe:recents-hidden-sources";
 const RECENTS_LAYOUT_KEY = "screenpipe:recents-layout";
 const RECENTS_SORT_KEY = "screenpipe:recents-sort";
-const EXTERNAL_CHAT_SYNC_INTERVAL_MS = 60_000;
 
 type RecentSource = "screenpipe" | ExternalChatSource;
 type RecentLayout = "source" | "list";
@@ -186,9 +185,6 @@ const RECENT_SOURCE_SHORTCUTS = {
   "claude-code": "l",
 } as const satisfies Record<RecentSource, string>;
 const RECENTS_MENU_SHORTCUT_KEYS = ["s", "c", "l", "b", "i", "p", "u"] as const;
-
-let externalChatSyncPromise: Promise<void> | null = null;
-let lastExternalChatSyncAt = 0;
 
 function recentSource(session: SessionRecord): RecentSource {
   return session.importedFrom?.source ?? "screenpipe";
@@ -263,25 +259,6 @@ function readHiddenRecentSources(): Set<RecentSource> {
   } catch {
     return new Set();
   }
-}
-
-function syncExternalChatsIfNeeded(force = false): Promise<void> {
-  const now = Date.now();
-  if (!force && now - lastExternalChatSyncAt < EXTERNAL_CHAT_SYNC_INTERVAL_MS) {
-    return Promise.resolve();
-  }
-  if (externalChatSyncPromise) return externalChatSyncPromise;
-  lastExternalChatSyncAt = now;
-  externalChatSyncPromise = scanExternalChatHistory()
-    .then((scan) => importExternalChatHistory(
-      scan.sources.flatMap((source) => source.candidates),
-      { skipUnchanged: true },
-    ))
-    .then(() => undefined)
-    .finally(() => {
-      externalChatSyncPromise = null;
-    });
-  return externalChatSyncPromise;
 }
 
 interface SidebarPipeExecution {
@@ -613,27 +590,39 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
   }, [actions]);
 
   // Local Codex and Claude histories are part of the chat index, not a
-  // separate import workflow. Sync once when the sidebar mounts and again
-  // when the app regains focus after the user worked in another agent.
+  // separate import workflow. Watch their native transcripts while the app is
+  // open; a bounded focus reconciliation recovers any events the OS dropped.
   useEffect(() => {
-    // Native E2E uses isolated, deterministic chat fixtures. Never scan the
-    // developer machine's real agent history from a test build.
-    if (process.env.NEXT_PUBLIC_SCREENPIPE_E2E === "true") return;
     let cancelled = false;
-    const sync = async () => {
+    let controller: ExternalChatSyncController | null = null;
+    const hydrate = async () => {
+      const metas = await listConversations({ includeHidden: true });
+      if (!cancelled) actions.hydrateFromDisk(metas.map(sessionRecordFromMeta));
+    };
+    const start = async () => {
       try {
-        await syncExternalChatsIfNeeded();
-        const metas = await listConversations({ includeHidden: true });
-        if (!cancelled) actions.hydrateFromDisk(metas.map(sessionRecordFromMeta));
+        const nextController = await startExternalChatSync();
+        if (cancelled) {
+          nextController.stop();
+          return;
+        }
+        controller = nextController;
+        await hydrate();
       } catch (error) {
         console.warn("[chat-sidebar] external chat sync failed", error);
       }
     };
-    void sync();
-    const onFocus = () => void sync();
+    void start();
+    const onFocus = () => {
+      if (!controller) return;
+      void controller.syncNow().then(hydrate).catch((error) => {
+        console.warn("[chat-sidebar] external chat reconciliation failed", error);
+      });
+    };
     window.addEventListener("focus", onFocus);
     return () => {
       cancelled = true;
+      controller?.stop();
       window.removeEventListener("focus", onFocus);
     };
   }, [actions]);

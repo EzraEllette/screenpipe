@@ -65,6 +65,7 @@ export const E2E_DATA_DIR = resolve(
   process.env.SCREENPIPE_E2E_DATA_DIR ??
     resolve(homedir(), '.screenpipe', '.e2e'),
 );
+export const E2E_EXTERNAL_CHAT_HOME = resolve(E2E_DATA_DIR, 'external-chat-home');
 const APP_PID_FILE = resolve(E2E_DATA_DIR, 'app.pid');
 
 // `onboarding` marks the onboarding store complete so the app drops straight
@@ -297,6 +298,15 @@ export async function startApp(port = WEBDRIVER_PORT): Promise<ReturnType<typeof
     retryDelay: 250,
   });
   mkdirSync(E2E_DATA_DIR, { recursive: true });
+  // The frontend's external-chat watcher must never inspect the developer's
+  // real home in an E2E build. Empty provider roots let any spec opt into
+  // realistic JSONL create/append behavior inside the isolated data tree.
+  mkdirSync(resolve(E2E_EXTERNAL_CHAT_HOME, '.claude', 'projects'), {
+    recursive: true,
+  });
+  mkdirSync(resolve(E2E_EXTERNAL_CHAT_HOME, '.codex', 'sessions'), {
+    recursive: true,
+  });
   removeSpotlightExclusion(E2E_DATA_DIR);
 
   if (backgroundAiToolsEnabled) {
@@ -342,6 +352,7 @@ export async function startApp(port = WEBDRIVER_PORT): Promise<ReturnType<typeof
     env: {
       ...process.env,
       SCREENPIPE_DATA_DIR: E2E_DATA_DIR,
+      SCREENPIPE_E2E_EXTERNAL_CHAT_HOME: E2E_EXTERNAL_CHAT_HOME,
       SCREENPIPE_E2E_SEED: E2E_SEED_FLAGS,
       SCREENPIPE_FOCUS_PORT: String(FOCUS_PORT),
       SCREENPIPE_PORT: String(LOCAL_API_PORT),
