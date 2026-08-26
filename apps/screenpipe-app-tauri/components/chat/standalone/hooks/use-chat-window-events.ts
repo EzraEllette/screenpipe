@@ -343,6 +343,7 @@ export function useChatConversationRoutingEvents({
 }
 
 interface UseChatE2EGlobalsOptions {
+  openFilePreview: (path: string) => void;
   setMessages: React.Dispatch<React.SetStateAction<Message[]>>;
   setConversationId: React.Dispatch<React.SetStateAction<string | null>>;
   piSessionIdRef: React.MutableRefObject<string>;
@@ -359,6 +360,7 @@ interface UseChatE2EGlobalsOptions {
 }
 
 export function useChatE2EGlobals({
+  openFilePreview,
   setMessages,
   setConversationId,
   piSessionIdRef,
@@ -503,6 +505,12 @@ export function useChatE2EGlobals({
     };
 
     (window as unknown as {
+      __e2eOpenFilePreview?: (path: string) => void;
+    }).__e2eOpenFilePreview = (path: string) => {
+      openFilePreview(path);
+    };
+
+    (window as unknown as {
       __e2eReadActiveTurn?: () => {
         sessionId: string;
         assistantMessageId: string | null;
@@ -594,6 +602,7 @@ export function useChatE2EGlobals({
     return () => {
       delete (window as unknown as { __e2eSeedUserMessage?: unknown }).__e2eSeedUserMessage;
       delete (window as unknown as { __e2eSeedAssistantMessage?: unknown }).__e2eSeedAssistantMessage;
+      delete (window as unknown as { __e2eOpenFilePreview?: unknown }).__e2eOpenFilePreview;
       delete (window as unknown as { __e2eReadActiveTurn?: unknown }).__e2eReadActiveTurn;
       delete (window as unknown as { __e2eLatchActiveSend?: unknown }).__e2eLatchActiveSend;
       delete (window as unknown as { __e2eLatchPreflightSend?: unknown }).__e2eLatchPreflightSend;
@@ -601,6 +610,7 @@ export function useChatE2EGlobals({
     };
   }, [
     forceQueueModeRef,
+    openFilePreview,
     sendDispatchInFlightRef,
     piContentBlocksRef,
     piMessageIdRef,

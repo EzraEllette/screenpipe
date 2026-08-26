@@ -22,6 +22,7 @@ import process from "node:process";
 const HERE = dirname(new URL(import.meta.url).pathname);
 let REPO = resolve(HERE, "../..");
 let MANIFEST = join(HERE, "cases.json");
+let EXTRACTION_SOURCE;
 const MAX_BUFFER = 64 * 1024 * 1024;
 
 function parseArgs(argv) {
@@ -147,11 +148,31 @@ function validateCase(evalCase) {
   }
 }
 
+function extractionSource() {
+  if (EXTRACTION_SOURCE) return EXTRACTION_SOURCE;
+
+  const promisor = command("git", [
+    "config",
+    "--bool",
+    "--get",
+    "remote.origin.promisor",
+  ]);
+  if (promisor.status !== 0 || promisor.stdout.trim() !== "true") {
+    EXTRACTION_SOURCE = REPO;
+    return EXTRACTION_SOURCE;
+  }
+
+  const origin = command("git", ["remote", "get-url", "origin"]);
+  EXTRACTION_SOURCE =
+    origin.status === 0 && origin.stdout.trim() ? origin.stdout.trim() : REPO;
+  return EXTRACTION_SOURCE;
+}
+
 function extractBase(evalCase, workspace) {
   const baseSha = mustRun("git", ["rev-parse", `${evalCase.base_ref}^{commit}`]).stdout.trim();
   mustRun("git", ["init", "-q"], { cwd: workspace });
   const isolatedEnv = { ...process.env, GIT_LFS_SKIP_SMUDGE: "1" };
-  mustRun("git", ["fetch", "-q", "--depth=1", "--no-tags", REPO, baseSha], {
+  mustRun("git", ["fetch", "-q", "--depth=1", "--no-tags", extractionSource(), baseSha], {
     cwd: workspace,
     env: isolatedEnv,
     timeout: 180_000,

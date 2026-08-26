@@ -549,6 +549,8 @@ const E2E_COMMANDS: &[&str] = &[
     "recording_health_return_race",
     "owned_browser_visible",
     "owned_browser_detach",
+    "owned_browser_tab_control",
+    "owned_browser_tab_snapshot",
     "inject_db_hard_fault",
     "db_hard_fault_state",
     "seed_flags",

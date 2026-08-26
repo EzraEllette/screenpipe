@@ -190,6 +190,14 @@ export interface SessionRecord {
 interface ChatStoreState {
   /** All known sessions, keyed by id. Includes both alive and on-disk-only. */
   sessions: Record<string, SessionRecord>;
+  /** Small, in-memory working set rendered as chat tabs. The sidebar remains
+   *  the durable index of every conversation; closing a tab only removes its
+   *  id from this list and never archives, deletes, or stops the session. */
+  openChatIds: string[];
+  /** Optional second conversation rendered beside the active composer.
+   *  Selecting it promotes it to the primary pane and keeps the previous
+   *  primary visible here, so only one component owns global agent events. */
+  splitChatId: string | null;
   /** True once the initial `~/.screenpipe/chats` scan has finished. */
   diskHydrated: boolean;
   /** Currently FOCUSED session — i.e. the chat the user is actively
@@ -224,6 +232,16 @@ interface ChatStoreActions {
    *  switches; used to re-highlight the sidebar row when the user
    *  navigates back to home. */
   setPanelSession: (id: string | null) => void;
+  /** Add a conversation to the visible tab working set. */
+  openChat: (id: string) => void;
+  /** Remove a tab without mutating or stopping its conversation. */
+  closeChat: (id: string) => void;
+  /** Keep only the named tab in the working set. */
+  closeOtherChats: (id: string) => void;
+  /** Close every tab after the named tab. */
+  closeChatsToRight: (id: string) => void;
+  /** Show a second live transcript, or close the split with null. */
+  setSplitChat: (id: string | null) => void;
   /** Toggle the pinned state. */
   togglePinned: (id: string) => void;
 
@@ -246,7 +264,7 @@ interface ChatStoreActions {
   patchMessage: (
     id: string,
     messageId: string,
-    patcher: (m: StoredMessage) => StoredMessage
+    patcher: (m: StoredMessage) => StoredMessage,
   ) => void;
   /** Replace the streaming-state triplet (text / message id / blocks).
    *  Pass undefined for any field you don't want to overwrite. */
@@ -258,7 +276,7 @@ interface ChatStoreActions {
       contentBlocks: StoredContentBlock[];
       isLoading: boolean;
       isStreaming: boolean;
-    }>
+    }>,
   ) => void;
   /** Atomic "begin a new turn" — clears streamingText / contentBlocks /
    *  streamingMessageId and flips isLoading + isStreaming to true. The
@@ -290,7 +308,7 @@ interface ChatStoreActions {
       contentBlocks: StoredContentBlock[];
       isStreaming: boolean;
       isLoading: boolean;
-    }
+    },
   ) => void;
   /** Write (or clear) the composer draft for a session. Pass
    *  `undefined` to drop the draft entirely (e.g. on successful send). */
@@ -345,7 +363,10 @@ export interface ChatSessionActivityPayload {
  * test.
  */
 export function applyChatSessionActivity(
-  store: Pick<ChatStore, "sessions" | "currentId" | "panelSessionId" | "actions">,
+  store: Pick<
+    ChatStore,
+    "sessions" | "currentId" | "panelSessionId" | "actions"
+  >,
   payload: ChatSessionActivityPayload | undefined,
   now: number = Date.now(),
 ): void {
@@ -370,7 +391,8 @@ export function applyChatSessionActivity(
     existing.status === nextStatus &&
     existing.lastError === nextLastError &&
     existing.updatedAt === updatedAt
-  ) return;
+  )
+    return;
   store.actions.patch(id, {
     title: nextTitle,
     preview: nextPreview,
@@ -411,6 +433,8 @@ export function getPersistedViewedAt(
 
 export const useChatStore = create<ChatStore>((set) => ({
   sessions: {},
+  openChatIds: [],
+  splitChatId: null,
   diskHydrated: false,
   currentId: null,
   panelSessionId: null,
@@ -443,14 +467,14 @@ export const useChatStore = create<ChatStore>((set) => ({
             draft: r.messageCount > 0 ? undefined : (r.draft ?? existing.draft),
             // updatedAt: take the larger so memory doesn't get clobbered
             updatedAt: Math.max(existing.updatedAt, r.updatedAt),
-            lastUserMessageAt: Math.max(
-              existing.lastUserMessageAt ?? 0,
-              r.lastUserMessageAt ?? 0,
-            ) || undefined,
-            lastContentAt: Math.max(
-              existing.lastContentAt ?? 0,
-              r.lastContentAt ?? 0,
-            ) || undefined,
+            lastUserMessageAt:
+              Math.max(
+                existing.lastUserMessageAt ?? 0,
+                r.lastUserMessageAt ?? 0,
+              ) || undefined,
+            lastContentAt:
+              Math.max(existing.lastContentAt ?? 0, r.lastContentAt ?? 0) ||
+              undefined,
             // lastViewedAt: 0 is the "never viewed" sentinel, so it must NOT
             // be collapsed to undefined — that would force restoreUnread onto
             // its fallback instead of computing the real (unread) state.
@@ -505,11 +529,13 @@ export const useChatStore = create<ChatStore>((set) => ({
 
     drop: (id) =>
       set((s) => {
-        if (!(id in s.sessions)) return {};
+        if (!(id in s.sessions) && !s.openChatIds.includes(id)) return {};
         const next = { ...s.sessions };
         delete next[id];
         return {
           sessions: next,
+          openChatIds: s.openChatIds.filter((openId) => openId !== id),
+          splitChatId: s.splitChatId === id ? null : s.splitChatId,
           currentId: s.currentId === id ? null : s.currentId,
         };
       }),
@@ -517,22 +543,73 @@ export const useChatStore = create<ChatStore>((set) => ({
     setCurrent: (id) =>
       set((s) => {
         const viewedAt = Date.now();
+        const openChatIds =
+          id && !s.openChatIds.includes(id)
+            ? [...s.openChatIds, id]
+            : s.openChatIds;
         // Viewing a session counts as reading it — lastViewedAt >= any
         // lastContentAt means isUnread() returns false. Same atomic update
         // so the row's unread state can't transiently flicker.
         if (id && s.sessions[id]) {
           return {
             currentId: id,
+            openChatIds,
             sessions: {
               ...s.sessions,
-              [id]: { ...s.sessions[id], unread: false, lastViewedAt: viewedAt },
+              [id]: {
+                ...s.sessions[id],
+                unread: false,
+                lastViewedAt: viewedAt,
+              },
             },
           };
         }
-        return { currentId: id };
+        return { currentId: id, openChatIds };
       }),
 
     setPanelSession: (id) => set({ panelSessionId: id }),
+
+    openChat: (id) =>
+      set((s) =>
+        s.openChatIds.includes(id)
+          ? {}
+          : { openChatIds: [...s.openChatIds, id] },
+      ),
+
+    closeChat: (id) =>
+      set((s) => ({
+        openChatIds: s.openChatIds.filter((openId) => openId !== id),
+        splitChatId: s.splitChatId === id ? null : s.splitChatId,
+      })),
+
+    closeOtherChats: (id) =>
+      set((s) => ({
+        openChatIds: s.openChatIds.includes(id) ? [id] : s.openChatIds,
+        splitChatId: null,
+      })),
+
+    closeChatsToRight: (id) =>
+      set((s) => {
+        const index = s.openChatIds.indexOf(id);
+        if (index === -1) return {};
+        const openChatIds = s.openChatIds.slice(0, index + 1);
+        return {
+          openChatIds,
+          splitChatId:
+            s.splitChatId && !openChatIds.includes(s.splitChatId)
+              ? null
+              : s.splitChatId,
+        };
+      }),
+
+    setSplitChat: (id) =>
+      set((s) => ({
+        splitChatId: id,
+        openChatIds:
+          id && !s.openChatIds.includes(id)
+            ? [...s.openChatIds, id]
+            : s.openChatIds,
+      })),
 
     togglePinned: (id) =>
       set((s) => {
@@ -704,7 +781,9 @@ export const useChatStore = create<ChatStore>((set) => ({
         const existingMsgs = (existing.messages as unknown[]) ?? [];
         const incomingMsgs = snapshot.messages ?? [];
         const messages =
-          incomingMsgs.length >= existingMsgs.length ? incomingMsgs : existingMsgs;
+          incomingMsgs.length >= existingMsgs.length
+            ? incomingMsgs
+            : existingMsgs;
         // Guard: never let a stale React closure re-enable streaming that
         // endTurn() already cleared. endTurn writes synchronously into
         // Zustand, but setIsStreaming/setIsLoading are async React state
@@ -880,7 +959,8 @@ export function getOrCreateEmptyChatId(): { id: string; isNew: boolean } {
   const panelId = state.panelSessionId;
   if (panelId) {
     const panel = state.sessions[panelId];
-    if (panel && isReusableBlankChatSession(panel)) return { id: panelId, isNew: false };
+    if (panel && isReusableBlankChatSession(panel))
+      return { id: panelId, isNew: false };
   }
 
   // Otherwise any other blank chat, newest first by createdAt.
@@ -995,13 +1075,17 @@ function sessionIsBetterDuplicate(a: SessionRecord, b: SessionRecord): boolean {
   const bReply = messagesHaveCompletedReply(b.messages);
   if (aReply !== bReply) return aReply;
   if (a.messageCount !== b.messageCount) return a.messageCount > b.messageCount;
-  return (a.lastUserMessageAt ?? a.updatedAt) > (b.lastUserMessageAt ?? b.updatedAt);
+  return (
+    (a.lastUserMessageAt ?? a.updatedAt) > (b.lastUserMessageAt ?? b.updatedAt)
+  );
 }
 
 /** Collapse store sessions that are the same conversation persisted under two
  *  ids (cross-window save race). Order-preserving; keeps the more complete
  *  copy. Pure — unit-testable in isolation. */
-export function dedupeSessionRecords(records: SessionRecord[]): SessionRecord[] {
+export function dedupeSessionRecords(
+  records: SessionRecord[],
+): SessionRecord[] {
   const kept: SessionRecord[] = [];
   const indicesByKey = new Map<string, number[]>();
   for (const rec of records) {
@@ -1029,7 +1113,8 @@ export function dedupeSessionRecords(records: SessionRecord[]): SessionRecord[] 
       }
     }
     if (mergeIndex >= 0) {
-      if (sessionIsBetterDuplicate(rec, kept[mergeIndex])) kept[mergeIndex] = rec;
+      if (sessionIsBetterDuplicate(rec, kept[mergeIndex]))
+        kept[mergeIndex] = rec;
       continue;
     }
     kept.push(rec);
@@ -1058,14 +1143,18 @@ export function isEmptyChatShell(s: SessionRecord): boolean {
   return !s.lastUserMessageAt;
 }
 
-export function selectOrderedSessions(state: ChatSessionsState): SessionRecord[] {
+export function selectOrderedSessions(
+  state: ChatSessionsState,
+): SessionRecord[] {
   const all = dedupeSessionRecords(Object.values(state.sessions));
   const pinned = all.filter((s) => s.pinned).sort(compareForSidebar);
   const recents = all.filter((s) => !s.pinned).sort(compareForSidebar);
   return [...pinned, ...recents];
 }
 
-export function selectRecentSwitcherSessions(state: ChatSessionsState): SessionRecord[] {
+export function selectRecentSwitcherSessions(
+  state: ChatSessionsState,
+): SessionRecord[] {
   const ordered = selectOrderedSessions(state);
   const isEligibleSwitcherSession = (session: SessionRecord) =>
     !session.hidden &&
@@ -1074,7 +1163,9 @@ export function selectRecentSwitcherSessions(state: ChatSessionsState): SessionR
     session.kind !== "pipe-watch" &&
     session.kind !== "pipe-run";
   return ordered
-    .filter((session) => isEligibleSwitcherSession(session) && session.lastViewedAt)
+    .filter(
+      (session) => isEligibleSwitcherSession(session) && session.lastViewedAt,
+    )
     .sort((a, b) => (b.lastViewedAt ?? 0) - (a.lastViewedAt ?? 0));
 }
 

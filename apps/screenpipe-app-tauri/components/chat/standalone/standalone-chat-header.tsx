@@ -16,6 +16,7 @@ import { resolveVisibleChatTitle } from "@/lib/chat/conversation-title";
 
 interface StandaloneChatHeaderProps {
   className?: string;
+  tabStrip?: React.ReactNode;
   rightActions?: React.ReactNode;
   conversationId: string | null;
   messages: Message[];
@@ -46,6 +47,7 @@ interface StandaloneChatHeaderProps {
 
 export function StandaloneChatHeader({
   className,
+  tabStrip,
   rightActions,
   conversationId,
   messages,
@@ -84,6 +86,7 @@ export function StandaloneChatHeader({
   // the row entirely instead of leaving a bordered band of dead space.
   const isEmpty =
     Boolean(hideInlineHistory) &&
+    !tabStrip &&
     !(conversationId && visibleTitle) &&
     !hasRightActions;
 
@@ -133,14 +136,16 @@ export function StandaloneChatHeader({
           <History size={14} />
         </Button>
       )}
+      {tabStrip}
       <ChatTitleMenu
         conversationId={conversationId}
         messages={messages}
         pendingUserText={pendingUserText}
         renameConversation={renameConversation}
         archiveConversation={archiveConversation}
+        compact={Boolean(tabStrip)}
       />
-      <div className="flex-1" />
+      {!tabStrip ? <div className="flex-1" /> : null}
       {!hideInlineHistory && (
         <>
           <Button

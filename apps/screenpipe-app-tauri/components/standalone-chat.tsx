@@ -35,6 +35,8 @@ import { useIsFullscreen } from "@/lib/hooks/use-is-fullscreen";
 import { useChatFilePreview } from "@/lib/hooks/use-chat-file-preview";
 import { useChatInspector } from "@/lib/hooks/use-chat-inspector";
 import { ChatInspectorPopover } from "@/components/chat/chat-inspector";
+import { ChatSplitPane } from "@/components/chat/chat-split-pane";
+import { ChatTabStrip } from "@/components/chat/chat-tab-strip";
 import { useSqlAutocomplete, useTagAutocomplete } from "@/lib/hooks/use-sql-autocomplete";
 import { loadConversationFile } from "@/lib/chat-storage";
 import {
@@ -694,6 +696,7 @@ export function StandaloneChat({
   const [conversationId, setConversationId] = useState<string | null>(
     initialSessionIdRef.current,
   );
+  const splitChatId = useChatStore((state) => state.splitChatId);
 
   // Single source of truth for the active chat id (#4719). The panel mints
   // `initialSessionIdRef` and seeds `conversationId` / `piSessionIdRef` from
@@ -739,17 +742,22 @@ export function StandaloneChat({
     consumePendingAttachments,
     stagePendingAttachments,
   } = useNextTurnAttachments(conversationId);
-  const { filePreview, openFilePreview, closeFilePreview } =
-    useChatFilePreview(conversationId);
+  const {
+    filePreview,
+    openFilePreview,
+    closeFilePreview,
+    selectFilePreview,
+    setFilePreviewPanelOpen,
+  } = useChatFilePreview(conversationId);
   const { inspectorOpen, setInspectorOpen, outputs: inspectorOutputs, sources: inspectorSources } =
     useChatInspector(messages, pipeRunArtifactSource);
   const [browserPanelState, setBrowserPanelState] = useState({
     hasUrl: false,
     open: false,
   });
-  const filePreviewOpen = filePreview?.visible === true && !!filePreview.path;
-  const sidePanelHasContent = filePreviewOpen || browserPanelState.hasUrl;
-  const sidePanelOpen = filePreviewOpen || browserPanelState.open;
+  const sidePanelHasContent =
+    (filePreview?.paths.length ?? 0) > 0 || browserPanelState.hasUrl;
+  const sidePanelOpen = browserPanelState.open;
   const inspectorHasContent =
     inspectorOutputs.length > 0 ||
     inspectorSources.length > 0;
@@ -763,18 +771,14 @@ export function StandaloneChat({
   }, [inspectorOpen, setInspectorOpen]);
 
   const toggleBrowserPanel = useCallback(() => {
-    if (filePreviewOpen) {
-      closeFilePreview();
-      return;
-    }
-    if (browserPanelState.hasUrl) {
+    if (sidePanelHasContent) {
       window.dispatchEvent(
         new CustomEvent("screenpipe:browser-sidebar-toggle", {
           detail: { action: "toggle" },
         }),
       );
     }
-  }, [browserPanelState.hasUrl, closeFilePreview, filePreviewOpen]);
+  }, [sidePanelHasContent]);
 
   const handlePanelStateChange = useCallback(
     (nextState: { hasUrl: boolean; open: boolean }) => {
@@ -951,6 +955,7 @@ export function StandaloneChat({
     openFilePreview,
   });
   useChatE2EGlobals({
+    openFilePreview,
     setMessages,
     setConversationId,
     piSessionIdRef,
@@ -1987,10 +1992,40 @@ export function StandaloneChat({
     void commands.piAcpReauthenticate(currentQueueSessionId).catch(() => {});
   }, [currentQueueSessionId]);
 
+  const activateChatTab = useCallback(
+    async (id: string) => {
+      const store = useChatStore.getState();
+      // Promoting the secondary pane swaps the former primary into its place,
+      // keeping both transcripts visible while the single composer changes
+      // ownership cleanly.
+      if (store.splitChatId === id && conversationId && conversationId !== id) {
+        store.actions.setSplitChat(conversationId);
+      }
+      store.actions.setCurrent(id);
+      await emit("chat-load-conversation", {
+        conversationId: id,
+        targetWindow: "home",
+      });
+    },
+    [conversationId],
+  );
+
   return (
     <div ref={dropRootRef} className={cn("flex flex-col bg-background", className ?? "h-screen")} data-testid="section-home">
       <StandaloneChatHeader
         className={className}
+        tabStrip={
+          hideInlineHistory ? (
+            <ChatTabStrip
+              activeId={conversationId}
+              onActivate={activateChatTab}
+              onNewChat={async () => {
+                piStoppedIntentionallyRef.current = true;
+                await startNewConversation();
+              }}
+            />
+          ) : undefined
+        }
         conversationId={conversationId}
         messages={messages}
         pendingUserText={pendingSend?.text ?? null}
@@ -1999,7 +2034,7 @@ export function StandaloneChat({
         isFullscreen={isFullscreen}
         hideInlineHistory={hideInlineHistory}
         hasRightActions={
-          inspectorHasContent || inspectorOpen || sidePanelHasContent
+          hideInlineHistory || inspectorHasContent || inspectorOpen || sidePanelHasContent
         }
         showHistory={showHistory}
         settings={settings}
@@ -2014,21 +2049,27 @@ export function StandaloneChat({
         }}
         rightActions={
           <div className="relative z-10 flex items-center gap-1">
-            {sidePanelHasContent ? (
+            {hideInlineHistory ? (
               <Button
                 variant="ghost"
                 size="icon"
                 onMouseDown={(e) => e.stopPropagation()}
                 onClick={(e) => {
                   e.stopPropagation();
-                  toggleBrowserPanel();
+                  if (sidePanelHasContent) {
+                    toggleBrowserPanel();
+                  } else {
+                    window.dispatchEvent(
+                      new CustomEvent("screenpipe:browser-sidebar-new-tab"),
+                    );
+                  }
                 }}
                 className={cn(
                   "h-7 w-7",
                   sidePanelOpen && "bg-muted ring-2 ring-primary ring-offset-1 ring-offset-background",
                 )}
-                title="Toggle side panel"
-                aria-label="Toggle side panel"
+                title={sidePanelHasContent ? "Toggle side panel" : "Open browser tab"}
+                aria-label={sidePanelHasContent ? "Toggle side panel" : "Open browser tab"}
                 aria-pressed={sidePanelOpen}
               >
                 {sidePanelOpen ? (
@@ -2284,18 +2325,32 @@ export function StandaloneChat({
       />
       </div> {/* End of chat column */}
 
+      {splitChatId && splitChatId !== conversationId ? (
+        <ChatSplitPane
+          sessionId={splitChatId}
+          onPromote={activateChatTab}
+          onClose={() => useChatStore.getState().actions.setSplitChat(null)}
+        />
+      ) : null}
+
       {/* Agent-controlled embedded browser. Slides in from the right when
           the agent navigates (or when restoring a chat that has saved
           state). The actual page is rendered by a Tauri WebviewWindow
           positioned over the placeholder div inside this component. */}
       <BrowserSidebar
         conversationId={conversationId}
+        additionalReservedWidth={
+          splitChatId && splitChatId !== conversationId ? 320 : 0
+        }
         // Session id the agent process runs under (the value tagged as the
         // navigation `owner` via x-screenpipe-session). Lets the sidebar reveal
         // this chat's own agent navigations even if `conversationId` state lags.
         agentSessionId={piSessionIdRef.current}
         filePreview={filePreview}
         onReplaceFilePreviewPath={openFilePreview}
+        onCloseFilePreviewPath={closeFilePreview}
+        onSelectFilePreviewPath={selectFilePreview}
+        onSetPanelOpen={setFilePreviewPanelOpen}
         onPanelStateChange={handlePanelStateChange}
       />
       </div> {/* End of horizontal chat+browser split */}

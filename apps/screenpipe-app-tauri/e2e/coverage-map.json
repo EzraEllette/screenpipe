@@ -660,7 +660,8 @@
       ],
       "layers": [
         "chat-ai",
-        "real-ui-e2e"
+        "tauri-command",
+        "window-lifecycle"
       ],
       "features": [
         "chat",
@@ -1208,6 +1209,68 @@
       "confidence": "partial",
       "ux": "synthetic",
       "notes": "Listener-order regression for metadata-only sidebar stubs gaining dedup keys."
+    },
+    {
+      "spec": "chat-right-panel-tabs.spec.ts",
+      "platforms": [
+        "windows",
+        "macos",
+        "linux"
+      ],
+      "layers": [
+        "chat-ai",
+        "real-ui-e2e"
+      ],
+      "features": [
+        "chat",
+        "right-panel-tabs",
+        "file-preview"
+      ],
+      "criticality": "medium",
+      "confidence": "strong",
+      "ux": "real-user-flow",
+      "notes": "Multiple file previews stay open in the chat right panel, preserve selection across hide and show, and close with predictable focus fallback."
+    },
+    {
+      "spec": "chat-workspace-tabs.spec.ts",
+      "platforms": [
+        "windows",
+        "macos",
+        "linux"
+      ],
+      "layers": [
+        "chat-ai",
+        "real-ui-e2e"
+      ],
+      "features": [
+        "chat",
+        "chat-tabs",
+        "chat-split-pane"
+      ],
+      "criticality": "high",
+      "confidence": "strong",
+      "ux": "real-user-flow",
+      "notes": "Multiple chats remain in a non-destructive working set, a second live transcript stays visible, and promoting it swaps primary composer ownership."
+    },
+    {
+      "spec": "owned-browser-tabs.spec.ts",
+      "platforms": [
+        "windows",
+        "macos"
+      ],
+      "layers": [
+        "chat-ai",
+        "real-ui-e2e"
+      ],
+      "features": [
+        "owned-browser",
+        "right-panel-tabs",
+        "native-child-webviews"
+      ],
+      "criticality": "high",
+      "confidence": "strong",
+      "ux": "command",
+      "notes": "A surviving app window drives two native child webviews after the home automation context is replaced, then verifies retained per-tab URLs and close cleanup through the E2E harness."
     },
     {
       "spec": "chat-source-file-preview.spec.ts",

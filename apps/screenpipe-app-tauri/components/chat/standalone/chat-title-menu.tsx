@@ -22,6 +22,8 @@ interface ChatTitleMenuProps {
   pendingUserText?: string | null;
   renameConversation: (id: string, title: string) => Promise<void> | void;
   archiveConversation: (id: string) => Promise<void> | void;
+  /** Tabs already show the title; render only the actions affordance. */
+  compact?: boolean;
 }
 
 export function ChatTitleMenu({
@@ -30,6 +32,7 @@ export function ChatTitleMenu({
   pendingUserText,
   renameConversation,
   archiveConversation,
+  compact = false,
 }: ChatTitleMenuProps) {
   const [open, setOpen] = useState(false);
   const [renaming, setRenaming] = useState(false);
@@ -130,9 +133,11 @@ export function ChatTitleMenu({
 
   return (
     <div className="relative z-10 flex min-w-0 max-w-[320px] items-center gap-1.5">
-      <span data-testid="chat-title" className="truncate text-xs font-medium text-foreground">
-        {title}
-      </span>
+      {!compact ? (
+        <span data-testid="chat-title" className="truncate text-xs font-medium text-foreground">
+          {title}
+        </span>
+      ) : null}
       <Popover open={open} onOpenChange={setOpen}>
         <PopoverTrigger asChild>
           <button

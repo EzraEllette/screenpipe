@@ -29,10 +29,42 @@ import { conversationDedupIdentity } from "../chat-dedup";
 function reset() {
   useChatStore.setState({
     sessions: {},
+    openChatIds: [],
+    splitChatId: null,
     currentId: null,
     panelSessionId: null,
   });
 }
+
+describe("chat-store: tab and split working set", () => {
+  beforeEach(reset);
+
+  it("opens the focused chat once and keeps close non-destructive", () => {
+    const actions = useChatStore.getState().actions;
+    actions.upsert(baseRecord({ id: "A", status: "streaming" }));
+    actions.setCurrent("A");
+    actions.setCurrent("A");
+    expect(useChatStore.getState().openChatIds).toEqual(["A"]);
+
+    actions.closeChat("A");
+    expect(useChatStore.getState().openChatIds).toEqual([]);
+    expect(useChatStore.getState().sessions.A.status).toBe("streaming");
+  });
+
+  it("adds the secondary chat to the working set and clears it when dropped", () => {
+    const actions = useChatStore.getState().actions;
+    actions.upsert(baseRecord({ id: "A" }));
+    actions.upsert(baseRecord({ id: "B" }));
+    actions.openChat("A");
+    actions.setSplitChat("B");
+    expect(useChatStore.getState().openChatIds).toEqual(["A", "B"]);
+    expect(useChatStore.getState().splitChatId).toBe("B");
+
+    actions.drop("B");
+    expect(useChatStore.getState().splitChatId).toBeNull();
+    expect(useChatStore.getState().openChatIds).toEqual(["A"]);
+  });
+});
 
 function baseRecord(overrides: Partial<SessionRecord> = {}): SessionRecord {
   return {

@@ -1401,6 +1401,18 @@ async ownedBrowserHide() : Promise<Result<null, string>> {
 }
 },
 /**
+ * Move through the selected webview's own navigation history. A missing tab
+ * id addresses the agent-controlled default browser.
+ */
+async ownedBrowserHistory(tabId: string | null, direction: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("owned_browser_history", { tabId, direction }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Navigate the embedded webview to `url`.
  *
  * Frontend restore/reload calls pass the foreground conversation id as
@@ -1434,6 +1446,55 @@ async ownedBrowserResolveSessionAccess(requestId: string, allow: boolean) : Prom
 async ownedBrowserSetBounds(parent: string, x: number, y: number, width: number, height: number) : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("owned_browser_set_bounds", { parent, x, y, width, height }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async ownedBrowserTabClearBrowsingData(tabId: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("owned_browser_tab_clear_browsing_data", { tabId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async ownedBrowserTabClose(tabId: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("owned_browser_tab_close", { tabId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async ownedBrowserTabHide(tabId: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("owned_browser_tab_hide", { tabId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Navigate one user-created browser tab without touching the agent-controlled
+ * default tab. If its native child is not mounted yet, the URL is consumed by
+ * the first bounds update.
+ */
+async ownedBrowserTabNavigate(tabId: string, url: string, owner: string | null) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("owned_browser_tab_navigate", { tabId, url, owner }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Position one user-created browser tab. Every tab owns a distinct native
+ * child webview and retains its page state while another tab is visible.
+ */
+async ownedBrowserTabSetBounds(tabId: string, parent: string, x: number, y: number, width: number, height: number) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("owned_browser_tab_set_bounds", { tabId, parent, x, y, width, height }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };

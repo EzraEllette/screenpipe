@@ -734,6 +734,50 @@ async fn owned_browser_detach() -> Result<(), String> {
 }
 
 #[command]
+async fn owned_browser_tab_snapshot(tab_id: String) -> Option<serde_json::Value> {
+    crate::owned_browser::tab_snapshot_for_harness(&tab_id).await
+}
+
+/// Drive the production tab commands from a WebDriver context that survives
+/// native child attachment. On macOS, attaching a child replaces the parent
+/// window's automation context even though the visible app stays intact.
+#[command]
+async fn owned_browser_tab_control(
+    app_handle: tauri::AppHandle,
+    tab_id: String,
+    action: String,
+    url: Option<String>,
+) -> Result<(), String> {
+    match action.as_str() {
+        "navigate" => {
+            let url = url.ok_or_else(|| "navigate requires a url".to_string())?;
+            crate::owned_browser::owned_browser_tab_navigate(
+                app_handle,
+                tab_id,
+                url,
+                Some("e2e-browser-tabs".to_string()),
+            )
+            .await
+        }
+        "show" => {
+            crate::owned_browser::owned_browser_tab_set_bounds(
+                app_handle,
+                tab_id,
+                "home".to_string(),
+                920.0,
+                120.0,
+                420.0,
+                560.0,
+            )
+            .await
+        }
+        "hide" => crate::owned_browser::owned_browser_tab_hide(tab_id).await,
+        "close" => crate::owned_browser::owned_browser_tab_close(tab_id).await,
+        _ => Err(format!("unsupported browser tab action: {action}")),
+    }
+}
+
+#[command]
 async fn inject_db_hard_fault(
     state: State<'_, RecordingState>,
 ) -> Result<serde_json::Value, String> {
@@ -832,6 +876,8 @@ pub(super) fn plugin() -> TauriPlugin<Wry> {
             recording_health_return_race,
             owned_browser_visible,
             owned_browser_detach,
+            owned_browser_tab_control,
+            owned_browser_tab_snapshot,
             inject_db_hard_fault,
             db_hard_fault_state,
             seed_flags,
