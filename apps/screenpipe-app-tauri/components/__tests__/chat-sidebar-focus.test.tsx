@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   filterRecentsBySource,
   handleMenuShortcut,
+  hiddenRecentSourcesFromStoredValue,
   isMachineOnlyImportedConversation,
   sortRecents,
   SidebarChatRow,
@@ -120,6 +121,17 @@ describe("SidebarChatRow current conversation", () => {
 });
 
 describe("Recents provider filtering", () => {
+  it("shows only screenpipe chats until source preferences are saved", () => {
+    expect([...hiddenRecentSourcesFromStoredValue(null)]).toEqual([
+      "codex",
+      "claude-code",
+    ]);
+  });
+
+  it("preserves an explicit preference to show external chats", () => {
+    expect([...hiddenRecentSourcesFromStoredValue("[]")]).toEqual([]);
+  });
+
   it("can independently hide Codex, Claude, and screenpipe chats", () => {
     const sessions: SessionRecord[] = [
       baseSession,
