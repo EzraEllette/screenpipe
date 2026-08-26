@@ -1846,7 +1846,11 @@ impl RuntimeState {
                 "isError": is_error
             }));
         }
+        // Foreground chat assembles text deltas, while headless consumers read
+        // the terminal payload. Preserve the same complete answer for both.
+        let mut terminal_message = None;
         if turn.message_open {
+            let mut terminal_text = turn.assistant_text.clone();
             if let Some(guidance) = model_access_guidance(&turn.assistant_text, &self.agent_id) {
                 self.output.send(json!({
                     "type": "message_update",
@@ -1860,15 +1864,36 @@ impl RuntimeState {
                     "agentId": self.agent_id,
                     "guidance": guidance
                 }));
+                if !terminal_text.trim().is_empty() {
+                    terminal_text.push_str("\n\n");
+                }
+                terminal_text.push_str(&guidance);
             }
+            let has_terminal_text = !terminal_text.trim().is_empty();
+            let content = if has_terminal_text {
+                json!([{ "type": "text", "text": terminal_text }])
+            } else {
+                json!([])
+            };
+            let message = json!({
+                "role": "assistant",
+                "content": content,
+                "stopReason": stop_reason
+            });
             self.output.send(json!({
                 "type": "message_end",
-                "message": { "role": "assistant", "stopReason": stop_reason }
+                "message": message.clone()
             }));
+            if has_terminal_text {
+                terminal_message = Some(message);
+            }
         }
         if turn.turn_open {
-            self.output
-                .send(json!({ "type": "agent_end", "authPending": auth_pending }));
+            let mut event = json!({ "type": "agent_end", "authPending": auth_pending });
+            if let Some(message) = terminal_message {
+                event["messages"] = json!([message]);
+            }
+            self.output.send(event);
         }
         turn.turn_open = false;
         turn.message_open = false;
@@ -6155,6 +6180,38 @@ mod tests {
                 && e["assistantMessageEvent"]["delta"] == json!("here is the summary")
         }));
         assert!(events_of_type(&events, "tool_execution_progress").is_empty());
+    }
+
+    #[test]
+    fn completed_turn_keeps_streamed_text_in_terminal_events() {
+        let output = ParentOutput::buffer();
+        let state = test_state(&output);
+        state.handle_update(json!({
+            "sessionUpdate": "agent_message_chunk",
+            "content": { "type": "text", "text": "{\"entries\":[" }
+        }));
+        state.handle_update(json!({
+            "sessionUpdate": "agent_message_chunk",
+            "content": { "type": "text", "text": "]}" }
+        }));
+        output.drain();
+
+        state.close_turn("end_turn");
+        let events = output.drain();
+        let message_end = events_of_type(&events, "message_end");
+        let agent_end = events_of_type(&events, "agent_end");
+
+        assert_eq!(message_end.len(), 1);
+        assert_eq!(
+            message_end[0]["message"]["content"][0]["text"],
+            json!("{\"entries\":[]}")
+        );
+        assert_eq!(agent_end.len(), 1);
+        assert_eq!(
+            agent_end[0]["messages"][0]["content"][0]["text"],
+            json!("{\"entries\":[]}")
+        );
+        assert_eq!(agent_end[0]["messages"][0]["stopReason"], json!("end_turn"));
     }
 
     #[test]
