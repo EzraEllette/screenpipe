@@ -1883,7 +1883,7 @@ export function MessageContent({
     const recoveredWithAnswer = !isGenerating && hasAssistantTextBody(message);
     return (
       <div className="space-y-2 min-w-0 w-full overflow-hidden">
-        {displayGroups.map((group) => {
+        {displayGroups.map((group, groupIndex) => {
           if (group.type === "text") {
             return (
               <MarkdownBlock
@@ -1891,6 +1891,7 @@ export function MessageContent({
                 key={`text-${group.key}`}
                 text={group.text}
                 isUser={isUser}
+                streaming={isGenerating && groupIndex === displayGroups.length - 1}
                 onOpenViewerPath={onOpenViewerPath}
                 renderSpecialCodeBlock={(language, content) => {
                   if (language === "mermaid") {
@@ -2016,6 +2017,7 @@ export function MessageContent({
           {...markdownOptions}
           text={displayText}
           isUser={isUser}
+          streaming={isGenerating}
           onOpenViewerPath={onOpenViewerPath}
           renderSpecialCodeBlock={(language, content) => {
             if (language === "mermaid") {

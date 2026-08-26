@@ -18,6 +18,7 @@
     "test:shortcut-overlay": "./scripts/test-shortcut-overlay.sh",
     "test:timeline": "./scripts/test-timeline.sh",
     "preview:timeline": "./scripts/preview-timeline.sh",
+    "bench:chat": "bun x vitest bench --config vitest.config.ts components/chat/standalone/chat-stream-render.bench.tsx --run",
     "test:watch": "bun x vitest --config vitest.config.ts",
     "lint:effects": "ESLINT_USE_FLAT_CONFIG=true eslint --config eslint.effects.config.mjs \"lib/**/*.{ts,tsx}\" \"components/**/*.{ts,tsx}\" \"app/**/*.{ts,tsx}\"",
     "prepare-updater-manifest": "bun ./e2e/mock-updates/updater-harness.ts prepare-manifest",

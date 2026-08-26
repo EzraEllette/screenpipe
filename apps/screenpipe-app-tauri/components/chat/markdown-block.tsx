@@ -25,6 +25,11 @@ import { cn } from "@/lib/utils";
 import { sanitizeToolCallXml } from "@/lib/utils/sanitize-tool-call-xml";
 import { LinkPreviewAnchor } from "@/components/chat/link-preview-anchor";
 
+// The transport snapshots text every 80 ms. Keeping rich parsing to once per
+// second cuts steady-stream full parses by 12.5x while the cheap plain-text
+// tail still updates with every snapshot.
+const STREAMING_MARKDOWN_COMMIT_MS = 1_000;
+
 export interface MarkdownBlockOptions {
   /** Extra parsing passes layered onto the main Chat Markdown pipeline. */
   additionalRemarkPlugins?: ReactMarkdownOptions["remarkPlugins"];
@@ -43,6 +48,8 @@ export interface MarkdownBlockOptions {
 interface MarkdownBlockProps extends MarkdownBlockOptions {
   text: string;
   isUser: boolean;
+  /** Keep incoming text live while bounding expensive full Markdown parses. */
+  streaming?: boolean;
   onOpenViewerPath?: (path: string) => void;
   renderSpecialCodeBlock?: (
     language: string,
@@ -50,9 +57,76 @@ interface MarkdownBlockProps extends MarkdownBlockOptions {
   ) => React.ReactNode | null;
 }
 
+export function stableStreamingMarkdownPrefix(text: string): string {
+  let fenceCharacter: "`" | "~" | null = null;
+  let fenceLength = 0;
+  let lastBoundary = 0;
+  let lineStart = 0;
+
+  while (lineStart < text.length) {
+    const newlineIndex = text.indexOf("\n", lineStart);
+    const lineEnd = newlineIndex === -1 ? text.length : newlineIndex;
+    const line = text.slice(lineStart, lineEnd).replace(/\r$/, "");
+    const nextLineStart = newlineIndex === -1 ? text.length : newlineIndex + 1;
+    const fenceMatch = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+
+    if (fenceMatch) {
+      const marker = fenceMatch[1];
+      const character = marker[0] as "`" | "~";
+      if (!fenceCharacter) {
+        fenceCharacter = character;
+        fenceLength = marker.length;
+      } else if (
+        character === fenceCharacter &&
+        marker.length >= fenceLength &&
+        fenceMatch[2].trim() === ""
+      ) {
+        fenceCharacter = null;
+        fenceLength = 0;
+      }
+    } else if (!fenceCharacter && line.trim() === "") {
+      lastBoundary = nextLineStart;
+    }
+
+    lineStart = nextLineStart;
+  }
+
+  return text.slice(0, lastBoundary);
+}
+
+function useStreamingMarkdownText(text: string, streaming: boolean) {
+  const [committedText, setCommittedText] = React.useState("");
+  const lastCommitAtRef = React.useRef(0);
+  const candidate = streaming ? stableStreamingMarkdownPrefix(text) : text;
+
+  React.useEffect(() => {
+    if (!streaming || !candidate || candidate === committedText) return;
+
+    const elapsed = Date.now() - lastCommitAtRef.current;
+    const delay = Math.max(0, STREAMING_MARKDOWN_COMMIT_MS - elapsed);
+    const timer = window.setTimeout(() => {
+      lastCommitAtRef.current = Date.now();
+      setCommittedText(candidate);
+    }, delay);
+
+    return () => window.clearTimeout(timer);
+  }, [candidate, committedText, streaming]);
+
+  if (!streaming) {
+    return { markdownText: text, tailText: "" };
+  }
+
+  const committedPrefix = text.startsWith(committedText) ? committedText : "";
+  return {
+    markdownText: committedPrefix,
+    tailText: text.slice(committedPrefix.length),
+  };
+}
+
 export function MarkdownBlock({
   text,
   isUser,
+  streaming = false,
   onOpenViewerPath,
   renderSpecialCodeBlock,
   additionalRemarkPlugins,
@@ -64,8 +138,12 @@ export function MarkdownBlock({
   const renderText = rewriteLocalMarkdownLinksForChat(
     isUser ? text : sanitizeToolCallXml(text),
   );
+  const { markdownText, tailText } = useStreamingMarkdownText(
+    renderText,
+    streaming,
+  );
 
-  return (
+  const markdown = markdownText ? (
     <MemoizedReactMarkdown
       className={cn(
         "prose prose-sm max-w-full break-words overflow-hidden [word-break:break-word] flex flex-col items-start",
@@ -214,7 +292,25 @@ export function MarkdownBlock({
         ...createCodeMarkdownComponents({ renderSpecialCodeBlock }),
       }}
     >
-      {renderText}
+      {markdownText}
     </MemoizedReactMarkdown>
+  ) : null;
+
+  return (
+    <>
+      {markdown}
+      {tailText ? (
+        <div
+          className={cn(
+            "max-w-full whitespace-pre-wrap break-words [word-break:break-word] leading-relaxed",
+            markdownText && "mt-2",
+            className,
+          )}
+          data-testid="streaming-markdown-tail"
+        >
+          {tailText}
+        </div>
+      ) : null}
+    </>
   );
 }
