@@ -6,9 +6,9 @@ and layer declared in the manifest, weighted by confidence and criticality.
 
 - Manifest: `e2e/coverage-map.json`
 - Specs directory: `e2e/specs`
-- Mapped specs: 127
-- Declared test blocks: 372
-- Weighted coverage points: 294.0
+- Mapped specs: 128
+- Declared test blocks: 373
+- Weighted coverage points: 295.0
 
 Confidence weights: strong=1.0, partial=0.7, conditional=0.4, smoke=0.3.
 Criticality weights: high=1.0, medium=0.7, low=0.4.
@@ -19,9 +19,9 @@ can execute more runtime cases than this number shows.
 
 | Platform | Specs | Declared tests | Weighted points | Layers | Features | Critical score |
 | --- | --- | --- | --- | --- | --- | --- |
-| windows | 97 | 316 | 260.0 | 15 | 106 | 92% |
-| macos | 123 | 334 | 263.8 | 17 | 115 | 90% |
-| linux | 86 | 274 | 229.4 | 14 | 103 | 89% |
+| windows | 98 | 317 | 261.0 | 15 | 107 | 92% |
+| macos | 124 | 335 | 264.8 | 17 | 116 | 90% |
+| linux | 87 | 275 | 230.4 | 14 | 104 | 89% |
 
 ## Runtime Results
 
@@ -39,16 +39,16 @@ pass/fail/skip counts.
 | capture-ocr | 2 specs / 16 tests / 6.4 pts | 8 specs / 12 tests / 4.8 pts | 1 specs / 3 tests / 1.2 pts |
 | chat-ai | 30 specs / 69 tests / 54.2 pts | 43 specs / 97 tests / 72.7 pts | 29 specs / 68 tests / 53.7 pts |
 | entitlement | - | 1 specs / 1 tests / 1.0 pts | - |
-| local-api | 27 specs / 116 tests / 97.0 pts | 36 specs / 109 tests / 92.5 pts | 22 specs / 84 tests / 75.2 pts |
+| local-api | 28 specs / 117 tests / 98.0 pts | 37 specs / 110 tests / 93.5 pts | 23 specs / 85 tests / 76.2 pts |
 | notifications | 4 specs / 26 tests / 17.3 pts | 3 specs / 5 tests / 3.4 pts | 2 specs / 4 tests / 3.1 pts |
 | onboarding | 9 specs / 38 tests / 33.8 pts | 11 specs / 42 tests / 37.2 pts | 9 specs / 38 tests / 33.8 pts |
 | os-integration | 7 specs / 32 tests / 26.9 pts | 14 specs / 29 tests / 17.4 pts | 2 specs / 15 tests / 10.8 pts |
 | performance | 3 specs / 45 tests / 45.0 pts | 5 specs / 36 tests / 31.8 pts | 2 specs / 30 tests / 30.0 pts |
 | pipes | 6 specs / 20 tests / 20.0 pts | 8 specs / 26 tests / 26.0 pts | 6 specs / 20 tests / 20.0 pts |
-| real-ui-e2e | 71 specs / 215 tests / 179.2 pts | 86 specs / 228 tests / 189.2 pts | 66 specs / 191 tests / 165.3 pts |
+| real-ui-e2e | 72 specs / 216 tests / 180.2 pts | 87 specs / 229 tests / 190.2 pts | 67 specs / 192 tests / 166.3 pts |
 | settings | 14 specs / 40 tests / 37.0 pts | 16 specs / 34 tests / 29.7 pts | 13 specs / 31 tests / 28.0 pts |
 | storage-privacy | 9 specs / 42 tests / 33.3 pts | 9 specs / 27 tests / 26.1 pts | 6 specs / 20 tests / 19.1 pts |
-| tauri-command | 20 specs / 58 tests / 45.5 pts | 29 specs / 75 tests / 57.8 pts | 19 specs / 59 tests / 46.3 pts |
+| tauri-command | 21 specs / 59 tests / 46.5 pts | 30 specs / 76 tests / 58.8 pts | 20 specs / 60 tests / 47.3 pts |
 | window-lifecycle | 19 specs / 66 tests / 55.0 pts | 19 specs / 46 tests / 32.4 pts | 13 specs / 39 tests / 29.9 pts |
 
 ## Critical Feature Matrix
@@ -174,6 +174,7 @@ pass/fail/skip counts.
 | main-window-close-reopen.spec.ts | windows, macos, linux | window-lifecycle, tauri-command | window-lifecycle, main-window | medium | partial | command | 1 | Main close/reopen without handle leaks. |
 | main-window.spec.ts | windows, macos, linux | window-lifecycle, tauri-command | window-lifecycle, main-window | medium | partial | command | 2 | Main window show/hide dedupe. |
 | meeting-apps-picker.spec.ts | windows, macos, linux | settings, real-ui-e2e | settings-recording, meeting-detector-ignored-apps | medium | strong | real-user-flow | 3 | Per-app meeting-detection ignore picker: open, toggle, count badge, persistence across reopen (#3882 / #3847). |
+| meeting-calendar-url-match.spec.ts | windows, macos, linux | real-ui-e2e, local-api, tauri-command | meeting-calendar-association | high | strong | real-user-flow | 1 | Runs the production calendar matcher and DB write with the reported back-to-back boundary shape: an outgoing URL-less event overlaps a target event starting in 40 seconds whose normalized Meet room exactly matches the detector URL. Verifies the persisted title and attendees, then proves the visible Meetings row uses the target rather than the outgoing event. |
 | meeting-chat-panel.spec.ts | macos | real-ui-e2e, local-api | meeting-notes | high | strong | real-user-flow | 3 | Seeds a settled meeting and walks the chat rail disclosure ladder in the real app: rest shows one line plus one chip and no send button, focus peeks open with suggestions, typing hides the chip and reveals send, Escape collapses while keeping the draft, status precedence names why the composer is disabled, and a 720x620 window produces no horizontal overflow. Captures a screenshot per state. |
 | meeting-note-bottom-click.spec.ts | windows, macos, linux | real-ui-e2e, local-api | meeting-notes | high | strong | real-user-flow | 3 | Seeds and opens a long meeting note, checks editor shell click focus behavior, then clicks the bottom editor line. |
 | meeting-overlay-pin.spec.ts | macos | real-ui-e2e, local-api, tauri-command, os-integration | meeting-notes, meeting-overlay-stream, shortcut-overlay | medium | partial | real-user-flow | 1 | Pins the native macOS live-transcript card against a real started meeting: it opens on hover, stays visible after the pointer leaves, and the authoritative stop edge hides it and clears the pin, asserted on the AppKit panel's observed visibility. Hover and the pin toggle are driven through the controller entry points the tracking area and pin button use, because AppKit delivers no synthetic hover to a nonactivating panel. The Windows/Linux reminder webview renders the sign-in gate under E2E seeds, so that surface is covered by component tests instead. |
