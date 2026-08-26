@@ -10,6 +10,8 @@ pub const SUPERVISOR_EXE: &str = "screenpipe-persistence-supervisor.exe";
 pub const REMOVER_EXE: &str = "remove-screenpipe-persistence.exe";
 pub const APP_EXE: &str = "screenpipe-app.exe";
 pub const RECHECK_SECONDS: u64 = 5;
+pub const POLICY_REFRESH_SECONDS: u64 = 5 * 60;
+pub const POLICY_DISABLED_FILE: &str = "policy-disabled";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LaunchDecision {
@@ -76,6 +78,18 @@ pub fn log_path(program_data: &Path) -> PathBuf {
     state_dir(program_data).join("supervisor.log")
 }
 
+pub fn policy_disabled_path(program_data: &Path) -> PathBuf {
+    state_dir(program_data).join(POLICY_DISABLED_FILE)
+}
+
+pub fn policy_enforcement_from_exit_code(code: Option<i32>) -> Option<bool> {
+    match code {
+        Some(10) => Some(false),
+        Some(11) => Some(true),
+        _ => None,
+    }
+}
+
 pub fn path_eq(left: &Path, right: &Path) -> bool {
     left.to_string_lossy()
         .eq_ignore_ascii_case(&right.to_string_lossy())
@@ -115,6 +129,14 @@ mod tests {
         assert_eq!(select_active_session(Some(7), &[3, 9]), Some(3));
         assert_eq!(select_active_session(None, &[9, 3]), Some(3));
         assert_eq!(select_active_session(Some(7), &[]), None);
+    }
+
+    #[test]
+    fn policy_refresh_exit_codes_are_explicit_and_fail_closed() {
+        assert_eq!(policy_enforcement_from_exit_code(Some(10)), Some(false));
+        assert_eq!(policy_enforcement_from_exit_code(Some(11)), Some(true));
+        assert_eq!(policy_enforcement_from_exit_code(Some(20)), None);
+        assert_eq!(policy_enforcement_from_exit_code(None), None);
     }
 
     #[test]

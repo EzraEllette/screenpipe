@@ -10,8 +10,10 @@ use std::io::Write;
 use std::mem::size_of;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::ptr;
 use std::sync::mpsc;
+use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use windows::core::{PCWSTR, PWSTR};
@@ -43,9 +45,9 @@ use windows_service::service_dispatcher;
 use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 
 use crate::{
-    is_path_within, launch_decision, log_path, marker_path, path_eq, select_active_session,
-    state_dir, LaunchDecision, APP_EXE, RECHECK_SECONDS, SERVICE_DISPLAY_NAME, SERVICE_NAME,
-    SUPERVISOR_EXE,
+    is_path_within, launch_decision, log_path, marker_path, path_eq, policy_disabled_path,
+    policy_enforcement_from_exit_code, select_active_session, state_dir, LaunchDecision, APP_EXE,
+    POLICY_REFRESH_SECONDS, RECHECK_SECONDS, SERVICE_DISPLAY_NAME, SERVICE_NAME, SUPERVISOR_EXE,
 };
 
 type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
@@ -57,10 +59,11 @@ const APP_LAUNCH_WAIT_SECONDS: u64 = 20;
 
 define_windows_service!(ffi_service_main, service_main);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug)]
 enum WorkerEvent {
     Wake,
     Stop,
+    PolicyRefreshed(std::result::Result<bool, String>),
 }
 
 struct OwnedHandle(HANDLE);
@@ -100,13 +103,14 @@ fn service_main(_arguments: Vec<OsString>) {
 
 fn run_service() -> Result<()> {
     let (event_tx, event_rx) = mpsc::channel();
+    let control_tx = event_tx.clone();
     let handler = move |control| match control {
         ServiceControl::Stop | ServiceControl::Shutdown => {
-            let _ = event_tx.send(WorkerEvent::Stop);
+            let _ = control_tx.send(WorkerEvent::Stop);
             ServiceControlHandlerResult::NoError
         }
         ServiceControl::SessionChange(_) => {
-            let _ = event_tx.send(WorkerEvent::Wake);
+            let _ = control_tx.send(WorkerEvent::Wake);
             ServiceControlHandlerResult::NoError
         }
         ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
@@ -117,11 +121,43 @@ fn run_service() -> Result<()> {
     log_event("info", "service_started", "supervision active");
 
     let app_path = installed_app_path()?;
+    let mut enforce_persistence = cached_policy_enforcement();
+    let mut next_policy_refresh = Instant::now();
+    let mut policy_refresh_in_flight = false;
     loop {
-        supervise_once(&app_path);
+        if !policy_refresh_in_flight && Instant::now() >= next_policy_refresh {
+            policy_refresh_in_flight = true;
+            next_policy_refresh = Instant::now() + Duration::from_secs(POLICY_REFRESH_SECONDS);
+            let policy_tx = event_tx.clone();
+            let policy_app_path = app_path.clone();
+            thread::spawn(move || {
+                let result = refresh_policy(&policy_app_path).map_err(|error| error.to_string());
+                let _ = policy_tx.send(WorkerEvent::PolicyRefreshed(result));
+            });
+        }
+
+        supervise_once(&app_path, enforce_persistence);
         match event_rx.recv_timeout(Duration::from_secs(RECHECK_SECONDS)) {
             Ok(WorkerEvent::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
             Ok(WorkerEvent::Wake) | Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Ok(WorkerEvent::PolicyRefreshed(result)) => {
+                policy_refresh_in_flight = false;
+                match result {
+                    Ok(enforced) => {
+                        if let Err(error) = cache_policy_enforcement(enforced) {
+                            log_event("warn", "policy_cache_failed", &error.to_string());
+                        } else if enforce_persistence != enforced {
+                            enforce_persistence = enforced;
+                            log_event(
+                                "info",
+                                "persistence_policy_changed",
+                                if enforced { "enforced" } else { "not_enforced" },
+                            );
+                        }
+                    }
+                    Err(error) => log_event("warn", "policy_refresh_failed", &error),
+                }
+            }
         }
     }
 
@@ -149,8 +185,8 @@ fn service_status(current_state: ServiceState) -> ServiceStatus {
     }
 }
 
-fn supervise_once(app_path: &Path) {
-    let enabled = marker_matches_app(app_path);
+fn supervise_once(app_path: &Path, enforce_persistence: bool) {
+    let enabled = enforce_persistence && marker_matches_app(app_path);
     let active_session = match active_interactive_session() {
         Ok(session) => session,
         Err(error) => {
@@ -181,6 +217,149 @@ fn supervise_once(app_path: &Path) {
             ),
         },
     }
+}
+
+fn cached_policy_enforcement() -> bool {
+    let Some(program_data) = env::var_os("ProgramData") else {
+        return true;
+    };
+    !policy_disabled_path(Path::new(&program_data)).is_file()
+}
+
+fn cache_policy_enforcement(enforced: bool) -> Result<()> {
+    let program_data = env::var_os("ProgramData").ok_or("ProgramData is unavailable")?;
+    let marker = policy_disabled_path(Path::new(&program_data));
+    if enforced {
+        match fs::remove_file(marker) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    } else {
+        fs::write(marker, b"disabled-by-enterprise-policy\n")?;
+        Ok(())
+    }
+}
+
+const POLICY_POWERSHELL: &str = r#"
+$ErrorActionPreference = 'Stop'
+$headers = @{}
+$config = $null
+if (Test-Path -LiteralPath $env:SCREENPIPE_PERSISTENCE_ENTERPRISE_CONFIG) {
+  $config = Get-Content -Raw -LiteralPath $env:SCREENPIPE_PERSISTENCE_ENTERPRISE_CONFIG | ConvertFrom-Json
+  if ($config.license_key) { $headers['X-License-Key'] = [string]$config.license_key }
+}
+if (-not $headers.ContainsKey('X-License-Key')) {
+  $registry = Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\screenpipe' -ErrorAction SilentlyContinue
+  if ($registry.EnterpriseLicenseKey) { $headers['X-License-Key'] = [string]$registry.EnterpriseLicenseKey }
+}
+if ($env:SCREENPIPE_PERSISTENCE_USER_PROFILE) {
+  $userConfigPath = Join-Path $env:SCREENPIPE_PERSISTENCE_USER_PROFILE '.screenpipe\enterprise.json'
+  if (Test-Path -LiteralPath $userConfigPath) {
+    $userConfig = Get-Content -Raw -LiteralPath $userConfigPath | ConvertFrom-Json
+    if (-not $config) { $config = $userConfig }
+    if (-not $headers.ContainsKey('X-License-Key') -and $userConfig.license_key) {
+      $headers['X-License-Key'] = [string]$userConfig.license_key
+    }
+  }
+  $authPath = Join-Path $env:SCREENPIPE_PERSISTENCE_USER_PROFILE '.screenpipe\auth.json'
+  if (Test-Path -LiteralPath $authPath) {
+    $auth = Get-Content -Raw -LiteralPath $authPath | ConvertFrom-Json
+    if ($auth.token) { $headers['Authorization'] = 'Bearer ' + [string]$auth.token }
+  }
+}
+if ($headers.Count -eq 0) { exit 20 }
+$policyUrl = $env:SCREENPIPE_PERSISTENCE_DEFAULT_POLICY_URL
+if ($config.ingest_url) {
+  $ingest = [Uri][string]$config.ingest_url
+  if ($ingest.Scheme -eq 'http' -or $ingest.Scheme -eq 'https') {
+    $policyUrl = $ingest.GetLeftPart([UriPartial]::Authority) + '/api/enterprise/policy'
+  }
+}
+$response = Invoke-RestMethod -Method Get -Uri $policyUrl -Headers $headers -TimeoutSec 15
+$value = $response.lockedSettings.enforcePersistence
+if ($value -eq $false -or [string]$value -eq 'false') { exit 10 }
+exit 11
+"#;
+
+fn refresh_policy(app_path: &Path) -> Result<bool> {
+    let config = app_path
+        .parent()
+        .ok_or("installed app path has no parent directory")?
+        .join("enterprise.json");
+    let profile = active_interactive_session()?
+        .and_then(|session_id| user_profile_for_session(session_id).ok().flatten());
+    let mut command = Command::new("powershell.exe");
+    command
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            POLICY_POWERSHELL,
+        ])
+        .env("SCREENPIPE_PERSISTENCE_ENTERPRISE_CONFIG", config)
+        .env(
+            "SCREENPIPE_PERSISTENCE_DEFAULT_POLICY_URL",
+            default_policy_url(),
+        )
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    if let Some(profile) = profile {
+        command.env("SCREENPIPE_PERSISTENCE_USER_PROFILE", profile);
+    }
+    let status = command.status()?;
+    policy_enforcement_from_exit_code(status.code())
+        .ok_or_else(|| format!("policy helper exited with {:?}", status.code()).into())
+}
+
+fn default_policy_url() -> String {
+    if let Ok(url) = env::var("SCREENPIPE_ENTERPRISE_POLICY_URL") {
+        if !url.trim().is_empty() {
+            return url;
+        }
+    }
+    let base = option_env!("NEXT_PUBLIC_SCREENPIPE_WEB_URL")
+        .unwrap_or("https://screenpipe.com")
+        .trim()
+        .trim_end_matches('/');
+    format!("{base}/api/enterprise/policy")
+}
+
+fn user_profile_for_session(session_id: u32) -> Result<Option<PathBuf>> {
+    let mut user_token = HANDLE::default();
+    unsafe { WTSQueryUserToken(session_id, &mut user_token) }?;
+    let user_token = OwnedHandle::new(user_token);
+    let mut environment = ptr::null_mut();
+    unsafe { CreateEnvironmentBlock(&mut environment, user_token.0, false) }?;
+    let profile = environment_value(environment.cast(), "USERPROFILE").map(PathBuf::from);
+    let _ = unsafe { DestroyEnvironmentBlock(environment) };
+    Ok(profile)
+}
+
+fn environment_value(block: *const u16, name: &str) -> Option<OsString> {
+    if block.is_null() {
+        return None;
+    }
+    let mut offset = 0usize;
+    while offset < 1_048_576 {
+        let start = unsafe { block.add(offset) };
+        let mut length = 0usize;
+        while offset + length < 1_048_576 && unsafe { *start.add(length) } != 0 {
+            length += 1;
+        }
+        if length == 0 {
+            return None;
+        }
+        let entry = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(start, length) });
+        if let Some((key, value)) = entry.split_once('=') {
+            if key.eq_ignore_ascii_case(name) {
+                return Some(OsString::from(value));
+            }
+        }
+        offset += length + 1;
+    }
+    None
 }
 
 fn marker_matches_app(app_path: &Path) -> bool {
@@ -372,9 +551,14 @@ fn install_persistence() -> Result<()> {
         app_path.as_os_str().to_string_lossy().as_bytes(),
     )?;
 
-    if let Err(error) =
-        create_and_start_service(&supervisor).and_then(|_| wait_for_supervised_app(&app_path))
-    {
+    let start_result = create_and_start_service(&supervisor).and_then(|_| {
+        if cached_policy_enforcement() {
+            wait_for_supervised_app(&app_path)
+        } else {
+            Ok(())
+        }
+    });
+    if let Err(error) = start_result {
         let _ = fs::remove_file(marker_path(Path::new(&program_data)));
         let _ = remove_service();
         return Err(error);
@@ -499,6 +683,7 @@ pub fn remove_persistence() -> Result<()> {
 
     if let Some(program_data) = env::var_os("ProgramData") {
         let state = state_dir(Path::new(&program_data));
+        let _ = fs::remove_file(policy_disabled_path(Path::new(&program_data)));
         let _ = fs::remove_file(log_path(Path::new(&program_data)));
         let _ = fs::remove_dir(state);
     }
