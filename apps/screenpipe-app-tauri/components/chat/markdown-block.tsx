@@ -26,9 +26,11 @@ import { sanitizeToolCallXml } from "@/lib/utils/sanitize-tool-call-xml";
 import { LinkPreviewAnchor } from "@/components/chat/link-preview-anchor";
 
 // The transport snapshots text every 80 ms. Keeping rich parsing to once per
-// second cuts steady-stream full parses by 12.5x while the cheap plain-text
-// tail still updates with every snapshot.
-const STREAMING_MARKDOWN_COMMIT_MS = 1_000;
+// four seconds limits scheduled rich parsing to once per 50 snapshots while
+// the cheap plain-text tail still updates with every snapshot. Completion
+// always forces the exact rich render immediately, so this only delays
+// in-flight formatting.
+const STREAMING_MARKDOWN_COMMIT_MS = 4_000;
 
 export interface MarkdownBlockOptions {
   /** Extra parsing passes layered onto the main Chat Markdown pipeline. */

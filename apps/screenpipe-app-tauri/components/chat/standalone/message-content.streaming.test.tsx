@@ -11,10 +11,12 @@ const streamingMessage: Message = {
   id: "streaming-markdown",
   role: "assistant",
   content: "## live finding\n\nnew evidence",
-  contentBlocks: [{
-    type: "text",
-    text: "## live finding\n\nnew evidence",
-  }],
+  contentBlocks: [
+    {
+      type: "text",
+      text: "## live finding\n\nnew evidence",
+    },
+  ],
   timestamp: 1_787_768_000_000,
 };
 
@@ -38,7 +40,46 @@ describe("MessageContent streaming Markdown", () => {
       <MessageContent message={streamingMessage} isGenerating={false} />,
     );
 
-    expect(screen.getByRole("heading", { name: "live finding" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "live finding" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByTestId("streaming-markdown-tail")).toBeNull();
+  });
+
+  it("only streams the final text group when tool work and prose are interleaved", () => {
+    const message: Message = {
+      id: "streaming-after-tool",
+      role: "assistant",
+      content: "",
+      contentBlocks: [
+        { type: "text", text: "I checked the source." },
+        {
+          type: "tool",
+          toolCall: {
+            id: "read-source",
+            toolName: "read",
+            args: { path: "/tmp/source.ts" },
+            result: "ok",
+            isRunning: false,
+          },
+        },
+        { type: "text", text: "## live result\n\nstill streaming" },
+      ],
+      timestamp: 1_787_768_000_000,
+    };
+
+    const view = render(<MessageContent message={message} isGenerating />);
+
+    expect(screen.getAllByTestId("streaming-markdown-tail")).toHaveLength(1);
+    expect(screen.getByTestId("streaming-markdown-tail")).toHaveTextContent(
+      "still streaming",
+    );
+    expect(screen.queryByRole("heading", { name: "live result" })).toBeNull();
+
+    view.rerender(<MessageContent message={message} isGenerating={false} />);
+    expect(
+      screen.getByRole("heading", { name: "live result" }),
+    ).toBeInTheDocument();
     expect(screen.queryByTestId("streaming-markdown-tail")).toBeNull();
   });
 });
