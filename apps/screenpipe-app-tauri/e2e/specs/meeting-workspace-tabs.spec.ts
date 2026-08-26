@@ -7,6 +7,7 @@
  *
  * - notes, transcript, and summary are persistent keyboard-accessible tabs
  * - changing tabs does not unmount the note editor
+ * - stopping a live meeting moves the reader to its summary
  * - every tab has one bounded scroll surface above the fixed control dock
  * - the workspace does not overflow when the window becomes narrow/short
  *
@@ -611,5 +612,19 @@ describe("meeting workspace tabs and responsive layout", function () {
       timeout: t(5_000),
       timeoutMsg: "follow-live control did not dismiss after resuming",
     });
+
+    const stopButton = await $(
+      '[aria-label="stop meeting"], [aria-label="stop and summarize"]',
+    );
+    await stopButton.waitForClickable({ timeout: t(5_000) });
+    await stopButton.click();
+    await browser.waitUntil(
+      async () => (await summaryTab.getAttribute("aria-selected")) === "true",
+      {
+        timeout: t(15_000),
+        timeoutMsg: "Summary tab did not open after the meeting stopped",
+      },
+    );
+    expect(await transcriptTab.getAttribute("aria-selected")).toBe("false");
   });
 });
