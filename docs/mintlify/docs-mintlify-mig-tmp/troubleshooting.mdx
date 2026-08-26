@@ -311,14 +311,14 @@ debug the pipeline in pieces:
 
 - screenpipe uses ~30 GB/month at 1 FPS — this is normal
 - reduce capture rate in settings
-- data is stored in `~/.screenpipe/data/` — you can delete old recordings
-- use cloud archive to offload and restore older data ([learn more →](/cloud-archive))
+- use **settings → storage** to shorten local retention or remove old media
+- compact the database after deletion to return unused space to the operating system
 
 ### can I store data on a NAS or external drive?
 
-you can back up `~/.screenpipe/` to external storage. be careful with active database and media writes on slow or unreliable network drives; they can make the app feel broken or risk corruption.
+you can back up `~/.screenpipe/` to external storage. quit screenpipe before copying the directory, keep the backup encrypted, and test a restore before relying on it.
 
-for active long-term retention, prefer [cloud archive](/cloud-archive) or a stable local disk plus backup. if you do use a NAS, test recording, search, restart, and recovery before relying on it.
+keep the live database on a stable local disk. slow or unreliable network drives can make the app feel broken or risk corruption.
 
 ### screenpipe using too much RAM
 

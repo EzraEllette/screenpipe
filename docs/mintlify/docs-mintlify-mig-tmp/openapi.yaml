@@ -148,8 +148,8 @@ paths:
       tags:
       - Search
       summary: Search screen and audio content
-      description: Query captured screen text (accessibility-first with OCR fallback), audio transcriptions, and UI elements with filters for time range, app,
-        window, content type, and more.
+      description: Query captured screen text (accessibility-first with OCR fallback), audio transcriptions, and UI elements
+        with filters for time range, app, window, content type, and more.
   /audio/list:
     get:
       operationId: routes_audio_api_list_audio_devices
@@ -1556,74 +1556,6 @@ paths:
       tags:
       - Cloud Sync
       summary: Pull pipe configs from cloud
-  /archive/init:
-    post:
-      description: POST /archive/init — initialize the archive system.
-      operationId: archive_archive_init
-      requestBody:
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/ArchiveInitRequest'
-        required: true
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ArchiveInitResponse'
-      tags:
-      - Cloud Archive
-      summary: Initialize cloud archive
-  /archive/configure:
-    post:
-      description: POST /archive/configure — update retention or disable.
-      operationId: archive_archive_configure
-      requestBody:
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/ArchiveConfigureRequest'
-        required: true
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                type: object
-      tags:
-      - Cloud Archive
-      summary: Configure archive settings
-  /archive/status:
-    get:
-      description: GET /archive/status — return current state.
-      operationId: archive_archive_status
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ArchiveStatusResponse'
-      tags:
-      - Cloud Archive
-      summary: Get archive status
-  /archive/run:
-    post:
-      description: POST /archive/run — trigger an immediate archive run.
-      operationId: archive_archive_run
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                type: object
-      tags:
-      - Cloud Archive
-      summary: Run archive now
   /retention/configure:
     post:
       description: POST /retention/configure — enable/disable local retention, set days.
@@ -1691,7 +1623,8 @@ paths:
       tags:
       - Data Management
       summary: Delete data in time range
-      description: Permanently delete all captured data (frames, accessibility text, OCR fallback text, audio, etc.) within a time range.
+      description: Permanently delete all captured data (frames, accessibility text, OCR fallback text, audio, etc.) within
+        a time range.
   /data/delete-device:
     post:
       description: Delete all locally-stored data that was synced from a specific remote device.
@@ -1871,82 +1804,6 @@ components:
       - minutes
       - first_seen
       - last_seen
-    ArchiveConfigureRequest:
-      type: object
-      properties:
-        enabled:
-          nullable: true
-          type: boolean
-        retention_days:
-          nullable: true
-          type: integer
-      required:
-      - enabled
-      - retention_days
-    ArchiveInitRequest:
-      type: object
-      properties:
-        token:
-          type: string
-        retention_days:
-          nullable: true
-          type: integer
-      required:
-      - token
-      - retention_days
-    ArchiveInitResponse:
-      type: object
-      properties:
-        success:
-          type: boolean
-        machine_id:
-          type: string
-      required:
-      - success
-      - machine_id
-    ArchiveStatusResponse:
-      type: object
-      properties:
-        enabled:
-          type: boolean
-        retention_days:
-          type: integer
-        watermark:
-          nullable: true
-          type: string
-        last_cleanup:
-          nullable: true
-          type: string
-        last_error:
-          nullable: true
-          type: string
-        storage_used:
-          type: integer
-        storage_limit:
-          type: integer
-        pending_count:
-          type: integer
-        is_uploading:
-          type: boolean
-        chunks_uploaded:
-          type: integer
-        media_files_uploaded:
-          type: integer
-        media_files_pending:
-          type: integer
-      required:
-      - enabled
-      - retention_days
-      - watermark
-      - last_cleanup
-      - last_error
-      - storage_used
-      - storage_limit
-      - pending_count
-      - is_uploading
-      - chunks_uploaded
-      - media_files_uploaded
-      - media_files_pending
     AudioChunk:
       type: object
       properties:
@@ -4893,8 +4750,6 @@ tags:
   description: Encrypt/decrypt all data at rest
 - name: Cloud Sync
   description: Sync data across devices via cloud
-- name: Cloud Archive
-  description: Archive old data to cloud storage
 - name: Data Retention
   description: Auto-delete old data locally
 - name: Data Management

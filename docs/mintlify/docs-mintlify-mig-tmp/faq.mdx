@@ -106,7 +106,7 @@ this FAQ is organized around the questions people ask support most often: what t
 
   - cloud transcription (deepgram, screenpipe-cloud)
   - cloud AI providers (Claude, ChatGPT, Gemini, OpenAI)
-  - cloud archive and team sync
+  - team sync
   - login and license verification
   - connected-app proxies (Slack, Notion, HubSpot, etc.)
 
@@ -239,7 +239,7 @@ this FAQ is organized around the questions people ask support most often: what t
 
   - screenpipe license or subscription: unlocks screenpipe app features, depending on your plan
   - Claude/ChatGPT/OpenAI/Anthropic/Ollama: powers AI responses when you choose that model path
-  - cloud archive or cloud transcription: optional services for storage or processing
+  - cloud transcription: optional processing service
 
   if a pipe fails with an AI error, check the AI provider settings. if the app says you are free after purchase, check the screenpipe account.
 </Expandable>
@@ -574,7 +574,7 @@ this FAQ is organized around the questions people ask support most often: what t
 
   - a cloud AI provider
   - cloud transcription or media analysis
-  - cloud archive or sync
+  - team sync
   - a connected-app proxy call
   - a support bundle you choose to send
 
@@ -588,7 +588,7 @@ this FAQ is organized around the questions people ask support most often: what t
   - `data/`: screen and audio media
   - `pipes/`: installed pipes
 
-  if you need long-term storage, use [cloud archive](/cloud-archive) or a carefully configured local backup/sync path. for a NAS, make sure the database and active write path are reliable; slow or flaky network storage can corrupt active databases or make the app feel broken.
+  if you need long-term storage, quit screenpipe and copy `~/.screenpipe/` to an encrypted backup. keep the live database on a reliable local disk; slow or flaky network storage can corrupt active databases or make the app feel broken.
 </Expandable>
 
 <Expandable title="how do I activate a Business trial or subscription?">
@@ -625,7 +625,7 @@ this FAQ is organized around the questions people ask support most often: what t
 
   - a cloud AI provider (Claude, ChatGPT, Gemini, etc.) — only the text you query
   - cloud transcription (deepgram, screenpipe-cloud) — only audio you record
-  - cloud archive or team sync — only what you choose to archive
+  - team sync — only data included by the configured team workflow
   - a connection proxy (Slack, Notion, etc.) — only the API payloads
   - a support bundle you upload yourself
 
@@ -651,7 +651,7 @@ this FAQ is organized around the questions people ask support most often: what t
 </Expandable>
 
 <Expandable title="is screenpipe HIPAA, SOC2, or GDPR compliant?">
-  screenpipe's architecture is local-first by default: capture and storage stay on the user's device, which removes most of the data-residency surface area. cloud features (transcription, archive, AI providers) are optional and can be disabled for compliance-sensitive deployments.
+  screenpipe's architecture is local-first by default: capture and storage stay on the user's device, which removes most of the data-residency surface area. cloud transcription, team sync, and AI providers are optional and can be disabled for compliance-sensitive deployments.
 
   formal certifications, BAAs, and DPAs are available for enterprise contracts — contact [louis@screenpi.pe](mailto:louis@screenpi.pe) with your compliance requirements. self-hosted, fully air-gapped deployments are supported.
 </Expandable>
@@ -673,7 +673,7 @@ this FAQ is organized around the questions people ask support most often: what t
 
   - **range-delete** from the timeline — select a time range and delete it
   - **compact database** (`/data/compact`) to reclaim disk after deleting
-  - **download my archive** to export your data before removing it
+  - make a reviewed backup before removing anything you may need later
 
   for a full wipe: quit screenpipe and delete `~/.screenpipe/data/` (media) and `~/.screenpipe/db.sqlite` (metadata). screenpipe will rebuild from empty on next start.
 </Expandable>
@@ -685,7 +685,7 @@ this FAQ is organized around the questions people ask support most often: what t
   - **lean**: also strips heavier text (elements, accessibility json, ui events), keeps searchable text and memories
   - **all**: keeps everything until the cutoff
 
-  to keep storage in check: pick a tighter retention mode in **settings → storage**, lower capture FPS, exclude apps you do not need, run **compact database** to reclaim space, or use [cloud archive](/cloud-archive) to offload older months. enterprise deployments can set retention policies as part of their config.
+  to keep storage in check: pick a tighter retention mode in **settings → storage**, lower capture FPS, exclude apps you do not need, or run **compact database** to reclaim space. enterprise deployments can set retention policies as part of their config.
 </Expandable>
 
 <Expandable title="does screenpipe phone home or send telemetry?">
@@ -714,7 +714,7 @@ this FAQ is organized around the questions people ask support most often: what t
   - select fewer audio devices
   - use a faster transcription model
   - close the timeline when you are not reviewing video
-  - archive or delete old media
+  - delete old media through local retention
 
   if the problem started suddenly, restart screenpipe and compare before/after. include OS, hardware, screenpipe version, selected devices, and logs when reporting performance issues.
 </Expandable>
@@ -758,7 +758,7 @@ this FAQ is organized around the questions people ask support most often: what t
   - exclude apps you do not need recorded
   - lower audio chunk duration or use mono
   - set up auto-cleanup of old media in settings → storage
-  - use [cloud archive](/cloud-archive) to offload older months
+  - shorten local retention after making any backup you need
 
   enterprise deployments can configure tighter retention by policy.
 </Expandable>
