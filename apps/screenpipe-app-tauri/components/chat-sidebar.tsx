@@ -563,7 +563,7 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
             useChatStore.getState().actions.patch(id, {
               hidden,
               unread: false,
-              ...(hidden ? { draft: false } : {}),
+              ...(hidden ? { draft: false, pinned: false } : {}),
             });
             return;
           }
@@ -1303,7 +1303,7 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
     // Stop any active session first to avoid immediate row resurrection
     // from trailing stream events.
     commands.piAbort(id).catch(() => {});
-    actions.patch(id, { hidden: true, unread: false });
+    actions.patch(id, { hidden: true, pinned: false, unread: false });
     // Archiving should tuck chats away immediately; users can reopen
     // the bucket manually when they want to review archived items.
     setArchivedCollapsed(true);
@@ -1328,7 +1328,7 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
     }
     // Best-effort persistence for restart durability.
     try {
-      await updateConversationFlags(id, { hidden: true });
+      await updateConversationFlags(id, { hidden: true, pinned: false });
     } catch {
       // ignore
     }

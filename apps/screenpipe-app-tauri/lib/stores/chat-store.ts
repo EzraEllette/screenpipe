@@ -783,6 +783,7 @@ export function sessionRecordFromMeta(m: ConversationMeta): SessionRecord {
     createdAt: m.createdAt,
     updatedAt: m.updatedAt,
     pinned: m.pinned,
+    hidden: m.hidden,
     unread: false,
     // Empty persisted chat files are abandoned drafts, not durable history.
     // Mark them here so a restart cannot resurrect stray "untitled" rows.

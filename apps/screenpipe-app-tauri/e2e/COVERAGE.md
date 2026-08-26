@@ -7,8 +7,8 @@ and layer declared in the manifest, weighted by confidence and criticality.
 - Manifest: `e2e/coverage-map.json`
 - Specs directory: `e2e/specs`
 - Mapped specs: 124
-- Declared test blocks: 362
-- Weighted coverage points: 285.0
+- Declared test blocks: 363
+- Weighted coverage points: 286.0
 
 Confidence weights: strong=1.0, partial=0.7, conditional=0.4, smoke=0.3.
 Criticality weights: high=1.0, medium=0.7, low=0.4.
@@ -19,9 +19,9 @@ can execute more runtime cases than this number shows.
 
 | Platform | Specs | Declared tests | Weighted points | Layers | Features | Critical score |
 | --- | --- | --- | --- | --- | --- | --- |
-| windows | 94 | 307 | 251.3 | 15 | 102 | 92% |
-| macos | 120 | 324 | 254.8 | 17 | 111 | 90% |
-| linux | 83 | 265 | 220.7 | 14 | 99 | 88% |
+| windows | 94 | 308 | 252.3 | 15 | 102 | 92% |
+| macos | 120 | 325 | 255.8 | 17 | 111 | 90% |
+| linux | 83 | 266 | 221.7 | 14 | 99 | 88% |
 
 ## Runtime Results
 
@@ -37,15 +37,15 @@ pass/fail/skip counts.
 | auth | - | 1 specs / 1 tests / 1.0 pts | - |
 | billing | 4 specs / 6 tests / 5.7 pts | 4 specs / 6 tests / 5.7 pts | 4 specs / 6 tests / 5.7 pts |
 | capture-ocr | 2 specs / 16 tests / 6.4 pts | 8 specs / 12 tests / 4.8 pts | 1 specs / 3 tests / 1.2 pts |
-| chat-ai | 27 specs / 60 tests / 45.5 pts | 40 specs / 87 tests / 63.7 pts | 26 specs / 59 tests / 45.0 pts |
+| chat-ai | 27 specs / 61 tests / 46.5 pts | 40 specs / 88 tests / 64.7 pts | 26 specs / 60 tests / 46.0 pts |
 | entitlement | - | 1 specs / 1 tests / 1.0 pts | - |
 | local-api | 27 specs / 116 tests / 97.0 pts | 36 specs / 109 tests / 92.5 pts | 22 specs / 84 tests / 75.2 pts |
 | notifications | 4 specs / 26 tests / 17.3 pts | 3 specs / 5 tests / 3.4 pts | 2 specs / 4 tests / 3.1 pts |
 | onboarding | 9 specs / 38 tests / 33.8 pts | 11 specs / 42 tests / 37.2 pts | 9 specs / 38 tests / 33.8 pts |
 | os-integration | 7 specs / 32 tests / 26.9 pts | 14 specs / 29 tests / 17.4 pts | 2 specs / 15 tests / 10.8 pts |
 | performance | 3 specs / 45 tests / 45.0 pts | 5 specs / 35 tests / 31.5 pts | 2 specs / 30 tests / 30.0 pts |
-| pipes | 6 specs / 19 tests / 19.0 pts | 8 specs / 25 tests / 25.0 pts | 6 specs / 19 tests / 19.0 pts |
-| real-ui-e2e | 68 specs / 206 tests / 170.5 pts | 83 specs / 219 tests / 180.5 pts | 63 specs / 182 tests / 156.6 pts |
+| pipes | 6 specs / 20 tests / 20.0 pts | 8 specs / 26 tests / 26.0 pts | 6 specs / 20 tests / 20.0 pts |
+| real-ui-e2e | 68 specs / 207 tests / 171.5 pts | 83 specs / 220 tests / 181.5 pts | 63 specs / 183 tests / 157.6 pts |
 | settings | 14 specs / 40 tests / 37.0 pts | 16 specs / 34 tests / 29.7 pts | 13 specs / 31 tests / 28.0 pts |
 | storage-privacy | 9 specs / 42 tests / 33.3 pts | 9 specs / 27 tests / 26.1 pts | 6 specs / 20 tests / 19.1 pts |
 | tauri-command | 19 specs / 54 tests / 41.5 pts | 28 specs / 71 tests / 53.8 pts | 18 specs / 55 tests / 42.3 pts |
@@ -138,7 +138,7 @@ pass/fail/skip counts.
 | chat-settings-background-stream.spec.ts | windows, macos, linux | chat-ai, settings, real-ui-e2e | chat, chat-streaming, settings | high | strong | real-user-flow | 1 | Opening the standalone Settings route mid-stream must not abort the chat: a long synthetic stream keeps running while the user round-trips to Settings, remains live in Recents, and restores the full response (early + final tokens) after the row is clicked. |
 | chat-sidebar-groups.spec.ts | windows, macos, linux | chat-ai, real-ui-e2e | chat, chat-sidebar-groups | medium | strong | real-user-flow | 9 | Pipe auto-grouping (collapse, badge, expand/collapse, localStorage persistence) and manual sidebar groups (move-to-group, section headers, remove-from-group cleanup). 8 tests. |
 | chat-sidebar-navigation.spec.ts | windows, macos, linux | chat-ai, real-ui-e2e | chat, chat-navigation, chat-sidebar | high | strong | real-user-flow | 4 | Native Home WebView coverage for one active conversation, atomic sidebar-to-panel navigation, clean new-chat drafts, semantic unread state, removal of the duplicate tab strip, and a title-scoped Pin/Rename/Archive menu. |
-| chat-sidebar-pipe-inventory.spec.ts | windows, macos, linux | chat-ai, pipes, real-ui-e2e | chat, pipes, chat-sidebar-groups | high | strong | mixed | 1 | The long chat inventory scrolls independently; a collapsed Pipes section loads nothing, expanding it lists a compact execution-backed activity page, expanding a pipe lazily loads its newest 10 executions, and older runs paginate on demand. |
+| chat-sidebar-pipe-inventory.spec.ts | windows, macos, linux | chat-ai, pipes, real-ui-e2e | chat, pipes, chat-sidebar-groups | high | strong | mixed | 2 | The long chat inventory scrolls independently; a collapsed Automations section loads nothing, expanding it lists a compact execution-backed activity page, expanding an automation lazily loads its newest 10 executions, older runs paginate on demand, and a pinned automation remains archived after reload. |
 | chat-sidebar-repeated-prompt.spec.ts | windows, macos, linux | chat-ai, real-ui-e2e | chat, chat-sidebar-dedupe | high | strong | real-user-flow | 1 | Two distinct chats sent with the same opening prompt stay visible in the left sidebar. |
 | chat-sidebar-stub-dedup.spec.ts | windows, macos, linux | chat-ai | chat, chat-sidebar-dedupe | medium | partial | synthetic | 1 | Listener-order regression for metadata-only sidebar stubs gaining dedup keys. |
 | chat-source-file-preview.spec.ts | windows, macos, linux | chat-ai, real-ui-e2e | chat | medium | strong | real-user-flow | 1 | Clicking a chat file source opens it in the preview sidebar with rendered markdown + syntax-highlighted code. |
