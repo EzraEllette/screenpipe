@@ -293,6 +293,14 @@ export interface ChatHistoryStore {
 
 // Extend SettingsStore with fields added before Rust types are regenerated
 export type Settings = SettingsStore & {
+	/** Enable account data sync for this device. Default false. */
+	dataSyncEnabled?: boolean;
+	/** Friendly name used to partition this device's synced data. */
+	dataSyncDeviceName?: string;
+	/** Start boundary for this device's current explicit opt-in. */
+	dataSyncEnabledAt?: string;
+	/** Account that explicitly enabled Data Sync on this device. */
+	dataSyncAccountId?: string;
 	/** Enable automatic Activities generation. Default false. */
 	activitiesEnabled?: boolean;
 	/** Native Activity generation cadence in minutes. Default 15. */
@@ -709,6 +717,7 @@ const applyProCloudAudioDefaults = (settings: Settings): Settings => {
 };
 
 let DEFAULT_SETTINGS: Settings = {
+			dataSyncEnabled: false,
 			activitiesEnabled: false,
 			activitiesIntervalMinutes: 15,
 			aiPresets: makeDefaultPresets(false) as any,

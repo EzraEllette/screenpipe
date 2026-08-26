@@ -175,10 +175,9 @@ thiserror = { version = "1.0", optional = true }
 # as thiserror — `#[path = ...]` imports aren't followed by cargo-machete.
 screenpipe-sync = { path = "../../../crates/screenpipe-sync", optional = true }
 
-# Telemetry wire contract (JSONL record schema + direct-upload manifest +
-# object-key layout) shared with the customer query gateway. Gated behind
-# enterprise-build like the crates above.
-screenpipe-telemetry-wire = { path = "../../../crates/screenpipe-telemetry-wire", optional = true }
+# Telemetry wire contract shared by Enterprise telemetry and opt-in consumer
+# data sync so both upload byte-compatible JSONL records.
+screenpipe-telemetry-wire = { path = "../../../crates/screenpipe-telemetry-wire" }
 
 # jemalloc — aggressively returns freed pages to OS, reducing RSS bloat
 [target.'cfg(not(target_os = "windows"))'.dependencies]
@@ -301,7 +300,6 @@ official-build = []
 enterprise-build = [
     "dep:thiserror",
     "dep:screenpipe-sync",
-    "dep:screenpipe-telemetry-wire",
     "screenpipe-core/enterprise-build",
 ]
 

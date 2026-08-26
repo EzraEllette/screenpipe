@@ -55,6 +55,7 @@ mod chat_control;
 mod chatgpt_oauth;
 #[allow(deprecated)]
 mod commands;
+mod data_sync;
 mod db_recovery_notifications;
 mod db_relaunch;
 mod db_self_heal;
@@ -2385,6 +2386,10 @@ async fn main() {
             // Runs forever in background; only takes effect on enterprise-
             // telemetry builds with SCREENPIPE_ENTERPRISE_LICENSE_KEY env set.
             let _enterprise_shutdown_tx = enterprise_sync::spawn(&app_handle);
+
+            // Account data sync. Runtime eligibility keeps customer-managed
+            // Enterprise accounts out while allowing Screenpipe's own org.
+            data_sync::spawn(&app_handle);
 
             // Standard builds: account-bound, explicit opt-in support logs.
             // Enterprise builds compile this as a no-op because their managed
