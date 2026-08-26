@@ -269,6 +269,22 @@ async closeWindow(window: ShowRewindWindow) : Promise<Result<null, string>> {
     else return { status: "error", error: e  as any };
 }
 },
+async codingWorkspaceCreate(conversationId: string, repositoryPath: string) : Promise<Result<CodingWorkspace, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("coding_workspace_create", { conversationId, repositoryPath }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async codingWorkspaceGet(conversationId: string) : Promise<Result<CodingWorkspace | null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("coding_workspace_get", { conversationId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async completeOnboarding() : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("complete_onboarding") };
@@ -3098,6 +3114,7 @@ export type ChatGptOAuthStatus = { logged_in: boolean;
  * keychain failure, timeout, etc.).
  */
 error: string | null }
+export type CodingWorkspace = { version: number; conversationId: string; repoRoot: string; gitCommonDir: string; worktreePath: string; branch: string; baseCommit: string; sourceDirty: boolean; createdAt: string }
 export type Credits = { amount: number }
 /**
  * A skill folder discovered somewhere on the user's device.
@@ -3132,6 +3149,14 @@ export type DiscoveredHost = { host: string; port: number; user: string | null; 
  * Only set when `HostName` resolves to an IP different from the alias.
  */
 alias?: string | null }
+/**
+ * One strict hostname rule used by browser capture allowlists and blocklists.
+ *
+ * `domain` is normalized by the capture policy before matching. The rule
+ * always matches the domain itself; `include_subdomains` extends the match to
+ * descendant hosts, except descendants rooted at `excluded_subdomains`.
+ */
+export type DomainRule = { domain: string; includeSubdomains?: boolean; excludedSubdomains?: string[] }
 export type EmbeddedLLM = { enabled: boolean; model: string; port: number }
 export type EngineEvent = { name: string; data: JsonValue }
 export type EnterpriseHostIdentity = { machine_id_hash: string | null; os_user_id_hash: string | null }
@@ -3752,9 +3777,15 @@ ignoredWindows: string[];
  */
 includedWindows: string[];
 /**
- * URLs to exclude from capture.
+ * Browser URLs to exclude from capture. Existing string entries remain
+ * supported; new entries can use explicit structured domain rules.
  */
-ignoredUrls?: string[];
+ignoredUrls?: UrlRule[];
+/**
+ * Strict browser hostname allowlist. When non-empty, native apps and
+ * browser windows without a positively detected matching URL are skipped.
+ */
+includedUrls?: DomainRule[];
 /**
  * Automatically detect and skip incognito / private browsing windows.
  */
@@ -4153,6 +4184,14 @@ export type SyncDeviceInfo = { id: string; deviceId: string; deviceName: string 
  * Sync status response.
  */
 export type SyncStatusResponse = { enabled: boolean; isSyncing: boolean; lastSync: string | null; lastError: string | null; storageUsed: number | null; storageLimit: number | null; deviceCount: number | null; deviceLimit: number | null; syncTier: string | null; machineId: string }
+/**
+ * A browser URL block rule.
+ *
+ * Strings are the legacy `ignoredUrls` format and keep their historical
+ * domain matching behavior. Structured rules provide explicit exact-domain,
+ * subdomain, and exception semantics without introducing a second setting.
+ */
+export type UrlRule = string | DomainRule
 export type User = { id: string | null; name: string | null; email: string | null; image: string | null; token: string | null; clerk_id: string | null; api_key: string | null; credits: Credits | null; stripe_connected: boolean | null; stripe_account_status: string | null; github_username: string | null; bio: string | null; website: string | null; contact: string | null; cloud_subscribed: boolean | null; credits_balance: number | null; app_entitled: boolean | null; subscription_plan: string | null; entitlement: JsonValue | null; enterprise_account: JsonValue | null }
 export type ViewerContent = { kind: "text"; text: string; name: string; path: string; truncated: boolean; total_bytes: number } | { kind: "image"; data_url: string; name: string; path: string } |
 /**

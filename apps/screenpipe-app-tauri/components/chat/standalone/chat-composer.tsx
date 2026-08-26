@@ -4,6 +4,7 @@
 "use client";
 
 import { AttachmentTray } from "@/components/chat/standalone/attachment-tray";
+import { ChatJumpToLatest } from "@/components/chat/standalone/chat-jump-to-latest";
 import { ComposerControlsRow } from "@/components/chat/standalone/composer-controls-row";
 import { ComposerInputBox } from "@/components/chat/standalone/composer-input-box";
 import { ComposerSuggestions } from "@/components/chat/standalone/composer-suggestions";
@@ -31,7 +32,9 @@ export function ChatComposer({
   mentions,
   filters,
   modelControls,
+  codingWorkspace,
   connectBanner,
+  jumpToLatest,
   onStop,
 }: ChatComposerProps) {
   const hasInput =
@@ -55,8 +58,10 @@ export function ChatComposer({
   return (
     <div
       ref={input.sectionRef}
+      data-testid="chat-composer"
       className="relative border-t border-border/60 bg-background"
     >
+      {jumpToLatest && <ChatJumpToLatest {...jumpToLatest} />}
       <div className={CHAT_RAIL_CLASS}>
         <PrefillContextBanner prefill={prefill} />
         <ComposerSuggestions suggestions={suggestions} />
@@ -104,6 +109,7 @@ export function ChatComposer({
             canChat={input.canChat}
             filters={filters}
             modelControls={modelControls}
+            codingWorkspace={codingWorkspace}
             isStreaming={input.isLoading || input.isStreaming}
             dictation={{
               inputValue: input.value,

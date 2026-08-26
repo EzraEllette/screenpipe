@@ -50,6 +50,17 @@ import {
 import { renderChartFence } from "@/components/chat/charts/chat-chart";
 import { PlanBlock } from "@/components/chat/standalone/plan-block";
 import { ActivityIcon, type ActivityIconState } from "@/components/chat/standalone/activity-icon";
+import {
+  parseStructuredAssistantOutput,
+  StructuredOutputBlock,
+} from "@/components/chat/standalone/structured-output";
+import { RichResultCards } from "@/components/chat/standalone/rich-result-card";
+import {
+  chatRichResultsFromToolCalls,
+  dedupeChatRichResults,
+  parseChatRichResults,
+  type ChatRichResult,
+} from "@/lib/chat/rich-results";
 
 const MermaidDiagram = React.lazy(() =>
   import("@/components/rewind/mermaid-diagram").then((mod) => ({
@@ -1687,6 +1698,7 @@ export function MessageContent({
   onImageClick,
   onRetry,
   onOpenViewerPath,
+  onOpenRichResult,
   onOpenConnectionSetup,
   onConnectConnectionAction,
   onContinueConnectionAction,
@@ -1706,6 +1718,7 @@ export function MessageContent({
   onImageClick?: (images: string[], index: number) => void;
   onRetry?: (prompt: string) => void;
   onOpenViewerPath?: (path: string) => void;
+  onOpenRichResult?: (result: ChatRichResult) => void | Promise<void>;
   onOpenConnectionSetup?: (connectionId: string) => void | Promise<void>;
   onConnectConnectionAction?: (connectionId: string, block?: Extract<ContentBlock, { type: "connection_action" }>) => Promise<InlineConnectStatus | void> | InlineConnectStatus | void;
   onContinueConnectionAction?: (prompt: string, label?: string) => void | Promise<void>;
@@ -1862,11 +1875,25 @@ export function MessageContent({
     const grouped = groupContentBlocks(message.contentBlocks);
     const collapsed = collapseHiddenWorkGroups(grouped);
     const displayGroups = mergeWorkAndIntermediateText(collapsed);
+    const parsedTextByKey = new Map<number, ReturnType<typeof parseChatRichResults>>();
+    const directiveResults: ChatRichResult[] = [];
+    for (const group of displayGroups) {
+      if (group.type !== "text") continue;
+      const parsed = isUser
+        ? { text: group.text, results: [] }
+        : parseChatRichResults(group.text, { streaming: isGenerating });
+      parsedTextByKey.set(group.key, parsed);
+      directiveResults.push(...parsed.results);
+    }
+    const toolResults = chatRichResultsFromToolCalls(
+      message.contentBlocks.flatMap((block) => block.type === "tool" ? [block.toolCall] : []),
+    );
+    const richResults = dedupeChatRichResults([...toolResults, ...directiveResults]);
 
     // If all blocks were absorbed (for example, thinking-only output with no
     // visible text or tool work), render nothing. The loader covers the active
     // case and an empty stopped turn should not invent a finished state.
-    if (displayGroups.length === 0 && !isGenerating && !sourceFooter && !retryCta) {
+    if (displayGroups.length === 0 && richResults.length === 0 && !isGenerating && !sourceFooter && !retryCta) {
       return null;
     }
 
@@ -1885,11 +1912,24 @@ export function MessageContent({
       <div className="space-y-2 min-w-0 w-full overflow-hidden">
         {displayGroups.map((group, groupIndex) => {
           if (group.type === "text") {
+            const text = parsedTextByKey.get(group.key)?.text ?? group.text;
+            if (!text) return null;
+            const structuredOutput = !isUser
+              ? parseStructuredAssistantOutput(text)
+              : null;
+            if (structuredOutput) {
+              return (
+                <StructuredOutputBlock
+                  key={`text-${group.key}`}
+                  output={structuredOutput}
+                />
+              );
+            }
             return (
               <MarkdownBlock
                 {...markdownOptions}
                 key={`text-${group.key}`}
-                text={group.text}
+                text={text}
                 isUser={isUser}
                 streaming={isGenerating && groupIndex === displayGroups.length - 1}
                 onOpenViewerPath={onOpenViewerPath}
@@ -1986,6 +2026,7 @@ export function MessageContent({
           }
           return null;
         })}
+        <RichResultCards results={richResults} onOpen={onOpenRichResult} />
         {sourceFooter}
         {retryCta}
       </div>
@@ -2002,17 +2043,26 @@ export function MessageContent({
   // "(tool result)" is a persistence placeholder given to tool-only messages so
   // they are not stored empty. It is not user-facing text, so never render it as
   // an assistant bubble (the tool activity itself renders from contentBlocks).
-  const displayText = rawText === "(tool result)" ? "" : rawText;
+  const unparsedDisplayText = rawText === "(tool result)" ? "" : rawText;
+  const parsedRichResults = isUser
+    ? { text: unparsedDisplayText, results: [] }
+    : parseChatRichResults(unparsedDisplayText, { streaming: isGenerating });
+  const displayText = parsedRichResults.text;
   const hasMeaningfulText = Boolean(displayText && displayText !== "Processing...");
+  const structuredOutput = !isUser && displayText
+    ? parseStructuredAssistantOutput(displayText)
+    : null;
 
-  if (!isUser && !hasMeaningfulText && !attachmentsRow && !sourceFooter && !retryCta) {
+  if (!isUser && !hasMeaningfulText && parsedRichResults.results.length === 0 && !attachmentsRow && !sourceFooter && !retryCta) {
     return null;
   }
 
   return (
     <div className="space-y-2 min-w-0 w-full">
       {attachmentsRow}
-      {displayText ? (
+      {structuredOutput ? (
+        <StructuredOutputBlock output={structuredOutput} />
+      ) : displayText ? (
         <MarkdownBlock
           {...markdownOptions}
           text={displayText}
@@ -2030,6 +2080,7 @@ export function MessageContent({
           }}
         />
       ) : null}
+      <RichResultCards results={parsedRichResults.results} onOpen={onOpenRichResult} />
       {sourceFooter}
       {retryCta}
     </div>

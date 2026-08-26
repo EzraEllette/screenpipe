@@ -736,6 +736,7 @@ async fn capture_pi_start_error(
         project_dir,
         None,
         provider_config,
+        None,
     )
     .await
     {

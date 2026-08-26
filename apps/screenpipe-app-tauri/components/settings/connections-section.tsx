@@ -2227,6 +2227,20 @@ const OAUTH_SCOPE_VARIANTS: Record<
   ],
 };
 
+export function getOAuthPanelCopy(integrationId: string, integrationName: string) {
+  if (integrationId === "slack") {
+    return {
+      description: "Connect a Slack workspace. Add each workspace where Screenpipe should act on your behalf.",
+      addAnotherLabel: "add another workspace",
+    };
+  }
+
+  return {
+    description: `Connect your ${integrationName} account. AI can act on your behalf once connected.`,
+    addAnotherLabel: "add another account",
+  };
+}
+
 export function getOAuthFallbackMessage(
   integrationId: string,
   phase: "pending" | "failed",
@@ -2283,6 +2297,7 @@ function OAuthPanel({
     ? initialScopeVariant!
     : scopeVariants?.[0]?.id ?? null;
   const [scopeVariant, setScopeVariant] = useState(defaultScopeVariant);
+  const panelCopy = getOAuthPanelCopy(integrationId, integrationName);
 
   const clearFallbackTimer = useCallback(() => {
     if (fallbackTimerRef.current) {
@@ -2404,7 +2419,7 @@ function OAuthPanel({
   return (
     <div className="space-y-3">
       <p className="text-xs text-muted-foreground">
-        Connect your {integrationName} account. AI can act on your behalf once connected.
+        {panelCopy.description}
       </p>
       {connected && (
         <div className="space-y-2">
@@ -2478,7 +2493,7 @@ function OAuthPanel({
         ) : (
           <Button onClick={handleConnect} disabled={connectDisabled} size="sm" className="gap-1.5 h-7 text-xs normal-case font-sans tracking-normal whitespace-nowrap">
             {connected && supportsOAuthInstances
-              ? (<><Plus className="h-3 w-3" />add another account</>)
+              ? (<><Plus className="h-3 w-3" />{panelCopy.addAnotherLabel}</>)
               : connected
                 ? (<><LogIn className="h-3 w-3" />reconnect {integrationName}</>)
               : (<><LogIn className="h-3 w-3" />connect with {integrationName}</>)}

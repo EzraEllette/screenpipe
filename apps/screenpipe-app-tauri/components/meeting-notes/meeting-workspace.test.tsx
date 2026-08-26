@@ -13,6 +13,7 @@ import {
   MeetingSummarySurface,
   MeetingWorkspaceTabs,
   preferredMeetingWorkspaceTab,
+  stopMeetingAndOpenSummary,
 } from "./meeting-workspace";
 
 describe("preferred meeting workspace tab", () => {
@@ -28,6 +29,33 @@ describe("preferred meeting workspace tab", () => {
     expect(preferredMeetingWorkspaceTab(null)).toBe("notes");
     expect(preferredMeetingWorkspaceTab("## Summary\n\n")).toBe("notes");
     expect(preferredMeetingWorkspaceTab("working note")).toBe("notes");
+  });
+});
+
+describe("meeting stop destination", () => {
+  it("opens summary only after the meeting stops successfully", async () => {
+    const onStop = vi.fn(async () => undefined);
+    const onValueChange = vi.fn();
+
+    await stopMeetingAndOpenSummary(onStop, onValueChange);
+
+    expect(onStop).toHaveBeenCalledOnce();
+    expect(onValueChange).toHaveBeenCalledWith("summary");
+    expect(onStop.mock.invocationCallOrder[0]).toBeLessThan(
+      onValueChange.mock.invocationCallOrder[0],
+    );
+  });
+
+  it("keeps the current tab when stopping fails", async () => {
+    const onStop = vi.fn(async () => {
+      throw new Error("stop failed");
+    });
+    const onValueChange = vi.fn();
+
+    await expect(
+      stopMeetingAndOpenSummary(onStop, onValueChange),
+    ).rejects.toThrow("stop failed");
+    expect(onValueChange).not.toHaveBeenCalled();
   });
 });
 

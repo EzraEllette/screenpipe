@@ -4210,6 +4210,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "file-id"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e1fc6a637b6dc58414714eddd9170ff187ecb0933d4c7024d1abbd23a3cc26e9"
+dependencies = [
+ "windows-sys 0.60.2",
+]
+
+[[package]]
 name = "filetime"
 version = "0.2.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7865,6 +7874,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "notify-debouncer-full"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "375bd3a138be7bfeff3480e4a623df4cbfb55b79df617c055cd810ba466fa078"
+dependencies = [
+ "file-id",
+ "log",
+ "notify",
+ "notify-types",
+ "walkdir",
+]
+
+[[package]]
 name = "notify-rust"
 version = "4.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7885,6 +7907,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "42b8cfee0e339a0337359f3c88165702ac6e600dc01c0cc9579a92d62b08477a"
 dependencies = [
  "bitflags 2.11.0",
+ "serde",
 ]
 
 [[package]]
@@ -11140,7 +11163,7 @@ dependencies = [
 
 [[package]]
 name = "screenpipe-app"
-version = "2.6.91"
+version = "2.6.92"
 dependencies = [
  "aes 0.8.4",
  "aes-gcm 0.10.3",
@@ -11274,7 +11297,7 @@ dependencies = [
 
 [[package]]
 name = "screenpipe-audio"
-version = "0.4.45"
+version = "0.4.46"
 dependencies = [
  "anyhow",
  "audiopipe",
@@ -11352,7 +11375,7 @@ dependencies = [
 
 [[package]]
 name = "screenpipe-config"
-version = "0.4.45"
+version = "0.4.46"
 dependencies = [
  "dirs 6.0.0",
  "screenpipe-cpu-features",
@@ -11365,7 +11388,7 @@ dependencies = [
 
 [[package]]
 name = "screenpipe-connect"
-version = "0.4.45"
+version = "0.4.46"
 dependencies = [
  "anyhow",
  "async-imap",
@@ -11411,7 +11434,7 @@ dependencies = [
 
 [[package]]
 name = "screenpipe-core"
-version = "0.4.45"
+version = "0.4.46"
 dependencies = [
  "accessibility",
  "accessibility-sys",
@@ -11464,11 +11487,11 @@ dependencies = [
 
 [[package]]
 name = "screenpipe-cpu-features"
-version = "0.4.45"
+version = "0.4.46"
 
 [[package]]
 name = "screenpipe-db"
-version = "0.4.45"
+version = "0.4.46"
 dependencies = [
  "anyhow",
  "chrono",
@@ -11496,7 +11519,7 @@ dependencies = [
 
 [[package]]
 name = "screenpipe-engine"
-version = "0.4.45"
+version = "0.4.46"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -11570,7 +11593,7 @@ dependencies = [
 
 [[package]]
 name = "screenpipe-events"
-version = "0.4.45"
+version = "0.4.46"
 dependencies = [
  "anyhow",
  "chrono",
@@ -11586,7 +11609,7 @@ dependencies = [
 
 [[package]]
 name = "screenpipe-overlay-win"
-version = "0.4.45"
+version = "0.4.46"
 dependencies = [
  "serde",
  "serde_json",
@@ -11605,7 +11628,7 @@ dependencies = [
 
 [[package]]
 name = "screenpipe-redact"
-version = "0.4.45"
+version = "0.4.46"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -11642,7 +11665,7 @@ dependencies = [
 
 [[package]]
 name = "screenpipe-resource"
-version = "0.4.45"
+version = "0.4.46"
 dependencies = [
  "serde",
  "sysinfo",
@@ -11662,7 +11685,7 @@ dependencies = [
 
 [[package]]
 name = "screenpipe-screen"
-version = "0.4.45"
+version = "0.4.46"
 dependencies = [
  "accessibility-sys",
  "anyhow",
@@ -11729,7 +11752,7 @@ dependencies = [
 
 [[package]]
 name = "screenpipe-sqlite-coordinator"
-version = "0.4.45"
+version = "0.4.46"
 dependencies = [
  "libsqlite3-sys",
  "serde",
@@ -11742,7 +11765,7 @@ dependencies = [
 
 [[package]]
 name = "screenpipe-sqlite-recovery"
-version = "0.4.45"
+version = "0.4.46"
 dependencies = [
  "cc",
  "libsqlite3-sys",
@@ -11750,7 +11773,7 @@ dependencies = [
 
 [[package]]
 name = "screenpipe-sync"
-version = "0.4.45"
+version = "0.4.46"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -11770,7 +11793,7 @@ dependencies = [
 
 [[package]]
 name = "screenpipe-telemetry-wire"
-version = "0.4.45"
+version = "0.4.46"
 dependencies = [
  "serde",
  "serde_json",
@@ -11780,7 +11803,7 @@ dependencies = [
 
 [[package]]
 name = "screenpipe-vault"
-version = "0.4.45"
+version = "0.4.46"
 dependencies = [
  "argon2 0.5.3",
  "chacha20poly1305",
@@ -14083,6 +14106,8 @@ dependencies = [
  "anyhow",
  "dunce",
  "glob",
+ "notify",
+ "notify-debouncer-full",
  "percent-encoding",
  "schemars 0.8.22",
  "serde",

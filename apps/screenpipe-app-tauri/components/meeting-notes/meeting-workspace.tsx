@@ -174,6 +174,14 @@ export function preferredMeetingWorkspaceTab(
   return extractMeetingSummary(note ?? "") ? "summary" : "notes";
 }
 
+export async function stopMeetingAndOpenSummary(
+  onStop: () => void | Promise<void>,
+  onValueChange: (value: MeetingWorkspaceTab) => void,
+): Promise<void> {
+  await onStop();
+  onValueChange("summary");
+}
+
 export interface MeetingSummaryRecovery {
   title: string;
   detail: string;

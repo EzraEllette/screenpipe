@@ -235,6 +235,18 @@
       ]
     },
     {
+      "id": "chat-coding-worktrees",
+      "label": "Conversation-owned coding worktrees",
+      "platforms": [
+        "windows",
+        "macos",
+        "linux"
+      ],
+      "layers": [
+        "chat-ai"
+      ]
+    },
+    {
       "id": "tray-search",
       "label": "Tray/search window behavior",
       "platforms": [
@@ -683,6 +695,26 @@
       "notes": "The Day Recap automation card previews its user-facing prompt in the empty composer on hover, restores the default placeholder on leave, and creates exactly one persisted conversation and one sidebar row; status-only activity for an unknown session must not create an empty untitled sibling."
     },
     {
+      "spec": "chat-coding-worktree.spec.ts",
+      "platforms": [
+        "windows",
+        "macos",
+        "linux"
+      ],
+      "layers": [
+        "chat-ai",
+        "real-ui-e2e"
+      ],
+      "features": [
+        "chat",
+        "chat-coding-worktrees"
+      ],
+      "criticality": "high",
+      "confidence": "strong",
+      "ux": "real-user-flow",
+      "notes": "Creates a conversation-owned worktree through the real desktop command path, proves dirty-source preservation, conversation isolation and resume, launches Pi in the owned cwd while ignoring a hostile project-local extension, and verifies work survives Pi stop. Runs in the focused Windows CI list as well as the recursive macOS and Linux suites."
+    },
+    {
       "spec": "chat-composer-isolation.spec.ts",
       "platforms": [
         "windows",
@@ -798,7 +830,26 @@
       "criticality": "medium",
       "confidence": "strong",
       "ux": "real-user-flow",
-      "notes": "A real Tauri chat session keeps a short answer at the top of the message rail without exposing a false new-content state."
+      "notes": "A real Tauri chat session keeps a short answer at the top of the message rail without exposing an interactive jump-to-latest control."
+    },
+    {
+      "spec": "chat-jump-to-latest.spec.ts",
+      "platforms": [
+        "windows",
+        "macos",
+        "linux"
+      ],
+      "layers": [
+        "chat-ai",
+        "real-ui-e2e"
+      ],
+      "features": [
+        "chat"
+      ],
+      "criticality": "medium",
+      "confidence": "strong",
+      "ux": "real-user-flow",
+      "notes": "A long real Tauri chat fades a quiet composer-anchored jump control at the latest message, reveals it after scrolling up, and returns to the bottom on click."
     },
     {
       "spec": "chat-hosted-retry-feedback.spec.ts",
@@ -838,6 +889,30 @@
       "confidence": "strong",
       "ux": "real-user-flow",
       "notes": "Seeds an assistant message containing ```chart fences and asserts the charts render inline between the surrounding paragraphs, bar widths are proportional to the data, hover shows a tooltip and recolours the mark, a malformed fence degrades to a readable code block, every chart exposes a screen-reader table, and no chart uses a rounded corner (DESIGN.md)."
+    },
+    {
+      "spec": "chat-rich-result-cards.spec.ts",
+      "platforms": [
+        "windows",
+        "macos",
+        "linux"
+      ],
+      "layers": [
+        "chat-ai",
+        "real-ui-e2e",
+        "tauri-command"
+      ],
+      "features": [
+        "chat",
+        "chat-results",
+        "pipes",
+        "artifacts",
+        "live-views"
+      ],
+      "criticality": "high",
+      "confidence": "strong",
+      "ux": "real-user-flow",
+      "notes": "Seeds durable scheduled-task, artifact, chat, Live View, and link results; proves directives stay hidden, all proposed/pending/success/paused/recovery states render truthfully, non-actionable states disable Open, light/dark review screenshots remain usable, and a created-chat card switches through the real Tauri conversation handoff."
     },
     {
       "spec": "chat-local-ai-gateway.spec.ts",
@@ -1044,12 +1119,14 @@
       ],
       "features": [
         "chat",
-        "chat-sidebar-groups"
+        "chat-sidebar-groups",
+        "chat-unread-state",
+        "chat-structured-output"
       ],
       "criticality": "high",
       "confidence": "strong",
       "ux": "real-user-flow",
-      "notes": "Recent local Codex and Claude histories sync automatically into the same Recents stream as native screenpipe chats. The primary sidebar has no import action; right-clicking View all filters by only the sources present, while a hover-only organizer exposes the same filters plus source grouping and priority or latest-update sorting. Captures sparse, crowded mixed-provider, and Codex-heavy native UI states with one harness icon per row, expanded pinned rows, and the capped recent working set."
+      "notes": "Recent local Codex and Claude histories sync automatically into the same Recents stream as native Screenpipe chats. Isolated real JSONL files prove that a background provider update does not invent an unread dot when the transcript has no provider attention state, and that a later assistant message updates the already-open chat without a page reload for both providers. A large Claude JSON response stays compact by default and expands into readable, pretty-printed output. The primary sidebar has no import action; right-clicking View all filters by only the sources present, while a hover-only organizer exposes the same filters plus source grouping and priority or latest-update sorting. Captures sparse, crowded mixed-provider, Codex-heavy, and structured-output native UI states with one harness icon per row, expanded pinned rows, and the capped recent working set."
     },
     {
       "spec": "chat-sidebar-groups.spec.ts",
@@ -1861,7 +1938,7 @@
       "criticality": "high",
       "confidence": "strong",
       "ux": "real-user-flow",
-      "notes": "Seeds a completed meeting with notes and summary, proves it reopens on the saved summary rather than the raw transcript, switches persistent tabs, resizes to 640x560, checks footer separation and horizontal overflow, then captures a review screenshot."
+      "notes": "Seeds a live meeting with notes and summary, proves the saved summary is the preferred outcome view, switches persistent tabs, resizes to 640x560, checks footer separation and horizontal overflow, captures a review screenshot, then stops from the transcript and verifies the Summary tab opens."
     },
     {
       "spec": "meeting-chat-panel.spec.ts",
