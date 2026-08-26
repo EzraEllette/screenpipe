@@ -347,8 +347,10 @@ pub async fn find_api_auth_key() -> Option<String> {
 #[cfg(test)]
 mod local_api_auth_tests {
     use super::*;
+    use serial_test::serial;
 
     #[tokio::test]
+    #[serial(secret_store)]
     async fn unreadable_encrypted_row_gets_stable_recovery_without_being_overwritten() {
         let dir = tempfile::tempdir().unwrap();
         let encryption_key = [7u8; 32];
@@ -556,11 +558,13 @@ fn cloud_token_from_store_json(data_dir: &Path) -> Option<String> {
 #[cfg(test)]
 mod cloud_token_tests {
     use super::*;
+    use serial_test::serial;
 
     const JWT: &str = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ0ZXN0In0.sig";
     const JWT_ALT: &str = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJvdGhlciJ9.sig";
 
     #[tokio::test]
+    #[serial(secret_store)]
     async fn resolve_cloud_token_reads_desktop_secret_store() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("db.sqlite");
@@ -587,6 +591,7 @@ mod cloud_token_tests {
     }
 
     #[tokio::test]
+    #[serial(secret_store)]
     async fn local_api_key_does_not_override_persisted_cloud_session() {
         let dir = tempfile::tempdir().unwrap();
         set_cloud_token(dir.path(), JWT).await.unwrap();
@@ -597,6 +602,7 @@ mod cloud_token_tests {
     }
 
     #[tokio::test]
+    #[serial(secret_store)]
     async fn cloud_session_round_trips_and_clears() {
         let dir = tempfile::tempdir().unwrap();
 
