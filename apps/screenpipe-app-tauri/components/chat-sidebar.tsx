@@ -151,10 +151,13 @@ import {
   buildGroupedRecents,
   latestSidebarPipeRunTimes,
   listMoveTargetGroups,
+  mergeSidebarPipeInventory,
   recurringPipeGroupKeys,
+  SIDEBAR_AUTOMATION_PAGE_SIZE,
   sortSidebarPipeRuns,
   visibleSidebarPipeNames,
   sessionGroupKey,
+  type SidebarPipeInventoryItem,
   type SidebarItem,
   type SidebarRecentsSection,
   validateSidebarGroupName,
@@ -163,7 +166,6 @@ import {
 /** Max top-level rows shown in recents. Pipes use the authoritative inventory. */
 const SIDEBAR_CAP = 8;
 const PIPE_RUNS_PER_GROUP = 10;
-const PIPE_INVENTORY_PAGE_SIZE = 20;
 const DELETED_PIPE_EXECUTIONS_KEY = "screenpipe:deleted-pipe-executions";
 const RECENTS_SOURCE_FILTER_KEY = "screenpipe:recents-hidden-sources";
 const RECENTS_LAYOUT_KEY = "screenpipe:recents-layout";
@@ -264,13 +266,6 @@ function syncExternalChatsIfNeeded(force = false): Promise<void> {
       externalChatSyncPromise = null;
     });
   return externalChatSyncPromise;
-}
-
-interface SidebarPipeInventoryItem {
-  name: string;
-  executionCount: number;
-  latestExecutionId: number;
-  lastRun: string | null;
 }
 
 interface SidebarPipeExecution {
@@ -707,6 +702,7 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
   const [pipeInventory, setPipeInventory] = useState<SidebarPipeInventoryItem[]>([]);
   const [pipeInventoryLoaded, setPipeInventoryLoaded] = useState(false);
   const [pipeInventoryAuthoritative, setPipeInventoryAuthoritative] = useState(false);
+  const pipeInventoryAuthoritativeRef = useRef(false);
   const [pipeInventoryLoadingMore, setPipeInventoryLoadingMore] = useState(false);
   const [pipeInventoryHasMore, setPipeInventoryHasMore] = useState(false);
   const pipeInventoryCursorRef = useRef<number | null>(null);
@@ -741,6 +737,7 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
     setPipeInventory([]);
     setPipeInventoryLoaded(false);
     setPipeInventoryAuthoritative(false);
+    pipeInventoryAuthoritativeRef.current = false;
     setPipeInventoryHasMore(false);
     pipeInventoryCursorRef.current = null;
   }, []);
@@ -760,10 +757,12 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
     preserveExisting = false,
   ) => {
     const generation = pipeDataGenerationRef.current;
+    const recoveringInitialPage =
+      preserveExisting && !pipeInventoryAuthoritativeRef.current;
     if (append) setPipeInventoryLoadingMore(true);
     try {
       const params = new URLSearchParams({
-        limit: String(PIPE_INVENTORY_PAGE_SIZE),
+        limit: String(SIDEBAR_AUTOMATION_PAGE_SIZE),
       });
       if (append && pipeInventoryCursorRef.current != null) {
         params.set("before_id", String(pipeInventoryCursorRef.current));
@@ -786,21 +785,25 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
           lastRun: typeof pipe.last_run_at === "string" ? pipe.last_run_at : null,
         });
       }
-      setPipeInventory((previous) => {
-        if (!append && !preserveExisting) return page;
-        const merged = new Map(previous.map((pipe) => [pipe.name, pipe]));
-        for (const pipe of page) merged.set(pipe.name, pipe);
-        return Array.from(merged.values()).sort(
-          (a, b) => b.latestExecutionId - a.latestExecutionId,
-        );
-      });
+      setPipeInventory((previous) =>
+        mergeSidebarPipeInventory(
+          previous,
+          page,
+          append
+            ? "append"
+            : preserveExisting && !recoveringInitialPage
+              ? "refresh"
+              : "replace",
+        ),
+      );
       // A heartbeat refreshes only the newest page. Preserve the pagination
       // cursor and older inventory rows the user explicitly loaded.
-      if (!preserveExisting) {
+      if (!preserveExisting || recoveringInitialPage) {
         setPipeInventoryHasMore(payload.has_more === true);
         pipeInventoryCursorRef.current =
           typeof payload.next_before_id === "number" ? payload.next_before_id : null;
       }
+      pipeInventoryAuthoritativeRef.current = true;
       setPipeInventoryAuthoritative(true);
     } catch {
       // Keep recent in-memory pipe groups available if the engine is still
@@ -956,7 +959,11 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
       else sessionsByPipe.set(name, [session]);
     }
 
-    const orderedNames = visibleSidebarPipeNames(pipeInventory, pipes);
+    const orderedNames = visibleSidebarPipeNames(
+      pipeInventory,
+      pipes,
+      pipeInventoryAuthoritative,
+    );
 
     return orderedNames.map((name) => {
       const inventoryItem = pipeInventory.find((pipe) => pipe.name === name);
@@ -993,7 +1000,13 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
         sessions,
       };
     });
-  }, [pipeInventory, pipes, loadedPipeRuns, storeSessionIds]);
+  }, [
+    pipeInventory,
+    pipeInventoryAuthoritative,
+    pipes,
+    loadedPipeRuns,
+    storeSessionIds,
+  ]);
 
   const pipeLastRuns = useMemo(
     () => latestSidebarPipeRunTimes(pipeInventory, pipes),

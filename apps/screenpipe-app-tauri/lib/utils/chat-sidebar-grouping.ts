@@ -4,6 +4,36 @@
 
 import type { SessionRecord } from "@/lib/stores/chat-store";
 
+export interface SidebarPipeInventoryItem {
+  name: string;
+  executionCount: number;
+  latestExecutionId: number;
+  lastRun: string | null;
+}
+
+export const SIDEBAR_AUTOMATION_PAGE_SIZE = 8;
+
+export function mergeSidebarPipeInventory(
+  previous: SidebarPipeInventoryItem[],
+  page: SidebarPipeInventoryItem[],
+  mode: "replace" | "append" | "refresh",
+): SidebarPipeInventoryItem[] {
+  if (mode === "replace") return page;
+
+  const merged = new Map(previous.map((pipe) => [pipe.name, pipe]));
+  for (const pipe of page) merged.set(pipe.name, pipe);
+  const sorted = Array.from(merged.values()).sort(
+    (a, b) => b.latestExecutionId - a.latestExecutionId,
+  );
+
+  // A heartbeat may replace rows in the pages already requested, but it must
+  // not silently reveal another row. Only an explicit "show more" append can
+  // increase the visible inventory. If the initial request failed, the first
+  // successful heartbeat becomes the initial page instead of staying empty.
+  const visibleCount = previous.length > 0 ? previous.length : page.length;
+  return mode === "refresh" ? sorted.slice(0, visibleCount) : sorted;
+}
+
 export function latestSidebarPipeRunTimes(
   inventory: Array<{ name: string; lastRun: string | null }>,
   sessions: SessionRecord[],
@@ -36,6 +66,7 @@ export function visibleSidebarPipeNames(
     latestExecutionId?: number;
   }>,
   sessions: SessionRecord[],
+  inventoryAuthoritative = false,
 ): string[] {
   const visible = new Map<
     string,
@@ -51,18 +82,23 @@ export function visibleSidebarPipeNames(
     });
   }
 
-  // Preserve locally-known history if the activity endpoint is unavailable
-  // or has not paged/refreshed far enough to include the pipe yet. Only
-  // terminal pipe-run sessions count here; live pipe-watch sessions should not
-  // move a group to "now" until that execution actually becomes history.
+  // Preserve locally-known history only while the activity endpoint is
+  // unavailable. Once its page is authoritative, disk history may update a
+  // visible row but must not add rows outside that page. Only terminal
+  // pipe-run sessions count here; live pipe-watch sessions should not move a
+  // group to "now" until that execution actually becomes history.
   for (const session of sessions) {
     const name = session.pipeContext?.pipeName;
     if (session.kind !== "pipe-run" || !name) continue;
     const current = visible.get(name);
+    if (inventoryAuthoritative && !current) continue;
     if (!current || session.updatedAt > current.latestRun) {
       visible.set(name, {
         latestRun: session.updatedAt,
-        latestExecutionId: current?.latestExecutionId ?? 0,
+        latestExecutionId: Math.max(
+          session.pipeContext?.executionId ?? 0,
+          current?.latestExecutionId ?? 0,
+        ),
       });
     }
   }

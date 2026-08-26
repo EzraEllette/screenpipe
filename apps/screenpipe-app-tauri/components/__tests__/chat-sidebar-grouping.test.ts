@@ -10,6 +10,8 @@ import {
   buildGroupedRecents,
   buildSidebarRecentsSections,
   latestSidebarPipeRunTimes,
+  mergeSidebarPipeInventory,
+  SIDEBAR_AUTOMATION_PAGE_SIZE,
   sortSidebarPipeRuns,
   visibleSidebarPipeNames,
   listMoveTargetGroups,
@@ -225,6 +227,81 @@ describe("visibleSidebarPipeNames", () => {
         ],
       ),
     ).toEqual(["new-pipe", "older-pipe", "oldest-pipe"]);
+  });
+
+  it("does not let saved history bypass an authoritative inventory page", () => {
+    expect(
+      visibleSidebarPipeNames(
+        [
+          {
+            name: "visible-pipe",
+            executionCount: 2,
+            latestExecutionId: 20,
+            lastRun: "2026-08-26T08:00:00.000Z",
+          },
+        ],
+        [
+          {
+            ...s("older", "older run", "older-pipe"),
+            kind: "pipe-run",
+            updatedAt: Date.parse("2026-08-25T08:00:00.000Z"),
+          },
+        ],
+        true,
+      ),
+    ).toEqual(["visible-pipe"]);
+  });
+});
+
+describe("mergeSidebarPipeInventory", () => {
+  const inventory = (start: number, count: number) =>
+    Array.from({ length: count }, (_, index) => ({
+      name: `pipe-${start - index}`,
+      executionCount: 1,
+      latestExecutionId: start - index,
+      lastRun: null,
+    }));
+
+  it("keeps the initial automation page compact", () => {
+    expect(SIDEBAR_AUTOMATION_PAGE_SIZE).toBe(8);
+    expect(
+      mergeSidebarPipeInventory(
+        [],
+        inventory(20, SIDEBAR_AUTOMATION_PAGE_SIZE),
+        "replace",
+      ),
+    ).toHaveLength(8);
+  });
+
+  it("refreshes visible rows without growing past the requested page", () => {
+    const firstPage = inventory(20, SIDEBAR_AUTOMATION_PAGE_SIZE);
+    const refreshed = mergeSidebarPipeInventory(
+      firstPage,
+      inventory(21, SIDEBAR_AUTOMATION_PAGE_SIZE),
+      "refresh",
+    );
+
+    expect(refreshed).toHaveLength(SIDEBAR_AUTOMATION_PAGE_SIZE);
+    expect(refreshed.map((pipe) => pipe.latestExecutionId)).toEqual([
+      21, 20, 19, 18, 17, 16, 15, 14,
+    ]);
+  });
+
+  it("recovers the initial page on the first successful heartbeat", () => {
+    expect(
+      mergeSidebarPipeInventory(
+        [],
+        inventory(20, SIDEBAR_AUTOMATION_PAGE_SIZE),
+        "refresh",
+      ),
+    ).toHaveLength(SIDEBAR_AUTOMATION_PAGE_SIZE);
+  });
+
+  it("grows only after an explicit append", () => {
+    const firstPage = inventory(20, SIDEBAR_AUTOMATION_PAGE_SIZE);
+    expect(
+      mergeSidebarPipeInventory(firstPage, inventory(12, 8), "append"),
+    ).toHaveLength(16);
   });
 });
 
