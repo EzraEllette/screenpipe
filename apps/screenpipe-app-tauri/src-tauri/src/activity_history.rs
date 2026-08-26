@@ -921,6 +921,7 @@ async fn run_pi(app: &AppHandle, session_prefix: &str, prompt: String) -> Result
         project_dir,
         token,
         Some(config),
+        None,
     )
     .await
     .map_err(|error| agent_failure(is_agent, error))?;

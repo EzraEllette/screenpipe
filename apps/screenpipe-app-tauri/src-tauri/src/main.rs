@@ -53,6 +53,7 @@ mod calendar;
 mod capture_session;
 mod chat_control;
 mod chatgpt_oauth;
+mod coding_workspace;
 #[allow(deprecated)]
 mod commands;
 mod data_sync;

@@ -93,6 +93,7 @@ import { useChatTurnIntents } from "@/components/chat/standalone/hooks/use-chat-
 import { usePiSteeringRefs } from "@/components/chat/standalone/hooks/use-pi-steering-transport";
 import { useNextTurnAttachments } from "@/components/chat/standalone/hooks/use-next-turn-attachments";
 import { useChatComposerDraftSync } from "@/components/chat/standalone/hooks/use-chat-composer-draft-sync";
+import { useCodingWorkspace } from "@/components/chat/standalone/hooks/use-coding-workspace";
 import { usePipeWatchSession } from "@/components/chat/standalone/hooks/use-pipe-watch-session";
 import { useChatTemplateSettings } from "@/components/chat/standalone/hooks/use-chat-template-settings";
 import { useTryInChatEvent } from "@/components/chat/standalone/hooks/use-try-in-chat-event";
@@ -1071,7 +1072,13 @@ export function StandaloneChat({
     canChat &&
     !activePipeExecution &&
     !continuousPipeChat?.replyDisabledReason;
-  const composerDisabledReason = activePipeExecution
+  const codingWorkspace = useCodingWorkspace({
+    conversationId,
+    locked: messages.length > 0,
+  });
+  const composerDisabledReason = codingWorkspace.isLoading
+    ? "preparing isolated worktree..."
+    : activePipeExecution
     ? `${activePipeExecution.name} is running. Reply after this run finishes.`
     : continuousPipeChat?.replyDisabledReason || disabledReason;
 
@@ -2177,7 +2184,7 @@ export function StandaloneChat({
           value: input,
           disabledReason: composerDisabledReason,
           placeholder: homeCardPromptPreview ?? undefined,
-          canChat: Boolean(canSendChatMessage),
+          canChat: Boolean(canSendChatMessage) && !codingWorkspace.isLoading,
           isLoading,
           isStreaming,
           isEmbedded,
@@ -2252,6 +2259,13 @@ export function StandaloneChat({
           onSelectPreset: handleSetActivePreset,
           onAcpConfigDefault: handleAcpConfigDefault,
           onReauthenticate: handleReauthenticate,
+        }}
+        codingWorkspace={{
+          workspace: codingWorkspace.workspace,
+          isLoading: codingWorkspace.isLoading,
+          error: codingWorkspace.error,
+          disabled: messages.length > 0 && !codingWorkspace.workspace,
+          onToggle: codingWorkspace.toggleWorktree,
         }}
         connectBanner={{
           show: showConnectBanner,

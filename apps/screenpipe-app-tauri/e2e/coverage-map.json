@@ -235,6 +235,18 @@
       ]
     },
     {
+      "id": "chat-coding-worktrees",
+      "label": "Conversation-owned coding worktrees",
+      "platforms": [
+        "windows",
+        "macos",
+        "linux"
+      ],
+      "layers": [
+        "chat-ai"
+      ]
+    },
+    {
       "id": "tray-search",
       "label": "Tray/search window behavior",
       "platforms": [
@@ -681,6 +693,26 @@
       "confidence": "partial",
       "ux": "real-user-flow",
       "notes": "The Day Recap automation card previews its user-facing prompt in the empty composer on hover, restores the default placeholder on leave, and creates exactly one persisted conversation and one sidebar row; status-only activity for an unknown session must not create an empty untitled sibling."
+    },
+    {
+      "spec": "chat-coding-worktree.spec.ts",
+      "platforms": [
+        "windows",
+        "macos",
+        "linux"
+      ],
+      "layers": [
+        "chat-ai",
+        "real-ui-e2e"
+      ],
+      "features": [
+        "chat",
+        "chat-coding-worktrees"
+      ],
+      "criticality": "high",
+      "confidence": "strong",
+      "ux": "real-user-flow",
+      "notes": "Creates a conversation-owned worktree through the real desktop command path, proves dirty-source preservation, conversation isolation and resume, launches Pi in the owned cwd while ignoring a hostile project-local extension, and verifies work survives Pi stop. Runs in the focused Windows CI list as well as the recursive macOS and Linux suites."
     },
     {
       "spec": "chat-composer-isolation.spec.ts",

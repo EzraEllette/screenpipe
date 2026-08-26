@@ -31,6 +31,7 @@ export function ChatComposer({
   mentions,
   filters,
   modelControls,
+  codingWorkspace,
   connectBanner,
   onStop,
 }: ChatComposerProps) {
@@ -104,6 +105,7 @@ export function ChatComposer({
             canChat={input.canChat}
             filters={filters}
             modelControls={modelControls}
+            codingWorkspace={codingWorkspace}
             isStreaming={input.isLoading || input.isStreaming}
             dictation={{
               inputValue: input.value,

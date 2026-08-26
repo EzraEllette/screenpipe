@@ -12,7 +12,7 @@ import type {
 import type { QueuedDisplayPayload } from "@/lib/chat/types";
 import type { Suggestion } from "@/lib/hooks/use-auto-suggestions";
 import type { ExtractedDoc } from "@/lib/pi/extract-document";
-import type { AIPreset, PiQueuedPrompt } from "@/lib/utils/tauri";
+import type { AIPreset, CodingWorkspace, PiQueuedPrompt } from "@/lib/utils/tauri";
 
 type ActiveChatFilters = {
   timeRanges: { label: string }[];
@@ -173,6 +173,14 @@ export interface ComposerModelControlsProps {
   onReauthenticate?: () => void;
 }
 
+export interface ComposerCodingWorkspaceProps {
+  workspace: CodingWorkspace | null;
+  isLoading: boolean;
+  error: string | null;
+  disabled: boolean;
+  onToggle: (checked: boolean) => void | Promise<void>;
+}
+
 export interface ComposerConnectBannerProps {
   show: boolean;
   suggestedConnectionTiles: ConnectionListItem[];
@@ -189,6 +197,7 @@ export interface ChatComposerProps {
   mentions: ComposerMentionsProps;
   filters: ComposerFiltersProps;
   modelControls: ComposerModelControlsProps;
+  codingWorkspace: ComposerCodingWorkspaceProps;
   connectBanner: ComposerConnectBannerProps;
   onStop: () => void | Promise<void>;
 }
