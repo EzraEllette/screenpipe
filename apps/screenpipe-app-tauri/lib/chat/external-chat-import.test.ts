@@ -127,10 +127,36 @@ describe("scanExternalChatHistory", () => {
     mocks.loadConversationFile.mockResolvedValue({
       id: "imported-codex-codex-session",
       title: "hello",
+      titleSource: "fallback",
       kind: "chat",
       createdAt: Date.parse("2026-08-21T12:00:00Z"),
       updatedAt,
-      messages: [{}, {}],
+      lastContentAt: updatedAt,
+      lastViewedAt: updatedAt,
+      importedFrom: {
+        source: "codex",
+        sourceId: "codex-session",
+        importedAt: updatedAt,
+      },
+      messages: [
+        {
+          id: "imported-codex-codex-session-u1",
+          role: "user",
+          content: "hello",
+          timestamp: Date.parse("2026-08-21T12:00:00Z"),
+          provider: "codex",
+          importedFrom: "codex",
+        },
+        {
+          id: "imported-codex-codex-session-a1",
+          role: "assistant",
+          content: "hi",
+          contentBlocks: [{ type: "text", text: "hi" }],
+          timestamp: updatedAt,
+          provider: "codex",
+          importedFrom: "codex",
+        },
+      ],
     });
 
     const result = await importExternalChatHistory([{
@@ -143,5 +169,152 @@ describe("scanExternalChatHistory", () => {
 
     expect(result).toMatchObject({ imported: 0, updated: 0, skipped: 1, failed: 0 });
     expect(mocks.saveConversationFile).not.toHaveBeenCalled();
+  });
+
+  it("marks newly discovered external history as already read", async () => {
+    const updatedAt = Date.parse("2026-08-21T12:01:00Z");
+    mocks.stat.mockResolvedValue({ size: 1024, mtime: new Date(updatedAt) });
+    mocks.readTextFile.mockResolvedValue([
+      JSON.stringify({
+        type: "session_meta",
+        timestamp: "2026-08-21T12:00:00Z",
+        payload: { id: "new-codex-session" },
+      }),
+      JSON.stringify({
+        type: "response_item",
+        timestamp: "2026-08-21T12:00:00Z",
+        payload: {
+          type: "message",
+          id: "u1",
+          role: "user",
+          content: [{ type: "input_text", text: "trace the failure" }],
+        },
+      }),
+      JSON.stringify({
+        type: "response_item",
+        timestamp: "2026-08-21T12:01:00Z",
+        payload: {
+          type: "message",
+          id: "a1",
+          role: "assistant",
+          content: [{ type: "output_text", text: "found it" }],
+        },
+      }),
+    ].join("\n"));
+    mocks.loadConversationFile.mockResolvedValue(null);
+
+    await importExternalChatHistory([{
+      source: "codex",
+      path: "/fixture/new-session.jsonl",
+      sourceId: "new-codex-session",
+      modifiedAt: updatedAt,
+      size: 1024,
+    }]);
+
+    expect(mocks.saveConversationFile).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: "trace the failure",
+        lastContentAt: updatedAt,
+        lastViewedAt: updatedAt,
+      }),
+    );
+  });
+
+  it("repairs legacy wrapper titles without losing local chat state", async () => {
+    const firstAt = Date.parse("2026-08-21T12:00:00Z");
+    const updatedAt = Date.parse("2026-08-21T12:01:00Z");
+    const wrapped = "<screenpipe-system-context>\nprivate context\n</screenpipe-system-context>\n\nfix the sidebar";
+    mocks.stat.mockResolvedValue({ size: 1024, mtime: new Date(updatedAt) });
+    mocks.readTextFile.mockResolvedValue([
+      JSON.stringify({
+        type: "session_meta",
+        timestamp: "2026-08-21T12:00:00Z",
+        payload: { id: "legacy-codex-session" },
+      }),
+      JSON.stringify({
+        type: "response_item",
+        timestamp: "2026-08-21T12:00:00Z",
+        payload: {
+          type: "message",
+          id: "u1",
+          role: "user",
+          content: [{ type: "input_text", text: wrapped }],
+        },
+      }),
+      JSON.stringify({
+        type: "response_item",
+        timestamp: "2026-08-21T12:01:00Z",
+        payload: {
+          type: "message",
+          id: "a1",
+          role: "assistant",
+          content: [{ type: "output_text", text: "done" }],
+        },
+      }),
+    ].join("\n"));
+    mocks.loadConversationFile.mockResolvedValue({
+      id: "imported-codex-legacy-codex-session",
+      title: wrapped,
+      titleSource: "fallback",
+      kind: "chat",
+      rev: 4,
+      pinned: true,
+      createdAt: firstAt,
+      updatedAt,
+      lastContentAt: updatedAt,
+      importedFrom: {
+        source: "codex",
+        sourceId: "legacy-codex-session",
+        importedAt: firstAt,
+      },
+      messages: [
+        {
+          id: "imported-codex-legacy-codex-session-u1",
+          role: "user",
+          content: wrapped,
+          timestamp: firstAt,
+          importedFrom: "codex",
+        },
+        {
+          id: "imported-codex-legacy-codex-session-a1",
+          role: "assistant",
+          content: "done",
+          timestamp: updatedAt,
+          importedFrom: "codex",
+        },
+        {
+          id: "screenpipe-follow-up",
+          role: "user",
+          content: "keep going",
+          timestamp: updatedAt + 1,
+        },
+      ],
+    });
+
+    const result = await importExternalChatHistory([{
+      source: "codex",
+      path: "/fixture/legacy-session.jsonl",
+      sourceId: "legacy-codex-session",
+      modifiedAt: updatedAt,
+      size: 1024,
+    }], { skipUnchanged: true });
+
+    expect(result).toMatchObject({ imported: 0, updated: 1, skipped: 0, failed: 0 });
+    expect(mocks.saveConversationFile).toHaveBeenCalledWith(
+      expect.objectContaining({
+        rev: 4,
+        title: "fix the sidebar",
+        pinned: true,
+        lastViewedAt: updatedAt,
+        importedFrom: expect.objectContaining({ importedAt: firstAt }),
+      }),
+    );
+    const saved = mocks.saveConversationFile.mock.calls[0][0];
+    expect(saved.messages.map((message: { id: string }) => message.id)).toEqual([
+      "imported-codex-legacy-codex-session-u1",
+      "imported-codex-legacy-codex-session-a1",
+      "screenpipe-follow-up",
+    ]);
+    expect(saved.messages[0].content).toBe("fix the sidebar");
   });
 });

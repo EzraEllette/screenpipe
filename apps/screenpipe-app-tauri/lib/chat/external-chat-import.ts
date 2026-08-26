@@ -14,6 +14,7 @@ import {
   parseExternalChatTranscript,
   type ExternalChatSource,
 } from "@/lib/chat/external-chat-parser";
+import type { ChatConversation, ChatMessage } from "@/lib/hooks/use-settings";
 
 export const MAX_EXTERNAL_CHATS_PER_SOURCE = 100;
 export const MAX_EXTERNAL_CHAT_FILE_BYTES = 32 * 1024 * 1024;
@@ -49,6 +50,118 @@ export interface ExternalChatImportResult {
   updated: number;
   skipped: number;
   failed: number;
+}
+
+function mergeImportedMessages(
+  existing: ChatMessage[],
+  incoming: ChatMessage[],
+  source: ExternalChatSource,
+): ChatMessage[] {
+  const incomingById = new Map(incoming.map((message) => [message.id, message]));
+  const consumed = new Set<string>();
+  const merged: ChatMessage[] = [];
+
+  for (const message of existing) {
+    if (message.importedFrom === source) {
+      const replacement = incomingById.get(message.id);
+      if (replacement) {
+        merged.push(replacement);
+        consumed.add(message.id);
+      }
+      // Source messages absent from the new parse were transport metadata.
+      continue;
+    }
+    merged.push(message);
+  }
+
+  for (const message of incoming) {
+    if (!consumed.has(message.id)) merged.push(message);
+  }
+
+  // A Screenpipe-side continuation can be interleaved with later source
+  // updates. Stable timestamp ordering keeps both without moving ties.
+  return merged.sort((left, right) => left.timestamp - right.timestamp);
+}
+
+function prepareImportedConversation(
+  incoming: ChatConversation,
+  existing: ChatConversation | null,
+): ChatConversation {
+  if (!existing) {
+    return {
+      ...incoming,
+      // Discovering existing history is not a notification. Only content
+      // appended after discovery should light the unread indicator.
+      lastViewedAt: incoming.lastContentAt ?? incoming.updatedAt,
+    };
+  }
+
+  const preserveUserTitle = existing.titleSource === "user";
+  const source = incoming.importedFrom?.source;
+  const messages = source
+    ? mergeImportedMessages(existing.messages, incoming.messages, source)
+    : incoming.messages;
+
+  return {
+    ...existing,
+    ...incoming,
+    rev: existing.rev,
+    title: preserveUserTitle ? existing.title : incoming.title,
+    titleSource: preserveUserTitle ? "user" : incoming.titleSource,
+    messages,
+    createdAt: Math.min(existing.createdAt, incoming.createdAt),
+    updatedAt: Math.max(existing.updatedAt, incoming.updatedAt),
+    lastUserMessageAt: Math.max(
+      existing.lastUserMessageAt ?? 0,
+      incoming.lastUserMessageAt ?? 0,
+    ) || undefined,
+    lastContentAt: Math.max(
+      existing.lastContentAt ?? 0,
+      incoming.lastContentAt ?? 0,
+    ) || undefined,
+    // Migrate legacy imports to "read at discovery" without swallowing a
+    // later source update: the old content watermark becomes the read point.
+    lastViewedAt:
+      existing.lastViewedAt
+      ?? existing.lastContentAt
+      ?? existing.updatedAt,
+    importedFrom: incoming.importedFrom
+      ? {
+          ...incoming.importedFrom,
+          importedAt:
+            existing.importedFrom?.importedAt
+            ?? incoming.importedFrom.importedAt,
+          ...(existing.importedFrom?.harness
+            ? { harness: existing.importedFrom.harness }
+            : {}),
+        }
+      : existing.importedFrom,
+  };
+}
+
+function importedConversationIsUnchanged(
+  existing: ChatConversation,
+  incoming: ChatConversation,
+): boolean {
+  if (
+    existing.updatedAt !== incoming.updatedAt
+    || existing.title !== incoming.title
+    || existing.titleSource !== incoming.titleSource
+    || existing.lastViewedAt !== incoming.lastViewedAt
+    || existing.messages.length !== incoming.messages.length
+  ) {
+    return false;
+  }
+
+  return existing.messages.every((message, index) => {
+    const candidate = incoming.messages[index];
+    return candidate != null
+      && message.id === candidate.id
+      && message.role === candidate.role
+      && message.content === candidate.content
+      && (message.contentBlocks?.length ?? 0)
+        === (candidate.contentBlocks?.length ?? 0);
+  });
 }
 
 function sourceLabel(source: ExternalChatSource): string {
@@ -278,16 +391,16 @@ export async function importExternalChatHistory(
         continue;
       }
       const existing = await loadConversationFile(conversation.id);
+      const prepared = prepareImportedConversation(conversation, existing);
       if (
         options.skipUnchanged &&
         existing &&
-        existing.updatedAt >= conversation.updatedAt &&
-        existing.messages.length === conversation.messages.length
+        importedConversationIsUnchanged(existing, prepared)
       ) {
         result.skipped += 1;
         continue;
       }
-      await saveConversationFile(conversation);
+      await saveConversationFile(prepared);
       if (existing) result.updated += 1;
       else result.imported += 1;
       try {

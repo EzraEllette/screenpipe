@@ -186,6 +186,16 @@ function recentSource(session: SessionRecord): RecentSource {
   return session.importedFrom?.source ?? "screenpipe";
 }
 
+export function isMachineOnlyImportedConversation(
+  session: Pick<SessionRecord, "importedFrom" | "title" | "titleSource">,
+): boolean {
+  return Boolean(
+    session.importedFrom
+    && session.titleSource !== "user"
+    && isInjectedTitle(session.title),
+  );
+}
+
 export function filterRecentsBySource(
   sessions: SessionRecord[],
   hiddenSources: ReadonlySet<RecentSource>,
@@ -352,7 +362,7 @@ function useVisibleChatSections(): {
       // `isEmptyChatShell` is the derived backstop for rows whose creator
       // never set the flag (prewarmed / auto-restarted Pi sessions used to
       // land here as empty "untitled" rows).
-      if (s.draft || isEmptyChatShell(s)) continue;
+      if (s.draft || isEmptyChatShell(s) || isMachineOnlyImportedConversation(s)) continue;
       if (s.hidden) {
         archived.push(s);
         continue;

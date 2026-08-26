@@ -6,6 +6,7 @@ import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   filterRecentsBySource,
+  isMachineOnlyImportedConversation,
   sortRecents,
   SidebarChatRow,
 } from "@/components/chat-sidebar";
@@ -145,6 +146,30 @@ describe("Recents provider filtering", () => {
       .toEqual(["chat-focus-test", "codex-chat"]);
     expect(filterRecentsBySource(sessions, new Set(["screenpipe", "codex"])).map(({ id }) => id))
       .toEqual(["claude-chat"]);
+  });
+
+  it("hides legacy machine-only imports but preserves a deliberate rename", () => {
+    const imported = {
+      ...baseSession,
+      title: "<screenpipe-system-context> internal context",
+      titleSource: "fallback" as const,
+      importedFrom: {
+        source: "codex" as const,
+        sourceId: "codex-machine-only",
+        importedAt: 100,
+      },
+    };
+
+    expect(isMachineOnlyImportedConversation(imported)).toBe(true);
+    expect(isMachineOnlyImportedConversation({
+      ...imported,
+      title: "Scheduled agent run",
+      titleSource: "user",
+    })).toBe(false);
+    expect(isMachineOnlyImportedConversation({
+      ...imported,
+      importedFrom: undefined,
+    })).toBe(false);
   });
 
   it("can sort the same list by latest update without mutating priority order", () => {
