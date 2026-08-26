@@ -180,6 +180,12 @@ const RECENT_SOURCE_OPTIONS: Array<{ source: RecentSource; label: string }> = [
   { source: "codex", label: "Codex" },
   { source: "claude-code", label: "Claude" },
 ];
+const RECENT_SOURCE_SHORTCUTS = {
+  screenpipe: "s",
+  codex: "c",
+  "claude-code": "l",
+} as const satisfies Record<RecentSource, string>;
+const RECENTS_MENU_SHORTCUT_KEYS = ["s", "c", "l", "b", "i", "p", "u"] as const;
 
 let externalChatSyncPromise: Promise<void> | null = null;
 let lastExternalChatSyncAt = 0;
@@ -1530,31 +1536,60 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
                         <MoreHorizontal className="h-3.5 w-3.5" aria-hidden />
                       </button>
                     </DropdownMenuTrigger>
-                    <DropdownMenuContent className="w-48" align="end">
+                    <DropdownMenuContent
+                      className="w-48"
+                      align="end"
+                      onKeyDown={handleRecentsMenuShortcut}
+                    >
                       <DropdownMenuLabel>show in recents</DropdownMenuLabel>
                       {RECENT_SOURCE_OPTIONS.filter(({ source }) =>
                         availableRecentSources.has(source),
                       ).map(({ source, label }) => (
                         <DropdownMenuCheckboxItem
                           key={source}
+                          data-shortcut={RECENT_SOURCE_SHORTCUTS[source]}
+                          aria-keyshortcuts={RECENT_SOURCE_SHORTCUTS[source].toUpperCase()}
                           checked={!hiddenRecentSources.has(source)}
                           onCheckedChange={() => toggleRecentSource(source)}
                           onSelect={(event) => event.preventDefault()}
                         >
                           {label}
+                          <DropdownMenuShortcut className="text-[10px] tracking-normal text-muted-foreground/55">
+                            {RECENT_SOURCE_SHORTCUTS[source].toUpperCase()}
+                          </DropdownMenuShortcut>
                         </DropdownMenuCheckboxItem>
                       ))}
                       <DropdownMenuSeparator />
                       <DropdownMenuLabel>organize sidebar</DropdownMenuLabel>
                       <DropdownMenuRadioGroup value={recentLayout} onValueChange={changeRecentLayout}>
-                        <DropdownMenuRadioItem value="source">By source</DropdownMenuRadioItem>
-                        <DropdownMenuRadioItem value="list">In one list</DropdownMenuRadioItem>
+                        <DropdownMenuRadioItem data-shortcut="b" aria-keyshortcuts="B" value="source">
+                          By source
+                          <DropdownMenuShortcut className="text-[10px] tracking-normal text-muted-foreground/55">
+                            B
+                          </DropdownMenuShortcut>
+                        </DropdownMenuRadioItem>
+                        <DropdownMenuRadioItem data-shortcut="i" aria-keyshortcuts="I" value="list">
+                          In one list
+                          <DropdownMenuShortcut className="text-[10px] tracking-normal text-muted-foreground/55">
+                            I
+                          </DropdownMenuShortcut>
+                        </DropdownMenuRadioItem>
                       </DropdownMenuRadioGroup>
                       <DropdownMenuSeparator />
                       <DropdownMenuLabel>sort chats by</DropdownMenuLabel>
                       <DropdownMenuRadioGroup value={recentSort} onValueChange={changeRecentSort}>
-                        <DropdownMenuRadioItem value="priority">Priority</DropdownMenuRadioItem>
-                        <DropdownMenuRadioItem value="updated">Last updated</DropdownMenuRadioItem>
+                        <DropdownMenuRadioItem data-shortcut="p" aria-keyshortcuts="P" value="priority">
+                          Priority
+                          <DropdownMenuShortcut className="text-[10px] tracking-normal text-muted-foreground/55">
+                            P
+                          </DropdownMenuShortcut>
+                        </DropdownMenuRadioItem>
+                        <DropdownMenuRadioItem data-shortcut="u" aria-keyshortcuts="U" value="updated">
+                          Last updated
+                          <DropdownMenuShortcut className="text-[10px] tracking-normal text-muted-foreground/55">
+                            U
+                          </DropdownMenuShortcut>
+                        </DropdownMenuRadioItem>
                       </DropdownMenuRadioGroup>
                     </DropdownMenuContent>
                   </DropdownMenu>
@@ -1579,7 +1614,7 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
                         View all <ChevronRight className="h-3 w-3" aria-hidden />
                       </button>
                     </ContextMenuTrigger>
-                    <ContextMenuContent className="w-44">
+                    <ContextMenuContent className="w-44" onKeyDown={handleRecentsMenuShortcut}>
                       <ContextMenuLabel>show in recents</ContextMenuLabel>
                       {RECENT_SOURCE_OPTIONS.filter(({ source }) =>
                         availableRecentSources.has(source),
@@ -1587,24 +1622,49 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
                         <ContextMenuCheckboxItem
                           key={source}
                           data-testid={`recents-filter-${source}`}
+                          data-shortcut={RECENT_SOURCE_SHORTCUTS[source]}
+                          aria-keyshortcuts={RECENT_SOURCE_SHORTCUTS[source].toUpperCase()}
                           checked={!hiddenRecentSources.has(source)}
                           onCheckedChange={() => toggleRecentSource(source)}
                           onSelect={(event) => event.preventDefault()}
                         >
                           {label}
+                          <ContextMenuShortcut className="text-[10px] tracking-normal text-muted-foreground/55">
+                            {RECENT_SOURCE_SHORTCUTS[source].toUpperCase()}
+                          </ContextMenuShortcut>
                         </ContextMenuCheckboxItem>
                       ))}
                       <ContextMenuSeparator />
                       <ContextMenuLabel>organize sidebar</ContextMenuLabel>
                       <ContextMenuRadioGroup value={recentLayout} onValueChange={changeRecentLayout}>
-                        <ContextMenuRadioItem value="source">By source</ContextMenuRadioItem>
-                        <ContextMenuRadioItem value="list">In one list</ContextMenuRadioItem>
+                        <ContextMenuRadioItem data-shortcut="b" aria-keyshortcuts="B" value="source">
+                          By source
+                          <ContextMenuShortcut className="text-[10px] tracking-normal text-muted-foreground/55">
+                            B
+                          </ContextMenuShortcut>
+                        </ContextMenuRadioItem>
+                        <ContextMenuRadioItem data-shortcut="i" aria-keyshortcuts="I" value="list">
+                          In one list
+                          <ContextMenuShortcut className="text-[10px] tracking-normal text-muted-foreground/55">
+                            I
+                          </ContextMenuShortcut>
+                        </ContextMenuRadioItem>
                       </ContextMenuRadioGroup>
                       <ContextMenuSeparator />
                       <ContextMenuLabel>sort chats by</ContextMenuLabel>
                       <ContextMenuRadioGroup value={recentSort} onValueChange={changeRecentSort}>
-                        <ContextMenuRadioItem value="priority">Priority</ContextMenuRadioItem>
-                        <ContextMenuRadioItem value="updated">Last updated</ContextMenuRadioItem>
+                        <ContextMenuRadioItem data-shortcut="p" aria-keyshortcuts="P" value="priority">
+                          Priority
+                          <ContextMenuShortcut className="text-[10px] tracking-normal text-muted-foreground/55">
+                            P
+                          </ContextMenuShortcut>
+                        </ContextMenuRadioItem>
+                        <ContextMenuRadioItem data-shortcut="u" aria-keyshortcuts="U" value="updated">
+                          Last updated
+                          <ContextMenuShortcut className="text-[10px] tracking-normal text-muted-foreground/55">
+                            U
+                          </ContextMenuShortcut>
+                        </ContextMenuRadioItem>
                       </ContextMenuRadioGroup>
                     </ContextMenuContent>
                   </ContextMenu>
@@ -2457,17 +2517,17 @@ interface ChatRowProps {
 const ROW_MENU_SHORTCUT_KEYS = ["p", "r", "a", "d"] as const;
 
 /**
- * Press a shortcut letter while a chat-row menu (right-click or kebab) is open
- * to fire the matching action. We forward an Enter keydown to the item so radix
- * runs its own onSelect + close — no second code path to keep in sync.
+ * Press a shortcut letter while a menu is open to fire the matching item. We
+ * forward Enter so radix runs its own onSelect + close — no second action path.
  */
-function handleRowMenuShortcut(e: React.KeyboardEvent<HTMLElement>) {
+export function handleMenuShortcut(
+  e: React.KeyboardEvent<HTMLElement>,
+  allowedKeys: readonly string[],
+) {
   if (e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return;
   if (e.key.length !== 1) return;
   const key = e.key.toLowerCase();
-  if (!ROW_MENU_SHORTCUT_KEYS.includes(key as (typeof ROW_MENU_SHORTCUT_KEYS)[number])) {
-    return;
-  }
+  if (!allowedKeys.includes(key)) return;
   const target = e.currentTarget.querySelector<HTMLElement>(`[data-shortcut="${key}"]`);
   if (!target) return;
   e.preventDefault();
@@ -2476,6 +2536,14 @@ function handleRowMenuShortcut(e: React.KeyboardEvent<HTMLElement>) {
   target.dispatchEvent(
     new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true })
   );
+}
+
+function handleRecentsMenuShortcut(e: React.KeyboardEvent<HTMLElement>) {
+  handleMenuShortcut(e, RECENTS_MENU_SHORTCUT_KEYS);
+}
+
+function handleRowMenuShortcut(e: React.KeyboardEvent<HTMLElement>) {
+  handleMenuShortcut(e, ROW_MENU_SHORTCUT_KEYS);
 }
 
 /**
