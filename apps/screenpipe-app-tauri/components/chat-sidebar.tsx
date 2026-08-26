@@ -246,9 +246,13 @@ function readRecentSort(): RecentSort {
   }
 }
 
-function readHiddenRecentSources(): Set<RecentSource> {
+export function hiddenRecentSourcesFromStoredValue(
+  stored: string | null,
+): Set<RecentSource> {
+  if (stored === null) return new Set(["codex", "claude-code"]);
+
   try {
-    const parsed = JSON.parse(localStorage.getItem(RECENTS_SOURCE_FILTER_KEY) ?? "[]");
+    const parsed = JSON.parse(stored);
     return new Set(
       Array.isArray(parsed)
         ? parsed.filter((source): source is RecentSource =>
@@ -257,7 +261,17 @@ function readHiddenRecentSources(): Set<RecentSource> {
         : [],
     );
   } catch {
-    return new Set();
+    return new Set(["codex", "claude-code"]);
+  }
+}
+
+function readHiddenRecentSources(): Set<RecentSource> {
+  try {
+    return hiddenRecentSourcesFromStoredValue(
+      localStorage.getItem(RECENTS_SOURCE_FILTER_KEY),
+    );
+  } catch {
+    return hiddenRecentSourcesFromStoredValue(null);
   }
 }
 
