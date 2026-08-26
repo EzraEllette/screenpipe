@@ -216,9 +216,19 @@ export function sortRecents(
   sort: RecentSort,
 ): SessionRecord[] {
   if (sort === "priority") return sessions;
+
+  // Loading a chat can update persistence metadata such as `updatedAt` and
+  // `lastViewedAt`. Sort by message activity so selecting a row never promotes
+  // it above chats that actually received newer content.
+  const contentActivityAt = (session: SessionRecord) =>
+    session.lastContentAt
+    ?? session.lastUserMessageAt
+    ?? session.updatedAt
+    ?? session.createdAt;
+
   return [...sessions].sort(
     (left, right) =>
-      right.updatedAt - left.updatedAt ||
+      contentActivityAt(right) - contentActivityAt(left) ||
       right.createdAt - left.createdAt ||
       left.id.localeCompare(right.id),
   );

@@ -189,6 +189,32 @@ describe("Recents provider filtering", () => {
     ]);
     expect(sessions[0].id).toBe("priority-first");
   });
+
+  it("does not promote a viewed chat above a chat with newer content", () => {
+    const sessions: SessionRecord[] = [
+      {
+        ...baseSession,
+        id: "viewed-older-chat",
+        updatedAt: 500,
+        lastViewedAt: 500,
+        lastContentAt: 100,
+        lastUserMessageAt: 90,
+      },
+      {
+        ...baseSession,
+        id: "newer-content-chat",
+        updatedAt: 300,
+        lastViewedAt: 300,
+        lastContentAt: 300,
+        lastUserMessageAt: 290,
+      },
+    ];
+
+    expect(sortRecents(sessions, "updated").map(({ id }) => id)).toEqual([
+      "newer-content-chat",
+      "viewed-older-chat",
+    ]);
+  });
 });
 
 describe("menu letter shortcuts", () => {
