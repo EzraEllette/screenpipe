@@ -278,6 +278,39 @@ async fn open_auto_meeting(
         .map_err(|error| error.to_string())
 }
 
+/// E2E helper: reproduce a detector start with competing calendar events.
+///
+/// The real matcher and DB write run inside screenpipe-engine. The harness only
+/// supplies deterministic private-data-free inputs so CI and PR recordings do
+/// not depend on a reviewer's calendar account or a live third-party call.
+#[command]
+async fn simulate_calendar_meeting_match(
+    state: State<'_, RecordingState>,
+    observed_meeting_url: String,
+    events: serde_json::Value,
+    now: String,
+) -> Result<i64, String> {
+    let now = chrono::DateTime::parse_from_rfc3339(&now)
+        .map_err(|error| error.to_string())?
+        .with_timezone(&chrono::Utc);
+    let events_json = serde_json::to_string(&events).map_err(|error| error.to_string())?;
+    let db = {
+        let server_guard = state.server.lock().await;
+        server_guard
+            .as_ref()
+            .ok_or_else(|| "server not running".to_string())?
+            .db
+            .clone()
+    };
+    screenpipe_engine::meeting_watcher::e2e_start_calendar_matched_meeting(
+        &db,
+        &observed_meeting_url,
+        &events_json,
+        now,
+    )
+    .await
+}
+
 /// E2E helper: report the currently open meeting, if any.
 ///
 /// Mirrors the "is a meeting still in progress?" question the streaming
@@ -301,8 +334,8 @@ async fn active_meeting_id(state: State<'_, RecordingState>) -> Result<Option<i6
 /// Returns `None` off macOS and whenever the native panel is unavailable, so a
 /// spec can tell "not this platform" apart from "card is hidden".
 #[command]
-fn native_meeting_overlay_state() -> Option<crate::native_shortcut_reminder::MeetingOverlayPanelState>
-{
+fn native_meeting_overlay_state(
+) -> Option<crate::native_shortcut_reminder::MeetingOverlayPanelState> {
     crate::native_shortcut_reminder::meeting_overlay_state()
 }
 
@@ -779,6 +812,7 @@ pub(super) fn plugin() -> TauriPlugin<Wry> {
             installed_tray_recording_status,
             shortcut_reminder_visible,
             open_auto_meeting,
+            simulate_calendar_meeting_match,
             active_meeting_id,
             native_meeting_overlay_state,
             native_timeline_search_state,
