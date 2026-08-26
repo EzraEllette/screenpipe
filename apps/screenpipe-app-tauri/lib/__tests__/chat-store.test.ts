@@ -733,6 +733,31 @@ describe("chat-store: persisted empty chat cleanup", () => {
 
     expect(record.draft).toBeUndefined();
   });
+
+  it("keeps an archived pinned automation hidden during disk hydration", () => {
+    const record = sessionRecordFromMeta({
+      id: "pipe:photo-analyzer:7923",
+      title: "photo-analyzer #7923",
+      createdAt: 100,
+      updatedAt: 200,
+      messageCount: 2,
+      pinned: true,
+      hidden: true,
+      kind: "pipe-run",
+      pipeContext: {
+        pipeName: "photo-analyzer",
+        executionId: 7923,
+      },
+    });
+
+    useChatStore.getState().actions.hydrateFromDisk([record]);
+
+    expect(useChatStore.getState().sessions[record.id]).toMatchObject({
+      pinned: true,
+      hidden: true,
+      kind: "pipe-run",
+    });
+  });
 });
 
 describe("chat-store: isEmptyChatShell (derived backstop for missing draft flags)", () => {

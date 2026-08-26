@@ -55,10 +55,9 @@ describe("notification file links", () => {
     expect(viewerPathFromNotificationUrl("https://example.com/report.md")).toBeNull();
   });
 
-  it("opens the viewer directly instead of showing the Main timeline", async () => {
+  it("recovers legacy file links into the Brain artifact detail", async () => {
     const showWindowActivated = vi.fn().mockResolvedValue(undefined);
     const emitEvent = vi.fn().mockResolvedValue(undefined);
-    const openViewerWindow = vi.fn().mockResolvedValue({ status: "ok" });
 
     await routeNotificationDeeplink(
       "screenpipe://view?path=%2FUsers%2Flouis%2Freport.md",
@@ -66,29 +65,38 @@ describe("notification file links", () => {
         showWindowActivated,
         emitEvent,
         sleepMs: vi.fn().mockResolvedValue(undefined),
-        openViewerWindow,
       },
     );
 
-    expect(openViewerWindow).toHaveBeenCalledWith("/Users/louis/report.md");
-    // Showing Main would cover the viewer with the timeline overlay — the
-    // "clicked the report, got the timeline" bug.
-    expect(showWindowActivated).not.toHaveBeenCalled();
-    expect(emitEvent).not.toHaveBeenCalled();
+    expect(showWindowActivated).toHaveBeenCalledWith({
+      Home: { page: "brain" },
+    });
+    expect(emitEvent).toHaveBeenCalledWith("open-brain-artifact", {
+      path: "/Users/louis/report.md",
+      source: "notification",
+    });
+    expect(emitEvent).not.toHaveBeenCalledWith(
+      "deep-link-received",
+      expect.anything(),
+    );
   });
 
-  it("surfaces viewer failures instead of pretending the click worked", async () => {
-    const openViewerWindow = vi
-      .fn()
-      .mockResolvedValue({ status: "error", error: "no such file" });
+  it("routes stable artifact ids without putting paths in the deeplink", async () => {
+    const showWindowActivated = vi.fn().mockResolvedValue(undefined);
+    const emitEvent = vi.fn().mockResolvedValue(undefined);
 
-    await expect(
-      routeNotificationDeeplink("file:///Users/louis/missing.md", {
-        showWindowActivated: vi.fn(),
-        emitEvent: vi.fn(),
-        sleepMs: vi.fn().mockResolvedValue(undefined),
-        openViewerWindow,
-      }),
-    ).rejects.toThrow("no such file");
+    await routeNotificationDeeplink("screenpipe://artifact/42", {
+      showWindowActivated,
+      emitEvent,
+      sleepMs: vi.fn().mockResolvedValue(undefined),
+    });
+
+    expect(showWindowActivated).toHaveBeenCalledWith({
+      Home: { page: "brain" },
+    });
+    expect(emitEvent).toHaveBeenCalledWith("open-brain-artifact", {
+      registeredId: 42,
+      source: "notification",
+    });
   });
 });

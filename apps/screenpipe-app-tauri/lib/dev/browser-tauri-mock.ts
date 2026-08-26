@@ -159,6 +159,7 @@ const NOOP_COMMANDS = new Set([
   "confirm_browser_cookie_access_for_session",
   "ensure_webview_focus",
   "open_login_window",
+  "open_viewer_window",
   "open_permission_settings",
   "owned_browser_hide",
   "reencrypt_store",
@@ -751,6 +752,29 @@ export function createBrowserIpcMock(options: BrowserIpcMockOptions) {
         return "/Users/screenpipe/.screenpipe";
       case "get_chats_dir":
         return chatsDir;
+      case "read_viewer_file": {
+        const path = String(input.path ?? "");
+        if (!path.endsWith("/imessage-sync/output/sync-summary.md")) {
+          return { kind: "error", message: "mock file not found", path };
+        }
+        const text = [
+          "# iMessage Sync",
+          "",
+          "**Run:** 2026-08-26 (Pacific)  **Status:** 5 conversations stored",
+          "",
+          "Fetched 5 new text messages since checkpoint `last_rowid` 14958. Grouped them into 5 conversations and stored all 5 as Screenpipe memories (0 errors). Memory IDs: 2998–3002.",
+          "",
+          "Checkpoint now: `last_rowid` 14969, **565** conversations stored, last ingest `2026-08-26T18:01:54.359Z`.",
+        ].join("\n");
+        return {
+          kind: "text",
+          text,
+          name: "sync-summary.md",
+          path,
+          truncated: false,
+          total_bytes: new TextEncoder().encode(text).byteLength,
+        };
+      }
       case "get_cloud_token":
       case "get_enterprise_license_key":
       case "get_enterprise_team_api_token":

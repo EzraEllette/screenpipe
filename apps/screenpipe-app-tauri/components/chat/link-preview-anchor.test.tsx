@@ -121,6 +121,34 @@ describe("LinkPreviewAnchor", () => {
     );
   });
 
+  it("shows closed instead of leftover draft on a closed GitHub pull request", async () => {
+    fetchRichLinkPreviewMock.mockResolvedValue({
+      title: "feat(chat): add conversation coding worktrees",
+      description:
+        "Problem Screenpipe Chat can launch Pi, but its shared runtime directory is not a safe coding checkout.",
+      author: "louis030195",
+      state: "closed",
+      thumbnailUrl: null,
+      updatedAt: "2026-08-07T09:36:54Z",
+    });
+
+    render(
+      <LinkPreviewAnchor href="https://github.com/screenpipe/screenpipe/pull/5596">
+        #5596
+      </LinkPreviewAnchor>,
+    );
+
+    fireEvent.focus(screen.getByRole("link", { name: "#5596" }));
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const tooltip = screen.getByRole("tooltip");
+    expect(tooltip).toHaveTextContent("feat(chat): add conversation coding worktrees");
+    expect(screen.getByText("closed")).toHaveClass("uppercase");
+    expect(tooltip).not.toHaveTextContent("draft");
+  });
+
   it("shows a title from a Linear issue URL without a remote request", () => {
     render(
       <LinkPreviewAnchor href="https://linear.app/screenpipe/issue/SCR-123/fix-chat-link-previews">

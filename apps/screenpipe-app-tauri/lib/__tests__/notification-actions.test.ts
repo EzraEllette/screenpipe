@@ -15,6 +15,10 @@ vi.mock("@tauri-apps/api/event", () => ({
 
 const tauriCommandMocks = vi.hoisted(() => ({
   openViewerWindow: vi.fn(async () => ({ status: "ok" as const, data: null })),
+  showWindowActivated: vi.fn(async () => ({
+    status: "ok" as const,
+    data: null,
+  })),
 }));
 
 vi.mock("@/lib/utils/tauri", () => ({
@@ -157,22 +161,26 @@ describe("notification deeplink routing", () => {
     );
   });
 
-  it("sends file link actions to the in-app viewer, not the browser or Main", async () => {
+  it("sends file link actions to the Brain artifact detail", async () => {
     tauriCommandMocks.openViewerWindow.mockClear();
+    tauriCommandMocks.showWindowActivated.mockClear();
     const { emit } = await import("@tauri-apps/api/event");
     vi.mocked(emit).mockClear();
 
-    // `commands.showWindowActivated` is deliberately absent from the mock —
-    // reaching the show-Main path would throw, so completing at all proves
-    // the timeline overlay was never shown over the viewer.
-    await executeNotificationAction({
+    const actionPromise = executeNotificationAction({
       type: "link",
       url: "file:///Users/louis/.screenpipe/pipes/time-breakdown/output/2026-08-25.md",
     });
+    await vi.runAllTimersAsync();
+    await actionPromise;
 
-    expect(tauriCommandMocks.openViewerWindow).toHaveBeenCalledWith(
-      "/Users/louis/.screenpipe/pipes/time-breakdown/output/2026-08-25.md",
-    );
-    expect(emit).not.toHaveBeenCalled();
+    expect(tauriCommandMocks.openViewerWindow).not.toHaveBeenCalled();
+    expect(tauriCommandMocks.showWindowActivated).toHaveBeenCalledWith({
+      Home: { page: "brain" },
+    });
+    expect(emit).toHaveBeenCalledWith("open-brain-artifact", {
+      path: "/Users/louis/.screenpipe/pipes/time-breakdown/output/2026-08-25.md",
+      source: "notification",
+    });
   });
 });

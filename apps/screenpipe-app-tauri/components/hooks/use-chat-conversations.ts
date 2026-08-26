@@ -1827,12 +1827,16 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
   // Permanent deletion remains available from the sidebar row menu, where
   // the conversation being acted on is explicit and a confirmation follows.
   const archiveConversation = async (convId: string) => {
-    await updateConversationFlags(convId, { hidden: true });
+    await updateConversationFlags(convId, { hidden: true, pinned: false });
     commands.piAbort(convId).catch(() => {});
 
     const { useChatStore } = await import("@/lib/stores/chat-store");
     const store = useChatStore.getState();
-    store.actions.patch(convId, { hidden: true, unread: false });
+    store.actions.patch(convId, {
+      hidden: true,
+      pinned: false,
+      unread: false,
+    });
     await refreshFileConversations();
 
     try {

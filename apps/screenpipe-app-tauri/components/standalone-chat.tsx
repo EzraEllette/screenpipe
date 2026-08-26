@@ -939,6 +939,7 @@ export function StandaloneChat({
     setIsStreaming,
     setMessages,
     setConversationId,
+    openFilePreview,
   });
   useChatConversationRoutingEvents({
     loadConversation,

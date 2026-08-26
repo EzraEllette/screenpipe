@@ -151,10 +151,13 @@ import {
   buildGroupedRecents,
   latestSidebarPipeRunTimes,
   listMoveTargetGroups,
+  mergeSidebarPipeInventory,
   recurringPipeGroupKeys,
+  SIDEBAR_AUTOMATION_PAGE_SIZE,
   sortSidebarPipeRuns,
   visibleSidebarPipeNames,
   sessionGroupKey,
+  type SidebarPipeInventoryItem,
   type SidebarItem,
   type SidebarRecentsSection,
   validateSidebarGroupName,
@@ -163,7 +166,6 @@ import {
 /** Max top-level rows shown in recents. Pipes use the authoritative inventory. */
 const SIDEBAR_CAP = 8;
 const PIPE_RUNS_PER_GROUP = 10;
-const PIPE_INVENTORY_PAGE_SIZE = 20;
 const DELETED_PIPE_EXECUTIONS_KEY = "screenpipe:deleted-pipe-executions";
 const RECENTS_SOURCE_FILTER_KEY = "screenpipe:recents-hidden-sources";
 const RECENTS_LAYOUT_KEY = "screenpipe:recents-layout";
@@ -178,6 +180,12 @@ const RECENT_SOURCE_OPTIONS: Array<{ source: RecentSource; label: string }> = [
   { source: "codex", label: "Codex" },
   { source: "claude-code", label: "Claude" },
 ];
+const RECENT_SOURCE_SHORTCUTS = {
+  screenpipe: "s",
+  codex: "c",
+  "claude-code": "l",
+} as const satisfies Record<RecentSource, string>;
+const RECENTS_MENU_SHORTCUT_KEYS = ["s", "c", "l", "b", "i", "p", "u"] as const;
 
 let externalChatSyncPromise: Promise<void> | null = null;
 let lastExternalChatSyncAt = 0;
@@ -208,9 +216,19 @@ export function sortRecents(
   sort: RecentSort,
 ): SessionRecord[] {
   if (sort === "priority") return sessions;
+
+  // Loading a chat can update persistence metadata such as `updatedAt` and
+  // `lastViewedAt`. Sort by message activity so selecting a row never promotes
+  // it above chats that actually received newer content.
+  const contentActivityAt = (session: SessionRecord) =>
+    session.lastContentAt
+    ?? session.lastUserMessageAt
+    ?? session.updatedAt
+    ?? session.createdAt;
+
   return [...sessions].sort(
     (left, right) =>
-      right.updatedAt - left.updatedAt ||
+      contentActivityAt(right) - contentActivityAt(left) ||
       right.createdAt - left.createdAt ||
       left.id.localeCompare(right.id),
   );
@@ -264,13 +282,6 @@ function syncExternalChatsIfNeeded(force = false): Promise<void> {
       externalChatSyncPromise = null;
     });
   return externalChatSyncPromise;
-}
-
-interface SidebarPipeInventoryItem {
-  name: string;
-  executionCount: number;
-  latestExecutionId: number;
-  lastRun: string | null;
 }
 
 interface SidebarPipeExecution {
@@ -552,7 +563,7 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
             useChatStore.getState().actions.patch(id, {
               hidden,
               unread: false,
-              ...(hidden ? { draft: false } : {}),
+              ...(hidden ? { draft: false, pinned: false } : {}),
             });
             return;
           }
@@ -707,6 +718,7 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
   const [pipeInventory, setPipeInventory] = useState<SidebarPipeInventoryItem[]>([]);
   const [pipeInventoryLoaded, setPipeInventoryLoaded] = useState(false);
   const [pipeInventoryAuthoritative, setPipeInventoryAuthoritative] = useState(false);
+  const pipeInventoryAuthoritativeRef = useRef(false);
   const [pipeInventoryLoadingMore, setPipeInventoryLoadingMore] = useState(false);
   const [pipeInventoryHasMore, setPipeInventoryHasMore] = useState(false);
   const pipeInventoryCursorRef = useRef<number | null>(null);
@@ -741,6 +753,7 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
     setPipeInventory([]);
     setPipeInventoryLoaded(false);
     setPipeInventoryAuthoritative(false);
+    pipeInventoryAuthoritativeRef.current = false;
     setPipeInventoryHasMore(false);
     pipeInventoryCursorRef.current = null;
   }, []);
@@ -760,10 +773,12 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
     preserveExisting = false,
   ) => {
     const generation = pipeDataGenerationRef.current;
+    const recoveringInitialPage =
+      preserveExisting && !pipeInventoryAuthoritativeRef.current;
     if (append) setPipeInventoryLoadingMore(true);
     try {
       const params = new URLSearchParams({
-        limit: String(PIPE_INVENTORY_PAGE_SIZE),
+        limit: String(SIDEBAR_AUTOMATION_PAGE_SIZE),
       });
       if (append && pipeInventoryCursorRef.current != null) {
         params.set("before_id", String(pipeInventoryCursorRef.current));
@@ -786,21 +801,25 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
           lastRun: typeof pipe.last_run_at === "string" ? pipe.last_run_at : null,
         });
       }
-      setPipeInventory((previous) => {
-        if (!append && !preserveExisting) return page;
-        const merged = new Map(previous.map((pipe) => [pipe.name, pipe]));
-        for (const pipe of page) merged.set(pipe.name, pipe);
-        return Array.from(merged.values()).sort(
-          (a, b) => b.latestExecutionId - a.latestExecutionId,
-        );
-      });
+      setPipeInventory((previous) =>
+        mergeSidebarPipeInventory(
+          previous,
+          page,
+          append
+            ? "append"
+            : preserveExisting && !recoveringInitialPage
+              ? "refresh"
+              : "replace",
+        ),
+      );
       // A heartbeat refreshes only the newest page. Preserve the pagination
       // cursor and older inventory rows the user explicitly loaded.
-      if (!preserveExisting) {
+      if (!preserveExisting || recoveringInitialPage) {
         setPipeInventoryHasMore(payload.has_more === true);
         pipeInventoryCursorRef.current =
           typeof payload.next_before_id === "number" ? payload.next_before_id : null;
       }
+      pipeInventoryAuthoritativeRef.current = true;
       setPipeInventoryAuthoritative(true);
     } catch {
       // Keep recent in-memory pipe groups available if the engine is still
@@ -956,7 +975,11 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
       else sessionsByPipe.set(name, [session]);
     }
 
-    const orderedNames = visibleSidebarPipeNames(pipeInventory, pipes);
+    const orderedNames = visibleSidebarPipeNames(
+      pipeInventory,
+      pipes,
+      pipeInventoryAuthoritative,
+    );
 
     return orderedNames.map((name) => {
       const inventoryItem = pipeInventory.find((pipe) => pipe.name === name);
@@ -993,7 +1016,13 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
         sessions,
       };
     });
-  }, [pipeInventory, pipes, loadedPipeRuns, storeSessionIds]);
+  }, [
+    pipeInventory,
+    pipeInventoryAuthoritative,
+    pipes,
+    loadedPipeRuns,
+    storeSessionIds,
+  ]);
 
   const pipeLastRuns = useMemo(
     () => latestSidebarPipeRunTimes(pipeInventory, pipes),
@@ -1274,7 +1303,7 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
     // Stop any active session first to avoid immediate row resurrection
     // from trailing stream events.
     commands.piAbort(id).catch(() => {});
-    actions.patch(id, { hidden: true, unread: false });
+    actions.patch(id, { hidden: true, pinned: false, unread: false });
     // Archiving should tuck chats away immediately; users can reopen
     // the bucket manually when they want to review archived items.
     setArchivedCollapsed(true);
@@ -1299,7 +1328,7 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
     }
     // Best-effort persistence for restart durability.
     try {
-      await updateConversationFlags(id, { hidden: true });
+      await updateConversationFlags(id, { hidden: true, pinned: false });
     } catch {
       // ignore
     }
@@ -1517,31 +1546,60 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
                         <MoreHorizontal className="h-3.5 w-3.5" aria-hidden />
                       </button>
                     </DropdownMenuTrigger>
-                    <DropdownMenuContent className="w-48" align="end">
+                    <DropdownMenuContent
+                      className="w-48"
+                      align="end"
+                      onKeyDown={handleRecentsMenuShortcut}
+                    >
                       <DropdownMenuLabel>show in recents</DropdownMenuLabel>
                       {RECENT_SOURCE_OPTIONS.filter(({ source }) =>
                         availableRecentSources.has(source),
                       ).map(({ source, label }) => (
                         <DropdownMenuCheckboxItem
                           key={source}
+                          data-shortcut={RECENT_SOURCE_SHORTCUTS[source]}
+                          aria-keyshortcuts={RECENT_SOURCE_SHORTCUTS[source].toUpperCase()}
                           checked={!hiddenRecentSources.has(source)}
                           onCheckedChange={() => toggleRecentSource(source)}
                           onSelect={(event) => event.preventDefault()}
                         >
                           {label}
+                          <DropdownMenuShortcut className="text-[10px] tracking-normal text-muted-foreground/55">
+                            {RECENT_SOURCE_SHORTCUTS[source].toUpperCase()}
+                          </DropdownMenuShortcut>
                         </DropdownMenuCheckboxItem>
                       ))}
                       <DropdownMenuSeparator />
                       <DropdownMenuLabel>organize sidebar</DropdownMenuLabel>
                       <DropdownMenuRadioGroup value={recentLayout} onValueChange={changeRecentLayout}>
-                        <DropdownMenuRadioItem value="source">By source</DropdownMenuRadioItem>
-                        <DropdownMenuRadioItem value="list">In one list</DropdownMenuRadioItem>
+                        <DropdownMenuRadioItem data-shortcut="b" aria-keyshortcuts="B" value="source">
+                          By source
+                          <DropdownMenuShortcut className="text-[10px] tracking-normal text-muted-foreground/55">
+                            B
+                          </DropdownMenuShortcut>
+                        </DropdownMenuRadioItem>
+                        <DropdownMenuRadioItem data-shortcut="i" aria-keyshortcuts="I" value="list">
+                          In one list
+                          <DropdownMenuShortcut className="text-[10px] tracking-normal text-muted-foreground/55">
+                            I
+                          </DropdownMenuShortcut>
+                        </DropdownMenuRadioItem>
                       </DropdownMenuRadioGroup>
                       <DropdownMenuSeparator />
                       <DropdownMenuLabel>sort chats by</DropdownMenuLabel>
                       <DropdownMenuRadioGroup value={recentSort} onValueChange={changeRecentSort}>
-                        <DropdownMenuRadioItem value="priority">Priority</DropdownMenuRadioItem>
-                        <DropdownMenuRadioItem value="updated">Last updated</DropdownMenuRadioItem>
+                        <DropdownMenuRadioItem data-shortcut="p" aria-keyshortcuts="P" value="priority">
+                          Priority
+                          <DropdownMenuShortcut className="text-[10px] tracking-normal text-muted-foreground/55">
+                            P
+                          </DropdownMenuShortcut>
+                        </DropdownMenuRadioItem>
+                        <DropdownMenuRadioItem data-shortcut="u" aria-keyshortcuts="U" value="updated">
+                          Last updated
+                          <DropdownMenuShortcut className="text-[10px] tracking-normal text-muted-foreground/55">
+                            U
+                          </DropdownMenuShortcut>
+                        </DropdownMenuRadioItem>
                       </DropdownMenuRadioGroup>
                     </DropdownMenuContent>
                   </DropdownMenu>
@@ -1566,7 +1624,7 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
                         View all <ChevronRight className="h-3 w-3" aria-hidden />
                       </button>
                     </ContextMenuTrigger>
-                    <ContextMenuContent className="w-44">
+                    <ContextMenuContent className="w-44" onKeyDown={handleRecentsMenuShortcut}>
                       <ContextMenuLabel>show in recents</ContextMenuLabel>
                       {RECENT_SOURCE_OPTIONS.filter(({ source }) =>
                         availableRecentSources.has(source),
@@ -1574,24 +1632,49 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
                         <ContextMenuCheckboxItem
                           key={source}
                           data-testid={`recents-filter-${source}`}
+                          data-shortcut={RECENT_SOURCE_SHORTCUTS[source]}
+                          aria-keyshortcuts={RECENT_SOURCE_SHORTCUTS[source].toUpperCase()}
                           checked={!hiddenRecentSources.has(source)}
                           onCheckedChange={() => toggleRecentSource(source)}
                           onSelect={(event) => event.preventDefault()}
                         >
                           {label}
+                          <ContextMenuShortcut className="text-[10px] tracking-normal text-muted-foreground/55">
+                            {RECENT_SOURCE_SHORTCUTS[source].toUpperCase()}
+                          </ContextMenuShortcut>
                         </ContextMenuCheckboxItem>
                       ))}
                       <ContextMenuSeparator />
                       <ContextMenuLabel>organize sidebar</ContextMenuLabel>
                       <ContextMenuRadioGroup value={recentLayout} onValueChange={changeRecentLayout}>
-                        <ContextMenuRadioItem value="source">By source</ContextMenuRadioItem>
-                        <ContextMenuRadioItem value="list">In one list</ContextMenuRadioItem>
+                        <ContextMenuRadioItem data-shortcut="b" aria-keyshortcuts="B" value="source">
+                          By source
+                          <ContextMenuShortcut className="text-[10px] tracking-normal text-muted-foreground/55">
+                            B
+                          </ContextMenuShortcut>
+                        </ContextMenuRadioItem>
+                        <ContextMenuRadioItem data-shortcut="i" aria-keyshortcuts="I" value="list">
+                          In one list
+                          <ContextMenuShortcut className="text-[10px] tracking-normal text-muted-foreground/55">
+                            I
+                          </ContextMenuShortcut>
+                        </ContextMenuRadioItem>
                       </ContextMenuRadioGroup>
                       <ContextMenuSeparator />
                       <ContextMenuLabel>sort chats by</ContextMenuLabel>
                       <ContextMenuRadioGroup value={recentSort} onValueChange={changeRecentSort}>
-                        <ContextMenuRadioItem value="priority">Priority</ContextMenuRadioItem>
-                        <ContextMenuRadioItem value="updated">Last updated</ContextMenuRadioItem>
+                        <ContextMenuRadioItem data-shortcut="p" aria-keyshortcuts="P" value="priority">
+                          Priority
+                          <ContextMenuShortcut className="text-[10px] tracking-normal text-muted-foreground/55">
+                            P
+                          </ContextMenuShortcut>
+                        </ContextMenuRadioItem>
+                        <ContextMenuRadioItem data-shortcut="u" aria-keyshortcuts="U" value="updated">
+                          Last updated
+                          <ContextMenuShortcut className="text-[10px] tracking-normal text-muted-foreground/55">
+                            U
+                          </ContextMenuShortcut>
+                        </ContextMenuRadioItem>
                       </ContextMenuRadioGroup>
                     </ContextMenuContent>
                   </ContextMenu>
@@ -2444,17 +2527,17 @@ interface ChatRowProps {
 const ROW_MENU_SHORTCUT_KEYS = ["p", "r", "a", "d"] as const;
 
 /**
- * Press a shortcut letter while a chat-row menu (right-click or kebab) is open
- * to fire the matching action. We forward an Enter keydown to the item so radix
- * runs its own onSelect + close — no second code path to keep in sync.
+ * Press a shortcut letter while a menu is open to fire the matching item. We
+ * forward Enter so radix runs its own onSelect + close — no second action path.
  */
-function handleRowMenuShortcut(e: React.KeyboardEvent<HTMLElement>) {
+export function handleMenuShortcut(
+  e: React.KeyboardEvent<HTMLElement>,
+  allowedKeys: readonly string[],
+) {
   if (e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return;
   if (e.key.length !== 1) return;
   const key = e.key.toLowerCase();
-  if (!ROW_MENU_SHORTCUT_KEYS.includes(key as (typeof ROW_MENU_SHORTCUT_KEYS)[number])) {
-    return;
-  }
+  if (!allowedKeys.includes(key)) return;
   const target = e.currentTarget.querySelector<HTMLElement>(`[data-shortcut="${key}"]`);
   if (!target) return;
   e.preventDefault();
@@ -2463,6 +2546,14 @@ function handleRowMenuShortcut(e: React.KeyboardEvent<HTMLElement>) {
   target.dispatchEvent(
     new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true })
   );
+}
+
+function handleRecentsMenuShortcut(e: React.KeyboardEvent<HTMLElement>) {
+  handleMenuShortcut(e, RECENTS_MENU_SHORTCUT_KEYS);
+}
+
+function handleRowMenuShortcut(e: React.KeyboardEvent<HTMLElement>) {
+  handleMenuShortcut(e, ROW_MENU_SHORTCUT_KEYS);
 }
 
 /**

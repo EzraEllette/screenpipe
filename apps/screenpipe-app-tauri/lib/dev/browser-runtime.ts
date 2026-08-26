@@ -28,6 +28,10 @@ function parseScenario(value: string | undefined): BrowserDevScenario {
 declare global {
   interface Window {
     __SCREENPIPE_BROWSER_RUNTIME_INSTALLED__?: boolean;
+    __SCREENPIPE_WEB_DEV_EMIT__?: (
+      event: string,
+      payload: unknown,
+    ) => Promise<void>;
   }
 }
 
@@ -52,7 +56,7 @@ export function installBrowserRuntime() {
     exe_extension: "",
   };
 
-  mockWindows("main");
+  mockWindows("home");
   mockConvertFileSrc("macos");
   mockIPC(
     createBrowserIpcMock({
@@ -67,6 +71,8 @@ export function installBrowserRuntime() {
     }),
     { shouldMockEvents: true },
   );
+  window.__SCREENPIPE_WEB_DEV_EMIT__ = (event, payload) =>
+    emit(event, payload);
 
   if (mode === "mock") installMockEngine(apiPort, scenario);
 

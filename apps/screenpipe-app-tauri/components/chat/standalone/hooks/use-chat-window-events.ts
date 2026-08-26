@@ -101,6 +101,11 @@ interface UseChatPrefillListenerOptions {
   setIsStreaming: React.Dispatch<React.SetStateAction<boolean>>;
   setMessages: React.Dispatch<React.SetStateAction<Message[]>>;
   setConversationId: React.Dispatch<React.SetStateAction<string | null>>;
+  openFilePreview: (
+    path: string,
+    previousMode?: "browser" | "hidden",
+    targetConversationId?: string | null,
+  ) => void;
 }
 
 export function useChatPrefillListener({
@@ -124,6 +129,7 @@ export function useChatPrefillListener({
   setIsStreaming,
   setMessages,
   setConversationId,
+  openFilePreview,
 }: UseChatPrefillListenerOptions) {
   const prefillInFlightRef = useRef(false);
   const { claimPrefillHandling } = useChatPrefillEvents();
@@ -138,8 +144,19 @@ export function useChatPrefillListener({
       autoSend?: boolean;
       source?: string;
       targetWindow?: string;
+      filePreviewPath?: string;
     }>("chat-prefill", (event) => {
-      const { context, prompt, displayLabel, frameId, images, autoSend, source, targetWindow } = event.payload;
+      const {
+        context,
+        prompt,
+        displayLabel,
+        frameId,
+        images,
+        autoSend,
+        source,
+        targetWindow,
+        filePreviewPath,
+      } = event.payload;
       const prefillImages = normalizeImageDataUrls(images);
 
       if (!shouldHandleChatPrefillForWindow({ targetWindow, autoSend }, getCurrentWindow().label)) return;
@@ -214,6 +231,9 @@ export function useChatPrefillListener({
       }
       if (prompt) {
         setInput(prompt);
+      }
+      if (filePreviewPath) {
+        openFilePreview(filePreviewPath, "hidden");
       }
       setTimeout(() => inputRef.current?.focus(), 100);
     });

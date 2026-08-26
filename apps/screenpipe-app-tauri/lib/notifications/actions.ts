@@ -6,9 +6,14 @@ import { emit } from "@tauri-apps/api/event";
 import { commands } from "@/lib/utils/tauri";
 import { localFetch, isLocalApiUrl } from "@/lib/api";
 import { showChatWithPrefill } from "@/lib/chat-utils";
+import {
+  artifactOpenRequestFromUrl,
+  OPEN_BRAIN_ARTIFACT_EVENT,
+} from "@/lib/artifact-deeplink";
 
 const GENERIC_DEEPLINK_MOUNT_DELAY_MS = 150;
 const MEETING_DEEPLINK_RETRY_DELAYS_MS = [0, 250, 750, 1500] as const;
+const ARTIFACT_DEEPLINK_RETRY_DELAYS_MS = [0, 250, 750, 1500] as const;
 
 // A single action attached to a notification. Carried both by the transient
 // notification panel (toast) and — once persisted — by the notification
@@ -87,6 +92,9 @@ export function parseMeetingDeeplink(url: string): {
 }
 
 export function windowForDeeplink(url: string) {
+  if (artifactOpenRequestFromUrl(url, "notification")) {
+    return { Home: { page: "brain" } };
+  }
   if (isMeetingDeeplink(url)) return { Home: { page: "meetings" } };
   if (isActivityDeeplink(url)) return { Home: { page: "activity" } };
   return "Main";
@@ -97,9 +105,9 @@ export function windowForDeeplink(url: string) {
  * producers use: `screenpipe://view?path=…` (what the /notify body rewriter
  * emits) and raw `file://` URLs (what pipes tend to put in link actions).
  *
- * These must open the in-app viewer window directly. Routing them like a
- * generic deeplink shows the Main timeline overlay first, which then covers
- * the viewer — the user clicks "open report" and sees the timeline instead.
+ * Notification file links recover into the Brain artifact detail. This helper
+ * remains exported for callers that only need to detect or inspect the legacy
+ * path form.
  */
 export function viewerPathFromNotificationUrl(url: string): string | null {
   let parsed: URL;
@@ -140,7 +148,6 @@ export async function routeNotificationDeeplink(
     showWindowActivated?: typeof commands.showWindowActivated;
     emitEvent?: typeof emit;
     sleepMs?: (ms: number) => Promise<void>;
-    openViewerWindow?: typeof commands.openViewerWindow;
   } = {},
 ): Promise<void> {
   const showWindowActivated =
@@ -148,15 +155,15 @@ export async function routeNotificationDeeplink(
   const emitEvent = deps.emitEvent ?? emit;
   const sleepMs = deps.sleepMs ?? sleep;
 
-  // File links open the viewer window directly. Showing Main first would put
-  // the fullscreen timeline overlay on top of the viewer that's about to open.
-  const viewerPath = viewerPathFromNotificationUrl(url);
-  if (viewerPath) {
-    const openViewerWindow =
-      deps.openViewerWindow ?? commands.openViewerWindow;
-    const result = await openViewerWindow(viewerPath);
-    if (result.status === "error") {
-      throw new Error(result.error);
+  const artifactRequest = artifactOpenRequestFromUrl(url, "notification");
+  if (artifactRequest) {
+    await showWindowActivated({ Home: { page: "brain" } });
+    for (const delayMs of ARTIFACT_DEEPLINK_RETRY_DELAYS_MS) {
+      if (delayMs > 0) {
+        await sleepMs(delayMs);
+      }
+      await emitEvent("navigate", { url: "/home?section=brain" });
+      await emitEvent(OPEN_BRAIN_ARTIFACT_EVENT, artifactRequest);
     }
     return;
   }

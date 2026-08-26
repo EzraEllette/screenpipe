@@ -200,6 +200,16 @@ describe("browser development runtime", () => {
       undefined,
       "ready",
     );
+    const artifacts = mockLocalApiResponse(
+      new URL("http://localhost:3030/artifacts?limit=1000"),
+      undefined,
+      "ready",
+    );
+    const missingArtifact = mockLocalApiResponse(
+      new URL("http://localhost:3030/artifacts?id=999999&limit=1"),
+      undefined,
+      "ready",
+    );
 
     expect(health.status).toBe(200);
     expect((await health.json()).status).toBe("healthy");
@@ -208,6 +218,20 @@ describe("browser development runtime", () => {
       pagination: { total: 0 },
     });
     expect(await memories.json()).toMatchObject({
+      data: [],
+      pagination: { total: 0 },
+    });
+    expect(await artifacts.json()).toMatchObject({
+      data: [
+        {
+          id: 4242,
+          title: "sync-summary.md",
+          source: "imessage-sync",
+        },
+      ],
+      pagination: { total: 1 },
+    });
+    expect(await missingArtifact.json()).toMatchObject({
       data: [],
       pagination: { total: 0 },
     });

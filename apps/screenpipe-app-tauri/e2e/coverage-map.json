@@ -1091,7 +1091,7 @@
       "criticality": "high",
       "confidence": "strong",
       "ux": "mixed",
-      "notes": "The long chat inventory scrolls independently; a collapsed Pipes section loads nothing, expanding it lists a compact execution-backed activity page, expanding a pipe lazily loads its newest 10 executions, and older runs paginate on demand."
+      "notes": "The long chat inventory scrolls independently; a collapsed Automations section loads nothing, expanding it lists a compact execution-backed activity page, expanding an automation lazily loads its newest 10 executions, older runs paginate on demand, and a pinned automation remains archived after reload."
     },
     {
       "spec": "chat-sidebar-repeated-prompt.spec.ts",

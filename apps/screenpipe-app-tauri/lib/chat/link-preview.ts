@@ -391,7 +391,27 @@ function compactGitHubBody(body: unknown): string | null {
     : compact;
 }
 
-function parseGitHubResponse(value: unknown): RichLinkPreview | null {
+export function githubPreviewState(item: {
+  draft?: unknown;
+  merged?: unknown;
+  merged_at?: unknown;
+  state?: unknown;
+}): NonNullable<RichLinkPreview["state"]> {
+  // GitHub keeps `draft: true` after a draft pull request is closed or merged.
+  // Lifecycle (merged/closed/open) has to win, otherwise a closed draft still
+  // reads as "DRAFT" in the hover card.
+  if (
+    item.merged === true ||
+    (typeof item.merged_at === "string" && item.merged_at.length > 0)
+  ) {
+    return "merged";
+  }
+  if (item.state === "closed") return "closed";
+  if (item.draft === true) return "draft";
+  return "open";
+}
+
+export function parseGitHubResponse(value: unknown): RichLinkPreview | null {
   if (!value || typeof value !== "object") return null;
   const item = value as Record<string, unknown>;
   if (typeof item.title !== "string" || !item.title.trim()) return null;
@@ -401,22 +421,12 @@ function parseGitHubResponse(value: unknown): RichLinkPreview | null {
       ? (item.user as Record<string, unknown>)
       : null;
   const author = typeof user?.login === "string" ? user.login : null;
-  const merged =
-    typeof item.merged_at === "string" && item.merged_at.length > 0;
-  const draft = item.draft === true;
-  const state = merged
-    ? "merged"
-    : draft
-      ? "draft"
-      : item.state === "closed"
-        ? "closed"
-        : "open";
 
   return {
     title: item.title.trim(),
     description: compactGitHubBody(item.body),
     author,
-    state,
+    state: githubPreviewState(item),
     thumbnailUrl: null,
     updatedAt: typeof item.updated_at === "string" ? item.updated_at : null,
   };
