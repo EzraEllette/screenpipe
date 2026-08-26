@@ -1204,6 +1204,16 @@ impl SCServer {
                 "/v1/web-search",
                 axum::routing::post(crate::routes::web_search::web_search),
             )
+            // User-scoped cloud data reads. The signed-in identity determines
+            // the bucket upstream; callers cannot provide an account or bucket.
+            .route(
+                "/data-sync/devices",
+                get(crate::routes::data_sync_proxy::devices),
+            )
+            .route(
+                "/data-sync/search",
+                get(crate::routes::data_sync_proxy::search),
+            )
             // Blocking connect broker for the harness MCP `screenpipe_connect_app`
             // tool: raise the in-chat connect card and wait for the user's answer.
             .route(

@@ -295,6 +295,10 @@ export interface ChatHistoryStore {
 export type Settings = SettingsStore & {
 	/** Enable account data sync for this device. Default false. */
 	dataSyncEnabled?: boolean;
+	/** Friendly name used to partition this device's synced data. */
+	dataSyncDeviceName?: string;
+	/** Start boundary for the current opt-in period. Prevents historical backfill. */
+	dataSyncEnabledAt?: string;
 	/** Enable automatic Activities generation. Default false. */
 	activitiesEnabled?: boolean;
 	/** Native Activity generation cadence in minutes. Default 15. */
