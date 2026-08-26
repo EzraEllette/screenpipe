@@ -1803,6 +1803,26 @@
       "notes": "Per-app meeting-detection ignore picker: open, toggle, count badge, persistence across reopen (#3882 / #3847)."
     },
     {
+      "spec": "meeting-calendar-url-match.spec.ts",
+      "platforms": [
+        "windows",
+        "macos",
+        "linux"
+      ],
+      "layers": [
+        "real-ui-e2e",
+        "local-api",
+        "tauri-command"
+      ],
+      "features": [
+        "meeting-calendar-association"
+      ],
+      "criticality": "high",
+      "confidence": "strong",
+      "ux": "real-user-flow",
+      "notes": "Runs the production calendar matcher and DB write with the reported back-to-back boundary shape: an outgoing URL-less event overlaps a target event starting in 40 seconds whose normalized Meet room exactly matches the detector URL. Verifies the persisted title and attendees, then proves the visible Meetings row uses the target rather than the outgoing event."
+    },
+    {
       "spec": "meeting-note-bottom-click.spec.ts",
       "platforms": [
         "windows",

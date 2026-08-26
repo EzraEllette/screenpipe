@@ -311,7 +311,7 @@ pub(crate) async fn apply_state_action(
             *flap_count = 0;
             // Calendar enrichment, skipped when the event already names another
             // meeting — one calendar event describes one meeting.
-            let calendar = resolve_calendar_binding(db, calendar_events, Utc::now()).await;
+            let calendar = resolve_calendar_binding(db, calendar_events, Utc::now(), None).await;
 
             // Try to merge with recently-ended meeting. The DB query
             // already filters out explicit_stop rows; the

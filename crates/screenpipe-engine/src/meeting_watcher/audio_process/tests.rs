@@ -5,7 +5,9 @@
 //! candidate resolution, suppression, and lifecycle, sharing common fixtures.
 
 use super::*;
-use crate::meeting_watcher::shared::calendar::find_overlapping_calendar_event;
+use crate::meeting_watcher::shared::calendar::{
+    find_calendar_event_for_meeting, find_overlapping_calendar_event, CalendarMatchMethod,
+};
 use screenpipe_db::DatabaseManager;
 
 fn chrome_process() -> AudioInputProcess {
@@ -2105,6 +2107,7 @@ fn calendar_event(
         start: start.to_rfc3339(),
         end: (start + lasts).to_rfc3339(),
         attendees: attendees.iter().map(|a| a.to_string()).collect(),
+        meeting_url: None,
         is_all_day: false,
     }
 }
@@ -2115,8 +2118,17 @@ async fn start_meeting_with_calendar(
     events: &[CalendarEventSignal],
     platform: &str,
 ) -> AutoStartOutcome {
+    start_meeting_with_calendar_url(db, events, platform, None).await
+}
+
+async fn start_meeting_with_calendar_url(
+    db: &DatabaseManager,
+    events: &[CalendarEventSignal],
+    platform: &str,
+    observed_meeting_url: Option<&str>,
+) -> AutoStartOutcome {
     let manual_meeting = tokio::sync::RwLock::new(None);
-    let calendar = resolve_calendar_binding(db, events, Utc::now()).await;
+    let calendar = resolve_calendar_binding(db, events, Utc::now(), observed_meeting_url).await;
     start_or_adopt_auto_meeting(db, &manual_meeting, platform, calendar.as_ref(), None).await
 }
 
@@ -2213,6 +2225,333 @@ async fn meeting_joined_shortly_before_start_still_binds_the_event() {
         row.attendees.as_deref(),
         Some("ben@example.com, louis@example.com"),
         "attendees must come along with the title"
+    );
+}
+
+/// Reproduces the reported boundary shape: detection fires 40 seconds before
+/// an unrelated URL-less event ends and the real Meet event begins. The
+/// browser room identity must beat the outgoing event's time rank and persist
+/// the target calendar id on the new meeting row.
+#[tokio::test]
+async fn exact_meet_url_beats_an_outgoing_overlapping_event() {
+    let (_dir, db) = setup_db().await;
+    let mut outgoing = calendar_event(
+        "habit-event",
+        "Outgoing focus block",
+        chrono::Duration::minutes(-44),
+        chrono::Duration::minutes(45),
+        &[],
+    );
+    outgoing.end = (Utc::now() + chrono::Duration::seconds(40)).to_rfc3339();
+
+    let mut target = calendar_event(
+        "target-event",
+        "Customer check-in",
+        chrono::Duration::seconds(40),
+        chrono::Duration::minutes(15),
+        &["guest@example.test", "host@example.test"],
+    );
+    target.meeting_url = Some("https://meet.google.com/abc-defg-hij".to_string());
+    let events = vec![outgoing, target];
+
+    let id = match start_meeting_with_calendar_url(
+        &db,
+        &events,
+        "Google Meet",
+        Some("https://meet.google.com/abc-defg-hij?authuser=0&hs=122"),
+    )
+    .await
+    {
+        AutoStartOutcome::Started(id) => id,
+        other => panic!("expected the correct meeting to start, got {other:?}"),
+    };
+
+    let row = db.get_meeting_by_id(id).await.unwrap();
+    assert_eq!(row.title.as_deref(), Some("Customer check-in"));
+    assert_eq!(
+        db.meeting_id_for_calendar_event("target-event")
+            .await
+            .unwrap(),
+        Some(id)
+    );
+    assert_eq!(
+        row.attendees.as_deref(),
+        Some("guest@example.test, host@example.test")
+    );
+}
+
+#[test]
+fn exact_conference_identity_is_order_independent() {
+    let now = Utc::now();
+    let outgoing = calendar_event(
+        "outgoing",
+        "Outgoing event",
+        chrono::Duration::minutes(-25),
+        chrono::Duration::minutes(30),
+        &[],
+    );
+    let mut target = calendar_event(
+        "target",
+        "Target event",
+        chrono::Duration::seconds(40),
+        chrono::Duration::minutes(30),
+        &[],
+    );
+    target.meeting_url = Some("meet.google.com/abc-defg-hij".to_string());
+
+    for events in [
+        vec![outgoing.clone(), target.clone()],
+        vec![target.clone(), outgoing.clone()],
+    ] {
+        let binding = find_calendar_event_for_meeting(
+            &events,
+            now,
+            Some("https://meet.google.com/abc-defg-hij?authuser=1#fragment"),
+        )
+        .expect("exact room should match");
+        assert_eq!(binding.key, "target");
+        assert_eq!(
+            binding.match_method,
+            CalendarMatchMethod::ExactConferenceUrl
+        );
+    }
+}
+
+#[test]
+fn known_room_refuses_ambiguous_time_only_candidates() {
+    let now = Utc::now();
+    let first = calendar_event(
+        "first",
+        "First event",
+        chrono::Duration::minutes(-5),
+        chrono::Duration::minutes(30),
+        &[],
+    );
+    let second = calendar_event(
+        "second",
+        "Second event",
+        chrono::Duration::minutes(-1),
+        chrono::Duration::minutes(30),
+        &[],
+    );
+    assert!(
+        find_calendar_event_for_meeting(
+            &[first, second],
+            now,
+            Some("https://meet.google.com/abc-defg-hij"),
+        )
+        .is_none(),
+        "a known room plus two URL-less events is ambiguous and must stay unenriched"
+    );
+}
+
+#[test]
+fn known_room_refuses_a_different_calendar_room() {
+    let now = Utc::now();
+    let mut event = calendar_event(
+        "wrong-room",
+        "Different Meet",
+        chrono::Duration::minutes(-5),
+        chrono::Duration::minutes(30),
+        &[],
+    );
+    event.meeting_url = Some("https://meet.google.com/wrong-room-id".to_string());
+    assert!(
+        find_calendar_event_for_meeting(
+            &[event],
+            now,
+            Some("https://meet.google.com/abc-defg-hij"),
+        )
+        .is_none(),
+        "time overlap cannot override a conflicting conference identity"
+    );
+}
+
+#[test]
+fn one_url_less_candidate_keeps_the_legacy_time_fallback() {
+    let now = Utc::now();
+    let event = calendar_event(
+        "only",
+        "Only plausible event",
+        chrono::Duration::minutes(-5),
+        chrono::Duration::minutes(30),
+        &[],
+    );
+    let binding = find_calendar_event_for_meeting(
+        &[event],
+        now,
+        Some("https://meet.google.com/abc-defg-hij"),
+    )
+    .expect("one URL-less event preserves time-only enrichment");
+    assert_eq!(binding.key, "only");
+    assert_eq!(binding.match_method, CalendarMatchMethod::TimeOnly);
+}
+
+#[test]
+fn exact_room_allows_early_join_and_small_end_grace_only() {
+    let now = Utc::now();
+    let with_offset = |id: &str, start: chrono::Duration, end: chrono::Duration| {
+        let mut event = calendar_event(id, id, start, end - start, &[]);
+        event.meeting_url = Some("https://meet.google.com/abc-defg-hij".to_string());
+        event
+    };
+
+    let early = with_offset(
+        "early",
+        chrono::Duration::minutes(8),
+        chrono::Duration::minutes(38),
+    );
+    assert_eq!(
+        find_calendar_event_for_meeting(
+            &[early],
+            now,
+            Some("https://meet.google.com/abc-defg-hij"),
+        )
+        .unwrap()
+        .key,
+        "early"
+    );
+
+    let recently_ended = with_offset(
+        "late",
+        chrono::Duration::minutes(-35),
+        chrono::Duration::minutes(-5),
+    );
+    assert_eq!(
+        find_calendar_event_for_meeting(
+            &[recently_ended],
+            now,
+            Some("https://meet.google.com/abc-defg-hij"),
+        )
+        .unwrap()
+        .key,
+        "late"
+    );
+
+    for event in [
+        with_offset(
+            "too-early",
+            chrono::Duration::minutes(11),
+            chrono::Duration::minutes(41),
+        ),
+        with_offset(
+            "too-late",
+            chrono::Duration::minutes(-41),
+            chrono::Duration::minutes(-11),
+        ),
+    ] {
+        assert!(find_calendar_event_for_meeting(
+            &[event],
+            now,
+            Some("https://meet.google.com/abc-defg-hij"),
+        )
+        .is_none());
+    }
+}
+
+#[test]
+fn zoom_web_and_join_urls_share_the_meeting_id() {
+    let now = Utc::now();
+    let mut event = calendar_event(
+        "zoom-event",
+        "Zoom call",
+        chrono::Duration::minutes(-1),
+        chrono::Duration::minutes(30),
+        &[],
+    );
+    event.meeting_url = Some("https://acme.zoom.us/j/123456789?pwd=calendar-secret".to_string());
+    let binding = find_calendar_event_for_meeting(
+        &[event],
+        now,
+        Some("https://zoom.us/wc/123456789/join?from=browser"),
+    )
+    .expect("Zoom join forms should share the numeric room identity");
+    assert_eq!(binding.key, "zoom-event");
+}
+
+#[test]
+fn teams_ignores_noise_while_webex_keeps_its_room_token() {
+    let now = Utc::now();
+    for (id, calendar_url, observed_url) in [
+        (
+            "teams-event",
+            "https://teams.microsoft.com/l/meetup-join/19%3ameeting_test/0?context=calendar",
+            "https://teams.microsoft.com/l/meetup-join/19%3Ameeting_test/0?context=browser#call",
+        ),
+        (
+            "webex-event",
+            "https://acme.webex.com/acme/j.php?MTID=room-token&utm_source=calendar",
+            "https://acme.webex.com/acme/j.php?mtid=room-token#join",
+        ),
+    ] {
+        let mut event = calendar_event(
+            id,
+            "Conference",
+            chrono::Duration::minutes(-1),
+            chrono::Duration::minutes(30),
+            &[],
+        );
+        event.meeting_url = Some(calendar_url.to_string());
+        assert_eq!(
+            find_calendar_event_for_meeting(&[event], now, Some(observed_url))
+                .expect("provider path should identify the room")
+                .key,
+            id
+        );
+    }
+
+    let mut wrong_webex = calendar_event(
+        "wrong-webex",
+        "Different Webex",
+        chrono::Duration::minutes(-1),
+        chrono::Duration::minutes(30),
+        &[],
+    );
+    wrong_webex.meeting_url =
+        Some("https://acme.webex.com/acme/j.php?MTID=different-room".to_string());
+    assert!(find_calendar_event_for_meeting(
+        &[wrong_webex],
+        now,
+        Some("https://acme.webex.com/acme/j.php?MTID=room-token"),
+    )
+    .is_none());
+}
+
+#[test]
+fn unsupported_observed_url_keeps_legacy_time_matching() {
+    let now = Utc::now();
+    let event = calendar_event(
+        "fallback",
+        "Unsupported provider",
+        chrono::Duration::minutes(-1),
+        chrono::Duration::minutes(30),
+        &[],
+    );
+    let binding = find_calendar_event_for_meeting(
+        &[event],
+        now,
+        Some("https://calls.example.test/room/opaque"),
+    )
+    .expect("unsupported providers retain the pre-existing time matcher");
+    assert_eq!(binding.key, "fallback");
+    assert_eq!(binding.match_method, CalendarMatchMethod::TimeOnly);
+}
+
+#[test]
+fn calendar_signal_deserializes_camel_case_meeting_url() {
+    let event: CalendarEventSignal = serde_json::from_value(serde_json::json!({
+        "id": "event-id",
+        "title": "Meet",
+        "start": "2026-08-26T14:00:00Z",
+        "end": "2026-08-26T14:30:00Z",
+        "attendees": [],
+        "meetingUrl": "https://meet.google.com/abc-defg-hij",
+        "isAllDay": false
+    }))
+    .unwrap();
+    assert_eq!(
+        event.meeting_url.as_deref(),
+        Some("https://meet.google.com/abc-defg-hij")
     );
 }
 
@@ -2470,6 +2809,7 @@ fn binding_key_is_stable_across_timestamp_formats() {
         start,
         end,
         attendees: vec![],
+        meeting_url: None,
         is_all_day: false,
     };
 

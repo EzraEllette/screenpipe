@@ -259,7 +259,9 @@ pub(crate) async fn apply_state_action(
             pid,
             bundle_id,
         } => {
-            let calendar = resolve_calendar_binding(db, calendar_events, Utc::now()).await;
+            let calendar =
+                resolve_calendar_binding(db, calendar_events, Utc::now(), meeting_url.as_deref())
+                    .await;
             let outcome = start_or_adopt_auto_meeting(
                 db,
                 manual_meeting,

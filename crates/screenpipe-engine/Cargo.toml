@@ -167,6 +167,7 @@ criterion = { workspace = true }
 # it, `cargo {check,clippy,build} -p screenpipe-engine` (no --features) fails
 # to compile. Mac/Win release builds layer redact-onnx-{coreml,directml} on top.
 default = ["qwen3-asr", "parakeet", "redact-onnx-cpu"]
+e2e = []
 metal = ["screenpipe-audio/metal"]
 heap-prof = ["dhat"]
 cuda = ["screenpipe-audio/cuda"]
