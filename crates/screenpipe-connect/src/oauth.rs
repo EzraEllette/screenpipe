@@ -361,6 +361,21 @@ fn oauth_json_is_recoverable(v: &Value) -> bool {
     oauth_json_has_valid_access_token(v) || v["refresh_token"].as_str().is_some()
 }
 
+/// Stable, non-secret identity used to key one OAuth connection instance.
+/// Most providers expose an account email. Slack's OAuth response instead
+/// identifies the connected workspace with a team id, so use that id only for
+/// Slack rather than treating all workspace metadata as an instance key.
+pub fn oauth_instance_identity<'a>(integration_id: &str, token_data: &'a Value) -> Option<&'a str> {
+    if integration_id == "slack" {
+        return token_data["team_id"]
+            .as_str()
+            .or_else(|| token_data["team"]["id"].as_str())
+            .or_else(|| token_data["email"].as_str());
+    }
+
+    token_data["email"].as_str()
+}
+
 /// Exact-key variant with no instance fallback. Everything `load_oauth_json`
 /// does except the multi-instance resolution.
 async fn load_oauth_json_exact(
@@ -539,6 +554,16 @@ pub async fn describe_oauth_error(
     display_name: &str,
     instance: Option<&str>,
 ) -> String {
+    let connection_kind = if integration_id == "slack" {
+        "workspace"
+    } else {
+        "account"
+    };
+    let instance_placeholder = if integration_id == "slack" {
+        "<team_id>"
+    } else {
+        "<email>"
+    };
     let instances: Vec<String> =
         list_recoverable_named_oauth_instances(store, integration_id).await;
     let all_instances: Vec<String> = list_oauth_instances(store, integration_id)
@@ -548,20 +573,20 @@ pub async fn describe_oauth_error(
         .collect();
     match (instance, instances.as_slice(), all_instances.as_slice()) {
         (Some(inst), _, _) => format!(
-            "{display_name} account '{inst}' is not connected or its token can't be refreshed — reconnect it from the Connections page in the desktop app"
+            "{display_name} {connection_kind} '{inst}' is not connected or its token can't be refreshed — reconnect it from the Connections page in the desktop app"
         ),
         (None, [], []) => format!(
             "{display_name} not connected — use 'Connect {display_name}' from the Connections page in the desktop app"
         ),
         (None, [], stale) => format!(
-            "{display_name} has saved account row(s) ({}) but none can be refreshed — reconnect it from the Connections page in the desktop app",
+            "{display_name} has saved {connection_kind} row(s) ({}) but none can be refreshed — reconnect it from the Connections page in the desktop app",
             stale.join(", "),
         ),
         (None, [only], _) => format!(
-            "{display_name} account '{only}' token can't be refreshed — reconnect it from the Connections page in the desktop app"
+            "{display_name} {connection_kind} '{only}' token can't be refreshed — reconnect it from the Connections page in the desktop app"
         ),
         (None, many, _) => format!(
-            "multiple {display_name} accounts connected ({}) — specify which one with `instance`. On JSON-body endpoints add `\"instance\": \"<email>\"` to the request body; on proxy/query endpoints add `?instance=<email>` (e.g. instance=\"{}\")",
+            "multiple {display_name} {connection_kind}s connected ({}) — specify which one with `instance`. On JSON-body endpoints add `\"instance\": \"{instance_placeholder}\"` to the request body; on proxy/query endpoints add `?instance={instance_placeholder}` (e.g. instance=\"{}\")",
             many.join(", "),
             many[0],
         ),
@@ -861,28 +886,28 @@ pub async fn sweep_shadowed_default_slots(store: &SecretStore) -> Result<usize> 
         };
 
         let default_val = load_oauth_json_exact(Some(store), id, None).await;
-        let default_email = default_val
+        let default_identity = default_val
             .as_ref()
-            .and_then(|v| v["email"].as_str().map(String::from));
+            .and_then(|v| oauth_instance_identity(id, v).map(String::from));
         let is_distinct_recoverable = default_val.as_ref().is_some_and(oauth_json_is_recoverable)
-            && default_email
+            && default_identity
                 .as_ref()
-                .is_some_and(|e| !named_for_id.contains(e));
+                .is_some_and(|identity| !named_for_id.contains(identity));
 
         let key = format!("oauth:{}", id);
         if is_distinct_recoverable {
             // A real, separate account sitting in the default slot — promote it
             // to its own named slot before clearing the default key.
-            let email = default_email.expect("distinct_recoverable implies Some email");
+            let identity = default_identity.expect("distinct_recoverable implies Some identity");
             if let Err(e) =
-                write_oauth_token_instance(Some(store), id, Some(&email), &default_val.unwrap())
+                write_oauth_token_instance(Some(store), id, Some(&identity), &default_val.unwrap())
                     .await
             {
                 // Promotion failed — leave the default slot intact rather than
                 // risk losing the account; we'll retry on the next launch.
                 tracing::warn!(
                     "oauth: failed to promote default-slot account {} for {} during sweep, leaving default slot intact: {e:#}",
-                    email,
+                    identity,
                     id,
                 );
                 continue;
@@ -891,7 +916,7 @@ pub async fn sweep_shadowed_default_slots(store: &SecretStore) -> Result<usize> 
                 Ok(()) => {
                     tracing::info!(
                         "oauth: promoted shadowed default-slot account {} to its own instance for {}",
-                        email,
+                        identity,
                         id,
                     );
                     deleted += 1;
@@ -899,7 +924,7 @@ pub async fn sweep_shadowed_default_slots(store: &SecretStore) -> Result<usize> 
                 Err(e) => {
                     tracing::warn!(
                         "oauth: promoted {} but failed to drop default slot for {}: {e:#}",
-                        email,
+                        identity,
                         id,
                     );
                 }
@@ -936,7 +961,7 @@ pub async fn sweep_shadowed_default_slots(store: &SecretStore) -> Result<usize> 
 ///   intent — a stale default slot otherwise shadows every `instance=None`
 ///   read).
 /// - default slot holds a *distinct, recoverable* account → promote it to its
-///   own named slot (`oauth:{id}:{email}`) first, so it survives alongside the
+///   own named slot (`oauth:{id}:{identity}`) first, so it survives alongside the
 ///   account we just saved, then clear the default key.
 pub async fn reconcile_default_slot_after_instanced_save(
     store: Option<&SecretStore>,
@@ -947,23 +972,23 @@ pub async fn reconcile_default_slot_after_instanced_save(
         return Ok(());
     };
 
-    let default_email = default_val["email"].as_str();
-    let is_distinct_recoverable =
-        oauth_json_is_recoverable(&default_val) && default_email.is_some_and(|e| e != new_instance);
+    let default_identity = oauth_instance_identity(integration_id, &default_val);
+    let is_distinct_recoverable = oauth_json_is_recoverable(&default_val)
+        && default_identity.is_some_and(|identity| identity != new_instance);
 
     if is_distinct_recoverable {
-        let email = default_email.expect("distinct_recoverable implies Some email");
+        let identity = default_identity.expect("distinct_recoverable implies Some identity");
         // Don't clobber an existing named slot for the same account (e.g. the
         // user just reconnected it under its own instance).
         let already_named = list_oauth_instances(store, integration_id)
             .await
             .into_iter()
-            .any(|i| i.as_deref() == Some(email));
+            .any(|i| i.as_deref() == Some(identity));
         if !already_named {
-            write_oauth_token_instance(store, integration_id, Some(email), &default_val).await?;
+            write_oauth_token_instance(store, integration_id, Some(identity), &default_val).await?;
             tracing::info!(
                 "oauth: promoted default-slot account {} to its own instance for {} (multi-account)",
-                email,
+                identity,
                 integration_id,
             );
         }
@@ -1222,6 +1247,50 @@ mod tests {
     async fn mem_store() -> SecretStore {
         let pool = SqlitePool::connect(":memory:").await.unwrap();
         SecretStore::new(pool, None).await.unwrap()
+    }
+
+    #[test]
+    fn oauth_instance_identity_prefers_slack_team_id_and_keeps_email_elsewhere() {
+        let token = json!({
+            "team": { "id": "T012345", "name": "Acme" },
+            "team_id": "T012345",
+            "workspace_name": "Acme",
+            "email": "same-user@example.com",
+        });
+
+        assert_eq!(oauth_instance_identity("slack", &token), Some("T012345"));
+        assert_eq!(
+            oauth_instance_identity("notion", &token),
+            Some("same-user@example.com")
+        );
+        assert_eq!(
+            oauth_instance_identity("slack", &json!({ "team": { "id": "T_LEGACY" } })),
+            Some("T_LEGACY")
+        );
+    }
+
+    #[tokio::test]
+    async fn describe_slack_ambiguity_names_workspaces_and_instance_key() {
+        let store = mem_store().await;
+        for team_id in ["T_FIRST", "T_SECOND"] {
+            store
+                .set_json(
+                    &format!("oauth:slack:{team_id}"),
+                    &json!({
+                        "authed_user": { "access_token": format!("token-{team_id}") },
+                        "team_id": team_id,
+                    }),
+                )
+                .await
+                .unwrap();
+        }
+
+        let error = describe_oauth_error(Some(&store), "slack", "Slack", None).await;
+        assert!(error.contains("multiple Slack workspaces connected"));
+        assert!(error.contains("T_FIRST"));
+        assert!(error.contains("T_SECOND"));
+        assert!(error.contains("<team_id>"));
+        assert!(!error.contains("<email>"));
     }
 
     #[test]
@@ -1842,6 +1911,53 @@ mod tests {
         assert_eq!(sweep_shadowed_default_slots(&store).await.unwrap(), 0);
     }
 
+    #[tokio::test]
+    async fn sweep_promotes_distinct_slack_workspace_from_default() {
+        let store = mem_store().await;
+        store
+            .set_json(
+                "oauth:slack",
+                &json!({
+                    "authed_user": { "access_token": "first" },
+                    "team": { "id": "T_FIRST", "name": "First" },
+                    "team_id": "T_FIRST",
+                }),
+            )
+            .await
+            .unwrap();
+        store
+            .set_json(
+                "oauth:slack:T_SECOND",
+                &json!({
+                    "authed_user": { "access_token": "second" },
+                    "team": { "id": "T_SECOND", "name": "Second" },
+                    "team_id": "T_SECOND",
+                }),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(sweep_shadowed_default_slots(&store).await.unwrap(), 1);
+        assert!(store
+            .get_json::<Value>("oauth:slack")
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            store
+                .get_json::<Value>("oauth:slack:T_FIRST")
+                .await
+                .unwrap()
+                .unwrap()["authed_user"]["access_token"],
+            "first"
+        );
+        assert!(store
+            .get_json::<Value>("oauth:slack:T_SECOND")
+            .await
+            .unwrap()
+            .is_some());
+    }
+
     // ---- reconcile_default_slot_after_instanced_save ------------------
     //
     // The "connecting a 2nd Google account wiped the 1st" bug: the first account used to
@@ -1909,6 +2025,56 @@ mod tests {
             names,
             vec!["alice@x.com".to_string(), "bob@x.com".to_string()]
         );
+    }
+
+    #[tokio::test]
+    async fn reconcile_promotes_distinct_default_slack_workspace() {
+        let store = mem_store().await;
+        store
+            .set_json(
+                "oauth:slack",
+                &json!({
+                    "authed_user": { "access_token": "first" },
+                    "team_id": "T_FIRST",
+                    "workspace_name": "First",
+                }),
+            )
+            .await
+            .unwrap();
+        store
+            .set_json(
+                "oauth:slack:T_SECOND",
+                &json!({
+                    "authed_user": { "access_token": "second" },
+                    "team_id": "T_SECOND",
+                    "workspace_name": "Second",
+                }),
+            )
+            .await
+            .unwrap();
+
+        reconcile_default_slot_after_instanced_save(Some(&store), "slack", "T_SECOND")
+            .await
+            .unwrap();
+
+        assert!(store
+            .get_json::<Value>("oauth:slack")
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            store
+                .get_json::<Value>("oauth:slack:T_FIRST")
+                .await
+                .unwrap()
+                .unwrap()["authed_user"]["access_token"],
+            "first"
+        );
+        assert!(store
+            .get_json::<Value>("oauth:slack:T_SECOND")
+            .await
+            .unwrap()
+            .is_some());
     }
 
     #[tokio::test]

@@ -57,6 +57,8 @@ static DEF: IntegrationDef = IntegrationDef {
         Send: POST /connections/slack/send with {\"text\":\"...\",\"channel\":\"...\"} \
         (defaults to your own direct message). With \"Send + read\" access also: \
         GET /connections/slack/search?q=..., /conversations, /history?channel=.... \
+        Multiple workspaces: pass `instance=<team_id>` in the JSON body or query string; \
+        omitting it works only when one workspace is connected. \
         The user token is stored in SecretStore and injected server-side.",
     fields: &[],
 };
@@ -75,6 +77,10 @@ impl Integration for Slack {
 
     fn oauth_scope_variants(&self) -> &'static [ScopeVariant] {
         SCOPE_VARIANTS
+    }
+
+    fn supports_oauth_instances(&self) -> bool {
+        true
     }
 
     async fn test(
@@ -138,5 +144,15 @@ impl Integration for Slack {
             (_, Some(channel)) => format!("connected to {}", channel),
             _ => "test message sent".into(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn advertises_multiple_oauth_workspaces() {
+        assert!(Slack.supports_oauth_instances());
     }
 }

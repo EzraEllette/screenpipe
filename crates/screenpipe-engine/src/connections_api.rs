@@ -2387,12 +2387,14 @@ async fn slack_send(
     {
         Some(value) => value,
         None => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(
-                    json!({ "error": "Slack is not connected. Connect Slack from the Connections page in the desktop app." }),
-                ),
-            );
+            let error = oauth_store::describe_oauth_error(
+                state.secret_store.as_deref(),
+                "slack",
+                "Slack",
+                body.instance.as_deref(),
+            )
+            .await;
+            return (StatusCode::UNAUTHORIZED, Json(json!({ "error": error })));
         }
     };
 
@@ -2610,12 +2612,25 @@ async fn slack_user_token(
     state: &ConnectionsState,
     instance: Option<&str>,
 ) -> Result<String, (StatusCode, Json<Value>)> {
-    let token_json = oauth_store::load_oauth_json(state.secret_store.as_deref(), "slack", instance)
-        .await
-        .ok_or((
-            StatusCode::UNAUTHORIZED,
-            Json(json!({ "error": "Slack is not connected. Connect Slack from the Connections page in the desktop app." })),
-        ))?;
+    let token_json = match oauth_store::load_oauth_json(
+        state.secret_store.as_deref(),
+        "slack",
+        instance,
+    )
+    .await
+    {
+        Some(value) => value,
+        None => {
+            let error = oauth_store::describe_oauth_error(
+                state.secret_store.as_deref(),
+                "slack",
+                "Slack",
+                instance,
+            )
+            .await;
+            return Err((StatusCode::UNAUTHORIZED, Json(json!({ "error": error }))));
+        }
+    };
     token_json["authed_user"]["access_token"]
         .as_str()
         .filter(|t| !t.is_empty())
