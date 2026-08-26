@@ -192,6 +192,11 @@ export function AccountSection() {
       if (checked && !accountId) {
         throw new Error("sign in again to enable data sync on this device");
       }
+      let deviceId = settings.deviceId;
+      if (!deviceId) {
+        deviceId = crypto.randomUUID();
+        await updateSettings({ deviceId });
+      }
 
       const deviceName = checked
         ? settings.dataSyncDeviceName?.trim() ||
@@ -221,7 +226,7 @@ export function AccountSection() {
           headers: {
             Authorization: `Bearer ${token}`,
             "Content-Type": "application/json",
-            "X-Screenpipe-Device-Id": settings.deviceId,
+            "X-Screenpipe-Device-Id": deviceId,
             "X-Screenpipe-Device-Label": deviceName,
           },
           body: JSON.stringify({ enabled: checked }),
@@ -235,7 +240,7 @@ export function AccountSection() {
       await updateSettings({
         dataSyncEnabled: checked,
         dataSyncDeviceName: deviceName,
-        dataSyncAccountId: checked ? accountId : "",
+        dataSyncAccountId: checked ? accountId! : "",
         ...(checked ? { dataSyncEnabledAt: new Date().toISOString() } : {}),
       });
     } catch (error) {
