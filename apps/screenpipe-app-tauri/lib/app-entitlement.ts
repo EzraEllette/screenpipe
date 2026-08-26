@@ -336,6 +336,14 @@ export function hasVerifiedPaidPlan(user: AppUser | null | undefined): boolean {
   return hasVerifiedPaidPlanAt(user, Date.now());
 }
 
+/** Data sync is available only to active plans above Free and Basic. */
+export function canUseDataSync(user: AppUser | null | undefined): boolean {
+  if (!hasVerifiedPaidPlan(user)) return false;
+
+  const plan = user?.subscription_plan?.trim().toLowerCase();
+  return plan !== "none" && plan !== "standard" && plan !== "basic";
+}
+
 function hasFutureGraceAt(
   entitlement: AppEntitlement | null,
   nowMs: number,

@@ -13,6 +13,7 @@ export const searchIndex: SettingsField[] = [
   { label: "Sign in to Screenpipe", keywords: ["login", "log in", "sign in"] },
   { label: "Logout", keywords: ["signout", "sign out", "log out"] },
   { label: "Screenpipe Business", keywords: ["subscription", "billing", "plan", "pro", "business", "max", "ultra", "upgrade", "manage"] },
+  { label: "Data Sync", keywords: ["allow data sync", "cloud", "account"] },
   { label: "sync scheduled tasks across devices", keywords: ["scheduled sync", "pipe sync", "sync"] },
   { label: "memories sync across devices", keywords: ["memories sync", "sync", "facts"] },
   { label: "connection sync across devices", keywords: ["connection sync", "sync", "slack", "notion"] },
@@ -33,6 +34,7 @@ import { commands } from "@/lib/utils/tauri";
 import { openExternalUrl } from "@/lib/open-external-url";
 import {
   planDisplayName,
+  canUseDataSync,
   isSignedInCloudSubscriber,
   type AppUser,
 } from "@/lib/app-entitlement";
@@ -959,6 +961,27 @@ export function AccountSection() {
           )}
 
         </>
+      )}
+
+      {canUseDataSync(appUser) && (
+        <Card className="p-4" data-testid="account-data-sync-setting">
+          <div className="flex items-center justify-between gap-6">
+            <div>
+              <p className="text-sm font-medium">Data Sync</p>
+              <p className="text-xs text-muted-foreground">
+                Sync screenpipe data from this device to your account
+              </p>
+            </div>
+            <Switch
+              id="data-sync-toggle"
+              aria-label="Data Sync"
+              checked={settings.dataSyncEnabled ?? false}
+              onCheckedChange={(checked) =>
+                updateSettings({ dataSyncEnabled: checked })
+              }
+            />
+          </div>
+        </Card>
       )}
     </div>
   );
