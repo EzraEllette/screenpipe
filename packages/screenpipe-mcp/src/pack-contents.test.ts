@@ -72,6 +72,7 @@ describe("pack-contents gate — file list", () => {
       "dist/activity-summary-tool.js",
       "dist/activity-summary-format.js",
       "dist/time-normalization.js",
+      "dist/team-frame.js",
       "dist/team-config.js",
       "dist/version.js",
     ]);
@@ -93,6 +94,10 @@ describe("pack-contents gate — file list", () => {
     expect(gate.REQUIRED_PATHS).toContain("dist/time-normalization.js");
   });
 
+  it("requires the team-frame module imported by the MCP entry point", () => {
+    expect(gate.REQUIRED_PATHS).toContain("dist/team-frame.js");
+  });
+
   it("requires the activity-summary formatter imported by the MCP entry point", () => {
     expect(gate.REQUIRED_PATHS).toContain("dist/activity-summary-format.js");
   });
@@ -112,6 +117,8 @@ describe("pack-contents gate — built-file contents", () => {
     "dist/index.js":
       'else if (args[i] === "--team-api-url" && args[i + 1]) {\n' +
       "const TEAM_API = (0, team_config_1.discoverTeamApiBase)(teamApiOverride);\n",
+    "dist/team-frame.js":
+      'const unavailable = "Do not claim to have seen this image";\n',
     "dist/activity-summary-format.js":
       'return ["Authoritative active time", "Never convert frame counts"];\n',
     "dist/time-normalization.js":

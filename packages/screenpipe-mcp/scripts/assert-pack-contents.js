@@ -54,6 +54,7 @@ const REQUIRED_PATHS = [
   "dist/activity-summary-tool.js", // bounded activity orchestration imported by dist/index.js
   "dist/activity-summary-format.js", // authoritative time + bounded context formatter imported by dist/index.js
   "dist/time-normalization.js", // local-calendar literals imported by dist/index.js
+  "dist/team-frame.js", // bounded JPEG response helper imported by dist/index.js
   "dist/team-config.js", // the whole point of 0.19.0
   "dist/version.js", // single source of truth for the reported version
 ];
@@ -77,6 +78,11 @@ const REQUIRED_MARKERS = [
     file: "dist/index.js",
     marker: "--team-api-url",
     why: "the CLI flag override must survive compilation",
+  },
+  {
+    file: "dist/team-frame.js",
+    marker: "Do not claim to have seen this image",
+    why: "missing frames must stay explicit instead of becoming invented visual evidence",
   },
   {
     file: "dist/activity-summary-format.js",

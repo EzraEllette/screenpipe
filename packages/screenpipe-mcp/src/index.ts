@@ -31,6 +31,7 @@ import {
   resolveMcpClient,
 } from "./qualified-value";
 import { discoverTeamApiBase, discoverTeamToken } from "./team-config";
+import { teamFrameContent, teamFramePath } from "./team-frame";
 import { PKG_VERSION } from "./version";
 import { formatForElementPurpose } from "./element-format";
 import { buildActivitySummaryResult } from "./activity-summary-tool";
@@ -1079,6 +1080,36 @@ const TEAM_TOOLS: Tool[] = [
           default: true,
         },
       },
+    },
+  },
+  {
+    name: "team-frame",
+    description:
+      "Read one PII-redacted team screenshot. Use device_id and frame_id from " +
+      "team-search or team-records. Returns actual JPEG image content when the " +
+      "device has uploaded it, or an explicit unavailable result. Never claim " +
+      "to have seen a frame unless this tool returns image content. " +
+      "Auth: enterprise admin token with read:records.",
+    annotations: { title: "Team Frame", readOnlyHint: true, openWorldHint: true, idempotentHint: true },
+    inputSchema: {
+      type: "object",
+      properties: {
+        device_id: {
+          type: "string",
+          minLength: 1,
+          maxLength: 64,
+          pattern: "^[A-Za-z0-9_-]+$",
+          description: "Device ID from team-search or team-devices.",
+        },
+        frame_id: {
+          type: "integer",
+          minimum: 1,
+          maximum: 999999999999999,
+          description: "Frame ID from team-search or team-records.",
+        },
+      },
+      required: ["device_id", "frame_id"],
+      additionalProperties: false,
     },
   },
 ];
@@ -2384,7 +2415,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // ---------------------------------------------------------------------
       case "team-search":
       case "team-devices":
-      case "team-records": {
+      case "team-records":
+      case "team-frame": {
         if (!TEAM_TOKEN) {
           return {
             content: [
@@ -2404,6 +2436,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               },
             ],
           };
+        }
+        if (name === "team-frame") {
+          const deviceId = args.device_id;
+          const frameId = args.frame_id;
+          const path = teamFramePath(deviceId, frameId);
+          const response = await fetchTeam(path);
+          return teamFrameContent(response, deviceId as string, frameId as number);
         }
         // Map MCP tool name → /api/enterprise/v1 path. team-records also
         // routes synthesized pipe outputs (kind=sop|skill|...) to the

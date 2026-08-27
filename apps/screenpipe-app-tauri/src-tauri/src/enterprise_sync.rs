@@ -747,6 +747,86 @@ mod imp {
         true
     }
 
+    fn default_enabled_sync_stream() -> bool {
+        true
+    }
+
+    /// Native mirror of the policy endpoint's `syncStreams` block.
+    ///
+    /// The Home webview normally applies this block through a Tauri command,
+    /// but managed-background deployments may never create that webview. Keep
+    /// the defaults aligned with the frontend: established text/event streams
+    /// remain enabled for older control planes, while newer data classes fail
+    /// closed until the server explicitly opts in.
+    #[derive(Debug, PartialEq, Eq, Deserialize)]
+    struct NativeSyncStreams {
+        #[serde(default = "default_enabled_sync_stream")]
+        frames: bool,
+        #[serde(default)]
+        parsed: bool,
+        #[serde(default = "default_enabled_sync_stream")]
+        audio: bool,
+        #[serde(default = "default_enabled_sync_stream")]
+        ui_events: bool,
+        #[serde(default = "default_enabled_sync_stream")]
+        memories: bool,
+        #[serde(default = "default_enabled_sync_stream")]
+        snapshots: bool,
+        #[serde(default)]
+        feedback: serde_json::Value,
+        #[serde(default)]
+        frame_images: serde_json::Value,
+    }
+
+    impl Default for NativeSyncStreams {
+        fn default() -> Self {
+            Self {
+                frames: true,
+                parsed: false,
+                audio: true,
+                ui_events: true,
+                memories: true,
+                snapshots: true,
+                feedback: serde_json::Value::String("off".to_string()),
+                frame_images: serde_json::Value::String("off".to_string()),
+            }
+        }
+    }
+
+    impl NativeSyncStreams {
+        fn feedback_mode(&self) -> String {
+            match self.feedback.as_str() {
+                Some(mode @ ("ratings" | "full")) => mode.to_string(),
+                _ => "off".to_string(),
+            }
+        }
+
+        fn frame_images_mode(&self) -> String {
+            match &self.frame_images {
+                serde_json::Value::String(mode)
+                    if matches!(mode.as_str(), "off" | "cited" | "all") =>
+                {
+                    mode.clone()
+                }
+                serde_json::Value::Bool(true) => "cited".to_string(),
+                _ => "off".to_string(),
+            }
+        }
+
+        fn apply(&self) {
+            crate::enterprise_policy::set_sync_streams(
+                self.frames,
+                self.parsed,
+                self.audio,
+                self.ui_events,
+                self.memories,
+                self.snapshots,
+                self.feedback_mode(),
+                self.frame_images_mode(),
+            );
+        }
+    }
+
     #[derive(Deserialize)]
     struct HiddenUiPolicyResponse {
         #[serde(rename = "hiddenSections", default)]
@@ -757,6 +837,8 @@ mod imp {
         require_account_login: bool,
         #[serde(rename = "recordingAllowed", default = "default_recording_allowed")]
         recording_allowed: bool,
+        #[serde(rename = "syncStreams", default)]
+        sync_streams: NativeSyncStreams,
     }
 
     #[derive(Debug, PartialEq, Eq)]
@@ -765,6 +847,7 @@ mod imp {
         enforce_auto_start: bool,
         require_account_login: bool,
         recording_allowed: bool,
+        sync_streams: NativeSyncStreams,
     }
 
     fn locked_setting_enforces_auto_start(value: Option<&serde_json::Value>) -> bool {
@@ -787,6 +870,7 @@ mod imp {
                 enforce_auto_start,
                 require_account_login: self.require_account_login,
                 recording_allowed: self.recording_allowed,
+                sync_streams: self.sync_streams,
             }
         }
     }
@@ -1197,6 +1281,11 @@ mod imp {
                     NativeAuthorizationResult::Authorized(policy) => {
                         let was_authorized = crate::enterprise_policy::recording_authorized();
                         crate::enterprise_policy::update_recording_authorized(true);
+                        // Managed-background deployments may never create the
+                        // Home webview, so the native watcher must apply the
+                        // complete upload policy it just authenticated. This
+                        // is idempotent when the visible frontend is running.
+                        policy.sync_streams.apply();
                         crate::enterprise_policy::set_enterprise_policy(
                             policy.hidden_sections,
                             policy.enforce_auto_start,
@@ -1544,7 +1633,8 @@ mod imp {
             enterprise_license_hash, exact_frame_url, explicitly_rejects_authorization,
             image_uploads_allowed, locked_setting_enforces_auto_start, native_policy_startup_delay,
             sibling_heartbeat_url, EnterprisePolicyCredentialKind, HiddenUiPolicyResponse,
-            NativePolicyFetchError, NATIVE_POLICY_STARTUP_DELAY, RECORDING_DISABLED_BY_ADMIN_CODE,
+            NativePolicyFetchError, NativeSyncStreams, NATIVE_POLICY_STARTUP_DELAY,
+            RECORDING_DISABLED_BY_ADMIN_CODE,
         };
         use std::collections::HashMap;
 
@@ -1624,6 +1714,16 @@ mod imp {
                 ]),
                 require_account_login: true,
                 recording_allowed: false,
+                sync_streams: NativeSyncStreams {
+                    frames: true,
+                    parsed: true,
+                    audio: false,
+                    ui_events: true,
+                    memories: false,
+                    snapshots: true,
+                    feedback: serde_json::Value::String("full".to_string()),
+                    frame_images: serde_json::Value::String("all".to_string()),
+                },
             };
 
             let policy = response.into_native_policy();
@@ -1638,6 +1738,10 @@ mod imp {
             assert!(policy.enforce_auto_start);
             assert!(policy.require_account_login);
             assert!(!policy.recording_allowed);
+            assert!(policy.sync_streams.parsed);
+            assert!(!policy.sync_streams.audio);
+            assert_eq!(policy.sync_streams.feedback_mode(), "full");
+            assert_eq!(policy.sync_streams.frame_images_mode(), "all");
         }
 
         #[test]
@@ -1650,6 +1754,66 @@ mod imp {
             .unwrap();
 
             assert!(response.into_native_policy().recording_allowed);
+        }
+
+        #[test]
+        fn native_policy_defaults_match_visible_frontend_for_older_control_planes() {
+            let response: HiddenUiPolicyResponse = serde_json::from_value(serde_json::json!({
+                "hiddenSections": [],
+                "lockedSettings": {}
+            }))
+            .unwrap();
+
+            assert_eq!(response.sync_streams, NativeSyncStreams::default());
+            assert_eq!(response.sync_streams.frame_images_mode(), "off");
+            assert_eq!(response.sync_streams.feedback_mode(), "off");
+        }
+
+        #[test]
+        fn native_policy_applies_image_streams_without_a_webview() {
+            let _guard = crate::enterprise_policy::sync_streams_test_lock();
+            let streams: NativeSyncStreams = serde_json::from_value(serde_json::json!({
+                "frames": true,
+                "parsed": true,
+                "audio": true,
+                "ui_events": true,
+                "memories": true,
+                "snapshots": true,
+                "feedback": "ratings",
+                "frame_images": "all"
+            }))
+            .unwrap();
+
+            streams.apply();
+            let applied = crate::enterprise_policy::current_sync_streams();
+            assert!(applied.parsed);
+            assert_eq!(
+                applied.feedback,
+                crate::enterprise_policy::FeedbackSyncMode::Ratings
+            );
+            assert_eq!(
+                applied.frame_images,
+                crate::enterprise_policy::FrameImagesMode::All
+            );
+
+            NativeSyncStreams::default().apply();
+        }
+
+        #[test]
+        fn native_image_policy_keeps_legacy_true_and_rejects_unknown_values() {
+            let legacy: NativeSyncStreams = serde_json::from_value(serde_json::json!({
+                "frame_images": true
+            }))
+            .unwrap();
+            let unknown: NativeSyncStreams = serde_json::from_value(serde_json::json!({
+                "frame_images": "ALL",
+                "feedback": "everything"
+            }))
+            .unwrap();
+
+            assert_eq!(legacy.frame_images_mode(), "cited");
+            assert_eq!(unknown.frame_images_mode(), "off");
+            assert_eq!(unknown.feedback_mode(), "off");
         }
 
         #[test]

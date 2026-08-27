@@ -133,7 +133,7 @@ function initializeHandshake(
   });
 }
 
-function listToolsHandshake(): Promise<any[]> {
+function listToolsHandshake(env: Record<string, string> = {}): Promise<any[]> {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [CLI], {
       env: {
@@ -142,6 +142,7 @@ function listToolsHandshake(): Promise<any[]> {
         SCREENPIPE_DISABLE_TELEMETRY: "1",
         SCREENPIPE_LOCAL_API_KEY: "sp-smoke-test-key",
         SCREENPIPE_API_URL: "http://127.0.0.1:59999",
+        ...env,
       },
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -251,6 +252,22 @@ describe("stdio startup handshake", () => {
     expect(properties?.parsed_context_limit?.minimum).toBe(1);
     expect(properties?.parsed_context_limit?.maximum).toBe(20);
   });
+
+  it("exposes team-frame only to enterprise-token MCP sessions", async () => {
+    const [personalTools, teamTools] = await Promise.all([
+      listToolsHandshake(),
+      listToolsHandshake({
+        SCREENPIPE_ENTERPRISE_TOKEN: "sk_ent_smoke_test",
+        SCREENPIPE_TEAM_API_URL: "http://127.0.0.1:59998/api/enterprise/v1",
+      }),
+    ]);
+
+    expect(personalTools.some((tool) => tool.name === "team-frame")).toBe(false);
+    const frame = teamTools.find((tool) => tool.name === "team-frame");
+    expect(frame?.annotations?.readOnlyHint).toBe(true);
+    expect(frame?.inputSchema?.required).toEqual(["device_id", "frame_id"]);
+    expect(frame?.inputSchema?.properties?.frame_id?.minimum).toBe(1);
+  }, INIT_DEADLINE_MS * 2);
 
   it("advertises local-calendar literals for every normalized time field", async () => {
     const tools = await listToolsHandshake();
