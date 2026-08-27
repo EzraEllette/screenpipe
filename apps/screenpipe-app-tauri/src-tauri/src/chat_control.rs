@@ -13,7 +13,7 @@ use crate::store::{AIPreset, AIProviderType, SettingsStore};
 use async_trait::async_trait;
 use screenpipe_core::agents::chat_control::{
     self, ChatControlEndpoint, ChatSendRequest, DeliveryMode, ScreenpipeChat, ScreenpipeChatHost,
-    ScreenpipeDelivery,
+    ScreenpipeDelivery, WorktreeStartRequest,
 };
 use serde_json::Value;
 use std::collections::HashSet;
@@ -221,6 +221,20 @@ impl ScreenpipeChatHost for DesktopChatHost {
             delivery_id: Some(queue_id),
             detail: "screenpipe started the dormant target chat with the message".to_string(),
         })
+    }
+
+    async fn start_worktree(&self, request: &WorktreeStartRequest) -> Result<Value, String> {
+        chat_control::worktree_route_owner(request.origin_session_id.as_deref())?;
+        let route_session_id = request
+            .origin_session_id
+            .clone()
+            .ok_or_else(|| "worktree routing session id is missing".to_string())?;
+        let workspace = crate::coding_workspace::create_for_agent(
+            route_session_id,
+            request.repository_path.clone(),
+        )
+        .await?;
+        serde_json::to_value(workspace).map_err(|error| error.to_string())
     }
 }
 

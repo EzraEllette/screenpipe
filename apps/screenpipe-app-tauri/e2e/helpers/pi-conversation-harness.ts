@@ -278,6 +278,18 @@ export class PiConversationHarness {
     this.textResponse = value;
   }
 
+  providerConfig(): Record<string, unknown> {
+    return {
+      provider: "custom",
+      url: this.baseUrl,
+      model: "screenpipe-e2e",
+      apiKey: "screenpipe-e2e-key",
+      maxTokens: 64,
+      maxContextChars: null,
+      systemPrompt: null,
+    };
+  }
+
   /**
    * Report token usage on the final stream chunk. Pi sends
    * `stream_options: { include_usage: true }`, so real providers always answer

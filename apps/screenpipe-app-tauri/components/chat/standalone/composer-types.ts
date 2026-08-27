@@ -175,6 +175,7 @@ export interface ComposerModelControlsProps {
 
 export interface ComposerCodingWorkspaceProps {
   workspace: CodingWorkspace | null;
+  enabled: boolean;
   isLoading: boolean;
   error: string | null;
   disabled: boolean;

@@ -4256,6 +4256,8 @@ mod tests {
         .expect("read chat-control extension");
         assert!(content.contains("name: \"search_chats\""));
         assert!(content.contains("name: \"send_to_chat\""));
+        assert!(content.contains("name: \"start_worktree\""));
+        assert!(content.contains("__worktree-route:"));
         assert!(content.contains("confirmed=true"));
         assert!(content.contains("SCREENPIPE_CHAT_CONTROL_ADDR"));
         assert!(!content.contains("/agent/chats/"));

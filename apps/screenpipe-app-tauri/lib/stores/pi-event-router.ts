@@ -71,7 +71,7 @@ import {
 } from "@/lib/chat-utils";
 import { deriveFallbackConversationTitle } from "@/lib/utils/chat-title";
 import { optimisticAssistantForUserEcho } from "@/lib/chat/cross-window-transcript-sync";
-import { isInternalTitleSession } from "@/lib/utils/internal-session";
+import { isInternalAgentSession } from "@/lib/utils/internal-session";
 import { useAcpSessionConfig } from "@/lib/stores/acp-session-config";
 import {
   agentActionMessage,
@@ -196,7 +196,7 @@ export async function handlePiEvent(envelope: AgentEventEnvelope) {
   const inner = envelope.event;
   if (!sid || !inner) return; // events without a session id or body can't be routed
   // Internal Pi sessions (title generation, etc.) — never routed to chat store
-  if (isInternalTitleSession(sid)) return;
+  if (isInternalAgentSession(sid)) return;
   // ACP adapters advertise their model/mode selectors per session. Pure
   // runtime metadata: capture it for the composer picker and stop — it must
   // not lazy-create a chat row or touch message content.

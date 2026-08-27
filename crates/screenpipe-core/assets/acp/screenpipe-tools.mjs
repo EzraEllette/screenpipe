@@ -379,7 +379,34 @@ const TEXT_EXT_KIND = {
   ".tsv": "text",
 };
 
+const WORKTREE_ROUTE_TOOL = {
+  name: "start_worktree",
+  description:
+    "Select the exact Git repository for the user's coding task and create its isolated conversation worktree. Call exactly once with one repository_path from the candidate list in the prompt.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      repository_path: {
+        type: "string",
+        description: "Exact absolute repository path copied from the candidate list.",
+      },
+    },
+    required: ["repository_path"],
+    additionalProperties: false,
+  },
+  async run(args) {
+    const repositoryPath = String(args?.repository_path ?? "").trim();
+    if (!repositoryPath) throw new Error("repository_path is required");
+    const result = await chatControlRequest("worktree", {
+      repository_path: repositoryPath,
+      origin_session_id: chatSessionId(),
+    });
+    return JSON.stringify(result, null, 2);
+  },
+};
+
 const TOOLS = [
+  ...(chatSessionId().startsWith("__worktree-route:") ? [WORKTREE_ROUTE_TOOL] : []),
   {
     name: "query_recordings",
     description:

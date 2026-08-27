@@ -19,6 +19,7 @@ import { E2E_DATA_DIR } from "../helpers/app-launcher.js";
 import { saveScreenshot } from "../helpers/screenshot-utils.js";
 import { invokeOrThrow } from "../helpers/tauri.js";
 import { openHomeWindow, t, waitForAppReady } from "../helpers/test-utils.js";
+import { PiConversationHarness } from "../helpers/pi-conversation-harness.js";
 
 type CodingWorkspace = {
   conversationId: string;
@@ -36,10 +37,11 @@ type PiInfo = {
   sessionId: string | null;
 };
 
-type AttachResult = {
+type PrepareResult = {
   ok: boolean;
+  created: boolean;
   workspace: CodingWorkspace | null;
-  error: string | null;
+  error?: string;
 };
 
 function git(cwd: string, ...args: string[]): string {
@@ -48,7 +50,7 @@ function git(cwd: string, ...args: string[]): string {
 
 function createDirtyRepository(): { root: string; repo: string } {
   const root = mkdtempSync(join(tmpdir(), "screenpipe-coding-worktree-e2e-"));
-  const repo = join(root, "source-repo");
+  const repo = join(root, "screenpipe");
   mkdirSync(join(repo, ".pi", "extensions"), { recursive: true });
   git(repo, "init");
   git(repo, "config", "core.autocrlf", "false");
@@ -66,43 +68,64 @@ function createDirtyRepository(): { root: string; repo: string } {
   return { root, repo };
 }
 
-async function attachCurrentConversation(
-  repositoryPath: string,
+async function prepareCurrentConversation(
+  prompt: string,
+  startingPath: string,
+  providerConfig: Record<string, unknown>,
 ): Promise<CodingWorkspace> {
   const result = (await browser.executeAsync(
-    (path: string, done: (value?: AttachResult) => void) => {
-      const attach = (
+    (
+      request: {
+        prompt: string;
+        startingPath: string;
+        providerConfig: Record<string, unknown>;
+      },
+      done: (value?: PrepareResult & { error?: string }) => void,
+    ) => {
+      const prepare = (
         window as unknown as {
-          __e2eAttachCodingWorkspace?: (
-            repositoryPath: string,
-          ) => Promise<CodingWorkspace>;
+          __e2ePrepareCodingWorkspace?: (
+            prompt: string,
+            startingPath?: string,
+            router?: {
+              providerConfig: Record<string, unknown>;
+              userToken: string | null;
+            },
+          ) => Promise<PrepareResult>;
         }
-      ).__e2eAttachCodingWorkspace;
-      if (!attach) {
+      ).__e2ePrepareCodingWorkspace;
+      if (!prepare) {
         done({
           ok: false,
+          created: false,
           workspace: null,
-          error: "coding workspace E2E hook is unavailable",
+          error: "coding workspace preparation E2E hook is unavailable",
         });
         return;
       }
-      void attach(path)
-        .then((workspace) => done({ ok: true, workspace, error: null }))
+      void prepare(request.prompt, request.startingPath, {
+        providerConfig: request.providerConfig,
+        userToken: null,
+      })
+        .then((preparation) => done(preparation))
         .catch((error: unknown) =>
           done({
             ok: false,
+            created: false,
             workspace: null,
             error: error instanceof Error ? error.message : String(error),
           }),
         );
     },
-    repositoryPath,
-  )) as AttachResult | undefined;
+    { prompt, startingPath, providerConfig },
+  )) as (PrepareResult & { error?: string }) | undefined;
   if (!result?.ok || !result.workspace) {
     throw new Error(
-      result?.error ?? "coding workspace attach returned no result",
+      result?.error ??
+        `coding workspace preparation returned no workspace: ${JSON.stringify(result)}`,
     );
   }
+  expect(result.created).toBe(true);
   return result.workspace;
 }
 
@@ -167,6 +190,7 @@ describe("Chat coding worktrees", function () {
   this.timeout(t(180_000));
   const fixture = createDirtyRepository();
   const created: CodingWorkspace[] = [];
+  const router = new PiConversationHarness("__worktree-e2e-observer");
 
   before(async () => {
     await waitForAppReady();
@@ -193,16 +217,27 @@ describe("Chat coding worktrees", function () {
           () =>
             typeof (
               window as unknown as {
-                __e2eAttachCodingWorkspace?: unknown;
+                __e2ePrepareCodingWorkspace?: unknown;
               }
-            ).__e2eAttachCodingWorkspace === "function",
+            ).__e2ePrepareCodingWorkspace === "function",
         )) as boolean,
-      { timeout: t(15_000), timeoutMsg: "coding workspace hook did not mount" },
+      {
+        timeout: t(15_000),
+        timeoutMsg: "coding workspace preparation hook did not mount",
+      },
     );
     await openFreshChat();
+    await router.initialize();
+    router.setToolCallSequence([
+      {
+        name: "start_worktree",
+        arguments: { repository_path: fixture.repo },
+      },
+    ]);
   });
 
   after(async () => {
+    await router.dispose().catch(() => {});
     for (const workspace of created.reverse()) {
       try {
         git(
@@ -221,7 +256,18 @@ describe("Chat coding worktrees", function () {
 
   it("preserves dirty source state, isolates conversations, resumes, and launches Pi in the owned worktree", async () => {
     const sourceHead = git(fixture.repo, "rev-parse", "HEAD");
-    const first = await attachCurrentConversation(fixture.repo);
+    const checkbox = await $('[data-testid="coding-workspace-checkbox"]');
+    await checkbox.waitForEnabled({ timeout: t(10_000) });
+    await checkbox.click();
+    await browser.waitUntil(
+      async () => (await checkbox.getAttribute("data-state")) === "checked",
+      { timeout: t(5_000), timeoutMsg: "worktree mode did not arm" },
+    );
+    const first = await prepareCurrentConversation(
+      "make the button blue",
+      fixture.root,
+      router.providerConfig(),
+    );
     created.push(first);
 
     expect(first.sourceDirty).toBe(true);
@@ -235,7 +281,6 @@ describe("Chat coding worktrees", function () {
     expect(git(fixture.repo, "status", "--porcelain=v1")).not.toBe("");
     expect(git(first.worktreePath, "status", "--porcelain=v1")).toBe("");
 
-    const checkbox = await $('[data-testid="coding-workspace-checkbox"]');
     await checkbox.waitForExist({ timeout: t(10_000) });
     expect(await checkbox.getAttribute("data-state")).toBe("checked");
     const badge = await $('[data-testid="coding-workspace-badge"]');

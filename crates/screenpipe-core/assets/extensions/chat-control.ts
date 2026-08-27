@@ -10,7 +10,7 @@ function textResult(text: string) {
 }
 
 async function brokerRequest(
-  action: "search" | "send",
+  action: "search" | "send" | "worktree",
   payload: Record<string, unknown>,
   signal: AbortSignal,
 ): Promise<any> {
@@ -85,6 +85,53 @@ const sources = ["screenpipe", "codex", "claude", "cursor", "gemini"];
 const sendableSources = ["screenpipe", "codex", "claude", "cursor"];
 
 export default function (pi: ExtensionAPI) {
+  if (originSessionId().startsWith("__worktree-route:")) {
+    pi.registerTool({
+      name: "start_worktree",
+      label: "Start Worktree",
+      description:
+        "Select the exact Git repository for the user's coding task and create its isolated conversation worktree. Call this exactly once with one repository_path from the candidate list in the prompt.",
+      promptSnippet:
+        "Use start_worktree exactly once to select a listed repository before the coding session starts.",
+      parameters: {
+        type: "object",
+        properties: {
+          repository_path: {
+            type: "string",
+            description:
+              "Exact absolute repository path copied from the candidate list.",
+          },
+        },
+        required: ["repository_path"],
+        additionalProperties: false,
+      } as any,
+      async execute(
+        _toolCallId: string,
+        input: { repository_path: string },
+        signal: AbortSignal,
+      ) {
+        try {
+          const response = await brokerRequest(
+            "worktree",
+            {
+              repository_path: input.repository_path,
+              origin_session_id: originSessionId(),
+            },
+            signal,
+          );
+          return textResult(JSON.stringify(response, null, 2));
+        } catch (error) {
+          return {
+            ...textResult(
+              `start_worktree failed: ${error instanceof Error ? error.message : error}`,
+            ),
+            isError: true,
+          };
+        }
+      },
+    });
+  }
+
   pi.registerTool({
     name: "search_chats",
     label: "Search Chats",

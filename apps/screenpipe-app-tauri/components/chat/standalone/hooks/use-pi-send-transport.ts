@@ -31,6 +31,7 @@ import type { ChatSendOptions, Message } from "@/lib/chat/types";
 import { normalizeComposerMentionsForModel } from "@/lib/chat-utils";
 import { chatSendTelemetryContext } from "@/lib/chat/response-feedback";
 import type { PiSendTransportOptions } from "@/components/chat/standalone/hooks/pi-types";
+import type { ResolvedPiProviderConfig } from "@/components/chat/standalone/hooks/use-pi-session-lifecycle";
 
 type LivePiSessionCheck =
   | { running: true; info: PiInfo }
@@ -110,6 +111,57 @@ export async function awaitPiStartInFlight(
   }
 }
 
+export async function prepareCodingWorkspaceForSend({
+  prompt,
+  prepare,
+  router,
+  sessionId,
+  startInFlightRef,
+  sessionSyncedRef,
+  stopPi = commands.piStop,
+  setPiInfo,
+}: {
+  prompt: string;
+  prepare?: (
+    prompt: string,
+    router?: {
+      providerConfig: ResolvedPiProviderConfig;
+      userToken: string | null;
+    },
+  ) => Promise<{ ok: boolean; created: boolean }>;
+  router?: {
+    providerConfig: ResolvedPiProviderConfig;
+    userToken: string | null;
+  };
+  sessionId: string | null;
+  startInFlightRef: { current: boolean };
+  sessionSyncedRef: { current: boolean };
+  stopPi?: typeof commands.piStop;
+  setPiInfo: (info: PiInfo | null) => void;
+}): Promise<{ proceed: boolean; error?: string }> {
+  if (!prepare) return { proceed: true };
+  let preparation: { ok: boolean; created: boolean };
+  try {
+    preparation = await prepare(prompt, router);
+  } catch (error) {
+    return {
+      proceed: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+  if (!preparation.ok) return { proceed: false };
+  if (!preparation.created) return { proceed: true };
+
+  await awaitPiStartInFlight(startInFlightRef);
+  const stopped = await stopPi(sessionId);
+  if (stopped.status === "error") {
+    return { proceed: false, error: stopped.error };
+  }
+  setPiInfo(stopped.data);
+  sessionSyncedRef.current = false;
+  return { proceed: true };
+}
+
 /** Read the process manager instead of trusting the render-time `piInfo`. */
 export async function checkLivePiSession(
   sessionId: string,
@@ -187,6 +239,7 @@ export function usePiSendTransport(options: PiSendTransportOptions) {
     prefillContext,
     prefillFrameId,
     prefillSource,
+    prepareCodingWorkspace,
     resolveComposerMentions,
     restartCurrentPiSession,
     saveConversation,
@@ -972,6 +1025,31 @@ export function usePiSendTransport(options: PiSendTransportOptions) {
   ) {
     if ((!canChat && !autoSendBypassRef.current) || (!getActivePreset() && !autoSendBypassRef.current)) return;
     const originalTrimmed = userMessage.trim();
+    const routerProviderConfig = buildProviderConfig(getActivePreset());
+    const workspacePreparation = await prepareCodingWorkspaceForSend({
+      prompt: originalTrimmed,
+      prepare: prepareCodingWorkspace,
+      router: routerProviderConfig
+        ? {
+            providerConfig: routerProviderConfig,
+            userToken: settings.user?.token ?? null,
+          }
+        : undefined,
+      sessionId: piSessionIdRef.current,
+      startInFlightRef: piStartInFlightRef,
+      sessionSyncedRef: piSessionSyncedRef,
+      setPiInfo,
+    });
+    if (!workspacePreparation.proceed) {
+      if (workspacePreparation.error) {
+        toast({
+          title: "could not prepare coding workspace",
+          description: workspacePreparation.error,
+          variant: "destructive",
+        });
+      }
+      return;
+    }
     // Composer mentions (`@app`, `@audio`, `@"speaker"`, `#tag`, `~range`,
     // `$skill`) are resolved into an explicit context block here. Without this
     // the model receives the raw token and has to guess what the chips above

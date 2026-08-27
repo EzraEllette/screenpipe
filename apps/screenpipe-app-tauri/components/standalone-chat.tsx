@@ -1088,6 +1088,7 @@ export function StandaloneChat({
   const codingWorkspace = useCodingWorkspace({
     conversationId,
     locked: messages.length > 0,
+    projectDirectory: piInfo?.projectDir,
   });
   const composerDisabledReason = codingWorkspace.isLoading
     ? "preparing isolated worktree..."
@@ -1173,6 +1174,7 @@ export function StandaloneChat({
     prefillContext,
     prefillFrameId,
     prefillSource,
+    prepareCodingWorkspace: codingWorkspace.prepareForPrompt,
     resolveComposerMentions,
     queuedPrompts,
     registerTurnIntent,
@@ -2321,6 +2323,7 @@ export function StandaloneChat({
         }}
         codingWorkspace={{
           workspace: codingWorkspace.workspace,
+          enabled: codingWorkspace.enabled,
           isLoading: codingWorkspace.isLoading,
           error: codingWorkspace.error,
           disabled: messages.length > 0 && !codingWorkspace.workspace,

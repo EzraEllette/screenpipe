@@ -211,6 +211,13 @@ export type PiSendTransportOptions = {
   prefillContext: string | null;
   prefillFrameId: number | null;
   prefillSource: string;
+  prepareCodingWorkspace?: (
+    prompt: string,
+    router?: {
+      providerConfig: ResolvedPiProviderConfig;
+      userToken: string | null;
+    },
+  ) => Promise<{ ok: boolean; created: boolean }>;
   /**
    * Resolves composer mention tokens into a `<screenpipe_query_context>` block
    * before the turn is sent. Owned by the chat surface because it needs the

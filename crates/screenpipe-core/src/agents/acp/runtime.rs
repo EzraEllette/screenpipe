@@ -5786,6 +5786,8 @@ mod tests {
     #[test]
     fn bundled_acp_tools_expose_self_improvement_contract() {
         let source = include_str!("../../../assets/acp/screenpipe-tools.mjs");
+        assert!(source.contains("name: \"start_worktree\""));
+        assert!(source.contains("__worktree-route:"));
         assert!(source.contains("name: \"user_profile\""));
         assert!(source.contains("name: \"skill_manage\""));
         assert!(source.contains("/agent/profile/manage"));

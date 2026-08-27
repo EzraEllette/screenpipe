@@ -70,6 +70,7 @@ import { ComposerControlsRow } from "./composer-controls-row";
 
 const idleCodingWorkspace = {
   workspace: null,
+  enabled: false,
   isLoading: false,
   error: null,
   disabled: false,

@@ -39,6 +39,7 @@ const MAX_BROKER_REQUEST_BYTES: usize = 64 * 1024;
 
 pub const CHAT_CONTROL_ADDR_ENV: &str = "SCREENPIPE_CHAT_CONTROL_ADDR";
 pub const CHAT_CONTROL_TOKEN_ENV: &str = "SCREENPIPE_CHAT_CONTROL_TOKEN";
+pub const WORKTREE_ROUTE_SESSION_PREFIX: &str = "__worktree-route:";
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -134,6 +135,29 @@ pub struct ChatSendResponse {
     pub title: String,
     pub delivery_id: Option<String>,
     pub detail: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct WorktreeStartRequest {
+    pub repository_path: String,
+    pub origin_session_id: Option<String>,
+}
+
+pub fn worktree_route_owner(origin_session_id: Option<&str>) -> Result<String, String> {
+    let route = origin_session_id
+        .and_then(|value| value.strip_prefix(WORKTREE_ROUTE_SESSION_PREFIX))
+        .ok_or_else(|| "start_worktree is only available during worktree routing".to_string())?;
+    let (owner_id, nonce) = route
+        .rsplit_once(':')
+        .ok_or_else(|| "worktree routing session id is invalid".to_string())?;
+    if owner_id.trim().is_empty()
+        || owner_id.len() > 200
+        || nonce.trim().is_empty()
+        || nonce.len() > 80
+    {
+        return Err("worktree routing session id is invalid".to_string());
+    }
+    Ok(owner_id.to_string())
 }
 
 /// One local source's slice of a search, plus whether the transcript scan
@@ -1502,6 +1526,8 @@ pub trait ScreenpipeChatHost: Send + Sync + 'static {
         request: &ChatSendRequest,
         chat: &ScreenpipeChat,
     ) -> Result<ScreenpipeDelivery, String>;
+
+    async fn start_worktree(&self, request: &WorktreeStartRequest) -> Result<Value, String>;
 }
 
 pub async fn send<H: ScreenpipeChatHost + ?Sized>(
@@ -1627,6 +1653,17 @@ async fn handle_broker_request<H: ScreenpipeChatHost + ?Sized>(
                 serde_json::from_value(request.payload).map_err(|error| error.to_string())?;
             serde_json::to_value(send(host, send_request).await?).map_err(|error| error.to_string())
         }
+        "worktree" => {
+            let worktree_request: WorktreeStartRequest =
+                serde_json::from_value(request.payload).map_err(|error| error.to_string())?;
+            if worktree_request.repository_path.trim().is_empty()
+                || worktree_request.repository_path.len() > 8_192
+            {
+                return Err("repository_path is invalid".to_string());
+            }
+            worktree_route_owner(worktree_request.origin_session_id.as_deref())?;
+            host.start_worktree(&worktree_request).await
+        }
         _ => Err("unknown chat-control action".to_string()),
     }
 }
@@ -1730,6 +1767,21 @@ mod tests {
         ) -> Result<ScreenpipeDelivery, String> {
             panic!("unconfirmed broker requests must not reach the host")
         }
+
+        async fn start_worktree(&self, _request: &WorktreeStartRequest) -> Result<Value, String> {
+            panic!("invalid worktree requests must not reach the host")
+        }
+    }
+
+    #[test]
+    fn worktree_route_owner_accepts_only_internal_router_sessions() {
+        assert_eq!(
+            worktree_route_owner(Some("__worktree-route:conversation-a:1234")).unwrap(),
+            "conversation-a"
+        );
+        assert!(worktree_route_owner(Some("conversation-a")).is_err());
+        assert!(worktree_route_owner(Some("__worktree-route::1234")).is_err());
+        assert!(worktree_route_owner(None).is_err());
     }
 
     async fn broker_call(endpoint: &ChatControlEndpoint, request: Value) -> Value {

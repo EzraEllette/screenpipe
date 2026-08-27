@@ -19,8 +19,9 @@ export function ComposerWorktreeToggle({
 }: {
   codingWorkspace: ComposerCodingWorkspaceProps;
 }) {
-  const { workspace, isLoading, error, disabled, onToggle } = codingWorkspace;
-  const checked = Boolean(workspace) || (isLoading && !error);
+  const { workspace, enabled, isLoading, error, disabled, onToggle } =
+    codingWorkspace;
+  const checked = enabled || Boolean(workspace);
   const repoName = workspace?.repoRoot.split(/[\\/]/).filter(Boolean).at(-1);
   const cannotUncheck = Boolean(workspace);
   const checkboxDisabled = disabled || isLoading || cannotUncheck;
@@ -35,10 +36,11 @@ export function ComposerWorktreeToggle({
         checked={checked}
         disabled={checkboxDisabled}
         onCheckedChange={(value) => {
-          if (value === true) void onToggle(true);
+          void onToggle(value === true);
         }}
         data-testid="coding-workspace-checkbox"
         aria-label="worktree"
+        title="let the AI choose a repository, then start the coding task in an isolated worktree"
         className="h-3.5 w-3.5"
       />
       <Label

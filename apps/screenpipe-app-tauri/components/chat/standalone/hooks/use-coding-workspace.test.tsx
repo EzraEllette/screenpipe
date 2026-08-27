@@ -9,20 +9,37 @@ import { useCodingWorkspace } from "./use-coding-workspace";
 
 const mocks = vi.hoisted(() => ({
   create: vi.fn(),
+  prepare: vi.fn(),
   get: vi.fn(),
-  open: vi.fn(),
+  route: vi.fn(),
   toast: vi.fn(),
 }));
 
 vi.mock("@/lib/utils/tauri", () => ({
   commands: {
     codingWorkspaceCreate: mocks.create,
+    codingWorkspacePrepare: mocks.prepare,
     codingWorkspaceGet: mocks.get,
   },
 }));
 
 vi.mock("@/components/ui/use-toast", () => ({ toast: mocks.toast }));
-vi.mock("@tauri-apps/plugin-dialog", () => ({ open: mocks.open }));
+vi.mock("@/lib/utils/select-worktree-repository", () => ({
+  selectWorktreeRepository: mocks.route,
+}));
+
+const router = {
+  providerConfig: {
+    provider: "screenpipe-cloud",
+    url: "https://example.test/v1",
+    model: "router-model",
+    apiKey: null,
+    maxTokens: 4096,
+    maxContextChars: null,
+    systemPrompt: null,
+  },
+  userToken: "token",
+};
 
 function workspace(conversationId: string): CodingWorkspace {
   return {
@@ -46,6 +63,7 @@ afterEach(() => {
   vi.clearAllMocks();
   vi.unstubAllEnvs();
   delete window.__e2eAttachCodingWorkspace;
+  delete window.__e2ePrepareCodingWorkspace;
 });
 
 describe("useCodingWorkspace", () => {
@@ -143,16 +161,11 @@ describe("useCodingWorkspace", () => {
 
     await waitFor(() => expect(hook.result.current.isLoading).toBe(false));
     expect(window.__e2eAttachCodingWorkspace).toBeUndefined();
+    expect(window.__e2ePrepareCodingWorkspace).toBeUndefined();
   });
 
-  it("does not attach after the chat locks while the repository picker is open", async () => {
-    let resolvePicker: ((value: string) => void) | undefined;
+  it("does not prepare a repository after the first message locks the chat", async () => {
     mocks.get.mockResolvedValue({ status: "ok", data: null });
-    mocks.open.mockReturnValue(
-      new Promise((resolve) => {
-        resolvePicker = resolve;
-      }),
-    );
 
     const hook = renderHook(
       ({ locked }) =>
@@ -161,22 +174,19 @@ describe("useCodingWorkspace", () => {
     );
     await waitFor(() => expect(hook.result.current.isLoading).toBe(false));
 
-    let selection: Promise<void>;
-    act(() => {
-      selection = hook.result.current.chooseRepository();
+    await act(async () => {
+      await hook.result.current.toggleWorktree(true);
     });
     hook.rerender({ locked: true });
-    await act(async () => {
-      resolvePicker!("/repos/conversation-a");
-      await selection!;
-    });
 
-    expect(mocks.create).not.toHaveBeenCalled();
+    await expect(
+      hook.result.current.prepareForPrompt("fix screenpipe"),
+    ).rejects.toThrow("before the first message");
+    expect(mocks.prepare).not.toHaveBeenCalled();
   });
 
-  it("opens the repository picker only when the checkbox is turned on", async () => {
+  it("arms and disarms worktree mode without opening a folder picker", async () => {
     mocks.get.mockResolvedValue({ status: "ok", data: null });
-    mocks.open.mockResolvedValue(null);
 
     const hook = renderHook(() =>
       useCodingWorkspace({ conversationId: "conversation-a", locked: false }),
@@ -186,11 +196,117 @@ describe("useCodingWorkspace", () => {
     await act(async () => {
       await hook.result.current.toggleWorktree(false);
     });
-    expect(mocks.open).not.toHaveBeenCalled();
+    expect(hook.result.current.enabled).toBe(false);
 
     await act(async () => {
       await hook.result.current.toggleWorktree(true);
     });
-    expect(mocks.open).toHaveBeenCalledTimes(1);
+    expect(hook.result.current.enabled).toBe(true);
+    expect(mocks.prepare).not.toHaveBeenCalled();
+  });
+
+  it("lets the AI choose the repository before creating the worktree", async () => {
+    mocks.get.mockResolvedValue({ status: "ok", data: null });
+    mocks.prepare.mockResolvedValue({
+      status: "ok",
+      data: {
+        status: "select",
+        workspace: null,
+        candidates: ["/Users/screenpipe/Documents/screenpipe"],
+        reason: "agent repository selection required",
+        routeSessionId: "__worktree-route:conversation-a:route-1",
+      },
+    });
+    mocks.route.mockResolvedValue(workspace("conversation-a"));
+
+    const hook = renderHook(() =>
+      useCodingWorkspace({
+        conversationId: "conversation-a",
+        locked: false,
+        projectDirectory: "/Users/screenpipe/Documents",
+      }),
+    );
+    await waitFor(() => expect(hook.result.current.isLoading).toBe(false));
+    await act(async () => {
+      await hook.result.current.toggleWorktree(true);
+    });
+
+    let prepared: {
+      ok: boolean;
+      created: boolean;
+      workspace: CodingWorkspace | null;
+    } = { ok: false, created: false, workspace: null };
+    await act(async () => {
+      prepared = await hook.result.current.prepareForPrompt(
+        "make screenpipe more beautiful",
+        router,
+      );
+    });
+
+    expect(mocks.prepare).toHaveBeenCalledWith(
+      "conversation-a",
+      "make screenpipe more beautiful",
+      "/Users/screenpipe/Documents",
+    );
+    expect(prepared).toEqual(
+      expect.objectContaining({ ok: true, created: true }),
+    );
+    expect(mocks.route).toHaveBeenCalledWith(
+      expect.objectContaining({
+        conversationId: "conversation-a",
+        task: "make screenpipe more beautiful",
+        candidates: ["/Users/screenpipe/Documents/screenpipe"],
+      }),
+    );
+    expect(hook.result.current.workspace?.conversationId).toBe(
+      "conversation-a",
+    );
+  });
+
+  it("routes a vague task through the AI instead of matching prompt words", async () => {
+    mocks.get.mockResolvedValue({ status: "ok", data: null });
+    mocks.prepare.mockResolvedValue({
+      status: "ok",
+      data: {
+        status: "select",
+        workspace: null,
+        candidates: ["/repos/screenpipe", "/repos/website-screenpipe"],
+        reason: "agent repository selection required",
+        routeSessionId: "__worktree-route:conversation-a:route-2",
+      },
+    });
+    mocks.route.mockResolvedValue(workspace("conversation-a"));
+
+    const hook = renderHook(() =>
+      useCodingWorkspace({ conversationId: "conversation-a", locked: false }),
+    );
+    await waitFor(() => expect(hook.result.current.isLoading).toBe(false));
+    await act(async () => {
+      await hook.result.current.toggleWorktree(true);
+    });
+
+    let prepared: {
+      ok: boolean;
+      created: boolean;
+      workspace: CodingWorkspace | null;
+    } = { ok: true, created: true, workspace: workspace("unexpected") };
+    await act(async () => {
+      prepared = await hook.result.current.prepareForPrompt(
+        "make the button blue",
+        router,
+      );
+    });
+
+    expect(prepared).toEqual(
+      expect.objectContaining({ ok: true, created: true }),
+    );
+    expect(mocks.route).toHaveBeenCalledWith(
+      expect.objectContaining({
+        task: "make the button blue",
+        candidates: ["/repos/screenpipe", "/repos/website-screenpipe"],
+      }),
+    );
+    expect(hook.result.current.enabled).toBe(true);
+    expect(hook.result.current.error).toBeNull();
   });
 });

@@ -13,6 +13,7 @@ use chrono::Utc;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -49,6 +50,32 @@ pub struct AgentWorktree {
     pub source_dirty: bool,
     pub created_at: String,
 }
+
+#[derive(Debug, Clone)]
+struct RepositoryCandidate {
+    repo_root: PathBuf,
+    current: bool,
+    modified_at: std::time::SystemTime,
+}
+
+const MAX_DISCOVERY_DIRECTORIES: usize = 1_024;
+const PRUNED_DISCOVERY_DIRECTORIES: &[&str] = &[
+    ".cache",
+    ".codex",
+    ".git",
+    ".next",
+    ".npm",
+    ".screenpipe",
+    ".Trash",
+    ".yarn",
+    "Applications",
+    "Codex",
+    "Library",
+    "Movies",
+    "Music",
+    "node_modules",
+    "target",
+];
 
 #[derive(Debug, Clone)]
 pub struct AgentWorktreeStore {
@@ -135,7 +162,7 @@ fn portable_path_value(value: &str) -> String {
 }
 
 fn git_command(cwd: &Path) -> Command {
-    let mut command = Command::new("git");
+    let mut command = crate::no_window_command("git");
     command
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_CONFIG_COUNT", "2")
@@ -223,6 +250,134 @@ fn resolve_repository(selected_path: &Path) -> Result<(PathBuf, PathBuf), String
     let common_raw = run_git(&repo_root, &["rev-parse", "--git-common-dir"])?;
     let common_dir = canonical_git_path(&repo_root, &common_raw)?;
     Ok((repo_root, common_dir))
+}
+
+fn add_repository_candidate(
+    selected_path: &Path,
+    current: bool,
+    candidates: &mut BTreeMap<PathBuf, RepositoryCandidate>,
+) {
+    let Ok((repo_root, common_dir)) = resolve_repository(selected_path) else {
+        return;
+    };
+    let modified_at = std::fs::metadata(&repo_root)
+        .and_then(|metadata| metadata.modified())
+        .unwrap_or(std::time::UNIX_EPOCH);
+    candidates
+        .entry(common_dir)
+        .and_modify(|candidate| candidate.current |= current)
+        .or_insert(RepositoryCandidate {
+            repo_root,
+            current,
+            modified_at,
+        });
+}
+
+fn is_pruned_discovery_directory(name: &str) -> bool {
+    name.starts_with('.') || PRUNED_DISCOVERY_DIRECTORIES.contains(&name)
+}
+
+fn collect_repositories(
+    search_roots: &[(PathBuf, usize)],
+    candidates: &mut BTreeMap<PathBuf, RepositoryCandidate>,
+) {
+    let mut queue = VecDeque::new();
+    for (root, max_depth) in search_roots {
+        if let Ok(root) = root.canonicalize() {
+            if root.is_dir() {
+                queue.push_back((root, 0usize, *max_depth));
+            }
+        }
+    }
+
+    let mut visited = HashSet::new();
+    let mut inspected = 0usize;
+    while let Some((directory, depth, max_depth)) = queue.pop_front() {
+        if inspected >= MAX_DISCOVERY_DIRECTORIES || !visited.insert(directory.clone()) {
+            continue;
+        }
+        inspected += 1;
+
+        if directory.join(".git").exists() {
+            add_repository_candidate(&directory, false, candidates);
+        }
+        if depth >= max_depth {
+            continue;
+        }
+
+        let Ok(entries) = std::fs::read_dir(&directory) else {
+            continue;
+        };
+        let mut entries: Vec<_> = entries.flatten().collect();
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if is_pruned_discovery_directory(&name) {
+                continue;
+            }
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            let path = entry.path();
+            if file_type.is_symlink() {
+                add_repository_candidate(&path, false, candidates);
+            } else if file_type.is_dir() {
+                queue.push_back((path, depth + 1, max_depth));
+            }
+        }
+    }
+}
+
+pub fn default_repository_search_roots(starting_path: Option<&Path>) -> Vec<(PathBuf, usize)> {
+    let mut roots = Vec::new();
+    if let Some(starting_path) = starting_path {
+        roots.push((starting_path.to_path_buf(), 2));
+    }
+    if let Some(home) = dirs::home_dir() {
+        for folder in [
+            "Documents",
+            "Desktop",
+            "Developer",
+            "Projects",
+            "repos",
+            "src",
+        ] {
+            roots.push((home.join(folder), 2));
+        }
+        roots.push((home, 1));
+    }
+    roots
+}
+
+/// Discover nearby Git repositories without deciding which one a task means.
+///
+/// Repository selection is deliberately left to the agent's constrained
+/// `start_worktree` tool. This function only provides a bounded, deduplicated
+/// candidate set and never guesses from prompt text or folder names.
+pub fn discover_repositories(
+    starting_path: Option<&Path>,
+    search_roots: &[(PathBuf, usize)],
+) -> Vec<PathBuf> {
+    let mut candidates = BTreeMap::new();
+    if let Some(starting_path) = starting_path {
+        add_repository_candidate(starting_path, true, &mut candidates);
+        collect_repositories(&[(starting_path.to_path_buf(), 2)], &mut candidates);
+    }
+    collect_repositories(search_roots, &mut candidates);
+    let mut candidates = candidates.into_values().collect::<Vec<_>>();
+    candidates.sort_by(|left, right| {
+        right
+            .current
+            .cmp(&left.current)
+            .then_with(|| right.modified_at.cmp(&left.modified_at))
+            .then_with(|| left.repo_root.cmp(&right.repo_root))
+    });
+    candidates
+        .into_iter()
+        .map(|candidate| candidate.repo_root)
+        .take(24)
+        .collect()
 }
 
 fn read_worktree(root: &Path, owner_id: &str) -> Result<Option<AgentWorktree>, String> {
@@ -669,6 +824,78 @@ mod tests {
         git(&repo, &["add", "tracked.txt"]);
         git(&repo, &["commit", "-m", "initial"]);
         (temp, repo, data)
+    }
+
+    fn init_repository(path: &Path) {
+        std::fs::create_dir_all(path).unwrap();
+        git(path, &["init"]);
+        git(
+            path,
+            &["config", "user.email", "screenpipe-test@example.com"],
+        );
+        git(path, &["config", "user.name", "screenpipe test"]);
+        std::fs::write(path.join("tracked.txt"), "committed\n").unwrap();
+        git(path, &["add", "tracked.txt"]);
+        git(path, &["commit", "-m", "initial"]);
+    }
+
+    #[test]
+    fn discovers_repositories_without_interpreting_prompt_text() {
+        let temp = tempfile::tempdir().unwrap();
+        let first = temp.path().join("screenpipe");
+        let second = temp.path().join("website-screenpipe");
+        init_repository(&first);
+        init_repository(&second);
+
+        let repositories =
+            discover_repositories(Some(temp.path()), &[(temp.path().to_path_buf(), 1)]);
+
+        assert_eq!(repositories.len(), 2);
+        assert!(repositories.contains(&first.canonicalize().unwrap()));
+        assert!(repositories.contains(&second.canonicalize().unwrap()));
+    }
+
+    #[test]
+    fn discovers_the_repository_containing_a_nested_starting_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("screenpipe");
+        let nested = repo.join("apps/desktop");
+        init_repository(&repo);
+        std::fs::create_dir_all(&nested).unwrap();
+        let other = temp.path().join("another-repo");
+        init_repository(&other);
+
+        let repositories = discover_repositories(Some(&nested), &[(temp.path().to_path_buf(), 2)]);
+
+        assert_eq!(repositories[0], repo.canonicalize().unwrap());
+        assert!(repositories.contains(&other.canonicalize().unwrap()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn deduplicates_a_repository_reached_through_a_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("screenpipe");
+        init_repository(&repo);
+        symlink(&repo, temp.path().join("screenpipe-link")).unwrap();
+
+        let repositories =
+            discover_repositories(Some(temp.path()), &[(temp.path().to_path_buf(), 1)]);
+
+        assert_eq!(repositories, vec![repo.canonicalize().unwrap()]);
+    }
+
+    #[test]
+    fn ignores_pruned_and_non_repository_directories() {
+        let temp = tempfile::tempdir().unwrap();
+        init_repository(&temp.path().join(".codex/worktrees/screenpipe"));
+        std::fs::create_dir_all(temp.path().join("plain-folder")).unwrap();
+
+        assert!(
+            discover_repositories(Some(temp.path()), &[(temp.path().to_path_buf(), 4)],).is_empty()
+        );
     }
 
     #[test]

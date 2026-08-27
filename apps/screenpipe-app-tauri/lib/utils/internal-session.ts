@@ -10,8 +10,17 @@
  * the title-generation utility (to mint prefixed session IDs).
  */
 export const INTERNAL_TITLE_PREFIX = "__title:";
+export const INTERNAL_WORKTREE_PREFIX = "__worktree-route:";
 
 /** Returns true when a session ID belongs to an internal title-gen session. */
 export function isInternalTitleSession(sessionId: string): boolean {
   return sessionId.startsWith(INTERNAL_TITLE_PREFIX);
+}
+
+/** Internal utility sessions never materialize as user-visible chats. */
+export function isInternalAgentSession(sessionId: string): boolean {
+  return (
+    isInternalTitleSession(sessionId) ||
+    sessionId.startsWith(INTERNAL_WORKTREE_PREFIX)
+  );
 }

@@ -285,6 +285,14 @@ async codingWorkspaceGet(conversationId: string) : Promise<Result<CodingWorkspac
     else return { status: "error", error: e  as any };
 }
 },
+async codingWorkspacePrepare(conversationId: string, prompt: string, startingPath: string | null) : Promise<Result<CodingWorkspacePreparation, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("coding_workspace_prepare", { conversationId, prompt, startingPath }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async completeOnboarding() : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("complete_onboarding") };
@@ -1988,6 +1996,10 @@ async redactPiiForFeedback(text: string, settingsJson: string) : Promise<Result<
 },
 /**
  * Tauri command: re-encrypt store.bin after frontend saves.
+ *
+ * Runs on a blocking worker. The previous sync command ran `fsync` of a
+ * ~262KB store on the AppKit main thread and stalled every other IPC
+ * (sampled 2026-08-26: 186% screenpipe-app + 93% Web Content).
  */
 async reencryptStore() : Promise<Result<null, string>> {
     try {
@@ -3176,6 +3188,7 @@ export type ChatGptOAuthStatus = { logged_in: boolean;
  */
 error: string | null }
 export type CodingWorkspace = { version: number; conversationId: string; repoRoot: string; gitCommonDir: string; worktreePath: string; branch: string; baseCommit: string; sourceDirty: boolean; createdAt: string }
+export type CodingWorkspacePreparation = { status: string; workspace: CodingWorkspace | null; candidates: string[]; reason: string | null; routeSessionId: string | null }
 export type Credits = { amount: number }
 /**
  * A skill folder discovered somewhere on the user's device.
