@@ -166,6 +166,86 @@ pub fn capture_ready_display_ids() -> Option<BTreeSet<u32>> {
     None
 }
 
+/// Whether this Mac is currently running with its built-in display inactive
+/// (clamshell mode).
+///
+/// CoreGraphics omits the built-in panel from both its active and online lists
+/// on some MacBooks after the lid closes, so display enumeration cannot answer
+/// this reliably. The IOPM root domain's `AppleClamshellState` is the system's
+/// direct lid-state signal. `false` on read failure and non-macOS platforms:
+/// unknown state must never suppress a real capture failure.
+#[cfg(target_os = "macos")]
+pub fn is_clamshell_mode() -> bool {
+    use std::ffi::{c_char, c_void};
+
+    type IoObject = u32;
+    type MachPort = u32;
+
+    #[link(name = "IOKit", kind = "framework")]
+    extern "C" {
+        fn IOServiceMatching(name: *const c_char) -> *mut c_void;
+        fn IOServiceGetMatchingService(main_port: MachPort, matching: *mut c_void) -> IoObject;
+        fn IORegistryEntryCreateCFProperty(
+            entry: IoObject,
+            key: *const c_void,
+            allocator: *const c_void,
+            options: u32,
+        ) -> *const c_void;
+        fn IOObjectRelease(object: IoObject) -> i32;
+    }
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        fn CFStringCreateWithCString(
+            allocator: *const c_void,
+            value: *const c_char,
+            encoding: u32,
+        ) -> *const c_void;
+        fn CFGetTypeID(value: *const c_void) -> usize;
+        fn CFBooleanGetTypeID() -> usize;
+        fn CFBooleanGetValue(value: *const c_void) -> u8;
+        fn CFRelease(value: *const c_void);
+    }
+
+    const UTF8: u32 = 0x0800_0100;
+    unsafe {
+        let matching = IOServiceMatching(b"IOPMrootDomain\0".as_ptr().cast());
+        if matching.is_null() {
+            return false;
+        }
+        // kIOMainPortDefault is MACH_PORT_NULL (0). The matching dictionary is
+        // consumed by IOServiceGetMatchingService.
+        let root_domain = IOServiceGetMatchingService(0, matching);
+        if root_domain == 0 {
+            return false;
+        }
+
+        let key = CFStringCreateWithCString(
+            std::ptr::null(),
+            b"AppleClamshellState\0".as_ptr().cast(),
+            UTF8,
+        );
+        if key.is_null() {
+            let _ = IOObjectRelease(root_domain);
+            return false;
+        }
+        let value = IORegistryEntryCreateCFProperty(root_domain, key, std::ptr::null(), 0);
+        CFRelease(key);
+        let _ = IOObjectRelease(root_domain);
+        if value.is_null() {
+            return false;
+        }
+
+        let is_closed = CFGetTypeID(value) == CFBooleanGetTypeID() && CFBooleanGetValue(value) != 0;
+        CFRelease(value);
+        is_closed
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn is_clamshell_mode() -> bool {
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
