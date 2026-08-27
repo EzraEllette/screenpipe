@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "suite": "screenpipe-app-coding-agent-regressions",
-  "dataset_version": "2026-08-26.2",
+  "dataset_version": "2026-08-27.1",
   "suite_type": "regression",
   "owner": "screenpipe engineering",
   "policy": {
@@ -657,6 +657,38 @@
           { "source_path": "apps/screenpipe-app-tauri/components/chat/standalone/hooks/use-chat-scroll.test.tsx" }
         ],
         "command": "cd apps/screenpipe-app-tauri && bun x vitest run --config vitest.config.ts components/chat/standalone/chat-jump-to-latest.test.tsx components/chat/standalone/chat-main-pane.test.tsx components/chat/standalone/hooks/use-chat-scroll.test.tsx"
+      }
+    },
+    {
+      "id": "app-chat-trailing-tool-answer",
+      "name": "Preserve a completed answer before a trailing tool",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "be90ee8fe24646fbee6aa6c1aae90c0716557de8",
+        "pull_request": "https://github.com/screenpipe/screenpipe/pull/6691"
+      },
+      "base_ref": "1de85ceefcb83c18a7f94f013c1f5ef67e639c96",
+      "oracle_ref": "be90ee8fe24646fbee6aa6c1aae90c0716557de8",
+      "gate": "advisory",
+      "trigger_paths": [
+        "apps/screenpipe-app-tauri/components/chat/standalone/message-content.tsx",
+        "apps/screenpipe-app-tauri/lib/chat/message-rendering.ts"
+      ],
+      "tags": ["regression", "escaped-failure", "chat", "rendering", "tool-call", "answer-loss"],
+      "prompt": "A completed assistant turn can contain earlier narration, tool activity, a final answer, and then a trailing tool event. The renderer hides all text before the last tool, leaving a tool receipt and an empty gap even though the answer is stored. Render the last non-empty answer for completed turns that end on a tool, keep earlier intermediate narration hidden, keep running turns compact, preserve text emitted after the final tool, and align the assistant action surface with the answer that is actually visible.",
+      "agent_timeout_seconds": 900,
+      "grader_dependency_links": [
+        { "source_path": "apps/screenpipe-app-tauri/node_modules", "destination_path": "apps/screenpipe-app-tauri/node_modules" }
+      ],
+      "grader": {
+        "timeout_seconds": 300,
+        "fixtures": [
+          { "source_path": "apps/screenpipe-app-tauri/components/chat/standalone/message-content.answer-recovery.test.tsx" },
+          { "source_path": "apps/screenpipe-app-tauri/components/chat/standalone/message-content.agent-action.test.tsx" },
+          { "source_path": "apps/screenpipe-app-tauri/components/chat/standalone/message-content.structured-output.test.tsx" },
+          { "source_path": "apps/screenpipe-app-tauri/lib/chat/__tests__/message-rendering.test.ts" }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && bun x vitest run --config vitest.config.ts components/chat/standalone/message-content.answer-recovery.test.tsx components/chat/standalone/message-content.agent-action.test.tsx components/chat/standalone/message-content.structured-output.test.tsx lib/chat/__tests__/message-rendering.test.ts"
       }
     }
   ]
