@@ -1330,6 +1330,25 @@
       "notes": "Stop on a live turn against a real Pi subprocess: abort mid-stream then send again (no ghost turn or hang), and two overlapping Stops followed by a clean send. Queue lifecycle regression for the request-id correlation refactor."
     },
     {
+      "spec": "chat-steer-continuation.spec.ts",
+      "platforms": [
+        "macos"
+      ],
+      "layers": [
+        "chat-ai",
+        "real-ui-e2e",
+        "tauri-command"
+      ],
+      "features": [
+        "chat",
+        "chat-streaming"
+      ],
+      "criticality": "high",
+      "confidence": "strong",
+      "ux": "real-user-flow",
+      "notes": "A real composer Cmd+Enter steer against Pi immediately inserts a distinct active assistant continuation below the steering bubble and preserves it through the original turn's agent_end transition."
+    },
+    {
       "spec": "chat-streaming-performance.spec.ts",
       "platforms": [
         "macos"

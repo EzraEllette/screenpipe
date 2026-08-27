@@ -1150,6 +1150,7 @@ export function StandaloneChat({
     buildProviderConfig,
     canChat: canSendChatMessage,
     cancelStreamingMessageRender,
+    flushStreamingMessageRender,
     consumePendingAttachments,
     currentQueueSessionId,
     beginQueuedAction,

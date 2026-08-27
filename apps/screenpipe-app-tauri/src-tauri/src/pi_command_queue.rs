@@ -677,7 +677,11 @@ impl PiQueueHandle {
     /// mode selectors could not take effect until the reply finished. Like
     /// abort/steer, these are delivered immediately and correlated by request
     /// id, so they never wait on the turn.
-    pub async fn send_immediate_awaited(&self, cmd_type_label: &str, mut payload: Value) -> Result<(), String> {
+    pub async fn send_immediate_awaited(
+        &self,
+        cmd_type_label: &str,
+        mut payload: Value,
+    ) -> Result<(), String> {
         let stdin = self
             .stdin
             .as_ref()
@@ -687,23 +691,39 @@ impl PiQueueHandle {
         if let Some(obj) = payload.as_object_mut() {
             obj.insert("id".to_string(), json!(&req_id));
         }
+        let is_steer = payload.get("type").and_then(Value::as_str) == Some("steer");
         let cmd_str = serde_json::to_string(&payload).map_err(|e| e.to_string())?;
         // Register before the write so an immediate response can't be lost.
         let response_rx = self.state.register_response(&req_id);
+        // Keep the logical turn busy across the old agent_end -> steered
+        // agent_start gap. This must be set before the write because Pi can
+        // emit the old turn's terminal event immediately after accepting steer.
+        if is_steer {
+            self.state.set_steer_in_flight();
+        }
         let write_result = {
             let mut stdin_guard = stdin.lock().await;
-            info!("pi_command_queue: writing immediate {} ({})", cmd_type_label, req_id);
+            info!(
+                "pi_command_queue: writing immediate {} ({})",
+                cmd_type_label, req_id
+            );
             writeln!(*stdin_guard, "{}", cmd_str)
                 .and_then(|_| stdin_guard.flush())
                 .map_err(|e| format!("{cmd_type_label} write failed: {e}"))
         };
         if let Err(error) = write_result {
             self.state.cancel_response(&req_id);
+            if is_steer {
+                self.state.clear_steer_in_flight();
+            }
             return Err(error);
         }
         let result =
             wait_for_response_or_terminated(response_rx, &mut alive_rx, cmd_type_label).await;
         self.state.cancel_response(&req_id);
+        if is_steer && result.is_err() {
+            self.state.clear_steer_in_flight();
+        }
         result
     }
 
@@ -1571,6 +1591,57 @@ mod tests {
         .await
         .expect("fast response must be retained");
         assert_eq!(result, Ok(()));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_immediate_steer_waits_for_ack_and_keeps_transition_busy() {
+        use std::process::{Command as StdCommand, Stdio};
+
+        let mut child = StdCommand::new("cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn cat as a fake pi stdin");
+        let stdin = Arc::new(Mutex::new(child.stdin.take().expect("child stdin")));
+        let state = PiQueueState::new();
+        let (tx, _rx) = mpsc::channel::<QueueMessage>(1);
+        let handle = PiQueueHandle {
+            tx,
+            stdin: Some(stdin),
+            state: state.clone(),
+        };
+
+        let send = tokio::spawn(async move {
+            handle
+                .send_immediate_awaited(
+                    "steer",
+                    json!({ "type": "steer", "message": "change direction" }),
+                )
+                .await
+        });
+
+        let request_id = wait_for_response_id(&state).await;
+        assert!(
+            state.is_steer_in_flight(),
+            "the old agent_end must not make the turn idle before steer starts"
+        );
+        assert!(
+            !send.is_finished(),
+            "the frontend command must wait for Pi's correlated steer response"
+        );
+
+        state.signal_response(&request_id, Ok(()));
+        assert_eq!(send.await.expect("steer task"), Ok(()));
+        assert!(
+            state.is_steer_in_flight(),
+            "acceptance is not the start event; keep the transition busy"
+        );
+
+        state.clear_steer_in_flight();
+        drop(state);
+        let _ = child.wait();
     }
 
     #[tokio::test]

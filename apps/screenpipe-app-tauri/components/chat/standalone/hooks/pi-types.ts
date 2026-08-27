@@ -180,6 +180,7 @@ export type PiSendTransportOptions = {
   buildProviderConfig: PiProviderConfigBuilder;
   canChat: boolean;
   cancelStreamingMessageRender: StreamingActions["cancelStreamingMessageRender"];
+  flushStreamingMessageRender: NonNullable<StreamingActions["flushStreamingMessageRender"]>;
   consumePendingAttachments: ComposerAttachmentActions["consumePendingAttachments"];
   currentQueueSessionId: string | null;
   beginQueuedAction: QueueActions["beginQueuedAction"];

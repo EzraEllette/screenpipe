@@ -10,9 +10,9 @@ and layer declared in the manifest, weighted by confidence and criticality.
 
 - Manifest: `e2e/coverage-map.json`
 - Specs directory: `e2e/specs`
-- Mapped specs: 132
-- Declared test blocks: 377
-- Weighted coverage points: 298.7
+- Mapped specs: 133
+- Declared test blocks: 378
+- Weighted coverage points: 299.7
 
 Confidence weights: strong=1.0, partial=0.7, conditional=0.4, smoke=0.3.
 Criticality weights: high=1.0, medium=0.7, low=0.4.
@@ -24,7 +24,7 @@ can execute more runtime cases than this number shows.
 | Platform | Specs | Declared tests | Weighted points | Layers | Features | Critical score |
 | --- | --- | --- | --- | --- | --- | --- |
 | windows | 102 | 321 | 264.7 | 15 | 115 | 92% |
-| macos | 128 | 339 | 268.5 | 17 | 123 | 90% |
+| macos | 129 | 340 | 269.5 | 17 | 123 | 90% |
 | linux | 90 | 279 | 234.1 | 14 | 111 | 89% |
 
 ## Runtime Results
@@ -41,7 +41,7 @@ pass/fail/skip counts.
 | auth | - | 1 specs / 1 tests / 1.0 pts | - |
 | billing | 4 specs / 6 tests / 5.7 pts | 4 specs / 6 tests / 5.7 pts | 4 specs / 6 tests / 5.7 pts |
 | capture-ocr | 2 specs / 16 tests / 6.4 pts | 8 specs / 12 tests / 4.8 pts | 1 specs / 3 tests / 1.2 pts |
-| chat-ai | 34 specs / 73 tests / 57.9 pts | 47 specs / 101 tests / 76.4 pts | 32 specs / 72 tests / 57.4 pts |
+| chat-ai | 34 specs / 73 tests / 57.9 pts | 48 specs / 102 tests / 77.4 pts | 32 specs / 72 tests / 57.4 pts |
 | entitlement | - | 1 specs / 1 tests / 1.0 pts | - |
 | local-api | 28 specs / 117 tests / 98.0 pts | 37 specs / 110 tests / 93.5 pts | 23 specs / 85 tests / 76.2 pts |
 | notifications | 4 specs / 26 tests / 17.3 pts | 3 specs / 5 tests / 3.4 pts | 2 specs / 4 tests / 3.1 pts |
@@ -49,10 +49,10 @@ pass/fail/skip counts.
 | os-integration | 7 specs / 32 tests / 26.9 pts | 14 specs / 29 tests / 17.4 pts | 2 specs / 15 tests / 10.8 pts |
 | performance | 3 specs / 45 tests / 45.0 pts | 5 specs / 36 tests / 31.8 pts | 2 specs / 30 tests / 30.0 pts |
 | pipes | 6 specs / 20 tests / 20.0 pts | 8 specs / 26 tests / 26.0 pts | 6 specs / 20 tests / 20.0 pts |
-| real-ui-e2e | 75 specs / 219 tests / 183.5 pts | 90 specs / 232 tests / 193.5 pts | 69 specs / 195 tests / 169.5 pts |
+| real-ui-e2e | 75 specs / 219 tests / 183.5 pts | 91 specs / 233 tests / 194.5 pts | 69 specs / 195 tests / 169.5 pts |
 | settings | 14 specs / 40 tests / 37.0 pts | 16 specs / 34 tests / 29.7 pts | 13 specs / 31 tests / 28.0 pts |
 | storage-privacy | 9 specs / 42 tests / 33.3 pts | 9 specs / 27 tests / 26.1 pts | 6 specs / 20 tests / 19.1 pts |
-| tauri-command | 22 specs / 60 tests / 46.9 pts | 31 specs / 77 tests / 59.3 pts | 21 specs / 61 tests / 47.8 pts |
+| tauri-command | 22 specs / 60 tests / 46.9 pts | 32 specs / 78 tests / 60.3 pts | 21 specs / 61 tests / 47.8 pts |
 | window-lifecycle | 20 specs / 67 tests / 55.5 pts | 20 specs / 47 tests / 32.9 pts | 14 specs / 40 tests / 30.4 pts |
 
 ## Critical Feature Matrix
@@ -151,6 +151,7 @@ pass/fail/skip counts.
 | chat-sidebar-repeated-prompt.spec.ts | windows, macos, linux | chat-ai, real-ui-e2e | chat, chat-sidebar-dedupe | high | strong | real-user-flow | 1 | Two distinct chats sent with the same opening prompt stay visible in the left sidebar. |
 | chat-sidebar-stub-dedup.spec.ts | windows, macos, linux | chat-ai | chat, chat-sidebar-dedupe | medium | partial | synthetic | 1 | Listener-order regression for metadata-only sidebar stubs gaining dedup keys. |
 | chat-source-file-preview.spec.ts | windows, macos, linux | chat-ai, real-ui-e2e | chat | medium | strong | real-user-flow | 1 | Clicking a chat file source opens it in the preview sidebar with rendered markdown + syntax-highlighted code. |
+| chat-steer-continuation.spec.ts | macos | chat-ai, real-ui-e2e, tauri-command | chat, chat-streaming | high | strong | real-user-flow | 1 | A real composer Cmd+Enter steer against Pi immediately inserts a distinct active assistant continuation below the steering bubble and preserves it through the original turn's agent_end transition. |
 | chat-stop-midturn.spec.ts | macos | chat-ai | chat | high | conditional | synthetic | 2 | Stop on a live turn against a real Pi subprocess: abort mid-stream then send again (no ghost turn or hang), and two overlapping Stops followed by a clean send. Queue lifecycle regression for the request-id correlation refactor. |
 | chat-streaming-performance.spec.ts | macos | chat-ai, performance | chat, chat-streaming | medium | conditional | performance | 3 | macOS-only foreground and background streaming responsiveness plus final rich-Markdown fidelity when headings, links, tables, inline code, and fenced code are split across synthetic production-shaped chunks. |
 | chat-stuck-queue-guard.spec.ts | windows, macos, linux | chat-ai | chat | high | partial | synthetic | 1 | A turn that ends while the panel does not own the session on the agent-event bus must still release the composer dispatch guards and must not duplicate the user message; regression for the stuck 'analyzing…' chat whose later messages all piled into QUEUED. |

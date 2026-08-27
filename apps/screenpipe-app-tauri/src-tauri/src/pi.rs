@@ -4357,7 +4357,7 @@ pub(crate) async fn pi_steer_inner(
         }
     }
 
-    queue.send_immediate(cmd).await
+    queue.send_immediate_awaited("steer", cmd).await
 }
 
 /// Promote a queued follow-up into Pi's native steer path. The prompt is
@@ -4387,7 +4387,7 @@ pub async fn pi_steer_queued(
         return Ok(false);
     };
     let cmd = queued_payload_to_steer_command(payload)?;
-    queue.send_immediate(cmd).await?;
+    queue.send_immediate_awaited("steer", cmd).await?;
     Ok(true)
 }
 

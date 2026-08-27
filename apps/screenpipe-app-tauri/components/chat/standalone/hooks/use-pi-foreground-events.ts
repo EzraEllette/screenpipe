@@ -42,6 +42,8 @@ import { useAcpBootState } from "@/lib/stores/acp-boot-state";
 import { toast } from "@/components/ui/use-toast";
 import { registerPiLogListener } from "@/components/chat/standalone/hooks/pi-log-listener";
 import { registerPiReauthListener } from "@/components/chat/standalone/hooks/pi-reauth-listener";
+import { hasPendingSteerTransition } from "@/components/chat/standalone/hooks/use-chat-turn-intents";
+import { extractFinalSteerMessage } from "@/components/chat/standalone/hooks/pi-steering-helpers";
 import {
   connectionActionFromToolResult,
   firstAgentEndAssistantError,
@@ -250,6 +252,13 @@ export function usePiForegroundEvents({
       if (!data) return;
       noteTurnLivenessEvent(data);
 
+      const pendingSteerTransition = data.type === "agent_end" && hasPendingSteerTransition(
+        turnIntentLedgerRef.current,
+        piSessionIdRef.current,
+        pendingNextPiUserIntentRef.current,
+        optimisticSteerRef.current?.turnIntentId,
+      );
+
       const actionSessionId = piSessionIdRef.current;
       if (actionSessionId && handleAgentActionEvent(data, actionSessionId)) return;
 
@@ -402,7 +411,9 @@ export function usePiForegroundEvents({
         // thinking / tool / idle / error per `statusForEvent`.
         try {
           const sid = piSessionIdRef.current;
-          const next = sid ? statusForEvent(data) : null;
+          const next = sid
+            ? (pendingSteerTransition ? "streaming" : statusForEvent(data))
+            : null;
           if (sid && next) {
             const store = useChatStore.getState();
             const cur = store.sessions[sid]?.status;
@@ -831,8 +842,18 @@ export function usePiForegroundEvents({
           // there's nothing streamed yet (clearing would orphan the
           // placeholder and re-create a duplicate on the first delta).
           const rawText = textFromMessageContent(data.message?.content);
-          const text = extractInjectedUserText(rawText) ?? rawText;
+          const unwrappedText = extractInjectedUserText(rawText) ?? rawText;
+          const text = extractFinalSteerMessage(unwrappedText) ?? unwrappedText;
           const sidForStartedUser = piSessionIdRef.current;
+          const preMatchedTurnIntent = findTurnIntentForUserStart(
+            sidForStartedUser,
+            text,
+            pendingNextPiUserDisplayRef.current,
+          );
+          const precreatedSteerAssistantId =
+            preMatchedTurnIntent?.kind === "steer"
+              ? (preMatchedTurnIntent.consumedAssistantId ?? null)
+              : null;
 
           // A sibling WebView can receive this Pi echo before React commits
           // the saved transcript and active assistant ref locally. The
@@ -859,7 +880,11 @@ export function usePiForegroundEvents({
           if (hasStreamedContent) {
             flushStreamingMessageRender();
             piStreamingTextRef.current = "";
-            piMessageIdRef.current = null;
+            // A steer owns the continuation row created at submission time.
+            // Keep that target across Pi's injected user turn so the actual
+            // steered response replaces residual old-turn text in the same
+            // row instead of creating a second assistant below it.
+            piMessageIdRef.current = precreatedSteerAssistantId;
             piContentBlocksRef.current = [];
             // Don't touch isLoading/isStreaming — pi-mono is still busy
             // processing the followUp turn.
@@ -872,7 +897,6 @@ export function usePiForegroundEvents({
             pendingOptimisticSteer.content.trim() === text.trim()
           );
           const shouldConsumePendingOptimisticSteer = isPendingOptimisticSteerEcho;
-          const preMatchedTurnIntent = findTurnIntentForUserStart(piSessionIdRef.current, text, pendingNextPiUserDisplayRef.current);
 
           // Rust drains queued prompts only after the previous logical turn
           // settles. A matching queued intent therefore owns a fresh response,
@@ -1064,6 +1088,32 @@ export function usePiForegroundEvents({
               record.kind === "queued" &&
               !record.consumedAssistantId,
           );
+
+          // Native steering closes the old assistant turn before the steered
+          // continuation starts. The optimistic steering row and its fresh
+          // assistant placeholder already belong to that continuation, so the
+          // old agent_end must not finalize or clear them. Preserve one pending
+          // steering item targeted at the active turn until Pi echoes the
+          // steered user message.
+          if (!isPipeWatch && pendingSteerTransition) {
+            setIsLoading(true);
+            setIsStreaming(true);
+            const steeringSessionId = piSessionIdRef.current;
+            if (steeringSessionId) {
+              useChatStore.getState().actions.setStreaming(steeringSessionId, {
+                streamingMessageId: piMessageIdRef.current,
+                streamingText: piStreamingTextRef.current,
+                contentBlocks: [...piContentBlocksRef.current],
+                isLoading: true,
+                isStreaming: true,
+              });
+              useChatStore.getState().actions.patch(steeringSessionId, {
+                status: "streaming",
+              });
+            }
+            emitSessionActivity({ status: "streaming" });
+            return;
+          }
 
           if (!isPipeWatch && data.willRetry === true) {
             // Pi retries anything that mentions 429 — including terminal

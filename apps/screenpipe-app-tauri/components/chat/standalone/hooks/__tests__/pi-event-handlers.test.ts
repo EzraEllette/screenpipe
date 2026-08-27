@@ -12,7 +12,10 @@ import {
   textFromAssistantMessages,
   textFromToolResult,
 } from "@/components/chat/standalone/hooks/pi-event-handlers";
-import { buildSteerPrompt } from "@/components/chat/standalone/hooks/pi-steering-helpers";
+import {
+  buildSteerPrompt,
+  extractFinalSteerMessage,
+} from "@/components/chat/standalone/hooks/pi-steering-helpers";
 
 describe("pi foreground event helpers", () => {
   it("extracts text from tool result content", () => {
@@ -112,6 +115,11 @@ describe("pi steering helpers", () => {
     expect(prompt).toContain(
       "Only supersede conflicting parts; preserve non-conflicting constraints",
     );
+    expect(extractFinalSteerMessage(prompt)).toBe("focus on risks");
+  });
+
+  it("does not treat an ordinary user prompt as an internal steer wrapper", () => {
+    expect(extractFinalSteerMessage("Final steering message:\nplain text")).toBeNull();
   });
 
   it("keeps unrelated constraints while the final correction wins", () => {
