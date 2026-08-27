@@ -126,13 +126,13 @@ export function ChatTitleMenu({
           }
         }}
         onBlur={() => void commitRename()}
-        className="relative z-10 h-7 max-w-[260px] border border-border bg-background px-2 text-xs font-medium focus:outline-none focus:ring-1 focus:ring-foreground/30"
+        className="relative z-20 h-7 max-w-[260px] border border-border bg-background px-2 text-xs font-medium focus:outline-none focus:ring-1 focus:ring-foreground/30"
       />
     );
   }
 
   return (
-    <div className="relative z-10 flex min-w-0 max-w-[320px] items-center gap-1.5">
+    <div className="relative z-20 flex min-w-0 max-w-[320px] items-center gap-1.5">
       {!compact ? (
         <span data-testid="chat-title" className="truncate text-xs font-medium text-foreground">
           {title}

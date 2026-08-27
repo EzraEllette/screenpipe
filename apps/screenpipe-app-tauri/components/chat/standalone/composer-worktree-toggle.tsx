@@ -25,6 +25,7 @@ export function ComposerWorktreeToggle({
   const repoName = workspace?.repoRoot.split(/[\\/]/).filter(Boolean).at(-1);
   const cannotUncheck = Boolean(workspace);
   const checkboxDisabled = disabled || isLoading || cannotUncheck;
+  const label = isLoading ? "preparing worktree" : "worktree";
 
   return (
     <div
@@ -40,7 +41,7 @@ export function ComposerWorktreeToggle({
         }}
         data-testid="coding-workspace-checkbox"
         aria-label="worktree"
-        title="let the AI choose a repository, then start the coding task in an isolated worktree"
+        title="run this task in its own isolated Git worktree"
         className="h-3.5 w-3.5"
       />
       <Label
@@ -50,7 +51,7 @@ export function ComposerWorktreeToggle({
           checkboxDisabled ? "cursor-not-allowed" : "cursor-pointer",
         )}
       >
-        worktree
+        {label}
       </Label>
       {isLoading && (
         <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />

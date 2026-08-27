@@ -461,6 +461,57 @@ describe("chat-store: getOrCreateEmptyChatId (no spam on +new)", () => {
 describe("chat-store: visible selection follows the rendered panel", () => {
   beforeEach(reset);
 
+  it("drops an unused mount placeholder after another chat reaches the panel", () => {
+    const actions = useChatStore.getState().actions;
+    actions.upsert(
+      baseRecord({
+        id: "placeholder",
+        draft: true,
+        messageCount: 0,
+        messages: [],
+      }),
+    );
+    actions.setCurrent("placeholder");
+    actions.setPanelSession("placeholder");
+    actions.upsert(baseRecord({ id: "real", messageCount: 2 }));
+    actions.setCurrent("real");
+
+    actions.setPanelSession("real");
+
+    const state = useChatStore.getState();
+    expect(state.panelSessionId).toBe("real");
+    expect(state.openChatIds).toEqual(["real"]);
+    expect(state.sessions.placeholder).toBeUndefined();
+  });
+
+  it("preserves an inactive blank tab when it owns a composer draft", () => {
+    const actions = useChatStore.getState().actions;
+    actions.upsert(
+      baseRecord({
+        id: "draft",
+        draft: true,
+        messageCount: 0,
+        messages: [],
+      }),
+    );
+    actions.setCurrent("draft");
+    actions.setPanelSession("draft");
+    actions.setComposerDraft("draft", {
+      input: "unsent work",
+      pastedImages: [],
+      attachedDocs: [],
+      pendingDocs: [],
+    });
+    actions.upsert(baseRecord({ id: "real", messageCount: 2 }));
+    actions.setCurrent("real");
+
+    actions.setPanelSession("real");
+
+    const state = useChatStore.getState();
+    expect(state.openChatIds).toEqual(["draft", "real"]);
+    expect(state.sessions.draft.composerDraft?.input).toBe("unsent work");
+  });
+
   it("clears unread immediately without claiming the panel switched", () => {
     useChatStore.getState().actions.upsert(baseRecord({ id: "A", lastContentAt: 100 }));
     useChatStore.getState().actions.setCurrent("A");

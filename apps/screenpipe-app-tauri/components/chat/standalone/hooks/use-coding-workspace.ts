@@ -4,6 +4,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "@/components/ui/use-toast";
+import { useChatStore } from "@/lib/stores/chat-store";
 import {
   commands,
   type CodingWorkspace,
@@ -15,6 +16,23 @@ export type WorktreeRouterContext = {
   providerConfig: PiProviderConfig;
   userToken: string | null;
 };
+
+function publishWorkspaceIdentity(
+  conversationId: string,
+  workspace: CodingWorkspace | null,
+): void {
+  const repoName = workspace?.repoRoot.split(/[\\/]/).filter(Boolean).at(-1);
+  useChatStore.getState().actions.patch(conversationId, {
+    codingWorkspace:
+      workspace && repoName
+        ? {
+            repoName,
+            branch: workspace.branch,
+            worktreePath: workspace.worktreePath,
+          }
+        : undefined,
+  });
+}
 
 declare global {
   interface Window {
@@ -82,6 +100,7 @@ export function useCodingWorkspace({
       .then((result) => {
         if (generation !== requestGenerationRef.current) return;
         if (result.status === "error") throw new Error(result.error);
+        publishWorkspaceIdentity(conversationId, result.data);
         setWorkspace(result.data);
         setEnabled(Boolean(result.data));
         setResolvedConversationId(conversationId);
@@ -128,6 +147,7 @@ export function useCodingWorkspace({
           return result.data;
         }
         setWorkspace(result.data);
+        publishWorkspaceIdentity(requestConversationId, result.data);
         setResolvedConversationId(requestConversationId);
         toast({
           title: "coding workspace ready",
@@ -253,6 +273,7 @@ export function useCodingWorkspace({
           conversationIdRef.current === requestConversationId
         ) {
           setWorkspace(preparedWorkspace);
+          publishWorkspaceIdentity(requestConversationId, preparedWorkspace);
           setEnabled(true);
           setResolvedConversationId(requestConversationId);
           toast({

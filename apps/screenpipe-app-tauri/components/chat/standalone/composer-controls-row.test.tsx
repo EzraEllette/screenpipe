@@ -78,6 +78,50 @@ const idleCodingWorkspace = {
 };
 
 describe("ComposerControlsRow", () => {
+  it("explains worktree preparation while the repository is being resolved", () => {
+    render(
+      <ComposerControlsRow
+        canChat={false}
+        filters={
+          {
+            activeFilterCount: 0,
+            activeFilters: [],
+            activeFilterLabels: [],
+            hasActiveFilters: false,
+            appFilterOpen: false,
+            onFilterMenuOpenChange: vi.fn(),
+          } as any
+        }
+        modelControls={{
+          settings: { aiPresets: [] },
+          activePreset: null,
+          activePipeExecution: null,
+          currentQueueSessionId: null,
+          onSelectPreset: vi.fn(),
+          onPresetSaved: vi.fn(),
+        }}
+        codingWorkspace={{
+          ...idleCodingWorkspace,
+          enabled: true,
+          isLoading: true,
+        }}
+        isStreaming={false}
+        sendButton={{
+          isStopMode: false,
+          hasPendingDocs: false,
+          sendDisabled: true,
+          onStop: vi.fn(),
+        }}
+      />,
+    );
+
+    expect(screen.getByText("preparing worktree")).toBeInTheDocument();
+    expect(screen.getByLabelText("worktree")).toHaveAttribute(
+      "title",
+      "run this task in its own isolated Git worktree",
+    );
+  });
+
   it("uses an upward arrow for the send action", () => {
     render(
       <ComposerControlsRow

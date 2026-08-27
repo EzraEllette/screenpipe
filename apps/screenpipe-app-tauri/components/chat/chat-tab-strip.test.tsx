@@ -156,4 +156,36 @@ describe("ChatTabStrip", () => {
     fireEvent(first.parentElement!, new MouseEvent("auxclick", { bubbles: true, button: 1 }));
     expect(useChatStore.getState().openChatIds).toEqual(["chat-b", "chat-c"]);
   });
+
+  it("keeps a conversation-owned worktree visible after the chat becomes inactive", () => {
+    const actions = useChatStore.getState().actions;
+    actions.upsert(
+      record({
+        id: "chat-a",
+        title: "isolated fix",
+        codingWorkspace: {
+          repoName: "screenpipe",
+          branch: "screenpipe/chat-chat-a",
+          worktreePath: "/worktrees/chat-a",
+        },
+      }),
+    );
+    actions.upsert(record({ id: "chat-b", title: "primary" }));
+    actions.openChat("chat-a");
+    actions.openChat("chat-b");
+
+    render(
+      <ChatTabStrip
+        activeId="chat-b"
+        onActivate={vi.fn()}
+        onNewChat={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("chat-tab-worktree-chat-a")).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "isolated fix" })).toHaveAttribute(
+      "title",
+      "isolated fix · worktree · screenpipe",
+    );
+  });
 });

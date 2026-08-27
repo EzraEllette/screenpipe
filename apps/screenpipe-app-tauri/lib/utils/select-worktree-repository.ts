@@ -10,8 +10,77 @@ import {
   type PiProviderConfig,
 } from "@/lib/utils/tauri";
 
-const ROUTE_TIMEOUT_MS = 60_000;
+const ROUTE_TIMEOUT_MS = 15_000;
 const ROUTE_POLL_MS = 100;
+
+function normalizedPath(value: string): string {
+  return value.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+}
+
+function normalizedWords(value: string): string {
+  return value
+    .normalize("NFKD")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function repositoryName(repositoryPath: string): string {
+  const path = normalizedPath(repositoryPath);
+  return normalizedWords(
+    path.slice(path.lastIndexOf("/") + 1).replace(/\.git$/, ""),
+  );
+}
+
+/**
+ * Skip a second agent process when the repository choice is already explicit.
+ *
+ * The starting directory owns the strongest signal: a coding task launched
+ * from inside a repository belongs to that repository. Outside a repository,
+ * accept only one exact, full repository-name mention. Partial keyword scoring
+ * stays deliberately out of this path so "screenpipe" cannot silently choose
+ * "website-screenpipe", and ambiguous requests still reach the constrained
+ * router agent.
+ */
+export function deterministicRepositoryCandidate({
+  task,
+  candidates,
+  startingPath,
+}: {
+  task: string;
+  candidates: string[];
+  startingPath: string | null;
+}): string | null {
+  if (startingPath) {
+    const normalizedStart = normalizedPath(startingPath);
+    const containing = candidates
+      .filter((candidate) => {
+        const normalizedCandidate = normalizedPath(candidate);
+        return (
+          normalizedStart === normalizedCandidate ||
+          normalizedStart.startsWith(`${normalizedCandidate}/`)
+        );
+      })
+      .sort(
+        (left, right) =>
+          normalizedPath(right).length - normalizedPath(left).length,
+      );
+    if (containing.length > 0) return containing[0];
+  }
+
+  const normalizedTask = ` ${normalizedWords(task)} `;
+  const matches = candidates
+    .map((candidate) => ({ candidate, name: repositoryName(candidate) }))
+    .filter(
+      ({ name }) => name.length >= 4 && normalizedTask.includes(` ${name} `),
+    )
+    .sort((left, right) => right.name.length - left.name.length);
+  if (matches.length === 0) return null;
+
+  const bestName = matches[0].name;
+  const bestMatches = matches.filter(({ name }) => name === bestName);
+  return bestMatches.length === 1 ? bestMatches[0].candidate : null;
+}
 
 function routerPrompt(
   task: string,
@@ -68,6 +137,20 @@ export async function selectWorktreeRepository({
     throw new Error("No nearby Git repository was found");
   }
 
+  const deterministicCandidate = deterministicRepositoryCandidate({
+    task,
+    candidates,
+    startingPath,
+  });
+  if (deterministicCandidate) {
+    const created = await commands.codingWorkspaceCreate(
+      conversationId,
+      deterministicCandidate,
+    );
+    if (created.status === "error") throw new Error(created.error);
+    return created.data;
+  }
+
   await mountAgentEventBus();
   const projectDir = await join(
     await homeDir(),
@@ -75,12 +158,15 @@ export async function selectWorktreeRepository({
     "pi-worktree-router",
   );
   let routeError: string | null = null;
+  let routeFinished = false;
   const unregister = registerForeground(routeSessionId, (envelope) => {
     const event = envelope.event;
     if (event?.type === "error") {
       routeError = String(
         event.error || event.message || "repository router failed",
       );
+    } else if (event?.type === "agent_end") {
+      routeFinished = true;
     }
   });
 
@@ -100,6 +186,9 @@ export async function selectWorktreeRepository({
       if (workspace.status === "error") throw new Error(workspace.error);
       if (workspace.data) return workspace.data;
       if (routeError) throw new Error(routeError);
+      if (routeFinished) {
+        throw new Error("The AI did not choose a repository");
+      }
       await new Promise((resolve) => setTimeout(resolve, ROUTE_POLL_MS));
     }
     throw new Error("The AI did not choose a repository in time");

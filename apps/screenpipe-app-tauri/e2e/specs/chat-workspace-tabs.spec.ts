@@ -155,7 +155,15 @@ describe("Chat workspace tabs and split", function () {
 
   it("keeps multiple chats open, swaps the split pane, and closes non-destructively", async () => {
     const initialTabs = await openTabIds();
-    expect(initialTabs.slice(-2)).toEqual([CHAT_A, CHAT_B]);
+    expect(initialTabs).toEqual([CHAT_A, CHAT_B]);
+
+    // Use native pointer clicks here. DOM element.click() bypasses hit testing
+    // and previously let the transparent window-drag layer hide the fact that
+    // every control in this header was physically unclickable.
+    await $(`button[role="tab"][aria-label="${TITLES[CHAT_A]}"]`).click();
+    await waitForForeground(CHAT_A);
+    await $(`button[role="tab"][aria-label="${TITLES[CHAT_B]}"]`).click();
+    await waitForForeground(CHAT_B);
 
     await openContextItem(CHAT_A, "Open in split");
     const split = await $('[data-testid="chat-split-pane"]');
@@ -200,13 +208,8 @@ describe("Chat workspace tabs and split", function () {
       },
     );
 
-    await browser.execute((id: string) => {
-      document
-        .querySelector<HTMLButtonElement>(
-          `[data-testid="chat-tab-close-${id}"]`,
-        )
-        ?.click();
-    }, CHAT_B);
+    await $(`[data-chat-tab-id="${CHAT_B}"]`).moveTo();
+    await $(`[data-testid="chat-tab-close-${CHAT_B}"]`).click();
     await browser.waitUntil(
       async () => !(await openTabIds()).includes(CHAT_B),
       {
@@ -218,5 +221,19 @@ describe("Chat workspace tabs and split", function () {
     expect(await $(`[data-testid="chat-row-${CHAT_B}"]`).isExisting()).toBe(
       true,
     );
+
+    await $('button[aria-label="New chat tab"]').click();
+    await browser.waitUntil(
+      async () => {
+        const ids = await openTabIds();
+        return ids.length === 2 && ids[0] === CHAT_A && ids[1] !== CHAT_B;
+      },
+      {
+        timeout: t(8_000),
+        interval: 100,
+        timeoutMsg: "new chat button did not create one interactive tab",
+      },
+    );
+    await saveScreenshot("chat-workspace-tabs-recovery");
   });
 });

@@ -4,10 +4,14 @@
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { CodingWorkspace, PiProviderConfig } from "@/lib/utils/tauri";
-import { selectWorktreeRepository } from "./select-worktree-repository";
+import {
+  deterministicRepositoryCandidate,
+  selectWorktreeRepository,
+} from "./select-worktree-repository";
 
 const mocks = vi.hoisted(() => ({
   startAndPrompt: vi.fn(),
+  create: vi.fn(),
   get: vi.fn(),
   stop: vi.fn(),
   register: vi.fn(() => vi.fn()),
@@ -26,6 +30,7 @@ vi.mock("@/lib/events/bus", () => ({
 vi.mock("@/lib/utils/tauri", () => ({
   commands: {
     piStartAndPrompt: mocks.startAndPrompt,
+    codingWorkspaceCreate: mocks.create,
     codingWorkspaceGet: mocks.get,
     piStop: mocks.stop,
   },
@@ -56,11 +61,58 @@ const workspace: CodingWorkspace = {
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.startAndPrompt.mockResolvedValue({ status: "ok", data: "prompt-id" });
+  mocks.create.mockResolvedValue({ status: "ok", data: workspace });
   mocks.get.mockResolvedValue({ status: "ok", data: workspace });
   mocks.stop.mockResolvedValue({ status: "ok", data: { running: false } });
 });
 
 describe("selectWorktreeRepository", () => {
+  it("uses the repository containing the starting directory without starting a router agent", async () => {
+    await expect(
+      selectWorktreeRepository({
+        routeSessionId: "__worktree-route:conversation-a:route-123",
+        conversationId: "conversation-a",
+        task: "make the button blue",
+        candidates: [
+          "/Users/test/Documents/screenpipe",
+          "/Users/test/Documents/website-screenpipe",
+        ],
+        startingPath: "/Users/test/Documents/screenpipe/apps/desktop",
+        providerConfig,
+        userToken: "token",
+      }),
+    ).resolves.toEqual(workspace);
+
+    expect(mocks.create).toHaveBeenCalledWith(
+      "conversation-a",
+      "/Users/test/Documents/screenpipe",
+    );
+    expect(mocks.startAndPrompt).not.toHaveBeenCalled();
+  });
+
+  it("uses one explicitly named repository without starting a router agent", async () => {
+    await expect(
+      selectWorktreeRepository({
+        routeSessionId: "__worktree-route:conversation-a:route-123",
+        conversationId: "conversation-a",
+        task: "send a test PR to the screenpipe repo",
+        candidates: [
+          "/Users/test/Documents/screenpipe",
+          "/Users/test/Documents/website-screenpipe",
+        ],
+        startingPath: "/Users/test/Documents/Codex/task",
+        providerConfig,
+        userToken: "token",
+      }),
+    ).resolves.toEqual(workspace);
+
+    expect(mocks.create).toHaveBeenCalledWith(
+      "conversation-a",
+      "/Users/test/Documents/screenpipe",
+    );
+    expect(mocks.startAndPrompt).not.toHaveBeenCalled();
+  });
+
   it("asks the selected AI to call only start_worktree for a vague task", async () => {
     await expect(
       selectWorktreeRepository({
@@ -94,6 +146,26 @@ describe("selectWorktreeRepository", () => {
     expect(prompt).toContain("/Users/test/Documents/screenpipe");
     expect(prompt).toContain("Call start_worktree exactly once");
     expect(mocks.stop).toHaveBeenCalledWith(sessionId);
+  });
+
+  it("does not guess when two candidates share the explicitly named repository", () => {
+    expect(
+      deterministicRepositoryCandidate({
+        task: "fix the screenpipe repo",
+        candidates: ["/repos/one/screenpipe", "/repos/two/screenpipe"],
+        startingPath: "/tmp/task",
+      }),
+    ).toBeNull();
+  });
+
+  it("does not partially match a related repository name", () => {
+    expect(
+      deterministicRepositoryCandidate({
+        task: "fix screenpipe",
+        candidates: ["/repos/website-screenpipe"],
+        startingPath: "/tmp/task",
+      }),
+    ).toBeNull();
   });
 
   it("refuses to route without a discovered repository", async () => {

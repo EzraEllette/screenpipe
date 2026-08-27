@@ -713,7 +713,7 @@
       "criticality": "high",
       "confidence": "strong",
       "ux": "real-user-flow",
-      "notes": "Arms worktree mode without a folder picker, gives a vague ‘make the button blue’ task plus nearby repositories to a real local model, requires that model to call only start_worktree, then creates the conversation-owned worktree through the authenticated desktop broker. Also proves dirty-source preservation, conversation isolation and resume, launches Pi in the owned cwd while ignoring a hostile project-local extension, and verifies work survives Pi stop. Runs in the focused Windows CI list as well as the recursive macOS and Linux suites."
+      "notes": "Arms worktree mode without a folder picker, gives a vague ‘make the button blue’ task plus nearby repositories to a real local model, requires that model to call only start_worktree, then creates the conversation-owned worktree through the authenticated desktop broker. Also proves dirty-source preservation, conversation isolation and resume, keeps the worktree identity visible in the chat tab, launches Pi in the owned cwd while ignoring a hostile project-local extension, and verifies work survives Pi stop. Runs in the focused Windows CI list as well as the recursive macOS and Linux suites."
     },
     {
       "spec": "chat-composer-isolation.spec.ts",
@@ -1271,7 +1271,7 @@
       "criticality": "high",
       "confidence": "strong",
       "ux": "real-user-flow",
-      "notes": "Multiple chats remain in a non-destructive working set, a second live transcript stays visible, and promoting it swaps primary composer ownership."
+      "notes": "Native pointer clicks reach tabs, close, and new-chat controls above the window drag region; unused mount placeholders do not create extra untitled tabs. Multiple real chats remain in a non-destructive working set, a second live transcript stays visible, and promoting it swaps primary composer ownership."
     },
     {
       "spec": "owned-browser-tabs.spec.ts",

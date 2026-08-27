@@ -4,7 +4,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { AlertCircle, Columns2, Plus, X } from "lucide-react";
+import { AlertCircle, Columns2, GitBranch, Plus, X } from "lucide-react";
 import {
   ContextMenu,
   ContextMenuContent,
@@ -136,7 +136,7 @@ export function ChatTabStrip({
 
   return (
     <div
-      className="flex min-w-0 flex-1 items-center gap-1"
+      className="relative z-20 flex min-w-0 flex-1 items-center gap-1"
       data-testid="chat-tab-strip"
     >
       <div
@@ -150,6 +150,7 @@ export function ChatTabStrip({
           const split = session.id === splitChatId;
           const title = visibleTabTitle(session);
           const status = tabStatus(session);
+          const codingWorkspace = session.codingWorkspace;
           const hasTabsToRight = index < tabs.length - 1;
 
           return (
@@ -175,7 +176,15 @@ export function ChatTabStrip({
                     role="tab"
                     aria-selected={active}
                     aria-label={title}
-                    title={split ? `${title} · split pane` : title}
+                    title={[
+                      title,
+                      codingWorkspace
+                        ? `worktree · ${codingWorkspace.repoName}`
+                        : null,
+                      split ? "split pane" : null,
+                    ]
+                      .filter(Boolean)
+                      .join(" · ")}
                     tabIndex={active ? 0 : -1}
                     className="flex h-full min-w-0 flex-1 items-center gap-2 rounded-md py-1 pl-2.5 pr-1 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring"
                     onClick={() => void onActivate(session.id)}
@@ -195,6 +204,13 @@ export function ChatTabStrip({
                       }
                     }}
                   >
+                    {codingWorkspace ? (
+                      <GitBranch
+                        aria-hidden
+                        className="h-3 w-3 shrink-0"
+                        data-testid={`chat-tab-worktree-${session.id}`}
+                      />
+                    ) : null}
                     {split ? (
                       <Columns2
                         aria-label="split pane"

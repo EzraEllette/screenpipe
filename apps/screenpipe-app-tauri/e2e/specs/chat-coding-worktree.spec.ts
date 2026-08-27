@@ -263,6 +263,8 @@ describe("Chat coding worktrees", function () {
       async () => (await checkbox.getAttribute("data-state")) === "checked",
       { timeout: t(5_000), timeoutMsg: "worktree mode did not arm" },
     );
+    const armedScreenshot = await saveScreenshot("chat-coding-worktree-armed");
+    expect(existsSync(armedScreenshot)).toBe(true);
     const first = await prepareCurrentConversation(
       "make the button blue",
       fixture.root,
@@ -285,6 +287,8 @@ describe("Chat coding worktrees", function () {
     expect(await checkbox.getAttribute("data-state")).toBe("checked");
     const badge = await $('[data-testid="coding-workspace-badge"]');
     await badge.waitForDisplayed({ timeout: t(10_000) });
+    const tabMarker = await $('[data-testid^="chat-tab-worktree-"]');
+    await tabMarker.waitForDisplayed({ timeout: t(10_000) });
     await badge.click();
     const popover = await $('[data-testid="coding-workspace-popover"]');
     await popover.waitForDisplayed({ timeout: t(5_000) });

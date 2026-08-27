@@ -2061,7 +2061,14 @@ export function StandaloneChat({
           await startNewConversation();
         }}
         rightActions={
-          <div className="relative z-10 flex items-center gap-1">
+          <div className="relative z-20 flex items-center gap-1">
+            <ChatInspectorPopover
+              open={inspectorOpen}
+              onOpenChange={setInspectorOpen}
+              outputs={inspectorOutputs}
+              sources={inspectorSources}
+              onOpenFile={openFilePreview}
+            />
             {hideInlineHistory ? (
               <Button
                 variant="ghost"
@@ -2098,15 +2105,6 @@ export function StandaloneChat({
 
       <div className="flex-1 flex min-h-0" data-browser-panel-host>
       <div className="relative flex-1 flex flex-col min-w-0" data-firstrun-target="messages">
-      <div className="absolute -top-8 right-2 z-30">
-        <ChatInspectorPopover
-          open={inspectorOpen}
-          onOpenChange={setInspectorOpen}
-          outputs={inspectorOutputs}
-          sources={inspectorSources}
-          onOpenFile={openFilePreview}
-        />
-      </div>
       <ChatMainPane
         firstRunLearningEnabled={firstRunLearningEnabled}
         firstRunAiPreset={firstRunAiPreset}

@@ -5,6 +5,7 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CodingWorkspace } from "@/lib/utils/tauri";
+import { useChatStore } from "@/lib/stores/chat-store";
 import { useCodingWorkspace } from "./use-coding-workspace";
 
 const mocks = vi.hoisted(() => ({
@@ -57,6 +58,13 @@ function workspace(conversationId: string): CodingWorkspace {
 
 beforeEach(() => {
   vi.stubEnv("NEXT_PUBLIC_SCREENPIPE_E2E", "true");
+  useChatStore.setState({
+    sessions: {},
+    openChatIds: [],
+    splitChatId: null,
+    currentId: null,
+    panelSessionId: null,
+  });
 });
 
 afterEach(() => {
@@ -67,6 +75,37 @@ afterEach(() => {
 });
 
 describe("useCodingWorkspace", () => {
+  it("publishes a compact worktree identity for inactive chat tabs", async () => {
+    useChatStore.getState().actions.upsert({
+      id: "conversation-a",
+      title: "isolated fix",
+      preview: "",
+      status: "idle",
+      messageCount: 1,
+      createdAt: 1,
+      updatedAt: 1,
+      pinned: false,
+      unread: false,
+    });
+    mocks.get.mockResolvedValue({
+      status: "ok",
+      data: workspace("conversation-a"),
+    });
+
+    const hook = renderHook(() =>
+      useCodingWorkspace({ conversationId: "conversation-a", locked: true }),
+    );
+
+    await waitFor(() => expect(hook.result.current.isLoading).toBe(false));
+    expect(
+      useChatStore.getState().sessions["conversation-a"].codingWorkspace,
+    ).toEqual({
+      repoName: "conversation-a",
+      branch: "screenpipe/chat-conversation-a",
+      worktreePath: "/worktrees/conversation-a",
+    });
+  });
+
   it("does not leak an in-flight creation into a newly selected conversation", async () => {
     let resolveCreate:
       ((value: { status: "ok"; data: CodingWorkspace }) => void) | undefined;
