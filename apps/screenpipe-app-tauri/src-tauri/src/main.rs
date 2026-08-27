@@ -263,6 +263,26 @@ fn should_prevent_window_close(label: &str) -> bool {
     label != "onboarding"
 }
 
+#[cfg(target_os = "macos")]
+fn emit_menu_close_window(app: &tauri::AppHandle) {
+    let focused = app
+        .webview_windows()
+        .into_values()
+        .find(|window| window.is_focused().unwrap_or(false));
+    if let Some(window) = focused {
+        let _ = window.emit("menu-close-window", ());
+        return;
+    }
+    for label in ["home", "chat"] {
+        if let Some(window) = app.get_webview_window(label) {
+            if window.is_visible().unwrap_or(false) {
+                let _ = window.emit("menu-close-window", ());
+                return;
+            }
+        }
+    }
+}
+
 /// Flag passed by tauri-plugin-autostart when the OS launches us at login.
 /// Used to skip Home so login starts stay in the tray.
 const AUTOSTART_ARG: &str = "--autostart";
@@ -1220,16 +1240,20 @@ async fn main() {
                     .item(&PredefinedMenuItem::select_all(app, None)?)
                     .build()?;
 
-                // Standard Window menu so macOS key equivalents (Cmd-W close,
-                // Cmd-M minimize) work — without a menu item carrying the
-                // accelerator, AppKit silently swallows the keystroke. Close
-                // goes through the CloseRequested handler above, so Cmd-W
-                // hides to tray exactly like the red traffic-light button.
+                // Custom Close (not PredefinedMenuItem::close_window) so Cmd-W
+                // can close a chat tab first. The frontend listens for
+                // menu-close-window and hides the window only when no tab
+                // consumed the chord. Traffic-light close is unchanged.
+                // Cmd-M still needs a menu key equivalent or AppKit swallows it.
                 let window_submenu = SubmenuBuilder::new(app, "Window")
                     .item(&PredefinedMenuItem::minimize(app, None)?)
                     .item(&PredefinedMenuItem::maximize(app, None)?)
                     .separator()
-                    .item(&PredefinedMenuItem::close_window(app, None)?)
+                    .item(
+                        &MenuItemBuilder::with_id("close_window", "Close")
+                            .accelerator("CmdOrCtrl+W")
+                            .build(app)?,
+                    )
                     .build()?;
 
                 let menu = MenuBuilder::new(app)
@@ -1259,6 +1283,12 @@ async fn main() {
                         }
                         "quit_app" => {
                             process_exit::confirm_and_request_app_quit(app_handle.clone());
+                        }
+                        "close_window" => {
+                            let app = app_handle.clone();
+                            let _ = app_handle.run_on_main_thread(move || {
+                                emit_menu_close_window(&app);
+                            });
                         }
                         _ => {}
                     }

@@ -63,6 +63,8 @@ describe("ShortcutGuide", () => {
       await screen.findByRole("dialog", { name: "keyboard shortcuts" }),
     ).toBeVisible();
     expect(screen.getByText("switch recent chat")).toBeInTheDocument();
+    expect(screen.getByText("close tab")).toBeInTheDocument();
+    expect(screen.getByText("⌘W")).toBeInTheDocument();
     expect(screen.getByText("⌃Tab")).toBeInTheDocument();
     expect(screen.getByText("⌘⌃K")).toBeInTheDocument();
 

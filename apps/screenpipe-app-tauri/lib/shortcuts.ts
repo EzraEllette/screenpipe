@@ -7,6 +7,7 @@ import { useShortcutGuideStore } from "@/lib/stores/shortcut-guide-store";
 
 export type InAppShortcutId =
   | "new_chat"
+  | "close_tab"
   | "command_menu"
   | "shortcut_guide"
   | "toggle_sidebar"
@@ -28,6 +29,12 @@ export const IN_APP_SHORTCUTS: readonly InAppShortcutDefinition[] = [
     section: "chat",
     label: "new chat",
     description: "start a clean conversation",
+  },
+  {
+    id: "close_tab",
+    section: "navigation",
+    label: "close tab",
+    description: "close the current chat tab, not the app",
   },
   {
     id: "next_recent_chat",
@@ -106,6 +113,8 @@ export function inAppShortcutLabel(
   switch (id) {
     case "new_chat":
       return `${primary}N`;
+    case "close_tab":
+      return `${primary}W`;
     case "command_menu":
       return `${primary}K`;
     case "shortcut_guide":
@@ -138,6 +147,8 @@ function specFor(id: InAppShortcutId, isMac: boolean): ShortcutSpec {
   switch (id) {
     case "new_chat":
       return { ...primary, key: "n", code: "KeyN" };
+    case "close_tab":
+      return { ...primary, key: "w", code: "KeyW" };
     case "command_menu":
       return { ...primary, key: "k", code: "KeyK" };
     case "shortcut_guide":
