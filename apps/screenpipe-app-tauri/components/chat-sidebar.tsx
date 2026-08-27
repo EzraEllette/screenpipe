@@ -141,7 +141,10 @@ import {
   startExternalChatSync,
   type ExternalChatSyncController,
 } from "@/lib/chat/external-chat-sync";
-import type { ExternalChatSource } from "@/lib/chat/external-chat-parser";
+import type {
+  ExternalChatSource,
+  ExternalChatTurnState,
+} from "@/lib/chat/external-chat-parser";
 import {
   PIPES_SIDEBAR_COLLAPSED_EVENT,
   PIPES_SIDEBAR_COLLAPSED_KEY,
@@ -492,7 +495,10 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
     let cancelled = false;
     const unlistenFns: Array<() => void> = [];
 
-    const syncConversationFromDisk = async (id: string) => {
+    const syncConversationFromDisk = async (
+      id: string,
+      externalTurnState?: ExternalChatTurnState,
+    ) => {
       try {
         const conv = await loadConversationFile(id);
         if (cancelled || !conv) return;
@@ -544,22 +550,50 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
             importedFrom: meta.importedFrom,
             draft: false,
           });
-          return;
+        } else {
+          store.actions.upsert(sessionRecordFromMeta(meta));
         }
 
-        store.actions.upsert(sessionRecordFromMeta(meta));
+        if (externalTurnState) {
+          const active = externalTurnState.isLoading || externalTurnState.isStreaming;
+          const assistant = [...conv.messages]
+            .reverse()
+            .find((message) => message.role === "assistant");
+          store.actions.setMessages(id, conv.messages as any);
+          store.actions.setStreaming(id, {
+            isLoading: externalTurnState.isLoading,
+            isStreaming: externalTurnState.isStreaming,
+            streamingMessageId: active ? assistant?.id ?? null : null,
+            streamingText:
+              active && assistant?.content !== "Processing..."
+                ? assistant?.content ?? ""
+                : "",
+            contentBlocks: active ? assistant?.contentBlocks ?? [] : [],
+          });
+          store.actions.patch(id, {
+            status: active ? "streaming" : "idle",
+            lastError: undefined,
+          });
+        }
       } catch {
         // ignore: a later save / hydrate can repair the row
       }
     };
 
     (async () => {
-      const unlistenSaved = await listen<{ id: string }>(
+      const unlistenSaved = await listen<{
+        id: string;
+        importedFrom?: ExternalChatSource;
+        turnState?: ExternalChatTurnState;
+      }>(
         "chat-conversation-saved",
         (event) => {
-          const id = event.payload?.id;
+          const { id, importedFrom, turnState } = event.payload ?? {};
           if (!id) return;
-          void syncConversationFromDisk(id);
+          void syncConversationFromDisk(
+            id,
+            importedFrom ? turnState : undefined,
+          );
         }
       );
       unlistenFns.push(unlistenSaved);

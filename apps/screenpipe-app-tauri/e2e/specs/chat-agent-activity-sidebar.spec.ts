@@ -22,8 +22,10 @@ const CODEX_ID = "e2e-agent-sidebar-codex";
 const CLAUDE_ID = "e2e-agent-sidebar-claude";
 const LIVE_CODEX_SESSION_ID = "e2e-live-codex";
 const LIVE_CODEX_ID = `imported-codex-${LIVE_CODEX_SESSION_ID}`;
+const LIVE_CODEX_WORK_ID = `${LIVE_CODEX_ID}-work-0`;
 const LIVE_CLAUDE_SESSION_ID = "e2e-live-claude";
 const LIVE_CLAUDE_ID = `imported-claude-code-${LIVE_CLAUDE_SESSION_ID}`;
+const LIVE_CLAUDE_TOOL_MESSAGE_ID = `${LIVE_CLAUDE_ID}-claude-tool`;
 const FIXTURE_PREFIX = "e2e-agent-sidebar-";
 const STRUCTURED_CLAUDE_ID = `${FIXTURE_PREFIX}structured-claude`;
 const STRUCTURED_ACTIVITY_TIMELINE = JSON.stringify({
@@ -84,6 +86,11 @@ function writeLiveCodexUserMessage(): string {
       payload: { id: LIVE_CODEX_SESSION_ID },
     }),
     JSON.stringify({
+      type: "event_msg",
+      timestamp: now.toISOString(),
+      payload: { type: "task_started", turn_id: "e2e-codex-turn" },
+    }),
+    JSON.stringify({
       type: "response_item",
       timestamp: now.toISOString(),
       payload: {
@@ -113,6 +120,39 @@ function appendLiveCodexAssistant(
       role: "assistant",
       content: [{ type: "output_text", text }],
     },
+  }) + "\n");
+}
+
+function appendLiveCodexToolCall(path: string): void {
+  appendFileSync(path, JSON.stringify({
+    type: "response_item",
+    timestamp: new Date().toISOString(),
+    payload: {
+      type: "custom_tool_call",
+      call_id: "codex-tool",
+      name: "exec",
+      input: "find /tmp -maxdepth 1",
+    },
+  }) + "\n");
+}
+
+function appendLiveCodexToolResult(path: string): void {
+  appendFileSync(path, JSON.stringify({
+    type: "response_item",
+    timestamp: new Date().toISOString(),
+    payload: {
+      type: "custom_tool_call_output",
+      call_id: "codex-tool",
+      output: "fixture command complete",
+    },
+  }) + "\n");
+}
+
+function appendLiveCodexTaskComplete(path: string): void {
+  appendFileSync(path, JSON.stringify({
+    type: "event_msg",
+    timestamp: new Date().toISOString(),
+    payload: { type: "task_complete", turn_id: "e2e-codex-turn" },
   }) + "\n");
 }
 
@@ -157,6 +197,44 @@ function appendLiveClaudeAssistant(
       model: "claude-e2e",
       content: [{ type: "text", text }],
       stop_reason: "end_turn",
+    },
+  }) + "\n");
+}
+
+function appendLiveClaudeToolCall(path: string): void {
+  appendFileSync(path, JSON.stringify({
+    type: "assistant",
+    sessionId: LIVE_CLAUDE_SESSION_ID,
+    uuid: "claude-tool-record",
+    timestamp: new Date().toISOString(),
+    message: {
+      id: "claude-tool",
+      role: "assistant",
+      model: "claude-e2e",
+      stop_reason: "tool_use",
+      content: [{
+        type: "tool_use",
+        id: "claude-tool-call",
+        name: "Bash",
+        input: { command: "find /tmp -maxdepth 1" },
+      }],
+    },
+  }) + "\n");
+}
+
+function appendLiveClaudeToolResult(path: string): void {
+  appendFileSync(path, JSON.stringify({
+    type: "user",
+    sessionId: LIVE_CLAUDE_SESSION_ID,
+    uuid: "claude-tool-result",
+    timestamp: new Date().toISOString(),
+    message: {
+      role: "user",
+      content: [{
+        type: "tool_result",
+        tool_use_id: "claude-tool-call",
+        content: "fixture command complete",
+      }],
     },
   }) + "\n");
 }
@@ -269,8 +347,6 @@ describe("unified recents sidebar", function () {
     const codexPath = writeLiveCodexUserMessage();
     const codexRow = await $(`[data-testid="chat-row-${LIVE_CODEX_ID}"]`);
     await codexRow.waitForDisplayed({ timeout: t(15_000) });
-    appendLiveCodexAssistant(codexPath);
-    await waitForImportedMessage(LIVE_CODEX_ID, `${LIVE_CODEX_ID}-a1`);
     expect(await codexRow.$('[aria-label="unread"]').isExisting()).toBe(false);
     await codexRow.$("button").click();
     await browser.waitUntil(
@@ -280,27 +356,57 @@ describe("unified recents sidebar", function () {
     await $(`[data-message-id="${LIVE_CODEX_ID}-u1"]`).waitForDisplayed({
       timeout: t(10_000),
     });
+    const codexThinking = await $("[data-testid='chat-turn-status']");
+    await codexThinking.waitForDisplayed({ timeout: t(10_000) });
+    expect(await codexThinking.getAttribute("data-phase")).toBe("analyzing");
+    await saveScreenshot("chat-external-codex-live-thinking");
+    appendLiveCodexAssistant(codexPath);
+    await waitForImportedMessage(LIVE_CODEX_ID, `${LIVE_CODEX_ID}-a1`);
     const codexAssistant = await $(`[data-message-id="${LIVE_CODEX_ID}-a1"]`);
-    await codexAssistant.waitForDisplayed({ timeout: t(10_000) });
+    await codexAssistant.waitForDisplayed({ timeout: t(15_000) });
     expect(await codexAssistant.getText()).toContain(
       "Codex reply streamed into Screenpipe",
     );
+    appendLiveCodexToolCall(codexPath);
+    const codexWork = await $(`[data-message-id="${LIVE_CODEX_WORK_ID}"]`);
+    await codexWork.waitForDisplayed({ timeout: t(15_000) });
+    await codexWork.$("[data-testid='tool-activity-running-indicator']")
+      .waitForDisplayed({ timeout: t(10_000) });
+    expect(
+      await codexWork.$("[data-testid='tool-activity-widget']")
+        .getAttribute("data-activity-state"),
+    ).toBe("running");
+    expect(await codexWork.getText()).toContain("Finding relevant information");
+    await browser.waitUntil(
+      async () => !(await $("[data-testid='chat-turn-status']").isExisting()),
+      { timeout: t(5_000), timeoutMsg: "expected the live Codex tool to own turn status" },
+    );
+    await saveScreenshot("chat-external-codex-live-tool");
+    appendLiveCodexToolResult(codexPath);
     appendLiveCodexAssistant(
       codexPath,
       "a2",
       "Second Codex reply streamed into the open chat",
     );
+    appendLiveCodexTaskComplete(codexPath);
     const secondCodexAssistant = await $(`[data-message-id="${LIVE_CODEX_ID}-a2"]`);
     await secondCodexAssistant.waitForDisplayed({ timeout: t(15_000) });
     expect(await secondCodexAssistant.getText()).toContain(
       "Second Codex reply streamed into the open chat",
     );
+    const completedCodexTool = secondCodexAssistant.$(
+      "[data-testid='tool-activity-widget']",
+    );
+    await browser.waitUntil(
+      async () =>
+        (await completedCodexTool.getAttribute("data-activity-state")) === "completed",
+      { timeout: t(15_000), timeoutMsg: "expected Codex tool activity to finish live" },
+    );
+    await saveScreenshot("chat-external-codex-live-completed");
 
     const claudePath = writeLiveClaudeUserMessage();
     const claudeRow = await $(`[data-testid="chat-row-${LIVE_CLAUDE_ID}"]`);
     await claudeRow.waitForDisplayed({ timeout: t(15_000) });
-    appendLiveClaudeAssistant(claudePath);
-    await waitForImportedMessage(LIVE_CLAUDE_ID, `${LIVE_CLAUDE_ID}-a1`);
     expect(await claudeRow.$('[aria-label="unread"]').isExisting()).toBe(false);
     await claudeRow.$("button").click();
     await browser.waitUntil(
@@ -310,21 +416,39 @@ describe("unified recents sidebar", function () {
     await $(`[data-message-id="${LIVE_CLAUDE_ID}-u1"]`).waitForDisplayed({
       timeout: t(10_000),
     });
+    const claudeThinking = await $("[data-testid='chat-turn-status']");
+    await claudeThinking.waitForDisplayed({ timeout: t(10_000) });
+    expect(await claudeThinking.getAttribute("data-phase")).toBe("analyzing");
+    await saveScreenshot("chat-external-claude-live-thinking");
+    appendLiveClaudeToolCall(claudePath);
+    const claudeWork = await $(`[data-message-id="${LIVE_CLAUDE_TOOL_MESSAGE_ID}"]`);
+    await claudeWork.waitForDisplayed({ timeout: t(15_000) });
+    await claudeWork.$("[data-testid='tool-activity-running-indicator']")
+      .waitForDisplayed({ timeout: t(10_000) });
+    expect(
+      await claudeWork.$("[data-testid='tool-activity-widget']")
+        .getAttribute("data-activity-state"),
+    ).toBe("running");
+    await browser.waitUntil(
+      async () => !(await $("[data-testid='chat-turn-status']").isExisting()),
+      { timeout: t(5_000), timeoutMsg: "expected the live Claude tool to own turn status" },
+    );
+    await saveScreenshot("chat-external-claude-live-tool");
+    appendLiveClaudeToolResult(claudePath);
     const claudeAssistant = await $(`[data-message-id="${LIVE_CLAUDE_ID}-a1"]`);
-    await claudeAssistant.waitForDisplayed({ timeout: t(10_000) });
+    appendLiveClaudeAssistant(claudePath);
+    await waitForImportedMessage(LIVE_CLAUDE_ID, `${LIVE_CLAUDE_ID}-a1`);
+    await claudeAssistant.waitForDisplayed({ timeout: t(15_000) });
     expect(await claudeAssistant.getText()).toContain(
       "Claude reply streamed into Screenpipe",
     );
-    appendLiveClaudeAssistant(
-      claudePath,
-      "a2",
-      "Second Claude reply streamed into the open chat",
+    await browser.waitUntil(
+      async () =>
+        (await claudeWork.$("[data-testid='tool-activity-widget']")
+          .getAttribute("data-activity-state")) === "completed",
+      { timeout: t(15_000), timeoutMsg: "expected Claude tool activity to finish live" },
     );
-    const secondClaudeAssistant = await $(`[data-message-id="${LIVE_CLAUDE_ID}-a2"]`);
-    await secondClaudeAssistant.waitForDisplayed({ timeout: t(15_000) });
-    expect(await secondClaudeAssistant.getText()).toContain(
-      "Second Claude reply streamed into the open chat",
-    );
+    await saveScreenshot("chat-external-claude-live-completed");
 
     // Restore the sparse fixture before the visual/provenance scenario. The
     // reload happens only after both live-update assertions have passed.

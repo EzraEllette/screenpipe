@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import {
   parseClaudeCodeTranscript,
   parseCodexTranscript,
+  parseExternalChatTranscriptSnapshot,
 } from "@/lib/chat/external-chat-parser";
 
 function jsonl(records: unknown[]): string {
@@ -66,6 +67,7 @@ describe("external agent chat parsers", () => {
           role: "assistant",
           model: "claude-test",
           content: [{ type: "text", text: "The fixture races its cleanup." }],
+          stop_reason: "end_turn",
         },
       },
       { type: "custom-title", sessionId: "claude-session", customTitle: "Flaky fixture" },
@@ -207,6 +209,146 @@ describe("external agent chat parsers", () => {
         }),
       }),
     ]));
+  });
+
+  it("keeps a Codex tool and turn live until their completion records arrive", () => {
+    const records = [
+      {
+        timestamp: "2026-08-27T15:00:00Z",
+        type: "session_meta",
+        payload: { id: "live-codex" },
+      },
+      {
+        timestamp: "2026-08-27T15:00:01Z",
+        type: "event_msg",
+        payload: { type: "task_started", turn_id: "turn-1" },
+      },
+      {
+        timestamp: "2026-08-27T15:00:02Z",
+        type: "response_item",
+        payload: {
+          type: "message",
+          id: "u1",
+          role: "user",
+          content: [{ type: "input_text", text: "inspect the live state" }],
+        },
+      },
+      {
+        timestamp: "2026-08-27T15:00:03Z",
+        type: "response_item",
+        payload: {
+          type: "custom_tool_call",
+          call_id: "call-1",
+          name: "exec",
+          input: "find /tmp -maxdepth 1",
+        },
+      },
+    ];
+    const options = { sourceId: "fallback", fallbackTimestamp: 1 };
+    const active = parseExternalChatTranscriptSnapshot("codex", jsonl(records), options);
+    const activeTool = active.conversation?.messages[1].contentBlocks?.find(
+      (block) => block.type === "tool",
+    );
+
+    expect(active.turnState).toEqual({ isLoading: true, isStreaming: true });
+    expect(activeTool).toMatchObject({
+      type: "tool",
+      toolCall: {
+        id: "call-1",
+        args: { command: "find /tmp -maxdepth 1" },
+        isRunning: true,
+        startedAtMs: Date.parse("2026-08-27T15:00:03Z"),
+      },
+    });
+
+    const completed = parseExternalChatTranscriptSnapshot("codex", jsonl([
+      ...records,
+      {
+        timestamp: "2026-08-27T15:00:04Z",
+        type: "response_item",
+        payload: {
+          type: "custom_tool_call_output",
+          call_id: "call-1",
+          output: "done",
+        },
+      },
+      {
+        timestamp: "2026-08-27T15:00:05Z",
+        type: "event_msg",
+        payload: { type: "task_complete", turn_id: "turn-1" },
+      },
+    ]), options);
+    const completedTool = completed.conversation?.messages[1].contentBlocks?.find(
+      (block) => block.type === "tool",
+    );
+
+    expect(completed.turnState).toEqual({ isLoading: false, isStreaming: false });
+    expect(completedTool).toMatchObject({
+      type: "tool",
+      toolCall: {
+        id: "call-1",
+        isRunning: false,
+        result: "done",
+      },
+    });
+    expect(
+      completedTool?.type === "tool"
+        ? completedTool.toolCall.startedAtMs
+        : undefined,
+    ).toBeUndefined();
+  });
+
+  it("shows Claude as active before its answer and while its tool is running", () => {
+    const records = [
+      {
+        type: "user",
+        sessionId: "live-claude",
+        uuid: "u1",
+        timestamp: "2026-08-27T16:00:00Z",
+        message: { role: "user", content: "inspect the live state" },
+      },
+    ];
+    const options = { sourceId: "fallback", fallbackTimestamp: 1 };
+    const thinking = parseExternalChatTranscriptSnapshot(
+      "claude-code",
+      jsonl(records),
+      options,
+    );
+
+    expect(thinking.turnState).toEqual({ isLoading: true, isStreaming: true });
+    expect(thinking.conversation?.messages.at(-1)).toMatchObject({
+      role: "assistant",
+      content: "Processing...",
+    });
+
+    const running = parseExternalChatTranscriptSnapshot("claude-code", jsonl([
+      ...records,
+      {
+        type: "assistant",
+        sessionId: "live-claude",
+        timestamp: "2026-08-27T16:00:01Z",
+        message: {
+          id: "a1",
+          role: "assistant",
+          stop_reason: "tool_use",
+          content: [{
+            type: "tool_use",
+            id: "tool-1",
+            name: "Bash",
+            input: { command: "pwd" },
+          }],
+        },
+      },
+    ]), options);
+    const runningTool = running.conversation?.messages.at(-1)?.contentBlocks?.find(
+      (block) => block.type === "tool",
+    );
+
+    expect(running.turnState).toEqual({ isLoading: true, isStreaming: true });
+    expect(runningTool).toMatchObject({
+      type: "tool",
+      toolCall: { id: "tool-1", isRunning: true },
+    });
   });
 
   it("uses the typed request instead of Codex attachment scaffolding", () => {

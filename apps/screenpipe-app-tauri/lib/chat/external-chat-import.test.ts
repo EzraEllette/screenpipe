@@ -212,6 +212,137 @@ describe("scanExternalChatHistory", () => {
     expect(mocks.saveConversationFile).not.toHaveBeenCalled();
   });
 
+  it("broadcasts active and completed Codex turn state even when disk content is unchanged", async () => {
+    const userAt = Date.parse("2026-08-27T15:00:02Z");
+    const toolAt = Date.parse("2026-08-27T15:00:03Z");
+    const outputAt = Date.parse("2026-08-27T15:00:04Z");
+    const id = "imported-codex-live-state";
+    const baseRecords = [
+      {
+        timestamp: "2026-08-27T15:00:00Z",
+        type: "session_meta",
+        payload: { id: "live-state" },
+      },
+      {
+        timestamp: "2026-08-27T15:00:01Z",
+        type: "event_msg",
+        payload: { type: "task_started", turn_id: "turn-1" },
+      },
+      {
+        timestamp: "2026-08-27T15:00:02Z",
+        type: "response_item",
+        payload: {
+          type: "message",
+          id: "u1",
+          role: "user",
+          content: [{ type: "input_text", text: "show live feedback" }],
+        },
+      },
+      {
+        timestamp: "2026-08-27T15:00:03Z",
+        type: "response_item",
+        payload: {
+          type: "custom_tool_call",
+          call_id: "call-1",
+          name: "exec",
+          input: "find /tmp -maxdepth 1",
+        },
+      },
+    ];
+    const candidate = {
+      source: "codex" as const,
+      path: "/fixture/live-state.jsonl",
+      sourceId: "live-state",
+      modifiedAt: toolAt,
+      size: 1024,
+    };
+    const conversation = (running: boolean, result?: string) => ({
+      id,
+      title: "show live feedback",
+      titleSource: "fallback" as const,
+      kind: "chat" as const,
+      createdAt: userAt,
+      updatedAt: result ? outputAt : toolAt,
+      lastUserMessageAt: userAt,
+      lastContentAt: result ? outputAt : toolAt,
+      lastViewedAt: result ? outputAt : toolAt,
+      importedFrom: {
+        source: "codex" as const,
+        sourceId: "live-state",
+        importedAt: userAt,
+      },
+      messages: [
+        {
+          id: `${id}-u1`,
+          role: "user" as const,
+          content: "show live feedback",
+          timestamp: userAt,
+          provider: "codex",
+          importedFrom: "codex" as const,
+        },
+        {
+          id: `${id}-work-0`,
+          role: "assistant" as const,
+          content: "",
+          timestamp: result ? outputAt : toolAt,
+          provider: "codex",
+          importedFrom: "codex" as const,
+          contentBlocks: [{
+            type: "tool" as const,
+            toolCall: {
+              id: "call-1",
+              toolName: "exec",
+              args: { command: "find /tmp -maxdepth 1" },
+              isRunning: running,
+              ...(running ? { startedAtMs: toolAt } : {}),
+              ...(result ? { result } : {}),
+            },
+          }],
+        },
+      ],
+    });
+
+    mocks.stat.mockResolvedValue({ size: 1024, mtime: new Date(toolAt) });
+    mocks.readTextFile.mockResolvedValue(baseRecords.map((record) => JSON.stringify(record)).join("\n"));
+    mocks.loadConversationFile.mockResolvedValue(conversation(true));
+
+    const activeResult = await importExternalChatHistory([candidate], { skipUnchanged: true });
+    expect(activeResult).toMatchObject({ imported: 0, updated: 0, skipped: 1, failed: 0 });
+    expect(mocks.emit).toHaveBeenLastCalledWith("chat-conversation-saved", expect.objectContaining({
+      id,
+      turnState: { isLoading: true, isStreaming: true },
+    }));
+
+    const completedRecords = [
+      ...baseRecords,
+      {
+        timestamp: "2026-08-27T15:00:04Z",
+        type: "response_item",
+        payload: {
+          type: "custom_tool_call_output",
+          call_id: "call-1",
+          output: "done",
+        },
+      },
+      {
+        timestamp: "2026-08-27T15:00:05Z",
+        type: "event_msg",
+        payload: { type: "task_complete", turn_id: "turn-1" },
+      },
+    ];
+    mocks.readTextFile.mockResolvedValue(
+      completedRecords.map((record) => JSON.stringify(record)).join("\n"),
+    );
+    mocks.loadConversationFile.mockResolvedValue(conversation(false, "done"));
+
+    const completedResult = await importExternalChatHistory([candidate], { skipUnchanged: true });
+    expect(completedResult).toMatchObject({ imported: 0, updated: 0, skipped: 1, failed: 0 });
+    expect(mocks.emit).toHaveBeenLastCalledWith("chat-conversation-saved", expect.objectContaining({
+      id,
+      turnState: { isLoading: false, isStreaming: false },
+    }));
+  });
+
   it("marks newly discovered external history as already read", async () => {
     const updatedAt = Date.parse("2026-08-21T12:01:00Z");
     mocks.stat.mockResolvedValue({ size: 1024, mtime: new Date(updatedAt) });

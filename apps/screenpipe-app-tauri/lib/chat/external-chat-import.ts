@@ -13,7 +13,7 @@ import {
 } from "@/lib/chat-storage";
 import {
   externalChatConversationId,
-  parseExternalChatTranscript,
+  parseExternalChatTranscriptSnapshot,
   type ExternalChatSource,
 } from "@/lib/chat/external-chat-parser";
 import type { ChatConversation, ChatMessage } from "@/lib/hooks/use-settings";
@@ -23,6 +23,7 @@ export const MAX_EXTERNAL_CHAT_FILE_BYTES = 32 * 1024 * 1024;
 export const EXTERNAL_CHAT_LOOKBACK_DAYS = 7;
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
+const externalTurnActiveByConversation = new Map<string, boolean>();
 
 export interface ExternalChatCandidate {
   source: ExternalChatSource;
@@ -457,35 +458,45 @@ export async function importExternalChatHistory(
         continue;
       }
       const jsonl = await readTextFile(candidate.path);
-      const conversation = parseExternalChatTranscript(candidate.source, jsonl, {
+      const snapshot = parseExternalChatTranscriptSnapshot(candidate.source, jsonl, {
         sourceId: candidate.sourceId,
         fallbackTimestamp: candidate.modifiedAt || Date.now(),
       });
+      const conversation = snapshot.conversation;
       if (!conversation) {
         result.skipped += 1;
         continue;
       }
       const existing = await loadConversationFile(conversation.id);
       const prepared = prepareImportedConversation(conversation, existing);
-      if (
+      const active = snapshot.turnState.isLoading || snapshot.turnState.isStreaming;
+      const wasActive = externalTurnActiveByConversation.get(conversation.id) === true;
+      const unchanged = Boolean(
         options.skipUnchanged &&
         existing &&
         importedConversationIsUnchanged(existing, prepared)
-      ) {
+      );
+      if (unchanged) {
         result.skipped += 1;
-        continue;
+      } else {
+        await saveConversationFile(prepared);
+        if (existing) result.updated += 1;
+        else result.imported += 1;
       }
-      await saveConversationFile(prepared);
-      if (existing) result.updated += 1;
-      else result.imported += 1;
-      try {
-        await emit("chat-conversation-saved", {
-          id: conversation.id,
-          importedFrom: candidate.source,
-        });
-      } catch {
-        // Persistence already succeeded; a failed UI broadcast must not turn
-        // a successful import into a misleading failure count.
+
+      externalTurnActiveByConversation.set(conversation.id, active);
+      if (!unchanged || active || wasActive) {
+        try {
+          await emit("chat-conversation-saved", {
+            id: conversation.id,
+            importedFrom: candidate.source,
+            updatedAt: prepared.updatedAt,
+            turnState: snapshot.turnState,
+          });
+        } catch {
+          // Persistence already succeeded; a failed UI broadcast must not turn
+          // a successful import into a misleading failure count.
+        }
       }
     } catch (error) {
       console.warn(`[chat-import] failed to import ${candidate.source} transcript`, error);

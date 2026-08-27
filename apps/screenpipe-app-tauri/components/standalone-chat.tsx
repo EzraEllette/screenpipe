@@ -301,9 +301,9 @@ export function StandaloneChat({
     setInput,
     inputRef,
   });
-  // Local buffer for regular (agent) sessions. Pipe-watch sessions source
-  // their messages from the chat store instead — see the `messages` derivation
-  // below, after `conversationId` is known.
+  // Local buffer for regular Screenpipe agent sessions. Read-only live
+  // sessions source messages from the chat store instead — see the `messages`
+  // derivation below, after `conversationId` is known.
   const [localMessages, setMessages] = useState<Message[]>([]);
   // One dialog for every ACP sign-in — CLI login (Cursor, Kimi, OpenCode) and
   // in-protocol auth-method selection alike. Single piece of state → deduped.
@@ -718,18 +718,25 @@ export function StandaloneChat({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Pipe-watch sessions keep their messages in the chat store, not in this
-  // component's local state. Read them from the store directly and fall back to
-  // the local buffer for regular sessions, instead of an effect that mirrored
-  // the store into local state (an extra render + a frame of stale messages).
-  // Pipe-watch and regular sessions are mutually exclusive — the agent
-  // foreground handler early-returns for pipe-watch — so the two sources never
-  // feed the same session. Every `messages` reader below is unchanged.
-  const pipeWatchMessages = useChatStore((state) =>
-    conversationId && state.sessions[conversationId]?.kind === "pipe-watch"
-      ? state.sessions[conversationId]?.messages
-      : undefined,
-  );
+  // Live read-only sessions keep their messages in the chat store, not in this
+  // component's local agent buffer. Pipe watches are written by their event
+  // writer; imported Codex/Claude chats are written by the JSONL watcher. Read
+  // both directly so a provider append cannot wait on a second local-state
+  // adoption path before it appears in the open chat.
+  const storeBackedMessages = useChatStore((state) => {
+    if (!conversationId) return undefined;
+    const session = state.sessions[conversationId];
+    const isExternalAgent = session?.importedFrom?.source === "codex"
+      || session?.importedFrom?.source === "claude-code";
+    return session?.kind === "pipe-watch" || isExternalAgent
+      ? session?.messages
+      : undefined;
+  });
+  const isExternalAgentConversation = useChatStore((state) => {
+    if (!conversationId) return false;
+    const source = state.sessions[conversationId]?.importedFrom?.source;
+    return source === "codex" || source === "claude-code";
+  });
   const pipeRunArtifactSource = useChatStore((state) => {
     if (!conversationId) return null;
     const context = state.sessions[conversationId]?.pipeContext;
@@ -737,7 +744,7 @@ export function StandaloneChat({
       ? `pipe:${context.pipeName}:${context.executionId}`
       : null;
   });
-  const messages = (pipeWatchMessages ?? localMessages) as Message[];
+  const messages = (storeBackedMessages ?? localMessages) as Message[];
 
   const {
     consumePendingAttachments,
@@ -1779,7 +1786,9 @@ export function StandaloneChat({
 
   const activeSourceFooterMessageId =
     isLoading || isStreaming
-      ? piMessageIdRef.current ?? currentStreamingMessageId ?? null
+      ? isExternalAgentConversation
+        ? currentStreamingMessageId ?? piMessageIdRef.current ?? null
+        : piMessageIdRef.current ?? currentStreamingMessageId ?? null
       : null;
 
   // Per-turn aggregation plan. Pipe sessions (pipe-run, pipe-watch) and any
