@@ -7,7 +7,7 @@
 import React from "react";
 import { emit } from "@tauri-apps/api/event";
 import posthog from "posthog-js";
-import { ChevronDown, Clock, ListChecks, Loader2 } from "lucide-react";
+import { Clock, ListChecks, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   formatCountdown,
@@ -20,7 +20,6 @@ import {
   useLearningWindow,
   type LearningWindowOptions,
 } from "@/lib/first-run/use-learning-window";
-import { FirstRunNextSteps } from "@/components/first-run/next-steps";
 import {
   dismissFirstRunSearchShortcutFromParent,
   FirstRunSearchShortcutPractice,
@@ -59,14 +58,12 @@ export function FirstRunReadyPanel({
   onOpenSummary,
   onPickAgent,
   onDismiss,
-  nextSteps,
 }: {
   handoffTargets: readonly AgentHandoffTarget[];
   handoffHint: string | null;
   onOpenSummary: () => void;
   onPickAgent: (target: AgentHandoffTarget) => void;
   onDismiss: () => void;
-  nextSteps: React.ReactNode;
 }) {
   return (
     <div>
@@ -81,8 +78,8 @@ export function FirstRunReadyPanel({
           screenpipe learned enough to help
         </h2>
         <p className="mt-2 max-w-xl text-[11px] leading-relaxed text-muted-foreground">
-          an evidence-backed summary of the apps and activity captured since setup
-          is waiting in a new chat.
+          an evidence-backed summary of the apps and activity captured since
+          setup is waiting in a new chat.
         </p>
         <div className="mt-4 flex flex-wrap items-center gap-2">
           <Button
@@ -106,12 +103,9 @@ export function FirstRunReadyPanel({
         )}
       </div>
 
-      {nextSteps}
-
       <div className="flex items-center justify-between gap-4 border-t border-border px-4 py-3">
         <p className="text-[10px] leading-relaxed text-muted-foreground">
-          screenpipe is ready now. these optional setups remain available from
-          Automations and Connections.
+          this summary stays available in chat history.
         </p>
         <Button
           size="sm"
@@ -128,10 +122,8 @@ export function FirstRunReadyPanel({
 
 export function FirstRunSetupReadyPanel({
   onDismiss,
-  nextSteps,
 }: {
   onDismiss: () => void;
-  nextSteps: React.ReactNode;
 }) {
   return (
     <div data-testid="first-run-setup-ready">
@@ -147,16 +139,14 @@ export function FirstRunSetupReadyPanel({
         </h2>
         <p className="mt-2 max-w-xl text-[11px] leading-relaxed text-muted-foreground">
           there was not enough activity in this short setup window to write a
-          useful first summary. you can still enable your daily summary now.
+          useful first summary. Screenpipe will keep recording in the
+          background.
         </p>
       </div>
 
-      {nextSteps}
-
       <div className="flex items-center justify-between gap-4 border-t border-border px-4 py-3">
         <p className="text-[10px] leading-relaxed text-muted-foreground">
-          these optional setups remain available from Automations and
-          Connections.
+          ask about anything you see, say, or hear from now on.
         </p>
         <Button
           size="sm"
@@ -172,15 +162,7 @@ export function FirstRunSetupReadyPanel({
   );
 }
 
-export function FirstRunSetupDock({
-  onDismiss,
-  nextSteps,
-}: {
-  onDismiss: () => void;
-  nextSteps: React.ReactNode;
-}) {
-  const [expanded, setExpanded] = React.useState(false);
-
+export function FirstRunSetupDock({ onDismiss }: { onDismiss: () => void }) {
   return (
     <div data-testid="first-run-setup-dock">
       <div className="flex flex-col gap-3 px-4 py-3 sm:flex-row sm:items-center">
@@ -192,42 +174,21 @@ export function FirstRunSetupDock({
             getting started
           </p>
           <p className="mt-0.5 text-[11px] leading-relaxed text-muted-foreground">
-            your summary is open. daily summary, digital clone, and calendar
-            setup stay available here while you chat.
+            your summary is open. try the search shortcut above, or keep
+            chatting.
           </p>
         </div>
-        <div className="flex shrink-0 items-center gap-1">
-          <Button
-            type="button"
-            size="sm"
-            variant="outline"
-            className="h-7 gap-1.5 px-2 text-[9px]"
-            data-testid="first-run-toggle-setup"
-            aria-expanded={expanded}
-            onClick={() => setExpanded((current) => !current)}
-          >
-            {expanded ? "close setup" : "open setup"}
-            <ChevronDown
-              className={`h-3 w-3 transition-transform duration-150 ${
-                expanded ? "rotate-180" : ""
-              }`}
-              aria-hidden="true"
-            />
-          </Button>
-          <Button
-            type="button"
-            size="sm"
-            variant="ghost"
-            className="h-7 px-2 text-[9px]"
-            data-testid="first-run-hide-setup"
-            onClick={onDismiss}
-          >
-            hide tips
-          </Button>
-        </div>
+        <Button
+          type="button"
+          size="sm"
+          variant="ghost"
+          className="h-7 shrink-0 px-2 text-[9px]"
+          data-testid="first-run-hide-setup"
+          onClick={onDismiss}
+        >
+          hide tips
+        </Button>
       </div>
-
-      {expanded && nextSteps}
     </div>
   );
 }
@@ -260,10 +221,7 @@ export function FirstRunLearningBanner(
     preferredTarget,
     hint: handoffHint,
     askAgent,
-  } = useAgentHandoff(
-    phase === "ready" && !summaryOpenedAt,
-    capturedApps,
-  );
+  } = useAgentHandoff(phase === "ready" && !summaryOpenedAt, capturedApps);
 
   React.useEffect(() => {
     if (
@@ -349,9 +307,6 @@ export function FirstRunLearningBanner(
               dismissFirstRunSearchShortcutFromParent();
               dismiss();
             }}
-            nextSteps={
-              <FirstRunNextSteps userToken={learningOptions.userToken} />
-            }
           />
         </section>
         {fallback ? <>{fallback}</> : null}
@@ -444,19 +399,11 @@ export function FirstRunLearningBanner(
           onOpenSummary={() => void openSummary()}
           onPickAgent={(target) => void askAgent(target)}
           onDismiss={() => dismiss()}
-          nextSteps={
-            <FirstRunNextSteps userToken={learningOptions.userToken} />
-          }
         />
       )}
 
       {phase === "empty" && (
-        <FirstRunSetupReadyPanel
-          onDismiss={() => dismiss()}
-          nextSteps={
-            <FirstRunNextSteps userToken={learningOptions.userToken} />
-          }
-        />
+        <FirstRunSetupReadyPanel onDismiss={() => dismiss()} />
       )}
     </section>
   );

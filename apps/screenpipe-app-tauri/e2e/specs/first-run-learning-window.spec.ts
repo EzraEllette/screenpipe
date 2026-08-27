@@ -18,9 +18,9 @@
 // What this proves that unit tests cannot:
 //   1. The banner mounts on Home — the surface setup now routes to — and its
 //      countdown is live rather than a frozen first render.
-//   2. A foreground empty result settles durably into useful setup choices.
-//      The real engine reason remains in state/telemetry without making the
-//      internal evidence threshold the user's problem.
+//   2. A foreground empty result settles durably with the real engine reason
+//      preserved. Connection setup already happened inside onboarding and is
+//      never gated on this result.
 //   3. A late retry runs in the background and surfaces only if a summary is
 //      ready. Reopening hours later must not look like onboarding restarted.
 //   4. Foreground terminal choices survive reload until the user dismisses
@@ -309,11 +309,11 @@ const learningState = (over: Record<string, unknown> = {}) => ({
     expect(await bannerCount()).toBe(0);
   });
 
-  it("ends an empty foreground result on useful setup choices", async () => {
+  it("ends an empty foreground result without repeating onboarding setup", async () => {
     // Ceiling already elapsed, so the window must settle on this mount. With
     // recording off the engine answers that it is not recording, and that
-    // exact reason remains available for diagnosis while onboarding still
-    // reaches the daily-summary setup instead of disappearing.
+    // exact reason remains available for diagnosis without reviving connection
+    // setup after onboarding has already finished.
     await openHomeWith(
       learningState({
         startedAt: new Date(Date.now() - 10 * 60 * 1_000).toISOString(),
@@ -345,18 +345,15 @@ const learningState = (over: Record<string, unknown> = {}) => ({
     expect(bodyText).toContain("screenpipe is ready");
     expect(
       await browser.execute(
-        () =>
-          !!document.querySelector(
-            '[data-testid="first-run-next-step-daily-email"]',
-          ),
+        () => !!document.querySelector('[data-testid="first-run-next-steps"]'),
       ),
-    ).toBe(true);
+    ).toBe(false);
 
     const filepath = await saveScreenshot("first-run-empty-ready");
     expect(existsSync(filepath)).toBe(true);
   });
 
-  it("keeps the setup choices across reload until the user dismisses them", async () => {
+  it("keeps the empty result across reload until the user dismisses it", async () => {
     await showWindow({ Home: { page: null } });
     await browser.switchToWindow("home");
     await browser.execute(() => {
@@ -371,12 +368,12 @@ const learningState = (over: Record<string, unknown> = {}) => ({
     await done.click();
     await browser.waitUntil(async () => (await bannerCount()) === 0, {
       timeout: t(10_000),
-      timeoutMsg: "setup choices survived explicit dismissal",
+      timeoutMsg: "empty result survived explicit dismissal",
     });
     expect((await storedLearningState())?.phase).toBe("done");
   });
 
-  it("opens the summary without inventing a user turn or losing setup", async () => {
+  it("opens the summary without inventing a user turn or losing tips", async () => {
     writeSummaryConversation();
     await browser.execute((key: string) => {
       window.localStorage.removeItem(key);
@@ -512,26 +509,11 @@ const learningState = (over: Record<string, unknown> = {}) => ({
       }, SEARCH_SHORTCUT_STORAGE_KEY),
     ).toMatchObject({ status: "completed", acknowledged: true });
 
-    const toggle = await browser.$('[data-testid="first-run-toggle-setup"]');
-    await toggle.click();
-    await browser.waitUntil(
-      async () =>
-        Boolean(
-          await browser.execute(
-            () =>
-              !!document.querySelector('[data-testid="first-run-next-steps"]'),
-          ),
-        ),
-      {
-        timeout: t(10_000),
-        timeoutMsg: "setup dock did not expand over the summary chat",
-      },
-    );
-
-    const expandedScreenshot = await saveScreenshot(
-      "first-run-summary-with-setup-open",
-    );
-    expect(existsSync(expandedScreenshot)).toBe(true);
+    expect(
+      await browser.execute(
+        () => !!document.querySelector('[data-testid="first-run-next-steps"]'),
+      ),
+    ).toBe(false);
   });
 
   // Regression guard for the bug this spec originally missed: the window used

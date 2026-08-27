@@ -120,6 +120,14 @@ vi.mock("@/components/onboarding/plan-selection-step", () => ({
     </div>
   ),
 }));
+vi.mock("@/components/onboarding/final-setup-step", () => ({
+  default: ({ handleNextSlide }: { handleNextSlide: () => void }) => (
+    <div>
+      <span>recommended setup</span>
+      <button onClick={handleNextSlide}>finish recommended setup</button>
+    </div>
+  ),
+}));
 vi.mock("@/lib/utils/tauri", () => ({
   commands: {
     setOnboardingStep: mocks.setOnboardingStep,
@@ -308,7 +316,7 @@ describe("enterprise onboarding authentication", () => {
     expect(screen.queryByText("connect apps")).not.toBeInTheDocument();
   });
 
-  it("shows plan selection last for a new free consumer account", async () => {
+  it("shows recommended setup after plan selection for a new free consumer account", async () => {
     mocks.enterprisePolicy.isManagedDeployment = false;
     mocks.settings.user = {
       has_payment_method: false,
@@ -326,6 +334,12 @@ describe("enterprise onboarding authentication", () => {
     expect(mocks.completeOnboarding).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole("button", { name: "continue free plan" }));
+    expect(await screen.findByText("recommended setup")).toBeInTheDocument();
+    expect(mocks.completeOnboarding).not.toHaveBeenCalled();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "finish recommended setup" }),
+    );
     await waitFor(() =>
       expect(mocks.completeOnboarding).toHaveBeenCalledWith({
         method: "setup_finished",
@@ -333,10 +347,9 @@ describe("enterprise onboarding authentication", () => {
     );
   });
 
-  // Regression: "plan" is the last slide, so showing it to a user who skipped
-  // sign-in trapped onboarding forever — the real PlanSelectionStep can neither
-  // load checkout without a token, and
-  // handleNextSlide never reaches completeOnboarding while a next slide exists.
+  // Regression: showing plan to a user who skipped sign-in trapped onboarding
+  // forever because the real PlanSelectionStep cannot load checkout without a
+  // token. The final setup step remains available without checkout.
   // The mock below always advances, which is why only the desktop E2E
   // (onboarding-background-ai-tools) caught it. Keep this asserting completion.
   it("finishes setup without plan selection when the user is signed out", async () => {
@@ -349,6 +362,11 @@ describe("enterprise onboarding authentication", () => {
       await screen.findByRole("button", { name: "finish engine" }),
     );
 
+    expect(await screen.findByText("recommended setup")).toBeInTheDocument();
+    expect(mocks.completeOnboarding).not.toHaveBeenCalled();
+    fireEvent.click(
+      screen.getByRole("button", { name: "finish recommended setup" }),
+    );
     await waitFor(() =>
       expect(mocks.completeOnboarding).toHaveBeenCalledWith({
         method: "setup_finished",
@@ -410,6 +428,11 @@ describe("enterprise onboarding authentication", () => {
       await screen.findByRole("button", { name: "finish engine" }),
     );
 
+    expect(await screen.findByText("recommended setup")).toBeInTheDocument();
+    expect(mocks.completeOnboarding).not.toHaveBeenCalled();
+    fireEvent.click(
+      screen.getByRole("button", { name: "finish recommended setup" }),
+    );
     await waitFor(() =>
       expect(mocks.completeOnboarding).toHaveBeenCalledWith({
         method: "setup_finished",
@@ -435,6 +458,11 @@ describe("enterprise onboarding authentication", () => {
         await screen.findByRole("button", { name: "finish engine" }),
       );
 
+      expect(await screen.findByText("recommended setup")).toBeInTheDocument();
+      expect(mocks.completeOnboarding).not.toHaveBeenCalled();
+      fireEvent.click(
+        screen.getByRole("button", { name: "finish recommended setup" }),
+      );
       await waitFor(() =>
         expect(mocks.completeOnboarding).toHaveBeenCalledWith({
           method: "setup_finished",
@@ -460,6 +488,11 @@ describe("enterprise onboarding authentication", () => {
       await screen.findByRole("button", { name: "finish engine" }),
     );
 
+    expect(await screen.findByText("recommended setup")).toBeInTheDocument();
+    expect(mocks.completeOnboarding).not.toHaveBeenCalled();
+    fireEvent.click(
+      screen.getByRole("button", { name: "finish recommended setup" }),
+    );
     await waitFor(() =>
       expect(mocks.completeOnboarding).toHaveBeenCalledWith({
         method: "setup_finished",
@@ -478,6 +511,11 @@ describe("enterprise onboarding authentication", () => {
       await screen.findByRole("button", { name: "finish engine" }),
     );
 
+    expect(await screen.findByText("recommended setup")).toBeInTheDocument();
+    expect(mocks.completeOnboarding).not.toHaveBeenCalled();
+    fireEvent.click(
+      screen.getByRole("button", { name: "finish recommended setup" }),
+    );
     await waitFor(() =>
       expect(mocks.completeOnboarding).toHaveBeenCalledWith({
         method: "setup_finished",
@@ -524,6 +562,11 @@ describe("enterprise onboarding authentication", () => {
       await screen.findByRole("button", { name: "finish engine" }),
     );
 
+    expect(await screen.findByText("recommended setup")).toBeInTheDocument();
+    expect(mocks.completeOnboarding).not.toHaveBeenCalled();
+    fireEvent.click(
+      screen.getByRole("button", { name: "finish recommended setup" }),
+    );
     await waitFor(() =>
       expect(mocks.completeOnboarding).toHaveBeenCalledWith({
         method: "setup_finished",
