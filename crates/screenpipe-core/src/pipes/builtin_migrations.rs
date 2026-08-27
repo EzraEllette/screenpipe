@@ -144,6 +144,19 @@ step 2d — name the speakers from the screen (do this every run, don't ask firs
 
 only rename when the on-screen evidence is unambiguous — never guess from voice alone. note which speakers you renamed (and which you left as-is) in your final message."#;
 
+/// The oldest save-only ending still present in long-lived installs. It saves
+/// the note before the agent prints any summary, so the meeting UI has nothing
+/// to stream and shows an empty spinner for the whole run. It also predates the
+/// dedicated summary endpoint, leaving the agent to rebuild the entire note.
+const LEGACY_DIRECT_SAVE_STEP: &str = r#"step 3 — if your summary is worth saving, append it to the meeting note (and refresh the title in the same call) via:
+
+  curl -s -X PUT "http://localhost:3030/meetings/<MEETING_ID>" \
+    -H "Authorization: Bearer $SCREENPIPE_LOCAL_API_KEY" \
+    -H "Content-Type: application/json" \
+    -d '{"title": "<NEW_TITLE_OR_OMIT>", "note": "<EXISTING_NOTE>\n\n## Summary\n<YOUR_SUMMARY>"}'
+
+replace `<EXISTING_NOTE>` with the meeting's current `note` field (empty string if none) so you don't overwrite the user's work; just append your summary under a `## Summary` heading. for the title: if the current title is missing, generic ("untitled", "meeting", just the app name) or doesn't capture what actually happened, replace it with a 5-8 word plain-english title (no quotes, no "meeting about…" prefix) — otherwise omit the field so a user-set title is left alone. if there's nothing useful to summarize (empty transcript, irrelevant audio), say so out loud and skip the PUT — don't write a placeholder."#;
+
 /// Swaps for `meeting-summary`, oldest defect first.
 fn meeting_summary_swaps() -> Vec<FragmentSwap> {
     let mut swaps = vec![
@@ -231,6 +244,15 @@ fn meeting_summary_swaps() -> Vec<FragmentSwap> {
             new: save_step,
         });
     }
+    if let Some(output_and_save_steps) = meeting_summary_output_and_save_steps() {
+        swaps.push(FragmentSwap {
+            why: "latency: older installed copies saved silently before printing any \
+                  summary, leaving the meeting UI on an empty spinner; upgrade the \
+                  whole ending to streamed output plus the dedicated save endpoint",
+            old: LEGACY_DIRECT_SAVE_STEP,
+            new: output_and_save_steps,
+        });
+    }
     if let Some(evidence_steps) = meeting_summary_evidence_steps() {
         swaps.push(FragmentSwap {
             why: "upgrade the older unbatched meeting-summary flow to accessibility and parsed data with OCR fallback",
@@ -282,6 +304,17 @@ fn meeting_summary_save_step() -> Option<&'static str> {
     section_between(
         bundled_prompt("meeting-summary")?,
         "step 3b — now save it through the dedicated summary endpoint",
+        "step 4 — offer to push",
+    )
+}
+
+/// The streamed summary plus the dedicated save step as shipped today. Older
+/// save-only installs need both sections together because they have no output
+/// step to replace independently.
+fn meeting_summary_output_and_save_steps() -> Option<&'static str> {
+    section_between(
+        bundled_prompt("meeting-summary")?,
+        "step 3 — write the summary",
         "step 4 — offer to push",
     )
 }
@@ -519,6 +552,46 @@ mod tests {
             .expect("legacy PUT save step should migrate");
         assert!(fixed.contains("/meetings/<MEETING_ID>/summary"));
         assert!(!fixed.contains("<EXISTING_NOTE>"));
+        assert!(migrate_builtin_pipe_text("meeting-summary", &fixed).is_none());
+    }
+
+    /// The long-lived install shape predates both live summary output and the
+    /// dedicated save endpoint. Exact-fragment migrations must cover it too;
+    /// otherwise those users keep watching an empty spinner until timeout.
+    #[test]
+    fn migrate_builtin_pipe_upgrades_save_only_meeting_summary_ending() {
+        let current_evidence = meeting_summary_evidence_steps().expect("bundled evidence steps");
+        let current_ending = meeting_summary_output_and_save_steps()
+            .expect("bundled prompt carries streamed output and save steps");
+        let bundled_presets =
+            meeting_summary_preset_chain().expect("bundled prompt carries preset chain");
+        let stale = bundled("meeting-summary")
+            .replace(current_evidence, LEGACY_SIMPLE_MEETING_EVIDENCE)
+            .replace(current_ending, LEGACY_DIRECT_SAVE_STEP)
+            .replace(
+                bundled_presets,
+                "preset:\n  - screenpipe-cloud\n  - cursor\n  - codexxx\n  - d\ntimeout: 600",
+            );
+
+        assert!(stale.contains("step 3 — if your summary is worth saving"));
+        assert!(!stale.contains("step 3 — write the summary"));
+
+        let fixed = migrate_builtin_pipe_text("meeting-summary", &stale)
+            .expect("save-only meeting summary should migrate");
+        assert!(fixed.contains("step 3 — write the summary"));
+        assert!(fixed.contains("the meeting UI streams this section live"));
+        assert!(fixed.contains("/meetings/<MEETING_ID>/summary"));
+        assert!(!fixed.contains("step 3 — if your summary is worth saving"));
+        assert!(!fixed.contains("<EXISTING_NOTE>"));
+        let (fixed_config, fixed_body) =
+            parse_frontmatter(&fixed).expect("migrated Pipe should parse");
+        let (_, bundled_body) =
+            parse_frontmatter(bundled("meeting-summary")).expect("bundled Pipe should parse");
+        assert_eq!(
+            fixed_config.preset,
+            ["screenpipe-cloud", "cursor", "codexxx", "d"]
+        );
+        assert_eq!(fixed_body, bundled_body);
         assert!(migrate_builtin_pipe_text("meeting-summary", &fixed).is_none());
     }
 
