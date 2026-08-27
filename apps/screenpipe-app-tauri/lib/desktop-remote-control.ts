@@ -38,11 +38,6 @@ export const BOOLEAN_REMOTE_CONTROL_DEFINITIONS = {
     shippedDefault: false,
     supportedPlatforms: ["windows"],
   },
-  sidebarCustomization: {
-    flagKey: "sidebar-customization-control",
-    settingKey: "enableSidebarCustomization",
-    shippedDefault: false,
-  },
   // Compatibility control retained for managed installs. The consumer UI's
   // visibility choice is independent from this rollout capability.
   overlayHiding: {
@@ -58,7 +53,7 @@ export const BOOLEAN_REMOTE_CONTROL_DEFINITIONS = {
  */
 export const NON_RECORDER_REMOTE_CONTROLS = new Set<
   BooleanRemoteControlKey | "aecMode" | "autoUpdate"
->(["autoUpdate", "sidebarCustomization", "overlayHiding"]);
+>(["autoUpdate", "overlayHiding"]);
 
 export const AEC_MODE_CONTROL_FLAG_KEY = "aec-mode-control";
 export const AUTO_UPDATE_CONTROL_FLAG_KEY = "auto-update-control";
@@ -93,7 +88,6 @@ export type DesktopRemotePreferences = {
   smartRecording: boolean | null;
   filterMusic: boolean | null;
   prioritizeInputLatency: boolean | null;
-  sidebarCustomization: boolean | null;
   overlayHiding: boolean | null;
   aecMode: AecMode | null;
 };
@@ -110,7 +104,6 @@ export type RemoteControllableSettings = {
   experimentalMeetingPiggyback?: boolean;
   filterMusic?: boolean;
   prioritizeInputLatency?: boolean;
-  enableSidebarCustomization?: boolean;
   allowHidingShortcutOverlay?: boolean;
   aecMode?: AecMode;
   screenpipeAecEnabled?: boolean;
@@ -138,7 +131,6 @@ export const LOCAL_DESKTOP_REMOTE_POLICY: DesktopRemotePolicySnapshot = {
     smartRecording: localBooleanPolicy("smartRecording"),
     filterMusic: localBooleanPolicy("filterMusic"),
     prioritizeInputLatency: localBooleanPolicy("prioritizeInputLatency"),
-    sidebarCustomization: localBooleanPolicy("sidebarCustomization"),
     overlayHiding: localBooleanPolicy("overlayHiding"),
   },
   aecMode: {
@@ -157,7 +149,6 @@ export const NEW_INSTALL_REMOTE_CONTROL_PREFERENCES: DesktopRemotePreferences =
     smartRecording: null,
     filterMusic: null,
     prioritizeInputLatency: null,
-    sidebarCustomization: null,
     overlayHiding: null,
     aecMode: null,
   };
@@ -217,9 +208,6 @@ export function cloneLocalDesktopRemotePolicy(): DesktopRemotePolicySnapshot {
       filterMusic: { ...LOCAL_DESKTOP_REMOTE_POLICY.boolean.filterMusic },
       prioritizeInputLatency: {
         ...LOCAL_DESKTOP_REMOTE_POLICY.boolean.prioritizeInputLatency,
-      },
-      sidebarCustomization: {
-        ...LOCAL_DESKTOP_REMOTE_POLICY.boolean.sidebarCustomization,
       },
       overlayHiding: { ...LOCAL_DESKTOP_REMOTE_POLICY.boolean.overlayHiding },
     },
@@ -313,7 +301,11 @@ export function normalizeDesktopRemotePolicySnapshot(
   ) as BooleanRemoteControlKey[];
   if (
     Object.keys(boolean).some(
-      (key) => !controlKeys.includes(key as BooleanRemoteControlKey),
+      // Sidebar customization graduated from its rollout. Accept and drop the
+      // old snapshot key so upgrading does not reset unrelated remote policy.
+      (key) =>
+        key !== "sidebarCustomization" &&
+        !controlKeys.includes(key as BooleanRemoteControlKey),
     ) ||
     !isAecModeRemotePolicy(candidate.aecMode)
   ) {
@@ -376,12 +368,6 @@ export function readDesktopRemotePolicySnapshot(
         "prioritizeInputLatency",
         payloadForFlag(
           BOOLEAN_REMOTE_CONTROL_DEFINITIONS.prioritizeInputLatency.flagKey,
-        ),
-      ),
-      sidebarCustomization: parseBooleanRemotePolicy(
-        "sidebarCustomization",
-        payloadForFlag(
-          BOOLEAN_REMOTE_CONTROL_DEFINITIONS.sidebarCustomization.flagKey,
         ),
       ),
       overlayHiding: parseBooleanRemotePolicy(
@@ -500,11 +486,6 @@ export function normalizeDesktopRemotePreferences(
     )
       ? current.prioritizeInputLatency
       : Boolean(settings.prioritizeInputLatency ?? false),
-    sidebarCustomization: validBooleanPreference(current?.sidebarCustomization)
-      ? current.sidebarCustomization
-      : // Existing installs never chose; leave them on the rollout default
-        // instead of freezing today's (off) value as an explicit opt-out.
-        null,
     // Always null. Nothing lets a user grant themselves the ability to hide
     // the overlay, so this control must track the remote default forever — a
     // seeded `false` would make flipping the flag on a no-op.
@@ -617,13 +598,6 @@ export function buildDesktopRemoteControlPatch(
       settings.platform,
       parseManagedBoolean(managed.prioritizeInputLatency),
     ),
-    sidebarCustomization: resolveBooleanRemoteControlValue(
-      "sidebarCustomization",
-      preferences.sidebarCustomization,
-      booleanPolicyOf(policy, "sidebarCustomization"),
-      settings.platform,
-      parseManagedBoolean(managed.enableSidebarCustomization),
-    ),
     overlayHiding: resolveBooleanRemoteControlValue(
       "overlayHiding",
       preferences.overlayHiding,
@@ -681,14 +655,6 @@ export function buildDesktopRemoteControlPatch(
   if (settings.prioritizeInputLatency !== effective.prioritizeInputLatency) {
     patch.prioritizeInputLatency = effective.prioritizeInputLatency;
     changedControls.push("prioritizeInputLatency");
-  }
-
-  if (
-    Boolean(settings.enableSidebarCustomization) !==
-    effective.sidebarCustomization
-  ) {
-    patch.enableSidebarCustomization = effective.sidebarCustomization;
-    changedControls.push("sidebarCustomization");
   }
 
   if (

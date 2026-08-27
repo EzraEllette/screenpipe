@@ -4,7 +4,11 @@
 
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { SidebarNavList, type SidebarNavItem } from "../sidebar-nav-list";
+import {
+  SidebarCustomizationMenu,
+  SidebarNavList,
+  type SidebarNavItem,
+} from "../sidebar-nav-list";
 import type { SidebarNavId } from "@/lib/utils/sidebar-nav-layout";
 
 const ITEMS: SidebarNavItem[] = [
@@ -24,11 +28,28 @@ function renderList(overrides: Partial<React.ComponentProps<typeof SidebarNavLis
   render(
     <SidebarNavList
       items={ITEMS}
-      hiddenItems={[{ id: "meetings" as SidebarNavId, label: "Meetings" }]}
       activeId="home"
       isTranslucent={false}
-      customizable
       canReset={false}
+      {...handlers}
+      {...overrides}
+    />,
+  );
+  return handlers;
+}
+
+function renderCustomizationMenu(
+  overrides: Partial<React.ComponentProps<typeof SidebarCustomizationMenu>> = {},
+) {
+  const handlers = {
+    onSetHidden: vi.fn(),
+    onReset: vi.fn(),
+  };
+  render(
+    <SidebarCustomizationMenu
+      hiddenItems={[{ id: "meetings" as SidebarNavId, label: "Meetings" }]}
+      isTranslucent={false}
+      canReset
       {...handlers}
       {...overrides}
     />,
@@ -120,19 +141,23 @@ describe("SidebarNavList", () => {
     expect(handlers.onSetHidden).toHaveBeenCalledWith("pipes", true);
   });
 
-  // The strongest products in this space (Linear "More", Notion "Hidden",
-  // Superhuman "Inactive") all give hidden entries a visible home. Restoring
-  // must not require hunting through an unrelated row's menu.
-  it("gives hidden rows a visible home that restores them in one click", () => {
-    const handlers = renderList();
-    expect(screen.getByTestId("sidebar-hidden-strip")).toBeInTheDocument();
-    fireEvent.click(screen.getByTestId("sidebar-show-meetings"));
+  it("restores hidden rows through progressive disclosure", () => {
+    const handlers = renderCustomizationMenu();
+    openDropdown("sidebar-options");
+    fireEvent.click(screen.getByText("Show Meetings"));
     expect(handlers.onSetHidden).toHaveBeenCalledWith("meetings", false);
   });
 
-  it("carries no hidden strip when nothing is hidden", () => {
-    renderList({ hiddenItems: [] });
-    expect(screen.queryByTestId("sidebar-hidden-strip")).toBeNull();
+  it("adds no sidebar-options chrome before the layout changes", () => {
+    renderCustomizationMenu({ hiddenItems: [], canReset: false });
+    expect(screen.queryByTestId("sidebar-options")).toBeNull();
+  });
+
+  it("resets a customized layout from sidebar options", () => {
+    const handlers = renderCustomizationMenu({ hiddenItems: [] });
+    openDropdown("sidebar-options");
+    fireEvent.click(screen.getByTestId("sidebar-options-reset"));
+    expect(handlers.onReset).toHaveBeenCalled();
   });
 
   // Discoverability: right-click and drag are both invisible affordances, so
@@ -164,24 +189,6 @@ describe("SidebarNavList", () => {
     expect(handlers.onReset).toHaveBeenCalled();
   });
 
-  // The rollout gate must leave the pre-customization sidebar untouched: same
-  // rows, same testids, no menu, no drag handles.
-  it("renders plain rows with no menu when the gate is off", () => {
-    renderList({ customizable: false });
-    expect(screen.getByTestId("nav-home")).toBeInTheDocument();
-    rightClick("nav-home");
-    expect(screen.queryByText("Move up")).toBeNull();
-    expect(screen.queryByText("Hide from sidebar")).toBeNull();
-    expect(screen.queryByTestId("nav-home-options")).toBeNull();
-    expect(screen.queryByTestId("sidebar-hidden-strip")).toBeNull();
-  });
-
-  it("still selects sections when the gate is off", () => {
-    const handlers = renderList({ customizable: false });
-    fireEvent.click(screen.getByTestId("nav-pipes"));
-    expect(handlers.onSelect).toHaveBeenCalledWith("pipes");
-  });
-
   it("renders trailing adornments such as the meeting recording dot", () => {
     renderList({
       items: [
@@ -192,7 +199,6 @@ describe("SidebarNavList", () => {
           trailing: <span data-testid="recording-dot" />,
         },
       ],
-      hiddenItems: [],
     });
     expect(screen.getByTestId("recording-dot")).toBeInTheDocument();
   });

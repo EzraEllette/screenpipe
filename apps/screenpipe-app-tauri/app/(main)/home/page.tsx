@@ -48,7 +48,10 @@ import {
   isSidebarNavLayoutDefault,
   type SidebarNavId,
 } from "@/lib/utils/sidebar-nav-layout";
-import { SidebarNavList } from "@/components/sidebar-nav-list";
+import {
+  SidebarCustomizationMenu,
+  SidebarNavList,
+} from "@/components/sidebar-nav-list";
 import { CommandPalette } from "@/components/command-palette";
 import { useToast } from "@/components/ui/use-toast";
 import { ToastAction } from "@/components/ui/toast";
@@ -1095,7 +1098,6 @@ function HomeContent() {
   const meetingsInToolbar =
     !meetingsInSidebar && availableSidebarIds.includes("meetings");
 
-  const sidebarCustomizable = Boolean(settings.enableSidebarCustomization);
   const persistSidebarLayout = (next: ReturnType<typeof normalizeSidebarNavLayout>) => {
     void updateSettings({ sidebarNavLayout: next });
   };
@@ -1112,8 +1114,8 @@ function HomeContent() {
       title: `${label} hidden`,
       description:
         id === "meetings"
-          ? "still one click away from the icon next to search."
-          : "find it under Hidden at the bottom of the sidebar.",
+          ? "still one click away from the icon in the top bar."
+          : "use sidebar options in the top bar to bring it back.",
       action: (
         <ToastAction
           altText={`Show ${label} in the sidebar again`}
@@ -1331,6 +1333,28 @@ function HomeContent() {
               </Tooltip>
             )}
 
+            {!sidebarCollapsed && (
+              <SidebarCustomizationMenu
+                hiddenItems={hiddenSidebarIds.map((id) => ({
+                  id,
+                  label: SIDEBAR_SECTION_DEFS[id].label,
+                }))}
+                isTranslucent={isTranslucent}
+                canReset={!isSidebarNavLayoutDefault(sidebarLayout)}
+                onSetHidden={(id, hidden) => {
+                  persistSidebarLayout(
+                    setSidebarNavItemHidden(
+                      sidebarLayout,
+                      availableSidebarIds,
+                      id,
+                      hidden,
+                    ),
+                  );
+                }}
+                onReset={() => persistSidebarLayout(DEFAULT_SIDEBAR_NAV_LAYOUT)}
+              />
+            )}
+
             {!sidebarCollapsed && meetingsInToolbar && (
               <Tooltip>
                 <TooltipTrigger asChild>
@@ -1395,17 +1419,12 @@ function HomeContent() {
                 conversation lists. */}
             <div className="pt-2 pr-2 pb-2 flex-1 flex flex-col min-h-0">
               {/* Main sections. Order and visibility are the user's — drag a
-                  row or right-click it (behind the sidebar-customization
-                  rollout gate); enterprise policy still decides eligibility. */}
+                  row or right-click it; enterprise policy still decides
+                  eligibility. */}
               <SidebarNavList
                 items={mainSections}
-                hiddenItems={hiddenSidebarIds.map((id) => ({
-                  id,
-                  label: SIDEBAR_SECTION_DEFS[id].label,
-                }))}
                 activeId={activeSection}
                 isTranslucent={isTranslucent}
-                customizable={sidebarCustomizable}
                 canReset={!isSidebarNavLayoutDefault(sidebarLayout)}
                 onSelect={(id) => {
                   setActiveSection(id);

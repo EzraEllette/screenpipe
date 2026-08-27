@@ -12,15 +12,11 @@
 //     and a "…" button appears, the same two cues Notion/Linear/Slack use, and
 //     the "…" opens the identical menu right-click does (one menu, two ways in
 //     — mirroring RowMenuItems in chat-sidebar.tsx).
-//   * Hiding a row used to make it vanish with no trace, and the only way back
-//     was right-clicking a *different* row to find "Show X". Hidden rows now
-//     have a home: a quiet disclosure under the nav listing exactly what is
-//     hidden, one click to bring it back. The control sits next to the thing it
-//     affects instead of inside an unrelated row's menu.
+//   * Hiding should remove chrome, not replace it with a second list. Once the
+//     layout changes, a compact sidebar-options button appears in the top
+//     chrome. Hidden rows live behind that progressive disclosure as explicit
+//     "Show X" actions.
 //
-// When the rollout gate is off this renders plain, non-draggable rows with no
-// menu and no disclosure, so customization behavior remains unchanged.
-
 import React from "react";
 import {
   DndContext,
@@ -41,10 +37,10 @@ import { CSS } from "@dnd-kit/utilities";
 import {
   ArrowDown,
   ArrowUp,
+  Eye,
   EyeOff,
   GripVertical,
   MoreHorizontal,
-  Plus,
   RotateCcw,
 } from "lucide-react";
 import {
@@ -74,12 +70,8 @@ export type SidebarNavItem = {
 
 export type SidebarNavListProps = {
   items: SidebarNavItem[];
-  /** Ids the user can bring back, with their labels, for the hidden strip. */
-  hiddenItems: Array<{ id: SidebarNavId; label: string }>;
   activeId: string;
   isTranslucent: boolean;
-  /** Rollout gate — false renders plain rows with no menu and no strip. */
-  customizable: boolean;
   canReset: boolean;
   onSelect: (id: SidebarNavId) => void;
   onIntent?: (id: SidebarNavId) => void;
@@ -87,6 +79,13 @@ export type SidebarNavListProps = {
   onShift: (id: SidebarNavId, direction: -1 | 1) => void;
   onSetHidden: (id: SidebarNavId, hidden: boolean) => void;
   onReset: () => void;
+};
+
+export type SidebarCustomizationMenuProps = Pick<
+  SidebarNavListProps,
+  "isTranslucent" | "canReset" | "onSetHidden" | "onReset"
+> & {
+  hiddenItems: Array<{ id: SidebarNavId; label: string }>;
 };
 
 const ITEM_CLS =
@@ -109,8 +108,8 @@ function rowClassName(isActive: boolean, isTranslucent: boolean) {
 
 /**
  * One menu, rendered into either the right-click surface or the "…" dropdown.
- * Actions are scoped to this row only — restoring a hidden row belongs to the
- * hidden strip, next to the row it affects.
+ * Actions are scoped to this row only. Restoring hidden rows lives behind the
+ * compact sidebar-options button in the top chrome.
  */
 function RowMenuItems({
   variant,
@@ -305,54 +304,64 @@ function SortableRow({
   );
 }
 
-/**
- * Where hidden rows live. Without this, hiding a row is a one-way door: it
- * vanishes and the user has no visible path back. Rendered only when something
- * is actually hidden, so a stock sidebar carries no extra chrome.
- */
-function HiddenStrip({
+/** Progressive disclosure for restoring hidden rows or resetting the layout. */
+export function SidebarCustomizationMenu({
   hiddenItems,
   isTranslucent,
-  onShow,
-}: {
-  hiddenItems: SidebarNavListProps["hiddenItems"];
-  isTranslucent: boolean;
-  onShow: (id: SidebarNavId) => void;
-}) {
-  if (hiddenItems.length === 0) return null;
+  canReset,
+  onSetHidden,
+  onReset,
+}: SidebarCustomizationMenuProps) {
+  if (!canReset) return null;
   return (
-    <div className="mt-1 space-y-0.5" data-testid="sidebar-hidden-strip">
-      <p className="px-2.5 pt-1 text-[10px] uppercase tracking-wide text-muted-foreground/60">
-        Hidden
-      </p>
-      {hiddenItems.map((hidden) => (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
         <button
-          key={hidden.id}
           type="button"
-          data-testid={`sidebar-show-${hidden.id}`}
-          onClick={() => onShow(hidden.id)}
-          title={`Show ${hidden.label} in the sidebar`}
+          aria-label="sidebar options"
+          title="sidebar options"
+          data-testid="sidebar-options"
+          data-announcement-anchor="top-sidebar-options"
           className={cn(
-            "flex w-full items-center gap-2.5 rounded-md px-2.5 py-1 text-left transition-colors duration-150 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-signal motion-reduce:transition-none",
+            "rounded-md p-1 transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-signal",
             isTranslucent
-              ? "vibrant-nav-item vibrant-nav-hover"
-              : "text-muted-foreground/70 hover:bg-card/50 hover:text-foreground",
+              ? "vibrant-nav-item"
+              : "text-muted-foreground hover:bg-muted/50 hover:text-foreground",
           )}
         >
-          <Plus className="h-3.5 w-3.5 shrink-0" />
-          <span className="text-xs truncate">{hidden.label}</span>
+          <MoreHorizontal className="h-3.5 w-3.5" />
         </button>
-      ))}
-    </div>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" className="w-48">
+        {hiddenItems.map((hidden) => (
+          <DropdownMenuItem
+            key={hidden.id}
+            className={ITEM_CLS}
+            data-testid={`sidebar-show-${hidden.id}`}
+            onSelect={() => onSetHidden(hidden.id, false)}
+          >
+            <Eye />
+            Show {hidden.label}
+          </DropdownMenuItem>
+        ))}
+        {hiddenItems.length > 0 && <DropdownMenuSeparator />}
+        <DropdownMenuItem
+          className={ITEM_CLS}
+          data-testid="sidebar-options-reset"
+          onSelect={onReset}
+        >
+          <RotateCcw />
+          Reset sidebar
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 
 export function SidebarNavList({
   items,
-  hiddenItems,
   activeId,
   isTranslucent,
-  customizable,
   canReset,
   onSelect,
   onIntent,
@@ -367,52 +376,6 @@ export function SidebarNavList({
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   );
-
-  if (!customizable) {
-    return (
-      <div className="space-y-0.5 shrink-0">
-        {items.map((item) => (
-          <button
-            key={item.id}
-            data-testid={`nav-${item.id}`}
-            data-announcement-anchor={`sidebar-${item.id}`}
-            onClick={() => onSelect(item.id)}
-            onMouseEnter={() => onIntent?.(item.id)}
-            onFocus={() => onIntent?.(item.id)}
-            aria-current={activeId === item.id ? "page" : undefined}
-            className={rowClassName(activeId === item.id, isTranslucent)}
-          >
-            <div
-              className={cn(
-                "transition-colors flex-shrink-0",
-                activeId === item.id
-                  ? isTranslucent
-                    ? "vibrant-sidebar-fg"
-                    : "text-signal"
-                  : isTranslucent
-                    ? "vibrant-sidebar-fg-muted"
-                    : "text-muted-foreground group-hover/navrow:text-foreground",
-              )}
-            >
-              {item.icon}
-            </div>
-            <span
-              className={cn(
-                "text-xs truncate",
-                item.trailing && "flex-1",
-                activeId === item.id && isTranslucent
-                  ? "font-semibold vibrant-sidebar-fg"
-                  : "font-medium",
-              )}
-            >
-              {item.label}
-            </span>
-            {item.trailing}
-          </button>
-        ))}
-      </div>
-    );
-  }
 
   const handleDragEnd = (event: DragEndEvent) => {
     const { active, over } = event;
@@ -453,11 +416,6 @@ export function SidebarNavList({
           </div>
         </SortableContext>
       </DndContext>
-      <HiddenStrip
-        hiddenItems={hiddenItems}
-        isTranslucent={isTranslucent}
-        onShow={(id) => onSetHidden(id, false)}
-      />
     </div>
   );
 }

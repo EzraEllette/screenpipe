@@ -133,8 +133,6 @@ describe("desktop remote control", () => {
       smartRecording: true,
       filterMusic: false,
       prioritizeInputLatency: true,
-      // Never chosen: stays null so the rollout default still applies.
-      sidebarCustomization: null,
       overlayHiding: null,
       aecMode: "screenpipe",
     });
@@ -187,13 +185,31 @@ describe("desktop remote control", () => {
           defaultEnabled: false,
           forceDisabled: false,
         },
+        overlayHiding: { defaultEnabled: false, forceDisabled: false },
+      },
+      autoUpdate: { forceEnabled: false },
+    });
+  });
+
+  it("drops the retired sidebar rollout without resetting other policies", () => {
+    const storedPolicy = {
+      ...LOCAL_DESKTOP_REMOTE_POLICY,
+      boolean: {
+        ...LOCAL_DESKTOP_REMOTE_POLICY.boolean,
+        semanticContext: { defaultEnabled: true, forceDisabled: true },
         sidebarCustomization: {
           defaultEnabled: false,
           forceDisabled: false,
         },
-        overlayHiding: { defaultEnabled: false, forceDisabled: false },
       },
-      autoUpdate: { forceEnabled: false },
+    };
+
+    expect(normalizeDesktopRemotePolicySnapshot(storedPolicy)).toEqual({
+      ...LOCAL_DESKTOP_REMOTE_POLICY,
+      boolean: {
+        ...LOCAL_DESKTOP_REMOTE_POLICY.boolean,
+        semanticContext: { defaultEnabled: true, forceDisabled: true },
+      },
     });
   });
 
@@ -389,7 +405,6 @@ describe("desktop remote control", () => {
         experimentalMeetingPiggyback: false,
         filterMusic: true,
         prioritizeInputLatency: false,
-        enableSidebarCustomization: false,
         aecMode: "off",
         screenpipeAecEnabled: false,
         macosInputVpioEnabled: false,
