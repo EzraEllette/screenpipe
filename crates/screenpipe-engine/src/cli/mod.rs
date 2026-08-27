@@ -2151,6 +2151,9 @@ pub enum TeamCommand {
     /// Chronological dump for one device — use after `devices` + `search`
     /// have narrowed down a person and a moment
     Records(TeamRecordsArgs),
+    /// Download one PII-redacted team frame after `search` or `records`
+    /// returns its device and frame ids
+    Frame(TeamFrameArgs),
     /// Manage the organization's hosted Pipes
     Pipes {
         #[command(subcommand)]
@@ -2393,6 +2396,21 @@ pub struct TeamRecordsArgs {
     /// Emit compact JSON-lines (one record per line). Default is pretty JSON.
     #[arg(long)]
     pub raw: bool,
+}
+
+#[derive(Parser, Clone, Debug)]
+pub struct TeamFrameArgs {
+    /// Device id returned by `screenpipe team search` or `records`.
+    #[arg(long)]
+    pub device_id: String,
+
+    /// Frame id returned by `screenpipe team search` or `records`.
+    #[arg(long)]
+    pub frame_id: u64,
+
+    /// New JPEG file to create. Existing files are never overwritten.
+    #[arg(long, value_hint = ValueHint::FilePath)]
+    pub output: PathBuf,
 }
 
 // =============================================================================

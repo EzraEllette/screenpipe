@@ -659,7 +659,7 @@ impl PiExecutor {
     /// app-owned, non-discovered root and return its exact skill file.
     ///
     /// This skill teaches pi how to query org-wide telemetry (devices,
-    /// search, records) via `https://screenpi.pe/api/enterprise/v1/*`. It
+    /// search, records, cited frame images) via the configured Enterprise API. It
     /// MUST only be present inside the separately distributed Enterprise app
     /// when the user is an admin with an active license, because exposing the
     /// prompts to non-admins is misleading (every call would 403) and dropping
@@ -4077,6 +4077,8 @@ mod tests {
         assert!(!consumer_skill.contains("screenpipe team pipes"));
         assert!(enterprise_skill.contains("screenpipe team pipes list"));
         assert!(enterprise_skill.contains("screenpipe team pipes schedule"));
+        assert!(enterprise_skill.contains("screenpipe team frame"));
+        assert!(enterprise_skill.contains("open the JPEG with your image tool"));
         assert!(enterprise_skill.contains("Injected only by the Enterprise app"));
         assert!(!enterprise_skill.contains("curl "));
         assert!(
