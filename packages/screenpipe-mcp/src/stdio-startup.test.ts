@@ -44,7 +44,11 @@ function ensureBuilt(): void {
     ...inputs.filter((f) => fs.existsSync(f)).map((f) => fs.statSync(f).mtimeMs),
   );
   if (builtAt > newestInput) return;
-  execFileSync("npx", ["tsc"], { cwd: PKG_ROOT, stdio: "inherit", timeout: 120000 });
+  execFileSync("bun", ["run", "build"], {
+    cwd: PKG_ROOT,
+    stdio: "inherit",
+    timeout: 120000,
+  });
 }
 
 /**
