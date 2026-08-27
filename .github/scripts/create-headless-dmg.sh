@@ -13,23 +13,22 @@ fi
 app_path="$1"
 output_dmg="$2"
 volume_name="$3"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd "$script_dir/../.." && pwd)"
+background_path="$repo_root/apps/screenpipe-app-tauri/src-tauri/assets/dmg-background.png"
+settings_path="$script_dir/dmgbuild-settings"
 
 [[ -d "$app_path" ]] || { echo "app bundle not found: $app_path" >&2; exit 1; }
+[[ -f "$background_path" ]] || { echo "DMG background not found: $background_path" >&2; exit 1; }
+[[ -f "$settings_path" ]] || { echo "dmgbuild settings not found: $settings_path" >&2; exit 1; }
+command -v dmgbuild >/dev/null || { echo "dmgbuild is required to create the styled DMG" >&2; exit 1; }
 
-stage_dir="$(mktemp -d)"
-cleanup() {
-	rm -rf "$stage_dir"
-}
-trap cleanup EXIT
-
-ditto "$app_path" "$stage_dir/$(basename "$app_path")"
-ln -s /Applications "$stage_dir/Applications"
 mkdir -p "$(dirname "$output_dmg")"
 rm -f "$output_dmg"
 
-hdiutil create \
-	-volname "$volume_name" \
-	-srcfolder "$stage_dir" \
-	-ov \
-	-format UDZO \
+dmgbuild \
+	-s "$settings_path" \
+	-D "app_path=$app_path" \
+	-D "background_path=$background_path" \
+	"$volume_name" \
 	"$output_dmg"
