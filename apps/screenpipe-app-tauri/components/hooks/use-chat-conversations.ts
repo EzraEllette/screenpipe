@@ -51,6 +51,10 @@ import {
   synchronizedActiveTurn,
   toRuntimeMessages,
 } from "@/lib/chat/cross-window-transcript-sync";
+import {
+  isEphemeralSideConversation,
+  isEphemeralSideConversationId,
+} from "@/lib/stores/chat-store";
 
 // --- Hook options ---
 
@@ -623,9 +627,6 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
   ) => {
     if (msgs.length === 0) return;
 
-    const historyEnabled = settings?.chatHistory?.historyEnabled ?? true;
-    if (!historyEnabled) return;
-
     // Bind the save to `conversationId` (React state), NOT
     // `piSessionIdRef.current` (a ref). The ref is updated eagerly inside
     // loadConversation — `piSessionIdRef.current = conv.id` runs before
@@ -659,6 +660,22 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
       piSessionIdRef.current ||
       useChatStore.getState().currentId;
     if (!convId) return;
+
+    // Temporary side conversations live only in the session store. Check the
+    // id registry as well as the live record: closing a side chat can remove
+    // its record while a debounced save from the previous render is still
+    // queued. In that race, the tombstone keeps the late callback off disk.
+    const chatState = useChatStore.getState();
+    if (isEphemeralSideConversationId(chatState, convId)) {
+      if (chatState.sessions[convId]) {
+        chatState.actions.setMessages(convId, msgs as any);
+        chatState.actions.patch(convId, { draft: false });
+      }
+      return;
+    }
+
+    const historyEnabled = settings?.chatHistory?.historyEnabled ?? true;
+    if (!historyEnabled) return;
 
     // Try to load existing conversation to preserve createdAt + title + kind.
     const { loadConversationFile } = await import("@/lib/chat-storage");
@@ -1227,6 +1244,17 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
   const loadConversation = async (conv: ChatConversation | ConversationMeta) => {
     const { useChatStore } = await import("@/lib/stores/chat-store");
     const store = useChatStore.getState();
+
+    // Closing a temporary side chat leaves a session-lifetime tombstone. A
+    // delayed tab/split event must not recreate that id as a normal session or
+    // steal foreground ownership after the user has already closed it.
+    if (
+      !store.sessions[conv.id] &&
+      isEphemeralSideConversationId(store, conv.id)
+    ) {
+      return;
+    }
+
     const outgoingSid = piSessionIdRef.current;
     const viewedAt = Date.now();
 
@@ -1312,12 +1340,16 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
     //     disk would silently drop tokens that arrived since the last
     //     persisted agent_end.
     const existing = store.sessions[conv.id];
+    const incomingIsEphemeralSideChat =
+      isEphemeralSideConversation(existing) ||
+      isEphemeralSideConversationId(store, conv.id);
     const needsPersistedSync =
-      !existing ||
-      !existing.hydratedAt ||
-      !existing.messages ||
-      existing.messages.length === 0 ||
-      existing.titleSource == null;
+      !incomingIsEphemeralSideChat &&
+      (!existing ||
+        !existing.hydratedAt ||
+        !existing.messages ||
+        existing.messages.length === 0 ||
+        existing.titleSource == null);
     let persisted: ChatConversation | null = null;
 
     if (needsPersistedSync) {
@@ -1499,11 +1531,16 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
       store.actions.markHydrated(conv.id);
     }
     store.actions.patch(conv.id, { lastViewedAt: viewedAt });
-    try {
-      await updateConversationFlags(conv.id, { lastViewedAt: viewedAt });
-    } catch {
-      // Best-effort: unread clears live immediately; the next full save can
-      // still persist the watermark if this patch fails.
+    const isEphemeralSideChat =
+      incomingIsEphemeralSideChat ||
+      isEphemeralSideConversationId(useChatStore.getState(), conv.id);
+    if (!isEphemeralSideChat) {
+      try {
+        await updateConversationFlags(conv.id, { lastViewedAt: viewedAt });
+      } catch {
+        // Best-effort: unread clears live immediately; the next full save can
+        // still persist the watermark if this patch fails.
+      }
     }
 
     setMessages(messagesForPanel);
@@ -1533,23 +1570,26 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
       }
     }
 
-    // Update activeConversationId in store
-    try {
-      const { getStore } = await import("@/lib/hooks/use-settings");
-      const store = await getStore();
-      const freshSettings = await store.get<any>("settings");
-      if (freshSettings?.chatHistory) {
-        await store.set("settings", {
-          ...freshSettings,
-          chatHistory: {
-            ...freshSettings.chatHistory,
-            activeConversationId: conv.id,
-          }
-        });
-        await store.save();
+    // A temporary side chat must not become the launch-time restore target.
+    // Keep the durable source conversation as activeConversationId instead.
+    if (!isEphemeralSideChat) {
+      try {
+        const { getStore } = await import("@/lib/hooks/use-settings");
+        const store = await getStore();
+        const freshSettings = await store.get<any>("settings");
+        if (freshSettings?.chatHistory) {
+          await store.set("settings", {
+            ...freshSettings,
+            chatHistory: {
+              ...freshSettings.chatHistory,
+              activeConversationId: conv.id,
+            }
+          });
+          await store.save();
+        }
+      } catch (e) {
+        console.warn("Failed to update active conversation:", e);
       }
-    } catch (e) {
-      console.warn("Failed to update active conversation:", e);
     }
 
     // Emit the preset ID so the chat panel can restore the model selection.
@@ -1721,7 +1761,10 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
   // chat agree from message 0). Passing one avoids the
   // generate-then-overwrite dance which left store.currentId pointing
   // at the throwaway uuid.
-  const startNewConversation = async (explicitId?: string) => {
+  const startNewConversation = async (
+    explicitId?: string,
+    options: { sideConversationParentId?: string } = {},
+  ) => {
     // Snapshot OUTGOING session into the store so the previous chat's
     // in-flight state survives the switch to "new chat". Without this,
     // hitting "+ new chat" in the middle of a stream would silently
@@ -1750,6 +1793,20 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
           pendingDocs: pendingDocsRef ? [...pendingDocsRef.current] : [],
         });
       }
+    }
+
+    // Leaving a temporary side conversation for a brand-new durable chat ends
+    // the side-chat lifecycle. Abort its process, remove its tab/transcript,
+    // and clear the split while retaining the store's id tombstone so any late
+    // autosave remains a no-op.
+    if (
+      outgoingSid &&
+      !options.sideConversationParentId &&
+      isEphemeralSideConversation(store.sessions[outgoingSid])
+    ) {
+      commands.piAbort(outgoingSid).catch(() => {});
+      store.actions.drop(outgoingSid);
+      store.actions.setSplitChat(null);
     }
 
     // Clear panel state
@@ -1796,7 +1853,9 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
       const now = Date.now();
       store.actions.upsert({
         id: newSid,
-        title: "untitled",
+        title: options.sideConversationParentId
+          ? "temporary side chat"
+          : "untitled",
         preview: "",
         status: "idle",
         messageCount: 0,
@@ -1806,6 +1865,13 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
         unread: false,
         draft: true,
         messages: [],
+        ...(options.sideConversationParentId
+          ? {
+              ephemeral: true,
+              sideConversation: true,
+              sideConversationParentId: options.sideConversationParentId,
+            }
+          : {}),
       });
     }
     piSessionIdRef.current = newSid;

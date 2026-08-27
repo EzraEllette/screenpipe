@@ -69,11 +69,55 @@ const TEXT_DELTA_EMIT_BATCH_CHARS: usize = 1_200;
 /// text-delta batching so titles stream visibly token-by-token.
 /// Keep in sync with TypeScript: lib/utils/internal-session.ts → INTERNAL_TITLE_PREFIX
 const TITLE_SESSION_PREFIX: &str = "__title:";
+/// Reserved namespace for temporary side chats. Keep in sync with
+/// `lib/chat/ephemeral-side-conversation.ts`.
+const EPHEMERAL_SIDE_CONVERSATION_PREFIX: &str = "temporary-side-chat-";
 const REQUIRED_PI_EXTENSION_PACKAGE: &str = "npm:pi-subagents";
 const CONVERSATION_HISTORY_OPEN: &str = "<conversation_history>";
 const CONVERSATION_HISTORY_CLOSE: &str = "</conversation_history>";
 const PI_INSTALL_ARGS: [&str; 2] = ["install", "--ignore-scripts"];
 const NPM_INSTALL_ARGS: [&str; 4] = ["install", "--ignore-scripts", "--no-audit", "--no-fund"];
+
+fn is_ephemeral_side_conversation_id(session_id: &str) -> bool {
+    let normalized_id = session_id.to_ascii_lowercase();
+    let Some(candidate) = normalized_id.strip_prefix(EPHEMERAL_SIDE_CONVERSATION_PREFIX) else {
+        return false;
+    };
+    let bytes = candidate.as_bytes();
+    if bytes.len() != 36 {
+        return false;
+    }
+    for (index, byte) in bytes.iter().copied().enumerate() {
+        if matches!(index, 8 | 13 | 18 | 23) {
+            if byte != b'-' {
+                return false;
+            }
+        } else if !byte.is_ascii_hexdigit() {
+            return false;
+        }
+    }
+    matches!(bytes[14], b'1'..=b'5')
+        && matches!(bytes[19].to_ascii_lowercase(), b'8' | b'9' | b'a' | b'b')
+}
+
+fn apply_pi_session_persistence(command: &mut Command, session_id: &str) {
+    if is_ephemeral_side_conversation_id(session_id) {
+        command.arg("--no-session");
+    }
+}
+
+fn ensure_ephemeral_side_chat_backend_supported(
+    session_id: &str,
+    uses_acp: bool,
+) -> Result<(), String> {
+    if is_ephemeral_side_conversation_id(session_id) && uses_acp {
+        return Err(
+            "Temporary side chats do not support coding-agent presets because ACP cannot guarantee ephemeral history"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PiConversationSyncState {
@@ -2727,6 +2771,7 @@ pub async fn pi_start_inner(
         .map_err(|e| format!("Failed to create project directory: {}", e))?;
 
     let use_acp = uses_acp_backend(provider_config.as_ref());
+    ensure_ephemeral_side_chat_backend_supported(session_id, use_acp)?;
 
     if use_acp {
         let acp = provider_config
@@ -3008,6 +3053,7 @@ pub async fn pi_start_inner(
     } else {
         let mut command = build_command_for_path(&pi_path);
         command.args(["--mode", "rpc"]);
+        apply_pi_session_persistence(&mut command, session_id);
         if coding_workspace.is_some() {
             // Never trust executable .pi resources from the selected repository.
             // Screenpipe-managed resources live in the separate runtime directory
@@ -5883,6 +5929,40 @@ mod tests {
     fn managed_pi_installs_disable_dependency_lifecycle_scripts() {
         assert!(super::PI_INSTALL_ARGS.contains(&"--ignore-scripts"));
         assert!(super::NPM_INSTALL_ARGS.contains(&"--ignore-scripts"));
+    }
+
+    #[test]
+    fn temporary_side_chat_ids_disable_pi_session_persistence() {
+        let temporary_id = "temporary-side-chat-123e4567-e89b-42d3-a456-426614174000";
+        assert!(super::is_ephemeral_side_conversation_id(temporary_id));
+        assert!(super::is_ephemeral_side_conversation_id(
+            "TEMPORARY-SIDE-CHAT-123E4567-E89B-42D3-A456-426614174000"
+        ));
+
+        let mut temporary_command = Command::new("pi");
+        super::apply_pi_session_persistence(&mut temporary_command, temporary_id);
+        assert_eq!(
+            temporary_command
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
+            vec!["--no-session".to_string()]
+        );
+        assert!(super::ensure_ephemeral_side_chat_backend_supported(temporary_id, false).is_ok());
+        assert!(super::ensure_ephemeral_side_chat_backend_supported(temporary_id, true).is_err());
+
+        for durable_id in [
+            "123e4567-e89b-42d3-a456-426614174000",
+            "temporary-side-chat-not-a-uuid",
+            "temporary-side-chat-123e4567-e89b-02d3-a456-426614174000",
+            "temporary-side-chat-123e4567-e89b-42d3-c456-426614174000",
+        ] {
+            assert!(!super::is_ephemeral_side_conversation_id(durable_id));
+            let mut durable_command = Command::new("pi");
+            super::apply_pi_session_persistence(&mut durable_command, durable_id);
+            assert_eq!(durable_command.get_args().count(), 0);
+            assert!(super::ensure_ephemeral_side_chat_backend_supported(durable_id, true).is_ok());
+        }
     }
 
     #[test]

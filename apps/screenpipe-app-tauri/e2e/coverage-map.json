@@ -1253,6 +1253,27 @@
       "notes": "Multiple file previews stay open in the chat right panel, preserve selection across hide and show, and close with predictable focus fallback."
     },
     {
+      "spec": "chat-selected-text-side-chat.spec.ts",
+      "platforms": [
+        "windows",
+        "macos",
+        "linux"
+      ],
+      "layers": [
+        "chat-ai",
+        "real-ui-e2e"
+      ],
+      "features": [
+        "chat",
+        "selected-text-actions",
+        "side-chat"
+      ],
+      "criticality": "high",
+      "confidence": "strong",
+      "ux": "real-user-flow",
+      "notes": "Selecting rendered assistant text exposes the current-chat and temporary side-chat actions. Add to chat keeps the active conversation; ask in side chat creates an editable unsent composer on the right while its source remains visible on the left. Sent side-chat content stays absent from Recents and disk, nested side chats are unavailable, replacement removes the old temporary session, and close restores the source without an orphan pane."
+    },
+    {
       "spec": "chat-workspace-tabs.spec.ts",
       "platforms": [
         "windows",

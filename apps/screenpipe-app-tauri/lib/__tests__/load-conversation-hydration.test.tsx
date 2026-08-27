@@ -6,8 +6,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, renderHook } from "@testing-library/react";
 import { useRef } from "react";
 
-const { loadConversationFile } = vi.hoisted(() => ({
+const {
+  loadConversationFile,
+  updateConversationFlags,
+  getStore,
+  settingsSet,
+  settingsSave,
+} = vi.hoisted(() => ({
   loadConversationFile: vi.fn(),
+  updateConversationFlags: vi.fn(async () => undefined),
+  settingsSet: vi.fn(async () => undefined),
+  settingsSave: vi.fn(async () => undefined),
+  getStore: vi.fn(),
 }));
 
 vi.mock("@/lib/chat-storage", () => ({
@@ -20,7 +30,7 @@ vi.mock("@/lib/chat-storage", () => ({
   searchConversations: vi.fn(async () => []),
   migrateFromStoreBin: vi.fn(async () => undefined),
   conversationDedupIdentity: vi.fn(() => null),
-  updateConversationFlags: vi.fn(async () => undefined),
+  updateConversationFlags,
   CHAT_HISTORY_INITIAL_LIMIT: 50,
 }));
 
@@ -32,11 +42,7 @@ vi.mock("@tauri-apps/api/event", () => ({
 vi.mock("@/lib/utils/tauri", () => ({ commands: {} }));
 
 vi.mock("@/lib/hooks/use-settings", () => ({
-  getStore: vi.fn(async () => ({
-    get: vi.fn(async () => ({})),
-    set: vi.fn(async () => undefined),
-    save: vi.fn(async () => undefined),
-  })),
+  getStore,
 }));
 
 import { useChatConversations } from "../../components/hooks/use-chat-conversations";
@@ -132,7 +138,21 @@ function useHarness() {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  useChatStore.setState({ sessions: {}, currentId: null, panelSessionId: null });
+  getStore.mockResolvedValue({
+    get: vi.fn(async () => ({
+      chatHistory: { activeConversationId: "chat-source" },
+    })),
+    set: settingsSet,
+    save: settingsSave,
+  });
+  useChatStore.setState({
+    sessions: {},
+    ephemeralSideConversationIds: {},
+    openChatIds: [],
+    splitChatId: null,
+    currentId: null,
+    panelSessionId: null,
+  });
 });
 
 afterEach(() => vi.clearAllMocks());
@@ -264,5 +284,46 @@ describe("direct conversation hydration", () => {
       user,
       completed,
     ]);
+  });
+
+  it("loads a live temporary side chat only from memory", async () => {
+    seedStore([user, completed], {
+      ephemeral: true,
+      sideConversation: true,
+      sideConversationParentId: "chat-source",
+      hydratedAt: 10,
+    });
+    const { result } = renderHook(() => useHarness());
+
+    await act(async () => {
+      await result.current.hook.loadConversation(conversation([]) as any);
+    });
+
+    expect(loadConversationFile).not.toHaveBeenCalled();
+    expect(updateConversationFlags).not.toHaveBeenCalled();
+    expect(getStore).not.toHaveBeenCalled();
+    expect(result.current.messagesRef.current).toEqual([user, completed]);
+  });
+
+  it("ignores a stale load after a temporary side chat is closed", async () => {
+    seedStore([user], {
+      ephemeral: true,
+      sideConversation: true,
+      sideConversationParentId: "chat-source",
+    });
+    useChatStore.getState().actions.drop("chat-target");
+    const { result } = renderHook(() => useHarness());
+
+    await act(async () => {
+      await result.current.hook.loadConversation(conversation([user]) as any);
+    });
+
+    const state = useChatStore.getState();
+    expect(loadConversationFile).not.toHaveBeenCalled();
+    expect(updateConversationFlags).not.toHaveBeenCalled();
+    expect(getStore).not.toHaveBeenCalled();
+    expect(state.sessions["chat-target"]).toBeUndefined();
+    expect(state.ephemeralSideConversationIds["chat-target"]).toBe(true);
+    expect(result.current.messagesRef.current).toEqual([]);
   });
 });

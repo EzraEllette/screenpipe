@@ -14,6 +14,7 @@ import {
 } from "@/components/ui/context-menu";
 import { isInjectedTitle } from "@/lib/chat-utils";
 import {
+  isEphemeralSideConversation,
   useChatActions,
   useChatStore,
   type SessionRecord,
@@ -24,9 +25,11 @@ interface ChatTabStripProps {
   activeId: string | null;
   onActivate: (id: string) => void | Promise<void>;
   onNewChat: () => void | Promise<void>;
+  onClose?: (id: string) => void | Promise<void>;
 }
 
 function visibleTabTitle(session: SessionRecord): string {
+  if (isEphemeralSideConversation(session)) return "temporary side chat";
   if (session.streamingTitle?.trim()) return session.streamingTitle.trim();
   const title = session.title.trim();
   if (!title || isInjectedTitle(title)) return "new chat";
@@ -51,6 +54,7 @@ export function ChatTabStrip({
   activeId,
   onActivate,
   onNewChat,
+  onClose,
 }: ChatTabStripProps) {
   const sessions = useChatStore((state) => state.sessions);
   const openChatIds = useChatStore((state) => state.openChatIds);
@@ -112,6 +116,7 @@ export function ChatTabStrip({
     const index = tabs.findIndex((tab) => tab.id === id);
     const fallback = tabs[index + 1] ?? tabs[index - 1] ?? null;
     if (id === activeId) closingActiveIdRef.current = id;
+    void onClose?.(id);
     actions.closeChat(id);
     if (id !== activeId) return;
     if (fallback?.id === splitChatId) actions.setSplitChat(null);
@@ -151,6 +156,7 @@ export function ChatTabStrip({
           const title = visibleTabTitle(session);
           const status = tabStatus(session);
           const codingWorkspace = session.codingWorkspace;
+          const temporary = isEphemeralSideConversation(session);
           const hasTabsToRight = index < tabs.length - 1;
 
           return (
@@ -181,6 +187,7 @@ export function ChatTabStrip({
                       codingWorkspace
                         ? `worktree · ${codingWorkspace.repoName}`
                         : null,
+                      temporary ? "not saved to history" : null,
                       split ? "split pane" : null,
                     ]
                       .filter(Boolean)
@@ -260,7 +267,7 @@ export function ChatTabStrip({
               </ContextMenuTrigger>
               <ContextMenuContent className="w-48">
                 <ContextMenuItem
-                  disabled={active || split}
+                  disabled={active || split || temporary}
                   onSelect={() => {
                     closeContextMenu();
                     actions.setSplitChat(session.id);
@@ -288,9 +295,12 @@ export function ChatTabStrip({
                   Close tab
                 </ContextMenuItem>
                 <ContextMenuItem
-                  disabled={tabs.length <= 1}
+                  disabled={tabs.length <= 1 || temporary}
                   onSelect={() => {
                     closeContextMenu();
+                    tabs
+                      .filter((tab) => tab.id !== session.id)
+                      .forEach((tab) => void onClose?.(tab.id));
                     actions.closeOtherChats(session.id);
                     if (!active) void onActivate(session.id);
                   }}
@@ -301,6 +311,9 @@ export function ChatTabStrip({
                   disabled={!hasTabsToRight}
                   onSelect={() => {
                     closeContextMenu();
+                    tabs
+                      .slice(index + 1)
+                      .forEach((tab) => void onClose?.(tab.id));
                     const activeIndex = tabs.findIndex(
                       (tab) => tab.id === activeId,
                     );

@@ -9,11 +9,15 @@ import { MessageContent } from "@/components/chat/standalone/message-content";
 import { Button } from "@/components/ui/button";
 import type { Message } from "@/lib/chat/types";
 import { isInjectedTitle } from "@/lib/chat-utils";
-import { useChatStore } from "@/lib/stores/chat-store";
+import {
+  useChatStore,
+  type SplitChatPosition,
+} from "@/lib/stores/chat-store";
 import { cn } from "@/lib/utils";
 
 interface ChatSplitPaneProps {
   sessionId: string;
+  side?: SplitChatPosition;
   onPromote: (id: string) => void | Promise<void>;
   onClose: () => void;
 }
@@ -30,6 +34,7 @@ function isMessage(value: unknown): value is Message {
 
 export function ChatSplitPane({
   sessionId,
+  side = "right",
   onPromote,
   onClose,
 }: ChatSplitPaneProps) {
@@ -58,9 +63,15 @@ export function ChatSplitPane({
 
   return (
     <section
-      className="flex min-h-0 min-w-[320px] basis-[42%] flex-col border-l border-border/60 bg-background"
+      className={cn(
+        "flex min-h-0 min-w-[320px] basis-[42%] flex-col bg-background",
+        side === "left"
+          ? "order-first border-r border-border/60"
+          : "border-l border-border/60",
+      )}
       aria-label={`Split view: ${title}`}
       data-testid="chat-split-pane"
+      data-side={side}
     >
       <header className="flex h-10 shrink-0 items-center gap-2 border-b border-border/50 px-3">
         {working ? (

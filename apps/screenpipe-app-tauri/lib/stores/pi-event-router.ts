@@ -82,6 +82,7 @@ import type { Message } from "@/lib/chat/types";
 import { isPendingAgentActionMessage } from "@/lib/chat/message-rendering";
 import {
   getPersistedViewedAt,
+  isEphemeralSideConversationId,
   useChatStore,
   isSessionForeground,
   sessionRecordFromMeta,
@@ -197,6 +198,18 @@ export async function handlePiEvent(envelope: AgentEventEnvelope) {
   if (!sid || !inner) return; // events without a session id or body can't be routed
   // Internal Pi sessions (title generation, etc.) — never routed to chat store
   if (isInternalAgentSession(sid)) return;
+  // A closed side chat can still have buffered backend events in flight. The
+  // tombstone blocks those in the creating renderer, while the reserved id
+  // namespace blocks them after reload and in other renderers that never held
+  // the temporary record. Without this guard, the lazy-create path below would
+  // resurrect the chat as a durable "untitled" history row.
+  const initialChatState = useChatStore.getState();
+  if (
+    !initialChatState.sessions[sid] &&
+    isEphemeralSideConversationId(initialChatState, sid)
+  ) {
+    return;
+  }
   // ACP adapters advertise their model/mode selectors per session. Pure
   // runtime metadata: capture it for the composer picker and stop — it must
   // not lazy-create a chat row or touch message content.
@@ -954,10 +967,15 @@ const saveQueue = new Map<string, Promise<void>>();
  *  the window closes. Used by the close-on-quit hook in
  *  `mountPiEventRouter`. */
 export async function flushPendingSaves(): Promise<void> {
-  const sessions = useChatStore.getState().sessions;
+  const state = useChatStore.getState();
+  const sessions = state.sessions;
   const ids = Object.keys(sessions).filter((id) => {
     const s = sessions[id];
-    return !!s.messages && s.messages.length > 0;
+    return (
+      !isEphemeralSideConversationId(state, id) &&
+      !!s.messages &&
+      s.messages.length > 0
+    );
   });
   await Promise.all(ids.map((id) => persistBackgroundSession(id)));
   // Also await any queue tails that were already in-flight before this
@@ -991,7 +1009,9 @@ async function persistBackgroundSession(
   const next = prev
     .catch(() => undefined)
     .then(async () => {
-      const session = useChatStore.getState().sessions[sid];
+      const state = useChatStore.getState();
+      if (isEphemeralSideConversationId(state, sid)) return;
+      const session = state.sessions[sid];
       if (!session) return;
       // Pipe transcripts are persisted by their dedicated writers. This guard
       // also protects close/termination flushes from overwriting a recorder

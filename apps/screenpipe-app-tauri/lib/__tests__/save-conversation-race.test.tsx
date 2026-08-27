@@ -163,7 +163,12 @@ beforeEach(() => {
   notifySaveStarted = null;
   deleteCachedBrowserState("chat-A");
   deleteCachedBrowserState("fresh-sid");
-  useChatStore.setState({ sessions: {}, currentId: null, panelSessionId: null });
+  useChatStore.setState({
+    sessions: {},
+    ephemeralSideConversationIds: {},
+    currentId: null,
+    panelSessionId: null,
+  });
 });
 
 afterEach(() => {
@@ -171,6 +176,55 @@ afterEach(() => {
 });
 
 describe("saveConversation race (PR #3600 / issue #3636 candidate)", () => {
+  it("keeps temporary side conversations off disk, including a late post-close save", async () => {
+    const messages = [
+      { id: "u1", role: "user" as const, content: "temporary question", timestamp: 1 },
+      { id: "a1", role: "assistant" as const, content: "temporary answer", timestamp: 2 },
+    ];
+    useChatStore.getState().actions.upsert({
+      id: "temporary-side",
+      title: "temporary side chat",
+      preview: "temporary answer",
+      status: "idle",
+      messageCount: messages.length,
+      createdAt: 1,
+      updatedAt: 2,
+      pinned: false,
+      unread: false,
+      draft: false,
+      messages,
+      ephemeral: true,
+      sideConversation: true,
+      sideConversationParentId: "source",
+    });
+
+    const { result } = renderHook(() =>
+      useHarness({
+        initialMessages: messages,
+        initialConversationId: "temporary-side",
+        initialPiSessionId: "temporary-side",
+      }),
+    );
+
+    await act(async () => {
+      await result.current.hook.saveConversation(messages);
+    });
+    expect(saveCalls).toHaveLength(0);
+    expect(loadConversationFile).not.toHaveBeenCalled();
+    expect(useChatStore.getState().sessions["temporary-side"].messages).toEqual(messages);
+
+    // Closing drops the heavy transcript, but the id tombstone survives long
+    // enough to reject a debounced callback from the previous render.
+    useChatStore.getState().actions.drop("temporary-side");
+    await act(async () => {
+      await result.current.hook.saveConversation(messages, {
+        idOverride: "temporary-side",
+      });
+    });
+    expect(saveCalls).toHaveLength(0);
+    expect(loadConversationFile).not.toHaveBeenCalled();
+  });
+
   it("writes A's messages under A's id during chat switch (PR #3600 fix)", async () => {
     // Set up the race condition state that exists for a single render
     // tick after `loadConversation(B)` has run:

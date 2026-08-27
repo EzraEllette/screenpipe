@@ -8,7 +8,10 @@ import { useRef, useState } from "react";
 import { Archive, MoreHorizontal, Pencil, Pin } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import type { Message } from "@/lib/chat/types";
-import { useChatStore } from "@/lib/stores/chat-store";
+import {
+  isEphemeralSideConversation,
+  useChatStore,
+} from "@/lib/stores/chat-store";
 import { resolveVisibleChatTitle } from "@/lib/chat/conversation-title";
 
 interface ChatTitleMenuProps {
@@ -67,7 +70,9 @@ export function ChatTitleMenu({
   // No conversation id OR no real content → don't render. The "+ New"
   // button on the right is enough; no point showing actions for a
   // nothing-chat.
-  if (!conversationId || !title) return null;
+  if (!conversationId || !title || isEphemeralSideConversation(session)) {
+    return null;
+  }
 
   const handleStartRename = () => {
     setDraft(title);

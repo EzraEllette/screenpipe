@@ -24,6 +24,7 @@ import { create } from "zustand";
 import type { ConversationKind, PipeContext } from "@/lib/hooks/use-settings";
 import type { ConversationMeta } from "@/lib/chat-storage";
 import type { ChatTitleSource } from "@/lib/utils/chat-title";
+import { isEphemeralSideConversationNamespaceId } from "@/lib/chat/ephemeral-side-conversation";
 import {
   CONVERSATION_DEDUP_WINDOW_MS,
   conversationDedupIdentity,
@@ -68,6 +69,8 @@ export interface SessionCodingWorkspace {
   branch: string;
   worktreePath: string;
 }
+
+export type SplitChatPosition = "left" | "right";
 
 export interface SessionRecord {
   /** Pi `session_id` — also the uuid used by `commands.piStart`. */
@@ -118,6 +121,16 @@ export interface SessionRecord {
   pinned: boolean;
   /** Archived conversation hidden from recents. */
   hidden?: boolean;
+  /** In-memory-only conversation. Ephemeral conversations are never written
+   *  to chat history, restored after restart, or offered by recent-chat UI. */
+  ephemeral?: boolean;
+  /** True when this ephemeral session is the temporary side conversation for
+   *  another chat. Kept separate from `ephemeral` so future temporary-chat
+   *  surfaces do not accidentally inherit side-pane behavior. */
+  sideConversation?: boolean;
+  /** Durable source conversation kept visible beside this side conversation.
+   *  In-memory only; used to preserve and clean up the two-pane relationship. */
+  sideConversationParentId?: string;
   /** ms since epoch of the most recent time this chat was actively viewed
    *  in the current app session. Ephemeral UI signal for recent-switching;
    *  never persisted to disk and does not affect the sidebar order. */
@@ -200,6 +213,11 @@ export interface SessionRecord {
 interface ChatStoreState {
   /** All known sessions, keyed by id. Includes both alive and on-disk-only. */
   sessions: Record<string, SessionRecord>;
+  /** Session-lifetime tombstones for ephemeral side conversations. A closed
+   *  side chat is removed from `sessions`, but a stale autosave callback may
+   *  still fire afterward. Keeping the id here makes that callback a no-op
+   *  without retaining its transcript in memory. Reset naturally on restart. */
+  ephemeralSideConversationIds: Record<string, true>;
   /** Small, in-memory working set rendered as chat tabs. The sidebar remains
    *  the durable index of every conversation; closing a tab only removes its
    *  id from this list and never archives, deletes, or stops the session. */
@@ -208,6 +226,9 @@ interface ChatStoreState {
    *  Selecting it promotes it to the primary pane and keeps the previous
    *  primary visible here, so only one component owns global agent events. */
   splitChatId: string | null;
+  /** Physical side for the secondary transcript. Selection-created side chats
+   *  keep the source on the left and give the fresh composer the right pane. */
+  splitChatPosition: SplitChatPosition;
   /** True once the initial `~/.screenpipe/chats` scan has finished. */
   diskHydrated: boolean;
   /** Currently FOCUSED session — i.e. the chat the user is actively
@@ -251,7 +272,10 @@ interface ChatStoreActions {
   /** Close every tab after the named tab. */
   closeChatsToRight: (id: string) => void;
   /** Show a second live transcript, or close the split with null. */
-  setSplitChat: (id: string | null) => void;
+  setSplitChat: (
+    id: string | null,
+    position?: SplitChatPosition,
+  ) => void;
   /** Toggle the pinned state. */
   togglePinned: (id: string) => void;
 
@@ -327,6 +351,23 @@ interface ChatStoreActions {
 
 export type ChatStore = ChatStoreState & { actions: ChatStoreActions };
 type ChatSessionsState = Pick<ChatStoreState, "sessions">;
+
+export function isEphemeralSideConversation(
+  session: Pick<SessionRecord, "ephemeral" | "sideConversation"> | undefined,
+): boolean {
+  return session?.ephemeral === true && session.sideConversation === true;
+}
+
+export function isEphemeralSideConversationId(
+  state: Pick<ChatStoreState, "sessions" | "ephemeralSideConversationIds">,
+  id: string,
+): boolean {
+  return (
+    isEphemeralSideConversationNamespaceId(id) ||
+    state.ephemeralSideConversationIds[id] === true ||
+    isEphemeralSideConversation(state.sessions[id])
+  );
+}
 
 export function isSessionForeground(
   state: Pick<ChatStoreState, "currentId" | "panelSessionId">,
@@ -443,8 +484,10 @@ export function getPersistedViewedAt(
 
 export const useChatStore = create<ChatStore>((set) => ({
   sessions: {},
+  ephemeralSideConversationIds: {},
   openChatIds: [],
   splitChatId: null,
+  splitChatPosition: "right",
   diskHydrated: false,
   currentId: null,
   panelSessionId: null,
@@ -457,6 +500,10 @@ export const useChatStore = create<ChatStore>((set) => ({
         // persisted truth.
         const next: Record<string, SessionRecord> = { ...s.sessions };
         for (const r of records) {
+          // A stale save racing a just-closed side chat must not resurrect it.
+          // The reserved id also rejects leaked files after a renderer or app
+          // restart, when the in-memory tombstone is intentionally gone.
+          if (isEphemeralSideConversationId(s, r.id)) continue;
           const existing = next[r.id];
           if (!existing) {
             next[r.id] = r;
@@ -520,7 +567,17 @@ export const useChatStore = create<ChatStore>((set) => ({
           : record;
         // Recompute unread from timestamps so it stays consistent.
         merged.unread = isUnread(merged);
-        return { sessions: { ...s.sessions, [record.id]: merged } };
+        return {
+          sessions: { ...s.sessions, [record.id]: merged },
+          ...(isEphemeralSideConversation(merged)
+            ? {
+                ephemeralSideConversationIds: {
+                  ...s.ephemeralSideConversationIds,
+                  [record.id]: true as const,
+                },
+              }
+            : {}),
+        };
       }),
 
     patch: (id, partial) =>
@@ -546,6 +603,8 @@ export const useChatStore = create<ChatStore>((set) => ({
           sessions: next,
           openChatIds: s.openChatIds.filter((openId) => openId !== id),
           splitChatId: s.splitChatId === id ? null : s.splitChatId,
+          splitChatPosition:
+            s.splitChatId === id ? "right" : s.splitChatPosition,
           currentId: s.currentId === id ? null : s.currentId,
         };
       }),
@@ -611,6 +670,10 @@ export const useChatStore = create<ChatStore>((set) => ({
             s.splitChatId && disposable.has(s.splitChatId)
               ? null
               : s.splitChatId,
+          splitChatPosition:
+            s.splitChatId && disposable.has(s.splitChatId)
+              ? "right"
+              : s.splitChatPosition,
         };
       }),
 
@@ -625,12 +688,15 @@ export const useChatStore = create<ChatStore>((set) => ({
       set((s) => ({
         openChatIds: s.openChatIds.filter((openId) => openId !== id),
         splitChatId: s.splitChatId === id ? null : s.splitChatId,
+        splitChatPosition:
+          s.splitChatId === id ? "right" : s.splitChatPosition,
       })),
 
     closeOtherChats: (id) =>
       set((s) => ({
         openChatIds: s.openChatIds.includes(id) ? [id] : s.openChatIds,
         splitChatId: null,
+        splitChatPosition: "right",
       })),
 
     closeChatsToRight: (id) =>
@@ -644,12 +710,17 @@ export const useChatStore = create<ChatStore>((set) => ({
             s.splitChatId && !openChatIds.includes(s.splitChatId)
               ? null
               : s.splitChatId,
+          splitChatPosition:
+            s.splitChatId && !openChatIds.includes(s.splitChatId)
+              ? "right"
+              : s.splitChatPosition,
         };
       }),
 
-    setSplitChat: (id) =>
+    setSplitChat: (id, position = "right") =>
       set((s) => ({
         splitChatId: id,
+        splitChatPosition: id ? position : "right",
         openChatIds:
           id && !s.openChatIds.includes(id)
             ? [...s.openChatIds, id]
@@ -952,6 +1023,7 @@ export function sessionRecordFromMeta(m: ConversationMeta): SessionRecord {
  * Returns `{ id, isNew }` so callers can decide whether to upsert.
  */
 export function isReusableBlankChatSession(s: SessionRecord): boolean {
+  if (isEphemeralSideConversation(s)) return false;
   if (!s.draft) return false;
   // A live draft owns an in-memory message buffer. Hydrated zero-message files
   // are marked draft to keep them out of Recents, but intentionally carry no
@@ -1191,7 +1263,9 @@ export function isEmptyChatShell(s: SessionRecord): boolean {
 export function selectOrderedSessions(
   state: ChatSessionsState,
 ): SessionRecord[] {
-  const all = dedupeSessionRecords(Object.values(state.sessions));
+  const all = dedupeSessionRecords(Object.values(state.sessions)).filter(
+    (session) => !isEphemeralSideConversation(session),
+  );
   const pinned = all.filter((s) => s.pinned).sort(compareForSidebar);
   const recents = all.filter((s) => !s.pinned).sort(compareForSidebar);
   return [...pinned, ...recents];

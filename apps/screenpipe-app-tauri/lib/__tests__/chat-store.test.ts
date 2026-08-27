@@ -21,14 +21,21 @@ import {
   selectDisplayedChatId,
   applyChatSessionActivity,
   ensureBlankChatSession,
+  isEphemeralSideConversationId,
   type SessionRecord,
   type ChatSessionActivityPayload,
 } from "../stores/chat-store";
 import { conversationDedupIdentity } from "../chat-dedup";
+import {
+  createEphemeralSideConversationId,
+  filterEphemeralSideConversationPresets,
+  isEphemeralSideConversationNamespaceId,
+} from "../chat/ephemeral-side-conversation";
 
 function reset() {
   useChatStore.setState({
     sessions: {},
+    ephemeralSideConversationIds: {},
     openChatIds: [],
     splitChatId: null,
     currentId: null,
@@ -63,6 +70,93 @@ describe("chat-store: tab and split working set", () => {
     actions.drop("B");
     expect(useChatStore.getState().splitChatId).toBeNull();
     expect(useChatStore.getState().openChatIds).toEqual(["A"]);
+  });
+});
+
+describe("chat-store: temporary side conversations", () => {
+  beforeEach(reset);
+
+  it("creates a reserved id that remains recognizable without store state", () => {
+    const id = createEphemeralSideConversationId();
+
+    expect(isEphemeralSideConversationNamespaceId(id)).toBe(true);
+    expect(
+      isEphemeralSideConversationId(
+        { sessions: {}, ephemeralSideConversationIds: {} },
+        id,
+      ),
+    ).toBe(true);
+    expect(isEphemeralSideConversationNamespaceId("temporary-side-chat-not-a-uuid"))
+      .toBe(false);
+  });
+
+  it("removes ACP presets because their history cannot be guaranteed ephemeral", () => {
+    const nativePreset = { id: "native", provider: "screenpipe-cloud" };
+    const acpPreset = { id: "agent", provider: "acp" };
+
+    expect(
+      filterEphemeralSideConversationPresets([nativePreset, acpPreset]),
+    ).toEqual([nativePreset]);
+  });
+
+  it("never surfaces or reuses a side conversation, even after it has messages", () => {
+    const actions = useChatStore.getState().actions;
+    actions.upsert(baseRecord({
+      id: "source",
+      title: "source chat",
+      messageCount: 1,
+      messages: [{ id: "u1", role: "user", content: "source", timestamp: 1 }],
+      lastViewedAt: 10,
+    }));
+    actions.upsert(baseRecord({
+      id: "temporary-side",
+      title: "temporary side chat",
+      messageCount: 2,
+      messages: [
+        { id: "u2", role: "user", content: "question", timestamp: 2 },
+        { id: "a2", role: "assistant", content: "answer", timestamp: 3 },
+      ],
+      draft: false,
+      lastViewedAt: 20,
+      ephemeral: true,
+      sideConversation: true,
+      sideConversationParentId: "source",
+    }));
+
+    expect(selectOrderedSessions(useChatStore.getState()).map((s) => s.id)).toEqual([
+      "source",
+    ]);
+    expect(
+      selectRecentSwitcherSessions(useChatStore.getState()).map((s) => s.id),
+    ).toEqual(["source"]);
+    expect(
+      isReusableBlankChatSession(useChatStore.getState().sessions["temporary-side"]),
+    ).toBe(false);
+  });
+
+  it("keeps an id tombstone after close so late saves cannot resurrect it", () => {
+    const actions = useChatStore.getState().actions;
+    actions.upsert(baseRecord({
+      id: "temporary-side",
+      ephemeral: true,
+      sideConversation: true,
+      sideConversationParentId: "source",
+    }));
+    actions.drop("temporary-side");
+
+    const state = useChatStore.getState();
+    expect(state.sessions["temporary-side"]).toBeUndefined();
+    expect(isEphemeralSideConversationId(state, "temporary-side")).toBe(true);
+  });
+
+  it("rejects a leaked namespaced disk record after in-memory state resets", () => {
+    const id = "temporary-side-chat-11111111-1111-4111-8111-111111111111";
+
+    useChatStore.getState().actions.hydrateFromDisk([
+      baseRecord({ id, messageCount: 1, draft: false }),
+    ]);
+
+    expect(useChatStore.getState().sessions[id]).toBeUndefined();
   });
 });
 

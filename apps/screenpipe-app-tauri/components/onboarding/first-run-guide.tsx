@@ -181,6 +181,7 @@ export default function FirstRunGuide({
       if (!trackedSessionRef.current) {
         const fresh = Object.values(state.sessions).find(
           (s) =>
+            !(s.ephemeral === true && s.sideConversation === true) &&
             (s.kind === undefined || s.kind === "chat") &&
             (s.lastUserMessageAt ?? 0) > sendBaselineRef.current,
         );

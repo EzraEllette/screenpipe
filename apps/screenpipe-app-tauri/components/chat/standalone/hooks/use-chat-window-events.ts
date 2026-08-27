@@ -17,7 +17,10 @@ import type { ContentBlock, Message, OptimisticSteerPayload } from "@/lib/chat/t
 import { normalizeImageDataUrls } from "@/lib/chat/image-content";
 import type { ChatConversation } from "@/lib/hooks/use-settings";
 import type { AIPreset } from "@/lib/utils/tauri";
-import { useChatStore } from "@/lib/stores/chat-store";
+import {
+  isEphemeralSideConversation,
+  useChatStore,
+} from "@/lib/stores/chat-store";
 import { useChatPrefillEvents } from "@/components/chat/standalone/hooks/use-chat-prefill-events";
 
 type SendMessageRef = React.MutableRefObject<
@@ -286,7 +289,10 @@ export function useChatConversationRoutingEvents({
     }
 
     const session = useChatStore.getState().sessions[convId];
-    if (session?.messages && session.messages.length > 0) {
+    if (
+      isEphemeralSideConversation(session) ||
+      (session?.messages && session.messages.length > 0)
+    ) {
       loadConversationRef.current({
         id: convId,
         title: session.title || "untitled",

@@ -55,4 +55,24 @@ describe("ChatSplitPane", () => {
     fireEvent.click(screen.getByRole("button", { name: "Close split view" }));
     expect(onClose).toHaveBeenCalledTimes(1);
   });
+
+  it("can keep the source transcript left of an active side-chat composer", () => {
+    render(
+      <ChatSplitPane
+        sessionId="split-chat"
+        side="left"
+        onPromote={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("chat-split-pane")).toHaveAttribute(
+      "data-side",
+      "left",
+    );
+    expect(screen.getByTestId("chat-split-pane")).toHaveClass(
+      "order-first",
+      "border-r",
+    );
+  });
 });

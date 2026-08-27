@@ -11,6 +11,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { SourceCitationFooter } from "@/components/chat/source-citation-footer";
 import { CollapsedSteerWorkRow } from "@/components/chat/standalone/collapsed-steer-work-row";
 import { ChatResponseFeedback } from "@/components/chat/standalone/chat-response-feedback";
+import { SelectedTextActions } from "@/components/chat/standalone/selected-text-actions";
 import {
   chatResponseValueActionProperties,
   chatTelemetryContextForResponse,
@@ -110,6 +111,8 @@ export interface ChatMessageListProps {
   onDismissConnectionAction?: (messageId: string, connectionId: string) => void;
   onAnswerAgentAction?: (block: Extract<ContentBlock, { type: "agent_action" }>, selectedOptionId?: string) => Promise<boolean> | boolean;
   onAskUserReply?: (reply: string, displayLabel: string) => Promise<void> | void;
+  onAddSelectedTextToChat?: (text: string) => void;
+  onAskSelectedTextInSideChat?: (text: string) => void | Promise<void>;
   suppressSourceFooters?: boolean;
 }
 
@@ -152,6 +155,8 @@ export function ChatMessageList({
   onDismissConnectionAction,
   onAnswerAgentAction,
   onAskUserReply,
+  onAddSelectedTextToChat,
+  onAskSelectedTextInSideChat,
   suppressSourceFooters = false,
 }: ChatMessageListProps) {
   // Null unless an ACP agent is installing/starting. Ticks only while it is.
@@ -225,6 +230,12 @@ export function ChatMessageList({
 
   return (
     <>
+      {onAddSelectedTextToChat ? (
+        <SelectedTextActions
+          onAddToChat={onAddSelectedTextToChat}
+          onAskInSideChat={onAskSelectedTextInSideChat}
+        />
+      ) : null}
       <AnimatePresence mode="popLayout">
         {(() => {
           const renderItems = buildCollapsedSteerRenderItems(visibleMessages, {
@@ -372,6 +383,9 @@ export function ChatMessageList({
                       }
                       data-testid="chat-message-bubble"
                       data-editing={editingMessageId === message.id ? "true" : "false"}
+                      data-selected-text-actions-target={
+                        message.role === "assistant" ? "true" : undefined
+                      }
                     >
                       {editingMessageId === message.id ? (
                         <div

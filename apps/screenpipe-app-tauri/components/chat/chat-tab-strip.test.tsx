@@ -25,8 +25,10 @@ function record(overrides: Partial<SessionRecord>): SessionRecord {
 function resetStore() {
   useChatStore.setState({
     sessions: {},
+    ephemeralSideConversationIds: {},
     openChatIds: [],
     splitChatId: null,
+    splitChatPosition: "right",
     currentId: null,
     panelSessionId: null,
   });
@@ -80,6 +82,7 @@ describe("ChatTabStrip", () => {
     fireEvent.contextMenu(screen.getByRole("tab", { name: "secondary" }));
     fireEvent.click(await screen.findByText("Open in split"));
     expect(useChatStore.getState().splitChatId).toBe("chat-b");
+    expect(useChatStore.getState().splitChatPosition).toBe("right");
     expect(screen.getByLabelText("split pane")).toBeInTheDocument();
     await waitFor(() =>
       expect(screen.queryByText("Open in split")).not.toBeInTheDocument(),
@@ -88,9 +91,55 @@ describe("ChatTabStrip", () => {
     fireEvent.contextMenu(screen.getByRole("tab", { name: "secondary" }));
     fireEvent.click(await screen.findByText("Close split"));
     expect(useChatStore.getState().splitChatId).toBeNull();
+    expect(useChatStore.getState().splitChatPosition).toBe("right");
     await waitFor(() =>
       expect(screen.queryByText("Close split")).not.toBeInTheDocument(),
     );
+  });
+
+  it("tracks a left source pane for selection-created side chats", () => {
+    const actions = useChatStore.getState().actions;
+    actions.upsert(record({ id: "chat-a", title: "source" }));
+
+    actions.setSplitChat("chat-a", "left");
+    expect(useChatStore.getState().splitChatId).toBe("chat-a");
+    expect(useChatStore.getState().splitChatPosition).toBe("left");
+
+    actions.setSplitChat(null);
+    expect(useChatStore.getState().splitChatPosition).toBe("right");
+  });
+
+  it("labels temporary side chats and delegates cleanup when they close", () => {
+    const actions = useChatStore.getState().actions;
+    actions.upsert(record({ id: "source", title: "source" }));
+    actions.upsert(record({
+      id: "temporary-side",
+      title: "ignored title",
+      ephemeral: true,
+      sideConversation: true,
+      sideConversationParentId: "source",
+    }));
+    actions.openChat("source");
+    actions.openChat("temporary-side");
+    actions.setSplitChat("source", "left");
+    const onClose = vi.fn();
+
+    render(
+      <ChatTabStrip
+        activeId="temporary-side"
+        onActivate={vi.fn()}
+        onNewChat={vi.fn()}
+        onClose={onClose}
+      />,
+    );
+
+    const tab = screen.getByRole("tab", { name: "temporary side chat" });
+    expect(tab).toHaveAttribute(
+      "title",
+      "temporary side chat · not saved to history",
+    );
+    fireEvent.click(screen.getByLabelText("Close temporary side chat"));
+    expect(onClose).toHaveBeenCalledWith("temporary-side");
   });
 
   it("does not resurrect a closed primary when its split neighbor becomes active", () => {
