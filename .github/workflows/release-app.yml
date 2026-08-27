@@ -480,6 +480,9 @@ jobs:
           echo "/opt/homebrew/bin" >> $GITHUB_PATH
           echo "/opt/homebrew/sbin" >> $GITHUB_PATH
           brew install ffmpeg wget
+          if [[ "${{ runner.environment }}" == "self-hosted" ]]; then
+            brew install python
+          fi
 
       - name: Install dependencies
         if: matrix.os_type == 'linux' && runner.environment == 'github-hosted'
@@ -1460,6 +1463,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          DMGBUILD_VENV="$RUNNER_TEMP/dmgbuild-venv"
+          python3 -m venv "$DMGBUILD_VENV"
+          "$DMGBUILD_VENV/bin/pip" install --disable-pip-version-check "dmgbuild==1.6.7"
+          export PATH="$DMGBUILD_VENV/bin:$PATH"
           TARGET="${{ matrix.target }}"
           BUNDLE_DIR="apps/screenpipe-app-tauri/src-tauri/target/${TARGET}/release/bundle"
           VERSION=$(sed -n 's/^version = "\([^"]*\)"/\1/p' apps/screenpipe-app-tauri/src-tauri/Cargo.toml | head -1)
