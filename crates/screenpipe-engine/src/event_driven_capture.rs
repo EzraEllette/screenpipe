@@ -1903,10 +1903,7 @@ pub(crate) async fn event_driven_capture_loop(
                 // Pre-capture DRM gate: check BEFORE any SCK call.
                 // Uses AX APIs only — prevents even a single leaked frame.
                 {
-                    let trigger_app = match &trigger {
-                        CaptureTrigger::AppSwitch { app_name, .. } => Some(app_name.as_str()),
-                        _ => None,
-                    };
+                    let trigger_app = drm_trigger_app_name(&trigger);
                     if crate::drm_detector::pre_capture_drm_check(pause_on_drm_content, trigger_app)
                     {
                         debug!(
@@ -2395,6 +2392,38 @@ fn normalize_metadata_value(value: Option<&str>) -> Option<String> {
         .map(str::to_string)
 }
 
+fn should_query_lightweight_focus(trigger: &CaptureTrigger) -> bool {
+    match trigger {
+        CaptureTrigger::AppSwitch { app_name, .. } => app_name.trim().is_empty(),
+        _ => true,
+    }
+}
+
+fn drm_trigger_app_name(trigger: &CaptureTrigger) -> Option<&str> {
+    match trigger {
+        CaptureTrigger::AppSwitch { app_name, .. } => {
+            Some(app_name.trim()).filter(|name| !name.is_empty())
+        }
+        _ => None,
+    }
+}
+
+fn capture_gate_app_name(
+    trigger: &CaptureTrigger,
+    lightweight_metadata: Option<&LightweightFocusedMetadata>,
+) -> Option<String> {
+    match trigger {
+        CaptureTrigger::AppSwitch { app_name, .. } => {
+            normalize_metadata_value(Some(app_name.as_str()))
+        }
+        _ => None,
+    }
+    .or_else(|| {
+        lightweight_metadata
+            .and_then(|metadata| normalize_metadata_value(metadata.app_name.as_deref()))
+    })
+}
+
 fn resolve_capture_metadata(
     tree_snapshot: Option<&screenpipe_a11y::tree::TreeSnapshot>,
     trigger: &CaptureTrigger,
@@ -2458,38 +2487,42 @@ fn resolve_capture_metadata_with_policy(
         CaptureTrigger::AppSwitch {
             app_name: trigger_app_name,
             ..
-        } if !trigger_app_name.is_empty() => {
-            if app_name.as_deref() != Some(trigger_app_name.as_str()) {
-                debug!(
-                    "focused app mismatch on app_switch: trigger='{}', tree={:?}; using trigger value and dropping stale window context",
-                    trigger_app_name, app_name
-                );
-                // App-switch events typically do not carry the new window
-                // title. Keeping the previous tree's title, URL, or document
-                // path would create a metadata pair that never existed.
-                window_name = None;
-                browser_url = None;
-                document_path = None;
+        } => {
+            if let Some(name) = normalize_metadata_value(Some(trigger_app_name.as_str())) {
+                if app_name.as_deref() != Some(name.as_str()) {
+                    debug!(
+                        "focused app mismatch on app_switch: trigger='{}', tree={:?}; using trigger value and dropping stale window context",
+                        trigger_app_name, app_name
+                    );
+                    // App-switch events typically do not carry the new window
+                    // title. Keeping the previous tree's title, URL, or document
+                    // path would create a metadata pair that never existed.
+                    window_name = None;
+                    browser_url = None;
+                    document_path = None;
+                }
+                app_name = Some(name);
             }
-            app_name = Some(trigger_app_name.clone());
         }
         CaptureTrigger::WindowFocus {
             window_name: trigger_window_name,
             ..
-        } if !trigger_window_name.is_empty() => {
-            if window_name.as_deref() != Some(trigger_window_name.as_str()) {
-                debug!(
-                    "focused window mismatch on window_focus: trigger='{}', tree={:?}; using trigger value and dropping stale URL context",
-                    trigger_window_name, window_name
-                );
-                // The trigger can outrun an AX walk during a browser tab or
-                // window switch. Never attach the previous surface's URL or
-                // document to the newly focused title; an active URL
-                // allowlist will fail this capture closed.
-                browser_url = None;
-                document_path = None;
+        } => {
+            if let Some(name) = normalize_metadata_value(Some(trigger_window_name.as_str())) {
+                if window_name.as_deref() != Some(name.as_str()) {
+                    debug!(
+                        "focused window mismatch on window_focus: trigger='{}', tree={:?}; using trigger value and dropping stale URL context",
+                        trigger_window_name, window_name
+                    );
+                    // The trigger can outrun an AX walk during a browser tab or
+                    // window switch. Never attach the previous surface's URL or
+                    // document to the newly focused title; an active URL
+                    // allowlist will fail this capture closed.
+                    browser_url = None;
+                    document_path = None;
+                }
+                window_name = Some(name);
             }
-            window_name = Some(trigger_window_name.clone());
         }
         _ => {}
     }
@@ -2951,9 +2984,8 @@ async fn do_capture(
     // we do a lightweight platform query. This ensures the walk budget applies
     // to ALL captures, not just app switches.
     let lightweight_focused_metadata = if monitor_hosts_focus {
-        match trigger {
-            CaptureTrigger::AppSwitch { .. } => None,
-            _ => match tokio::time::timeout(
+        if should_query_lightweight_focus(trigger) {
+            match tokio::time::timeout(
                 Duration::from_secs(1),
                 tokio::task::spawn_blocking(get_focused_metadata_lightweight),
             )
@@ -2968,18 +3000,15 @@ async fn do_capture(
                     debug!("focused metadata lookup timed out");
                     None
                 }
-            },
+            }
+        } else {
+            None
         }
     } else {
         None
     };
     let trigger_app = if monitor_hosts_focus {
-        match trigger {
-            CaptureTrigger::AppSwitch { app_name, .. } => Some(app_name.clone()),
-            _ => lightweight_focused_metadata
-                .as_ref()
-                .and_then(|metadata| metadata.app_name.clone()),
-        }
+        capture_gate_app_name(trigger, lightweight_focused_metadata.as_ref())
     } else {
         None
     };
@@ -4035,6 +4064,78 @@ mod tests {
     }
 
     #[test]
+    fn blank_app_switch_queries_lightweight_focus() {
+        for app_name in ["", "   ", "\t", "\n"] {
+            let trigger = CaptureTrigger::AppSwitch {
+                app_name: app_name.into(),
+                target: None,
+            };
+
+            assert!(
+                should_query_lightweight_focus(&trigger),
+                "blank app switch {app_name:?} must recover focused metadata"
+            );
+        }
+    }
+
+    #[test]
+    fn named_app_switch_keeps_fast_paths() {
+        let trigger = CaptureTrigger::AppSwitch {
+            app_name: " Finder ".into(),
+            target: None,
+        };
+
+        assert!(!should_query_lightweight_focus(&trigger));
+        assert_eq!(drm_trigger_app_name(&trigger), Some("Finder"));
+        assert_eq!(
+            capture_gate_app_name(&trigger, None).as_deref(),
+            Some("Finder")
+        );
+    }
+
+    #[test]
+    fn blank_app_switch_uses_recovered_app_for_pre_walk_gates() {
+        let metadata = LightweightFocusedMetadata {
+            app_name: Some(" Telegram ".into()),
+            window_name: Some("Lucern Clinic".into()),
+        };
+
+        for app_name in ["", "   ", "\t", "\n"] {
+            let trigger = CaptureTrigger::AppSwitch {
+                app_name: app_name.into(),
+                target: None,
+            };
+
+            let gate_app = capture_gate_app_name(&trigger, Some(&metadata));
+            let (recorded_app, _, _, _) = resolve_capture_metadata(None, &trigger, Some(&metadata));
+
+            assert_eq!(gate_app.as_deref(), Some("Telegram"));
+            assert_eq!(gate_app, recorded_app);
+            assert_eq!(drm_trigger_app_name(&trigger), None);
+        }
+    }
+
+    #[test]
+    fn blank_app_switch_uses_recovered_metadata_without_tree() {
+        let metadata = LightweightFocusedMetadata {
+            app_name: Some("Telegram".into()),
+            window_name: Some("Lucern Clinic".into()),
+        };
+
+        for trigger_app in ["", "   ", "\t", "\n"] {
+            let trigger = CaptureTrigger::AppSwitch {
+                app_name: trigger_app.into(),
+                target: None,
+            };
+            let (app_name, window_name, _, _) =
+                resolve_capture_metadata(None, &trigger, Some(&metadata));
+
+            assert_eq!(app_name.as_deref(), Some("Telegram"));
+            assert_eq!(window_name.as_deref(), Some("Lucern Clinic"));
+        }
+    }
+
+    #[test]
     fn resolve_capture_metadata_uses_lightweight_metadata_when_tree_values_are_blank() {
         let snapshot = screenpipe_a11y::tree::TreeSnapshot {
             app_name: "  ".into(),
@@ -4195,6 +4296,37 @@ mod tests {
         );
 
         assert_eq!(app_name.as_deref(), Some("Telegram"));
+        assert_eq!(window_name.as_deref(), Some("Fresh Title"));
+    }
+
+    #[test]
+    fn resolve_capture_metadata_normalizes_window_focus_trigger_title() {
+        let metadata = LightweightFocusedMetadata {
+            app_name: Some("Telegram".into()),
+            window_name: Some("Recovered Title".into()),
+        };
+
+        for trigger_window in ["", "   ", "\t", "\n"] {
+            let (_, window_name, _, _) = resolve_capture_metadata(
+                None,
+                &CaptureTrigger::WindowFocus {
+                    window_name: trigger_window.into(),
+                    target: None,
+                },
+                Some(&metadata),
+            );
+
+            assert_eq!(window_name.as_deref(), Some("Recovered Title"));
+        }
+
+        let (_, window_name, _, _) = resolve_capture_metadata(
+            None,
+            &CaptureTrigger::WindowFocus {
+                window_name: " Fresh Title ".into(),
+                target: None,
+            },
+            Some(&metadata),
+        );
         assert_eq!(window_name.as_deref(), Some("Fresh Title"));
     }
 
