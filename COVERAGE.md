@@ -24,13 +24,13 @@ results and `cargo llvm-cov` data on top when judging release confidence.
 
 - Mapped specs: 133
 - Declared test blocks: 378
-- Weighted coverage points: 299.7
+- Weighted coverage points: 299.1
 
 | Platform | Specs | Declared tests | Weighted points | Layers | Features | Critical score |
 | --- | --- | --- | --- | --- | --- | --- |
-| windows | 102 | 321 | 264.7 | 15 | 115 | 92% |
-| macos | 129 | 340 | 269.5 | 17 | 123 | 90% |
-| linux | 90 | 279 | 234.1 | 14 | 111 | 89% |
+| windows | 102 | 321 | 264.1 | 15 | 114 | 88% |
+| macos | 129 | 340 | 268.9 | 17 | 122 | 87% |
+| linux | 90 | 279 | 233.5 | 14 | 110 | 84% |
 
 ### Core Engine
 

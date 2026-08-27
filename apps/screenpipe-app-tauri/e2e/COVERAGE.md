@@ -12,7 +12,7 @@ and layer declared in the manifest, weighted by confidence and criticality.
 - Specs directory: `e2e/specs`
 - Mapped specs: 133
 - Declared test blocks: 378
-- Weighted coverage points: 299.7
+- Weighted coverage points: 299.1
 
 Confidence weights: strong=1.0, partial=0.7, conditional=0.4, smoke=0.3.
 Criticality weights: high=1.0, medium=0.7, low=0.4.
@@ -23,9 +23,9 @@ can execute more runtime cases than this number shows.
 
 | Platform | Specs | Declared tests | Weighted points | Layers | Features | Critical score |
 | --- | --- | --- | --- | --- | --- | --- |
-| windows | 102 | 321 | 264.7 | 15 | 115 | 92% |
-| macos | 129 | 340 | 269.5 | 17 | 123 | 90% |
-| linux | 90 | 279 | 234.1 | 14 | 111 | 89% |
+| windows | 102 | 321 | 264.1 | 15 | 114 | 88% |
+| macos | 129 | 340 | 268.9 | 17 | 122 | 87% |
+| linux | 90 | 279 | 233.5 | 14 | 110 | 84% |
 
 ## Runtime Results
 
@@ -41,7 +41,7 @@ pass/fail/skip counts.
 | auth | - | 1 specs / 1 tests / 1.0 pts | - |
 | billing | 4 specs / 6 tests / 5.7 pts | 4 specs / 6 tests / 5.7 pts | 4 specs / 6 tests / 5.7 pts |
 | capture-ocr | 2 specs / 16 tests / 6.4 pts | 8 specs / 12 tests / 4.8 pts | 1 specs / 3 tests / 1.2 pts |
-| chat-ai | 34 specs / 73 tests / 57.9 pts | 48 specs / 102 tests / 77.4 pts | 32 specs / 72 tests / 57.4 pts |
+| chat-ai | 34 specs / 73 tests / 57.3 pts | 48 specs / 102 tests / 76.8 pts | 32 specs / 72 tests / 56.8 pts |
 | entitlement | - | 1 specs / 1 tests / 1.0 pts | - |
 | local-api | 28 specs / 117 tests / 98.0 pts | 37 specs / 110 tests / 93.5 pts | 23 specs / 85 tests / 76.2 pts |
 | notifications | 4 specs / 26 tests / 17.3 pts | 3 specs / 5 tests / 3.4 pts | 2 specs / 4 tests / 3.1 pts |
@@ -49,7 +49,7 @@ pass/fail/skip counts.
 | os-integration | 7 specs / 32 tests / 26.9 pts | 14 specs / 29 tests / 17.4 pts | 2 specs / 15 tests / 10.8 pts |
 | performance | 3 specs / 45 tests / 45.0 pts | 5 specs / 36 tests / 31.8 pts | 2 specs / 30 tests / 30.0 pts |
 | pipes | 6 specs / 20 tests / 20.0 pts | 8 specs / 26 tests / 26.0 pts | 6 specs / 20 tests / 20.0 pts |
-| real-ui-e2e | 75 specs / 219 tests / 183.5 pts | 91 specs / 233 tests / 194.5 pts | 69 specs / 195 tests / 169.5 pts |
+| real-ui-e2e | 75 specs / 219 tests / 182.9 pts | 91 specs / 233 tests / 193.9 pts | 69 specs / 195 tests / 168.9 pts |
 | settings | 14 specs / 40 tests / 37.0 pts | 16 specs / 34 tests / 29.7 pts | 13 specs / 31 tests / 28.0 pts |
 | storage-privacy | 9 specs / 42 tests / 33.3 pts | 9 specs / 27 tests / 26.1 pts | 6 specs / 20 tests / 19.1 pts |
 | tauri-command | 22 specs / 60 tests / 46.9 pts | 32 specs / 78 tests / 60.3 pts | 21 specs / 61 tests / 47.8 pts |
@@ -78,7 +78,7 @@ pass/fail/skip counts.
 | Meeting note creation and editing | real-ui-e2e | covered (strong; windows-user-journey, meeting-note-bottom-click) | covered (strong; meeting-note-bottom-click, meeting-chat-panel) | covered (strong; meeting-note-bottom-click, meeting-replay-player) |
 | Pipes discover, install, and play | pipes | covered (strong; pipes, brain-overview) | covered (strong; pipes, brain-overview) | covered (strong; pipes, brain-overview) |
 | Chat window, composer, and streaming state | chat-ai | covered (strong; acp-backend, chat-sidebar-groups) | covered (strong; acp-backend, chat-sidebar-groups) | covered (strong; acp-backend, chat-sidebar-groups) |
-| Conversation-owned coding worktrees | chat-ai | covered (strong; chat-coding-worktree) | covered (strong; chat-coding-worktree) | covered (strong; chat-coding-worktree) |
+| Conversation-owned coding worktrees | chat-ai | gap | gap | gap |
 | Tray/search window behavior | window-lifecycle | covered (strong; window-lifecycle, tray-search) | covered (strong; window-lifecycle, tray-search) | covered (strong; window-lifecycle, tray-search) |
 | Native tray recording status refresh | os-integration | covered (strong; tray-recording-status) | - | - |
 | Storage retention safety UX | storage-privacy | covered (strong; settings-sections, windows-user-journey) | covered (strong; settings-sections) | covered (strong; settings-sections) |
@@ -89,9 +89,9 @@ pass/fail/skip counts.
 
 ## Critical Gaps
 
-- windows: Real capture, OCR, and indexing (weak); Meetings-only audio device ownership (weak); Updater install and rollback safety (gap).
-- macos: Real capture, OCR, and indexing (weak); Audio device health (weak); Meetings-only audio device ownership (weak); Updater install and rollback safety (gap).
-- linux: Real capture, OCR, and indexing (weak); Audio device health (gap); Updater install and rollback safety (gap).
+- windows: Real capture, OCR, and indexing (weak); Meetings-only audio device ownership (weak); Conversation-owned coding worktrees (gap); Updater install and rollback safety (gap).
+- macos: Real capture, OCR, and indexing (weak); Audio device health (weak); Meetings-only audio device ownership (weak); Conversation-owned coding worktrees (gap); Updater install and rollback safety (gap).
+- linux: Real capture, OCR, and indexing (weak); Audio device health (gap); Conversation-owned coding worktrees (gap); Updater install and rollback safety (gap).
 
 ## Execution Integrity
 
@@ -123,7 +123,7 @@ pass/fail/skip counts.
 | chat-agent-activity-sidebar.spec.ts | windows, macos, linux | chat-ai, real-ui-e2e | chat, chat-sidebar-groups, chat-unread-state, chat-structured-output, chat-turn-status | high | strong | real-user-flow | 3 | Recent local Codex and Claude histories sync automatically into the same Recents stream as native Screenpipe chats. Isolated real JSONL files prove that a background provider update does not invent an unread dot when the transcript has no provider attention state, that an opened provider chat shows live thinking and running tool feedback, and that tool completion plus later assistant text arrive without a page reload for both providers. A large Claude JSON response stays compact by default and expands into readable, pretty-printed output. The primary sidebar has no import action; right-clicking View all filters by only the sources present, while a hover-only organizer exposes the same filters plus source grouping and priority or latest-update sorting. Captures sparse, crowded mixed-provider, Codex-heavy, and structured-output native UI states with one harness icon per row, expanded pinned rows, and the capped recent working set. |
 | chat-ask-user-tool-card.spec.ts | windows, macos, linux | chat-ai, tauri-command, window-lifecycle | chat, chat-tools, pi-ask-user | medium | partial | mixed | 1 | Synthetic assistant tool block renders the Pi ask_user dropdown and sends the selected answer through the normal chat reply path. |
 | chat-automation-card-duplicate.spec.ts | windows, macos, linux | chat-ai, real-ui-e2e | chat, chat-home-card-placeholder-preview, chat-sidebar-dedupe, chat-session-activity | medium | partial | real-user-flow | 1 | The Day Recap automation card previews its user-facing prompt in the empty composer on hover, restores the default placeholder on leave, and creates exactly one persisted conversation and one sidebar row; status-only activity for an unknown session must not create an empty untitled sibling. |
-| chat-coding-worktree.spec.ts | windows, macos, linux | chat-ai, real-ui-e2e | chat, chat-coding-worktrees | high | strong | real-user-flow | 1 | Arms worktree mode without a folder picker, gives a vague ‘make the button blue’ task plus nearby repositories to a real local model, requires that model to call only start_worktree, then creates the conversation-owned worktree through the authenticated desktop broker. Also proves dirty-source preservation, conversation isolation and resume, keeps the worktree identity visible in the chat tab, launches Pi in the owned cwd while ignoring a hostile project-local extension, and verifies work survives Pi stop. Runs in the focused Windows CI list as well as the recursive macOS and Linux suites. |
+| chat-coding-worktree.spec.ts | windows, macos, linux | chat-ai, real-ui-e2e | chat | high | conditional | real-user-flow | 1 | Temporarily quarantined while the composer worktree opt-in is hidden. The retained workflow fixture covers AI repository routing, dirty-source preservation, conversation isolation and resume, worktree identity, Pi cwd ownership, hostile extension isolation, and stop recovery when the control is restored; it does not currently contribute critical worktree coverage. |
 | chat-composer-isolation.spec.ts | windows, macos, linux | chat-ai, real-ui-e2e | chat, chat-drafts | medium | partial | mixed | 1 | Composer draft isolation across conversations. |
 | chat-connections-context-duplicate.spec.ts | windows, macos | chat-ai | chat, chat-sidebar-dedupe | medium | partial | synthetic | 1 | QUARANTINED (#4689): connections-context wrapper stripping regression. The synthetic background-router event path never persists deterministically on Linux/macOS CI; re-enable once it drives a deterministic persisted session. |
 | chat-context-usage-providers.spec.ts | macos | chat-ai, real-ui-e2e, tauri-command | chat, context-usage, acp-backend, agent-streaming | medium | strong | real-user-flow | 3 | The composer's context reading, once per harness class that can report one. Native Pi answers a real OpenAI-compatible turn whose stream carries usage, and the project-local context-usage extension publishes a per-category breakdown that must sum to the model's own total and must keep non-empty rules/skills buckets, which is what guards the classifier's coupling to pi's prompt section markers. A deterministic stdio ACP adapter reports only the protocol usage_update pair and must render one bar plus the line saying no breakdown is available. Also covers the pre-first-turn state, where the panel says nothing rather than estimating. |

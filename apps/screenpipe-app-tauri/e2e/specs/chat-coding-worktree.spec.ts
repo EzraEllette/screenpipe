@@ -186,7 +186,10 @@ async function openFreshChat(): Promise<void> {
   );
 }
 
-describe("Chat coding worktrees", function () {
+// The composer opt-in is intentionally hidden for now. Keep this complete
+// workflow fixture close to the product code so restoring the control also
+// restores its cross-platform regression coverage.
+describe.skip("Chat coding worktrees", function () {
   this.timeout(t(180_000));
   const fixture = createDirtyRepository();
   const created: CodingWorkspace[] = [];

@@ -4,27 +4,20 @@
 "use client";
 
 import { CircleAlert, GitBranch, Loader2 } from "lucide-react";
-import { Checkbox } from "@/components/ui/checkbox";
-import { Label } from "@/components/ui/label";
 import {
   Popover,
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover";
 import type { ComposerCodingWorkspaceProps } from "./composer-types";
-import { cn } from "@/lib/utils";
 
 export function ComposerWorktreeToggle({
   codingWorkspace,
 }: {
   codingWorkspace: ComposerCodingWorkspaceProps;
 }) {
-  const { workspace, enabled, isLoading, error, disabled, onToggle } =
-    codingWorkspace;
-  const checked = enabled || Boolean(workspace);
+  const { workspace, isLoading, error } = codingWorkspace;
   const repoName = workspace?.repoRoot.split(/[\\/]/).filter(Boolean).at(-1);
-  const cannotUncheck = Boolean(workspace);
-  const checkboxDisabled = disabled || isLoading || cannotUncheck;
 
   if (isLoading) {
     return (
@@ -41,32 +34,13 @@ export function ComposerWorktreeToggle({
     );
   }
 
+  if (!workspace && !error) return null;
+
   return (
     <div
       className="flex h-7 shrink-0 items-center gap-1.5"
       data-testid="coding-workspace-row"
     >
-      <Checkbox
-        id="composer-worktree"
-        checked={checked}
-        disabled={checkboxDisabled}
-        onCheckedChange={(value) => {
-          void onToggle(value === true);
-        }}
-        data-testid="coding-workspace-checkbox"
-        aria-label="worktree"
-        title="run this task in its own isolated Git worktree"
-        className="h-3.5 w-3.5"
-      />
-      <Label
-        htmlFor="composer-worktree"
-        className={cn(
-          "whitespace-nowrap text-xs font-medium text-muted-foreground",
-          checkboxDisabled ? "cursor-not-allowed" : "cursor-pointer",
-        )}
-      >
-        worktree
-      </Label>
       {workspace && repoName && (
         <Popover>
           <PopoverTrigger asChild>
@@ -137,7 +111,7 @@ export function ComposerWorktreeToggle({
               {error}
             </p>
             <p className="text-[10px] text-muted-foreground">
-              enable worktree and send again to retry.
+              send again to continue without an isolated worktree.
             </p>
           </PopoverContent>
         </Popover>

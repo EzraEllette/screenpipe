@@ -707,13 +707,12 @@
         "real-ui-e2e"
       ],
       "features": [
-        "chat",
-        "chat-coding-worktrees"
+        "chat"
       ],
       "criticality": "high",
-      "confidence": "strong",
+      "confidence": "conditional",
       "ux": "real-user-flow",
-      "notes": "Arms worktree mode without a folder picker, gives a vague ‘make the button blue’ task plus nearby repositories to a real local model, requires that model to call only start_worktree, then creates the conversation-owned worktree through the authenticated desktop broker. Also proves dirty-source preservation, conversation isolation and resume, keeps the worktree identity visible in the chat tab, launches Pi in the owned cwd while ignoring a hostile project-local extension, and verifies work survives Pi stop. Runs in the focused Windows CI list as well as the recursive macOS and Linux suites."
+      "notes": "Temporarily quarantined while the composer worktree opt-in is hidden. The retained workflow fixture covers AI repository routing, dirty-source preservation, conversation isolation and resume, worktree identity, Pi cwd ownership, hostile extension isolation, and stop recovery when the control is restored; it does not currently contribute critical worktree coverage."
     },
     {
       "spec": "chat-composer-isolation.spec.ts",

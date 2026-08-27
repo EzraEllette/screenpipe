@@ -77,7 +77,101 @@ const idleCodingWorkspace = {
   onToggle: vi.fn(),
 };
 
+const activeCodingWorkspace = {
+  ...idleCodingWorkspace,
+  enabled: true,
+  workspace: {
+    version: 1,
+    conversationId: "conversation-a",
+    repoRoot: "/repos/screenpipe",
+    gitCommonDir: "/repos/screenpipe/.git",
+    worktreePath: "/worktrees/conversation-a",
+    branch: "screenpipe/chat-conversation-a",
+    baseCommit: "abc123",
+    sourceDirty: false,
+    createdAt: "2026-08-27T12:00:00.000Z",
+  },
+};
+
 describe("ComposerControlsRow", () => {
+  it("hides the idle worktree opt-in control", () => {
+    render(
+      <ComposerControlsRow
+        canChat
+        filters={
+          {
+            activeFilterCount: 0,
+            activeFilters: [],
+            activeFilterLabels: [],
+            hasActiveFilters: false,
+            appFilterOpen: false,
+            onFilterMenuOpenChange: vi.fn(),
+          } as any
+        }
+        modelControls={{
+          settings: { aiPresets: [] },
+          activePreset: null,
+          activePipeExecution: null,
+          currentQueueSessionId: null,
+          onSelectPreset: vi.fn(),
+          onPresetSaved: vi.fn(),
+        }}
+        codingWorkspace={idleCodingWorkspace}
+        isStreaming={false}
+        sendButton={{
+          isStopMode: false,
+          hasPendingDocs: false,
+          sendDisabled: false,
+          onStop: vi.fn(),
+        }}
+      />,
+    );
+
+    expect(screen.queryByLabelText("worktree")).not.toBeInTheDocument();
+    expect(screen.queryByText("worktree")).not.toBeInTheDocument();
+  });
+
+  it("keeps existing worktree status visible without the checkbox", () => {
+    render(
+      <ComposerControlsRow
+        canChat
+        filters={
+          {
+            activeFilterCount: 0,
+            activeFilters: [],
+            activeFilterLabels: [],
+            hasActiveFilters: false,
+            appFilterOpen: false,
+            onFilterMenuOpenChange: vi.fn(),
+          } as any
+        }
+        modelControls={{
+          settings: { aiPresets: [] },
+          activePreset: null,
+          activePipeExecution: null,
+          currentQueueSessionId: null,
+          onSelectPreset: vi.fn(),
+          onPresetSaved: vi.fn(),
+        }}
+        codingWorkspace={activeCodingWorkspace}
+        isStreaming={false}
+        sendButton={{
+          isStopMode: false,
+          hasPendingDocs: false,
+          sendDisabled: false,
+          onStop: vi.fn(),
+        }}
+      />,
+    );
+
+    expect(
+      screen.queryByTestId("coding-workspace-checkbox"),
+    ).not.toBeInTheDocument();
+    expect(screen.getByTestId("coding-workspace-badge")).toHaveTextContent(
+      "screenpipe",
+    );
+  });
+
   it("explains worktree preparation while the repository is being resolved", () => {
     render(
       <ComposerControlsRow
@@ -160,7 +254,7 @@ describe("ComposerControlsRow", () => {
       />,
     );
 
-    expect(screen.getByLabelText("worktree")).not.toBeChecked();
+    expect(screen.queryByLabelText("worktree")).not.toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "worktree setup failed" }),
     ).toBeInTheDocument();
@@ -310,11 +404,6 @@ describe("ComposerControlsRow", () => {
 
     expect(screen.getByTestId("mock-acp-permission")).toHaveTextContent(
       "codex-acp",
-    );
-    const permission = screen.getByTestId("mock-acp-permission");
-    const worktree = screen.getByTestId("coding-workspace-row");
-    expect(permission.compareDocumentPosition(worktree)).toBe(
-      Node.DOCUMENT_POSITION_FOLLOWING,
     );
     expect(screen.getByTestId("mock-acp-config")).toHaveTextContent(
       "codex-acp",
