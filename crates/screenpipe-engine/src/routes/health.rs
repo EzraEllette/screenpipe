@@ -448,6 +448,25 @@ fn meetings_only_audio_idle_state(
     }
 }
 
+/// macOS continues to enumerate the built-in MacBook microphone after the lid
+/// closes even though it can only deliver zero-filled buffers. For health
+/// purposes that device is unavailable in clamshell mode. External microphones
+/// remain real inputs and must still surface capture failures normally.
+fn input_device_is_available(device_name: &str, clamshell_mode: bool) -> bool {
+    if !device_name.contains("(input)") {
+        return false;
+    }
+    if !clamshell_mode {
+        return true;
+    }
+
+    let lower = device_name.to_ascii_lowercase();
+    let built_in_laptop_mic = (lower.contains("macbook") && lower.contains("microphone"))
+        || lower.contains("built-in microphone")
+        || lower.contains("internal microphone");
+    !built_in_laptop_mic
+}
+
 /// Classify the raw audio capture status from health signals. Pure so it can be
 /// unit-tested in isolation. `stream_timeout_recent` must mean a recent timeout
 /// that the same current device has not recovered from, NOT a cumulative count
@@ -478,11 +497,12 @@ fn classify_audio_status(
         "meeting_detector_unavailable"
     } else if audio_waiting_for_meeting {
         "waiting_for_meeting"
-    } else if audio_never_captured && !has_input_device {
+    } else if !has_input_device {
         // Audio is on but there is no microphone to capture from — expected
         // idle, not a failure. Distinct from "not_started" so /health stays 200
-        // and the desktop stall notification (which keys off "not_started")
-        // does not false-fire on machines without a mic.
+        // and the desktop stall notification does not false-fire on machines
+        // without a mic. This also covers a previously-used built-in MacBook
+        // mic becoming unavailable when the lid closes in clamshell mode.
         "no_input_device"
     } else if audio_never_captured {
         "not_started"
@@ -1493,9 +1513,10 @@ async fn health_check_inner(state: &Arc<AppState>) -> HealthCheckResponse {
     // 503 degraded, nor trip the desktop "mic not capturing" stall notification.
     // Input devices are tagged "(input)" in the device list (output-only devices
     // like "Remote Audio (output)" are not microphones).
+    let clamshell_mode = screenpipe_core::display_topology::is_clamshell_mode();
     let has_input_device = audio_devices
         .iter()
-        .any(|device| device.to_string().contains("(input)"));
+        .any(|device| input_device_is_available(&device.to_string(), clamshell_mode));
 
     // Detect "active_no_data": the device appears active (selected and in the
     // device list) but the zero-fill watchdog has fired *recently*, indicating
@@ -3106,6 +3127,14 @@ mod tests {
             ),
             "no_input_device"
         );
+        // previously captured + mic later unavailable (for example clamshell)
+        // remains the same benign state instead of degrading to stale.
+        assert_eq!(
+            classify_audio_status(
+                false, false, false, false, false, false, true, false, 1000, 2000, 60
+            ),
+            "no_input_device"
+        );
         // never captured but a mic exists -> not_started
         assert_eq!(
             classify_audio_status(
@@ -3189,5 +3218,24 @@ mod tests {
             audio_is_degraded(status_broken),
             "a present-but-silent mic must still surface as degraded"
         );
+    }
+
+    #[test]
+    fn clamshell_ignores_only_the_builtin_laptop_microphone() {
+        assert!(input_device_is_available(
+            "MacBook Pro Microphone (input)",
+            false
+        ));
+        assert!(!input_device_is_available(
+            "MacBook Pro Microphone (input)",
+            true
+        ));
+        assert!(!input_device_is_available(
+            "Built-in Microphone (input)",
+            true
+        ));
+        assert!(input_device_is_available("USB Microphone (input)", true));
+        assert!(input_device_is_available("AirPods Pro (input)", true));
+        assert!(!input_device_is_available("System Audio (output)", true));
     }
 }
