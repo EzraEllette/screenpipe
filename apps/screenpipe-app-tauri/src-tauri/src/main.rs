@@ -128,8 +128,6 @@ mod suggestions;
 mod sync;
 mod tray;
 #[cfg(target_os = "macos")]
-mod tray_monitor_preview;
-#[cfg(target_os = "macos")]
 mod staged_update;
 mod stale_tier;
 mod updates;
