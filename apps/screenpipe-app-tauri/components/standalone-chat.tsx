@@ -83,6 +83,7 @@ import { useChatMessageActions } from "@/components/chat/standalone/hooks/use-ch
 import { useChatExportMenu } from "@/components/chat/standalone/hooks/use-chat-export-menu";
 import { useChatSessionRuntime } from "@/components/chat/standalone/hooks/use-chat-session-runtime";
 import { usePiForegroundEvents } from "@/components/chat/standalone/hooks/use-pi-foreground-events";
+import { useTurnLiveness } from "@/components/chat/standalone/hooks/use-turn-liveness";
 import { usePiSendTransport } from "@/components/chat/standalone/hooks/use-pi-send-transport";
 import { useChatPanelEffects } from "@/components/chat/standalone/hooks/use-chat-panel-effects";
 import {
@@ -793,6 +794,13 @@ export function StandaloneChat({
   );
 
   const currentQueueSessionId = conversationId ?? piSessionIdRef.current;
+  const {
+    noteEvent: noteTurnLivenessEvent,
+    status: turnLiveness,
+  } = useTurnLiveness({
+    active: isLoading || isStreaming,
+    sessionId: currentQueueSessionId,
+  });
   const {
     queuedActionPromptId,
     queuedScrollRef,
@@ -1711,7 +1719,9 @@ export function StandaloneChat({
     setPiInfo,
     settings: rolloutSettings,
     syncThinkingLevelAfterStart,
+    turnIntentLedgerRef,
     turnIntentTextValuesMatch,
+    noteTurnLivenessEvent,
   });
 
   const messageHistory = React.useMemo(
@@ -1794,6 +1804,7 @@ export function StandaloneChat({
     setMessages,
     isLoading,
     isStreaming,
+    turnLiveness,
     activeSourceFooterMessageId,
     highlightedMessageId,
     citationPlan,
@@ -2228,7 +2239,10 @@ export function StandaloneChat({
           inputRef,
           value: input,
           disabledReason: composerDisabledReason,
-          placeholder: homeCardPromptPreview ?? undefined,
+          placeholder:
+            isLoading || isStreaming
+              ? "Message will be queued..."
+              : homeCardPromptPreview ?? undefined,
           canChat: Boolean(canSendChatMessage) && !codingWorkspace.isLoading,
           isLoading,
           isStreaming,

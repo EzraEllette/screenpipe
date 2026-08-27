@@ -53,4 +53,61 @@ describe("TurnStatus contrast", () => {
     expect(chevron).toHaveClass("text-muted-foreground");
     expect(chevron).not.toHaveClass("text-muted-foreground/50");
   });
+
+  it("turns off the active scan while offline", () => {
+    render(
+      <TurnStatus
+        turnKey="offline-turn"
+        signals={{ active: true, liveness: { state: "offline" } }}
+      />,
+    );
+
+    const status = screen.getByTestId("chat-turn-status");
+    expect(status).toHaveAttribute("data-liveness", "offline");
+    expect(screen.queryByTestId("chat-turn-scan-glyph")).not.toBeInTheDocument();
+    expect(screen.getByText(/offline · message saved/)).toBeInTheDocument();
+  });
+
+  it("keeps the scan active during a bounded automatic retry", () => {
+    render(
+      <TurnStatus
+        turnKey="retrying-turn"
+        signals={{
+          active: true,
+          liveness: {
+            state: "retrying",
+            attempt: 2,
+            maxAttempts: 3,
+            retryInMs: 4_000,
+          },
+        }}
+      />,
+    );
+
+    expect(screen.getByTestId("chat-turn-status")).toHaveAttribute(
+      "data-liveness",
+      "retrying",
+    );
+    expect(screen.getByTestId("chat-turn-scan-glyph")).toBeInTheDocument();
+    expect(screen.getByText(/retrying · attempt 2\/3/)).toBeInTheDocument();
+  });
+
+  it("turns off phosphor when the harness has stopped producing events", () => {
+    render(
+      <TurnStatus
+        turnKey="stalled-turn"
+        signals={{
+          active: true,
+          liveness: { state: "stalled", silentForMs: 30_000 },
+        }}
+      />,
+    );
+
+    expect(screen.getByTestId("chat-turn-status")).toHaveAttribute(
+      "data-liveness",
+      "stalled",
+    );
+    expect(screen.queryByTestId("chat-turn-scan-glyph")).not.toBeInTheDocument();
+    expect(screen.getByText(/still working · no update for 30s/)).toBeInTheDocument();
+  });
 });

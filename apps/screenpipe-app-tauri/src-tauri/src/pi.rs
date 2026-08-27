@@ -2703,7 +2703,7 @@ pub async fn pi_start_inner(
         user_token.as_deref(),
         provider_config.as_ref(),
     );
-    let extension_safe_mode = pi_extension_safe_mode_enabled(&project_dir);
+    let mut extension_safe_mode = pi_extension_safe_mode_enabled(&project_dir);
     let sid = session_id.to_string();
 
     // Fast path before provider discovery/config writes. Home and standalone
@@ -2785,7 +2785,19 @@ pub async fn pi_start_inner(
         // Ensure Pi is configured with the user's provider
         ensure_pi_config(user_token.as_deref(), provider_config.as_ref()).await?;
         if !extension_safe_mode {
-            ensure_required_pi_extension_package().await?;
+            if let Err(error) = ensure_required_pi_extension_package().await {
+                // The baseline subagent package improves capability, but a
+                // fresh profile must still be able to chat when the registry
+                // or internet is unavailable. Safe mode disables third-party
+                // packages while explicitly retaining Screenpipe-managed
+                // extensions; a process restart retries the installation.
+                warn!(
+                    "Could not install required Pi extension package; starting '{}' in managed-extension safe mode: {}",
+                    project_dir, error
+                );
+                enable_pi_extension_safe_mode(&project_dir);
+                extension_safe_mode = true;
+            }
         }
     } else if is_pi_acp {
         // Same pi as native, so the same shared extension set.

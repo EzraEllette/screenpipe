@@ -137,6 +137,9 @@ export function TurnStatus({
   const phase = resolveTurnPhase(signals, previous);
   const terminal = isTerminalPhase(phase);
   const live = !terminal && phase !== "idle";
+  const livenessState = live ? signals.liveness?.state ?? null : null;
+  const visiblyActive =
+    live && livenessState !== "offline" && livenessState !== "stalled";
 
   if (phase !== "idle") {
     if (traceRef.current.startedAt == null) traceRef.current.startedAt = Date.now();
@@ -170,6 +173,7 @@ export function TurnStatus({
     <div
       data-testid="chat-turn-status"
       data-phase={phase}
+      data-liveness={livenessState ?? undefined}
       role="status"
       aria-live="polite"
       className={cn("w-fit max-w-full self-start", className)}
@@ -186,8 +190,8 @@ export function TurnStatus({
           "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-offset-1",
         )}
       >
-        {live ? (
-          <ScanGlyph live={live} phase={phase} />
+        {visiblyActive ? (
+          <ScanGlyph live={visiblyActive} phase={phase} />
         ) : (
           <span
             aria-hidden="true"
@@ -243,7 +247,11 @@ export function TurnStatus({
                   )}
                 />
                 <span className="font-mono text-[10px] tracking-wide text-muted-foreground">
-                  {turnPhaseLabel(node.phase, signals)}
+                  {turnPhaseLabel(node.phase, {
+                    ...signals,
+                    liveness:
+                      node.state === "current" ? signals.liveness : null,
+                  })}
                 </span>
                 {suffix && (
                   <span className="font-mono text-[10px] tabular-nums text-muted-foreground/60">

@@ -169,6 +169,16 @@ describe("Hosted AI retry feedback and follow-up queue", function () {
     expect(await $("form textarea").getAttribute("placeholder")).toBe(
       "Message will be queued...",
     );
+    const turnStatus = await $('[data-testid="chat-turn-status"]');
+    await browser.waitUntil(
+      async () => (await turnStatus.getAttribute("data-liveness")) === "retrying",
+      {
+        timeout: t(10_000),
+        interval: 100,
+        timeoutMsg: "turn status did not expose the real provider retry lifecycle",
+      },
+    );
+    expect(await turnStatus.getText()).toMatch(/retrying · attempt \d+\/\d+/);
 
     await submitComposer(QUEUED_PROMPT);
     await browser.waitUntil(
@@ -246,21 +256,60 @@ describe("Hosted AI retry feedback and follow-up queue", function () {
       },
     );
 
-    await browser.waitUntil(
-      async () => {
-        const replyText = await browser.execute(() =>
-          Array.from(
-            document.querySelectorAll('[data-testid="chat-message-assistant"]'),
-          ).map((reply) => reply.textContent ?? ""),
-        );
-        return replyText.filter((text) => text.includes("mock-ok")).length >= 2;
-      },
-      {
-        timeout: t(30_000),
-        interval: 100,
-        timeoutMsg: "queued message did not receive its assistant reply",
-      },
-    );
+    try {
+      await browser.waitUntil(
+        async () => {
+          const replyText = await browser.execute(() =>
+            Array.from(
+              document.querySelectorAll('[data-testid="chat-message-assistant"]'),
+            ).map((reply) => reply.textContent ?? ""),
+          );
+          return replyText.filter((text) => text.includes("mock-ok")).length >= 2;
+        },
+        {
+          timeout: t(30_000),
+          interval: 100,
+          timeoutMsg: "queued message did not receive its assistant reply",
+        },
+      );
+    } catch (error) {
+      const transcript = await browser.execute(() =>
+        Array.from(
+          document.querySelectorAll<HTMLElement>('[data-message-id]'),
+        ).map((message) => ({
+          id: message.dataset.messageId,
+          role: message.dataset.testid?.replace("chat-message-", ""),
+          text: message.textContent ?? "",
+        })),
+      );
+      const eventSummary = (await piConversation.agentEvents()).map((payload) => {
+        const event = payload as {
+          sessionId?: unknown;
+          event?: {
+            type?: unknown;
+            willRetry?: unknown;
+            success?: unknown;
+            attempt?: unknown;
+            assistantMessageEvent?: { type?: unknown; delta?: unknown };
+          };
+        };
+        if (event.sessionId !== CHAT_ID || !event.event) return null;
+        return {
+          type: event.event.type,
+          willRetry: event.event.willRetry,
+          success: event.event.success,
+          attempt: event.event.attempt,
+          assistantEventType: event.event.assistantMessageEvent?.type,
+          delta: event.event.assistantMessageEvent?.delta,
+        };
+      }).filter(Boolean);
+      const turnTargetTrace = await browser.execute(
+        () => (window as any).__e2eTurnTargetTrace ?? [],
+      );
+      throw new Error(
+        `${error instanceof Error ? error.message : String(error)}; transcript: ${JSON.stringify(transcript)}; events: ${JSON.stringify(eventSummary)}; targets: ${JSON.stringify(turnTargetTrace)}`,
+      );
+    }
 
     const bodyText = await $("body").getText();
     expect(bodyText).not.toContain("mid-response");

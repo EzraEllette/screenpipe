@@ -307,7 +307,9 @@ export type PiForegroundEventsOptions = {
   setPiInfo: PiStateActions["setPiInfo"];
   settings: Settings;
   syncThinkingLevelAfterStart: PiStateActions["syncThinkingLevelAfterStart"];
+  turnIntentLedgerRef: SteeringRefs["turnIntentLedgerRef"];
   turnIntentTextValuesMatch: TurnIntentActions["turnIntentTextValuesMatch"];
+  noteTurnLivenessEvent: (event: unknown) => void;
 };
 
 export type PiSendCommand = (

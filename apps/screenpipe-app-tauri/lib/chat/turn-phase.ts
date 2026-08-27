@@ -85,6 +85,8 @@ export type TurnSignals = {
   streaming?: boolean;
   /** Terminal outcome, set from the event stream — never inferred. */
   outcome?: "done" | "stopped" | "interrupted" | "failed" | null;
+  /** Transport/recovery truth layered over the current work phase. */
+  liveness?: import("@/lib/chat/turn-liveness").TurnLivenessStatus | null;
 };
 
 /**
@@ -173,6 +175,27 @@ export function turnPhaseLabel(
 ): string {
   const elapsed = elapsedMs != null ? formatTurnElapsed(elapsedMs) : null;
   const withElapsed = (base: string) => (elapsed ? `${base} · ${elapsed}` : base);
+
+  if (isLivePhase(phase)) {
+    const liveness = signals.liveness;
+    if (liveness?.state === "offline") {
+      return "offline · message saved; retrying when online";
+    }
+    if (liveness?.state === "retrying") {
+      const attempt = `attempt ${liveness.attempt}/${liveness.maxAttempts}`;
+      const retrySeconds =
+        liveness.retryInMs == null
+          ? null
+          : Math.max(0, Math.ceil(liveness.retryInMs / 1_000));
+      return retrySeconds && retrySeconds > 0
+        ? `retrying · ${attempt} · in ${retrySeconds}s`
+        : `retrying · ${attempt}`;
+    }
+    if (liveness?.state === "stalled") {
+      const quiet = formatTurnElapsed(liveness.silentForMs) ?? "30s";
+      return `still working · no update for ${quiet}`;
+    }
+  }
 
   switch (phase) {
     case "starting":

@@ -19,6 +19,7 @@ import { qualifiedValue } from "@/lib/analytics/qualified-value";
 import { MessageContent } from "@/components/chat/standalone/message-content";
 import { TurnStatus } from "@/components/chat/standalone/turn-status";
 import type { TurnSignals } from "@/lib/chat/turn-phase";
+import type { TurnLivenessStatus } from "@/lib/chat/turn-liveness";
 import {
   buildCollapsedSteerRenderItems,
   hasAssistantTextBody,
@@ -74,6 +75,7 @@ export interface ChatMessageListProps {
   messages: Message[];
   isLoading: boolean;
   isStreaming: boolean;
+  turnLiveness?: TurnLivenessStatus | null;
   activeSourceFooterMessageId: string | null;
   expandedSteerWorkIds: Set<string>;
   onToggleCollapsedSteerWork: (id: string) => void;
@@ -115,6 +117,7 @@ export function ChatMessageList({
   messages,
   isLoading,
   isStreaming,
+  turnLiveness,
   activeSourceFooterMessageId,
   expandedSteerWorkIds,
   onToggleCollapsedSteerWork,
@@ -167,6 +170,10 @@ export function ChatMessageList({
   );
 
   const turnActive = isLoading || isStreaming;
+  const transformationActive =
+    turnActive &&
+    turnLiveness?.state !== "offline" &&
+    turnLiveness?.state !== "stalled";
   const visibleMessages = messages.filter((message) => {
     if (message.role !== "assistant") return true;
     return hasRenderableAssistantBody(message) || isSteeredAssistantMessage(message);
@@ -209,7 +216,7 @@ export function ChatMessageList({
       }
     }
   }
-  const hasLiveToolStatusOwner = turnActive && visibleMessages.some(
+  const hasLiveToolStatusOwner = transformationActive && visibleMessages.some(
     (message) =>
       message.role === "assistant" &&
       hasAssistantToolWorkBody(message) &&
@@ -249,13 +256,15 @@ export function ChatMessageList({
             const canShowMessageActions = !item.showActionsWhenExpandedBy ||
               expandedSteerWorkIds.has(item.showActionsWhenExpandedBy);
             const hasActiveSteerChild = steerChildActiveParentIds.has(message.id);
-            const isActiveStreamingAssistantMessage =
+            const isActiveAssistantMessage =
               message.role === "assistant" &&
               (isLoading || isStreaming) &&
               (message.id === activeAssistantMessageId || hasActiveSteerChild);
+            const isActiveStreamingAssistantMessage =
+              isActiveAssistantMessage && transformationActive;
             const shouldShowAssistantActions = message.role !== "assistant" || hasAssistantTextBody(message);
             const shouldShowMessageActionBar =
-              canShowMessageActions && !isActiveStreamingAssistantMessage && shouldShowAssistantActions;
+              canShowMessageActions && !isActiveAssistantMessage && shouldShowAssistantActions;
             const nextAssistant = visibleMessages
               .slice(messageIndex + 1)
               .find((candidate) => candidate.role === "assistant");
@@ -641,6 +650,7 @@ export function ChatMessageList({
             booting,
             bootLabel: boot,
             streaming,
+            liveness: turnLiveness,
           };
 
           return (

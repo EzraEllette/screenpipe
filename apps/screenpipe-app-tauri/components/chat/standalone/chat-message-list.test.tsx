@@ -242,4 +242,20 @@ describe("ChatMessageList turn status ownership", () => {
       .toHaveAttribute("data-generating", "false");
     expect(screen.getByTestId("chat-turn-status")).toBeInTheDocument();
   });
+
+  it("turns off tool phosphor and gives recovery state one owner", () => {
+    render(<ChatMessageList {...messageListProps({
+      messages: [userMessage, completedToolMessage],
+      isLoading: true,
+      isStreaming: true,
+      activeSourceFooterMessageId: completedToolMessage.id,
+      turnLiveness: { state: "offline" },
+    })} />);
+
+    expect(screen.getByTestId(`message-content-${completedToolMessage.id}`))
+      .toHaveAttribute("data-generating", "false");
+    expect(screen.getByTestId("chat-turn-status"))
+      .toHaveAttribute("data-liveness", "offline");
+    expect(screen.queryByTestId("chat-turn-scan-glyph")).not.toBeInTheDocument();
+  });
 });

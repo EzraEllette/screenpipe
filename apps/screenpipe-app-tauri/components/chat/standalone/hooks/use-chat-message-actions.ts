@@ -20,12 +20,14 @@ import {
 } from "@/lib/chat/rich-results";
 import { openPipeForReview } from "@/lib/external-deeplink";
 import { rememberSelectedLiveViewDashboard } from "@/lib/live-views/onboarding-activation";
+import type { TurnLivenessStatus } from "@/lib/chat/turn-liveness";
 
 interface UseChatMessageActionsOptions {
   messages: Message[];
   setMessages: React.Dispatch<React.SetStateAction<Message[]>>;
   isLoading: boolean;
   isStreaming: boolean;
+  turnLiveness?: TurnLivenessStatus | null;
   activeSourceFooterMessageId: string | null;
   highlightedMessageId: string | null;
   citationPlan: MarkdownCitationPlan;
@@ -45,6 +47,7 @@ export function useChatMessageActions({
   setMessages,
   isLoading,
   isStreaming,
+  turnLiveness,
   activeSourceFooterMessageId,
   highlightedMessageId,
   citationPlan,
@@ -248,6 +251,7 @@ export function useChatMessageActions({
     messages,
     isLoading,
     isStreaming,
+    turnLiveness,
     activeSourceFooterMessageId,
     expandedSteerWorkIds,
     onToggleCollapsedSteerWork: toggleCollapsedSteerWork,
