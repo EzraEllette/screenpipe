@@ -375,9 +375,6 @@ function SettingsContent() {
         }
       `}</style>
 
-      {/* Drag region */}
-      <div className="absolute top-0 left-0 right-0 h-8 z-10" data-tauri-drag-region />
-
       {/* Left sidebar */}
       <AppSidebar className="pl-4">
         {/* Back to app */}

@@ -1190,9 +1190,6 @@ function HomeContent() {
         open={shortcutGuideOpen}
         onOpenChange={setShortcutGuideOpen}
       />
-      {/* Drag region — always absolute so it works with full-bleed translucent layout */}
-      <div className="absolute top-0 left-0 right-0 h-8 z-10" data-tauri-drag-region />
-
       {/* ⌘K command palette — a second door to actions the sidebar, toolbar,
           and global shortcuts already own. Each row prints its shortcut, so
           palette use teaches the direct key. Home window only: the settings
@@ -1259,8 +1256,8 @@ function HomeContent() {
               No wordmark, no header row (Claude / Codex style). When
               the sidebar is collapsed it is hidden entirely and the
               strip floats over the content, reduced to toggle + status
-              dot. The h-8 drag region already keeps the top band free
-              of interactive content, so nothing collides. Fixed
+              dot. The persistent main shell owns dragging in blank parts of
+              this top band and excludes these controls. Fixed
               positioning anchors the strip to the viewport so it isn't
               clipped by AppSidebar's overflow. The notification bell
               lives in the Pipes view header (pipe-store.tsx) since

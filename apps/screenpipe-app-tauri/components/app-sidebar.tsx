@@ -12,6 +12,7 @@ import React, {
   useState,
 } from "react";
 import { createPortal } from "react-dom";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { cn } from "@/lib/utils";
 import { useSettings } from "@/lib/hooks/use-settings";
 import { useIsFullscreen } from "@/lib/hooks/use-is-fullscreen";
@@ -85,6 +86,42 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
 
 export const SIDEBAR_WIDTH_EXPANDED = "w-[15rem]";
 
+const MAIN_WINDOW_DRAG_HEIGHT = 32;
+const MAIN_WINDOW_NO_DRAG_SELECTOR = [
+  "a",
+  "button",
+  "input",
+  "label",
+  "select",
+  "summary",
+  "textarea",
+  "[contenteditable]:not([contenteditable='false'])",
+  "[tabindex]:not([tabindex='-1'])",
+  "[role='button']",
+  "[role='checkbox']",
+  "[role='link']",
+  "[role='menuitem']",
+  "[role='option']",
+  "[role='radio']",
+  "[role='separator']",
+  "[role='slider']",
+  "[role='switch']",
+  "[role='tab']",
+  "[data-window-no-drag]",
+].join(",");
+
+export function shouldStartMainWindowDrag(
+  target: EventTarget | null,
+  clientY: number,
+  button: number,
+): boolean {
+  if (button !== 0 || clientY < 0 || clientY >= MAIN_WINDOW_DRAG_HEIGHT) {
+    return false;
+  }
+  if (!(target instanceof Element)) return false;
+  return target.closest(MAIN_WINDOW_NO_DRAG_SELECTOR) === null;
+}
+
 interface SidebarSlot {
   className?: string;
 }
@@ -127,6 +164,22 @@ export function AppSidebarLayout({ children }: { children: React.ReactNode }) {
   return (
     <SidebarShellContext.Provider value={{ container, setSlot }}>
       <div
+        // Own dragging at the persistent shell instead of with page-local
+        // overlays. Capture phase reaches the shell before stacked child chrome
+        // can stop propagation, while the predicate keeps controls untouched.
+        data-testid="main-window-drag-surface"
+        onMouseDownCapture={(event) => {
+          if (
+            !shouldStartMainWindowDrag(
+              event.target,
+              event.clientY,
+              event.button,
+            )
+          ) {
+            return;
+          }
+          void getCurrentWindow().startDragging().catch(() => {});
+        }}
         style={
           {
             "--app-sidebar-width": slot ? `${width}px` : "0px",

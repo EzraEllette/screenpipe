@@ -122,6 +122,7 @@ describe("timeline cache history access", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.useFakeTimers();
+    vi.setSystemTime(nowMs);
     fs.exists.mockResolvedValue(true);
   });
 
