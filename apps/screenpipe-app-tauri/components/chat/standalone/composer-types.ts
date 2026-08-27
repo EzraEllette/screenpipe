@@ -192,7 +192,6 @@ export interface ComposerConnectBannerProps {
 export interface ComposerJumpToLatestProps {
   hasMessages: boolean;
   scrolledUp: boolean;
-  live: boolean;
   onJump: () => void;
 }
 

@@ -13,7 +13,6 @@ function renderJump(overrides: Partial<ComponentProps<typeof ChatJumpToLatest>> 
     <ChatJumpToLatest
       hasMessages
       scrolledUp
-      live={false}
       onJump={onJump}
       {...overrides}
     />,
@@ -47,25 +46,14 @@ describe("ChatJumpToLatest", () => {
     expect(button.className).toContain("rounded-none");
     expect(button.className).toContain("shadow-none");
     expect(button.className).not.toContain("transition-opacity");
-    expect(button).toHaveAttribute("data-live", "false");
     fireEvent.click(button);
     expect(onJump).toHaveBeenCalledOnce();
   });
 
-  it("marks phosphor only while a turn is live and the user is above the latest", () => {
-    const { rerender } = renderJump({ live: true, scrolledUp: true });
-    expect(screen.getByTestId("chat-jump-to-latest")).toHaveAttribute("data-live", "true");
-    expect(screen.getByTestId("chat-jump-to-latest").className).toContain("border-phosphor");
-
-    rerender(
-      <ChatJumpToLatest
-        hasMessages
-        scrolledUp={false}
-        live
-        onJump={vi.fn()}
-      />,
-    );
-    expect(screen.getByTestId("chat-jump-to-latest")).toHaveAttribute("data-live", "false");
-    expect(screen.getByTestId("chat-jump-to-latest").className).not.toContain("border-phosphor");
+  it("uses a neutral color because jumping is navigation, not execution", () => {
+    renderJump();
+    const button = screen.getByTestId("chat-jump-to-latest");
+    expect(button.className).toContain("border-foreground/50");
+    expect(button.className).not.toContain("phosphor");
   });
 });

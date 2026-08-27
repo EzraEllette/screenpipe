@@ -34,7 +34,6 @@ type JumpMetrics = {
   composerTop: number;
   ariaHidden: string | null;
   ariaLabel: string | null;
-  live: string | null;
   label: string;
 };
 
@@ -151,7 +150,6 @@ async function readJumpMetrics(): Promise<JumpMetrics | null> {
       composerTop: composerRect?.top ?? rect.bottom,
       ariaHidden: button.getAttribute("aria-hidden"),
       ariaLabel: button.getAttribute("aria-label"),
-      live: button.getAttribute("data-live"),
       label: (button.textContent ?? "").replace(/\s+/g, " ").trim(),
     };
   })) as JumpMetrics | null;
@@ -234,7 +232,6 @@ describe("chat jump to latest", function () {
     const atBottom = await waitForJumpState(false);
     expect(atBottom.label).toBe("");
     expect(atBottom.ariaLabel).toBe("Jump to latest");
-    expect(atBottom.live).toBe("false");
     expect(atBottom.borderRadius).toBe("0px");
     expect(await $('[data-testid="chat-new-content"]').isExisting()).toBe(false);
     await saveScreenshot("chat-jump-to-latest-at-bottom");
@@ -249,7 +246,6 @@ describe("chat jump to latest", function () {
     const composerGap = scrolledUp.composerTop - scrolledUp.bottom;
     expect(composerGap).toBeGreaterThanOrEqual(4);
     expect(composerGap).toBeLessThanOrEqual(16);
-    expect(scrolledUp.live).toBe("false");
     await saveScreenshot("chat-jump-to-latest-scrolled-up");
 
     const jump = await $('[data-testid="chat-jump-to-latest"]');

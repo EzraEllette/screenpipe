@@ -2204,7 +2204,6 @@ export function StandaloneChat({
         jumpToLatest={{
           hasMessages: messages.length > 0,
           scrolledUp: isUserScrolledUp,
-          live: isLoading || isStreaming,
           onJump: scrollToBottom,
         }}
         prefill={{
