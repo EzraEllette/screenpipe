@@ -42,7 +42,7 @@ export function AttachedContextCard({ context }: { context: AttachedContext }) {
 
   return (
     <div className="space-y-2">
-      <div className="rounded-xl border border-border/50 bg-muted/40 shadow-sm">
+      <div className="rounded-lg border border-border/50 bg-muted/40 shadow-sm">
         <div className="flex items-center gap-2.5 px-3 py-2">
           <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-background/70">
             <FileText className="h-4 w-4 text-muted-foreground" />

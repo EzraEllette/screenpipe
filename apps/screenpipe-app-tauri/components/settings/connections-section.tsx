@@ -739,7 +739,7 @@ export const INTEGRATION_ICON_KEYS = new Set<string>(Object.keys(INTEGRATION_ICO
 
 export function IntegrationIcon({
   icon,
-  className = "w-10 h-10 bg-muted rounded-xl flex items-center justify-center",
+  className = "w-10 h-10 bg-muted rounded-lg flex items-center justify-center",
   fallbackClassName = "h-5 w-5 text-muted-foreground",
 }: {
   icon: string;
@@ -826,7 +826,7 @@ function ListRow({ tile, selected, onClick, onTryInChat }: {
         if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onClick(); }
       }}
       className={`
-        group/row flex w-full items-center gap-3 px-3 py-3 rounded-xl border transition-all text-left cursor-pointer select-none
+        group/row flex w-full items-center gap-3 px-3 py-3 rounded-lg border transition-all text-left cursor-pointer select-none
         ${selected
           ? "border-foreground bg-accent"
           : "border-transparent hover:bg-accent/50 hover:border-border"
@@ -868,7 +868,7 @@ function ListRow({ tile, selected, onClick, onTryInChat }: {
             </TooltipProvider>
           </>
         ) : (
-          <div className="absolute inset-0 rounded-xl bg-muted flex items-center justify-center">
+          <div className="absolute inset-0 rounded-lg bg-muted flex items-center justify-center">
             <Plus className="h-4 w-4 text-foreground" />
           </div>
         )}
@@ -895,7 +895,7 @@ function McpSpotlight({
   return (
     <div
       className={`
-        rounded-xl border bg-card p-3 transition-colors
+        rounded-lg border bg-card p-3 transition-colors
         ${selected ? "border-foreground bg-accent" : "border-border"}
       `}
     >
@@ -944,7 +944,7 @@ function AiToolsSpotlight({
   return (
     <div
       className={`
-        rounded-xl border bg-card p-3 transition-colors
+        rounded-lg border bg-card p-3 transition-colors
         ${selected ? "border-foreground bg-accent" : "border-border"}
       `}
     >
@@ -993,7 +993,7 @@ function SkillsSpotlight({
   return (
     <div
       className={`
-        rounded-xl border bg-card p-3 transition-colors
+        rounded-lg border bg-card p-3 transition-colors
         ${selected ? "border-foreground bg-accent" : "border-border"}
       `}
     >

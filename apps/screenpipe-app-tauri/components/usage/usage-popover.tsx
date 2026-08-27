@@ -125,7 +125,7 @@ export function UsagePopover({
         align="end"
         side="top"
         sideOffset={6}
-        className="w-[min(420px,calc(100vw-24px))] rounded-xl border-border p-3.5 shadow-lg shadow-black/5"
+        className="w-[min(420px,calc(100vw-24px))] rounded-lg border-border p-3.5 shadow-lg shadow-black/5"
         data-testid="usage-popover-content"
       >
         <div className="space-y-3.5">

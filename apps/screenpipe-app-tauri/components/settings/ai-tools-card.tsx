@@ -283,7 +283,7 @@ export function AiToolsCard({ onChanged }: { onChanged?: () => void }) {
     : `${connectedCount} of ${rows.length} connected`;
 
   return (
-    <div className={`rounded-xl border bg-card p-3 transition-colors ${expanded ? "border-foreground bg-accent" : "border-border"}`}>
+    <div className={`rounded-lg border bg-card p-3 transition-colors ${expanded ? "border-foreground bg-accent" : "border-border"}`}>
       <div className="flex items-center gap-3">
         <button
           type="button"

@@ -148,6 +148,8 @@ Use a restrained, tiered radius system:
 - **8px (`rounded-lg`)** for cards, dialogs, media, and primary work surfaces
 - **6px (`rounded-md`)** for buttons, inputs, selects, and ordinary controls
 - **4px (`rounded-sm`)** for compact menu items and dense control labels
+- Legacy `rounded-xl`, `rounded-2xl`, and `rounded-3xl` utilities resolve to
+  the 8px surface tier instead of introducing oversized corner styles
 - **Pills/circles** only for short statuses, avatars, toggles, and true circular controls
 - **0px** for app/window edges, split panes, rails, crop or measurement marks,
   timelines, charts, canvases, and Escher-inspired structural geometry

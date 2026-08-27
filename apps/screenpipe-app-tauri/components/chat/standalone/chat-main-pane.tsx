@@ -211,7 +211,7 @@ export function ChatMainPane({
               disabledReason &&
               (!hasPresets || !hasValidModel || needsLogin) && (
                 <div className="relative flex flex-col items-center justify-center py-12 space-y-4">
-                  <div className="relative p-6 rounded-2xl border bg-muted/50 border-border/50">
+                  <div className="relative p-6 rounded-lg border bg-muted/50 border-border/50">
                     {needsLogin ? (
                       <PipeAIIconLarge size={48} thinking={false} className="text-muted-foreground" />
                     ) : (
@@ -282,7 +282,7 @@ export function ChatMainPane({
                 className="relative flex min-w-0 justify-end"
               >
                 <div className="group/message flex min-w-0 max-w-[82%] flex-col items-end">
-                  <div className="relative max-w-full overflow-hidden rounded-xl bg-muted/60 px-4 py-3 text-sm text-foreground">
+                  <div className="relative max-w-full overflow-hidden rounded-lg bg-muted/60 px-4 py-3 text-sm text-foreground">
                     <p className="whitespace-pre-wrap break-words">
                       {pendingSend.displayLabel ?? pendingSend.text}
                     </p>

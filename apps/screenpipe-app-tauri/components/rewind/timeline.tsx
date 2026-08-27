@@ -1462,7 +1462,7 @@ export default function Timeline({ embedded = false }: { embedded?: boolean }) {
 								<X className="w-4 h-4 text-muted-foreground" />
 							</button>
 						)}
-						<div className="bg-card text-foreground p-6 rounded-2xl text-center space-y-3 max-w-md mx-4">
+						<div className="bg-card text-foreground p-6 rounded-lg text-center space-y-3 max-w-md mx-4">
 							<h3 className="font-medium">Loading Timeline</h3>
 							<p className="text-sm text-foreground">
 								Fetching your recorded frames...
@@ -1493,7 +1493,7 @@ export default function Timeline({ embedded = false }: { embedded?: boolean }) {
 								<X className="w-4 h-4 text-muted-foreground" />
 							</button>
 						)}
-						<div className="bg-destructive/20 border border-destructive/30 text-foreground p-6 rounded-2xl text-center space-y-4 max-w-md mx-4">
+						<div className="bg-destructive/20 border border-destructive/30 text-foreground p-6 rounded-lg text-center space-y-4 max-w-md mx-4">
 							<div className="flex flex-col items-center gap-2">
 								<AlertCircle className="h-6 w-6 text-destructive" />
 								<h3 className="font-medium text-destructive">Connection Error</h3>

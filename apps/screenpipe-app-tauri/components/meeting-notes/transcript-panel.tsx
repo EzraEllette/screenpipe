@@ -1352,7 +1352,7 @@ export const SpeakerParagraph = React.memo(function SpeakerParagraph({
       )}
       <div
         className={cn(
-          "relative w-fit max-w-full rounded-2xl px-3 py-2 shadow-[0_1px_0_rgb(0_0_0/0.03)] transition-colors",
+          "relative w-fit max-w-full rounded-lg px-3 py-2 shadow-[0_1px_0_rgb(0_0_0/0.03)] transition-colors",
           isSelf
             ? "bg-foreground/[0.07] dark:bg-foreground/[0.10]"
             : "bg-muted/80",

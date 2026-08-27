@@ -138,7 +138,7 @@ export function HistorySwipeIndicator({ enabled }: { enabled: boolean }) {
         "shadow-md will-change-transform",
         "motion-safe:transition-[transform,opacity] motion-safe:duration-75 motion-safe:ease-out",
         "motion-reduce:transition-none",
-        isBack ? "rounded-r-2xl" : "rounded-l-2xl",
+        isBack ? "rounded-r-lg" : "rounded-l-lg",
       )}
       data-direction={indicator.direction}
       data-edge={isBack ? "left" : "right"}

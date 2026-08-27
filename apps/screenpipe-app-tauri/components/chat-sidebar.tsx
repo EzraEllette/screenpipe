@@ -216,7 +216,7 @@ export function RecentsSourceFilterLabel({
         alt=""
         width={16}
         height={16}
-        className="h-4 w-4 shrink-0 rounded-[4px] object-contain"
+        className="h-4 w-4 shrink-0 rounded-sm object-contain"
         unoptimized
       />
       <span className="truncate">{label}</span>
@@ -2967,7 +2967,7 @@ export function SidebarChatRow({
               alt=""
               width={17}
               height={17}
-              className="h-[17px] w-[17px] rounded-[4px] object-contain"
+              className="h-[17px] w-[17px] rounded-sm object-contain"
               unoptimized
             />
           ) : (

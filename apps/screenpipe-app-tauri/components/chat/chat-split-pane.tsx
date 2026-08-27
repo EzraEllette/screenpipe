@@ -122,7 +122,7 @@ export function ChatSplitPane({
             >
               <div
                 className={cn(
-                  "min-w-0 overflow-hidden rounded-xl text-sm",
+                  "min-w-0 overflow-hidden rounded-lg text-sm",
                   message.role === "user"
                     ? "max-w-[88%] bg-muted/60 px-3 py-2.5"
                     : "w-full py-1",

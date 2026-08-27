@@ -260,7 +260,7 @@ export function TimelineTagToolbar({ anchorRect, onAskAI, onRunPipe, templatePip
 				transform: "translate(-50%, -100%) translateY(-12px)",
 			}}
 		>
-			<div className="bg-popover border border-border rounded-xl shadow-2xl px-3 py-2.5 flex flex-col gap-2 min-w-[280px] max-w-[380px] relative">
+			<div className="bg-popover border border-border rounded-lg shadow-2xl px-3 py-2.5 flex flex-col gap-2 min-w-[280px] max-w-[380px] relative">
 				{/* Close button */}
 				<button
 					onClick={() => setSelectionRange(null)}

@@ -356,7 +356,7 @@ export function ChatMessageList({
                         beginEditingMessage(message, pendingCaretRef.current ?? undefined);
                       }}
                       className={cn(
-                        "relative rounded-xl text-sm overflow-hidden max-w-full transition-all",
+                        "relative rounded-lg text-sm overflow-hidden max-w-full transition-all",
                         message.role === "user"
                           ? "bg-muted/60 text-foreground px-4 py-3"
                           : "bg-background text-foreground py-1 w-full",

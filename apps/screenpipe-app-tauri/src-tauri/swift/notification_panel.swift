@@ -1703,7 +1703,7 @@ class InboxPanelController: NSObject {
 
     private static let panelWidth: CGFloat = 340
     private static let panelHeight: CGFloat = 440
-    private static let cornerRadius: CGFloat = 12
+    private static let cornerRadius: CGFloat = 8
 
     /// Toggle from the bell. Returns whether the panel is visible after.
     func toggle(json: String?) -> Bool {

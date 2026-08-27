@@ -173,9 +173,15 @@ module.exports = {
 		  },
 		},
 		borderRadius: {
-		  lg: "var(--radius)",
-		  md: "calc(var(--radius) - 2px)",
+		  // Keep every named radius on the shared 8 / 6 / 4px app scale.
+		  // Legacy oversized utilities remain valid without creating a fourth tier.
+		  DEFAULT: "calc(var(--radius) - 4px)",
 		  sm: "calc(var(--radius) - 4px)",
+		  md: "calc(var(--radius) - 2px)",
+		  lg: "var(--radius)",
+		  xl: "var(--radius)",
+		  "2xl": "var(--radius)",
+		  "3xl": "var(--radius)",
 		},
 		boxShadow: {
 		  sm: "var(--shadow-sm)",

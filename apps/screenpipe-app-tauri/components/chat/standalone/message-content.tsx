@@ -1802,7 +1802,7 @@ export function MessageContent({
           <div
             key={`doc-${doc.name}-${i}`}
             title={`${doc.name} — ${doc.charCount.toLocaleString()} chars${doc.truncated ? " (truncated)" : ""}`}
-            className="flex items-center gap-2.5 h-20 max-w-[260px] rounded-xl border border-border/50 bg-muted/40 px-3 shadow-sm"
+            className="flex items-center gap-2.5 h-20 max-w-[260px] rounded-lg border border-border/50 bg-muted/40 px-3 shadow-sm"
           >
             <div className={`shrink-0 w-11 h-11 rounded-lg flex items-center justify-center text-[10px] font-semibold tracking-tight ${badge.tint}`}>
               {badge.label}
@@ -1821,7 +1821,7 @@ export function MessageContent({
           key={`img-${i}`}
           type="button"
           onClick={() => onImageClick?.(message.images ?? [], i)}
-          className="rounded-xl border border-border/50 shadow-sm overflow-hidden p-0 block text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          className="rounded-lg border border-border/50 shadow-sm overflow-hidden p-0 block text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         >
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img src={img} alt={`Attached ${i + 1}`} className="h-20 w-20 min-h-20 min-w-20 object-cover cursor-pointer" />
