@@ -35,6 +35,8 @@ import { commands } from "@/lib/utils/tauri";
 
 const GMAIL_POLL_INTERVAL_MS = 2_000;
 const GMAIL_POLL_ATTEMPTS = 60;
+const PIPE_READY_POLL_INTERVAL_MS = 500;
+const PIPE_READY_POLL_ATTEMPTS = 60;
 const DAILY_EMAIL_PIPE = "daily-email-summary";
 const DIGITAL_CLONE_PIPE = "digital-clone";
 const SPEAKER_RECONCILIATION_PIPE = "speaker-reconciliation";
@@ -42,6 +44,18 @@ const SPEAKER_RECONCILIATION_PIPE = "speaker-reconciliation";
 type ConnectionState = boolean | null;
 type ConnectionId = "gmail" | "google-calendar";
 type PipeSetupState = "missing" | "disabled" | "enabled" | null;
+
+const CONNECTION_ANALYTICS_ID: Record<ConnectionId, string> = {
+  gmail: "composio-gmail",
+  "google-calendar": "google-calendar",
+};
+
+function connectionCtaProperties(id: ConnectionId) {
+  return {
+    integration: CONNECTION_ANALYTICS_ID[id],
+    source: "onboarding_final_setup",
+  };
+}
 
 async function checkPipeState(
   slug: string,
@@ -59,6 +73,22 @@ async function checkPipeState(
     throw new Error("pipe status unavailable");
   }
   return body.data.config.enabled ? "enabled" : "disabled";
+}
+
+async function waitForPipeState(
+  slug: string,
+  signal: AbortSignal,
+): Promise<Exclude<PipeSetupState, null>> {
+  for (let attempt = 0; attempt < PIPE_READY_POLL_ATTEMPTS; attempt += 1) {
+    if (signal.aborted) throw new DOMException("cancelled", "AbortError");
+    try {
+      return await checkPipeState(slug);
+    } catch (error) {
+      if (attempt === PIPE_READY_POLL_ATTEMPTS - 1) throw error;
+      await wait(PIPE_READY_POLL_INTERVAL_MS, signal);
+    }
+  }
+  throw new Error("pipe status unavailable");
 }
 
 async function installPipe(slug: string, bundled: boolean): Promise<void> {
@@ -330,6 +360,8 @@ export default function FinalSetupStep({
   const [error, setError] = useState<string | null>(null);
   const refreshIdRef = useRef(0);
   const gmailAbortRef = useRef<AbortController | null>(null);
+  const pipeSetupAbortRef = useRef<AbortController | null>(null);
+  const connectionImpressionsRef = useRef(new Set<ConnectionId>());
 
   const refresh = useCallback(async () => {
     const refreshId = ++refreshIdRef.current;
@@ -356,8 +388,28 @@ export default function FinalSetupStep({
 
   useEffect(() => {
     void refresh();
-    return () => gmailAbortRef.current?.abort();
+    return () => {
+      gmailAbortRef.current?.abort();
+      pipeSetupAbortRef.current?.abort();
+    };
   }, [refresh]);
+
+  useEffect(() => {
+    if (checking) return;
+    const connections: Array<[ConnectionId, ConnectionState]> = [
+      ["gmail", gmailConnected],
+      ["google-calendar", calendarConnected],
+    ];
+    connections.forEach(([id, connected]) => {
+      if (connected === true || connectionImpressionsRef.current.has(id))
+        return;
+      connectionImpressionsRef.current.add(id);
+      posthog.capture("onboarding_connection_cta_impression", {
+        ...connectionCtaProperties(id),
+        cta_state: connected === null ? "retry" : "connect",
+      });
+    });
+  }, [calendarConnected, checking, gmailConnected]);
 
   const refreshPipeStates = useCallback(async () => {
     const slugs = [
@@ -386,23 +438,41 @@ export default function FinalSetupStep({
   const setupPipe = useCallback(async (slug: string, bundled: boolean) => {
     setBusyPipe(slug);
     setError(null);
+    pipeSetupAbortRef.current?.abort();
+    const controller = new AbortController();
+    pipeSetupAbortRef.current = controller;
     try {
-      const currentState = await checkPipeState(slug);
+      // A reload can reach this screen before the local pipe API is listening.
+      // Preserve the user's click and finish it when startup catches up.
+      const currentState = await waitForPipeState(slug, controller.signal);
       if (currentState === "missing") await installPipe(slug, bundled);
       if (currentState !== "enabled") await enablePipe(slug);
       setPipeStates((current) => ({ ...current, [slug]: "enabled" }));
       posthog.capture("first_run_next_step_selected", { step: slug });
-    } catch {
-      setError(
-        "Screenpipe is still starting. try this option again in a moment.",
-      );
+    } catch (setupError) {
+      if (!(
+        setupError instanceof DOMException && setupError.name === "AbortError"
+      )) {
+        setError("Screenpipe couldn't finish this setup. try again.");
+      }
     } finally {
+      if (pipeSetupAbortRef.current === controller) {
+        pipeSetupAbortRef.current = null;
+      }
       setBusyPipe(null);
     }
   }, []);
 
   const connectGmail = useCallback(async () => {
+    posthog.capture(
+      "onboarding_connection_cta_attempted",
+      connectionCtaProperties("gmail"),
+    );
     if (!userToken) {
+      posthog.capture("onboarding_connection_cta_failed", {
+        ...connectionCtaProperties("gmail"),
+        failure_stage: "authentication",
+      });
       setError("sign in to connect Gmail, then try again.");
       return;
     }
@@ -411,9 +481,12 @@ export default function FinalSetupStep({
     gmailAbortRef.current?.abort();
     const controller = new AbortController();
     gmailAbortRef.current = controller;
+    let failureStage = "authorization";
     try {
       const redirectUrl = await authorizeComposioToolkit(userToken, "gmail");
+      failureStage = "open_oauth";
       await openUrl(redirectUrl);
+      failureStage = "completion";
       const connected = await waitForGmailConnection(
         userToken,
         controller.signal,
@@ -435,6 +508,10 @@ export default function FinalSetupStep({
         connectError instanceof DOMException &&
         connectError.name === "AbortError"
       )) {
+        posthog.capture("onboarding_connection_cta_failed", {
+          ...connectionCtaProperties("gmail"),
+          failure_stage: failureStage,
+        });
         setError(
           connectError instanceof Error
             ? connectError.message
@@ -447,6 +524,10 @@ export default function FinalSetupStep({
   }, [userToken]);
 
   const connectCalendar = useCallback(async () => {
+    posthog.capture(
+      "onboarding_connection_cta_attempted",
+      connectionCtaProperties("google-calendar"),
+    );
     setBusyConnection("google-calendar");
     setError(null);
     try {
@@ -461,6 +542,10 @@ export default function FinalSetupStep({
         source: "onboarding_final_setup",
       });
     } catch (connectError) {
+      posthog.capture("onboarding_connection_cta_failed", {
+        ...connectionCtaProperties("google-calendar"),
+        failure_stage: "oauth_connect",
+      });
       setError(
         connectError instanceof Error
           ? connectError.message
