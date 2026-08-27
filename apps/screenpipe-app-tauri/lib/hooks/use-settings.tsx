@@ -1576,6 +1576,7 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 	// Install global fetch interceptor to catch 401s from screenpipe.com
 	const settingsRef = useRef(settings);
 	settingsRef.current = settings;
+	const settingsUpdateGenerationRef = useRef(0);
 
 	// Monotonic auth generation, bumped on every explicit sign-out. A
 	// loadUser() call snapshots this at entry; if a sign-out bumps it while the
@@ -1790,6 +1791,15 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 	}, [settings.fontSize]);
 
 	const updateSettings = async (updates: Partial<Settings>) => {
+		const updateGeneration = ++settingsUpdateGenerationRef.current;
+		const settingsBeforeUpdate = settingsRef.current;
+
+		// Controlled switches and checkboxes must reflect the click immediately.
+		// Waiting for the asynchronous store listener makes React render the old
+		// value again, so the first click appears to undo itself. Persistence stays
+		// authoritative: a failed latest write is rolled back below.
+		setSettings((current) => ({ ...current, ...updates }) as Settings);
+
 		// Every settings mutation funnels through here, which makes this the one
 		// place that can answer "which controls do people actually change" without
 		// wiring ~40 call sites. The payload is redacted to booleans and numbers
@@ -1813,7 +1823,20 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 			// session. Fire-and-forget; the listener above bumps each window's ref.
 			emit("screenpipe-auth-signout").catch(() => {});
 		}
-		await settingsStore.set(updates);
+		try {
+			await settingsStore.set(updates);
+		} catch (error) {
+			// Do not let an older failed write overwrite a newer optimistic click.
+			// The queued newer write (and its store event) owns reconciliation.
+			if (settingsUpdateGenerationRef.current === updateGeneration) {
+				try {
+					setSettings(await settingsStore.get());
+				} catch {
+					setSettings(settingsBeforeUpdate);
+				}
+			}
+			throw error;
+		}
 		// Settings will be updated via the listener
 		if (clearsAccount) {
 			// Account changes must not alter the user's local retention policy.

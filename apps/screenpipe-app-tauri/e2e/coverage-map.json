@@ -2439,6 +2439,27 @@
       "notes": "Privacy settings reveal/copy local API key flow."
     },
     {
+      "spec": "privacy-first-click-settings.spec.ts",
+      "platforms": [
+        "windows",
+        "macos",
+        "linux"
+      ],
+      "layers": [
+        "settings",
+        "storage-privacy",
+        "real-ui-e2e"
+      ],
+      "features": [
+        "settings-optimistic-state",
+        "settings-privacy-filters"
+      ],
+      "criticality": "high",
+      "confidence": "strong",
+      "ux": "real-user-flow",
+      "notes": "Delayed settings persistence proves the first click remains visible for both a category switch and a native checkbox while the store write is pending."
+    },
+    {
       "spec": "privacy-installed-apps.spec.ts",
       "platforms": [
         "windows",

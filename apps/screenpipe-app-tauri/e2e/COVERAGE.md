@@ -10,9 +10,9 @@ and layer declared in the manifest, weighted by confidence and criticality.
 
 - Manifest: `e2e/coverage-map.json`
 - Specs directory: `e2e/specs`
-- Mapped specs: 133
-- Declared test blocks: 378
-- Weighted coverage points: 299.1
+- Mapped specs: 134
+- Declared test blocks: 380
+- Weighted coverage points: 301.1
 
 Confidence weights: strong=1.0, partial=0.7, conditional=0.4, smoke=0.3.
 Criticality weights: high=1.0, medium=0.7, low=0.4.
@@ -23,9 +23,9 @@ can execute more runtime cases than this number shows.
 
 | Platform | Specs | Declared tests | Weighted points | Layers | Features | Critical score |
 | --- | --- | --- | --- | --- | --- | --- |
-| windows | 102 | 321 | 264.1 | 15 | 114 | 88% |
-| macos | 129 | 340 | 268.9 | 17 | 122 | 87% |
-| linux | 90 | 279 | 233.5 | 14 | 110 | 84% |
+| windows | 103 | 323 | 266.1 | 15 | 115 | 88% |
+| macos | 130 | 342 | 270.9 | 17 | 123 | 87% |
+| linux | 91 | 281 | 235.5 | 14 | 111 | 84% |
 
 ## Runtime Results
 
@@ -49,9 +49,9 @@ pass/fail/skip counts.
 | os-integration | 7 specs / 32 tests / 26.9 pts | 14 specs / 29 tests / 17.4 pts | 2 specs / 15 tests / 10.8 pts |
 | performance | 3 specs / 45 tests / 45.0 pts | 5 specs / 36 tests / 31.8 pts | 2 specs / 30 tests / 30.0 pts |
 | pipes | 6 specs / 20 tests / 20.0 pts | 8 specs / 26 tests / 26.0 pts | 6 specs / 20 tests / 20.0 pts |
-| real-ui-e2e | 75 specs / 219 tests / 182.9 pts | 91 specs / 233 tests / 193.9 pts | 69 specs / 195 tests / 168.9 pts |
-| settings | 14 specs / 40 tests / 37.0 pts | 16 specs / 34 tests / 29.7 pts | 13 specs / 31 tests / 28.0 pts |
-| storage-privacy | 9 specs / 42 tests / 33.3 pts | 9 specs / 27 tests / 26.1 pts | 6 specs / 20 tests / 19.1 pts |
+| real-ui-e2e | 76 specs / 221 tests / 184.9 pts | 92 specs / 235 tests / 195.9 pts | 70 specs / 197 tests / 170.9 pts |
+| settings | 15 specs / 42 tests / 39.0 pts | 17 specs / 36 tests / 31.7 pts | 14 specs / 33 tests / 30.0 pts |
+| storage-privacy | 10 specs / 44 tests / 35.3 pts | 10 specs / 29 tests / 28.1 pts | 7 specs / 22 tests / 21.1 pts |
 | tauri-command | 22 specs / 60 tests / 46.9 pts | 32 specs / 78 tests / 60.3 pts | 21 specs / 61 tests / 47.8 pts |
 | window-lifecycle | 20 specs / 67 tests / 55.5 pts | 20 specs / 47 tests / 32.9 pts | 14 specs / 40 tests / 30.4 pts |
 
@@ -209,6 +209,7 @@ pass/fail/skip counts.
 | pipes.spec.ts | windows, macos, linux | pipes, real-ui-e2e, local-api | pipes | high | strong | real-user-flow | 8 | Pipes discover, install failure, connection modal, install, list, play, and stop. |
 | privacy-api-auth-enforcement.spec.ts | windows, macos, linux | settings, local-api, storage-privacy | settings-privacy-api-auth, local-api-auth, restart-flow | high | conditional | mixed | 1 | Opt-in restart smoke toggles API auth and verifies backend behavior. |
 | privacy-api-auth.spec.ts | windows, macos, linux | settings, storage-privacy, real-ui-e2e | settings-privacy-api-auth, local-api-auth | high | strong | real-user-flow | 1 | Privacy settings reveal/copy local API key flow. |
+| privacy-first-click-settings.spec.ts | windows, macos, linux | settings, storage-privacy, real-ui-e2e | settings-optimistic-state, settings-privacy-filters | high | strong | real-user-flow | 2 | Delayed settings persistence proves the first click remains visible for both a category switch and a native checkbox while the store write is pending. |
 | privacy-installed-apps.spec.ts | windows, macos, linux | settings, storage-privacy, real-ui-e2e | settings-privacy-filters, installed-apps | medium | strong | real-user-flow | 1 | Privacy content filters surface installed-but-not-captured apps as typeable options with the not-captured hint (fetch-intercepted /installed-apps for determinism). |
 | recording-health-focus-cold.spec.ts | macos | capture-ocr, local-api, os-integration, real-ui-e2e | app-launch, capture-ocr, health, recording-health-alerts | high | conditional | mixed | 1 | Opt-in macOS focus-aware Cold-state reproduction proves capture attempts can remain intentionally flat while the independent loop heartbeat advances, /health stays ok, and the recording-health overlay remains normal in the original process. |
 | recording-health-return-race.spec.ts | windows, macos, linux | tauri-command, os-integration, real-ui-e2e | app-launch, recording-health-alerts | high | strong | command | 1 | Accelerated app-level replay of the idle-to-attended stale race verifies that return input does not raise the recording-health failure overlay before capture recovery can be observed. |
