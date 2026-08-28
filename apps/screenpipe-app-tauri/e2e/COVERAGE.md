@@ -11,8 +11,8 @@ and layer declared in the manifest, weighted by confidence and criticality.
 - Manifest: `e2e/coverage-map.json`
 - Specs directory: `e2e/specs`
 - Mapped specs: 135
-- Declared test blocks: 387
-- Weighted coverage points: 308.1
+- Declared test blocks: 388
+- Weighted coverage points: 309.1
 
 Confidence weights: strong=1.0, partial=0.7, conditional=0.4, smoke=0.3.
 Criticality weights: high=1.0, medium=0.7, low=0.4.
@@ -23,9 +23,9 @@ can execute more runtime cases than this number shows.
 
 | Platform | Specs | Declared tests | Weighted points | Layers | Features | Critical score |
 | --- | --- | --- | --- | --- | --- | --- |
-| windows | 104 | 330 | 273.1 | 15 | 117 | 88% |
-| macos | 131 | 349 | 277.9 | 17 | 125 | 87% |
-| linux | 92 | 288 | 242.5 | 14 | 113 | 84% |
+| windows | 104 | 331 | 274.1 | 15 | 118 | 88% |
+| macos | 131 | 350 | 278.9 | 17 | 126 | 87% |
+| linux | 92 | 289 | 243.5 | 14 | 115 | 84% |
 
 ## Runtime Results
 
@@ -41,7 +41,7 @@ pass/fail/skip counts.
 | auth | - | 1 specs / 1 tests / 1.0 pts | - |
 | billing | 4 specs / 6 tests / 5.7 pts | 4 specs / 6 tests / 5.7 pts | 4 specs / 6 tests / 5.7 pts |
 | capture-ocr | 2 specs / 16 tests / 6.4 pts | 8 specs / 12 tests / 4.8 pts | 1 specs / 3 tests / 1.2 pts |
-| chat-ai | 35 specs / 80 tests / 64.3 pts | 49 specs / 109 tests / 83.8 pts | 33 specs / 79 tests / 63.8 pts |
+| chat-ai | 35 specs / 81 tests / 65.3 pts | 49 specs / 110 tests / 84.8 pts | 33 specs / 80 tests / 64.8 pts |
 | entitlement | - | 1 specs / 1 tests / 1.0 pts | - |
 | local-api | 28 specs / 117 tests / 98.0 pts | 37 specs / 110 tests / 93.5 pts | 23 specs / 85 tests / 76.2 pts |
 | notifications | 4 specs / 26 tests / 17.3 pts | 3 specs / 5 tests / 3.4 pts | 2 specs / 4 tests / 3.1 pts |
@@ -49,7 +49,7 @@ pass/fail/skip counts.
 | os-integration | 7 specs / 32 tests / 26.9 pts | 14 specs / 29 tests / 17.4 pts | 2 specs / 15 tests / 10.8 pts |
 | performance | 3 specs / 45 tests / 45.0 pts | 5 specs / 36 tests / 31.8 pts | 2 specs / 30 tests / 30.0 pts |
 | pipes | 6 specs / 20 tests / 20.0 pts | 8 specs / 26 tests / 26.0 pts | 6 specs / 20 tests / 20.0 pts |
-| real-ui-e2e | 77 specs / 228 tests / 191.9 pts | 93 specs / 242 tests / 202.9 pts | 71 specs / 204 tests / 177.9 pts |
+| real-ui-e2e | 77 specs / 229 tests / 192.9 pts | 93 specs / 243 tests / 203.9 pts | 71 specs / 205 tests / 178.9 pts |
 | settings | 15 specs / 42 tests / 39.0 pts | 17 specs / 36 tests / 31.7 pts | 14 specs / 33 tests / 30.0 pts |
 | storage-privacy | 10 specs / 44 tests / 35.3 pts | 10 specs / 29 tests / 28.1 pts | 7 specs / 22 tests / 21.1 pts |
 | tauri-command | 22 specs / 60 tests / 46.9 pts | 32 specs / 78 tests / 60.3 pts | 21 specs / 61 tests / 47.8 pts |
@@ -162,7 +162,7 @@ pass/fail/skip counts.
 | chat-turn-liveness.spec.ts | windows, macos, linux | chat-ai, real-ui-e2e | chat, chat-streaming, offline-recovery | high | strong | real-user-flow | 1 | The real desktop chat turns off its active phosphor signal and explains that a message is saved when WebView connectivity drops, restores active state on reconnect, and exposes a silent harness after the bounded no-event deadline. |
 | chat-window.spec.ts | windows, macos, linux | chat-ai, window-lifecycle, real-ui-e2e | chat, window-lifecycle | high | strong | real-user-flow | 1 | Opens Chat and focuses the composer for typing. |
 | chat-within-session-context-loss.spec.ts | macos | chat-ai | chat, chat-context | medium | conditional | synthetic | 5 | macOS-only within-chat context retention regression. |
-| chat-workspace-tabs.spec.ts | windows, macos, linux | chat-ai, real-ui-e2e | chat, chat-tabs, chat-split-pane | high | strong | real-user-flow | 1 | Native pointer clicks reach tabs, close, and new-chat controls above the window drag region; unused mount placeholders do not create extra untitled tabs. Multiple real chats remain in a non-destructive working set, a second live transcript stays visible, and promoting it swaps primary composer ownership. |
+| chat-workspace-tabs.spec.ts | windows, macos, linux | chat-ai, real-ui-e2e | chat, chat-tabs, chat-split-pane, owned-browser, browser-session-consent, right-panel-tabs | high | strong | real-user-flow | 2 | Native pointer clicks reach tabs, close, and new-chat controls above the window drag region; unused mount placeholders do not create extra untitled tabs. Multiple real chats remain in a non-destructive working set, a second live transcript stays visible, and promoting it swaps primary composer ownership. Back-to-back owned-browser navigation and consent events keep the login prompt visible without a false loading animation, retain the current address, and render both browser chrome rows at 36px. |
 | connected-share.spec.ts | windows, macos, linux | real-ui-e2e, local-api | meeting-notes, brain-overview, live-views, connections | high | strong | real-user-flow | 1 | Exercises the Send snapshot dialog from meeting notes and Live Views across disconnected setup, connected direct-send, receipt, and Chat-draft destinations, with mocked connection APIs and screenshot coverage. |
 | db-hard-fault-fail-closed.spec.ts | windows, macos, linux | local-api, tauri-command, real-ui-e2e | database-hard-fault-containment, app-launch | high | strong | mixed | 1 | Opt-in packaged-desktop regression: causes real SQLITE_CORRUPT in the isolated E2E database, then proves the engine API and database owners stop while the desktop stays alive and does not respawn across the watchdog window. |
 | first-run-agent-handoff.spec.ts | windows, macos, linux | onboarding, real-ui-e2e | onboarding, first-run-learning, mcp-registration | high | partial | real-user-flow | 4 | Agent handoff beside the first-run summary: the summary stays primary and clickable whether or not an agent is offered, an offered target is never nameless or unclickable, the filesystem probe cannot break the ready banner or the summary click-through, opening the result collapses into the compact setup dock, and the paste instruction appears only after the handoff runs. Waits for the async probe before concluding absence. Does not assert WHICH agent: detectAiTools resolves the real home in the webview (SCREENPIPE_E2E_AI_TOOLS_HOME is Rust-only), so selection is host-dependent and is covered in lib/first-run/agent-handoff.test.ts and use-agent-handoff.test.ts. |

@@ -203,15 +203,15 @@ export function BrowserSidebar({
   const [collapsed, setCollapsed] = useState(false);
   const [currentUrl, setCurrentUrl] = useState<string | null>(null);
   const [currentOwner, setCurrentOwner] = useState<string | null>(null);
-  const [currentNavigationId, setCurrentNavigationId] = useState<string | null>(
-    null,
-  );
+  const [currentNavigationId, setCurrentNavigationIdState] = useState<
+    string | null
+  >(null);
   const [currentTitle, setCurrentTitle] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [browserTabs, setBrowserTabs] = useState<LiveBrowserTab[]>([]);
-  const [activeBrowserTabId, setActiveBrowserTabId] = useState<string | null>(
-    null,
-  );
+  const [activeBrowserTabId, setActiveBrowserTabIdState] = useState<
+    string | null
+  >(null);
   const [addressDraft, setAddressDraft] = useState("");
   const [sessionAccessRequest, setSessionAccessRequest] =
     useState<ActiveSessionAccessRequest | null>(null);
@@ -241,8 +241,20 @@ export function BrowserSidebar({
   const dialogActiveRef = useRef(false);
   const filePreviewRef = useRef(filePreview);
   filePreviewRef.current = filePreview;
+  const onSelectFilePreviewPathRef = useRef(onSelectFilePreviewPath);
+  onSelectFilePreviewPathRef.current = onSelectFilePreviewPath;
+  const onSetPanelOpenRef = useRef(onSetPanelOpen);
+  onSetPanelOpenRef.current = onSetPanelOpen;
+  const currentNavigationIdRef = useRef(currentNavigationId);
   const activeBrowserTabIdRef = useRef(activeBrowserTabId);
-  activeBrowserTabIdRef.current = activeBrowserTabId;
+  const setCurrentNavigationId = useCallback((navigationId: string | null) => {
+    currentNavigationIdRef.current = navigationId;
+    setCurrentNavigationIdState(navigationId);
+  }, []);
+  const setActiveBrowserTabId = useCallback((tabId: string | null) => {
+    activeBrowserTabIdRef.current = tabId;
+    setActiveBrowserTabIdState(tabId);
+  }, []);
   const browserTabsRef = useRef(browserTabs);
   browserTabsRef.current = browserTabs;
   /** Closing the default browser tab hides it without destroying it. Ignore
@@ -635,7 +647,12 @@ export function BrowserSidebar({
     // cookie-consent prompt must not surface in another chat.
     if (isForeignNavigation(payload.owner, conversationId, agentSessionId))
       return;
-    if (isMismatchedNavigation(payload.navigationId, currentNavigationId))
+    if (
+      isMismatchedNavigation(
+        payload.navigationId,
+        currentNavigationIdRef.current,
+      )
+    )
       return;
     const request = {
       requestId,
@@ -646,6 +663,9 @@ export function BrowserSidebar({
       navigationId: payload.navigationId!,
       owner: payload.owner ?? null,
     };
+    // Block any already-scheduled bounds push before React commits the card;
+    // otherwise the native child can briefly repaint above the HTML prompt.
+    sessionAccessActiveRef.current = true;
     setSessionAccessRequest(request);
     setSessionAccessAnswer(null);
     setV20CookieBlock(null);
@@ -658,7 +678,21 @@ export function BrowserSidebar({
     setCurrentOwner(request.owner);
     setCurrentNavigationId(request.navigationId);
     setCurrentTitle(null);
-    setLoading(true);
+    // Rust has paused before native navigation while it waits for this
+    // decision. Keep both loading indicators still until WebKit emits a real
+    // page-load event after the answer; an indeterminate animation here looks
+    // like the page is repeatedly reloading.
+    setLoading(false);
+    const activeTabId = activeBrowserTabIdRef.current;
+    if (activeTabId) {
+      updateBrowserTab(activeTabId, {
+        url: request.url,
+        owner: request.owner,
+        navigationId: request.navigationId,
+        title: null,
+        loading: false,
+      });
+    }
     persistState({ url: request.url, collapsed: false });
     hideNativeBrowserTab(activeBrowserTabIdRef.current).catch(() => {});
   });
@@ -668,7 +702,12 @@ export function BrowserSidebar({
     if (!payload?.url || !payload?.host) return;
     if (isForeignNavigation(payload.owner, conversationId, agentSessionId))
       return;
-    if (isMismatchedNavigation(payload.navigationId, currentNavigationId))
+    if (
+      isMismatchedNavigation(
+        payload.navigationId,
+        currentNavigationIdRef.current,
+      )
+    )
       return;
     const block = {
       url: payload.url,
@@ -680,6 +719,7 @@ export function BrowserSidebar({
       navigationId: payload.navigationId!,
       owner: payload.owner ?? null,
     };
+    sessionAccessActiveRef.current = true;
     setSessionAccessRequest(null);
     setSessionAccessAnswer(null);
     setV20CookieBlock(block);
@@ -693,6 +733,16 @@ export function BrowserSidebar({
     setCurrentNavigationId(block.navigationId);
     setCurrentTitle(null);
     setLoading(false);
+    const activeTabId = activeBrowserTabIdRef.current;
+    if (activeTabId) {
+      updateBrowserTab(activeTabId, {
+        url: block.url,
+        owner: block.owner,
+        navigationId: block.navigationId,
+        title: null,
+        loading: false,
+      });
+    }
     persistState({ url: block.url, collapsed: false });
     hideNativeBrowserTab(activeBrowserTabIdRef.current).catch(() => {});
   });
@@ -773,8 +823,8 @@ export function BrowserSidebar({
     if (
       isMismatchedNavigation(
         payload.navigationId,
-        tabId === activeBrowserTabId
-          ? currentNavigationId
+        tabId === activeBrowserTabIdRef.current
+          ? currentNavigationIdRef.current
           : knownTab?.navigationId,
       )
     )
@@ -867,8 +917,8 @@ export function BrowserSidebar({
         // Preserve its active tab and hidden/open state when returning to the
         // chat; only create browser-active panel state on a first restore.
         if (!filePreviewRef.current) {
-          onSelectFilePreviewPath?.(null);
-          onSetPanelOpen?.(!wasCollapsed);
+          onSelectFilePreviewPathRef.current?.(null);
+          onSetPanelOpenRef.current?.(!wasCollapsed);
         }
         setCurrentUrl(url);
         setAddressDraft(url);
@@ -926,13 +976,7 @@ export function BrowserSidebar({
       cancelled = true;
       if (unlistenReady) unlistenReady();
     };
-  }, [
-    conversationId,
-    hideNativeBrowserTab,
-    onSelectFilePreviewPath,
-    onSetPanelOpen,
-    updateBrowserTab,
-  ]);
+  }, [conversationId, hideNativeBrowserTab, updateBrowserTab]);
 
   useEffect(() => {
     if (previewActive) {
@@ -1574,12 +1618,15 @@ export function BrowserSidebar({
               ) : null
             ) : (
               <>
-                <div className="relative flex items-center gap-2 px-3 h-10 border-b border-border/50 bg-background/60 pl-4">
+                <div
+                  className="relative flex h-9 items-center gap-1 border-b border-border/50 bg-background/60 px-2 pl-3"
+                  data-testid="owned-browser-toolbar"
+                >
                   <button
                     onClick={() => void moveHistory("back")}
                     title="Back"
                     aria-label="Browser back"
-                    className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
+                    className="flex h-7 w-7 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
                   >
                     <ChevronLeft className="h-3.5 w-3.5" />
                   </button>
@@ -1587,7 +1634,7 @@ export function BrowserSidebar({
                     onClick={() => void moveHistory("forward")}
                     title="Forward"
                     aria-label="Browser forward"
-                    className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
+                    className="flex h-7 w-7 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
                   >
                     <ChevronRight className="h-3.5 w-3.5" />
                   </button>
@@ -1608,7 +1655,8 @@ export function BrowserSidebar({
                     <button
                       onClick={openCookieMenu}
                       title="Browser session cookies"
-                      className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground"
+                      aria-label="Browser session cookies"
+                      className="flex h-7 w-7 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
                     >
                       <Cookie className="h-3.5 w-3.5" />
                     </button>
@@ -1616,7 +1664,8 @@ export function BrowserSidebar({
                   <button
                     onClick={reload}
                     title="Reload"
-                    className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground"
+                    aria-label="Reload page"
+                    className="flex h-7 w-7 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
                   >
                     <RotateCw className="h-3.5 w-3.5" />
                   </button>
@@ -1659,7 +1708,7 @@ export function BrowserSidebar({
                       <p className="text-xs leading-5 text-muted-foreground">
                         {sessionAccessRequest.alreadyGranted
                           ? "Screenpipe is about to copy browser session cookies. macOS may ask for browser Safe Storage access next."
-                          : "ScreenPipe can use your browser sessions so the agent opens sites already signed in. This applies to all sites. It does not read saved passwords."}
+                          : "Screenpipe can use your browser sessions so the agent opens sites already signed in. This applies to all sites. It does not read saved passwords."}
                       </p>
                       {isMac && !sessionAccessRequest.alreadyGranted && (
                         <p className="mt-2 text-xs leading-5 text-muted-foreground">

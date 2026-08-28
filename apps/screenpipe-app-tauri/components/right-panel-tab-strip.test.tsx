@@ -52,6 +52,7 @@ describe("RightPanelTabStrip", () => {
     expect(
       screen.getByRole("tablist", { name: "Open side panel items" }),
     ).toBeInTheDocument();
+    expect(screen.getByTestId("right-panel-tab-strip")).toHaveClass("h-9");
     expect(screen.getByRole("tab", { name: "screenpipe.com" })).toHaveAttribute(
       "aria-selected",
       "true",

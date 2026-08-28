@@ -40,6 +40,41 @@ async function emitTauri(event: string, payload: unknown): Promise<void> {
   );
 }
 
+async function emitTauriSequence(
+  events: Array<{ event: string; payload: unknown }>,
+): Promise<void> {
+  await browser.executeAsync(
+    (
+      queuedEvents: Array<{ event: string; payload: unknown }>,
+      done: () => void,
+    ) => {
+      const runtime = globalThis as unknown as {
+        __TAURI__?: {
+          event?: { emit: (name: string, body: unknown) => Promise<unknown> };
+        };
+        __TAURI_INTERNALS__?: {
+          invoke: (command: string, args: object) => Promise<unknown>;
+        };
+      };
+      const emit = (event: string, payload: unknown) =>
+        runtime.__TAURI__?.event?.emit
+          ? runtime.__TAURI__.event.emit(event, payload)
+          : runtime.__TAURI_INTERNALS__?.invoke("plugin:event|emit", {
+              event,
+              payload,
+            });
+      void (async () => {
+        for (const item of queuedEvents) {
+          await Promise.resolve(emit(item.event, item.payload));
+        }
+      })()
+        .then(() => done())
+        .catch(() => done());
+    },
+    events,
+  );
+}
+
 async function seedChat(id: string, title: string): Promise<void> {
   await browser.execute(
     (sessionId: string, marker: string) => {
@@ -60,6 +95,23 @@ async function waitForForeground(id: string): Promise<void> {
       timeout: t(10_000),
       interval: 100,
       timeoutMsg: `${id} did not become active`,
+    },
+  );
+}
+
+async function waitForOwnedBrowserListener(id: string): Promise<void> {
+  await browser.waitUntil(
+    async () =>
+      (await browser.execute(
+        (conversationId: string) =>
+          (window as any).__e2eOwnedBrowserNavigateReady?.conversationId ===
+          conversationId,
+        id,
+      )) as boolean,
+    {
+      timeout: t(10_000),
+      interval: 100,
+      timeoutMsg: `owned-browser listener did not bind to ${id}`,
     },
   );
 }
@@ -151,6 +203,104 @@ describe("Chat workspace tabs and split", function () {
   after(async () => {
     await emitTauri("chat-deleted", { id: CHAT_A });
     await emitTauri("chat-deleted", { id: CHAT_B });
+  });
+
+  it("shows an immediate browser-session prompt in compact chrome", async () => {
+    await waitForOwnedBrowserListener(CHAT_B);
+
+    await emitTauri("owned-browser:navigate", {
+      url: "https://example.com/first",
+      owner: CHAT_B,
+      navigationId: "workspace-browser-first",
+      reveal: true,
+    });
+    await browser.waitUntil(
+      async () =>
+        (await browser.execute(
+          () =>
+            document
+              .querySelector<HTMLInputElement>(
+                'input[aria-label="Browser address"]',
+              )
+              ?.value.endsWith("/first") === true,
+        )) as boolean,
+      {
+        timeout: t(5_000),
+        interval: 100,
+        timeoutMsg: "first browser navigation did not render",
+      },
+    );
+
+    await emitTauriSequence([
+      {
+        event: "owned-browser:navigate",
+        payload: {
+          url: "https://www.reddit.com/",
+          owner: CHAT_B,
+          navigationId: "workspace-browser-replacement",
+          reveal: true,
+        },
+      },
+      {
+        event: "owned-browser:session-access-request",
+        payload: {
+          request_id: "workspace-browser-session-request",
+          url: "https://www.reddit.com/",
+          host: "reddit.com",
+          already_granted: false,
+          navigationId: "workspace-browser-replacement",
+          owner: CHAT_B,
+        },
+      },
+    ]);
+
+    await browser.waitUntil(
+      async () =>
+        (await browser.execute(() =>
+          document.body.textContent?.includes("Use your browser login?"),
+        )) as boolean,
+      {
+        timeout: t(5_000),
+        interval: 100,
+        timeoutMsg: "browser-session prompt did not remain visible",
+      },
+    );
+    const browserChrome = await browser.execute(() => {
+      const toolbar = document.querySelector<HTMLElement>(
+        '[data-testid="owned-browser-toolbar"]',
+      );
+      const tabStrip = document.querySelector<HTMLElement>(
+        '[data-testid="right-panel-tab-strip"]',
+      );
+      const address = document.querySelector<HTMLInputElement>(
+        'input[aria-label="Browser address"]',
+      );
+      return {
+        toolbarHeight: toolbar?.getBoundingClientRect().height ?? 0,
+        tabStripHeight: tabStrip?.getBoundingClientRect().height ?? 0,
+        address: address?.value ?? "",
+        pageLoading: Boolean(toolbar?.querySelector('[role="progressbar"]')),
+        tabLoading: Boolean(
+          tabStrip?.querySelector('[aria-label$=" loading"]'),
+        ),
+      };
+    });
+    expect(browserChrome).toEqual({
+      toolbarHeight: 36,
+      tabStripHeight: 36,
+      address: "https://www.reddit.com/",
+      pageLoading: false,
+      tabLoading: false,
+    });
+    await saveScreenshot("owned-browser-session-prompt-visible");
+
+    await browser.execute(() => {
+      document
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="right-panel-tab-strip"] button[aria-label^="Close "]',
+        )
+        ?.click();
+    });
   });
 
   it("keeps multiple chats open, swaps the split pane, and closes non-destructively", async () => {

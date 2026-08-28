@@ -78,7 +78,7 @@ export function RightPanelTabStrip({
 
   return (
     <div
-      className="flex h-10 min-w-0 shrink-0 items-stretch border-b border-border/60 bg-muted/20 pl-2"
+      className="flex h-9 min-w-0 shrink-0 items-stretch border-b border-border/60 bg-muted/20 pl-2"
       data-testid="right-panel-tab-strip"
     >
       <div

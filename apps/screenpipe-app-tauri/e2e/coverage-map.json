@@ -1287,12 +1287,15 @@
       "features": [
         "chat",
         "chat-tabs",
-        "chat-split-pane"
+        "chat-split-pane",
+        "owned-browser",
+        "browser-session-consent",
+        "right-panel-tabs"
       ],
       "criticality": "high",
       "confidence": "strong",
       "ux": "real-user-flow",
-      "notes": "Native pointer clicks reach tabs, close, and new-chat controls above the window drag region; unused mount placeholders do not create extra untitled tabs. Multiple real chats remain in a non-destructive working set, a second live transcript stays visible, and promoting it swaps primary composer ownership."
+      "notes": "Native pointer clicks reach tabs, close, and new-chat controls above the window drag region; unused mount placeholders do not create extra untitled tabs. Multiple real chats remain in a non-destructive working set, a second live transcript stays visible, and promoting it swaps primary composer ownership. Back-to-back owned-browser navigation and consent events keep the login prompt visible without a false loading animation, retain the current address, and render both browser chrome rows at 36px."
     },
     {
       "spec": "owned-browser-tabs.spec.ts",
