@@ -5,58 +5,9 @@ import { FC, memo } from 'react'
 import ReactMarkdown, { defaultUrlTransform, Options } from 'react-markdown'
 import { commands } from "@/lib/utils/tauri";
 import { MediaComponent } from "@/components/rewind/media";
-import { getApiBaseUrl } from "@/lib/api";
+import { LocalMarkdownImage } from "@/components/markdown/local-markdown-image";
+import { imageMimeFromName } from "@/components/meeting-notes/image-utils";
 import { isMediaFilePath, normalizeLocalMediaMarkdown, normalizeMediaFilePath } from "@/lib/utils/media-file-path";
-import { convertFileSrc } from "@tauri-apps/api/core";
-
-export function createScreenpipeUrlTransform(allowedHosts: readonly string[]) {
-  const allowed = new Set(allowedHosts);
-
-  return (url: string): string => {
-    try {
-      const parsed = new URL(url);
-      if (parsed.protocol === "screenpipe:" && allowed.has(parsed.host)) {
-        return url;
-      }
-    } catch {
-      // Fall back to react-markdown's default sanitizer for malformed URLs.
-    }
-
-    return defaultUrlTransform(url);
-  };
-}
-
-export const notificationUrlTransform = createScreenpipeUrlTransform(["view"]);
-export const viewerUrlTransform = createScreenpipeUrlTransform(["view"]);
-export const chatUrlTransform = createScreenpipeUrlTransform([
-  "timeline",
-  "frame",
-  "meeting",
-  "view",
-]);
-
-export function screenpipeViewerPathFromHref(href: string): string | null {
-  try {
-    const url = new URL(href);
-    if (url.protocol !== "screenpipe:" || url.host !== "view") {
-      return null;
-    }
-    return url.searchParams.get("path");
-  } catch {
-    return null;
-  }
-}
-
-export async function openScreenpipeViewerLink(href: string): Promise<boolean> {
-  const path = screenpipeViewerPathFromHref(href);
-  if (!path) return false;
-
-  const result = await commands.openViewerWindow(path);
-  if (result.status === "error") {
-    throw new Error(result.error);
-  }
-  return true;
-}
 
 function unwrapMarkdownUrl(url: string): string {
   const trimmed = url.trim();
@@ -104,21 +55,59 @@ export function resolveLocalPathFromMarkdownUrl(url: string): string | null {
   return null;
 }
 
-function localImageFallbackSrc(path: string): string {
-  return `${getApiBaseUrl()}/experimental/frames/from-file?path=${encodeURIComponent(path)}`;
+export function createScreenpipeUrlTransform(allowedHosts: readonly string[]) {
+  const allowed = new Set(allowedHosts);
+
+  return (url: string): string => {
+    // react-markdown's default sanitizer strips file:// and would leave
+    // local chat images with an empty src. Keep absolute paths intact.
+    if (resolveLocalPathFromMarkdownUrl(url)) {
+      return url;
+    }
+
+    try {
+      const parsed = new URL(url);
+      if (parsed.protocol === "screenpipe:" && allowed.has(parsed.host)) {
+        return url;
+      }
+    } catch {
+      // Fall back to react-markdown's default sanitizer for malformed URLs.
+    }
+
+    return defaultUrlTransform(url);
+  };
 }
 
-function localImageSrc(path: string): string {
+export const notificationUrlTransform = createScreenpipeUrlTransform(["view"]);
+export const viewerUrlTransform = createScreenpipeUrlTransform(["view"]);
+export const chatUrlTransform = createScreenpipeUrlTransform([
+  "timeline",
+  "frame",
+  "meeting",
+  "view",
+]);
+
+export function screenpipeViewerPathFromHref(href: string): string | null {
   try {
-    return convertFileSrc(path);
+    const url = new URL(href);
+    if (url.protocol !== "screenpipe:" || url.host !== "view") {
+      return null;
+    }
+    return url.searchParams.get("path");
   } catch {
-    return localImageFallbackSrc(path);
+    return null;
   }
 }
 
-function hideBrokenLocalImage(target: HTMLImageElement) {
-  target.style.display = "none";
-  target.setAttribute("aria-hidden", "true");
+export async function openScreenpipeViewerLink(href: string): Promise<boolean> {
+  const path = screenpipeViewerPathFromHref(href);
+  if (!path) return false;
+
+  const result = await commands.openViewerWindow(path);
+  if (result.status === "error") {
+    throw new Error(result.error);
+  }
+  return true;
 }
 
 function wrapPathForMarkdown(path: string): string {
@@ -191,35 +180,33 @@ export function createMediaAwareMarkdownComponents(
     img({ src, alt, ...props }) {
       if (!src) return null;
 
-      const CustomImage = base.img;
-      if (CustomImage) {
-        return <CustomImage src={src} alt={alt} {...props} />;
-      }
-
       if (isMediaFilePath(src)) {
         return <MediaComponent filePath={src} className="my-2" />;
       }
 
       const localPath = resolveLocalPathFromMarkdownUrl(src);
-      const imgSrc = localPath ? localImageSrc(localPath) : src;
+      if (localPath && imageMimeFromName(localPath)) {
+        return (
+          <LocalMarkdownImage
+            path={localPath}
+            alt={alt}
+            className="max-w-full h-auto rounded-md my-2 border border-border"
+          />
+        );
+      }
+
+      const CustomImage = base.img;
+      if (CustomImage) {
+        return <CustomImage src={src} alt={alt} {...props} />;
+      }
 
       return (
         // eslint-disable-next-line @next/next/no-img-element
         <img
-          src={imgSrc}
+          src={src}
           alt={alt || ""}
           className="max-w-full h-auto rounded-md my-2 border border-border"
           loading="lazy"
-          onError={(e) => {
-            const target = e.currentTarget;
-            if (!localPath) return;
-            if (!target.dataset.retried) {
-              target.dataset.retried = "1";
-              target.src = localImageFallbackSrc(localPath);
-              return;
-            }
-            hideBrokenLocalImage(target);
-          }}
           {...props}
         />
       );
