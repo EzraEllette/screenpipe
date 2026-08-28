@@ -209,6 +209,70 @@ describe("ReplayStrip", () => {
     expect(container.querySelector("audio, video")).toBeNull();
   });
 
+  it("still shows the earliest frame when the cursor precedes the first capture", async () => {
+    // Meeting bounds are padded (meeting_start can be minutes before the
+    // first captured frame). Seeking to the very start must not blank the
+    // player with "no screen images available" while frames exist.
+    mocks.fetchFrameSamples.mockResolvedValue([
+      { frameId: 1, timestamp: transcriptAt },
+      { frameId: 2, timestamp: secondFrameAt },
+    ]);
+
+    renderReplayStrip();
+
+    await waitFor(() =>
+      expect(screen.getByTestId("replay-active-frame")).toHaveAttribute(
+        "data-frame-id",
+        "1",
+      ),
+    );
+
+    // Home seeks to rangeStart (meetingStart), 2 minutes before frame 1.
+    fireEvent.keyDown(screen.getByTestId("replay-scrubber"), { key: "Home" });
+
+    expect(screen.getByTestId("replay-scrubber")).toHaveAttribute(
+      "aria-valuenow",
+      "0",
+    );
+    expect(screen.getByTestId("replay-active-frame")).toHaveAttribute(
+      "data-frame-id",
+      "1",
+    );
+    expect(
+      screen.queryByText(/no screen images available/i),
+    ).not.toBeInTheDocument();
+  });
+
+  it("seeks when clicking the control-bar progress slider", async () => {
+    mocks.fetchFrameSamples.mockResolvedValue([
+      { frameId: 1, timestamp: transcriptAt },
+      { frameId: 2, timestamp: secondFrameAt },
+    ]);
+
+    renderReplayStrip();
+
+    await waitFor(() =>
+      expect(screen.getByTestId("replay-active-frame")).toHaveAttribute(
+        "data-frame-id",
+        "1",
+      ),
+    );
+
+    const bar = screen.getByLabelText("silent replay progress");
+    bar.getBoundingClientRect = () =>
+      ({ left: 0, width: 200, top: 0, height: 28, right: 200, bottom: 28 }) as DOMRect;
+    // jsdom has no PointerEvent; a MouseEvent named "pointerdown" carries
+    // clientX and still triggers React's onPointerDown.
+    fireEvent(bar, new MouseEvent("pointerdown", { clientX: 100, bubbles: true }));
+
+    // Meeting is 10 minutes; clicking the middle seeks to ~300s.
+    const valueNow = Number(
+      screen.getByTestId("replay-scrubber").getAttribute("aria-valuenow"),
+    );
+    expect(valueNow).toBeGreaterThanOrEqual(295);
+    expect(valueNow).toBeLessThanOrEqual(305);
+  });
+
   it("plays captured frames once in timestamp order and pauses cleanly", async () => {
     const start = "2026-06-12T10:00:00.000Z";
     const next = "2026-06-12T10:00:01.000Z";

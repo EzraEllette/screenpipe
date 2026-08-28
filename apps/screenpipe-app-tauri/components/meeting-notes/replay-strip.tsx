@@ -88,6 +88,25 @@ export function formatReplayElapsed(ms: number): string {
   return `${minutes}:${String(seconds).padStart(2, "0")}`;
 }
 
+// Pointer capture keeps a drag alive outside the element, but the id is only
+// capturable while that pointer is active. Treat it as best effort so a
+// non-capturable pointer can never break seeking.
+function capturePointer(el: Element, pointerId: number) {
+  try {
+    el.setPointerCapture?.(pointerId);
+  } catch {
+    // pointer already released or never active
+  }
+}
+
+function releasePointer(el: Element, pointerId: number) {
+  try {
+    el.releasePointerCapture?.(pointerId);
+  } catch {
+    // nothing captured
+  }
+}
+
 export function ReplayStrip({ meetingId, segments, timeRange }: ReplayStripProps) {
   // Bounds from notable-quotes sample (cheap, already loaded).
   const sampleSorted = useMemo(
@@ -183,6 +202,7 @@ export function ReplayStrip({ meetingId, segments, timeRange }: ReplayStripProps
 
   const updateCursor = useCallback(
     (nextMs: number) => {
+      if (!Number.isFinite(nextMs)) return;
       const clamped = Math.min(Math.max(nextMs, rangeStartMs), rangeEndMs);
       cursorRef.current = clamped;
       setCursorMs(clamped);
@@ -336,7 +356,13 @@ export function ReplayStrip({ meetingId, segments, timeRange }: ReplayStripProps
   }, [renderableFrames, rangeStartMs, durationMs]);
 
   const activeFrame = useMemo<FrameSample | null>(() => {
-    return frameAtOrBefore(renderableFrames, cursorMs);
+    // Meeting bounds are padded and capture can start after meeting_start,
+    // so a cursor before the first captured frame is normal. Clamp to the
+    // earliest frame instead of blanking the player with "no screen images
+    // available" while frames exist.
+    return (
+      frameAtOrBefore(renderableFrames, cursorMs) ?? renderableFrames[0] ?? null
+    );
   }, [renderableFrames, cursorMs]);
 
   const activeChunk = useMemo<MeetingAudioChunk | null>(() => {
@@ -354,13 +380,13 @@ export function ReplayStrip({ meetingId, segments, timeRange }: ReplayStripProps
     100,
   );
 
-  const trackRef = useRef<HTMLDivElement | null>(null);
   const draggingRef = useRef(false);
+  // Seek relative to whichever seek surface (thumbnail scrubber or
+  // control-bar progress slider) received the pointer event.
   const seekFromEvent = useCallback(
-    (clientX: number) => {
-      const el = trackRef.current;
-      if (!el) return;
+    (el: Element, clientX: number) => {
       const rect = el.getBoundingClientRect();
+      if (rect.width <= 0) return;
       const ratio = Math.min(Math.max((clientX - rect.left) / rect.width, 0), 1);
       updateCursor(rangeStartMs + ratio * durationMs);
     },
@@ -370,20 +396,22 @@ export function ReplayStrip({ meetingId, segments, timeRange }: ReplayStripProps
     (e: React.PointerEvent) => {
       setIsPlaying(false);
       draggingRef.current = true;
-      (e.target as Element).setPointerCapture?.(e.pointerId);
-      seekFromEvent(e.clientX);
+      // Seek first: pointer capture is a best-effort drag enhancement and must
+      // never be able to swallow the seek it precedes.
+      seekFromEvent(e.currentTarget, e.clientX);
+      capturePointer(e.target as Element, e.pointerId);
     },
     [seekFromEvent],
   );
   const onPointerMove = useCallback(
     (e: React.PointerEvent) => {
-      if (draggingRef.current) seekFromEvent(e.clientX);
+      if (draggingRef.current) seekFromEvent(e.currentTarget, e.clientX);
     },
     [seekFromEvent],
   );
   const onPointerUp = useCallback((e: React.PointerEvent) => {
     draggingRef.current = false;
-    (e.target as Element).releasePointerCapture?.(e.pointerId);
+    releasePointer(e.target as Element, e.pointerId);
   }, []);
 
   const onScrubberKeyDown = useCallback(
@@ -542,17 +570,26 @@ export function ReplayStrip({ meetingId, segments, timeRange }: ReplayStripProps
               {formatReplayElapsed(durationMs)}
             </span>
             <div
-              role="progressbar"
+              role="slider"
+              tabIndex={0}
               aria-label="silent replay progress"
               aria-valuemin={0}
               aria-valuemax={Math.round(durationMs / 1000)}
               aria-valuenow={Math.round((cursorMs - rangeStartMs) / 1000)}
-              className="relative h-px flex-1 bg-white/30"
+              aria-valuetext={`${formatReplayElapsed(cursorMs - rangeStartMs)} of ${formatReplayElapsed(durationMs)}`}
+              className="relative flex h-full flex-1 cursor-pointer touch-none items-center focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white"
+              onPointerDown={onPointerDown}
+              onPointerMove={onPointerMove}
+              onPointerUp={onPointerUp}
+              onPointerCancel={onPointerUp}
+              onKeyDown={onScrubberKeyDown}
             >
-              <div
-                className="absolute inset-y-0 left-0 bg-white"
-                style={{ width: `${cursorPct}%` }}
-              />
+              <div className="relative h-px w-full bg-white/30">
+                <div
+                  className="absolute inset-y-0 left-0 bg-white"
+                  style={{ width: `${cursorPct}%` }}
+                />
+              </div>
             </div>
             <button
               type="button"
@@ -619,7 +656,6 @@ export function ReplayStrip({ meetingId, segments, timeRange }: ReplayStripProps
 
         {/* Thumbnail strip + scrubber */}
         <div
-          ref={trackRef}
           data-testid="replay-scrubber"
           role="slider"
           tabIndex={0}

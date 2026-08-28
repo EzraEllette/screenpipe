@@ -120,7 +120,12 @@ describe("historical meeting silent replay player", function () {
       method: "PUT",
       body: JSON.stringify({
         title: TITLE,
-        meeting_start: new Date(firstMs - 1_000).toISOString(),
+        // 30s of pre-capture padding: meeting bounds regularly start before
+        // the first captured frame, and seeking into that region must clamp
+        // to the earliest frame instead of showing "no screen images
+        // available". Keep it under 60s — the next seeded fixture frame
+        // lives at now-1min and must stay outside the replay window.
+        meeting_start: new Date(firstMs - 30_000).toISOString(),
         meeting_end: new Date(lastMs + 1_000).toISOString(),
         note: "",
       }),
@@ -213,6 +218,77 @@ describe("historical meeting silent replay player", function () {
         "data-frame-id",
       ),
     ).toBe(pausedFrameId);
+
+    // Both regressions are position-dependent, and this harness cannot deliver
+    // a positioned press: WebKit WebDriver synthesizes a bare click with
+    // clientX 0 and no pointerdown/mousedown at all (verified against a live
+    // listener), and browser.keys() never reaches a focused div. So drive the
+    // real sliders in the real build with real PointerEvents at real
+    // coordinates read off the live layout. Both surfaces are addressed by
+    // attributes that predate the fix, so this spec fails on the buggy build.
+    const scrubber = await waitForTestId("replay-scrubber", 5_000);
+    const progress = await $('[aria-label="silent replay progress"]');
+    await progress.waitForExist({ timeout: t(5_000) });
+    const valueMax = Number(await scrubber.getAttribute("aria-valuemax"));
+    expect(valueMax).toBeGreaterThan(0);
+    const pressSlider = async (element: WebdriverIO.Element, ratio: number) => {
+      await browser.execute(
+        (el: HTMLElement, atRatio: number) => {
+          const rect = el.getBoundingClientRect();
+          const init = {
+            bubbles: true,
+            clientX: rect.left + rect.width * atRatio,
+            clientY: rect.top + rect.height / 2,
+            pointerId: 1,
+            isPrimary: true,
+          };
+          el.dispatchEvent(new PointerEvent("pointerdown", init));
+          el.dispatchEvent(new PointerEvent("pointerup", init));
+        },
+        element,
+        ratio,
+      );
+    };
+
+    // Regression (silent-blank bug): the start of the track is inside the
+    // padded pre-capture region (meeting_start is 30s before the first
+    // captured frame). Seeking there must clamp to the earliest frame instead
+    // of blanking the player with "no screen images available". Driven through
+    // the thumbnail scrubber, which already seeked correctly before the fix,
+    // so this isolates the blanking bug from the dead-slider bug below.
+    await pressSlider(scrubber, 0);
+    await browser.waitUntil(
+      async () => (await scrubber.getAttribute("aria-valuenow")) === "0",
+      {
+        timeout: t(5_000),
+        timeoutMsg:
+          "pressing the scrubber start did not seek to the meeting start",
+      },
+    );
+    expect((await player.getText()).toLowerCase()).not.toContain(
+      "no screen images available",
+    );
+    expect(
+      await $("[data-testid='replay-active-frame']").getAttribute(
+        "data-frame-id",
+      ),
+    ).toBe(firstFrameId);
+
+    // Regression (unclickable slider bug): the control-bar progress line was a
+    // bare progressbar with no seek handling, so pressing it did nothing at
+    // any position. It is a real slider now - pressing its middle seeks to
+    // ~50% of the meeting.
+    await pressSlider(progress, 0.5);
+    await browser.waitUntil(
+      async () => {
+        const now = Number(await scrubber.getAttribute("aria-valuenow"));
+        return now >= valueMax * 0.4 && now <= valueMax * 0.6;
+      },
+      {
+        timeout: t(5_000),
+        timeoutMsg: "pressing the middle of the progress slider did not seek",
+      },
+    );
 
     const selectedTabs = (await browser.execute(() =>
       Array.from(
