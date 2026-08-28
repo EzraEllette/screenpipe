@@ -5,6 +5,10 @@
 import { describe, expect, it } from "vitest";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
+import {
+  SCREENPIPE_API_SKILL_MD,
+  SCREENPIPE_CLI_SKILL_MD,
+} from "../lib/generated/screenpipe-skills";
 
 const REQUIRED_HEADER = `// screenpipe — AI that knows everything you've seen, said, or heard
 // https://screenpipe.com
@@ -21,5 +25,17 @@ describe("generated skill content", () => {
 
     expect(generator.replace(/\r\n/g, "\n").startsWith(REQUIRED_HEADER)).toBe(true);
     expect(generated.replace(/\r\n/g, "\n").startsWith(REQUIRED_HEADER)).toBe(true);
+  });
+
+  it("embeds the canonical runtime skills without mirror drift", async () => {
+    const repoRoot = path.resolve(import.meta.dirname, "../../..");
+    const skillsRoot = path.join(repoRoot, "crates/screenpipe-core/assets/skills");
+    const [apiSkill, cliSkill] = await Promise.all([
+      readFile(path.join(skillsRoot, "screenpipe-api/SKILL.md"), "utf8"),
+      readFile(path.join(skillsRoot, "screenpipe-cli/SKILL.md"), "utf8"),
+    ]);
+
+    expect(SCREENPIPE_API_SKILL_MD).toBe(apiSkill);
+    expect(SCREENPIPE_CLI_SKILL_MD).toBe(cliSkill);
   });
 });
