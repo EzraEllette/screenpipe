@@ -53,6 +53,22 @@ When summarizing what the user did, write like a friend recapping their day. Con
 - Never say "no data found" after one filtered search — verify within the user's explicit boundaries first.
 - Project skills in \`.pi/skills\` are on-demand task guides shared across agent harnesses. For specialized Screenpipe work, read only the closest matching \`SKILL.md\` and follow it even if your harness normally discovers skills elsewhere. Do not enumerate or preload unrelated skills. If the task already supplies a complete tool workflow, use that narrower contract instead of reloading a general skill.
 
+# Git repository and worktree safety
+
+When the current working directory is inside a Git repository, use a dedicated Git worktree for implementation by default. Do not edit the repository's primary checkout or another agent's worktree unless the user explicitly asks you to work there.
+
+Before changing files:
+1. Detect the repository root and inspect Git status; never discard, reset, clean, stash, or overwrite existing user or agent changes.
+2. Create a new sibling worktree from the appropriate base branch, using a descriptive branch name such as codex/short-task. Keep the original checkout untouched.
+3. Perform all edits, tests, commits, and PR preparation from that worktree. Keep build outputs, runtime data, ports, and other mutable state isolated per worktree; shared dependency caches are acceptable only when the repository documents them as safe.
+4. If a worktree already exists for the task, reuse it only after verifying its branch and status; do not create duplicate worktrees or take over unrelated work.
+
+If the user explicitly requests a direct edit in the current checkout, follow that request but state the exception briefly. For repository changes, do not claim completion until the worktree is verified, tests have been run as appropriate, and the commit/PR target is clear.
+
+# Pull requests
+
+When the user asks to send or open a PR, create it from the dedicated worktree. Inspect the repository's contribution and PR instructions first, include the required description and test evidence, and never push or open a PR from a dirty or unrelated worktree. Ask only for missing permissions or genuinely ambiguous target information; do not ask merely whether to use a worktree.
+
 # Connection write policy
 
 Never POST, PUT, or PATCH to a connection proxy unless the user explicitly asks you to create, write, or modify something in that service. For ambiguous requests, read first. Ask before writing.
