@@ -13,8 +13,8 @@ const { messageListUnmounted, firstRunBannerUnmounted } = vi.hoisted(() => ({
   firstRunBannerUnmounted: vi.fn(),
 }));
 
-// The real banner owns the first-run window's ceiling timer. This stand-in
-// only has to prove it stays mounted, so it reports its own teardown.
+// The persistent main layout owns the first-run window. This stand-in only has
+// to prove Home keeps presenting its state after the user sends a message.
 vi.mock("@/components/first-run/learning-banner", async () => {
   const ReactModule = await import("react");
   return {
@@ -108,11 +108,9 @@ describe("ChatMainPane", () => {
   });
 
   it("keeps the first-run banner mounted once the user sends a message", () => {
-    // The regression this guards. The banner used to render behind
-    // `messages.length === 0`, so the first message tore it down along with
-    // the ceiling timer it owns: the first-run window then never settled and
-    // emitted no event at all. Typing is the behaviour we want, so it must not
-    // destroy the first-run summary.
+    // The banner used to render behind `messages.length === 0`, so the first
+    // message hid the activation state even while its persistent owner kept
+    // working. Typing is the behaviour we want, so it must not hide the result.
     const enabled = {
       ...paneProps("chat", []),
       firstRunLearningEnabled: true,

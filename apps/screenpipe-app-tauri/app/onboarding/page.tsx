@@ -12,6 +12,7 @@ import PermissionsStep from "@/components/onboarding/permissions-step";
 import TimelineChoice from "@/components/onboarding/timeline-choice";
 import EngineStartup from "@/components/onboarding/engine-startup";
 import PlanSelectionStep from "@/components/onboarding/plan-selection-step";
+import FinalSetupStep from "@/components/onboarding/final-setup-step";
 import { useOnboarding } from "@/lib/hooks/use-onboarding";
 import { useManagedPolicy } from "@/lib/hooks/use-managed-policy";
 import { useSettings } from "@/lib/hooks/use-settings";
@@ -24,7 +25,13 @@ import { readOnboardingCheckoutStatus } from "@/lib/onboarding-checkout-navigati
 import { requiresOnboardingCheckout } from "@/lib/onboarding-checkout";
 
 type SlideKey =
-  "login" | "acquisition" | "permissions" | "timeline" | "engine" | "plan";
+  | "login"
+  | "acquisition"
+  | "permissions"
+  | "timeline"
+  | "engine"
+  | "plan"
+  | "recommended-setup";
 
 // One size for the whole flow. Per-slide sizes made the window jump on every
 // step, worst on "plan", which widened to 760 even though the content column is
@@ -48,6 +55,7 @@ const SLIDE_ORDER: SlideKey[] = [
   "timeline",
   "engine",
   "plan",
+  "recommended-setup",
 ];
 
 // endowed progress: the bar first renders on permissions with login already
@@ -204,7 +212,10 @@ export default function OnboardingPage() {
           // worse for having been asked.
           (s !== "acquisition" || !isManagedDeployment) &&
           (s !== "timeline" || timelineChoiceVisible) &&
-          (s !== "plan" || shouldShowPlanSelection),
+          (s !== "plan" || shouldShowPlanSelection) &&
+          // Managed deployments may authenticate with only a license key, so
+          // consumer Gmail/Calendar authorization is not available there.
+          (s !== "recommended-setup" || !isManagedDeployment),
       ),
     [isManagedDeployment, shouldShowPlanSelection, timelineChoiceVisible],
   );
@@ -247,6 +258,7 @@ export default function OnboardingPage() {
           timeline: "timeline",
           engine: "engine",
           plan: "plan",
+          "recommended-setup": "recommended-setup",
           // Native Rust now connects detected AI tools in the background, and
           // the goal/dashboard slide is gone: setup no longer asks the user to
           // declare intent before anything has been observed. Saved installs
@@ -412,8 +424,9 @@ export default function OnboardingPage() {
 
     // Walk SLIDE_ORDER (never the filtered list) so the index stays valid even
     // for a slide that policy hides, then land on the next visible slide.
-    // Consumer onboarding ends on plan selection after the engine is ready.
-    // Managed deployments skip that consumer purchase surface.
+    // Consumer onboarding ends on recommended setup after the engine is ready
+    // and, when required, checkout has completed. This step must not depend on
+    // the post-onboarding learning window: Gmail and Calendar belong in setup.
     const nextSlide = SLIDE_ORDER.slice(currentIdx + 1).find(
       (s) =>
         visibleOrder.includes(s) &&
@@ -564,6 +577,12 @@ export default function OnboardingPage() {
           )}
           {currentSlide === "plan" && (
             <PlanSelectionStep handleNextSlide={handleNextSlide} />
+          )}
+          {currentSlide === "recommended-setup" && (
+            <FinalSetupStep
+              userToken={user?.token}
+              handleNextSlide={handleNextSlide}
+            />
           )}
         </div>
       </div>

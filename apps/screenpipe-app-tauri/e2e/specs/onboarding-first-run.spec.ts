@@ -139,7 +139,10 @@ const waitForTestId = async (testId: string, timeout = 20_000) => {
           testId,
         ),
       ),
-    { timeout: t(timeout), timeoutMsg: `[data-testid="${testId}"] never appeared` },
+    {
+      timeout: t(timeout),
+      timeoutMsg: `[data-testid="${testId}"] never appeared`,
+    },
   );
   return browser.$(`[data-testid="${testId}"]`);
 };
@@ -201,8 +204,9 @@ const seedLearningWindow = async (state: Record<string, unknown>) => {
     // property. The answer set is fixed on purpose.
     const inputs = await browser.execute(
       () =>
-        document.querySelectorAll('[data-testid="onboarding-acquisition"] input')
-          .length +
+        document.querySelectorAll(
+          '[data-testid="onboarding-acquisition"] input',
+        ).length +
         document.querySelectorAll(
           '[data-testid="onboarding-acquisition"] textarea',
         ).length,
@@ -241,9 +245,10 @@ const seedLearningWindow = async (state: Record<string, unknown>) => {
     await waitForBodyText("permission", 15_000);
   });
 
-  it("keeps engine final for a signed-out install with no goal picker", async () => {
-    await gotoSlide("engine");
+  it("keeps recommended setup final for a signed-out install with no goal picker", async () => {
+    await gotoSlide("recommended-setup");
     await waitForTestId("onboarding-scroll-region", 30_000);
+    await waitForTestId("onboarding-final-setup", 30_000);
 
     // Nothing in the shipped flow may ask for a goal any more: the dashboard
     // that question fed is no longer built during setup.
@@ -252,8 +257,9 @@ const seedLearningWindow = async (state: Record<string, unknown>) => {
     expect(text).not.toContain("build my first live view");
 
     // A fresh signed-out install cannot enter hosted checkout because there is
-    // no account to attach a subscription to. Engine is therefore the final
-    // reachable step until authenticated free-account truth exists.
+    // no account to attach a subscription to. It must still encounter the
+    // final connection setup instead of depending on Home's learning timer.
+    expect(text).toContain("connect gmail");
     const match = text.match(/setup[^0-9]*(\d+)\s*of\s*(\d+)/);
     if (match) {
       const [, current, total] = match.map(Number);
@@ -287,7 +293,8 @@ const seedLearningWindow = async (state: Record<string, unknown>) => {
     expect(text).not.toContain("opening secure checkout");
     expect(
       await browser.execute(
-        () => !!document.querySelector('[data-testid="onboarding-card-capture"]'),
+        () =>
+          !!document.querySelector('[data-testid="onboarding-card-capture"]'),
       ),
     ).toBe(false);
 

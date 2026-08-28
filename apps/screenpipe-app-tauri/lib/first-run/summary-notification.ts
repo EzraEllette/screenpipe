@@ -16,6 +16,7 @@ export type FirstRunSummaryNotificationPayload = {
   type: "firstRunSummary";
   priority: "normal";
   transient: false;
+  autoDismissMs: 0;
   actions: Array<{
     id: string;
     label: string;
@@ -59,6 +60,7 @@ export function buildFirstRunSummaryNotification(
     type: "firstRunSummary",
     priority: "normal",
     transient: false,
+    autoDismissMs: 0,
     actions,
   };
 }

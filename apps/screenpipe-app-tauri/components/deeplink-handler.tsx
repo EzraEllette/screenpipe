@@ -100,11 +100,21 @@ export function DeeplinkHandler() {
         parsedUrl.pathname === "first-run-summary"
       ) {
         const learning = readLearningWindow();
-        if (learning.phase !== "ready" || !learning.chatId) return;
+        let chatId = learning.phase === "ready" ? learning.chatId : null;
+        if (!chatId) {
+          const onboarding = await commands.getOnboardingStatus();
+          if (
+            onboarding.status === "ok" &&
+            onboarding.data.firstRunSummaryPhase === "ready"
+          ) {
+            chatId = onboarding.data.firstRunSummaryChatId ?? null;
+          }
+        }
+        if (!chatId) return;
         await commands.showWindowActivated({ Home: { page: "home" } });
         await new Promise((resolve) => setTimeout(resolve, 150));
         await emit("chat-load-conversation", {
-          conversationId: learning.chatId,
+          conversationId: chatId,
           targetWindow: "home",
         });
         markLearningSummaryOpened();

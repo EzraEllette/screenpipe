@@ -53,6 +53,15 @@ export function hasAuthoritativeActivePiTurn({
   return isStreaming || assistantMessageId !== null;
 }
 
+export function shouldInterruptActivePiTurn({
+  startedFreshPiSession,
+  ...turnState
+}: Parameters<typeof hasAuthoritativeActivePiTurn>[0] & {
+  startedFreshPiSession: boolean;
+}): boolean {
+  return !startedFreshPiSession && hasAuthoritativeActivePiTurn(turnState);
+}
+
 export async function awaitPendingPiPresetSwitch(
   promiseRef: { current: Promise<void> | null },
 ): Promise<void> {
@@ -317,13 +326,17 @@ export function usePiSendTransport(options: PiSendTransportOptions) {
     }
   }
 
-  async function interruptActivePiTurn(sessionId = piSessionIdRef.current) {
-    const hasActiveTurn = hasAuthoritativeActivePiTurn({
+  async function interruptActivePiTurn(
+    sessionId = piSessionIdRef.current,
+    startedFreshPiSession = false,
+  ) {
+    const shouldInterrupt = shouldInterruptActivePiTurn({
+      startedFreshPiSession,
       isLoading,
       isStreaming,
       assistantMessageId: piMessageIdRef.current,
     });
-    if (!hasActiveTurn) return;
+    if (!shouldInterrupt) return;
 
     let aborted = false;
     try {
@@ -445,6 +458,7 @@ export function usePiSendTransport(options: PiSendTransportOptions) {
     // not immediately started a second time, and a failed one cannot reuse the
     // stale provider.
     let liveSession: Awaited<ReturnType<typeof checkLivePiSession>>;
+    let startedFreshPiSession = false;
     try {
       liveSession = await checkLivePiSession(attemptSessionId, setAttemptPiInfo);
     } catch (e) {
@@ -537,6 +551,7 @@ export function usePiSendTransport(options: PiSendTransportOptions) {
                   });
                 }
                 started = true;
+                startedFreshPiSession = true;
                 break;
               } else {
                 lastError = result.status === "error"
@@ -639,7 +654,11 @@ export function usePiSendTransport(options: PiSendTransportOptions) {
         return;
       }
 
-      await interruptActivePiTurn(attemptSessionId);
+      // A process started by this send cannot have an active model turn yet.
+      // Restored chats can briefly retain stale streaming refs while their new
+      // Pi process starts; aborting that idle process wedges the first reply
+      // before its prompt is ever dispatched.
+      await interruptActivePiTurn(attemptSessionId, startedFreshPiSession);
     } catch (e) {
       finishAttempt();
       throw e;

@@ -2749,6 +2749,7 @@ pub async fn complete_onboarding(app_handle: tauri::AppHandle) -> Result<(), Str
 
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
     close_window(app_handle.clone(), ShowRewindWindow::Onboarding).await?;
+    crate::first_run_summary::arm(&app_handle)?;
 
     // Hidden UI applies to the main app, but incomplete onboarding remains
     // visible long enough to finish permissions. Once onboarding completes,

@@ -13,7 +13,6 @@ import type { LearningWindowView } from "@/lib/first-run/use-learning-window";
 const mocks = vi.hoisted(() => ({
   view: {} as LearningWindowView,
   emit: vi.fn().mockResolvedValue(undefined),
-  sendNotification: vi.fn().mockResolvedValue(undefined),
   handoff: {
     targets: [],
     resolved: false,
@@ -23,33 +22,27 @@ const mocks = vi.hoisted(() => ({
   } as {
     targets: { id: string; label: string; deeplink?: string; hint: string }[];
     resolved: boolean;
-    preferredTarget: { id: string; label: string; deeplink?: string; hint: string } | null;
+    preferredTarget: {
+      id: string;
+      label: string;
+      deeplink?: string;
+      hint: string;
+    } | null;
     hint: string | null;
     askAgent: ReturnType<typeof vi.fn>;
   },
 }));
 
-vi.mock("@/lib/first-run/use-learning-window", () => ({
-  useLearningWindow: () => mocks.view,
+vi.mock("@/components/first-run/learning-window-provider", () => ({
+  useFirstRunLearningWindow: () => ({
+    learning: mocks.view,
+    handoff: mocks.handoff,
+  }),
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({
   emit: mocks.emit,
   listen: vi.fn(async () => () => {}),
-}));
-
-vi.mock("@/lib/first-run/use-agent-handoff", () => ({
-  useAgentHandoff: () => mocks.handoff,
-}));
-
-vi.mock("@/lib/first-run/summary-notification", () => ({
-  sendFirstRunSummaryNotification: mocks.sendNotification,
-}));
-
-vi.mock("@/components/first-run/next-steps", () => ({
-  FirstRunNextSteps: () => (
-    <div data-testid="first-run-next-steps">next steps</div>
-  ),
 }));
 
 vi.mock("@/lib/hooks/use-settings", () => ({
@@ -97,55 +90,6 @@ beforeEach(() => {
 });
 
 describe("first-run learning banner", () => {
-  it("sends the ready notification once after agent detection settles", async () => {
-    const markNotificationSent = vi.fn();
-    mocks.view = view({
-      phase: "ready",
-      chatId: "private-chat-id",
-      markNotificationSent,
-    });
-    mocks.handoff.resolved = true;
-    render(<FirstRunLearningBanner />);
-
-    await waitFor(() => expect(mocks.sendNotification).toHaveBeenCalledWith(null));
-    expect(markNotificationSent).toHaveBeenCalledTimes(1);
-  });
-
-  it("does not notify again after delivery or after the summary opened", () => {
-    mocks.handoff.resolved = true;
-    for (const state of [
-      view({
-        phase: "ready",
-        chatId: "private-chat-id",
-        notificationSentAt: "2026-08-23T00:00:00.000Z",
-      }),
-      view({
-        phase: "ready",
-        chatId: "private-chat-id",
-        summaryOpenedAt: "2026-08-23T00:00:00.000Z",
-      }),
-    ]) {
-      mocks.view = state;
-      const rendered = render(<FirstRunLearningBanner />);
-      rendered.unmount();
-    }
-    expect(mocks.sendNotification).not.toHaveBeenCalled();
-  });
-
-  it("retries later when /notify rejects instead of spending the latch", async () => {
-    const markNotificationSent = vi.fn();
-    mocks.sendNotification.mockRejectedValueOnce(new Error("offline"));
-    mocks.handoff.resolved = true;
-    mocks.view = view({
-      phase: "ready",
-      chatId: "private-chat-id",
-      markNotificationSent,
-    });
-    render(<FirstRunLearningBanner />);
-    await waitFor(() => expect(mocks.sendNotification).toHaveBeenCalledTimes(1));
-    expect(markNotificationSent).not.toHaveBeenCalled();
-  });
-
   it("renders nothing outside the window so it is safe to mount always", () => {
     mocks.view = view({ phase: "idle" });
     const { container } = render(<FirstRunLearningBanner />);
@@ -213,7 +157,7 @@ describe("first-run learning banner", () => {
     expect(screen.queryByText("Reading from")).not.toBeInTheDocument();
   });
 
-  it("opens the seeded chat without retiring setup", async () => {
+  it("opens the seeded chat without dismissing the learning result", async () => {
     const dismiss = vi.fn();
     const markSummaryOpened = vi.fn();
     mocks.view = view({
@@ -235,7 +179,7 @@ describe("first-run learning banner", () => {
     expect(dismiss).not.toHaveBeenCalled();
   });
 
-  it("keeps a compact expandable setup dock over the opened summary", async () => {
+  it("keeps compact first-summary tips over the opened summary", async () => {
     const dismiss = vi.fn();
     mocks.view = view({
       phase: "ready",
@@ -259,9 +203,6 @@ describe("first-run learning banner", () => {
       screen.queryByTestId("first-run-next-steps"),
     ).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByTestId("first-run-toggle-setup"));
-    expect(screen.getByTestId("first-run-next-steps")).toBeInTheDocument();
-
     fireEvent.click(screen.getByTestId("first-run-hide-setup"));
     expect(dismiss).toHaveBeenCalledTimes(1);
     expect(
@@ -272,7 +213,7 @@ describe("first-run learning banner", () => {
     ).toMatchObject({ status: "dismissed" });
   });
 
-  it("offers the state-aware daily setup after learning resolves", () => {
+  it("does not repeat onboarding setup after learning resolves", () => {
     const dismiss = vi.fn();
     mocks.view = view({
       phase: "ready",
@@ -284,12 +225,14 @@ describe("first-run learning banner", () => {
     expect(
       screen.getByText("screenpipe learned enough to help"),
     ).toBeInTheDocument();
-    expect(screen.getByTestId("first-run-next-steps")).toBeInTheDocument();
+    expect(
+      screen.queryByTestId("first-run-next-steps"),
+    ).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "this is ready" }));
     expect(dismiss).toHaveBeenCalled();
   });
 
-  it("ends a foreground empty result with useful setup choices", () => {
+  it("ends a foreground empty result without repeating onboarding setup", () => {
     const dismiss = vi.fn();
     for (const emptyReason of [
       "not_recording",
@@ -308,7 +251,9 @@ describe("first-run learning banner", () => {
       });
       const rendered = render(<FirstRunLearningBanner />);
       expect(screen.getByText("screenpipe is ready")).toBeInTheDocument();
-      expect(screen.getByTestId("first-run-next-steps")).toBeInTheDocument();
+      expect(
+        screen.queryByTestId("first-run-next-steps"),
+      ).not.toBeInTheDocument();
       expect(
         screen.queryByTestId("first-run-open-summary"),
       ).not.toBeInTheDocument();
