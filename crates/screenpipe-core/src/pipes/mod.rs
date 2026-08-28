@@ -1547,10 +1547,19 @@ fn read_chatgpt_token_from_legacy_file() -> Option<String> {
         .unwrap_or(0);
 
     if now >= expires_at.saturating_sub(60) {
-        refresh_chatgpt_token(&mut token_data, now);
-        if let Ok(updated) = serde_json::to_string_pretty(&token_data) {
-            let _ = std::fs::write(&path, updated);
+        if refresh_chatgpt_token(&mut token_data, now) {
+            if let Ok(updated) = serde_json::to_string_pretty(&token_data) {
+                let _ = std::fs::write(&path, updated);
+            }
         }
+    }
+
+    if token_data
+        .get("reauth_required")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+    {
+        return None;
     }
 
     token_data
@@ -1579,6 +1588,14 @@ fn read_chatgpt_token_from_secrets() -> Option<String> {
             let bytes = store.get("oauth:chatgpt").await.ok()??;
             let mut token_data: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
 
+            if token_data
+                .get("reauth_required")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false)
+            {
+                return None;
+            }
+
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -1589,12 +1606,69 @@ fn read_chatgpt_token_from_secrets() -> Option<String> {
                 .unwrap_or(0);
 
             if now >= expires_at.saturating_sub(60) {
-                refresh_chatgpt_token(&mut token_data, now);
-                // Write refreshed token back to secrets store
-                if let Ok(updated_bytes) = serde_json::to_vec(&token_data) {
-                    if let Err(e) = store.set("oauth:chatgpt", &updated_bytes).await {
-                        tracing::warn!("failed to write refreshed ChatGPT token to secrets: {}", e);
+                let lease_owner = uuid::Uuid::new_v4().simple().to_string();
+                let mut acquired = false;
+                for _ in 0..140 {
+                    acquired = store
+                        .try_acquire_refresh_lease("oauth:chatgpt", &lease_owner, 45)
+                        .await
+                        .ok()?;
+                    if acquired {
+                        break;
                     }
+                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                }
+                if !acquired {
+                    tracing::warn!("timed out waiting for another ChatGPT token refresh");
+                    return None;
+                }
+
+                // The lease winner may have refreshed while we waited. Always
+                // reread before redeeming a rotating refresh token.
+                let refresh_result = async {
+                    let latest = store.get("oauth:chatgpt").await.ok()??;
+                    token_data = serde_json::from_slice(&latest).ok()?;
+                    if token_data
+                        .get("reauth_required")
+                        .and_then(|value| value.as_bool())
+                        .unwrap_or(false)
+                    {
+                        return None;
+                    }
+                    let latest_expires_at = token_data
+                        .get("expires_at")
+                        .and_then(|value| value.as_u64())
+                        .unwrap_or(0);
+                    if now >= latest_expires_at.saturating_sub(60) {
+                        if !refresh_chatgpt_token(&mut token_data, now) {
+                            return None;
+                        }
+                        let updated_bytes = serde_json::to_vec(&token_data).ok()?;
+                        if let Err(error) = store.set("oauth:chatgpt", &updated_bytes).await {
+                            tracing::warn!(
+                                "failed to write refreshed ChatGPT token to secrets: {error}"
+                            );
+                            return None;
+                        }
+                    }
+                    Some(())
+                }
+                .await;
+
+                if let Err(error) = store
+                    .release_refresh_lease("oauth:chatgpt", &lease_owner)
+                    .await
+                {
+                    tracing::warn!("failed to release ChatGPT refresh lease: {error}");
+                }
+                refresh_result?;
+
+                if token_data
+                    .get("reauth_required")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false)
+                {
+                    return None;
                 }
             }
 
@@ -1614,14 +1688,24 @@ fn read_chatgpt_token_from_secrets() -> Option<String> {
 
 /// Refresh an expired ChatGPT OAuth token using the refresh_token grant.
 /// Mutates `token_data` in place with the new access_token, refresh_token, and expires_at.
-fn refresh_chatgpt_token(token_data: &mut serde_json::Value, now: u64) {
+fn chatgpt_refresh_requires_reauth(body: &str) -> bool {
+    let code = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| value.pointer("/error/code")?.as_str().map(str::to_owned));
+    matches!(
+        code.as_deref(),
+        Some("refresh_token_reused" | "invalid_grant")
+    )
+}
+
+fn refresh_chatgpt_token(token_data: &mut serde_json::Value, now: u64) -> bool {
     let refresh_token = match token_data
         .get("refresh_token")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
     {
         Some(t) => t,
-        None => return,
+        None => return false,
     };
 
     tracing::info!("ChatGPT OAuth token expired, refreshing...");
@@ -1630,7 +1714,7 @@ fn refresh_chatgpt_token(token_data: &mut serde_json::Value, now: u64) {
         .build()
     {
         Ok(c) => c,
-        Err(_) => return,
+        Err(_) => return false,
     };
 
     let refresh_res = client
@@ -1646,28 +1730,48 @@ fn refresh_chatgpt_token(token_data: &mut serde_json::Value, now: u64) {
 
     match refresh_res {
         Ok(resp) if resp.status().is_success() => {
-            if let Ok(v) = resp.json::<serde_json::Value>() {
-                if let Some(new_token) = v.get("access_token").and_then(|t| t.as_str()) {
-                    let new_refresh = v
-                        .get("refresh_token")
-                        .and_then(|t| t.as_str())
-                        .unwrap_or(refresh_token.as_str());
-                    let new_expires_in =
-                        v.get("expires_in").and_then(|t| t.as_u64()).unwrap_or(3600);
+            let Ok(v) = resp.json::<serde_json::Value>() else {
+                token_data["reauth_required"] = serde_json::Value::Bool(true);
+                tracing::warn!(
+                    "ChatGPT refresh response could not be read; reauthentication required"
+                );
+                return true;
+            };
+            let Some(new_token) = v.get("access_token").and_then(|t| t.as_str()) else {
+                token_data["reauth_required"] = serde_json::Value::Bool(true);
+                tracing::warn!(
+                    "ChatGPT refresh response omitted the access token; reauthentication required"
+                );
+                return true;
+            };
+            let new_refresh = v
+                .get("refresh_token")
+                .and_then(|t| t.as_str())
+                .unwrap_or(refresh_token.as_str());
+            let new_expires_in = v.get("expires_in").and_then(|t| t.as_u64()).unwrap_or(3600);
 
-                    token_data["access_token"] = serde_json::Value::String(new_token.to_string());
-                    token_data["refresh_token"] =
-                        serde_json::Value::String(new_refresh.to_string());
-                    token_data["expires_at"] = serde_json::json!(now + new_expires_in);
-                    tracing::info!("ChatGPT token refreshed successfully");
-                }
-            }
+            token_data["access_token"] = serde_json::Value::String(new_token.to_string());
+            token_data["refresh_token"] = serde_json::Value::String(new_refresh.to_string());
+            token_data["expires_at"] = serde_json::json!(now + new_expires_in);
+            token_data["reauth_required"] = serde_json::Value::Bool(false);
+            tracing::info!("ChatGPT token refreshed successfully");
+            true
         }
         Ok(resp) => {
-            tracing::error!("ChatGPT token refresh failed ({})", resp.status());
+            let status = resp.status();
+            let body = resp.text().unwrap_or_default();
+            if chatgpt_refresh_requires_reauth(&body) {
+                token_data["reauth_required"] = serde_json::Value::Bool(true);
+                tracing::warn!("ChatGPT session requires reauthentication");
+                true
+            } else {
+                tracing::error!("ChatGPT token refresh failed ({status}): {body}");
+                false
+            }
         }
         Err(e) => {
             tracing::error!("ChatGPT token refresh request failed: {}", e);
+            false
         }
     }
 }
@@ -8508,6 +8612,19 @@ mod tests {
     use chrono::{TimeZone, Timelike};
     use std::path::Path;
     use std::sync::atomic::Ordering;
+
+    #[test]
+    fn rotating_chatgpt_token_errors_require_reauthentication() {
+        assert!(chatgpt_refresh_requires_reauth(
+            r#"{"error":{"code":"refresh_token_reused"}}"#
+        ));
+        assert!(chatgpt_refresh_requires_reauth(
+            r#"{"error":{"code":"invalid_grant"}}"#
+        ));
+        assert!(!chatgpt_refresh_requires_reauth(
+            r#"{"error":{"code":"temporarily_unavailable"}}"#
+        ));
+    }
 
     struct SequencedExecutor {
         outputs: std::sync::Mutex<VecDeque<AgentOutput>>,
