@@ -84,6 +84,30 @@ describe("provider error copy", () => {
     expect(msg).toContain("ollama pull llama3.2");
   });
 
+  it("maps native Ollama tool-capability errors to actionable, non-retryable copy", () => {
+    const raw =
+      'Error: 400: {"message":"registry.ollama.ai/library/qwen2.5vl:3b does not support tools","type":"invalid_request_error","param":null,"code":null,"detail":"untrusted upstream suffix"}';
+
+    const presentation = buildProviderErrorPresentation(raw, {
+      provider: "native-ollama",
+      model: "qwen2.5vl:3b",
+    });
+
+    expect(presentation).toEqual({
+      kind: "provider",
+      message:
+        'Ollama model "qwen2.5vl:3b" does not support tools. Switch your AI preset to an Ollama model that supports tools.',
+      retryable: false,
+    });
+    expect(presentation?.message).not.toContain("untrusted upstream suffix");
+    expect(
+      buildProviderErrorPresentation(raw, {
+        provider: "custom",
+        model: "qwen2.5vl:3b",
+      }),
+    ).toBeNull();
+  });
+
   it("maps screenpipe cloud connection errors to a transient-outage message", () => {
     const msg = buildProviderErrorMessage("Connection error.", {
       provider: "screenpipe-cloud",
