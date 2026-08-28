@@ -213,6 +213,10 @@ describe("ComposerControlsRow", () => {
     expect(
       screen.getByRole("status", { name: "preparing worktree" }),
     ).toBeInTheDocument();
+    expect(screen.getByTestId("pipe-ai-icon")).toHaveAttribute(
+      "data-live",
+      "true",
+    );
     expect(
       screen.queryByTestId("coding-workspace-checkbox"),
     ).not.toBeInTheDocument();

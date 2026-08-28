@@ -141,6 +141,8 @@
     --signal-foreground: 0 0% 100%;
     --phosphor: 77 100% 62%;          /* #C7FF3E */
     --phosphor-ink: 0 0% 2%;          /* foreground on a phosphor fill */
+    /* Compact live marks on bone: same hue, dark enough to read. */
+    --phosphor-mark: 77 90% 30%;      /* #6A9108 — readable on bone */
     --trace: 60 4% 45%;               /* #78786F — captured evidence, inactive */
 
     --shadow-sm: 0 1px 2px -1px hsl(0 0% 0% / 0.08);
@@ -173,6 +175,7 @@
        focus and small-state contrast on both bone and ink. */
     --phosphor: 77 100% 62%;
     --phosphor-ink: 0 0% 2%;
+    --phosphor-mark: 77 100% 62%;     /* #C7FF3E — lime reads on ink */
     --trace: 60 4% 56%;
     --signal: 0 0% 72%;
     --signal-foreground: 0 0% 4%;
@@ -777,6 +780,172 @@
 
     .sp-onboarding-packet {
       left: 50%;
+    }
+  }
+
+  /* Pipe thinking marks. Phosphor only while captured work is becoming
+     memory or an agent step is executing. Light uses --phosphor-mark
+     (dark sap green) so a 5px cell reads on bone. */
+  .sp-pipe-live {
+    fill: currentColor;
+    fill-opacity: 0.55;
+  }
+
+  .sp-pipe[data-live="true"] .sp-pipe-live {
+    fill: hsl(var(--phosphor-mark));
+    fill-opacity: 1;
+  }
+
+  .sp-pipe[data-live="true"] .sp-pipe-bore-fill {
+    fill: hsl(var(--foreground) / 0.16);
+  }
+
+  @keyframes sp-pipe-packet {
+    0% { transform: translateX(0); opacity: 0; }
+    12.5% { opacity: 1; }
+    87.5% { opacity: 1; }
+    100% { transform: translateX(19px); opacity: 0; }
+  }
+
+  .sp-pipe-packet {
+    transform-box: fill-box;
+    transform-origin: 0 0;
+    animation: sp-pipe-packet 1.2s steps(8, end) infinite;
+  }
+
+  @keyframes sp-pipe-flood {
+    0% { opacity: 0; }
+    12%, 78% { opacity: 1; }
+    88%, 100% { opacity: 0; }
+  }
+
+  .sp-pipe-flood-cell {
+    opacity: 0;
+    animation: sp-pipe-flood 1.6s steps(1, end) infinite;
+  }
+
+  @keyframes sp-pipe-mobius-in {
+    0% { transform: translateX(0); opacity: 0; }
+    8% { opacity: 1; }
+    40% { opacity: 1; }
+    48%, 100% { transform: translateX(19px); opacity: 0; }
+  }
+
+  @keyframes sp-pipe-mobius-out {
+    0%, 48% { transform: translateX(0); opacity: 0; }
+    56% { opacity: 1; }
+    90% { opacity: 1; }
+    100% { transform: translateX(-19px); opacity: 0; }
+  }
+
+  .sp-pipe-mobius-in,
+  .sp-pipe-mobius-out {
+    transform-box: fill-box;
+    transform-origin: 0 0;
+  }
+
+  .sp-pipe-mobius-in { animation: sp-pipe-mobius-in 1.6s steps(8, end) infinite; }
+  .sp-pipe-mobius-out { animation: sp-pipe-mobius-out 1.6s steps(8, end) infinite; }
+
+  @keyframes sp-pipe-shut-nw {
+    0%, 100% { transform: translate(0, 0); }
+    42%, 58% { transform: translate(12px, 12px); }
+  }
+  @keyframes sp-pipe-shut-ne {
+    0%, 100% { transform: translate(0, 0); }
+    42%, 58% { transform: translate(-12px, 12px); }
+  }
+  @keyframes sp-pipe-shut-sw {
+    0%, 100% { transform: translate(0, 0); }
+    42%, 58% { transform: translate(12px, -12px); }
+  }
+  @keyframes sp-pipe-shut-se {
+    0%, 100% { transform: translate(0, 0); }
+    42%, 58% { transform: translate(-12px, -12px); }
+  }
+  @keyframes sp-pipe-shut-core {
+    0%, 40%, 60%, 100% { opacity: 0; }
+    50% { opacity: 1; }
+  }
+
+  .sp-pipe-shut {
+    transform-box: fill-box;
+    transform-origin: 0 0;
+    fill: currentColor;
+    fill-opacity: 0.14;
+    stroke: currentColor;
+    stroke-width: 1.25;
+  }
+
+  .sp-pipe-shut-nw { animation: sp-pipe-shut-nw 1.4s steps(6, end) infinite; }
+  .sp-pipe-shut-ne { animation: sp-pipe-shut-ne 1.4s steps(6, end) infinite; }
+  .sp-pipe-shut-sw { animation: sp-pipe-shut-sw 1.4s steps(6, end) infinite; }
+  .sp-pipe-shut-se { animation: sp-pipe-shut-se 1.4s steps(6, end) infinite; }
+  .sp-pipe-shut-core { animation: sp-pipe-shut-core 1.4s steps(6, end) infinite; }
+
+  @keyframes sp-pipe-wf-top {
+    0% { transform: translateX(0); opacity: 0; }
+    4% { opacity: 1; }
+    22% { opacity: 1; transform: translateX(14px); }
+    26%, 100% { opacity: 0; transform: translateX(16px); }
+  }
+  @keyframes sp-pipe-wf-mid {
+    0%, 36% { transform: translateX(0); opacity: 0; }
+    40% { opacity: 1; }
+    56% { opacity: 1; transform: translateX(-14px); }
+    60%, 100% { opacity: 0; transform: translateX(-16px); }
+  }
+  @keyframes sp-pipe-wf-bot {
+    0%, 70% { transform: translateX(0); opacity: 0; }
+    74% { opacity: 1; }
+    90% { opacity: 1; transform: translateX(14px); }
+    94%, 100% { opacity: 0; transform: translateX(16px); }
+  }
+  @keyframes sp-pipe-wf-d1 {
+    0%, 24%, 38%, 100% { opacity: 0; transform: translateY(0); }
+    28% { opacity: 1; }
+    34% { opacity: 1; transform: translateY(4px); }
+  }
+  @keyframes sp-pipe-wf-d2 {
+    0%, 58%, 72%, 100% { opacity: 0; transform: translateY(0); }
+    62% { opacity: 1; }
+    68% { opacity: 1; transform: translateY(4px); }
+  }
+
+  .sp-pipe-wf-top,
+  .sp-pipe-wf-mid,
+  .sp-pipe-wf-bot,
+  .sp-pipe-wf-d1,
+  .sp-pipe-wf-d2 {
+    transform-box: fill-box;
+    transform-origin: 0 0;
+  }
+
+  .sp-pipe-wf-top { animation: sp-pipe-wf-top 1.8s steps(8, end) infinite; }
+  .sp-pipe-wf-mid { animation: sp-pipe-wf-mid 1.8s steps(8, end) infinite; }
+  .sp-pipe-wf-bot { animation: sp-pipe-wf-bot 1.8s steps(8, end) infinite; }
+  .sp-pipe-wf-d1 { animation: sp-pipe-wf-d1 1.8s steps(8, end) infinite; }
+  .sp-pipe-wf-d2 { animation: sp-pipe-wf-d2 1.8s steps(8, end) infinite; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .sp-pipe-packet,
+    .sp-pipe-flood-cell,
+    .sp-pipe-mobius-in,
+    .sp-pipe-mobius-out,
+    .sp-pipe-shut,
+    .sp-pipe-shut-core,
+    .sp-pipe-wf-top,
+    .sp-pipe-wf-mid,
+    .sp-pipe-wf-bot,
+    .sp-pipe-wf-d1,
+    .sp-pipe-wf-d2 {
+      animation: none;
+      opacity: 1;
+    }
+
+    .sp-pipe-packet,
+    .sp-pipe-mobius-in {
+      transform: translateX(9px);
     }
   }
 

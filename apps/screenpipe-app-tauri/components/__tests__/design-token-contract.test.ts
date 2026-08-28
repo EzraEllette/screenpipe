@@ -63,6 +63,8 @@ describe("calm app design token contract", () => {
     expect(dark["--signal"]).toBe("0 0% 72%");
     expect(light["--phosphor"]).toBe("77 100% 62%");
     expect(dark["--phosphor"]).toBe("77 100% 62%");
+    expect(light["--phosphor-mark"]).toBe("77 90% 30%");
+    expect(dark["--phosphor-mark"]).toBe("77 100% 62%");
   });
 
   it("keeps dark mode neutral and calm", () => {
