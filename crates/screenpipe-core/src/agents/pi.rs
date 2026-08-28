@@ -4087,6 +4087,19 @@ mod tests {
         );
     }
 
+    #[test]
+    fn bundled_read_skills_keep_the_live_database_behind_screenpipe() {
+        let api_skill = include_str!("../../assets/skills/screenpipe-api/SKILL.md");
+        let cli_skill = include_str!("../../assets/skills/screenpipe-cli/SKILL.md");
+
+        for skill in [api_skill, cli_skill] {
+            assert!(skill.contains("Never access live `db.sqlite`"));
+            assert!(!skill.contains("sqlite3 \"file:"));
+        }
+        assert!(api_skill.contains("MCP `query_recordings`"));
+        assert!(cli_skill.contains("SQL analysis through Screenpipe"));
+    }
+
     #[cfg(not(feature = "enterprise-build"))]
     #[test]
     fn consumer_build_never_enables_enterprise_team_skill() {

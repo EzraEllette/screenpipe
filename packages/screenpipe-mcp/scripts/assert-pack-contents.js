@@ -10,8 +10,10 @@
  * modules entirely. `screenpipe-mcp@0.19.1` shipped a large runtime dependency
  * tree that Bun/npx can corrupt when several agents cold-start concurrently;
  * production then fails on a random missing AJV, Zod, SDK, locale, or local
- * module. The package must therefore ship self-contained entry bundles and no
- * runtime dependency installation surface.
+ * module. A later audit also found an MCP authentication fallback that opened
+ * the recorder's live SQLite database outside Screenpipe's locking boundary.
+ * The package must therefore ship self-contained entry bundles, no runtime
+ * dependency installation surface, and no direct recording-database access.
  *
  * Two independent classes of failure are checked, because they fail
  * differently:
@@ -89,6 +91,16 @@ const FORBIDDEN_MARKERS = [
     file: "dist/index.js",
     pattern: /\bTEAM_API\s*=\s*"https/,
     why: "the team API base must be resolved at runtime (discoverTeamApiBase), never a literal — a hardcoded base is exactly what 401'd for gateway orgs",
+  },
+  {
+    file: "dist/index.js",
+    pattern: /\bsqlite3(?:\.exe)?\b/i,
+    why: "the MCP must use Screenpipe's authenticated API or CLI and never spawn an external SQLite client",
+  },
+  {
+    file: "dist/index.js",
+    pattern: /\bdb\.sqlite(?:-wal|-shm)?\b/i,
+    why: "the MCP must never open or copy the recorder's live database files",
   },
 ];
 
@@ -182,7 +194,7 @@ function main() {
     `pack contents OK — screenpipe-mcp@${version}, ${files.length} files, ` +
       `${REQUIRED_PATHS.length} required paths present, ` +
       `${REQUIRED_MARKERS.length} content markers verified, ` +
-      `zero runtime dependencies, no hardcoded team base.`,
+      `zero runtime dependencies, no hardcoded team base, no direct SQLite access.`,
   );
 }
 

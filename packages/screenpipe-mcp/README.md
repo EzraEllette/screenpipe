@@ -48,8 +48,9 @@ If you're not using the desktop app, edit your Claude Desktop config:
 
 Requires Node/`npx` on `PATH`. Pin `@latest` so the first install doesn't cache a
 stale version forever. Get your key with `screenpipe auth token`. If you omit the
-key, the server will try to discover it (bundled bun → npx → local DB) — this works
-but is slower and can time out on first run.
+key, the server will try to discover it through the bundled Screenpipe CLI and
+then `npx`. It never opens the live SQLite database directly. Discovery can be
+slower on first run, so setting the environment variable is still recommended.
 
 Enterprise admins: add `SCREENPIPE_ENTERPRISE_TOKEN` (and, for orgs running their
 own query gateway, `SCREENPIPE_TEAM_API_URL`) to the same `env` block to get the
@@ -363,7 +364,10 @@ To disable crash/error reporting, set any of:
 ### Data usage
 Tool calls are passed straight through to your local Screenpipe daemon
 and the results stream back to Claude. The MCP server doesn't keep
-anything.
+anything. Database access stays inside Screenpipe's daemon and first-party CLI,
+which own SQLite lifecycle and locking; the MCP server never opens, copies, or
+mutates the live database, WAL, or shared-memory files. Use MCP tools such as
+`query_recordings` for SQL-shaped analysis.
 
 ### Data storage
 Nothing is stored by the MCP server itself. Recordings, OCR text,

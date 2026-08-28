@@ -128,6 +128,19 @@ describe("pack-contents gate — built-file contents", () => {
     expect(failures.some((f) => f.includes("forbidden"))).toBe(true);
   });
 
+  it("rejects the former direct live-database authentication fallback", () => {
+    const unsafe = {
+      ...goodDist,
+      "dist/index.js":
+        goodDist["dist/index.js"] +
+        'execFile("sqlite3", ["/home/user/.screenpipe/db.sqlite", "SELECT value FROM secrets"]);\n',
+    };
+    const failures: string[] = gate.markerFailures(reader(unsafe));
+
+    expect(failures.some((failure) => failure.includes("sqlite3"))).toBe(true);
+    expect(failures.some((failure) => failure.includes("db\\.sqlite"))).toBe(true);
+  });
+
   it("fails loudly when a required built file is missing entirely", () => {
     const failures: string[] = gate.markerFailures(() => null);
     expect(failures).toHaveLength(gate.REQUIRED_MARKERS.length);

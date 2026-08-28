@@ -86,14 +86,13 @@ const SCREENPIPE_API = resolveScreenpipeApiBase({ baseOverride, host, port });
 //   3. CLI via node-adjacent npx — for dev environments that have node but
 //      not the desktop app.
 //   4. CLI via PATH-based npx — last CLI fallback.
-//   5. Direct sqlite3 read of ~/.screenpipe/db.sqlite — plaintext entries
-//      only (encrypted entries need the keychain, which only the CLI can
-//      reach). Kept as a final last-resort for users who have screenpipe
-//      *data* but no working CLI install (rare). Demoted below the CLI
-//      paths because it reimplements logic that lives in `auth_key.rs` and
-//      can silently drift on storage-format changes.
 //
-// If all 5 miss we log a loud stderr warning so it surfaces in the host's
+// The MCP process never opens Screenpipe's SQLite files. The desktop app and
+// CLI own database access, locking, WAL handling, and secret-store decoding;
+// bypassing those boundaries here can race the recorder or drift from the
+// encrypted storage format.
+//
+// If all 4 miss we log a loud stderr warning so it surfaces in the host's
 // MCP log instead of the user just seeing 403s with no explanation.
 async function discoverApiKey(): Promise<string> {
   const envKey = process.env.SCREENPIPE_LOCAL_API_KEY || process.env.SCREENPIPE_API_KEY;
@@ -224,51 +223,7 @@ async function discoverApiKey(): Promise<string> {
     }
   } catch {}
 
-  // 5. Direct sqlite3 read of the secret store (last-resort). Plaintext
-  //    entries only — encrypted ones live behind the keychain, which the
-  //    CLI paths above already cover. Used when the user has screenpipe
-  //    data on disk but no working CLI install.
-  const sqliteCandidates: string[] =
-    process.platform === "win32"
-      ? ["sqlite3.exe", "C:\\Windows\\System32\\sqlite3.exe"]
-      : process.platform === "darwin"
-      ? ["sqlite3", "/usr/bin/sqlite3", "/opt/homebrew/bin/sqlite3", "/usr/local/bin/sqlite3"]
-      : ["sqlite3", "/usr/bin/sqlite3", "/usr/local/bin/sqlite3"];
-  try {
-    const dbPath = path.join(home, ".screenpipe", "db.sqlite");
-    if (fs.existsSync(dbPath)) {
-      let row: string | null = null;
-      for (const candidate of sqliteCandidates) {
-        if (budgetLeft() <= 0) break;
-        try {
-          const { stdout } = await execFileAsync(
-            candidate,
-            [dbPath, "SELECT hex(nonce), value FROM secrets WHERE key = 'api_auth_key';"],
-            { timeout: Math.min(5000, budgetLeft()), encoding: "utf-8" },
-          );
-          row = String(stdout).trim();
-          break;
-        } catch {
-          // try next candidate
-        }
-      }
-      if (row) {
-        const sepIdx = row.indexOf("|");
-        const nonceHex = sepIdx >= 0 ? row.substring(0, sepIdx) : "";
-        const value = sepIdx >= 0 ? row.substring(sepIdx + 1) : row;
-        const isPlaintext = !nonceHex || /^0+$/.test(nonceHex);
-        if (isPlaintext && value) {
-          const decoded = Buffer.from(value, "base64").toString("utf-8");
-          if (decoded && decoded.startsWith("sp-")) return decoded;
-          if (value.startsWith("sp-")) return value;
-        }
-        // Encrypted — only the CLI paths above can decrypt this; we
-        // already tried them.
-      }
-    }
-  } catch {}
-
-  // All five paths missed. Log loudly to stderr so the host's MCP
+  // All four paths missed. Log loudly to stderr so the host's MCP
   // panel surfaces this instead of the user seeing cryptic 403s from
   // the screenpipe server on every tool call.
   process.stderr.write(
@@ -277,14 +232,14 @@ async function discoverApiKey(): Promise<string> {
       "  - env vars (SCREENPIPE_LOCAL_API_KEY / SCREENPIPE_API_KEY) not set",
       "  - bundled `bun` from screenpipe.app not found at any known install path",
       "  - npx fallback unavailable",
-      "  - direct sqlite3 read of ~/.screenpipe/db.sqlite failed",
       "Fix: set SCREENPIPE_LOCAL_API_KEY in your MCP launcher's env block,",
-      "or install the screenpipe desktop app (https://screenpi.pe).",
+      "or install the screenpipe desktop app (https://screenpi.pe) so its CLI",
+      "can resolve the key without bypassing Screenpipe's database boundary.",
       "",
     ].join("\n"),
   );
-  // This is a user-side misconfiguration (no key set + no desktop app / CLI /
-  // local DB), not a screenpipe defect — the stderr hint above tells the user
+  // This is a user-side misconfiguration (no key set + no desktop app / CLI),
+  // not a screenpipe defect — the stderr hint above tells the user
   // how to fix it. Log it as `info` for activation signal, and throttle to one
   // event per machine per day so a respawning MCP host can't escalate it.
   captureMcpMessage("api key discovery failed", "info", {
@@ -295,7 +250,7 @@ async function discoverApiKey(): Promise<string> {
 }
 
 // API key is resolved LAZILY, never at module load. `discoverApiKey()` can run
-// several subprocess fallbacks (bundled bun, npx, sqlite) that, on a cold cache
+// several subprocess fallbacks (bundled bun and npx) that, on a cold cache
 // or restricted PATH, take many seconds. Running that synchronously at module
 // scope used to block the entire module body from finishing — which meant
 // `main()` (and therefore `server.connect()`) was never reached until discovery
