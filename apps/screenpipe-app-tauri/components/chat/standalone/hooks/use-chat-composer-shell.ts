@@ -271,7 +271,7 @@ export function useChatComposerShellActions({
       isComposing?: boolean;
       keyCode?: number;
     };
-    const nativeIsComposing = nativeEvent.isComposing || nativeEvent.keyCode === 229;
+    const nativeIsComposing = Boolean(nativeEvent.isComposing) || nativeEvent.keyCode === 229;
     if (isComposing || nativeIsComposing) return;
 
     if (

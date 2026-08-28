@@ -62,7 +62,7 @@ describe("resolveVisibleChatTitle", () => {
 
   it("falls back to untitled when there are messages but nothing to derive from", () => {
     const injected = { id: "1", role: "user", content: "", timestamp: 1 } as Message;
-    expect(resolveVisibleChatTitle({ messages: [injected] })).toBe("untitled");
+    expect(resolveVisibleChatTitle({ messages: [injected] })).toBe("");
   });
 
   it("gives the header and the menu the same answer for the same input", () => {

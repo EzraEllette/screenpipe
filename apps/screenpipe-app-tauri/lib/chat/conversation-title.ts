@@ -35,8 +35,9 @@ export type VisibleChatTitleInput = {
 
 /**
  * Priority: a streaming AI title, then a real stored title, then a title
- * derived from the first user message (or the in-flight one), then the
- * "untitled" placeholder once there is anything to name, then nothing.
+ * derived from the first user message (or the in-flight one). A brand-new
+ * conversation stays unlabeled rather than showing the document-like
+ * "untitled" placeholder.
  */
 export function resolveVisibleChatTitle({
   storeTitle,
@@ -62,6 +63,7 @@ export function resolveVisibleChatTitle({
           content: pendingTitleSource,
         } as Message)
       : undefined;
+  const hasRealUserContent = Boolean(firstUserMsg || pendingTitleSource);
 
   const storeTitleIsReal =
     Boolean(storeTitle) &&
@@ -69,8 +71,10 @@ export function resolveVisibleChatTitle({
     !isInjectedTitle(storeTitle as string);
   if (storeTitleIsReal) return storeTitle as string;
 
-  if (derivedTitle) return derivedTitle;
+  if (derivedTitle && hasRealUserContent) return derivedTitle;
 
-  const hasSomethingToName = messages.length > 0 || Boolean(pendingTitleSource);
-  return hasSomethingToName ? "untitled" : "";
+  // Empty chats and prompt-only plumbing are intentionally unlabeled.
+  // "New chat" is supplied by the creation affordance, not persisted as a
+  // conversation title.
+  return "";
 }
