@@ -25,9 +25,6 @@ const GPT56_MAX_READ_BREAKPOINTS = 50;
 const GPT56_HISTORY_BREAKPOINTS = GPT56_MAX_READ_BREAKPOINTS - 1;
 const CACHEABLE_CONTENT_TYPES = new Set([
 	'text',
-	'image_url',
-	'input_audio',
-	'file',
 	'refusal',
 ]);
 
@@ -50,14 +47,6 @@ function isCacheableContentPart(part: any): boolean {
 			return typeof part.text === 'string' && part.text.length > 0;
 		case 'refusal':
 			return typeof part.refusal === 'string' && part.refusal.length > 0;
-		case 'image_url':
-			return typeof part.image_url === 'string'
-				? part.image_url.length > 0
-				: Boolean(part.image_url?.url);
-		case 'input_audio':
-			return Boolean(part.input_audio?.data);
-		case 'file':
-			return Boolean(part.file?.file_id || part.file?.filename || part.file?.file_data);
 		default:
 			return false;
 	}
