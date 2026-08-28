@@ -76,6 +76,7 @@ import {
 import { commands } from "@/lib/utils/tauri";
 import { isInjectedTitle } from "@/lib/chat-utils";
 import { createConversationBranch } from "@/lib/chat/branch-conversation";
+import { showChatArchiveUndoToast } from "@/components/chat/archive-undo-toast";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -1370,6 +1371,8 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
     }
     // Stop any active session first to avoid immediate row resurrection
     // from trailing stream events.
+    const wasPinned = useChatStore.getState().sessions[id]?.pinned ?? false;
+    const wasCurrent = id === currentId;
     commands.piAbort(id).catch(() => {});
     actions.patch(id, { hidden: true, pinned: false, unread: false });
     // Archiving should tuck chats away immediately; users can reopen
@@ -1413,6 +1416,30 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
     } catch {
       // ignore
     }
+    showChatArchiveUndoToast({
+      onUndo: async () => {
+        actions.patch(id, {
+          hidden: false,
+          pinned: wasPinned,
+          unread: false,
+        });
+        actions.openChat(id);
+        try {
+          await updateConversationFlags(id, {
+            hidden: false,
+            pinned: wasPinned,
+          });
+        } catch {
+          // The in-memory restore still gives the user an immediate path back.
+        }
+        try {
+          await emit("chat-visibility-changed", { id, hidden: false });
+        } catch {
+          // ignore
+        }
+        if (wasCurrent) await handleSelect(id);
+      },
+    });
   };
 
   const handleBranch = async (id: string) => {

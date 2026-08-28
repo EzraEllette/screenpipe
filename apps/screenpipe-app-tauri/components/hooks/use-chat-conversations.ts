@@ -56,6 +56,7 @@ import {
   isEphemeralSideConversationId,
 } from "@/lib/stores/chat-store";
 import { createConversationBranch } from "@/lib/chat/branch-conversation";
+import { showChatArchiveUndoToast } from "@/components/chat/archive-undo-toast";
 
 // --- Hook options ---
 
@@ -1863,6 +1864,7 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
     const wasCurrent =
       conversationId === convId || piSessionIdRef.current === convId;
     const fallbackId = fallbackOpenChatId(store, convId);
+    const wasPinned = store.sessions[convId]?.pinned ?? false;
 
     await updateConversationFlags(convId, { hidden: true, pinned: false });
     commands.piAbort(convId).catch(() => {});
@@ -1880,6 +1882,38 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
       // The local store and file are already updated; another window can
       // repair itself on its next disk hydration.
     }
+
+    showChatArchiveUndoToast({
+      onUndo: async () => {
+        await updateConversationFlags(convId, {
+          hidden: false,
+          pinned: wasPinned,
+        });
+        store.actions.patch(convId, {
+          hidden: false,
+          pinned: wasPinned,
+          unread: false,
+        });
+        store.actions.openChat(convId);
+        await refreshFileConversations();
+        try {
+          await emit("chat-visibility-changed", {
+            id: convId,
+            hidden: false,
+          });
+        } catch {
+          // The local restore is complete; sibling windows can repair on
+          // their next disk hydration.
+        }
+        if (!wasCurrent) return;
+        store.actions.setCurrent(convId);
+        try {
+          await emit("chat-load-conversation", { conversationId: convId });
+        } catch {
+          // The restored row remains visible and selectable in this window.
+        }
+      },
+    });
 
     if (!wasCurrent) return;
 

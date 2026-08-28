@@ -42,6 +42,7 @@ import {
 import { useChatStore } from "@/lib/stores/chat-store";
 import { pipeConversationDeletionKey } from "@/lib/pipe-execution-status";
 import { ImportChatsDialog } from "@/components/chat/import-chats-dialog";
+import { showChatArchiveUndoToast } from "@/components/chat/archive-undo-toast";
 import {
   listMoveTargetGroups,
   validateSidebarGroupName,
@@ -596,6 +597,7 @@ export function ChatHistoryView({
                     disabled={rowPending}
                     onSelect={(e) => {
                       void (async () => {
+                        const wasPinned = conv.pinned ?? false;
                         await updateConversationFlags(conv.id, { hidden: true, pinned: false });
                         patchSidebarSession(conv.id, { hidden: true, pinned: false }, conv);
                         try {
@@ -604,6 +606,28 @@ export function ChatHistoryView({
                           // ignore
                         }
                         void load();
+                        showChatArchiveUndoToast({
+                          onUndo: async () => {
+                            await updateConversationFlags(conv.id, {
+                              hidden: false,
+                              pinned: wasPinned,
+                            });
+                            patchSidebarSession(
+                              conv.id,
+                              { hidden: false, pinned: wasPinned },
+                              conv,
+                            );
+                            try {
+                              await emit("chat-visibility-changed", {
+                                id: conv.id,
+                                hidden: false,
+                              });
+                            } catch {
+                              // ignore
+                            }
+                            void load();
+                          },
+                        });
                       })();
                     }}
                   >
@@ -772,6 +796,11 @@ export function ChatHistoryView({
                                     ? ids.filter((id) => !visibleById.get(id)?.hidden)
                                     : ids;
                                 if (idsToArchive.length === 0) return;
+                                const archivedStates = idsToArchive.map((id) => ({
+                                  id,
+                                  meta: visibleById.get(id),
+                                  pinned: visibleById.get(id)?.pinned ?? false,
+                                }));
                                 setBulkPending("archiving");
                                 const result = await bulkSetHidden(idsToArchive, true);
                                 setBulkPending(null);
@@ -784,6 +813,34 @@ export function ChatHistoryView({
                                 }
                                 clearSelection();
                                 void load();
+                                showChatArchiveUndoToast({
+                                  count: archivedStates.length,
+                                  onUndo: async () => {
+                                    for (const archived of archivedStates) {
+                                      await updateConversationFlags(archived.id, {
+                                        hidden: false,
+                                        pinned: archived.pinned,
+                                      });
+                                      patchSidebarSession(
+                                        archived.id,
+                                        {
+                                          hidden: false,
+                                          pinned: archived.pinned,
+                                        },
+                                        archived.meta,
+                                      );
+                                      try {
+                                        await emit("chat-visibility-changed", {
+                                          id: archived.id,
+                                          hidden: false,
+                                        });
+                                      } catch {
+                                        // ignore
+                                      }
+                                    }
+                                    void load();
+                                  },
+                                });
                               }}
                             >
                               <Archive className="h-3.5 w-3.5" />
