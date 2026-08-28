@@ -553,8 +553,9 @@ pub struct PiState(pub Arc<Mutex<PiPool>>);
 #[serde(rename_all = "camelCase")]
 pub struct PiInfo {
     pub running: bool,
-    /// True while this session has a prompt, queued follow-up, or pending RPC
-    /// response. Destructive settings use it to avoid clearing live context.
+    /// True while this session is still initializing, or has a prompt, queued
+    /// follow-up, or pending RPC response. Destructive settings use it to
+    /// avoid clearing live context.
     pub busy: bool,
     pub project_dir: Option<String>,
     pub pid: Option<u32>,
@@ -622,6 +623,28 @@ fn pi_session_has_in_flight_work(
         .map(|pending| !pending.is_empty())
         .unwrap_or(true);
     pending_rpc || queue_state.map(|state| state.is_busy()).unwrap_or(false)
+}
+
+fn pi_session_is_busy(
+    starting: bool,
+    queue_state: Option<&Arc<crate::pi_command_queue::PiQueueState>>,
+    pending_responses: &PendingResponses,
+) -> bool {
+    starting || pi_session_has_in_flight_work(queue_state, pending_responses)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IdleStopDecision {
+    Keep,
+    Stop,
+}
+
+fn idle_stop_decision(starting: bool, has_in_flight_work: bool) -> IdleStopDecision {
+    if starting || has_in_flight_work {
+        IdleStopDecision::Keep
+    } else {
+        IdleStopDecision::Stop
+    }
 }
 
 fn event_tool_call_ids(event: &Value) -> Vec<String> {
@@ -879,6 +902,14 @@ pub struct PiManager {
     /// Join handle for the queue drain task (for cleanup).
     queue_task: Option<tokio::task::JoinHandle<()>>,
     conversation_sync: PiConversationSync,
+    /// True from process spawn until ACP/Pi reports ready. Chat switches call
+    /// `pi_stop_if_idle` during this window; treating it as idle kills Cursor
+    /// ACP mid-init (`ACP runtime exited before initialization completed`).
+    starting: bool,
+    /// Set when a panel releases the session while `starting` is still true.
+    /// After ready, a deferred idle reap runs so a start-only session does not
+    /// leak, while `pi_start_and_prompt` still has time to queue the first turn.
+    release_when_idle: bool,
 }
 
 /// Terminate the process group rooted at the hidden ACP runtime. The runtime
@@ -928,6 +959,8 @@ impl PiManager {
             queue_state: None,
             queue_task: None,
             conversation_sync: PiConversationSync::new(),
+            starting: false,
+            release_when_idle: false,
         }
     }
 
@@ -1040,6 +1073,8 @@ impl PiManager {
         self.project_dir = None;
         self.conversation_sync = PiConversationSync::new();
         self.launch_fingerprint = None;
+        self.starting = false;
+        self.release_when_idle = false;
         // Drop all pending response channels so waiting callers get an error
         self.pending_responses.lock().unwrap().clear();
     }
@@ -1049,7 +1084,11 @@ impl PiManager {
     }
 
     fn has_in_flight_work(&self) -> bool {
-        pi_session_has_in_flight_work(self.queue_state.as_ref(), &self.pending_responses)
+        pi_session_is_busy(
+            self.starting,
+            self.queue_state.as_ref(),
+            &self.pending_responses,
+        )
     }
 }
 
@@ -2469,12 +2508,18 @@ pub async fn pi_stop(
     }
 }
 
+/// After a released session finishes initializing, wait this long before
+/// reaping so `pi_start_and_prompt` can queue the first prompt.
+const STARTUP_IDLE_RELEASE_GRACE: std::time::Duration = std::time::Duration::from_millis(250);
+
 /// Stop and forget an idle Pi session without interrupting in-flight work.
 ///
 /// Chat panels call this when they give up foreground ownership. Keeping every
 /// completed ACP conversation resident leaves a full Bun/Node/agent process
 /// tree behind for each chat. The busy check and removal happen under the pool
-/// lock, so a prompt cannot race between the check and teardown.
+/// lock, so a prompt cannot race between the check and teardown. Sessions that
+/// are still initializing are kept until they report ready; if the panel
+/// already released them, a deferred reap runs after the first prompt can land.
 #[tauri::command]
 #[specta::specta]
 pub async fn pi_stop_if_idle(
@@ -2482,25 +2527,63 @@ pub async fn pi_stop_if_idle(
     session_id: Option<String>,
 ) -> Result<PiInfo, String> {
     let sid = session_id.unwrap_or_else(|| "chat".to_string());
+    Ok(stop_session_if_idle(&state, &sid).await)
+}
 
+async fn stop_session_if_idle(state: &PiState, sid: &str) -> PiInfo {
     let manager = {
         let mut pool = state.0.lock().await;
-        let Some(manager) = pool.sessions.get_mut(&sid) else {
-            return Ok(PiInfo::default());
+        let Some(manager) = pool.sessions.get_mut(sid) else {
+            return PiInfo::default();
         };
-        if manager.has_in_flight_work() {
-            debug!("Keeping busy Pi session '{}' alive in background", sid);
-            return Ok(manager.snapshot(&sid));
+        if idle_stop_decision(
+            manager.starting,
+            pi_session_has_in_flight_work(
+                manager.queue_state.as_ref(),
+                &manager.pending_responses,
+            ),
+        ) == IdleStopDecision::Keep
+        {
+            if manager.starting {
+                manager.release_when_idle = true;
+                debug!(
+                    "Keeping starting Pi session '{}' alive until initialization completes",
+                    sid
+                );
+            } else {
+                debug!("Keeping busy Pi session '{}' alive in background", sid);
+            }
+            return manager.snapshot(sid);
         }
-        pool.sessions.remove(&sid)
+        pool.sessions.remove(sid)
     };
 
     let Some(mut manager) = manager else {
-        return Ok(PiInfo::default());
+        return PiInfo::default();
     };
     info!("Stopping idle Pi sidecar for released session: {}", sid);
     manager.stop().await;
-    Ok(manager.snapshot(&sid))
+    manager.snapshot(sid)
+}
+
+fn schedule_startup_ready_release(state: &PiState, sid: &str) {
+    let state = state.clone();
+    let sid = sid.to_string();
+    tokio::spawn(async move {
+        let release_when_idle = {
+            let mut pool = state.0.lock().await;
+            let Some(manager) = pool.sessions.get_mut(&sid) else {
+                return;
+            };
+            manager.starting = false;
+            manager.release_when_idle
+        };
+        if !release_when_idle {
+            return;
+        }
+        tokio::time::sleep(STARTUP_IDLE_RELEASE_GRACE).await;
+        let _ = stop_session_if_idle(&state, &sid).await;
+    });
 }
 
 /// Start the Pi sidecar in RPC mode (Tauri command wrapper)
@@ -2951,9 +3034,9 @@ pub async fn pi_start_inner(
 
     // Evict least-recently-active idle session if at capacity. Two safety
     // properties beyond the prior LRU-only scheme:
-    //   1. Skip sessions with in-flight RPC responses — those are mid-turn
-    //      (streaming a reply, running a tool). Killing them mid-stream is
-    //      a worse UX than refusing to open a new session.
+    //   1. Skip sessions that are still initializing or have in-flight work —
+    //      killing Cursor ACP mid-init or a streaming turn is worse than
+    //      refusing to open a new session.
     //   2. Emit `pi_session_evicted` so the UI can reflect the loss instead
     //      of the chat tab silently going dark. Frontend listens, marks the
     //      tab as closed and explains why.
@@ -2964,12 +3047,7 @@ pub async fn pi_start_inner(
             .sessions
             .iter()
             .filter(|(k, m)| {
-                k.as_str() != "chat"
-                    && k.as_str() != sid.as_str()
-                    && m.pending_responses
-                        .lock()
-                        .map(|r| r.is_empty())
-                        .unwrap_or(true)
+                k.as_str() != "chat" && k.as_str() != sid.as_str() && !m.has_in_flight_work()
             })
             .min_by_key(|(_, m)| m.last_activity)
             .map(|(k, _)| k.clone());
@@ -3578,6 +3656,8 @@ pub async fn pi_start_inner(
         m.child = Some(child);
         m.stdin = None; // stdin is now owned by the queue
         m.is_acp = use_acp;
+        m.starting = true;
+        m.release_when_idle = false;
         m.project_dir = Some(screenpipe_core::agents::worktree::portable_path(&launch_dir));
         m.launch_fingerprint = Some(launch_fingerprint);
         m.last_activity = std::time::Instant::now();
@@ -3989,6 +4069,8 @@ pub async fn pi_start_inner(
                         error!("Pi process exited immediately with code {} — check 'Pi stderr:' warnings above for details (bun path: {})", code, bun_path);
                         m.child = None;
                         m.stdin = None;
+                        m.starting = false;
+                        m.release_when_idle = false;
                         let install_hint = take_pi_install_error()
                             .map(|e| format!(" The Pi install previously failed: {} Restart screenpipe to retry the install automatically.", e))
                             .unwrap_or_default();
@@ -4025,6 +4107,11 @@ pub async fn pi_start_inner(
     // Handled in the frontend — standalone-chat.tsx suppresses startsWith errors.
     // Do NOT send a warmup prompt here — it burns rate limits on free models
     // and can crash Pi with 429 errors.
+
+    // Clear `starting` off the command path so a chat switch during Cursor ACP
+    // init cannot reap the sidecar. If the panel already released the session,
+    // the spawned task reaps it after the first prompt has a chance to land.
+    schedule_startup_ready_release(state, &sid);
 
     Ok(snapshot)
 }
@@ -6428,6 +6515,44 @@ mod tests {
         let (tx, _rx) = tokio::sync::oneshot::channel();
         pending.lock().unwrap().insert("req_1".to_string(), tx);
         assert!(super::pi_session_has_in_flight_work(None, &pending));
+    }
+
+    #[test]
+    fn idle_stop_keeps_starting_sessions_without_queue_work() {
+        assert_eq!(
+            super::idle_stop_decision(true, false),
+            super::IdleStopDecision::Keep
+        );
+        assert_eq!(
+            super::idle_stop_decision(true, true),
+            super::IdleStopDecision::Keep
+        );
+        assert_eq!(
+            super::idle_stop_decision(false, true),
+            super::IdleStopDecision::Keep
+        );
+        assert_eq!(
+            super::idle_stop_decision(false, false),
+            super::IdleStopDecision::Stop
+        );
+    }
+
+    #[test]
+    fn pi_session_busy_includes_startup() {
+        let pending: super::PendingResponses =
+            std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+        let queue_state = crate::pi_command_queue::PiQueueState::new();
+
+        assert!(!super::pi_session_is_busy(
+            false,
+            Some(&queue_state),
+            &pending
+        ));
+        assert!(super::pi_session_is_busy(
+            true,
+            Some(&queue_state),
+            &pending
+        ));
     }
 
     /// Process-level regression for the customer-visible lifecycle: one child
