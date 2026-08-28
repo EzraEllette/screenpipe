@@ -281,6 +281,114 @@ describe("ChatTabStrip", () => {
     );
   });
 
+  it("archives the active tab on Ctrl+E and keeps the sibling open", async () => {
+    const actions = useChatStore.getState().actions;
+    for (const [id, title] of [
+      ["chat-a", "first"],
+      ["chat-b", "second"],
+    ] as const) {
+      actions.upsert(record({ id, title }));
+      actions.openChat(id);
+    }
+    const onActivate = vi.fn();
+    const archiveConversation = vi.fn(async () => {});
+    render(
+      <ChatTabStrip
+        activeId="chat-b"
+        onActivate={onActivate}
+        onNewChat={vi.fn()}
+        archiveConversation={archiveConversation}
+      />,
+    );
+
+    fireEvent.keyDown(window, { key: "e", code: "KeyE", ctrlKey: true });
+
+    await waitFor(() =>
+      expect(archiveConversation).toHaveBeenCalledWith("chat-b"),
+    );
+    expect(useChatStore.getState().openChatIds).toEqual(["chat-a"]);
+    expect(onActivate).toHaveBeenCalledWith("chat-a");
+  });
+
+  it("closes an empty untitled draft on Ctrl+E instead of archiving it", async () => {
+    const actions = useChatStore.getState().actions;
+    actions.upsert(
+      record({
+        id: "chat-a",
+        title: "keep",
+        messageCount: 2,
+      }),
+    );
+    actions.upsert(
+      record({
+        id: "draft",
+        title: "untitled",
+        messageCount: 0,
+        draft: true,
+      }),
+    );
+    actions.openChat("chat-a");
+    actions.openChat("draft");
+    const archiveConversation = vi.fn(async () => {});
+    const onActivate = vi.fn();
+    render(
+      <ChatTabStrip
+        activeId="draft"
+        onActivate={onActivate}
+        onNewChat={vi.fn()}
+        archiveConversation={archiveConversation}
+      />,
+    );
+
+    fireEvent.keyDown(window, { key: "e", code: "KeyE", ctrlKey: true });
+
+    expect(archiveConversation).not.toHaveBeenCalled();
+    expect(useChatStore.getState().openChatIds).toEqual(["chat-a"]);
+    expect(onActivate).toHaveBeenCalledWith("chat-a");
+  });
+
+  it("prints the archive shortcut on the tab menu", async () => {
+    const actions = useChatStore.getState().actions;
+    actions.upsert(record({ id: "chat-a", title: "crm" }));
+    actions.openChat("chat-a");
+
+    render(
+      <ChatTabStrip
+        activeId="chat-a"
+        onActivate={vi.fn()}
+        onNewChat={vi.fn()}
+        archiveConversation={vi.fn(async () => {})}
+      />,
+    );
+
+    fireEvent.contextMenu(screen.getByRole("tab", { name: "crm" }));
+    expect(await screen.findByText("Archive")).toBeVisible();
+    expect(screen.getByText("Ctrl+E")).toBeVisible();
+  });
+
+  it("starts a new chat on Ctrl+E when the last real tab is archived", async () => {
+    const actions = useChatStore.getState().actions;
+    actions.upsert(record({ id: "chat-a", title: "only" }));
+    actions.openChat("chat-a");
+    const onNewChat = vi.fn();
+    const archiveConversation = vi.fn(async () => {});
+    render(
+      <ChatTabStrip
+        activeId="chat-a"
+        onActivate={vi.fn()}
+        onNewChat={onNewChat}
+        archiveConversation={archiveConversation}
+      />,
+    );
+
+    fireEvent.keyDown(window, { key: "e", code: "KeyE", ctrlKey: true });
+
+    await waitFor(() =>
+      expect(archiveConversation).toHaveBeenCalledWith("chat-a"),
+    );
+    expect(onNewChat).toHaveBeenCalledTimes(1);
+  });
+
   it("starts a new chat on Ctrl+W when the last tab is closed", () => {
     const actions = useChatStore.getState().actions;
     actions.upsert(record({ id: "chat-a", title: "only" }));

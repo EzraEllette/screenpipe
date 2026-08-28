@@ -1849,17 +1849,29 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
   // The chat-title menu uses Archive as its safe primary history action.
   // Permanent deletion remains available from the sidebar row menu, where
   // the conversation being acted on is explicit and a confirmation follows.
+  // Close the tab as part of archive. Sibling tabs stay the resume path;
+  // mint a new chat only when this was the last open tab and the tab strip
+  // is not already going to recover via ⌘W's closer.
   const archiveConversation = async (convId: string) => {
+    const { fallbackOpenChatId, useChatStore } = await import(
+      "@/lib/stores/chat-store"
+    );
+    const { hasRegisteredChatTabCloser } = await import(
+      "@/lib/close-tab-shortcut"
+    );
+    const store = useChatStore.getState();
+    const wasCurrent =
+      conversationId === convId || piSessionIdRef.current === convId;
+    const fallbackId = fallbackOpenChatId(store, convId);
+
     await updateConversationFlags(convId, { hidden: true, pinned: false });
     commands.piAbort(convId).catch(() => {});
-
-    const { useChatStore } = await import("@/lib/stores/chat-store");
-    const store = useChatStore.getState();
     store.actions.patch(convId, {
       hidden: true,
       pinned: false,
       unread: false,
     });
+    store.actions.closeChat(convId);
     await refreshFileConversations();
 
     try {
@@ -1869,7 +1881,19 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
       // repair itself on its next disk hydration.
     }
 
-    if (conversationId === convId || piSessionIdRef.current === convId) {
+    if (!wasCurrent) return;
+
+    if (fallbackId) {
+      store.actions.setCurrent(fallbackId);
+      try {
+        await emit("chat-load-conversation", { conversationId: fallbackId });
+      } catch {
+        // Local currentId already moved; the panel can recover on next click.
+      }
+      return;
+    }
+
+    if (!hasRegisteredChatTabCloser()) {
       await startNewConversation();
     }
   };

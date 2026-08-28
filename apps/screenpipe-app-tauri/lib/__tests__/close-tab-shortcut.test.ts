@@ -5,6 +5,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   consumeCloseShortcut,
+  hasRegisteredChatTabCloser,
   registerChatTabCloser,
   resetCloseShortcutForTests,
 } from "@/lib/close-tab-shortcut";
@@ -60,5 +61,15 @@ describe("consumeCloseShortcut", () => {
     ).toBe("ignored");
     expect(closeTab).toHaveBeenCalledTimes(1);
     expect(closeWindow).not.toHaveBeenCalled();
+  });
+});
+
+describe("hasRegisteredChatTabCloser", () => {
+  it("is true only while a tab closer is registered", () => {
+    expect(hasRegisteredChatTabCloser()).toBe(false);
+    const unregister = registerChatTabCloser(() => true);
+    expect(hasRegisteredChatTabCloser()).toBe(true);
+    unregister();
+    expect(hasRegisteredChatTabCloser()).toBe(false);
   });
 });

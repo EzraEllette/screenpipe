@@ -15,6 +15,7 @@ import {
   selectRecentSwitcherSessions,
   selectVisibleOpenChatTabs,
   nextOpenChatTabId,
+  fallbackOpenChatId,
   getOrCreateEmptyChatId,
   isReusableBlankChatSession,
   isEmptyChatShell,
@@ -100,6 +101,24 @@ describe("chat-store: tab and split working set", () => {
     expect(nextOpenChatTabId(["A", "worktree"], "A", 1)).toBe("worktree");
     expect(nextOpenChatTabId(["A", "worktree"], "worktree", 1)).toBe("A");
     expect(nextOpenChatTabId(["A"], "A", 1)).toBeNull();
+  });
+
+  it("picks the next open tab after archive, then the previous", () => {
+    const actions = useChatStore.getState().actions;
+    actions.upsert(baseRecord({ id: "A" }));
+    actions.upsert(baseRecord({ id: "B" }));
+    actions.upsert(baseRecord({ id: "hidden", hidden: true }));
+    actions.upsert(baseRecord({ id: "C" }));
+    actions.openChat("A");
+    actions.openChat("B");
+    actions.openChat("hidden");
+    actions.openChat("C");
+
+    const state = useChatStore.getState();
+    expect(fallbackOpenChatId(state, "B")).toBe("C");
+    expect(fallbackOpenChatId(state, "C")).toBe("B");
+    expect(fallbackOpenChatId(state, "A")).toBe("B");
+    expect(fallbackOpenChatId({ sessions: state.sessions, openChatIds: ["A"] }, "A")).toBeNull();
   });
 });
 

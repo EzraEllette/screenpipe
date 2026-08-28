@@ -4,10 +4,12 @@
 "use client";
 
 import * as React from "react";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Archive, MoreHorizontal, Pencil, Pin } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import type { Message } from "@/lib/chat/types";
+import { usePlatform } from "@/lib/hooks/use-platform";
+import { inAppShortcutLabel, matchesInAppShortcut } from "@/lib/shortcuts";
 import {
   isEphemeralSideConversation,
   useChatStore,
@@ -41,6 +43,8 @@ export function ChatTitleMenu({
   const [renaming, setRenaming] = useState(false);
   const [draft, setDraft] = useState("");
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const { isMac } = usePlatform();
+  const archiveShortcut = inAppShortcutLabel("archive_chat", isMac);
 
   // Title source order:
   //   1. The session's title from the chat-store (in-memory, freshest;
@@ -66,6 +70,30 @@ export function ChatTitleMenu({
     messages,
     pendingUserText,
   });
+  const canArchive =
+    Boolean(conversationId && title) &&
+    !isEphemeralSideConversation(session);
+
+  useEffect(() => {
+    if (!canArchive || !conversationId) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (!matchesInAppShortcut(event, "archive_chat", isMac)) return;
+      if (document.querySelector('[role="dialog"][data-state="open"]')) return;
+      if (renaming) return;
+      event.preventDefault();
+      event.stopPropagation();
+      setOpen(false);
+      void archiveConversation(conversationId);
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [
+    archiveConversation,
+    canArchive,
+    conversationId,
+    isMac,
+    renaming,
+  ]);
 
   // No conversation id OR no real content → don't render. The "+ New"
   // button on the right is enough; no point showing actions for a
@@ -183,9 +211,13 @@ export function ChatTitleMenu({
           <button
             className="flex h-8 w-full items-center gap-2 px-2 text-left text-sm hover:bg-muted focus-visible:outline-none focus-visible:bg-muted"
             onClick={() => void handleArchive()}
+            aria-label="Archive"
           >
             <Archive className="h-3.5 w-3.5 shrink-0" aria-hidden />
             Archive
+            <span className="ml-auto text-[10px] tracking-normal text-muted-foreground/55">
+              {archiveShortcut}
+            </span>
           </button>
         </PopoverContent>
       </Popover>

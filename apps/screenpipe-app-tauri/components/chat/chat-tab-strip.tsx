@@ -26,7 +26,10 @@ import type { Message } from "@/lib/chat/types";
 import { isInjectedTitle } from "@/lib/chat-utils";
 import { registerChatTabCloser } from "@/lib/close-tab-shortcut";
 import { usePlatform } from "@/lib/hooks/use-platform";
-import { inAppShortcutLabel } from "@/lib/shortcuts";
+import {
+  inAppShortcutLabel,
+  matchesInAppShortcut,
+} from "@/lib/shortcuts";
 import {
   isEphemeralSideConversation,
   useChatActions,
@@ -156,6 +159,7 @@ export function ChatTabStrip({
   const actions = useChatActions();
   const { isMac } = usePlatform();
   const closeShortcut = inAppShortcutLabel("close_tab", isMac);
+  const archiveShortcut = inAppShortcutLabel("archive_chat", isMac);
   const scrollerRef = useRef<HTMLDivElement | null>(null);
   const closingActiveIdRef = useRef<string | null>(null);
   const [contextMenuRevision, setContextMenuRevision] = useState(0);
@@ -180,9 +184,11 @@ export function ChatTabStrip({
 
   useEffect(() => {
     if (!activeId || closingActiveIdRef.current === activeId) return;
+    const session = sessions[activeId];
+    if (!session || session.hidden) return;
     closingActiveIdRef.current = null;
     actions.openChat(activeId);
-  }, [actions, activeId]);
+  }, [actions, activeId, sessions]);
 
   useEffect(() => {
     if (!renamingId) return;
@@ -256,6 +262,43 @@ export function ChatTabStrip({
       void finishClose(onNewChat);
     }
   }, [actions, activeId, onActivate, onNewChat, splitChatId, tabs]);
+
+  const archiveTab = useCallback(
+    (id: string) => {
+      const session = sessions[id];
+      if (!session || isEphemeralSideConversation(session)) return;
+      const emptyDraft =
+        session.draft === true &&
+        session.messageCount === 0 &&
+        session.kind !== "pipe-watch" &&
+        session.kind !== "pipe-run";
+      if (emptyDraft || !archiveConversation) {
+        if (emptyDraft) closeTab(id);
+        return;
+      }
+      void Promise.resolve(archiveConversation(id)).finally(() => {
+        closeTab(id);
+      });
+    },
+    [archiveConversation, closeTab, sessions],
+  );
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (!matchesInAppShortcut(event, "archive_chat", isMac)) return;
+      if (document.querySelector('[role="dialog"][data-state="open"]')) return;
+      if (renamingId) return;
+      const id =
+        (activeId && tabs.some((tab) => tab.id === activeId) && activeId) ||
+        tabs[0]?.id;
+      if (!id) return;
+      event.preventDefault();
+      event.stopPropagation();
+      archiveTab(id);
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [activeId, archiveTab, isMac, renamingId, tabs]);
 
   useEffect(() => {
     return registerChatTabCloser(() => {
@@ -490,10 +533,13 @@ export function ChatTabStrip({
                     <ContextMenuItem
                       onSelect={() => {
                         closeContextMenu();
-                        void archiveConversation?.(session.id);
+                        archiveTab(session.id);
                       }}
                     >
                       Archive
+                      <ContextMenuShortcut className="text-[10px] tracking-normal text-muted-foreground/55">
+                        {archiveShortcut}
+                      </ContextMenuShortcut>
                     </ContextMenuItem>
                     <ContextMenuSeparator />
                   </>

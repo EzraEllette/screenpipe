@@ -62,6 +62,7 @@ import {
   isEmptyChatShell,
   selectDisplayedChatId,
   sessionRecordFromMeta,
+  fallbackOpenChatId,
   type SessionRecord,
 } from "@/lib/stores/chat-store";
 import {
@@ -1374,24 +1375,32 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
     // Archiving should tuck chats away immediately; users can reopen
     // the bucket manually when they want to review archived items.
     setArchivedCollapsed(true);
-    // Move the panel off a chat that just left the visible list.
+    const fallbackId = fallbackOpenChatId(useChatStore.getState(), id);
+    actions.closeChat(id);
+    // Move the panel off a chat that just left the visible list. Prefer
+    // the next open tab; mint untitled only when this was the last one.
     if (id === currentId) {
-      const fresh = crypto.randomUUID();
-      actions.upsert({
-        id: fresh,
-        title: "untitled",
-        preview: "",
-        status: "idle",
-        messageCount: 0,
-        createdAt: Date.now(),
-        updatedAt: Date.now(),
-        pinned: false,
-        unread: false,
-        draft: true,
-        messages: [],
-      });
-      actions.setCurrent(fresh);
-      emit("chat-load-conversation", { conversationId: fresh });
+      if (fallbackId) {
+        actions.setCurrent(fallbackId);
+        emit("chat-load-conversation", { conversationId: fallbackId });
+      } else {
+        const fresh = crypto.randomUUID();
+        actions.upsert({
+          id: fresh,
+          title: "untitled",
+          preview: "",
+          status: "idle",
+          messageCount: 0,
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+          pinned: false,
+          unread: false,
+          draft: true,
+          messages: [],
+        });
+        actions.setCurrent(fresh);
+        emit("chat-load-conversation", { conversationId: fresh });
+      }
     }
     // Best-effort persistence for restart durability.
     try {

@@ -91,6 +91,25 @@ describe("ChatTitleMenu", () => {
     );
   });
 
+  it("prints the archive shortcut on the title menu", async () => {
+    render(
+      <ChatTitleMenu
+        conversationId={SESSION.id}
+        messages={[
+          { id: "u", role: "user", content: "day recap", timestamp: 1 },
+        ]}
+        renameConversation={vi.fn()}
+        archiveConversation={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "chat options for day recap" }),
+    );
+    expect(await screen.findByRole("button", { name: "Archive" })).toBeVisible();
+    expect(screen.getByText(/⌘E|Ctrl\+E/)).toBeVisible();
+  });
+
   it("renames the same conversation from the title-owned menu", async () => {
     const renameConversation = vi.fn(async () => {});
     render(

@@ -1300,6 +1300,31 @@ export function selectVisibleOpenChatTabs(state: {
     );
 }
 
+/** Next tab after close/archive: the neighbor to the right, else left. */
+export function fallbackOpenChatId(
+  state: {
+    sessions: Record<string, SessionRecord>;
+    openChatIds: string[];
+  },
+  closingId: string,
+): string | null {
+  const isKeep = (id: string) => {
+    if (id === closingId) return false;
+    const session = state.sessions[id];
+    return Boolean(session && !session.hidden);
+  };
+  const index = state.openChatIds.indexOf(closingId);
+  if (index >= 0) {
+    for (let i = index + 1; i < state.openChatIds.length; i++) {
+      if (isKeep(state.openChatIds[i])) return state.openChatIds[i];
+    }
+    for (let i = index - 1; i >= 0; i--) {
+      if (isKeep(state.openChatIds[i])) return state.openChatIds[i];
+    }
+  }
+  return state.openChatIds.find(isKeep) ?? null;
+}
+
 export function nextOpenChatTabId(
   tabIds: string[],
   currentId: string | null,

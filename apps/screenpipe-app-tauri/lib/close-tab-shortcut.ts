@@ -18,6 +18,10 @@ export function registerChatTabCloser(handler: () => boolean): () => void {
   };
 }
 
+export function hasRegisteredChatTabCloser(): boolean {
+  return closeTabHandler !== null;
+}
+
 export function resetCloseShortcutForTests(): void {
   closeTabHandler = null;
   lastConsumedAt = 0;
