@@ -303,4 +303,92 @@ describe("ChatTabStrip", () => {
       "isolated fix · worktree · screenpipe",
     );
   });
+
+  it("hides the unread dot on the active tab and keeps it on background tabs", () => {
+    const actions = useChatStore.getState().actions;
+    actions.upsert(
+      record({
+        id: "chat-a",
+        title: "front",
+        lastContentAt: 20,
+        lastViewedAt: 1,
+      }),
+    );
+    actions.upsert(
+      record({
+        id: "chat-b",
+        title: "background",
+        lastContentAt: 20,
+        lastViewedAt: 1,
+      }),
+    );
+    actions.openChat("chat-a");
+    actions.openChat("chat-b");
+
+    render(
+      <ChatTabStrip
+        activeId="chat-a"
+        onActivate={vi.fn()}
+        onNewChat={vi.fn()}
+      />,
+    );
+
+    expect(useChatStore.getState().sessions["chat-a"].unread).toBe(true);
+    expect(useChatStore.getState().sessions["chat-b"].unread).toBe(true);
+    expect(screen.queryByLabelText("unread")).toBeInTheDocument();
+    expect(
+      screen.getByRole("tab", { name: "front" }).querySelector("[aria-label='unread']"),
+    ).toBeNull();
+    expect(
+      screen.getByRole("tab", { name: "background" }).querySelector("[aria-label='unread']"),
+    ).not.toBeNull();
+  });
+
+  it("shows the working dot instead of the worktree icon while a worktree chat runs", () => {
+    const actions = useChatStore.getState().actions;
+    actions.upsert(
+      record({
+        id: "chat-a",
+        title: "isolated fix",
+        status: "streaming",
+        codingWorkspace: {
+          repoName: "screenpipe",
+          branch: "screenpipe/chat-chat-a",
+          worktreePath: "/worktrees/chat-a",
+        },
+      }),
+    );
+    actions.openChat("chat-a");
+
+    render(
+      <ChatTabStrip
+        activeId="chat-a"
+        onActivate={vi.fn()}
+        onNewChat={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByLabelText("working")).toBeInTheDocument();
+    expect(screen.queryByTestId("chat-tab-worktree-chat-a")).not.toBeInTheDocument();
+  });
+
+  it("keeps the working dot on a split tab instead of replacing it with the split icon", () => {
+    const actions = useChatStore.getState().actions;
+    actions.upsert(record({ id: "chat-a", title: "primary" }));
+    actions.upsert(record({ id: "chat-b", title: "secondary", status: "thinking" }));
+    actions.openChat("chat-a");
+    actions.openChat("chat-b");
+    actions.setSplitChat("chat-b");
+
+    render(
+      <ChatTabStrip
+        activeId="chat-a"
+        onActivate={vi.fn()}
+        onNewChat={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByLabelText("working")).toBeInTheDocument();
+    expect(screen.queryByLabelText("split pane")).not.toBeInTheDocument();
+  });
 });

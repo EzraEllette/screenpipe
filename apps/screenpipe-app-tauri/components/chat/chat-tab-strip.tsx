@@ -40,18 +40,73 @@ function visibleTabTitle(session: SessionRecord): string {
   return title;
 }
 
-function tabStatus(session: SessionRecord): {
-  className: string;
-  label: string;
-} | null {
-  if (session.status === "error") {
-    return { className: "text-destructive", label: "error" };
-  }
+type TabGlyph =
+  | { kind: "error"; label: "error" }
+  | { kind: "working"; label: "working" }
+  | { kind: "unread"; label: "unread" }
+  | { kind: "worktree"; label: string }
+  | { kind: "split"; label: "split pane" };
+
+/** One left-slot mark. Status wins over worktree/split so the dot stays
+ *  readable instead of stacking a branch icon on top of a 6px circle. */
+function tabGlyph(
+  session: SessionRecord,
+  active: boolean,
+  split: boolean,
+): TabGlyph | null {
+  if (session.status === "error") return { kind: "error", label: "error" };
   if (["streaming", "thinking", "tool"].includes(session.status)) {
-    return { className: "bg-primary animate-pulse", label: "working" };
+    return { kind: "working", label: "working" };
   }
-  if (session.unread) return { className: "bg-primary", label: "unread" };
+  if (session.unread && !active) return { kind: "unread", label: "unread" };
+  if (session.codingWorkspace) {
+    return {
+      kind: "worktree",
+      label: `worktree · ${session.codingWorkspace.repoName}`,
+    };
+  }
+  if (split) return { kind: "split", label: "split pane" };
   return null;
+}
+
+function TabGlyphMark({
+  glyph,
+  sessionId,
+}: {
+  glyph: TabGlyph;
+  sessionId: string;
+}) {
+  if (glyph.kind === "error") {
+    return (
+      <AlertCircle
+        aria-label={glyph.label}
+        className="h-3 w-3 text-destructive"
+      />
+    );
+  }
+  if (glyph.kind === "working" || glyph.kind === "unread") {
+    return (
+      <span
+        aria-label={glyph.label}
+        className={cn(
+          "h-1.5 w-1.5 rounded-full",
+          glyph.kind === "working"
+            ? "bg-foreground animate-pulse"
+            : "bg-foreground",
+        )}
+      />
+    );
+  }
+  if (glyph.kind === "worktree") {
+    return (
+      <GitBranch
+        aria-hidden
+        className="h-3 w-3"
+        data-testid={`chat-tab-worktree-${sessionId}`}
+      />
+    );
+  }
+  return <Columns2 aria-label={glyph.label} className="h-3 w-3" />;
 }
 
 export function ChatTabStrip({
@@ -171,7 +226,7 @@ export function ChatTabStrip({
           const active = session.id === activeId;
           const split = session.id === splitChatId;
           const title = visibleTabTitle(session);
-          const status = tabStatus(session);
+          const glyph = tabGlyph(session, active, split);
           const codingWorkspace = session.codingWorkspace;
           const temporary = isEphemeralSideConversation(session);
           const hasTabsToRight = index < tabs.length - 1;
@@ -228,33 +283,10 @@ export function ChatTabStrip({
                       }
                     }}
                   >
-                    {codingWorkspace ? (
-                      <GitBranch
-                        aria-hidden
-                        className="h-3 w-3 shrink-0"
-                        data-testid={`chat-tab-worktree-${session.id}`}
-                      />
-                    ) : null}
-                    {split ? (
-                      <Columns2
-                        aria-label="split pane"
-                        className="h-3 w-3 shrink-0"
-                      />
-                    ) : status ? (
-                      status.label === "error" ? (
-                        <AlertCircle
-                          aria-label={status.label}
-                          className={cn("h-3 w-3 shrink-0", status.className)}
-                        />
-                      ) : (
-                        <span
-                          aria-label={status.label}
-                          className={cn(
-                            "h-1.5 w-1.5 shrink-0 rounded-full",
-                            status.className,
-                          )}
-                        />
-                      )
+                    {glyph ? (
+                      <span className="flex h-3 w-3 shrink-0 items-center justify-center">
+                        <TabGlyphMark glyph={glyph} sessionId={session.id} />
+                      </span>
                     ) : null}
                     <span
                       data-testid={active ? "chat-title" : undefined}
