@@ -41,9 +41,10 @@ import { saveConversationFile } from "@/lib/chat-storage";
 import {
   flushPendingSaves,
   handlePiEvent,
+  handleSessionEvicted,
   handleTerminated,
 } from "../stores/pi-event-router";
-import { useChatStore, type SessionRecord } from "../stores/chat-store";
+import { useChatStore, selectOrderedSessions, type SessionRecord } from "../stores/chat-store";
 import { useAcpSessionConfig } from "../stores/acp-session-config";
 import type { AgentEventEnvelope, AgentInnerEvent } from "../events/types";
 
@@ -725,6 +726,61 @@ describe("pi-event-router: agent_terminated", () => {
         ],
       })
     );
+  });
+});
+
+describe("pi-event-router: agent_session_evicted", () => {
+  beforeEach(reset);
+
+  it("keeps the recents row and sort keys when the pool kills Pi", () => {
+    seed("older", { createdAt: 100, lastUserMessageAt: 100, status: "streaming" });
+    seed("newer", { createdAt: 200, lastUserMessageAt: 200, status: "streaming" });
+
+    handleSessionEvicted({ sessionId: "older" });
+
+    const older = useChatStore.getState().sessions.older;
+    expect(older).toBeDefined();
+    expect(older.status).toBe("idle");
+    expect(older.createdAt).toBe(100);
+    expect(older.lastUserMessageAt).toBe(100);
+    expect(older.isStreaming).toBe(false);
+    expect(selectOrderedSessions(useChatStore.getState()).map((s) => s.id)).toEqual([
+      "newer",
+      "older",
+    ]);
+  });
+
+  it("does not lazy-recreate the row after eviction, so later tokens cannot reshuffle it", async () => {
+    seed("A", {
+      createdAt: 100,
+      lastUserMessageAt: 100,
+      title: "real title",
+      status: "streaming",
+    });
+    seed("B", { createdAt: 200, lastUserMessageAt: 200 });
+
+    handleSessionEvicted({ sessionId: "A" });
+    await handlePiEvent(piEvt("A", { type: "agent_start" }));
+    await handlePiEvent(
+      piEvt("A", {
+        type: "message_start",
+        message: { role: "assistant" },
+      } as AgentInnerEvent),
+    );
+
+    const a = useChatStore.getState().sessions.A;
+    expect(a.createdAt).toBe(100);
+    expect(a.lastUserMessageAt).toBe(100);
+    expect(a.title).toBe("real title");
+    expect(selectOrderedSessions(useChatStore.getState()).map((s) => s.id)).toEqual([
+      "B",
+      "A",
+    ]);
+  });
+
+  it("ignores eviction for unknown sessions", () => {
+    handleSessionEvicted({ sessionId: "ghost" });
+    expect(useChatStore.getState().sessions.ghost).toBeUndefined();
   });
 });
 

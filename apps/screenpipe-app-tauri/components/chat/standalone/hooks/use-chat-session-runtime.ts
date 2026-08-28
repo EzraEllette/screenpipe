@@ -4,10 +4,8 @@
 
 import { useEffect, useRef } from "react";
 import type * as React from "react";
-import { emit } from "@tauri-apps/api/event";
 import {
   mountAgentEventBus,
-  onEvicted as onAgentEvicted,
   registerForeground,
 } from "@/lib/events/bus";
 import { useChatPipeWatch } from "@/components/chat/standalone/hooks/use-chat-pipe-watch";
@@ -32,7 +30,6 @@ interface UseChatSessionRuntimeOptions {
   isStreamingRef: React.MutableRefObject<boolean>;
   messagesRef: React.MutableRefObject<Message[]>;
   handleAgentEventDataRef: React.MutableRefObject<((data: any) => void) | null>;
-  startNewConversationRef: React.MutableRefObject<(() => Promise<void>) | null>;
   forceQueueModeRef: React.MutableRefObject<boolean>;
   sendDispatchInFlightRef: React.MutableRefObject<boolean>;
 }
@@ -81,7 +78,6 @@ export function useChatSessionRuntime({
   isStreamingRef,
   messagesRef,
   handleAgentEventDataRef,
-  startNewConversationRef,
   forceQueueModeRef,
   sendDispatchInFlightRef,
 }: UseChatSessionRuntimeOptions) {
@@ -338,29 +334,6 @@ export function useChatSessionRuntime({
     piSessionIdRef,
     piStreamingTextRef,
   ]);
-
-  useEffect(() => {
-    let cancelled = false;
-    let off: (() => void) | null = null;
-    (async () => {
-      await mountAgentEventBus();
-      if (cancelled) return;
-      off = onAgentEvicted(async (payload) => {
-        if (cancelled) return;
-        if (payload.sessionId !== piSessionIdRef.current) return;
-        await startNewConversationRef.current?.();
-        emit("chat-current-session", { id: piSessionIdRef.current });
-      });
-    })();
-    return () => {
-      cancelled = true;
-      try {
-        off?.();
-      } catch {
-        // ignore
-      }
-    };
-  }, [piSessionIdRef, startNewConversationRef]);
 
   return {
     ...pipeWatch,

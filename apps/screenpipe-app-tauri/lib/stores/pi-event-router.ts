@@ -358,13 +358,24 @@ export async function handlePiEvent(envelope: AgentEventEnvelope) {
   store.actions.patch(sid, patch);
 }
 
-function handleSessionEvicted(payload: AgentSessionEvictedPayload) {
-  // The Pi process for this session has been killed by the pool. Drop the
-  // record from the in-memory store so the sidebar reflects reality. The
-  // on-disk transcript is preserved — user can re-open the conversation
-  // and a fresh Pi process will be started for the same id.
-  previewLastEmittedAt.delete(payload.sessionId);
-  useChatStore.getState().actions.drop(payload.sessionId);
+export function handleSessionEvicted(payload: AgentSessionEvictedPayload) {
+  // Pool eviction only kills the Pi process. The conversation still exists
+  // on disk and in the sidebar — dropping the store row made RECENTS jump:
+  // the chat vanished, then the next token lazy-created it as untitled with
+  // createdAt=now (no lastUserMessageAt), so it popped to a new position.
+  // Stay put and go idle, same as a clean process exit. The next send
+  // respawns Pi under this same id.
+  const sid = payload.sessionId;
+  if (!sid) return;
+  previewLastEmittedAt.delete(sid);
+  const store = useChatStore.getState();
+  if (!store.sessions[sid]) return;
+  store.actions.patch(sid, {
+    status: "idle",
+    lastError: undefined,
+    updatedAt: Date.now(),
+  });
+  store.actions.endTurn(sid);
 }
 
 export function handleTerminated(payload: AgentTerminatedPayload) {

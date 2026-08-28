@@ -60,7 +60,6 @@ function useRuntimeHarness() {
   const isStreamingRef = useRef(false);
   const messagesRef = useRef([]);
   const handleAgentEventDataRef = useRef<((data: unknown) => void) | null>(null);
-  const startNewConversationRef = useRef<(() => Promise<void>) | null>(null);
   const forceQueueModeRef = useRef(false);
   const sendDispatchInFlightRef = useRef(false);
 
@@ -79,7 +78,6 @@ function useRuntimeHarness() {
     isStreamingRef,
     messagesRef,
     handleAgentEventDataRef,
-    startNewConversationRef,
     forceQueueModeRef,
     sendDispatchInFlightRef,
   });

@@ -1026,7 +1026,6 @@ export function StandaloneChat({
     isStreamingRef,
     messagesRef,
     handleAgentEventDataRef,
-    startNewConversationRef,
     forceQueueModeRef,
     sendDispatchInFlightRef,
   });
