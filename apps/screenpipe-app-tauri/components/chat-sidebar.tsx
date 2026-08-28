@@ -49,6 +49,7 @@ import {
   Timer,
   Terminal,
   MoreHorizontal,
+  GitBranch,
 } from "lucide-react";
 import { usePlatform } from "@/lib/hooks/use-platform";
 import { emit, listen } from "@tauri-apps/api/event";
@@ -73,6 +74,7 @@ import {
 } from "@/lib/chat-storage";
 import { commands } from "@/lib/utils/tauri";
 import { isInjectedTitle } from "@/lib/chat-utils";
+import { createConversationBranch } from "@/lib/chat/branch-conversation";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -1403,6 +1405,50 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
     }
   };
 
+  const handleBranch = async (id: string) => {
+    setOpenConversationMenuId(null);
+    const executionMetadata = executionMetadataRef.current.get(id);
+    if (
+      executionMetadata &&
+      !(await materializePipeExecution(id, executionMetadata))
+    ) {
+      return;
+    }
+
+    try {
+      const source = await loadConversationFile(id);
+      if (!source) throw new Error("conversation is not available on disk");
+      const branch = createConversationBranch({
+        sourceId: id,
+        title: source.title,
+        messages: source.messages,
+      });
+      if (!branch) throw new Error("conversation has no messages to branch");
+
+      await saveConversationFile(branch);
+      const meta = conversationMetaFromJson(branch);
+      if (!meta) throw new Error("branched conversation is invalid");
+      actions.upsert(sessionRecordFromMeta(meta));
+      actions.setMessages(branch.id, branch.messages as any);
+      try {
+        await emit("chat-conversation-saved", {
+          id: branch.id,
+          title: branch.title,
+        });
+      } catch {
+        // The branch is already durable and available in this window.
+      }
+      await handleSelect(branch.id);
+    } catch (error) {
+      console.warn("[chat-sidebar] failed to branch conversation:", error);
+      toast({
+        title: "couldn't branch chat",
+        description: "the conversation could not be copied. try again.",
+        variant: "destructive",
+      });
+    }
+  };
+
   const handleUnarchive = async (id: string) => {
     actions.patch(id, { hidden: false, unread: false });
     try {
@@ -1584,6 +1630,7 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
                     onDeleteRequest={setDeletingSessionId}
                     onTogglePin={handleTogglePin}
                     onRenameRequest={handleRenameRequest}
+                    onBranch={handleBranch}
                     openConversationMenuId={openConversationMenuId}
                     setOpenConversationMenuId={setOpenConversationMenuId}
                   />
@@ -1771,6 +1818,7 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
                   onDeleteRequest={setDeletingSessionId}
                   onTogglePin={handleTogglePin}
                   onRenameRequest={handleRenameRequest}
+                  onBranch={handleBranch}
                   onMoveToGroup={handleMoveToGroup}
                   onNewGroupRequest={setNewGroupSessionId}
                   existingGroups={existingGroups}
@@ -1820,6 +1868,7 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
                       onDeleteRequest={setDeletingSessionId}
                       onTogglePin={handleTogglePin}
                       onRenameRequest={handleRenameRequest}
+                      onBranch={handleBranch}
                       onMoveToGroup={handleMoveToGroup}
                       onNewGroupRequest={setNewGroupSessionId}
                       existingGroups={existingGroups}
@@ -2327,6 +2376,7 @@ function RecentsBody({
   onDeleteRequest,
   onTogglePin,
   onRenameRequest,
+  onBranch,
   onMoveToGroup,
   onNewGroupRequest,
   existingGroups,
@@ -2346,6 +2396,7 @@ function RecentsBody({
   onDeleteRequest: (id: string | null) => void;
   onTogglePin: (id: string) => Promise<void> | void;
   onRenameRequest: (id: string) => void;
+  onBranch: (id: string) => Promise<void> | void;
   onMoveToGroup: (id: string, group: string | undefined) => void;
   onNewGroupRequest: (id: string) => void;
   existingGroups: string[];
@@ -2365,6 +2416,7 @@ function RecentsBody({
         onDeleteRequest={onDeleteRequest}
         onTogglePin={onTogglePin}
         onRenameRequest={onRenameRequest}
+        onBranch={onBranch}
         onMoveToGroup={onMoveToGroup}
         onNewGroupRequest={onNewGroupRequest}
         existingGroups={existingGroups}
@@ -2385,6 +2437,7 @@ function RecentsBody({
         onDeleteRequest={onDeleteRequest}
         onTogglePin={onTogglePin}
         onRenameRequest={onRenameRequest}
+        onBranch={onBranch}
         onMoveToGroup={onMoveToGroup}
         onNewGroupRequest={onNewGroupRequest}
         existingGroups={existingGroups}
@@ -2453,6 +2506,7 @@ function PipeGroupRow({
   onDeleteRequest,
   onTogglePin,
   onRenameRequest,
+  onBranch,
   onMoveToGroup,
   onNewGroupRequest,
   existingGroups,
@@ -2475,6 +2529,7 @@ function PipeGroupRow({
   onDeleteRequest: (id: string | null) => void;
   onTogglePin: (id: string) => Promise<void> | void;
   onRenameRequest: (id: string) => void;
+  onBranch: (id: string) => Promise<void> | void;
   onMoveToGroup: (id: string, group: string | undefined) => void;
   onNewGroupRequest: (id: string) => void;
   existingGroups: string[];
@@ -2537,6 +2592,7 @@ function PipeGroupRow({
               onDeleteRequest={onDeleteRequest}
               onTogglePin={onTogglePin}
               onRenameRequest={onRenameRequest}
+              onBranch={onBranch}
               insideGroup
               openConversationMenuId={openConversationMenuId}
               setOpenConversationMenuId={setOpenConversationMenuId}
@@ -2570,6 +2626,7 @@ interface ChatRowProps {
   onDeleteRequest: (id: string | null) => void;
   onTogglePin: (id: string) => Promise<void> | void;
   onRenameRequest: (id: string) => void;
+  onBranch?: (id: string) => Promise<void> | void;
   onMoveToGroup?: (id: string, group: string | undefined) => void;
   onNewGroupRequest?: (id: string) => void;
   existingGroups?: string[];
@@ -2584,7 +2641,7 @@ interface ChatRowProps {
  * Each maps to an item carrying `data-shortcut={key}`; pressing the key while a
  * row menu is open selects that item. Keep in sync with `RowMenuItems`.
  */
-const ROW_MENU_SHORTCUT_KEYS = ["p", "r", "a", "d"] as const;
+const ROW_MENU_SHORTCUT_KEYS = ["p", "r", "b", "a", "d"] as const;
 
 /**
  * Press a shortcut letter while a menu is open to fire the matching item. We
@@ -2658,6 +2715,7 @@ function RowMenuItems({
   onDeleteRequest,
   onTogglePin,
   onRenameRequest,
+  onBranch,
   onMoveToGroup,
   onNewGroupRequest,
   existingGroups,
@@ -2670,6 +2728,7 @@ function RowMenuItems({
   onDeleteRequest: (id: string | null) => void;
   onTogglePin: (id: string) => Promise<void> | void;
   onRenameRequest: (id: string) => void;
+  onBranch?: (id: string) => Promise<void> | void;
   onMoveToGroup?: (id: string, group: string | undefined) => void;
   onNewGroupRequest?: (id: string) => void;
   existingGroups?: string[];
@@ -2705,6 +2764,22 @@ function RowMenuItems({
         Rename
         <P.Shortcut className={shortcutCls}>R</P.Shortcut>
       </P.Item>
+      {onBranch && (
+        <P.Item
+          data-shortcut="b"
+          aria-keyshortcuts="B"
+          className={itemCls}
+          disabled={session.messageCount === 0}
+          onSelect={(e: Event) => {
+            e.stopPropagation();
+            void onBranch(session.id);
+          }}
+        >
+          <GitBranch className="h-3 w-3 text-muted-foreground" />
+          Branch in new chat
+          <P.Shortcut className={shortcutCls}>B</P.Shortcut>
+        </P.Item>
+      )}
       {onMoveToGroup && existingGroups && (
         <P.Sub>
           <P.SubTrigger
@@ -2848,6 +2923,7 @@ export function SidebarChatRow({
   onDeleteRequest,
   onTogglePin,
   onRenameRequest,
+  onBranch,
   onMoveToGroup,
   onNewGroupRequest,
   existingGroups,
@@ -2884,6 +2960,7 @@ export function SidebarChatRow({
     onDeleteRequest,
     onTogglePin,
     onRenameRequest,
+    onBranch,
     onMoveToGroup,
     onNewGroupRequest,
     existingGroups,

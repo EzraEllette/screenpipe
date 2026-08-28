@@ -55,6 +55,7 @@ import {
   isEphemeralSideConversation,
   isEphemeralSideConversationId,
 } from "@/lib/stores/chat-store";
+import { createConversationBranch } from "@/lib/chat/branch-conversation";
 
 // --- Hook options ---
 
@@ -1632,60 +1633,16 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
       }
     }
 
-    const newId = crypto.randomUUID();
     const currentTitle = store.sessions[outgoingSid]?.title?.trim();
-    const title = currentTitle || "Branched Chat";
     const branchedFrom = outgoingSid || conversationId || undefined;
-    const createdAt = Date.now();
-    const lastUserMessageAt = [...branchedMessages]
-      .reverse()
-      .find((m) => m.role === "user")?.timestamp;
-
-    const conversation: ChatConversation = {
-      id: newId,
-      title,
-      messages: branchedMessages.slice(-100).map((m) => {
-        let content = m.content;
-        if (!content && m.contentBlocks?.length) {
-          content = m.contentBlocks
-            .filter((b: any) => b.type === "text")
-            .map((b: any) => b.text)
-            .join("\n");
-        }
-        const blocks = m.contentBlocks?.map((b: any) => {
-          if (b.type === "tool") {
-            const { isRunning, ...rest } = b.toolCall;
-            return { type: "tool", toolCall: { ...rest, isRunning: false, result: rest.result?.slice(0, 4000) } };
-          }
-          if (b.type === "thinking") return { ...b, isThinking: false };
-          return b;
-        });
-        return {
-          id: m.id,
-          role: m.role,
-          content,
-          ...(m.intent ? { intent: m.intent } : {}),
-          ...(m.turnIntentId ? { turnIntentId: m.turnIntentId } : {}),
-          timestamp: m.timestamp,
-          ...(m.displayContent ? { displayContent: m.displayContent } : {}),
-          ...(blocks?.length ? { contentBlocks: blocks } : {}),
-          ...(m.images?.length ? { images: m.images } : {}),
-          ...((m as any).attachments?.length ? { attachments: (m as any).attachments } : {}),
-          ...(m.model ? { model: m.model } : {}),
-          ...(m.provider ? { provider: m.provider } : {}),
-          ...(m.interruptedBySteer ? { interruptedBySteer: true } : {}),
-          ...(m.steeredResponse ? { steeredResponse: true } : {}),
-          ...(m.workDurationMs ? { workDurationMs: m.workDurationMs } : {}),
-          ...(m.stoppedByUser ? { stoppedByUser: true } : {}),
-        };
-      }),
-      createdAt,
-      updatedAt: createdAt,
-      ...(lastUserMessageAt ? { lastUserMessageAt } : {}),
-      // Exempts the fork from the first-user-message dedup, which would
-      // otherwise collapse it into the parent it was branched from.
-      ...(branchedFrom ? { branchedFrom } : {}),
-    };
+    if (!branchedFrom) return;
+    const conversation = createConversationBranch({
+      sourceId: branchedFrom,
+      title: currentTitle,
+      messages: branchedMessages,
+    });
+    if (!conversation) return;
+    const newId = conversation.id;
 
     await saveConversationFile(conversation);
     await refreshFileConversations();
