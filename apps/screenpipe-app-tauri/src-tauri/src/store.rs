@@ -984,6 +984,21 @@ pub struct OnboardingStore {
     /// Used to resume after app restart (e.g., after granting permissions)
     #[serde(rename = "currentStep", default)]
     pub current_step: Option<String>,
+    #[serde(
+        rename = "firstRunSummaryPhase",
+        default = "default_first_run_summary_phase"
+    )]
+    pub first_run_summary_phase: String,
+    #[serde(rename = "firstRunSummaryStartedAt", default)]
+    pub first_run_summary_started_at: Option<String>,
+    #[serde(rename = "firstRunSummaryChatId", default)]
+    pub first_run_summary_chat_id: Option<String>,
+    #[serde(rename = "firstRunSummaryNotificationSentAt", default)]
+    pub first_run_summary_notification_sent_at: Option<String>,
+    #[serde(rename = "firstRunSummaryNotificationId", default)]
+    pub first_run_summary_notification_id: Option<String>,
+    #[serde(rename = "firstRunSummaryError", default)]
+    pub first_run_summary_error: Option<String>,
 }
 
 impl Default for OnboardingStore {
@@ -992,8 +1007,18 @@ impl Default for OnboardingStore {
             is_completed: false,
             completed_at: None,
             current_step: None,
+            first_run_summary_phase: "idle".to_string(),
+            first_run_summary_started_at: None,
+            first_run_summary_chat_id: None,
+            first_run_summary_notification_sent_at: None,
+            first_run_summary_notification_id: None,
+            first_run_summary_error: None,
         }
     }
+}
+
+fn default_first_run_summary_phase() -> String {
+    "idle".to_string()
 }
 
 impl OnboardingStore {
@@ -1052,6 +1077,12 @@ impl OnboardingStore {
         self.is_completed = false;
         self.completed_at = None;
         self.current_step = None;
+        self.first_run_summary_phase = "idle".to_string();
+        self.first_run_summary_started_at = None;
+        self.first_run_summary_chat_id = None;
+        self.first_run_summary_notification_sent_at = None;
+        self.first_run_summary_notification_id = None;
+        self.first_run_summary_error = None;
     }
 }
 

@@ -15,14 +15,6 @@ import {
 
 import type { ActivitySnapshot } from "./learning-window";
 
-/** Long enough for a few sentences, short enough that the banner never hangs.
- *  The deterministic summary is the fallback, so expiring costs the user
- *  nothing but a slightly plainer paragraph. */
-const SUMMARY_TIMEOUT_MS = 30_000;
-/** Settle after the stream goes quiet rather than waiting for the full
- *  agent_end lifecycle, which can lag well past the last token. Longer than
- *  the title generator's 300ms because a paragraph has natural pauses. */
-const IDLE_SETTLE_MS = 900;
 const SUMMARY_PROJECT_DIR = "pi-first-run";
 const MAX_WINDOWS = 8;
 const MAX_FILES = 5;
@@ -187,10 +179,14 @@ export function validateSummaryCandidate(
 }
 
 function buildProviderConfig(preset: AIPreset): PiProviderConfig {
+  const isAcp = preset.provider === "acp";
   return {
+    ...(isAcp
+      ? { backend: "acp" as const, acpAgent: preset.acpAgent ?? null }
+      : {}),
     provider: preset.provider,
     url: preset.url || "",
-    model: preset.model || "",
+    model: preset.model || (isAcp ? preset.acpAgent?.id : "") || "",
     apiKey: ("apiKey" in preset ? (preset.apiKey as string) : null) || null,
     maxContextChars: preset.maxContextChars,
     systemPrompt: null,
@@ -200,10 +196,10 @@ function buildProviderConfig(preset: AIPreset): PiProviderConfig {
 /**
  * Write the first-run summary with the user's own AI preset.
  *
- * Runs in a dedicated short-lived Pi session (same pattern as title
- * generation) so it never lands in the sidebar and cannot disturb an open
- * chat. Returns null on any failure — the caller keeps the deterministic
- * summary, so this can only ever improve the result.
+ * Runs through the user's selected AI preset in a dedicated agent session.
+ * The session never lands in the sidebar or disturbs an open chat. There is
+ * deliberately no wall-clock cutoff: the visible writing state owns the wait,
+ * while only an actual agent result or error decides the outcome.
  */
 export async function summarizeFirstRunWithAi(
   activity: ActivitySnapshot,
@@ -232,9 +228,6 @@ export async function summarizeFirstRunWithAi(
   };
 
   if (!preset) return decline("no_preset");
-  // An ACP preset has no local model to spawn a second harness with, and
-  // trying could reopen interactive auth during onboarding of all moments.
-  if (preset.provider === "acp") return decline("acp_preset");
   // A hosted preset without a signed-in token cannot authenticate. Real
   // onboarding signs in on its first slide, so this is mostly a dev-skip or
   // signed-out state — but it is the single likeliest cause of a silent
@@ -246,20 +239,29 @@ export async function summarizeFirstRunWithAi(
   const facts = buildActivityFacts(activity, options.elapsedMs);
   if (!facts.trim()) return decline("no_facts");
 
+  const logStage = (stage: string) => {
+    void commands
+      .writeBrowserLog(
+        "info",
+        `[first-run] agent stage=${stage} provider=${preset.provider}`,
+      )
+      .catch(() => {});
+  };
+
   const sessionId = `${INTERNAL_TITLE_PREFIX}first-run-${Date.now()}-${Math.random()
     .toString(36)
     .slice(2, 8)}`;
 
   try {
+    logStage("mounting_event_bus");
     await mountAgentEventBus();
+    logStage("event_bus_ready");
 
     const home = await homeDir();
     const dir = await join(home, ".screenpipe", SUMMARY_PROJECT_DIR);
 
     let accumulated = "";
     let done = false;
-    let timeoutId: ReturnType<typeof setTimeout> | null = null;
-    let idleTimerId: ReturnType<typeof setTimeout> | null = null;
     let resolveResponse!: (value: string | null) => void;
     const responsePromise = new Promise<string | null>((resolve) => {
       resolveResponse = resolve;
@@ -268,10 +270,6 @@ export async function summarizeFirstRunWithAi(
     const settle = (value: string | null) => {
       if (done) return;
       done = true;
-      if (timeoutId !== null) clearTimeout(timeoutId);
-      if (idleTimerId !== null) clearTimeout(idleTimerId);
-      timeoutId = null;
-      idleTimerId = null;
       resolveResponse(value);
     };
 
@@ -287,11 +285,6 @@ export async function summarizeFirstRunWithAi(
 
       if (isTextDelta) {
         accumulated += evt.delta ?? evt.assistantMessageEvent?.delta ?? "";
-        if (idleTimerId !== null) clearTimeout(idleTimerId);
-        idleTimerId = setTimeout(() => {
-          idleTimerId = null;
-          settle(accumulated || null);
-        }, IDLE_SETTLE_MS);
         return;
       }
 
@@ -325,34 +318,27 @@ export async function summarizeFirstRunWithAi(
     }
 
     try {
-      const started = await commands.piStart(
+      logStage("start_and_prompt_requested");
+      const started = await commands.piStartAndPrompt(
         sessionId,
         dir,
         options.userToken ?? null,
         buildProviderConfig(preset),
+        buildSummaryPrompt(facts),
       );
-      if (started.status !== "ok" || !started.data?.running) {
+      if (started.status !== "ok") {
         return decline("session_start_failed");
       }
+      logStage("prompt_accepted");
 
-      const prompted = await commands.piPrompt(
-        sessionId,
-        buildSummaryPrompt(facts),
-        null,
-        null,
-      );
-      if (prompted.status !== "ok") return decline("prompt_failed");
-
-      timeoutId = setTimeout(() => settle(null), SUMMARY_TIMEOUT_MS);
       const raw = await responsePromise;
+      logStage("agent_finished");
       const validated = validateSummaryCandidate(raw);
       if (!validated) {
-        return decline(raw ? "output_rejected" : "no_output_or_timeout");
+        return decline(raw ? "output_rejected" : "no_output");
       }
       return validated;
     } finally {
-      if (timeoutId !== null) clearTimeout(timeoutId);
-      if (idleTimerId !== null) clearTimeout(idleTimerId);
       if (unregister) unregister();
       commands.piStop(sessionId).catch(() => {});
     }

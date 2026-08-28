@@ -483,10 +483,13 @@ fn settings_restrict_activity_history(settings: &SettingsStore, is_enterprise_bu
     !is_enterprise_build && settings.is_free_or_unattributed_user()
 }
 
-fn provider_config(settings: &SettingsStore) -> Result<(PiProviderConfig, Option<String>), String> {
-    let selected_id = settings
-        .extra
-        .get("activitiesAiPresetId")
+fn provider_config(
+    settings: &SettingsStore,
+    selected_preset_key: Option<&str>,
+    task_system_prompt: &str,
+) -> Result<(PiProviderConfig, Option<String>), String> {
+    let selected_id = selected_preset_key
+        .and_then(|key| settings.extra.get(key))
         .and_then(Value::as_str);
     let preset = settings
         .ai_presets
@@ -551,7 +554,7 @@ fn provider_config(settings: &SettingsStore) -> Result<(PiProviderConfig, Option
             max_tokens: preset.max_tokens.clamp(2_048, 8_192),
             max_context_chars: Some(preset.max_context_chars),
             system_prompt: Some(
-                [preset.prompt.trim(), SYSTEM_PROMPT]
+                [preset.prompt.trim(), task_system_prompt]
                     .into_iter()
                     .filter(|part| !part.is_empty())
                     .collect::<Vec<_>>()
@@ -903,13 +906,21 @@ fn agent_failure(is_agent: bool, error: String) -> String {
     }
 }
 
-async fn run_pi(app: &AppHandle, session_prefix: &str, prompt: String) -> Result<String, String> {
+pub(crate) async fn run_background_pi(
+    app: &AppHandle,
+    session_prefix: &str,
+    project_directory_name: &str,
+    prompt: String,
+    timeout: Option<std::time::Duration>,
+    selected_preset_key: Option<&str>,
+    task_system_prompt: &str,
+) -> Result<String, String> {
     let settings = SettingsStore::get(app)?.ok_or("Settings are not available")?;
-    let (config, token) = provider_config(&settings)?;
+    let (config, token) = provider_config(&settings, selected_preset_key, task_system_prompt)?;
     let is_agent = config.backend.is_some();
     let session_id = format!("__title:{session_prefix}-{}", uuid::Uuid::new_v4());
     let project_dir = screenpipe_core::paths::default_screenpipe_data_dir()
-        .join("pi-daily-summary")
+        .join(project_directory_name)
         .to_string_lossy()
         .to_string();
     let state = app.state::<PiState>();
@@ -938,7 +949,7 @@ async fn run_pi(app: &AppHandle, session_prefix: &str, prompt: String) -> Result
         return Err(agent_failure(is_agent, error));
     }
 
-    let result = tokio::time::timeout(std::time::Duration::from_secs(15 * 60), async {
+    let wait_for_result = async {
         let mut empty_completion_retries = 0;
         loop {
             let envelope = match events.recv().await {
@@ -969,15 +980,32 @@ async fn run_pi(app: &AppHandle, session_prefix: &str, prompt: String) -> Result
                 ActivityRunEvent::Ignore => {}
             }
         }
-    })
-    .await
-    .map_err(|_| "Activity generation timed out".to_string());
+    };
+    let result = match timeout {
+        Some(timeout) => tokio::time::timeout(timeout, wait_for_result)
+            .await
+            .map_err(|_| "Activity generation timed out".to_string()),
+        None => Ok(wait_for_result.await),
+    };
 
     let mut pool = state.0.lock().await;
     if let Some(manager) = pool.sessions.get_mut(&session_id) {
         manager.stop().await;
     }
     result?
+}
+
+async fn run_pi(app: &AppHandle, session_prefix: &str, prompt: String) -> Result<String, String> {
+    run_background_pi(
+        app,
+        session_prefix,
+        "pi-daily-summary",
+        prompt,
+        Some(std::time::Duration::from_secs(15 * 60)),
+        Some("activitiesAiPresetId"),
+        SYSTEM_PROMPT,
+    )
+    .await
 }
 
 fn minimum_history_entry_count(
@@ -1839,7 +1867,8 @@ mod tests {
     fn a_coding_agent_preset_generates_activities_through_its_adapter() {
         let settings = settings_with_presets("cursor", vec![agent_preset("cursor", "cursor", "")]);
 
-        let (config, _) = provider_config(&settings).expect("agent preset is usable");
+        let (config, _) = provider_config(&settings, Some("activitiesAiPresetId"), SYSTEM_PROMPT)
+            .expect("agent preset is usable");
 
         assert!(matches!(config.backend, Some(PiBackend::Acp)));
         let agent = config.acp_agent.expect("adapter config");
@@ -1863,7 +1892,8 @@ mod tests {
             }],
         );
 
-        let (config, _) = provider_config(&settings).expect("model preset is usable");
+        let (config, _) = provider_config(&settings, Some("activitiesAiPresetId"), SYSTEM_PROMPT)
+            .expect("model preset is usable");
 
         assert!(config.backend.is_none());
         assert!(config.acp_agent.is_none());
@@ -1887,7 +1917,8 @@ mod tests {
             ],
         );
 
-        let (config, _) = provider_config(&settings).expect("agent preset is usable");
+        let (config, _) = provider_config(&settings, Some("activitiesAiPresetId"), SYSTEM_PROMPT)
+            .expect("agent preset is usable");
 
         assert!(matches!(config.backend, Some(PiBackend::Acp)));
         assert_eq!(
@@ -1908,7 +1939,8 @@ mod tests {
             }],
         );
 
-        let error = provider_config(&settings).expect_err("an adapter is required");
+        let error = provider_config(&settings, Some("activitiesAiPresetId"), SYSTEM_PROMPT)
+            .expect_err("an adapter is required");
 
         assert!(error.contains("broken"), "{error}");
     }

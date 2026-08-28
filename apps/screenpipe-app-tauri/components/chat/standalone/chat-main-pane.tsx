@@ -14,7 +14,6 @@ import { PipeAIIconLarge } from "@/components/pipe-ai-icon";
 import { InlineChatHistory } from "@/components/chat/standalone/inline-chat-history";
 import { ChatMessageList, type ChatMessageListProps } from "@/components/chat/standalone/chat-message-list";
 import type { ConversationMeta } from "@/lib/chat-storage";
-import type { AIPreset } from "@/lib/utils/tauri";
 import { cn } from "@/lib/utils";
 import type { Message } from "@/lib/chat/types";
 import type { ContinuousPipeChatPolicy } from "@/lib/pipe-chat-policy";
@@ -27,14 +26,8 @@ type ActivePipeExecution = {
 } | null;
 
 interface ChatMainPaneProps {
-  /** Only the Home webview owns the first-summary lifecycle. */
+  /** Only Home presents the first-summary lifecycle owned by the main layout. */
   firstRunLearningEnabled?: boolean;
-  /** Preset the first-run summary is written with, and the token it needs.
-   *  Passed down rather than read here so this pane (and the banner below it)
-   *  stay renderable without a settings provider. */
-  firstRunAiPreset?: AIPreset | null;
-  firstRunUserToken?: string | null;
-  firstRunAiSettingsLoaded?: boolean;
   hideInlineHistory?: boolean;
   showHistory: boolean;
   onCloseHistory: () => void;
@@ -108,9 +101,6 @@ export function ChatMainPane({
   homeStarterProps,
   messageListProps,
   pendingSend,
-  firstRunAiPreset,
-  firstRunUserToken,
-  firstRunAiSettingsLoaded,
 }: ChatMainPaneProps) {
   const homeStarter =
     messages.length === 0 &&
@@ -250,27 +240,15 @@ export function ChatMainPane({
                   )}
                 </div>
               )}
-            {/* Post-setup learning window. Home is the single owner; the
-                separate Chat webview must not start a second copy from the
-                same onboarding timestamp. It sits on Home's chat because that
-                is where setup lands and where the summary appears once ready.
+            {/* Post-setup learning window presentation. The persistent main
+                layout owns the work and notification; Home only shows its
+                current state where setup lands and the result opens.
 
-                Deliberately NOT gated on `messages.length === 0`. The window
-                owns a ceiling timer, and unmounting the banner kills it: the
-                user sends one message, this subtree goes away mid-wait, and
-                the window never settles — no summary, and no
-                `first_run_learning_resolved`/`_empty` either, so the failure
-                is invisible. Typing is the behaviour we want, so it must not
-                destroy the first-run summary. Measured 2026-08: 69% of users
-                who completed setup produced no learning event at all while
-                staying in the app a median of 9.4 hours. */}
+                Deliberately NOT gated on `messages.length === 0`. The state
+                must remain visible after the user sends a message. Typing is
+                the behaviour we want, so it must not hide the result. */}
             {firstRunLearningEnabled && !activePipeExecution && (
-              <FirstRunLearningBanner
-                aiPreset={firstRunAiPreset}
-                userToken={firstRunUserToken}
-                aiSettingsLoaded={firstRunAiSettingsLoaded}
-                fallback={homeStarter}
-              />
+              <FirstRunLearningBanner fallback={homeStarter} />
             )}
             {!firstRunLearningEnabled && homeStarter}
             {/* The message the user just sent, shown from the send frame until

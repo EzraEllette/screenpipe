@@ -19,6 +19,8 @@ describe("first-run summary notification", () => {
   it("opens the local summary without embedding its chat id or content", () => {
     const payload = buildFirstRunSummaryNotification(null);
     expect(payload.id).toBe(FIRST_RUN_SUMMARY_NOTIFICATION_ID);
+    expect(payload.autoDismissMs).toBe(0);
+    expect(payload.transient).toBe(false);
     expect(payload.actions).toEqual([
       expect.objectContaining({
         label: "open summary",

@@ -2542,6 +2542,10 @@ pub async fn pi_start_and_prompt(
     provider_config: Option<PiProviderConfig>,
     message: String,
 ) -> Result<String, String> {
+    info!(
+        "pi_start_and_prompt stage=requested session='{}'",
+        session_id
+    );
     let coding_workspace = crate::coding_workspace::launch_for_session(&session_id)?;
     let started = pi_start_inner(
         app.clone(),
@@ -2556,7 +2560,13 @@ pub async fn pi_start_and_prompt(
     if !started.running {
         return Err("Pi did not start".to_string());
     }
-    pi_prompt_inner(&app, state.inner(), &session_id, message, None, None).await
+    let request_id =
+        pi_prompt_inner(&app, state.inner(), &session_id, message, None, None).await?;
+    info!(
+        "pi_start_and_prompt stage=prompt_accepted session='{}' request_id='{}'",
+        session_id, request_id
+    );
+    Ok(request_id)
 }
 
 /// Kill orphan Pi RPC processes left over from a previous app crash.
@@ -2733,6 +2743,7 @@ pub async fn pi_start_inner(
     provider_config: Option<PiProviderConfig>,
     coding_workspace: Option<crate::coding_workspace::CodingWorkspaceLaunch>,
 ) -> Result<PiInfo, String> {
+    info!("pi_start stage=requested session='{}'", session_id);
     let project_dir = project_dir.trim().to_string();
     if project_dir.is_empty() {
         return Err("Project directory is required".to_string());
@@ -2878,6 +2889,8 @@ pub async fn pi_start_inner(
         }
     }
 
+    info!("pi_start stage=config_ready session='{}'", sid);
+
     // Determine which Pi provider and model to use
     let (pi_provider, pi_model) = match &provider_config {
         // An ACP session's model calls belong to the adapter, so there is no Pi
@@ -2891,7 +2904,9 @@ pub async fn pi_start_inner(
         None => ("screenpipe".to_string(), "auto".to_string()),
     };
 
+    info!("pi_start stage=waiting_for_pool session='{}'", sid);
     let mut pool = state.0.lock().await;
+    info!("pi_start stage=pool_acquired session='{}'", sid);
 
     // Stop existing instance for this session if running
     let mut any_alive = false;
@@ -3530,7 +3545,7 @@ pub async fn pi_start_inner(
         .map_err(|e| format!("Failed to spawn pi: {}", e))?;
 
     let pid = child.id();
-    info!("Pi started with PID: {}", pid);
+    info!("pi_start stage=process_spawned session='{}' pid={}", sid, pid);
 
     // Take stdin for writing commands
     let stdin = child

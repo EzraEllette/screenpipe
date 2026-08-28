@@ -422,14 +422,13 @@ describe("window lifecycle", () => {
     expect(done.chatId).toBeNull();
   });
 
-  it("settles a window that outlived its ceiling instead of resuming it", () => {
+  it("leaves an expired window for the native owner to settle", () => {
     const stale = new Date(
       Date.now() - LEARNING_WINDOW_CEILING_MS - 1_000,
     ).toISOString();
     beginLearningWindow(stale, true);
-    // A reload after the ceiling must not show an expired countdown.
     const settled = readLearningWindow();
-    expect(settled.phase).toBe("empty");
+    expect(settled.phase).toBe("learning");
     expect(settled.showProgress).toBe(true);
   });
 
@@ -570,9 +569,7 @@ describe("classifyEmptyReason", () => {
 });
 
 describe("writing phase", () => {
-  it("resumes a persisted writing phase as ready when the chat was seeded", () => {
-    // The process died after seedFirstRunSummaryChat but before markReady.
-    // The summary exists, so send the user to it rather than settling silently.
+  it("preserves writing until the native owner publishes ready", () => {
     beginLearningWindow(new Date().toISOString());
     markLearningWriting();
     const current = readLearningWindow();
@@ -581,17 +578,14 @@ describe("writing phase", () => {
       JSON.stringify({ ...current, phase: "writing", chatId: "chat-42" }),
     );
     const resumed = readLearningWindow();
-    expect(resumed.phase).toBe("ready");
+    expect(resumed.phase).toBe("writing");
     expect(resumed.chatId).toBe("chat-42");
   });
 
-  it("settles a persisted writing phase with no chat instead of restoring a spinner", () => {
-    // The model call died with the process and the seed claim is already
-    // spent, so nothing will resume the work. Restoring `writing` would show a
-    // spinner that can never finish.
+  it("preserves a persisted native writing phase across reloads", () => {
     beginLearningWindow(new Date().toISOString());
     markLearningWriting();
-    expect(readLearningWindow().phase).toBe("empty");
+    expect(readLearningWindow().phase).toBe("writing");
   });
 
   it("marks writing without disturbing the anchor", () => {
@@ -630,7 +624,7 @@ describe("progress visibility", () => {
   });
 });
 
-describe("a window that expired while nothing was mounted", () => {
+describe("a native window that expired while nothing was mounted", () => {
   const seedExpiredLearning = () => {
     window.localStorage.setItem(
       "screenpipe.first-run.learning-window.v1",
@@ -647,36 +641,25 @@ describe("a window that expired while nothing was mounted", () => {
     );
   };
 
-  it("flags itself for reporting instead of settling silently", () => {
-    // The regression: this settle path emits nothing of its own, because the
-    // ceiling effect is gated on `phase === "learning"` and normalize has
-    // already left it. Without the flag the most common first-run outcome is
-    // invisible in analytics.
+  it("remains live until native state settles it", () => {
     seedExpiredLearning();
     const state = readLearningWindow();
-    expect(state.phase).toBe("empty");
-    // Still `unknown` on purpose: the hook re-derives the real engine reason
-    // from the pending flag, so rehydration must not invent a diagnostic
-    // state of its own.
-    expect(state.emptyReason).toBe("unknown");
-    expect(state.pendingEmptyReport).toBe(true);
+    expect(state.phase).toBe("learning");
+    expect(state.emptyReason).toBeNull();
+    expect(state.pendingEmptyReport).toBe(false);
     expect(state.showProgress).toBe(true);
   });
 
-  it("flags the settle rather than inventing a new diagnostic reason", () => {
-    // A rehydrated window must reach the same copy a ceiling-settled one does.
-    // An "expired while closed" state replaced an actionable engine reason
-    // with a shrug and broke the existing first-run E2E, which asserts the
-    // copy names something the user can act on.
+  it("does not invent a webview diagnostic reason", () => {
     seedExpiredLearning();
     const state = readLearningWindow();
-    expect(state.pendingEmptyReport).toBe(true);
-    expect(state.emptyReason).toBe("unknown");
+    expect(state.pendingEmptyReport).toBe(false);
+    expect(state.emptyReason).toBeNull();
   });
 
   it("clears the flag exactly once and is safe to call on every mount", () => {
     seedExpiredLearning();
-    expect(readLearningWindow().pendingEmptyReport).toBe(true);
+    expect(readLearningWindow().pendingEmptyReport).toBe(false);
     expect(clearPendingEmptyReport().pendingEmptyReport).toBe(false);
     expect(clearPendingEmptyReport().pendingEmptyReport).toBe(false);
     expect(readLearningWindow().pendingEmptyReport).toBe(false);

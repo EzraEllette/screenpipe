@@ -13,7 +13,6 @@ import type { LearningWindowView } from "@/lib/first-run/use-learning-window";
 const mocks = vi.hoisted(() => ({
   view: {} as LearningWindowView,
   emit: vi.fn().mockResolvedValue(undefined),
-  sendNotification: vi.fn().mockResolvedValue(undefined),
   handoff: {
     targets: [],
     resolved: false,
@@ -34,21 +33,16 @@ const mocks = vi.hoisted(() => ({
   },
 }));
 
-vi.mock("@/lib/first-run/use-learning-window", () => ({
-  useLearningWindow: () => mocks.view,
+vi.mock("@/components/first-run/learning-window-provider", () => ({
+  useFirstRunLearningWindow: () => ({
+    learning: mocks.view,
+    handoff: mocks.handoff,
+  }),
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({
   emit: mocks.emit,
   listen: vi.fn(async () => () => {}),
-}));
-
-vi.mock("@/lib/first-run/use-agent-handoff", () => ({
-  useAgentHandoff: () => mocks.handoff,
-}));
-
-vi.mock("@/lib/first-run/summary-notification", () => ({
-  sendFirstRunSummaryNotification: mocks.sendNotification,
 }));
 
 vi.mock("@/lib/hooks/use-settings", () => ({
@@ -96,59 +90,6 @@ beforeEach(() => {
 });
 
 describe("first-run learning banner", () => {
-  it("sends the ready notification once after agent detection settles", async () => {
-    const markNotificationSent = vi.fn();
-    mocks.view = view({
-      phase: "ready",
-      chatId: "private-chat-id",
-      markNotificationSent,
-    });
-    mocks.handoff.resolved = true;
-    render(<FirstRunLearningBanner />);
-
-    await waitFor(() =>
-      expect(mocks.sendNotification).toHaveBeenCalledWith(null),
-    );
-    expect(markNotificationSent).toHaveBeenCalledTimes(1);
-  });
-
-  it("does not notify again after delivery or after the summary opened", () => {
-    mocks.handoff.resolved = true;
-    for (const state of [
-      view({
-        phase: "ready",
-        chatId: "private-chat-id",
-        notificationSentAt: "2026-08-23T00:00:00.000Z",
-      }),
-      view({
-        phase: "ready",
-        chatId: "private-chat-id",
-        summaryOpenedAt: "2026-08-23T00:00:00.000Z",
-      }),
-    ]) {
-      mocks.view = state;
-      const rendered = render(<FirstRunLearningBanner />);
-      rendered.unmount();
-    }
-    expect(mocks.sendNotification).not.toHaveBeenCalled();
-  });
-
-  it("retries later when /notify rejects instead of spending the latch", async () => {
-    const markNotificationSent = vi.fn();
-    mocks.sendNotification.mockRejectedValueOnce(new Error("offline"));
-    mocks.handoff.resolved = true;
-    mocks.view = view({
-      phase: "ready",
-      chatId: "private-chat-id",
-      markNotificationSent,
-    });
-    render(<FirstRunLearningBanner />);
-    await waitFor(() =>
-      expect(mocks.sendNotification).toHaveBeenCalledTimes(1),
-    );
-    expect(markNotificationSent).not.toHaveBeenCalled();
-  });
-
   it("renders nothing outside the window so it is safe to mount always", () => {
     mocks.view = view({ phase: "idle" });
     const { container } = render(<FirstRunLearningBanner />);

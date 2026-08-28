@@ -18,7 +18,6 @@ import { acpAdapterInfo } from "@/lib/utils/preset-appearance";
 import { BrowserSidebar } from "@/components/browser-sidebar";
 import { toast } from "@/components/ui/use-toast";
 import type { AIPreset, JsonValue } from "@/lib/utils/tauri";
-import { pickPipePreset } from "@/lib/utils/pick-pipe-preset";
 // OpenAI SDK no longer used directly — all providers route through Pi agent
 import posthog from "posthog-js";
 import { useAcpWarmup } from "@/components/chat/standalone/hooks/use-acp-warmup";
@@ -160,7 +159,7 @@ export function StandaloneChat({
 }: {
   className?: string;
   /**
-   * Makes this webview the single owner of the post-setup summary lifecycle.
+   * Presents the post-setup summary owned by the persistent main layout.
    * Home opts in; the separate Chat window stays read-only for that state.
    */
   firstRunLearningEnabled?: boolean;
@@ -190,12 +189,9 @@ export function StandaloneChat({
     () => filterAcpPresets(settings.aiPresets, acpEnabled),
     [settings.aiPresets, acpEnabled],
   );
-  // Preset the first-run summary is written with. Sourced from the
-  // rollout-filtered list so it inherits the ACP gate, and passed down as a
-  // prop so the pane and banner below stay renderable without a provider.
-  const firstRunAiPreset = React.useMemo(
-    () => pickPipePreset(availableAiPresets as AIPreset[]),
-    [availableAiPresets],
+  const rolloutSettings = React.useMemo(
+    () => ({ ...settings, aiPresets: availableAiPresets }) as typeof settings,
+    [settings, availableAiPresets],
   );
   const { isMac, isWindows, isLoading: isPlatformLoading } = usePlatform();
   const hardcodedConnectionTiles = useHardcodedTiles();
@@ -2280,9 +2276,6 @@ export function StandaloneChat({
       <div className="relative flex-1 flex flex-col min-w-0" data-firstrun-target="messages">
       <ChatMainPane
         firstRunLearningEnabled={firstRunLearningEnabled}
-        firstRunAiPreset={firstRunAiPreset}
-        firstRunUserToken={settings?.user?.token ?? null}
-        firstRunAiSettingsLoaded={isSettingsLoaded}
         hideInlineHistory={hideInlineHistory}
         showHistory={showHistory}
         onCloseHistory={() => setShowHistory(false)}

@@ -79,6 +79,27 @@ pub async fn send_typed_with_actions_and_priority_confirmed(
     post_notification(&payload).await
 }
 
+pub async fn send_typed_with_actions_priority_and_id_confirmed(
+    id: impl Into<String>,
+    title: impl Into<String>,
+    body: impl Into<String>,
+    notification_type: &'static str,
+    auto_dismiss_ms: Option<u64>,
+    actions: Vec<serde_json::Value>,
+    priority: NotificationPriority,
+) -> Result<(), String> {
+    let mut payload = notification_payload(
+        title,
+        body,
+        notification_type,
+        auto_dismiss_ms,
+        actions,
+        priority,
+    );
+    payload["id"] = json!(id.into());
+    post_notification(&payload).await
+}
+
 fn notification_payload(
     title: impl Into<String>,
     body: impl Into<String>,

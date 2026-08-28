@@ -15,6 +15,7 @@ const mocks = vi.hoisted(() => ({
   registerComposioMcpServer: vi.fn(),
   oauthStatus: vi.fn(),
   oauthConnect: vi.fn(),
+  spawnScreenpipe: vi.fn(),
   openUrl: vi.fn(),
   foregroundAfterOAuth: vi.fn(),
   notifyConnectionsUpdated: vi.fn(),
@@ -43,6 +44,7 @@ vi.mock("@/lib/utils/tauri", () => ({
   commands: {
     oauthStatus: mocks.oauthStatus,
     oauthConnect: mocks.oauthConnect,
+    spawnScreenpipe: mocks.spawnScreenpipe,
   },
 }));
 vi.mock("posthog-js", () => ({ default: { capture: mocks.capture } }));
@@ -77,9 +79,36 @@ beforeEach(() => {
     calendarConnected = true;
     return { status: "ok", data: { connected: true } };
   });
+  mocks.spawnScreenpipe.mockResolvedValue({ status: "ok", data: null });
 });
 
 describe("final onboarding setup", () => {
+  it("resumes the engine when onboarding reloads directly into setup", async () => {
+    render(
+      <FinalSetupStep userToken="signed-in-token" handleNextSlide={vi.fn()} />,
+    );
+
+    await waitFor(() =>
+      expect(mocks.spawnScreenpipe).toHaveBeenCalledWith(null),
+    );
+  });
+
+  it("does not respawn an engine that is already reachable", async () => {
+    mocks.localFetch.mockImplementation(async (url: string) => {
+      if (url === "/health") return { ok: true } as Response;
+      throw new Error("unavailable");
+    });
+    render(
+      <FinalSetupStep userToken="signed-in-token" handleNextSlide={vi.fn()} />,
+    );
+
+    await waitFor(() => expect(mocks.localFetch).toHaveBeenCalledWith(
+      "/health",
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    ));
+    expect(mocks.spawnScreenpipe).not.toHaveBeenCalled();
+  });
+
   it("shows every pipe option even when the engine is unavailable", async () => {
     const handleNextSlide = vi.fn();
     render(
@@ -149,8 +178,10 @@ describe("final onboarding setup", () => {
         if (url === "/pipes/digital-clone") {
           return cloneState === "missing"
             ? ({
-                ok: false,
-                json: async () => ({ error: "not found" }),
+                ok: true,
+                json: async () => ({
+                  error: "pipe 'digital-clone' not found",
+                }),
               } as Response)
             : ({
                 ok: true,

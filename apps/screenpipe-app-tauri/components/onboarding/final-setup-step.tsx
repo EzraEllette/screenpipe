@@ -37,6 +37,7 @@ const GMAIL_POLL_INTERVAL_MS = 2_000;
 const GMAIL_POLL_ATTEMPTS = 60;
 const PIPE_READY_POLL_INTERVAL_MS = 500;
 const PIPE_READY_POLL_ATTEMPTS = 60;
+const ENGINE_HEALTH_TIMEOUT_MS = 3_000;
 const DAILY_EMAIL_PIPE = "daily-email-summary";
 const DIGITAL_CLONE_PIPE = "digital-clone";
 const SPEAKER_RECONCILIATION_PIPE = "speaker-reconciliation";
@@ -61,14 +62,16 @@ async function checkPipeState(
   slug: string,
 ): Promise<Exclude<PipeSetupState, null>> {
   const response = await localFetch(`/pipes/${encodeURIComponent(slug)}`);
+  const body = await response.json().catch(() => null);
+  // The pipe detail route returns a JSON error with HTTP 200 when the pipe is
+  // absent. Treat that live response contract as installable, not as an API
+  // startup failure that should be polled forever.
+  if (typeof body?.error === "string" && body.error.includes("not found")) {
+    return "missing";
+  }
   if (!response.ok) {
-    const body = await response.json().catch(() => null);
-    if (typeof body?.error === "string" && body.error.includes("not found")) {
-      return "missing";
-    }
     throw new Error("pipe status unavailable");
   }
-  const body = await response.json();
   if (typeof body?.data?.config?.enabled !== "boolean") {
     throw new Error("pipe status unavailable");
   }
@@ -361,7 +364,37 @@ export default function FinalSetupStep({
   const refreshIdRef = useRef(0);
   const gmailAbortRef = useRef<AbortController | null>(null);
   const pipeSetupAbortRef = useRef<AbortController | null>(null);
+  const engineResumeStartedRef = useRef(false);
   const connectionImpressionsRef = useRef(new Set<ConnectionId>());
+
+  const resumeEngineIfNeeded = useCallback(() => {
+    if (engineResumeStartedRef.current) return;
+    engineResumeStartedRef.current = true;
+
+    void localFetch("/health", {
+      signal: AbortSignal.timeout(ENGINE_HEALTH_TIMEOUT_MS),
+    })
+      .catch(() => null)
+      .then((healthResponse) => {
+        if (healthResponse) return;
+
+        // Onboarding restores its persisted slide after an app restart. When
+        // that slide is recommended setup, the earlier engine-start screen is
+        // intentionally skipped, so revive the engine here without making
+        // Gmail or Calendar wait for it. spawnScreenpipe may remain pending
+        // when an engine is already coming up, hence this is fire-and-forget.
+        void commands
+          .spawnScreenpipe(null)
+          .then((result) => {
+            if (result.status === "error") {
+              throw new Error(result.error);
+            }
+          })
+          .catch(() => {
+            posthog.capture("onboarding_final_setup_engine_resume_failed");
+          });
+      });
+  }, []);
 
   const refresh = useCallback(async () => {
     const refreshId = ++refreshIdRef.current;
@@ -387,12 +420,13 @@ export default function FinalSetupStep({
   }, [userToken]);
 
   useEffect(() => {
+    resumeEngineIfNeeded();
     void refresh();
     return () => {
       gmailAbortRef.current?.abort();
       pipeSetupAbortRef.current?.abort();
     };
-  }, [refresh]);
+  }, [refresh, resumeEngineIfNeeded]);
 
   useEffect(() => {
     if (checking) return;

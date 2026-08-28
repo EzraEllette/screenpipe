@@ -15,17 +15,12 @@ import {
 } from "@/lib/first-run/learning-window";
 import { appIconUrl } from "@/lib/first-run/recent-activity";
 import { AgentHandoffPicker } from "@/components/first-run/agent-handoff-picker";
-import { useAgentHandoff } from "@/lib/first-run/use-agent-handoff";
-import {
-  useLearningWindow,
-  type LearningWindowOptions,
-} from "@/lib/first-run/use-learning-window";
+import { useFirstRunLearningWindow } from "@/components/first-run/learning-window-provider";
 import {
   dismissFirstRunSearchShortcutFromParent,
   FirstRunSearchShortcutPractice,
 } from "@/components/first-run/search-shortcut-practice";
 import type { AgentHandoffTarget } from "@/lib/first-run/agent-handoff";
-import { sendFirstRunSummaryNotification } from "@/lib/first-run/summary-notification";
 
 function CapturedAppIcon({ app }: { app: FirstRunCapturedApp }) {
   const [failed, setFailed] = React.useState(false);
@@ -200,67 +195,21 @@ export function FirstRunSetupDock({ onDismiss }: { onDismiss: () => void }) {
  * on the surface the user lands on after onboarding.
  */
 export function FirstRunLearningBanner(
-  props: LearningWindowOptions & { fallback?: React.ReactNode } = {},
+  props: { fallback?: React.ReactNode } = {},
 ) {
-  const { fallback, ...learningOptions } = props;
+  const { fallback } = props;
+  const { learning, handoff } = useFirstRunLearningWindow();
   const {
     phase,
     capturedApps,
     remainingMs,
     chatId,
     summaryOpenedAt,
-    notificationSentAt,
     showProgress,
     markSummaryOpened,
-    markNotificationSent,
     dismiss,
-  } = useLearningWindow(learningOptions);
-  const {
-    targets: handoffTargets,
-    resolved: handoffResolved,
-    preferredTarget,
-    hint: handoffHint,
-    askAgent,
-  } = useAgentHandoff(phase === "ready" && !summaryOpenedAt, capturedApps);
-
-  React.useEffect(() => {
-    if (
-      phase !== "ready" ||
-      !chatId ||
-      summaryOpenedAt ||
-      notificationSentAt ||
-      !handoffResolved
-    ) {
-      return;
-    }
-    let cancelled = false;
-    void sendFirstRunSummaryNotification(preferredTarget)
-      .then(() => {
-        if (cancelled) return;
-        markNotificationSent();
-        posthog.capture("first_run_summary_notification_sent", {
-          agent: preferredTarget?.id ?? null,
-          has_agent_action: Boolean(preferredTarget),
-        });
-      })
-      .catch(() => {
-        if (cancelled) return;
-        posthog.capture("first_run_summary_notification_failed", {
-          has_agent_action: Boolean(preferredTarget),
-        });
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [
-    chatId,
-    handoffResolved,
-    markNotificationSent,
-    notificationSentAt,
-    phase,
-    preferredTarget,
-    summaryOpenedAt,
-  ]);
+  } = learning;
+  const { targets: handoffTargets, hint: handoffHint, askAgent } = handoff;
 
   // Only show progress when setup just caused it. A foreground empty result is
   // still a terminal onboarding state: hiding it also hid the daily-summary
@@ -368,14 +317,11 @@ export function FirstRunLearningBanner(
               Writing your summary
             </p>
           </div>
-          {/* No countdown. The clock measured how long we would keep waiting
-              for something to summarize, and that question is already
-              answered; the model can take tens of seconds and outlast the
-              ceiling, so a timer here would tick to 0:00 and then keep
-              spinning. */}
+          {/* No countdown. The clock measured evidence collection; the selected
+              agent now owns this visible writing state until it finishes. */}
           <p className="text-[11px] leading-relaxed text-muted-foreground">
-            Screenpipe saw enough. Putting the summary together now — this takes
-            a few seconds.
+            Screenpipe saw enough. Your selected AI is putting the summary
+            together now — this can take a minute or two.
           </p>
           {capturedApps.length > 0 && (
             <div className="flex items-center gap-2 pt-0.5">
