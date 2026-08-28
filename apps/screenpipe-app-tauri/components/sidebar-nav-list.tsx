@@ -8,8 +8,9 @@
 // Design notes, because the first pass got this wrong:
 //
 //   * Drag and right-click are affordances with no signifier — nothing on a
-//     plain row tells you it can move. On hover the leading icon becomes a grip
-//     and a "…" button appears, the same two cues Notion/Linear/Slack use, and
+//     plain row tells you it can move. Hovering the leading icon turns it into
+//     a grip, while hovering the row reveals a "…" button. These are the same
+//     cues Notion/Linear/Slack use, and
 //     the "…" opens the identical menu right-click does (one menu, two ways in
 //     — mirroring RowMenuItems in chat-sidebar.tsx).
 //   * Hiding should remove chrome, not replace it with a second list. Once the
@@ -237,7 +238,7 @@ function SortableRow({
           >
             <div
               className={cn(
-                "relative transition-colors flex-shrink-0",
+                "group/navicon relative flex-shrink-0 transition-colors",
                 isActive
                   ? isTranslucent
                     ? "vibrant-sidebar-fg"
@@ -247,14 +248,14 @@ function SortableRow({
                     : "text-muted-foreground group-hover/navrow:text-foreground",
               )}
             >
-              {/* Signifier: on hover the section icon becomes a grip, so "this
-                  row can be moved" is visible instead of folklore. */}
-              <span className="block transition-opacity duration-150 group-hover/navrow:opacity-0">
+              {/* Keep the drag signifier local to the icon hit area so moving
+                  across the rest of the row does not flash the grip. */}
+              <span className="block transition-opacity duration-150 group-hover/navicon:opacity-0">
                 {item.icon}
               </span>
               <GripVertical
                 aria-hidden="true"
-                className="absolute inset-0 h-3.5 w-3.5 opacity-0 transition-opacity duration-150 group-hover/navrow:opacity-100"
+                className="absolute inset-0 h-3.5 w-3.5 opacity-0 transition-opacity duration-150 group-hover/navicon:opacity-100"
               />
             </div>
             <span

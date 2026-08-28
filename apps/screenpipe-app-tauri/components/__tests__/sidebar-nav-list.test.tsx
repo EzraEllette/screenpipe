@@ -114,6 +114,19 @@ describe("SidebarNavList", () => {
     expect(onIntent).toHaveBeenNthCalledWith(2, "pipes");
   });
 
+  it("reveals the drag grip only from the icon hover target", () => {
+    renderList();
+    const row = screen.getByTestId("nav-home");
+    const grip = row.querySelector("svg[aria-hidden='true']");
+    const icon = grip?.previousElementSibling;
+
+    expect(grip?.parentElement).toHaveClass("group/navicon");
+    expect(grip).toHaveClass("group-hover/navicon:opacity-100");
+    expect(grip).not.toHaveClass("group-hover/navrow:opacity-100");
+    expect(icon).toHaveClass("group-hover/navicon:opacity-0");
+    expect(icon).not.toHaveClass("group-hover/navrow:opacity-0");
+  });
+
   it("moves a row from the right-click menu", () => {
     const handlers = renderList();
     rightClick("nav-brain");
