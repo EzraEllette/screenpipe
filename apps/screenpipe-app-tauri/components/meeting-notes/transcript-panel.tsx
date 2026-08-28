@@ -89,6 +89,7 @@ export interface LiveTranscriptDelta {
   meeting_id: number;
   provider: string;
   model?: string | null;
+  stream_id?: string;
   item_id: string;
   device_name: string;
   device_type: string;
@@ -104,6 +105,8 @@ export interface LiveTranscriptFinal {
   item_id: string;
   device_name: string;
   device_type: string;
+  stream_id?: string;
+  session_speaker_id?: string | null;
   speaker_name?: string | null;
   transcript: string;
   captured_at: string;
@@ -131,6 +134,7 @@ export interface LiveTranscriptBlock {
   itemId: string;
   deviceName: string;
   deviceType: string;
+  sessionSpeakerId?: string | null;
   speakerName?: string | null;
   provider: string;
   model?: string | null;
@@ -283,6 +287,7 @@ export function applyLiveFinal(
       itemId: event.item_id,
       deviceName: event.device_name,
       deviceType: event.device_type,
+      sessionSpeakerId: event.session_speaker_id,
       speakerName: event.speaker_name,
       provider: event.provider,
       model: event.model,
@@ -426,7 +431,9 @@ function groupBySpeaker(chunks: MeetingAudioChunk[]): SpeakerBlock[] {
     const speakerKey =
       speakerId != null
         ? `speaker:${speakerId}`
-        : `stream:${c.deviceName || c.deviceType}:${speakerName}`;
+        : c.sessionSpeakerId
+          ? `session:${c.sessionSpeakerId}`
+          : `stream:${c.deviceName || c.deviceType}:${speakerName}`;
     const last = out[out.length - 1];
     const sameSpeaker = last?.speakerKey === speakerKey;
     // Glue if same speaker AND within 30s of last segment — keeps long pauses
@@ -472,7 +479,9 @@ export function liveBlockToSpeakerBlock(
         : block.deviceType.toLowerCase() === "input"
           ? "me"
           : "speaker"),
-    speakerKey: `stream:${block.deviceName}:${block.deviceType}:${block.speakerName?.trim() || "unknown"}`,
+    speakerKey: block.sessionSpeakerId
+      ? `session:${block.sessionSpeakerId}`
+      : `stream:${block.deviceName}:${block.deviceType}:${block.speakerName?.trim() || "unknown"}`,
     startMs,
     endMs: startMs,
     text,

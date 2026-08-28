@@ -677,6 +677,37 @@ impl DatabaseManager {
         transcript: &str,
         captured_at: DateTime<Utc>,
     ) -> Result<i64, SqlxError> {
+        self.insert_meeting_transcript_segment_with_identity(
+            meeting_id,
+            provider,
+            model,
+            item_id,
+            device_name,
+            device_type,
+            "legacy",
+            None,
+            speaker_name,
+            transcript,
+            captured_at,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn insert_meeting_transcript_segment_with_identity(
+        &self,
+        meeting_id: i64,
+        provider: &str,
+        model: Option<&str>,
+        item_id: &str,
+        device_name: &str,
+        device_type: &str,
+        stream_id: &str,
+        session_speaker_id: Option<&str>,
+        speaker_name: Option<&str>,
+        transcript: &str,
+        captured_at: DateTime<Utc>,
+    ) -> Result<i64, SqlxError> {
         let trimmed = transcript.trim();
         if trimmed.is_empty() {
             return Ok(0);
@@ -685,8 +716,8 @@ impl DatabaseManager {
         let mut tx = self.begin_immediate_with_retry().await?;
         let result = sqlx::query(
             "INSERT OR IGNORE INTO meeting_transcript_segments \
-             (meeting_id, provider, model, item_id, device_name, device_type, speaker_name, transcript, captured_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+             (meeting_id, provider, model, item_id, device_name, device_type, stream_id, session_speaker_id, speaker_name, transcript, captured_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         )
         .bind(meeting_id)
         .bind(provider)
@@ -694,6 +725,8 @@ impl DatabaseManager {
         .bind(item_id)
         .bind(device_name)
         .bind(device_type)
+        .bind(stream_id)
+        .bind(session_speaker_id)
         .bind(speaker_name)
         .bind(trimmed)
         .bind(captured_at.to_rfc3339())
@@ -1200,6 +1233,7 @@ impl DatabaseManager {
                     NULL AS audio_chunk_id,
                     NULL AS audio_file_path,
                     mts.speaker_id AS speaker_id,
+                    mts.session_speaker_id AS session_speaker_id,
                     -- Prefer the resolved global speaker's name, then preserve
                     -- Deepgram's stream-local label until voice backfill gives it
                     -- a durable identity. A mic is a capture source, not proof
@@ -1229,6 +1263,7 @@ impl DatabaseManager {
                     at.audio_chunk_id AS audio_chunk_id,
                     ac.file_path AS audio_file_path,
                     at.speaker_id AS speaker_id,
+                    NULL AS session_speaker_id,
                     s.name AS speaker_name,
                     at.transcription AS transcript,
                     at.timestamp AS captured_at,

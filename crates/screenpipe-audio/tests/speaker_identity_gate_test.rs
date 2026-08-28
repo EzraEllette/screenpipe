@@ -164,6 +164,77 @@ async fn distinct_voices_still_produce_distinct_speakers() {
     assert_eq!(speaker_count(&db).await, 4);
 }
 
+/// A mixed or noisy segment can land inside the distance threshold for two
+/// established people. Nearest-neighbour-only matching arbitrarily selected
+/// one and then learned the mixed vector, corrupting that person's profile.
+#[tokio::test]
+async fn ambiguous_long_audio_abstains_without_creating_or_learning() {
+    let db = test_db().await;
+    let first_embedding = voice_embedding(0);
+    let second_embedding = voice_embedding(1);
+    let first = db
+        .insert_speaker(&first_embedding)
+        .await
+        .expect("insert first established speaker");
+    let second = db
+        .insert_speaker(&second_embedding)
+        .await
+        .expect("insert second established speaker");
+    let first_centroid = centroid_of(&db, first.id).await;
+    let second_centroid = centroid_of(&db, second.id).await;
+
+    // Exactly between two orthogonal profiles: cosine distance is ~0.293 to
+    // both, comfortably inside the 0.55 match threshold but with zero margin.
+    let ambiguous: Vec<f32> = first_embedding
+        .iter()
+        .zip(&second_embedding)
+        .map(|(a, b)| a + b)
+        .collect();
+    let result = get_or_create_speaker_from_embedding(&db, &ambiguous, 8.0)
+        .await
+        .expect("ambiguous identification must not error");
+
+    assert!(result.is_none(), "an ambiguous probe must abstain");
+    assert_eq!(
+        speaker_count(&db).await,
+        2,
+        "abstention must not create a profile"
+    );
+    assert_eq!(centroid_of(&db, first.id).await, first_centroid);
+    assert_eq!(centroid_of(&db, second.id).await, second_centroid);
+}
+
+/// The margin compares first and second place before thresholding the runner
+/// up. Otherwise a profile at distance 0.56 disappears and a profile at 0.50
+/// wins despite only a 0.06 lead, below the required 0.08 confidence margin.
+#[tokio::test]
+async fn near_threshold_runner_up_still_forces_abstention() {
+    let db = test_db().await;
+    let mut probe = vec![0.0f32; EMBEDDING_DIM];
+    probe[0] = 1.0;
+
+    let profile_at_distance = |distance: f32| {
+        let similarity = 1.0 - distance;
+        let mut embedding = vec![0.0f32; EMBEDDING_DIM];
+        embedding[0] = similarity;
+        embedding[1] = (1.0 - similarity * similarity).sqrt();
+        embedding
+    };
+    db.insert_speaker(&profile_at_distance(0.50))
+        .await
+        .expect("insert best profile");
+    db.insert_speaker(&profile_at_distance(0.56))
+        .await
+        .expect("insert near-threshold runner-up profile");
+
+    let result = get_or_create_speaker_from_embedding(&db, &probe, 8.0)
+        .await
+        .expect("margin check must not error");
+
+    assert!(result.is_none(), "a 0.06 lead must be treated as ambiguous");
+    assert_eq!(speaker_count(&db).await, 2);
+}
+
 /// Between the two gates a segment may recognize a known speaker but must not
 /// write itself into that speaker's stored profile. Asserted on the centroid
 /// itself, so any profile mutation is caught directly.

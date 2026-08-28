@@ -29,6 +29,64 @@ mod timeline_live_meeting_tests {
         db
     }
 
+    /// A provider reconnect resets its own timestamps and speaker numbering.
+    /// Both turns must survive, while the repeated label stays split across the
+    /// two opaque stream-scoped identities.
+    #[tokio::test]
+    async fn test_reconnected_live_stream_preserves_scoped_speaker_identity() {
+        let db = setup_test_db().await;
+        let base = Utc::now();
+        let meeting_id = db
+            .insert_meeting("zoom.us", "ui_scan", None, None)
+            .await
+            .unwrap();
+
+        for (stream_id, session_speaker_id, captured_at) in [
+            ("stream-a", "live_a", base),
+            ("stream-b", "live_b", base + Duration::seconds(5)),
+        ] {
+            db.insert_meeting_transcript_segment_with_identity(
+                meeting_id,
+                "screenpipe-cloud",
+                Some("nova-3"),
+                &format!("deepgram:{stream_id}:0:0"),
+                "System Audio",
+                "output",
+                stream_id,
+                Some(session_speaker_id),
+                Some("speaker 1"),
+                "provider timestamp zero turn",
+                captured_at,
+            )
+            .await
+            .unwrap();
+        }
+
+        let segments = db
+            .list_meeting_transcript_segments(meeting_id)
+            .await
+            .unwrap();
+        let live_segments: Vec<_> = segments
+            .iter()
+            .filter(|segment| segment.source == "live")
+            .collect();
+
+        assert_eq!(
+            live_segments.len(),
+            2,
+            "neither reconnect turn may be dropped"
+        );
+        assert_eq!(live_segments[0].speaker_name.as_deref(), Some("speaker 1"));
+        assert_eq!(
+            live_segments[0].session_speaker_id.as_deref(),
+            Some("live_a")
+        );
+        assert_eq!(
+            live_segments[1].session_speaker_id.as_deref(),
+            Some("live_b")
+        );
+    }
+
     /// A live meeting segment with no corresponding background transcription must
     /// still appear on the timeline.
     #[tokio::test]

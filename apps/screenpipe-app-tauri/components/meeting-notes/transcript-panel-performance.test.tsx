@@ -181,6 +181,7 @@ describe("SpeakerParagraph render isolation", () => {
       item_id: "final-1",
       device_name: "System Audio",
       device_type: "output",
+      session_speaker_id: "live_stream_a_speaker_2",
       speaker_name: "speaker 2",
       transcript: "Hello there.",
       captured_at: "2026-07-29T19:00:06.000Z",
@@ -188,6 +189,7 @@ describe("SpeakerParagraph render isolation", () => {
     expect(finalized).toHaveLength(1);
     expect(finalized[0]).toMatchObject({
       itemId: "final-1",
+      sessionSpeakerId: "live_stream_a_speaker_2",
       speakerName: "speaker 2",
       final: true,
     });
@@ -260,6 +262,42 @@ describe("SpeakerParagraph render isolation", () => {
     expect(
       isSpeakerContinuation(remote ?? undefined, nearby ?? undefined),
     ).toBe(false);
+  });
+
+  it("keeps one provider speaker stable inside a stream and splits it after reconnect", () => {
+    const turn = (sessionSpeakerId: string, capturedAt: string) =>
+      liveBlockToSpeakerBlock(
+        {
+          key: `${sessionSpeakerId}:${capturedAt}`,
+          itemId: `${sessionSpeakerId}:${capturedAt}`,
+          deviceName: "System Audio",
+          deviceType: "output",
+          sessionSpeakerId,
+          speakerName: "speaker 1",
+          provider: "deepgram",
+          text: "a provider-labelled turn",
+          capturedAt,
+          final: true,
+        },
+        0,
+      );
+
+    const first = turn("live_stream_a_speaker_1", "2026-07-29T19:00:00.000Z");
+    const continuation = turn(
+      "live_stream_a_speaker_1",
+      "2026-07-29T19:00:05.000Z",
+    );
+    const afterReconnect = turn(
+      "live_stream_b_speaker_1",
+      "2026-07-29T19:00:10.000Z",
+    );
+
+    expect(first?.speakerKey).toBe(continuation?.speakerKey);
+    expect(first?.speakerKey).not.toBe(afterReconnect?.speakerKey);
+    expect(isSpeakerContinuation(first ?? undefined, continuation ?? undefined)).toBe(true);
+    expect(isSpeakerContinuation(continuation ?? undefined, afterReconnect ?? undefined)).toBe(
+      false,
+    );
   });
 
   it("keeps live finals authoritative while retaining background gap fill", () => {
