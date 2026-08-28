@@ -122,6 +122,18 @@ describe("provider error copy", () => {
     }
   });
 
+  it("maps an expired TLS certificate to retryable cloud connectivity copy", () => {
+    const presentation = buildProviderErrorPresentation(
+      "Error: certificate has expired",
+      { provider: "screenpipe-cloud", model: "auto" },
+    );
+
+    expect(presentation).toMatchObject({ kind: "provider", retryable: true });
+    expect(presentation?.message).toContain("screenpipe cloud");
+    expect(presentation?.message.toLowerCase()).toContain("try again");
+    expect(presentation?.message).not.toContain("certificate has expired");
+  });
+
   it("maps the daily free-chat wall to tomorrow-or-BYOK copy", () => {
     const msg = buildProviderErrorMessage(
       '{"error":"free_chat_limit_exceeded","limit":2}',
