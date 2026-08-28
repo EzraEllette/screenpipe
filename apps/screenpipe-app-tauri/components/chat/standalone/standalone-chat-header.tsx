@@ -137,14 +137,20 @@ export function StandaloneChatHeader({
         </Button>
       )}
       {tabStrip}
-      <ChatTitleMenu
-        conversationId={conversationId}
-        messages={messages}
-        pendingUserText={pendingUserText}
-        renameConversation={renameConversation}
-        archiveConversation={archiveConversation}
-        compact={Boolean(tabStrip)}
-      />
+      {tabStrip ? (
+        <div
+          data-testid="chat-header-tab-spacer"
+          className="min-h-px min-w-2 flex-1"
+        />
+      ) : (
+        <ChatTitleMenu
+          conversationId={conversationId}
+          messages={messages}
+          pendingUserText={pendingUserText}
+          renameConversation={renameConversation}
+          archiveConversation={archiveConversation}
+        />
+      )}
       {!tabStrip ? <div className="flex-1" /> : null}
       {!hideInlineHistory && (
         <>

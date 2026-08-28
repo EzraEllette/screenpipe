@@ -2203,6 +2203,8 @@ export function StandaloneChat({
               onActivate={activateChatTab}
               onNewChat={startDurableNewConversation}
               onClose={discardTemporarySideConversation}
+              renameConversation={renameConversation}
+              archiveConversation={archiveConversation}
             />
           ) : undefined
         }

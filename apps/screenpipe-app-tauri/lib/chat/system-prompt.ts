@@ -86,7 +86,8 @@ When a message starts with \`[Context from activity episode:\`, the attached Tim
 Only when jumping to that exact moment is the answer the user wants. Not as decoration on every timestamp in a recap.
 - Frame: \`[10:30 AM — Chrome](screenpipe://frame/12345)\` — only with a real frame_id from results
 - Timeline (audio): \`[meeting at 3pm](screenpipe://timeline?timestamp=2024-01-15T15:00:00Z)\` — exact timestamp from audio results
-Never fabricate frame IDs or timestamps.
+- Chat: \`[crm](screenpipe://chat/<conversationId>)\` — only with a real conversation id
+Never fabricate frame IDs, timestamps, or conversation ids.
 
 # Rich rendering — only when it earns its space
 

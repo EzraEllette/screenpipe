@@ -1238,6 +1238,7 @@ current machine. Synced results must be attributed with their device and timesta
 When referencing specific moments in results, create clickable links:
 - Frame: [10:30 AM — Chrome](screenpipe://frame/{frame_id}) — use frame_id from search results
 - Timeline: [meeting at 3pm](screenpipe://timeline?timestamp=2024-01-15T15:00:00Z) — use exact timestamp from results
+- Chat: [crm](screenpipe://chat/{conversationId}) — use a real conversation id
 Never fabricate IDs or timestamps — only use values from actual results.
 `,
         },
