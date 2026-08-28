@@ -50,6 +50,7 @@ interface HealthCheckResponse {
   last_audio_timestamp: string | null;
   last_ui_timestamp: string | null;
   frame_status: string;
+  vision_reason?: string | null;
   audio_status: string;
   ui_status: string;
   message: string;
@@ -71,6 +72,7 @@ function isHealthChanged(
     oldHealth.last_audio_timestamp !== newHealth.last_audio_timestamp ||
     oldHealth.last_ui_timestamp !== newHealth.last_ui_timestamp ||
     oldHealth.frame_status !== newHealth.frame_status ||
+    oldHealth.vision_reason !== newHealth.vision_reason ||
     oldHealth.audio_status !== newHealth.audio_status ||
     oldHealth.ui_status !== newHealth.ui_status ||
     oldHealth.message !== newHealth.message ||

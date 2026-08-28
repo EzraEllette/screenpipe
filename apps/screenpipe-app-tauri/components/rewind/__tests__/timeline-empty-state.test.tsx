@@ -60,6 +60,7 @@ const store = vi.hoisted(() => ({
 	error: null as unknown,
 	message: null as string | null,
 	frameStatus: "disabled",
+	visionReason: null as string | null,
 	hasCachedData: false,
 }));
 
@@ -105,7 +106,12 @@ vi.mock("@/lib/hooks/use-timeline-data", () => ({
 }));
 
 vi.mock("@/lib/hooks/use-health-check", () => ({
-	useHealthCheck: () => ({ health: { frame_status: store.frameStatus } }),
+	useHealthCheck: () => ({
+		health: {
+			frame_status: store.frameStatus,
+			vision_reason: store.visionReason,
+		},
+	}),
 }));
 
 // --- everything else is scaffolding -----------------------------------------
@@ -295,6 +301,7 @@ beforeEach(() => {
 		error: null,
 		message: null,
 		frameStatus: "disabled",
+		visionReason: null,
 		hasCachedData: false,
 	});
 	posthogCapture.mockClear();
@@ -426,5 +433,19 @@ describe("Timeline empty state (mounted)", () => {
 		expect(screen.getByTestId("frame-canvas")).toBeInTheDocument();
 		expect(screen.getByText(DISCORD_URL)).toBeInTheDocument();
 		expect(queryPanel()).toBeNull();
+	});
+
+	it("keeps recorded frames visible when new screenshots are turned off", () => {
+		setStore({
+			frames: [aug5Frame()],
+			frameStatus: "ok",
+			visionReason: "screenshots_disabled_by_config",
+		});
+		render(<Timeline embedded />);
+
+		expect(screen.getByTestId("frame-canvas")).toBeInTheDocument();
+		expect(
+			screen.queryByRole("heading", { name: /screenshots are turned off/i }),
+		).toBeNull();
 	});
 });
