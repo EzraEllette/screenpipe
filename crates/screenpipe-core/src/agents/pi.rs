@@ -11,10 +11,53 @@ use super::{install_spawned_pid, AgentExecutor, AgentOutput, ExecutionHandle};
 use anyhow::{anyhow, Result};
 use arc_swap::ArcSwap;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::ffi::{OsStr, OsString};
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tracing::{debug, error, info, warn};
+
+static USER_SKILL_SYNC_LOCK: Mutex<()> = Mutex::new(());
+
+fn user_skill_fingerprint(root: &Path) -> std::io::Result<String> {
+    fn hash_dir(root: &Path, dir: &Path, hasher: &mut Sha256) -> std::io::Result<()> {
+        let mut entries = std::fs::read_dir(dir)?.collect::<std::io::Result<Vec<_>>>()?;
+        entries.sort_by_key(|entry| entry.file_name());
+
+        for entry in entries {
+            let file_type = entry.file_type()?;
+            if !file_type.is_dir() && !file_type.is_file() {
+                continue;
+            }
+
+            let path = entry.path();
+            let relative = path.strip_prefix(root).unwrap_or(&path).to_string_lossy();
+            hasher.update(if file_type.is_dir() { b"d" } else { b"f" });
+            hasher.update((relative.len() as u64).to_le_bytes());
+            hasher.update(relative.as_bytes());
+
+            if file_type.is_dir() {
+                hash_dir(root, &path, hasher)?;
+            } else {
+                let mut file = std::fs::File::open(path)?;
+                let mut buffer = [0_u8; 16 * 1024];
+                loop {
+                    let read = file.read(&mut buffer)?;
+                    if read == 0 {
+                        break;
+                    }
+                    hasher.update(&buffer[..read]);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    let mut hasher = Sha256::new();
+    hash_dir(root, root, &mut hasher)?;
+    Ok(format!("{:x}", hasher.finalize()))
+}
 
 pub const PI_PACKAGE: &str = "@earendil-works/pi-coding-agent@0.84.1";
 pub const PI_AI_PACKAGE: &str = "@earendil-works/pi-ai@0.84.1";
@@ -868,7 +911,8 @@ impl PiExecutor {
     ///
     /// Idempotent + self-cleaning: each mirrored skill is stamped with
     /// [`Self::USER_SKILL_MARKER`]; on every call we refresh the contents of
-    /// skills still in the store and remove previously-mirrored skills that
+    /// skills changed in the store, skip managed copies whose recorded source
+    /// fingerprint still matches, and remove previously-mirrored skills that
     /// have left it. Baseline + hand-authored skills (no marker) are never
     /// touched. Best-effort: a single malformed skill is logged and skipped so
     /// it can never break a session.
@@ -880,6 +924,9 @@ impl PiExecutor {
     /// Implementation of [`Self::sync_user_skills`] with the store path passed
     /// in, so it can be unit-tested without touching the real data dir.
     fn sync_user_skills_from(store: &Path, project_dir: &Path) -> Result<()> {
+        let _sync_guard = USER_SKILL_SYNC_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let dest_root = project_dir.join(".pi").join("skills");
 
         // Copy/refresh every store skill (a folder containing SKILL.md).
@@ -900,22 +947,27 @@ impl PiExecutor {
                 if Self::BASELINE_SKILL_NAMES.contains(&key.as_str()) {
                     continue;
                 }
+                store_keys.insert(key.clone());
                 let dest = dest_root.join(&key);
                 let copy = (|| -> std::io::Result<()> {
+                    let fingerprint = user_skill_fingerprint(&src)?;
+                    let marker = format!(
+                        "mirrored from <data>/skills by screenpipe\nfingerprint={fingerprint}\n"
+                    );
+                    if std::fs::read_to_string(dest.join(Self::USER_SKILL_MARKER))
+                        .is_ok_and(|existing| existing == marker)
+                    {
+                        return Ok(());
+                    }
                     if dest.exists() {
                         std::fs::remove_dir_all(&dest)?;
                     }
                     crate::paths::copy_dir_all(&src, &dest)?;
-                    std::fs::write(
-                        dest.join(Self::USER_SKILL_MARKER),
-                        b"mirrored from <data>/skills by screenpipe\n",
-                    )?;
+                    std::fs::write(dest.join(Self::USER_SKILL_MARKER), marker)?;
                     Ok(())
                 })();
                 match copy {
-                    Ok(()) => {
-                        store_keys.insert(key);
-                    }
+                    Ok(()) => {}
                     Err(e) => warn!("failed to mirror user skill {:?}: {}", src, e),
                 }
             }
@@ -4687,6 +4739,26 @@ mod tests {
             .join("screenpipe-api")
             .join(PiExecutor::USER_SKILL_MARKER)
             .exists());
+
+        // An unchanged source preserves the managed copy instead of deleting
+        // and recursively copying the full skill tree again.
+        std::fs::write(skills.join("foo").join("copy-sentinel"), "preserved").unwrap();
+        PiExecutor::sync_user_skills_from(&store, &project).unwrap();
+        assert!(skills.join("foo").join("copy-sentinel").exists());
+
+        // A source content change invalidates the marker and refreshes the
+        // managed copy, removing anything that is no longer in the source.
+        std::fs::write(
+            store.join("foo").join("SKILL.md"),
+            "---\nname: foo\n---\nupdated",
+        )
+        .unwrap();
+        PiExecutor::sync_user_skills_from(&store, &project).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(skills.join("foo").join("SKILL.md")).unwrap(),
+            "---\nname: foo\n---\nupdated"
+        );
+        assert!(!skills.join("foo").join("copy-sentinel").exists());
 
         // Remove from store, sync again → our mirror is gone, baseline stays.
         std::fs::remove_dir_all(store.join("foo")).unwrap();

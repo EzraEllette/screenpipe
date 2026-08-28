@@ -30,7 +30,7 @@ interface WatchTarget {
 }
 
 export interface ExternalChatSyncController {
-  syncNow(force?: boolean): Promise<void>;
+  syncNow(force?: boolean): Promise<boolean>;
   stop(): void;
 }
 
@@ -102,7 +102,7 @@ export async function startExternalChatSync(
   const home = await resolveExternalChatHome(options.home);
   if (!home) {
     return {
-      syncNow: async () => {},
+      syncNow: async () => false,
       stop: () => {},
     };
   }
@@ -160,20 +160,24 @@ export async function startExternalChatSync(
   };
 
   const controller: ExternalChatSyncController = {
-    syncNow: (force = false) => enqueue(async () => {
-      await ensureWatchers();
-      const now = Date.now();
-      if (!force && now - lastFullSyncAt < FULL_RECONCILIATION_INTERVAL_MS) return;
-      lastFullSyncAt = now;
-      try {
-        const scan = await scanExternalChatHistory({ home });
-        await importExternalChatHistory(candidatesFromScan(scan), {
-          skipUnchanged: true,
-        });
-      } catch (error) {
-        console.warn("[chat-sync] failed to reconcile external chat history", error);
-      }
-    }),
+    syncNow: (force = false) => {
+      let reconciled = false;
+      return enqueue(async () => {
+        await ensureWatchers();
+        const now = Date.now();
+        if (!force && now - lastFullSyncAt < FULL_RECONCILIATION_INTERVAL_MS) return;
+        lastFullSyncAt = now;
+        try {
+          const scan = await scanExternalChatHistory({ home });
+          await importExternalChatHistory(candidatesFromScan(scan), {
+            skipUnchanged: true,
+          });
+          reconciled = true;
+        } catch (error) {
+          console.warn("[chat-sync] failed to reconcile external chat history", error);
+        }
+      }).then(() => reconciled);
+    },
     stop: () => {
       stopped = true;
       for (const unwatch of unwatchByRoot.values()) unwatch();

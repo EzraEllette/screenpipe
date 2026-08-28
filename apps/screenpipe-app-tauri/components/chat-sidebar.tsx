@@ -66,6 +66,7 @@ import {
   type SessionRecord,
 } from "@/lib/stores/chat-store";
 import {
+  CHAT_HISTORY_INITIAL_LIMIT,
   conversationMetaFromJson,
   deleteConversationFile,
   listConversations,
@@ -172,6 +173,10 @@ import {
 
 /** Max top-level rows shown in recents. Pipes use the authoritative inventory. */
 const SIDEBAR_CAP = 8;
+export const CHAT_SIDEBAR_HYDRATION_OPTIONS = {
+  limit: CHAT_HISTORY_INITIAL_LIMIT,
+  includeHidden: true,
+} as const;
 const PIPE_RUNS_PER_GROUP = 10;
 const DELETED_PIPE_EXECUTIONS_KEY = "screenpipe:deleted-pipe-executions";
 const RECENTS_SOURCE_FILTER_KEY = "screenpipe:recents-hidden-sources";
@@ -680,7 +685,9 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
     let cancelled = false;
     let controller: ExternalChatSyncController | null = null;
     const hydrate = async () => {
-      const metas = await listConversations({ includeHidden: true });
+      // Each item crosses the Tauri filesystem boundary. Keep this bounded:
+      // large imported histories can contain tens of thousands of chat files.
+      const metas = await listConversations(CHAT_SIDEBAR_HYDRATION_OPTIONS);
       if (!cancelled) actions.hydrateFromDisk(metas.map(sessionRecordFromMeta));
     };
     const start = async () => {
@@ -699,9 +706,11 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
     void start();
     const onFocus = () => {
       if (!controller) return;
-      void controller.syncNow().then(hydrate).catch((error) => {
-        console.warn("[chat-sidebar] external chat reconciliation failed", error);
-      });
+      void controller.syncNow()
+        .then((reconciled) => reconciled ? hydrate() : undefined)
+        .catch((error) => {
+          console.warn("[chat-sidebar] external chat reconciliation failed", error);
+        });
     };
     window.addEventListener("focus", onFocus);
     return () => {

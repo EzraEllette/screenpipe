@@ -170,7 +170,8 @@ describe("external chat live sync", () => {
       paths: [`${codexRoot}/2026/08/26/ignored.jsonl`],
       attrs: {},
     });
-    await controller.syncNow();
+    expect(await controller.syncNow()).toBe(false);
+    expect(mocks.scanExternalChatHistory).toHaveBeenCalledTimes(1);
     expect(mocks.candidateForPath).toHaveBeenCalledTimes(1);
 
     controller.stop();

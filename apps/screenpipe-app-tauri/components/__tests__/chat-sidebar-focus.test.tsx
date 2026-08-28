@@ -5,6 +5,7 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
+  CHAT_SIDEBAR_HYDRATION_OPTIONS,
   filterRecentsBySource,
   handleMenuShortcut,
   hiddenRecentSourcesFromStoredValue,
@@ -15,6 +16,7 @@ import {
   visibleRecentSourceOptions,
 } from "@/components/chat-sidebar";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { CHAT_HISTORY_INITIAL_LIMIT } from "@/lib/chat-storage";
 import type { SessionRecord } from "@/lib/stores/chat-store";
 
 const baseSession: SessionRecord = {
@@ -33,6 +35,15 @@ const noop = vi.fn();
 
 beforeAll(() => {
   globalThis.PointerEvent ||= MouseEvent as unknown as typeof PointerEvent;
+});
+
+describe("chat sidebar hydration", () => {
+  it("bounds disk hydration to the recent chat window", () => {
+    expect(CHAT_SIDEBAR_HYDRATION_OPTIONS).toEqual({
+      limit: CHAT_HISTORY_INITIAL_LIMIT,
+      includeHidden: true,
+    });
+  });
 });
 
 function renderRow(
