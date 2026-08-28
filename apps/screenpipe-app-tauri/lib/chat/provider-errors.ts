@@ -100,6 +100,7 @@ function isConnectionLikeError(errorStr: string): boolean {
     // 2026-06-18 outage: reqwest "error sending request" / "tls handshake eof".
     normalized.includes("error sending request") ||
     normalized.includes("tls handshake") ||
+    normalized === "error: certificate has expired" ||
     normalized.includes("unexpected eof") ||
     normalized.includes("unexpectedeof") ||
     normalized.includes("could not connect") ||
