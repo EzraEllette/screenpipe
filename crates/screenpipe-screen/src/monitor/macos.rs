@@ -35,12 +35,11 @@ const MACOS_CAPTURE_TIMEOUT: Duration = Duration::from_secs(12);
 const MACOS_CG_FALLBACK_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// ScreenCaptureKit can stop delivering the `SCShareableContent` completion
-/// callback after a capture teardown or update. Serialize healthy calls, but
-/// reserve one worker for a fresh retry after the first Apple callback wedges.
+/// callback after a capture teardown or update. Serialize healthy calls; the
+/// async sck-rs API makes a timed-out enumeration cancellable without leaving
+/// a blocking worker behind.
 static SCK_MONITOR_ENUMERATION_SERIALIZER: Lazy<tokio::sync::Mutex<()>> =
     Lazy::new(|| tokio::sync::Mutex::new(()));
-static SCK_MONITOR_ENUMERATION_WORKERS: Lazy<Arc<tokio::sync::Semaphore>> =
-    Lazy::new(|| Arc::new(tokio::sync::Semaphore::new(2)));
 static XCAP_MONITOR_ENUMERATION_SERIALIZER: Lazy<tokio::sync::Mutex<()>> =
     Lazy::new(|| tokio::sync::Mutex::new(()));
 static XCAP_MONITOR_ENUMERATION_WORKERS: Lazy<Arc<tokio::sync::Semaphore>> =
@@ -208,7 +207,7 @@ where
 {
     // Bounding only the holder leaves the wait unbounded, so a queued caller
     // inherits the sum of every holder ahead of it. See the same repair and
-    // reasoning in `run_bounded_sck_enumeration`; this is the capture-path twin
+    // reasoning in `run_async_sck_enumeration`; this is the capture-path twin
     // and sits directly under the capture loop's own bounded await.
     // See tests::capture_wait_stays_bounded_when_callers_queue.
     let Ok(_serial_guard) = tokio::time::timeout(timeout, serializer.lock()).await else {
@@ -466,28 +465,18 @@ fn is_clamshell_inactive_builtin(display_id: u32) -> bool {
     screenpipe_core::display_topology::is_clamshell_inactive_builtin(display_id)
 }
 
-async fn run_bounded_sck_enumeration<T, F>(
+async fn run_async_sck_enumeration<T, F, Fut>(
     serializer: &tokio::sync::Mutex<()>,
-    workers: Arc<tokio::sync::Semaphore>,
     timeout: Duration,
     enumerate: F,
 ) -> std::result::Result<T, MonitorListError>
 where
-    T: Send + 'static,
-    F: FnOnce() -> std::result::Result<T, MonitorListError> + Send + 'static,
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = std::result::Result<T, MonitorListError>>,
 {
-    // Healthy enumeration stays single-file. After a timeout this guard is
-    // released, allowing one genuinely fresh SCK request to recover capture.
-    //
-    // Bounding only the holder is not enough. Each holder is capped at
-    // `timeout`, but an unbounded wait here lets a queued caller inherit the
-    // sum of every holder ahead of it: with callbacks that are slow yet do
-    // return, permits recycle, nobody fast-fails, and the Nth caller waits
-    // N * timeout. That is the #3939 shape — a 250ms-bounded await in the
-    // capture loop reported frozen for 73-299s, which is 5-20 holders deep at
-    // the 15s production timeout. Cap the wait so a caller never blocks for
-    // more than roughly twice the timeout it asked for.
-    // See tests::enumeration_wait_stays_bounded_when_callers_queue.
+    // Bound both the serializer queue and the Apple callback. Dropping the
+    // async sck-rs future cancels our wait while cidre keeps any escaping
+    // Objective-C block state alive for a late callback.
     let _serial_guard = match tokio::time::timeout(timeout, serializer.lock()).await {
         Ok(guard) => guard,
         Err(_) => {
@@ -498,32 +487,8 @@ where
         }
     };
 
-    // A timed-out spawn_blocking task cannot be cancelled because the Apple
-    // callback is outside Rust's control. Two permits bound the damage while
-    // still leaving capacity for one fresh recovery attempt.
-    let permit = workers.try_acquire_owned().map_err(|e| match e {
-        tokio::sync::TryAcquireError::NoPermits => MonitorListError::Other(
-            "ScreenCaptureKit monitor enumeration retry budget exhausted; two Apple callbacks remain blocked, restart screenpipe to recover"
-                .to_string(),
-        ),
-        tokio::sync::TryAcquireError::Closed => MonitorListError::Other(
-            "ScreenCaptureKit monitor enumeration worker pool closed".to_string(),
-        ),
-    })?;
-
-    let task = tokio::task::spawn_blocking(move || {
-        // Keep the permit inside the blocking task. If the async caller times
-        // out, the OS call may still be running and must continue to consume
-        // one of the two bounded worker slots until it really returns.
-        let _permit = permit;
-        enumerate()
-    });
-
-    match tokio::time::timeout(timeout, task).await {
-        Ok(Ok(result)) => result,
-        Ok(Err(e)) => Err(MonitorListError::Other(format!(
-            "macOS monitor enumeration task failed: {e}"
-        ))),
+    match tokio::time::timeout(timeout, enumerate()).await {
+        Ok(result) => result,
         Err(_) => {
             let message = format!(
                 "macOS monitor enumeration timed out after {}s; ScreenCaptureKit/replayd did not reply",
@@ -535,7 +500,7 @@ where
     }
 }
 
-fn enumerate_sck_monitors() -> std::result::Result<Vec<SafeMonitor>, MonitorListError> {
+async fn enumerate_sck_monitors() -> std::result::Result<Vec<SafeMonitor>, MonitorListError> {
     #[cfg(feature = "e2e")]
     if std::env::var("SCREENPIPE_E2E_SCK_RELAUNCH_POISONED")
         .ok()
@@ -559,13 +524,11 @@ fn enumerate_sck_monitors() -> std::result::Result<Vec<SafeMonitor>, MonitorList
         && !SCK_E2E_HANG_INJECTED.swap(true, std::sync::atomic::Ordering::SeqCst)
     {
         tracing::warn!("e2e: injecting one blocked ScreenCaptureKit monitor enumeration callback");
-        loop {
-            std::thread::park();
-        }
+        std::future::pending::<()>().await;
     }
 
     tracing::debug!("Using sck-rs for screen capture (macOS 12.3+)");
-    match SckMonitor::all() {
+    match SckMonitor::all_async().await {
         Ok(monitors) if monitors.is_empty() => Err(MonitorListError::NoMonitorsFound),
         Ok(monitors) => Ok(monitors
             .into_iter()
@@ -619,7 +582,8 @@ pub fn e2e_arm_sck_lookup_hang_fault() -> bool {
 }
 
 #[cfg(debug_assertions)]
-fn enumerate_sck_monitors_for_lookup() -> std::result::Result<Vec<SafeMonitor>, MonitorListError> {
+async fn enumerate_sck_monitors_for_lookup(
+) -> std::result::Result<Vec<SafeMonitor>, MonitorListError> {
     if e2e_lookup_hang_enabled()
         && SCK_E2E_LOOKUP_HANG_ARMED.load(std::sync::atomic::Ordering::SeqCst)
         && !SCK_E2E_LOOKUP_HANG_INJECTED.swap(true, std::sync::atomic::Ordering::SeqCst)
@@ -631,16 +595,15 @@ fn enumerate_sck_monitors_for_lookup() -> std::result::Result<Vec<SafeMonitor>, 
                 b"1",
             );
         }
-        loop {
-            std::thread::park();
-        }
+        std::future::pending::<()>().await;
     }
-    enumerate_sck_monitors()
+    enumerate_sck_monitors().await
 }
 
 #[cfg(not(debug_assertions))]
-fn enumerate_sck_monitors_for_lookup() -> std::result::Result<Vec<SafeMonitor>, MonitorListError> {
-    enumerate_sck_monitors()
+async fn enumerate_sck_monitors_for_lookup(
+) -> std::result::Result<Vec<SafeMonitor>, MonitorListError> {
+    enumerate_sck_monitors().await
 }
 
 /// How long a successful enumeration may answer `get_monitor_by_id`.
@@ -863,15 +826,14 @@ fn sck_monitor_error_allows_fallback(error: &MonitorListError) -> bool {
 
 /// List monitors with detailed error information (permission denied vs no monitors)
 pub async fn list_monitors_detailed() -> std::result::Result<Vec<SafeMonitor>, MonitorListError> {
-    // Wrap the ObjC call paths in an autorelease pool. Tokio blocking workers
-    // are long-lived; without a per-call drain these objects accumulate.
-    // See monitor::tests::repro_list_monitors_autorelease_leak.
+    // sck-rs initiates the callback and converts the returned topology inside
+    // scoped autorelease pools. The legacy xcap path retains its blocking
+    // worker pool below.
     let result: std::result::Result<Vec<SafeMonitor>, MonitorListError> = if use_sck_rs() {
-        let sck_result = run_bounded_sck_enumeration(
+        let sck_result = run_async_sck_enumeration(
             &SCK_MONITOR_ENUMERATION_SERIALIZER,
-            SCK_MONITOR_ENUMERATION_WORKERS.clone(),
             MONITOR_ENUMERATION_TIMEOUT,
-            || cidre::objc::ar_pool(enumerate_sck_monitors),
+            enumerate_sck_monitors,
         )
         .await;
         match sck_result {
@@ -912,11 +874,10 @@ pub async fn list_monitors_cached() -> Vec<SafeMonitor> {
 
 pub async fn get_default_monitor() -> Option<SafeMonitor> {
     if use_sck_rs() {
-        let sck_result = run_bounded_sck_enumeration(
+        let sck_result = run_async_sck_enumeration(
             &SCK_MONITOR_ENUMERATION_SERIALIZER,
-            SCK_MONITOR_ENUMERATION_WORKERS.clone(),
             monitor_lookup_timeout(),
-            || cidre::objc::ar_pool(enumerate_sck_monitors_for_lookup),
+            enumerate_sck_monitors_for_lookup,
         )
         .await;
         match sck_result {
@@ -944,11 +905,10 @@ pub async fn get_monitor_by_id(id: u32) -> Option<SafeMonitor> {
         return Some(monitor);
     }
     if use_sck_rs() {
-        match run_bounded_sck_enumeration(
+        match run_async_sck_enumeration(
             &SCK_MONITOR_ENUMERATION_SERIALIZER,
-            SCK_MONITOR_ENUMERATION_WORKERS.clone(),
             monitor_lookup_timeout(),
-            || cidre::objc::ar_pool(enumerate_sck_monitors_for_lookup),
+            enumerate_sck_monitors_for_lookup,
         )
         .await
         {
@@ -1274,18 +1234,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn monitor_enumeration_timeout_allows_one_bounded_retry() {
         let serializer = tokio::sync::Mutex::new(());
-        let workers = Arc::new(tokio::sync::Semaphore::new(2));
-        let (release_tx, release_rx) = std::sync::mpsc::channel();
-
-        let first = run_bounded_sck_enumeration(
-            &serializer,
-            workers.clone(),
-            Duration::from_millis(25),
-            move || {
-                release_rx.recv().expect("release first enumeration");
-                Ok(1u8)
-            },
-        )
+        let first = run_async_sck_enumeration(&serializer, Duration::from_millis(25), || async {
+            std::future::pending::<std::result::Result<u8, MonitorListError>>().await
+        })
         .await;
         assert!(matches!(
             first,
@@ -1293,108 +1244,32 @@ mod tests {
                 if message.contains("ScreenCaptureKit/replayd did not reply")
         ));
 
-        let second = run_bounded_sck_enumeration(
-            &serializer,
-            workers.clone(),
-            Duration::from_secs(1),
-            || Ok(2u8),
-        )
-        .await;
+        let second =
+            run_async_sck_enumeration(&serializer, Duration::from_secs(1), || async { Ok(2u8) })
+                .await;
         assert!(matches!(second, Ok(2)), "a fresh retry should recover");
-
-        release_tx.send(()).expect("unblock first enumeration");
-        let recovered =
-            run_bounded_sck_enumeration(&serializer, workers, Duration::from_secs(1), || Ok(3u8))
-                .await;
-        assert!(matches!(recovered, Ok(3)));
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn monitor_enumeration_never_exceeds_two_blocked_workers() {
-        let serializer = tokio::sync::Mutex::new(());
-        let workers = Arc::new(tokio::sync::Semaphore::new(2));
-        let (release_first_tx, release_first_rx) = std::sync::mpsc::channel();
-        let (release_second_tx, release_second_rx) = std::sync::mpsc::channel();
-
-        for release_rx in [release_first_rx, release_second_rx] {
-            let result = run_bounded_sck_enumeration(
-                &serializer,
-                workers.clone(),
-                Duration::from_millis(25),
-                move || {
-                    release_rx.recv().expect("release blocked enumeration");
-                    Ok(1u8)
-                },
-            )
-            .await;
-            assert!(matches!(
-                result,
-                Err(MonitorListError::Other(ref message))
-                    if message.contains("ScreenCaptureKit/replayd did not reply")
-            ));
-        }
-
-        let third_ran = Arc::new(AtomicBool::new(false));
-        let third_ran_in_task = third_ran.clone();
-        let third = run_bounded_sck_enumeration(
-            &serializer,
-            workers.clone(),
-            Duration::from_secs(1),
-            move || {
-                third_ran_in_task.store(true, Ordering::SeqCst);
-                Ok(3u8)
-            },
-        )
-        .await;
-        assert!(matches!(
-            third,
-            Err(MonitorListError::Other(ref message))
-                if message.contains("retry budget exhausted")
-        ));
-        assert!(!third_ran.load(Ordering::SeqCst));
-
-        release_first_tx.send(()).expect("release first worker");
-        release_second_tx.send(()).expect("release second worker");
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while workers.available_permits() < 2 {
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .expect("blocked worker permits should be released");
-        let recovered =
-            run_bounded_sck_enumeration(&serializer, workers, Duration::from_secs(1), || Ok(4u8))
-                .await;
-        assert!(matches!(recovered, Ok(4)));
     }
 
     /// Production #3939 freezes report 73-299s frozen in a 250ms-bounded await.
-    /// `run_bounded_sck_enumeration` bounds the *holder* at `timeout`, but the
-    /// wait for `serializer` is unbounded, so queued callers inherit the sum of
-    /// every holder ahead of them. With callbacks that are slow but do return,
-    /// permits recycle, nobody fast-fails, and the queue grows without limit.
+    /// The enumeration wrapper must bound both the holder and the serializer
+    /// wait so queued callers cannot inherit every deadline ahead of them.
     ///
     /// A caller must never wait for more than a small multiple of the timeout
     /// it asked for, however many callers are queued.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn enumeration_wait_stays_bounded_when_callers_queue() {
         const TIMEOUT: Duration = Duration::from_millis(100);
-        // Longer than TIMEOUT so every holder times out, but finite so the
-        // permit recycles and later callers never hit the retry budget.
         const CALLBACK: Duration = Duration::from_millis(160);
         const CALLERS: usize = 6;
 
         let serializer: &'static tokio::sync::Mutex<()> =
             Box::leak(Box::new(tokio::sync::Mutex::new(())));
-        let workers = Arc::new(tokio::sync::Semaphore::new(2));
-
         let started = Instant::now();
         let mut handles = Vec::new();
         for _ in 0..CALLERS {
-            let workers = workers.clone();
             handles.push(tokio::spawn(async move {
-                let _ = run_bounded_sck_enumeration(serializer, workers, TIMEOUT, move || {
-                    std::thread::sleep(CALLBACK);
+                let _ = run_async_sck_enumeration(serializer, TIMEOUT, move || async move {
+                    tokio::time::sleep(CALLBACK).await;
                     Ok(1u8)
                 })
                 .await;
@@ -1407,14 +1282,13 @@ mod tests {
             worst = worst.max(handle.await.expect("caller task panicked"));
         }
 
-        // Two permits let two holders overlap, so ~2x TIMEOUT is the honest
-        // ceiling for a bounded design. Allow 3x for scheduling slack.
+        // One timeout for the active holder, one for this caller's own future,
+        // plus scheduling slack on loaded CI hosts.
         let ceiling = TIMEOUT * 3;
         assert!(
             worst <= ceiling,
             "queued caller waited {worst:?} for a {TIMEOUT:?} bounded call \
-             ({CALLERS} callers, ceiling {ceiling:?}) — the serializer wait is unbounded, \
-             so waiters inherit every holder ahead of them"
+             ({CALLERS} callers, ceiling {ceiling:?})"
         );
     }
 
@@ -1461,53 +1335,6 @@ mod tests {
             worst <= ceiling,
             "queued capture caller waited {worst:?} for a {TIMEOUT:?} bounded call \
              ({CALLERS} callers, ceiling {ceiling:?})"
-        );
-    }
-
-    /// The other regime, for contrast: when callbacks never return, both
-    /// permits stay pinned and later callers fast-fail on the retry budget
-    /// instead of queueing. This caps the wait at ~2x timeout, which means a
-    /// permanent wedge alone cannot explain a multi-minute production freeze.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn enumeration_fast_fails_once_both_permits_are_pinned() {
-        const TIMEOUT: Duration = Duration::from_millis(100);
-        const CALLERS: usize = 6;
-
-        let serializer: &'static tokio::sync::Mutex<()> =
-            Box::leak(Box::new(tokio::sync::Mutex::new(())));
-        let workers = Arc::new(tokio::sync::Semaphore::new(2));
-        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
-        let release_rx = Arc::new(std::sync::Mutex::new(release_rx));
-
-        let started = Instant::now();
-        let mut handles = Vec::new();
-        for _ in 0..CALLERS {
-            let workers = workers.clone();
-            let release_rx = release_rx.clone();
-            handles.push(tokio::spawn(async move {
-                let _ = run_bounded_sck_enumeration(serializer, workers, TIMEOUT, move || {
-                    // Park until the test releases us; models an Apple callback
-                    // that never comes back.
-                    let _ = release_rx.lock().expect("release lock").recv();
-                    Ok(1u8)
-                })
-                .await;
-                started.elapsed()
-            }));
-        }
-
-        let mut worst = Duration::ZERO;
-        for handle in handles {
-            worst = worst.max(handle.await.expect("caller task panicked"));
-        }
-        for _ in 0..CALLERS {
-            let _ = release_tx.send(());
-        }
-
-        assert!(
-            worst <= TIMEOUT * 4,
-            "with both permits pinned every later caller should fast-fail, \
-             but the worst wait was {worst:?}"
         );
     }
 
@@ -1650,14 +1477,11 @@ mod tests {
         let baseline = peak_rss_bytes();
         eprintln!("[repro] baseline peak RSS: {}", fmt_mb(baseline));
 
-        // -- Phase 1: drive the code path AS-WRITTEN (should leak) --
-        // We call `SckMonitor::all()` directly on a tokio blocking worker,
-        // matching what `list_monitors_detailed` does today.
+        // -- Phase 1: reproduce the historical unpooled sync path --
         let before_phase1 = peak_rss_bytes();
         for _ in 0..N {
             tokio::task::spawn_blocking(|| {
-                // No ar_pool — matches current production path in
-                // list_monitors_detailed on macOS.
+                // No ar_pool — the pre-fix production shape.
                 let _ = sck_rs::Monitor::all();
             })
             .await
