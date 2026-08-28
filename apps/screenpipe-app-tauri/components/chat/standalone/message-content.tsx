@@ -1820,6 +1820,8 @@ export function MessageContent({
         <button
           key={`img-${i}`}
           type="button"
+          onMouseDown={(event) => event.stopPropagation()}
+          onMouseUp={(event) => event.stopPropagation()}
           onClick={() => onImageClick?.(message.images ?? [], i)}
           className="rounded-lg border border-border/50 shadow-sm overflow-hidden p-0 block text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         >
