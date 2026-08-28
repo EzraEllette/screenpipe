@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "suite": "screenpipe-app-coding-agent-regressions",
-  "dataset_version": "2026-08-27.1",
+  "dataset_version": "2026-08-28.1",
   "suite_type": "regression",
   "owner": "screenpipe engineering",
   "policy": {
@@ -689,6 +689,51 @@
           { "source_path": "apps/screenpipe-app-tauri/lib/chat/__tests__/message-rendering.test.ts" }
         ],
         "command": "cd apps/screenpipe-app-tauri && bun x vitest run --config vitest.config.ts components/chat/standalone/message-content.answer-recovery.test.tsx components/chat/standalone/message-content.agent-action.test.tsx components/chat/standalone/message-content.structured-output.test.tsx lib/chat/__tests__/message-rendering.test.ts"
+      }
+    },
+    {
+      "id": "app-chat-recents-pool-eviction",
+      "name": "Keep Recents stable when the agent pool evicts a chat",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "3d10440e5ad238a8790a74a220ec3631a26ca2e1",
+        "pull_request": "https://github.com/screenpipe/screenpipe/pull/6741"
+      },
+      "base_ref": "a47bfd71075c1d8d63f3b76f4d45fe17d414a5c9",
+      "oracle_ref": "3d10440e5ad238a8790a74a220ec3631a26ca2e1",
+      "gate": "advisory",
+      "trigger_paths": [
+        "apps/screenpipe-app-tauri/lib/stores/pi-event-router.ts",
+        "apps/screenpipe-app-tauri/components/chat/standalone/hooks/use-chat-session-runtime.ts",
+        "apps/screenpipe-app-tauri/components/standalone-chat.tsx"
+      ],
+      "tags": ["regression", "escaped-failure", "chat", "recents", "session-eviction", "ordering", "state-preservation"],
+      "prompt": "When several chats are running, the agent process pool can evict one chat. The app then removes that conversation from its in-memory index, so it disappears from Recents and a later event can recreate it untitled with new sort timestamps; an active evicted chat can also jump to a blank conversation. Treat process eviction as a runtime state change rather than conversation deletion: keep the existing conversation identity, title, timestamps, ordering, messages, and on-disk history; settle its loading and streaming state; ignore evictions for unknown conversations; and let the next send restart the agent under the same conversation ID. Preserve normal clean termination and background event routing.",
+      "agent_timeout_seconds": 900,
+      "grader_dependency_links": [
+        { "source_path": "apps/screenpipe-app-tauri/node_modules", "destination_path": "apps/screenpipe-app-tauri/node_modules" }
+      ],
+      "grader": {
+        "timeout_seconds": 300,
+        "fixtures": [
+          {
+            "local_path": "graders/app-chat-recents-pool-eviction.test.ts",
+            "destination_path": "apps/screenpipe-app-tauri/lib/__tests__/pi-event-router.pool-eviction-eval.test.ts"
+          },
+          {
+            "source_ref": "a47bfd71075c1d8d63f3b76f4d45fe17d414a5c9",
+            "source_path": "apps/screenpipe-app-tauri/lib/__tests__/pi-event-router.test.ts"
+          },
+          {
+            "source_ref": "a47bfd71075c1d8d63f3b76f4d45fe17d414a5c9",
+            "source_path": "apps/screenpipe-app-tauri/components/chat/standalone/hooks/use-chat-session-runtime.test.tsx"
+          },
+          {
+            "source_ref": "a47bfd71075c1d8d63f3b76f4d45fe17d414a5c9",
+            "source_path": "apps/screenpipe-app-tauri/lib/__tests__/chat-store.test.ts"
+          }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && NODE_OPTIONS=--localstorage-file=.eval-localstorage bun x vitest run --config vitest.config.ts lib/__tests__/pi-event-router.pool-eviction-eval.test.ts lib/__tests__/pi-event-router.test.ts components/chat/standalone/hooks/use-chat-session-runtime.test.tsx lib/__tests__/chat-store.test.ts"
       }
     }
   ]
