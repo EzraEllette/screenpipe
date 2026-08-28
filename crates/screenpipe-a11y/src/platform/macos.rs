@@ -47,6 +47,12 @@ static AX_QUERY_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 /// on a specific element still overrides it for that element.
 const AX_DEFAULT_TIMEOUT_SECS: f32 = 1.0;
 
+/// Keep click attribution recent enough that a delayed AX hit-test cannot
+/// accidentally describe a window that moved under the recorded coordinate.
+const CLICK_ATTRIBUTION_MAX_AGE: Duration = Duration::from_secs(2);
+const CLICK_ATTRIBUTION_QUEUE_MIN: usize = 4;
+const CLICK_ATTRIBUTION_QUEUE_MAX: usize = 64;
+
 /// Apply [`AX_DEFAULT_TIMEOUT_SECS`] as this process's default AX timeout.
 ///
 /// Passing the system-wide element to `AXUIElementSetMessagingTimeout` sets the
@@ -711,17 +717,40 @@ fn get_clipboard_change_count() -> Option<i64> {
 // Event Tap Implementation
 // ============================================================================
 
-/// Request to capture element context for a click — processed by a
-/// dedicated worker thread instead of spawning a thread per click.
+/// Immutable mouse-down facts captured from CGEvent before focus can change.
+/// Target app/window resolution stays on the dedicated worker so the event-tap
+/// callback never performs AX IPC or trusts the asynchronously updated focus
+/// cache for click attribution.
 struct ContextCaptureRequest {
     x: f64,
     y: f64,
-    config: UiCaptureConfig,
     app_pid: i32,
-    app_name: Option<String>,
-    window_title: Option<String>,
-    start: Instant,
-    tx: Sender<UiEvent>,
+    captured_at: Instant,
+    timestamp: chrono::DateTime<Utc>,
+    relative_ms: u64,
+    button: u8,
+    click_count: u8,
+    modifiers: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClickDropReason {
+    UnsupportedEventType,
+    InvalidTargetPid,
+    InvalidClickCount,
+    NonFiniteCoordinates,
+    CoordinatesOutOfRange,
+    StaleRequest,
+    MenuBar,
+    OwnProcess,
+    MissingAppName,
+    FilteredApp,
+    MissingElementPid,
+    MismatchedElementPid,
+    OwnElement,
+    MissingWindowTitle,
+    FilteredTarget,
+    PrivateWindow,
 }
 
 /// Clipboard capture request — processed by a dedicated worker thread.
@@ -764,8 +793,9 @@ struct TapState {
     current_window: Arc<ArcSwap<Option<String>>>,
     current_pid: Arc<AtomicI32>,
     activity_feed: Option<ActivityFeed>,
-    /// Bounded channel for context capture requests — a single worker thread
-    /// processes these instead of spawning a thread per click.
+    /// Bounded channel for authoritative click capture — a single worker
+    /// resolves the CGEvent target's app/window and optional AX element without
+    /// blocking the event tap or spawning a thread per click.
     context_tx: Sender<ContextCaptureRequest>,
     /// Bounded channel for clipboard capture — avoids spawning a thread per
     /// Cmd+C/X/V and blocks the event tap with get_clipboard().
@@ -935,58 +965,27 @@ fn run_event_tap(
             | cg::EventType::RIGHT_MOUSE_DRAGGED.mask();
     }
 
-    // Single worker thread for context capture — avoids spawning a thread per click
-    let (context_tx, context_rx) = bounded::<ContextCaptureRequest>(4);
-    thread::Builder::new()
+    // A single worker owns click attribution and optional element context. The
+    // queue follows small recorder bounds but caps its own backlog because an
+    // old coordinate is no longer trustworthy after windows can move.
+    let (context_tx, context_rx) =
+        bounded::<ContextCaptureRequest>(click_attribution_queue_capacity(config.max_buffer_size));
+    let context_config = config.clone();
+    let context_event_tx = tx.clone();
+    if let Err(err) = thread::Builder::new()
         .name("ctx-capture".into())
         .spawn(move || {
             while let Ok(req) = context_rx.recv() {
-                // Excluded apps / ignored windows / private-browsing windows
-                // are never AX-inspected — parity with the tree walker's
-                // gating. The bare click row is filtered downstream by the
-                // same config; this stops the enriched element/ancestor
-                // context at the source so excluded surfaces never even get
-                // an AX round-trip.
-                if let Some(app) = req.app_name.as_deref() {
-                    if !req
-                        .config
-                        .should_capture_target(app, req.window_title.as_deref())
-                    {
-                        continue;
+                if let Some(click) = capture_click_at_position(&req, &context_config) {
+                    if let Err(err) = context_event_tx.try_send(click) {
+                        debug!(?err, "click output queue full; dropping attributed click");
                     }
-                }
-                if req
-                    .window_title
-                    .as_deref()
-                    .is_some_and(crate::incognito::is_title_private)
-                {
-                    continue;
-                }
-                if let Some(element) =
-                    get_element_at_position(req.x, req.y, &req.config, req.app_pid)
-                {
-                    let ctx_event = UiEvent {
-                        id: None,
-                        timestamp: Utc::now(),
-                        relative_ms: req.start.elapsed().as_millis() as u64,
-                        data: EventData::Click {
-                            x: req.x as i32,
-                            y: req.y as i32,
-                            button: 0,
-                            click_count: 0,
-                            modifiers: 0,
-                        },
-                        app_name: req.app_name,
-                        window_title: req.window_title,
-                        browser_url: None,
-                        element: Some(element),
-                        frame_id: None,
-                    };
-                    let _ = req.tx.try_send(ctx_event);
                 }
             }
         })
-        .ok();
+    {
+        error!(?err, "failed to spawn click attribution worker");
+    }
 
     // Single worker thread for clipboard capture — avoids spawning a thread per
     // Cmd+C/X and avoids blocking the event tap callback on Cmd+V.
@@ -1198,22 +1197,27 @@ extern "C" fn tap_callback(
     // Lock-free reads — no mutex contention in the input event path
     let app_name = (**state.current_app.load()).clone();
     let window_title = (**state.current_window.load()).clone();
-    let event_target_pid = event.field_i64(CG_EVENT_TARGET_UNIX_PROCESS_ID) as i32;
-    let app_pid = if event_target_pid > 0 {
-        event_target_pid
-    } else {
-        state.current_pid.load(Ordering::Acquire)
-    };
+    let event_target_pid =
+        i32::try_from(event.field_i64(CG_EVENT_TARGET_UNIX_PROCESS_ID)).unwrap_or(0);
 
-    // Check if we should capture based on app/window exclusions
-    if let Some(ref app) = app_name {
-        if !state.config.should_capture_app(app) {
-            return Some(event);
+    let is_click = matches!(
+        event_type,
+        cg::EventType::LEFT_MOUSE_DOWN | cg::EventType::RIGHT_MOUSE_DOWN
+    );
+
+    // Keyboard/move/scroll events describe the current focus. Clicks do not:
+    // macOS sends mouse-down to the window under the pointer before the focus
+    // observer updates, so their filters run later against the CGEvent target.
+    if !is_click {
+        if let Some(ref app) = app_name {
+            if !state.config.should_capture_app(app) {
+                return Some(event);
+            }
         }
-    }
-    if let Some(ref window) = window_title {
-        if !state.config.should_capture_window(window) {
-            return Some(event);
+        if let Some(ref window) = window_title {
+            if !state.config.should_capture_window(window) {
+                return Some(event);
+            }
         }
     }
 
@@ -1228,39 +1232,18 @@ extern "C" fn tap_callback(
                 return Some(event);
             }
 
-            let btn = if event_type == cg::EventType::LEFT_MOUSE_DOWN {
-                0
-            } else {
-                1
+            // kCGEventTargetUnixProcessID is the receiver of this mouse-down.
+            // Never fall back to current_pid here: it is intentionally stale
+            // during the click-to-focus transition described in issue #6709.
+            let request = match snapshot_click_request(event_type, event, timestamp, t) {
+                Ok(request) => request,
+                Err(reason) => {
+                    debug!(?reason, "dropping invalid mouse-down snapshot");
+                    return Some(event);
+                }
             };
-            let clicks = event.field_i64(cg::EventField::MOUSE_EVENT_CLICK_STATE) as u8;
-
-            let mut ui_event = UiEvent::click(
-                timestamp,
-                t,
-                loc.x as i32,
-                loc.y as i32,
-                btn,
-                clicks,
-                mods.0,
-            );
-            ui_event.app_name = app_name.clone();
-            ui_event.window_title = window_title.clone();
-
-            let _ = state.tx.try_send(ui_event);
-
-            // Send context capture request to dedicated worker (non-blocking)
-            if state.config.capture_context {
-                let _ = state.context_tx.try_send(ContextCaptureRequest {
-                    x: loc.x,
-                    y: loc.y,
-                    config: state.config.clone(),
-                    app_pid,
-                    app_name: app_name.clone(),
-                    window_title: window_title.clone(),
-                    start: state.start,
-                    tx: state.tx.clone(),
-                });
+            if let Err(err) = state.context_tx.try_send(request) {
+                debug!(?err, "click attribution queue full; dropping click");
             }
         }
 
@@ -1963,36 +1946,51 @@ fn find_labeled_descendant_at(
     best.map(|(r, n, b)| (r, n, Some(b)))
 }
 
-fn get_element_at_position(
-    x: f64,
-    y: f64,
+fn capture_click_at_position(
+    request: &ContextCaptureRequest,
     config: &UiCaptureConfig,
-    app_pid: i32,
-) -> Option<ElementContext> {
-    // Skip menu bar area (top ~30 pixels) to avoid conflicts with tray icon accessibility
-    // This prevents crashes when clicking tray icons while accessibility capture is active
-    if y < 30.0 {
+) -> Option<UiEvent> {
+    if let Err(reason) = validate_click_request_age(request.captured_at, Instant::now()) {
+        debug!(?reason, "dropping stale click attribution request");
         return None;
     }
-
-    if is_own_process(app_pid) {
+    let app_name = process_name_for_pid(request.app_pid);
+    if let Err(reason) = validate_click_preflight(
+        request,
+        config,
+        app_name.as_deref(),
+        std::process::id() as i32,
+    ) {
+        debug!(?reason, "dropping click during attribution preflight");
         return None;
     }
+    let app_name = app_name?;
 
     // Serialize accessibility queries to prevent concurrent calls that corrupt
-    // AppKit's internal accessibility caches. Use try_lock to avoid blocking
-    // the event tap callback path – if another query is in-flight, skip this one.
-    let _guard = AX_QUERY_LOCK.try_lock()?;
+    // AppKit's internal accessibility caches. This runs on the click worker,
+    // never the event-tap callback, so waiting for the current bounded AX read
+    // preserves the click instead of racing and dropping its attribution.
+    let _guard = AX_QUERY_LOCK.lock();
 
     let sys = ax::UiElement::sys_wide();
-    let elem = sys.element_at_pos(x as f32, y as f32).ok()?;
+    let elem = sys
+        .element_at_pos(request.x as f32, request.y as f32)
+        .ok()?;
 
-    // Skip elements belonging to our own process to avoid crashes when querying
-    // our overlay views (e.g. shortcut reminder) that may be mid-dismissal
-    if let Ok(pid) = elem.pid() {
-        if pid == std::process::id() as i32 {
-            return None;
-        }
+    // Cross-check the hit-test against the immutable CGEvent receiver. A focus
+    // transition can change the system-wide AX answer after mouse-down; mixing
+    // those two processes would recreate the attribution bug in a new form.
+    let element_pid = elem.pid().ok();
+    if let Err(reason) =
+        validate_click_element_pid(request.app_pid, element_pid, std::process::id() as i32)
+    {
+        debug!(
+            event_target_pid = request.app_pid,
+            ?element_pid,
+            ?reason,
+            "dropping click whose AX hit-test disagrees with CGEvent target"
+        );
+        return None;
     }
 
     // Every AX read below is IPC into the target app, and the macOS default
@@ -2002,17 +2000,199 @@ fn get_element_at_position(
     // next clicks' context. Cap it like the tree walker does (tree/macos.rs).
     let _ = elem.set_messaging_timeout_secs(0.1);
 
-    let role = role_string(&elem)?;
-    let bounds = get_element_bounds(&elem);
+    // AXWindow belongs to the hit-tested element, unlike AXFocusedWindow which
+    // can still describe the previously focused app at mouse-down time.
+    let window = elem.window().ok()?;
+    let _ = window.set_messaging_timeout_secs(0.1);
+    let raw_window_title = get_string_attr(&window, ax::attr::title())
+        .or_else(|| get_string_attr(&window, ax::attr::desc()));
+
+    // Attribution is resolved before any persistence or enrichment. This makes
+    // exclusions and private-window detection apply to the clicked surface,
+    // and intentionally drops unattributable clicks instead of labeling them
+    // with a different app/window from the focus cache.
+    let window_title =
+        match validate_click_window_title(config, &app_name, raw_window_title.as_deref()) {
+            Ok(title) => title,
+            Err(reason) => {
+                debug!(?reason, "dropping click without a capturable AXWindow");
+                return None;
+            }
+        };
+
+    let element = config
+        .capture_context
+        .then(|| build_click_element_context(&elem, request.x, request.y, config))
+        .flatten();
+
+    attributed_click_event(request, app_name, window_title, element)
+        .map_err(|reason| debug!(?reason, "dropping click with invalid event coordinates"))
+        .ok()
+}
+
+fn valid_event_target_pid(raw_pid: i64) -> Option<i32> {
+    i32::try_from(raw_pid).ok().filter(|pid| *pid > 0)
+}
+
+fn snapshot_click_request(
+    event_type: cg::EventType,
+    event: &cg::Event,
+    timestamp: chrono::DateTime<Utc>,
+    relative_ms: u64,
+) -> Result<ContextCaptureRequest, ClickDropReason> {
+    let button = match event_type {
+        cg::EventType::LEFT_MOUSE_DOWN => 0,
+        cg::EventType::RIGHT_MOUSE_DOWN => 1,
+        _ => return Err(ClickDropReason::UnsupportedEventType),
+    };
+    let app_pid = valid_event_target_pid(event.field_i64(CG_EVENT_TARGET_UNIX_PROCESS_ID))
+        .ok_or(ClickDropReason::InvalidTargetPid)?;
+    let click_count = u8::try_from(event.field_i64(cg::EventField::MOUSE_EVENT_CLICK_STATE))
+        .map_err(|_| ClickDropReason::InvalidClickCount)?;
+    let location = event.location();
+    let request = ContextCaptureRequest {
+        x: location.x,
+        y: location.y,
+        app_pid,
+        captured_at: Instant::now(),
+        timestamp,
+        relative_ms,
+        button,
+        click_count,
+        modifiers: Modifiers::from_cg_flags(event.flags().0).0,
+    };
+    click_event_coordinates(&request)?;
+    Ok(request)
+}
+
+fn click_attribution_queue_capacity(max_buffer_size: usize) -> usize {
+    max_buffer_size.clamp(CLICK_ATTRIBUTION_QUEUE_MIN, CLICK_ATTRIBUTION_QUEUE_MAX)
+}
+
+fn validate_click_request_age(captured_at: Instant, now: Instant) -> Result<(), ClickDropReason> {
+    if now.saturating_duration_since(captured_at) > CLICK_ATTRIBUTION_MAX_AGE {
+        return Err(ClickDropReason::StaleRequest);
+    }
+    Ok(())
+}
+
+fn click_event_coordinates(request: &ContextCaptureRequest) -> Result<(i32, i32), ClickDropReason> {
+    if !request.x.is_finite() || !request.y.is_finite() {
+        return Err(ClickDropReason::NonFiniteCoordinates);
+    }
+    let min = i32::MIN as f64;
+    let max = i32::MAX as f64;
+    if !(min..=max).contains(&request.x) || !(min..=max).contains(&request.y) {
+        return Err(ClickDropReason::CoordinatesOutOfRange);
+    }
+    Ok((request.x as i32, request.y as i32))
+}
+
+fn validate_click_preflight(
+    request: &ContextCaptureRequest,
+    config: &UiCaptureConfig,
+    app_name: Option<&str>,
+    own_pid: i32,
+) -> Result<(), ClickDropReason> {
+    if valid_event_target_pid(i64::from(request.app_pid)).is_none() {
+        return Err(ClickDropReason::InvalidTargetPid);
+    }
+    click_event_coordinates(request)?;
+    // Skip menu bar area (top ~30 pixels) to avoid conflicts with tray icon
+    // accessibility. This preserves the existing crash-avoidance boundary.
+    if request.y < 30.0 {
+        return Err(ClickDropReason::MenuBar);
+    }
+    if request.app_pid == own_pid {
+        return Err(ClickDropReason::OwnProcess);
+    }
+    let app_name = app_name
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .ok_or(ClickDropReason::MissingAppName)?;
+    // Preserve the existing privacy boundary: a fully excluded target app is
+    // never AX-inspected. Scoped/window filters necessarily run after AXWindow
+    // resolution below.
+    if !config.should_capture_app(app_name) {
+        return Err(ClickDropReason::FilteredApp);
+    }
+    Ok(())
+}
+
+fn validate_click_element_pid(
+    event_target_pid: i32,
+    element_pid: Option<i32>,
+    own_pid: i32,
+) -> Result<(), ClickDropReason> {
+    let element_pid = element_pid.ok_or(ClickDropReason::MissingElementPid)?;
+    if element_pid != event_target_pid {
+        return Err(ClickDropReason::MismatchedElementPid);
+    }
+    if element_pid == own_pid {
+        return Err(ClickDropReason::OwnElement);
+    }
+    Ok(())
+}
+
+fn validate_click_window_title(
+    config: &UiCaptureConfig,
+    app_name: &str,
+    window_title: Option<&str>,
+) -> Result<String, ClickDropReason> {
+    let window_title = window_title
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .ok_or(ClickDropReason::MissingWindowTitle)?;
+    if !config.should_capture_target(app_name, Some(window_title)) {
+        return Err(ClickDropReason::FilteredTarget);
+    }
+    if crate::incognito::is_title_private(window_title) {
+        return Err(ClickDropReason::PrivateWindow);
+    }
+    Ok(window_title.to_string())
+}
+
+fn attributed_click_event(
+    request: &ContextCaptureRequest,
+    app_name: String,
+    window_title: String,
+    element: Option<ElementContext>,
+) -> Result<UiEvent, ClickDropReason> {
+    let (x, y) = click_event_coordinates(request)?;
+    let mut event = UiEvent::click(
+        request.timestamp,
+        request.relative_ms,
+        x,
+        y,
+        request.button,
+        request.click_count,
+        request.modifiers,
+    );
+    event.app_name = Some(app_name);
+    event.window_title = Some(truncate(&window_title, 200));
+    event.element = element;
+    Ok(event)
+}
+
+/// Build optional rich element context from an already validated hit-test.
+/// Caller holds [`AX_QUERY_LOCK`] and has applied the per-element timeout.
+fn build_click_element_context(
+    elem: &ax::UiElement,
+    x: f64,
+    y: f64,
+    config: &UiCaptureConfig,
+) -> Option<ElementContext> {
+    let role = role_string(elem)?;
+    let bounds = get_element_bounds(elem);
 
     // Try multiple attributes to get the element name/label
     // Different elements use different attributes for their label
-    let name = get_string_attr(&elem, ax::attr::title())
-        .or_else(|| get_string_attr(&elem, ax::attr::desc()))
+    let name = get_string_attr(elem, ax::attr::title())
+        .or_else(|| get_string_attr(elem, ax::attr::desc()))
         .or_else(|| {
             // For buttons and many controls, the value contains the label
             if role.contains("Button") || role.contains("MenuItem") || role.contains("Link") {
-                get_string_attr(&elem, ax::attr::value())
+                get_string_attr(elem, ax::attr::value())
             } else {
                 None
             }
@@ -2028,7 +2208,7 @@ fn get_element_at_position(
     // recorded action is "click AXButton: Continue" instead of "click AXGroup".
     let (role, name, bounds) = if name.as_deref().map(str::trim).unwrap_or("").is_empty() {
         let mut budget: u32 = 96;
-        match find_labeled_descendant_at(&elem, x, y, 5, &mut budget) {
+        match find_labeled_descendant_at(elem, x, y, 5, &mut budget) {
             Some((r, n, b)) => (r, Some(n), b.or(bounds)),
             None => (role, name, bounds),
         }
@@ -2059,7 +2239,7 @@ fn get_element_at_position(
     // is a valid prefix either way). Budgeted: <=12 hops, 15 ms wall clock.
     // Hop names can mirror on-screen content (web group labels, document
     // titles), so they get the same hot-path PII scrub as element_value.
-    let mut chain = collect_ancestor_chain(&elem, 12, Duration::from_millis(15));
+    let mut chain = collect_ancestor_chain(elem, 12, Duration::from_millis(15));
     if config.apply_pii_removal {
         for hop in &mut chain {
             if let Some(n) = hop.name.take() {
@@ -2071,11 +2251,11 @@ fn get_element_at_position(
 
     let value =
         if role.contains("TextField") || role.contains("TextArea") || role.contains("ComboBox") {
-            get_string_attr(&elem, ax::attr::value())
+            get_string_attr(elem, ax::attr::value())
         } else {
             None
         };
-    let description = get_string_attr(&elem, ax::attr::desc());
+    let description = get_string_attr(elem, ax::attr::desc());
 
     Some(ElementContext {
         role,
@@ -2158,10 +2338,6 @@ fn collect_ancestor_chain(
             .filter(|p| p.get_type_id() == ax::UiElement::type_id());
     }
     chain
-}
-
-fn is_own_process(pid: i32) -> bool {
-    pid > 0 && pid == std::process::id() as i32
 }
 
 fn get_element_bounds(elem: &ax::UiElement) -> Option<ElementBounds> {
@@ -2918,6 +3094,14 @@ extern "C" fn activity_only_callback(
 }
 
 #[cfg(test)]
+#[path = "macos_click_attribution_e2e.rs"]
+mod macos_click_attribution_e2e;
+
+#[cfg(test)]
+#[path = "macos_click_attribution_eval.rs"]
+mod macos_click_attribution_eval;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -3008,11 +3192,83 @@ mod tests {
     }
 
     #[test]
-    fn test_own_process_detection() {
-        assert!(is_own_process(std::process::id() as i32));
-        assert!(!is_own_process(0));
-        assert!(!is_own_process(-1));
-        assert!(!is_own_process((std::process::id() as i32) + 1));
+    fn click_target_pid_never_falls_back_to_stale_focus() {
+        assert_eq!(valid_event_target_pid(42), Some(42));
+        assert_eq!(valid_event_target_pid(0), None);
+        assert_eq!(valid_event_target_pid(-1), None);
+        assert_eq!(valid_event_target_pid(i64::from(i32::MAX) + 1), None);
+    }
+
+    #[test]
+    fn click_snapshot_rejects_malformed_core_graphics_fields() {
+        let point = cg::Point::new(100.0, 100.0);
+        let mut event = cg::Event::mouse(
+            None,
+            cg::EventType::LEFT_MOUSE_DOWN,
+            point,
+            cg::MouseButton::Left,
+        )
+        .expect("create test mouse event");
+        let timestamp = Utc::now();
+
+        event.set_field_i64(CG_EVENT_TARGET_UNIX_PROCESS_ID, i64::from(i32::MAX) + 1);
+        assert!(matches!(
+            snapshot_click_request(cg::EventType::LEFT_MOUSE_DOWN, &event, timestamp, 1),
+            Err(ClickDropReason::InvalidTargetPid)
+        ));
+
+        event.set_field_i64(CG_EVENT_TARGET_UNIX_PROCESS_ID, 42);
+        event.set_field_i64(cg::EventField::MOUSE_EVENT_CLICK_STATE, 256);
+        assert!(matches!(
+            snapshot_click_request(cg::EventType::LEFT_MOUSE_DOWN, &event, timestamp, 1),
+            Err(ClickDropReason::InvalidClickCount)
+        ));
+
+        event.set_field_i64(cg::EventField::MOUSE_EVENT_CLICK_STATE, 1);
+        assert!(matches!(
+            snapshot_click_request(cg::EventType::LEFT_MOUSE_UP, &event, timestamp, 1),
+            Err(ClickDropReason::UnsupportedEventType)
+        ));
+    }
+
+    #[test]
+    fn attributed_click_preserves_original_mouse_down_facts() {
+        let timestamp = Utc::now();
+        let request = ContextCaptureRequest {
+            x: 321.75,
+            y: 654.25,
+            app_pid: 42,
+            captured_at: Instant::now(),
+            timestamp,
+            relative_ms: 987,
+            button: 1,
+            click_count: 2,
+            modifiers: Modifiers::CTRL | Modifiers::SHIFT,
+        };
+
+        let event = attributed_click_event(
+            &request,
+            "Google Chrome".to_string(),
+            "Inbox".to_string(),
+            None,
+        )
+        .expect("valid coordinates");
+
+        assert_eq!(event.timestamp, timestamp);
+        assert_eq!(event.relative_ms, 987);
+        assert_eq!(event.app_name.as_deref(), Some("Google Chrome"));
+        assert_eq!(event.window_title.as_deref(), Some("Inbox"));
+        assert!(event.element.is_none());
+        assert!(matches!(
+            event.data,
+            EventData::Click {
+                x: 321,
+                y: 654,
+                button: 1,
+                click_count: 2,
+                modifiers,
+            } if modifiers == Modifiers::CTRL | Modifiers::SHIFT
+        ));
     }
 
     #[test]

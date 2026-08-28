@@ -1275,10 +1275,12 @@
     },
     {
       "id": "a11y-macos-tree",
-      "label": "macOS accessibility tree units and real app probes",
+      "label": "macOS accessibility units, click-attribution eval, and real app probes",
       "crate": "screenpipe-a11y",
       "files": [
         "src/incognito/macos.rs",
+        "src/platform/macos_click_attribution_e2e.rs",
+        "src/platform/macos_click_attribution_eval.rs",
         "src/platform/macos.rs",
         "src/tree/macos.rs",
         "src/tree/macos_lines.rs",
@@ -1302,7 +1304,7 @@
       "criticality": "high",
       "confidence": "conditional",
       "kind": "mixed",
-      "notes": "macOS AX unit coverage plus real TextEdit/Finder/Obsidian probes. Obsidian tests are ignored by default because they require a local app install and AX permission."
+      "notes": "macOS AX unit coverage, a scored 100-case click-attribution policy eval, and real TextEdit/Finder/Obsidian probes. Click attribution and Obsidian live tests are ignored by default when they require a logged-in desktop, app install, or AX permission."
     },
     {
       "id": "a11y-windows-tree",
