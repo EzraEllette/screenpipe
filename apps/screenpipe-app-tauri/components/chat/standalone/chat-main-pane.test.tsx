@@ -140,4 +140,29 @@ describe("ChatMainPane", () => {
     render(<ChatMainPane {...paneProps("chat", [])} />);
     expect(screen.queryByTestId("first-run-banner")).not.toBeInTheDocument();
   });
+
+  it("renders a pending follow-up after durable chat history", () => {
+    const existingMessage: Message = {
+      id: "existing-message",
+      role: "user",
+      content: "existing durable message",
+      timestamp: Date.now(),
+    };
+
+    render(
+      <ChatMainPane
+        {...paneProps("chat", [existingMessage])}
+        pendingSend={{ text: "follow-up message" }}
+      />,
+    );
+
+    const messageList = screen.getByTestId("message-list");
+    const pendingBubble = screen.getByTestId("chat-pending-user-message");
+    expect(messageList).toHaveTextContent("1");
+    expect(pendingBubble).toHaveTextContent("follow-up message");
+    expect(
+      messageList.compareDocumentPosition(pendingBubble) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).not.toBe(0);
+  });
 });
