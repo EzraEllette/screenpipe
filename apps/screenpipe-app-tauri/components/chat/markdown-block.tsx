@@ -25,12 +25,12 @@ import { cn } from "@/lib/utils";
 import { sanitizeToolCallXml } from "@/lib/utils/sanitize-tool-call-xml";
 import { LinkPreviewAnchor } from "@/components/chat/link-preview-anchor";
 
-// The transport snapshots text every 80 ms. Keeping rich parsing to once per
-// four seconds limits scheduled rich parsing to once per 50 snapshots while
-// the cheap plain-text tail still updates with every snapshot. Completion
-// always forces the exact rich render immediately, so this only delays
-// in-flight formatting.
-const STREAMING_MARKDOWN_COMMIT_MS = 4_000;
+// The transport snapshots text every 80 ms. Parse only complete blocks
+// (blank-line / closed-fence boundaries) and commit each one on the same
+// snapshot so headings, lists, and links do not sit as raw source. Each
+// committed block is its own MemoizedReactMarkdown tree, so a new
+// paragraph does not re-parse earlier ones. The unfinished tail stays
+// cheap plain text. Completion still forces the exact full render.
 
 export interface MarkdownBlockOptions {
   /** Extra parsing passes layered onto the main Chat Markdown pipeline. */
@@ -50,7 +50,7 @@ export interface MarkdownBlockOptions {
 interface MarkdownBlockProps extends MarkdownBlockOptions {
   text: string;
   isUser: boolean;
-  /** Keep incoming text live while bounding expensive full Markdown parses. */
+  /** Commit complete blocks immediately; keep the unfinished tail as live text. */
   streaming?: boolean;
   onOpenViewerPath?: (path: string) => void;
   renderSpecialCodeBlock?: (
@@ -59,11 +59,16 @@ interface MarkdownBlockProps extends MarkdownBlockOptions {
   ) => React.ReactNode | null;
 }
 
-export function stableStreamingMarkdownPrefix(text: string): string {
+function scanStreamingMarkdown(text: string): {
+  prefix: string;
+  blocks: string[];
+} {
   let fenceCharacter: "`" | "~" | null = null;
   let fenceLength = 0;
   let lastBoundary = 0;
+  let blockStart = 0;
   let lineStart = 0;
+  const blocks: string[] = [];
 
   while (lineStart < text.length) {
     const newlineIndex = text.indexOf("\n", lineStart);
@@ -88,40 +93,32 @@ export function stableStreamingMarkdownPrefix(text: string): string {
       }
     } else if (!fenceCharacter && line.trim() === "") {
       lastBoundary = nextLineStart;
+      const block = text.slice(blockStart, lastBoundary);
+      if (block.trim() !== "") {
+        blocks.push(block);
+      }
+      blockStart = lastBoundary;
     }
 
     lineStart = nextLineStart;
   }
 
-  return text.slice(0, lastBoundary);
+  return { prefix: text.slice(0, lastBoundary), blocks };
 }
 
-function useStreamingMarkdownText(text: string, streaming: boolean) {
-  const [committedText, setCommittedText] = React.useState("");
-  const lastCommitAtRef = React.useRef(0);
-  const candidate = streaming ? stableStreamingMarkdownPrefix(text) : text;
+export function stableStreamingMarkdownPrefix(text: string): string {
+  return scanStreamingMarkdown(text).prefix;
+}
 
-  React.useEffect(() => {
-    if (!streaming || !candidate || candidate === committedText) return;
-
-    const elapsed = Date.now() - lastCommitAtRef.current;
-    const delay = Math.max(0, STREAMING_MARKDOWN_COMMIT_MS - elapsed);
-    const timer = window.setTimeout(() => {
-      lastCommitAtRef.current = Date.now();
-      setCommittedText(candidate);
-    }, delay);
-
-    return () => window.clearTimeout(timer);
-  }, [candidate, committedText, streaming]);
-
+function streamingMarkdownParts(text: string, streaming: boolean) {
   if (!streaming) {
-    return { markdownText: text, tailText: "" };
+    return { blocks: text ? [text] : [], tailText: "" };
   }
 
-  const committedPrefix = text.startsWith(committedText) ? committedText : "";
+  const { prefix, blocks } = scanStreamingMarkdown(text);
   return {
-    markdownText: committedPrefix,
-    tailText: text.slice(committedPrefix.length),
+    blocks,
+    tailText: text.slice(prefix.length),
   };
 }
 
@@ -140,22 +137,16 @@ export function MarkdownBlock({
   const renderText = rewriteLocalMarkdownLinksForChat(
     isUser ? text : sanitizeToolCallXml(text),
   );
-  const { markdownText, tailText } = useStreamingMarkdownText(
-    renderText,
-    streaming,
+  const { blocks, tailText } = streamingMarkdownParts(renderText, streaming);
+  const markdownClassName = cn(
+    "prose prose-sm max-w-full break-words overflow-hidden [word-break:break-word] flex flex-col items-start",
+    isUser ? "text-foreground dark:prose-invert" : "dark:prose-invert",
+    className,
   );
 
-  const markdown = markdownText ? (
-    <MemoizedReactMarkdown
-      className={cn(
-        "prose prose-sm max-w-full break-words overflow-hidden [word-break:break-word] flex flex-col items-start",
-        isUser ? "text-foreground dark:prose-invert" : "dark:prose-invert",
-        className,
-      )}
-      remarkPlugins={[remarkGfm, ...(additionalRemarkPlugins ?? [])]}
-      urlTransform={urlTransform ?? chatUrlTransform}
-      rehypePlugins={[rehypeRaw]}
-      components={{
+  const remarkPlugins = [remarkGfm, ...(additionalRemarkPlugins ?? [])];
+  const resolvedUrlTransform = urlTransform ?? chatUrlTransform;
+  const markdownComponents: NonNullable<ReactMarkdownOptions["components"]> = {
         p({ children }) {
           return <p className="mb-2 last:mb-0 leading-relaxed">{children}</p>;
         },
@@ -292,11 +283,19 @@ export function MarkdownBlock({
         // so a fenced block looks identical in the chat and the file-preview
         // sidebar, and stays readable in light and dark mode.
         ...createCodeMarkdownComponents({ renderSpecialCodeBlock }),
-      }}
+  };
+  const markdown = blocks.map((block, index) => (
+    <MemoizedReactMarkdown
+      key={index}
+      className={markdownClassName}
+      remarkPlugins={remarkPlugins}
+      urlTransform={resolvedUrlTransform}
+      rehypePlugins={[rehypeRaw]}
+      components={markdownComponents}
     >
-      {markdownText}
+      {block}
     </MemoizedReactMarkdown>
-  ) : null;
+  ));
 
   return (
     <>
@@ -305,7 +304,7 @@ export function MarkdownBlock({
         <div
           className={cn(
             "max-w-full whitespace-pre-wrap break-words [word-break:break-word] leading-relaxed",
-            markdownText && "mt-2",
+            blocks.length > 0 && "mt-2",
             className,
           )}
           data-testid="streaming-markdown-tail"

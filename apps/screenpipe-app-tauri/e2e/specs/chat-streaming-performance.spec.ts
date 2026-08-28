@@ -101,6 +101,7 @@ interface PipeBurstPerfResult {
 
 interface RichMarkdownStreamResult extends StreamingPerfResult {
   headingText: string;
+  headingVisibleDuringStream: boolean;
   externalLinkHref: string;
   tableCount: number;
   codeText: string;
@@ -428,6 +429,7 @@ async function runRichMarkdownStreamingStress(
       let lastFrameAt = performance.now();
       let mutationCount = 0;
       let frameTimer: number | undefined;
+      let headingVisibleDuringStream = false;
 
       const assistant = () => {
         const messages = Array.from(
@@ -459,6 +461,7 @@ async function runRichMarkdownStreamingStress(
           mutationCount,
           assistantText: message?.textContent ?? "",
           headingText: message?.querySelector("h2")?.textContent ?? "",
+          headingVisibleDuringStream,
           externalLinkHref:
             message
               ?.querySelector<HTMLAnchorElement>('a[href*="screenpi.pe"]')
@@ -509,6 +512,11 @@ async function runRichMarkdownStreamingStress(
               assistantMessageEvent: { type: "text_delta", delta },
             });
             await new Promise((resolve) => window.setTimeout(resolve, delayMs));
+            const liveHeading =
+              assistant()?.querySelector("h2")?.textContent ?? "";
+            if (liveHeading === "streamed finding") {
+              headingVisibleDuringStream = true;
+            }
           }
           await emitAgentEvent({ type: "agent_end" });
           await new Promise((resolve) => window.setTimeout(resolve, 700));
@@ -823,6 +831,7 @@ describe("Chat streaming performance", function () {
       frames: result.frames,
       maxFrameGapMs: Math.round(result.maxFrameGapMs),
       mutationCount: result.mutationCount,
+      headingVisibleDuringStream: result.headingVisibleDuringStream,
       avgCpuPercent: Math.round(cpu.avgCpuPercent),
       p95CpuPercent: Math.round(cpu.p95CpuPercent),
       avgCpuDeltaPercent: Math.round(avgCpuDeltaPercent),
@@ -832,6 +841,7 @@ describe("Chat streaming performance", function () {
 
     expect(result.error).toBeUndefined();
     expect(result.emittedDeltas).toBe(RICH_MARKDOWN_CHUNKS.length);
+    expect(result.headingVisibleDuringStream).toBe(true);
     expect(result.headingText).toBe("streamed finding");
     expect(result.externalLinkHref).toContain("screenpi.pe");
     expect(result.tableCount).toBe(1);

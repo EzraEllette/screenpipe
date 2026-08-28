@@ -12,8 +12,12 @@ const STREAM_SNAPSHOT_COUNT = Number(
 const STREAM_SNAPSHOT_INTERVAL_MS = 80;
 const VIRTUAL_CLOCK_START_MS = 1_000_000;
 const SAMPLE_COUNT = Number(process.env.SCREENPIPE_CHAT_BENCH_SAMPLES ?? "7");
+// Instant complete-block commits are slower than the old 4s deferral, but
+// still cheaper than parsing the growing document every 80 ms. The live
+// heading assertion below is the product gate; this floor only rejects a
+// full-document streaming parse.
 const MIN_SPEEDUP = Number(
-  process.env.SCREENPIPE_CHAT_BENCH_MIN_SPEEDUP ?? "10",
+  process.env.SCREENPIPE_CHAT_BENCH_MIN_SPEEDUP ?? "2",
 );
 const realNow = nodePerformance.now.bind(nodePerformance);
 
@@ -165,11 +169,30 @@ async function main() {
     );
     act(() => scheduler.advanceBy(0));
 
+    let liveHeading = Boolean(
+      isGenerating && view.queryByRole("heading", { name: /finding 1/ }),
+    );
+    let elapsedMs = 0;
+
     for (const message of snapshots.slice(1)) {
       view.rerender(
         React.createElement(MessageContent, { message, isGenerating }),
       );
       act(() => scheduler.advanceBy(STREAM_SNAPSHOT_INTERVAL_MS));
+      elapsedMs += STREAM_SNAPSHOT_INTERVAL_MS;
+      if (
+        isGenerating &&
+        elapsedMs <= 1_000 &&
+        view.queryByRole("heading", { name: /finding 1/ })
+      ) {
+        liveHeading = true;
+      }
+    }
+
+    if (isGenerating && !liveHeading) {
+      throw new Error(
+        "streaming path did not render complete Markdown within 1s",
+      );
     }
 
     view.rerender(

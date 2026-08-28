@@ -25,16 +25,17 @@ describe("MessageContent streaming Markdown", () => {
     vi.useRealTimers();
   });
 
-  it("keeps the live tail cheap and renders the exact Markdown immediately at completion", () => {
-    vi.useFakeTimers();
+  it("renders complete Markdown immediately and the exact document at completion", () => {
     const view = render(
       <MessageContent message={streamingMessage} isGenerating />,
     );
 
+    expect(
+      screen.getByRole("heading", { name: "live finding" }),
+    ).toBeInTheDocument();
     expect(screen.getByTestId("streaming-markdown-tail")).toHaveTextContent(
       "new evidence",
     );
-    expect(screen.queryByRole("heading", { name: "live finding" })).toBeNull();
 
     view.rerender(
       <MessageContent message={streamingMessage} isGenerating={false} />,
@@ -74,7 +75,9 @@ describe("MessageContent streaming Markdown", () => {
     expect(screen.getByTestId("streaming-markdown-tail")).toHaveTextContent(
       "still streaming",
     );
-    expect(screen.queryByRole("heading", { name: "live result" })).toBeNull();
+    expect(
+      screen.getByRole("heading", { name: "live result" }),
+    ).toBeInTheDocument();
 
     view.rerender(<MessageContent message={message} isGenerating={false} />);
     expect(

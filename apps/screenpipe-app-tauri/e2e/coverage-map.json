@@ -1387,7 +1387,7 @@
       "criticality": "medium",
       "confidence": "conditional",
       "ux": "performance",
-      "notes": "macOS-only foreground and background streaming responsiveness plus final rich-Markdown fidelity when headings, links, tables, inline code, and fenced code are split across synthetic production-shaped chunks."
+      "notes": "macOS-only foreground and background streaming responsiveness plus live and final rich-Markdown fidelity when headings, links, tables, inline code, and fenced code are split across synthetic production-shaped chunks."
     },
     {
       "spec": "chat-stuck-queue-guard.spec.ts",
