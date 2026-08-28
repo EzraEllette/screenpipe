@@ -83,6 +83,22 @@ export function appendSelectedTextToComposer(
   return prefix ? `${prefix}\n\n${quoted}\n\n` : `${quoted}\n\n`;
 }
 
+function eventIsOnToolbar(event: Event, toolbar: HTMLElement | null): boolean {
+  if (!toolbar) return false;
+  if (event.composedPath().includes(toolbar)) return true;
+  return event.target instanceof Node && toolbar.contains(event.target);
+}
+
+/**
+ * Keep the browser selection until click. Codex's overlay uses mousedown
+ * preventDefault for this; pointerdown preventDefault cancels click in WebKit.
+ */
+function preserveSelectionOnToolbarMouseDown(
+  event: React.MouseEvent,
+): void {
+  event.preventDefault();
+}
+
 export function SelectedTextActions({
   onAddToChat,
   onAskInSideChat,
@@ -122,7 +138,7 @@ export function SelectedTextActions({
       if (event.key === "Escape") dismiss();
     };
     const onPointerDown = (event: PointerEvent) => {
-      if (toolbarRef.current?.contains(event.target as Node)) return;
+      if (eventIsOnToolbar(event, toolbarRef.current)) return;
       dismiss();
     };
 
@@ -196,10 +212,7 @@ export function SelectedTextActions({
         transform: "translateX(-50%)",
         visibility: position ? "visible" : "hidden",
       }}
-      onPointerDown={(event) => {
-        event.preventDefault();
-        event.stopPropagation();
-      }}
+      onMouseDown={preserveSelectionOnToolbarMouseDown}
     >
       <button
         type="button"
