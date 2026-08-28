@@ -39,14 +39,14 @@ export const IN_APP_SHORTCUTS: readonly InAppShortcutDefinition[] = [
   {
     id: "next_recent_chat",
     section: "chat",
-    label: "switch recent chat",
-    description: "hold control, cycle, then release",
+    label: "next chat tab",
+    description: "hold control, cycle open tabs, then release",
   },
   {
     id: "previous_recent_chat",
     section: "chat",
-    label: "switch recent chat backward",
-    description: "reverse the recent-chat switcher",
+    label: "previous chat tab",
+    description: "cycle open chat tabs backward",
   },
   {
     id: "toggle_sidebar",

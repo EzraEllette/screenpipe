@@ -52,6 +52,7 @@ function resetStore() {
     sessions: {},
     currentId: null,
     panelSessionId: null,
+    openChatIds: [],
     diskHydrated: false,
   });
 }
@@ -62,9 +63,6 @@ function seed(record: Partial<SessionRecord> & Pick<SessionRecord, "id">) {
     title: record.title ?? record.id,
     preview: "",
     status: "idle",
-    // Seeded rows stand in for real conversations. The switcher only lists
-    // chats that exist (isEmptyChatShell), so they need a message count —
-    // a zero-message row is an empty shell and is filtered out.
     messageCount: 2,
     createdAt: record.createdAt ?? 1_000,
     updatedAt: record.updatedAt ?? record.createdAt ?? 1_000,
@@ -72,6 +70,13 @@ function seed(record: Partial<SessionRecord> & Pick<SessionRecord, "id">) {
     unread: false,
     ...record,
   });
+}
+
+function seedOpenTab(
+  record: Partial<SessionRecord> & Pick<SessionRecord, "id">,
+) {
+  seed(record);
+  useChatStore.getState().actions.openChat(record.id);
 }
 
 describe("RecentChatSwitcherController", () => {
@@ -87,17 +92,23 @@ describe("RecentChatSwitcherController", () => {
     vi.restoreAllMocks();
   });
 
-  it("cycles forward with Ctrl+Tab and commits on Control release", async () => {
-    seed({ id: "chat-a", lastViewedAt: 300, createdAt: 300, updatedAt: 300 });
-    seed({ id: "chat-b", lastViewedAt: 200, createdAt: 200, updatedAt: 200 });
-    seed({ id: "chat-c", lastViewedAt: 100, createdAt: 100, updatedAt: 100 });
+  it("cycles open tabs with Ctrl+Tab and commits on Control release", async () => {
+    seedOpenTab({ id: "chat-a", title: "first tab" });
+    seedOpenTab({ id: "chat-b", title: "second tab" });
+    seedOpenTab({ id: "chat-c", title: "third tab" });
+    seed({
+      id: "closed-recent",
+      title: "closed recent",
+      lastViewedAt: 9_000,
+    });
     useChatStore.setState({ currentId: "chat-a" });
     const onActivateConversation = vi.fn(async () => {});
 
     render(<RecentChatSwitcherController onActivateConversation={onActivateConversation} />);
 
     fireEvent.keyDown(window, { key: "Tab", ctrlKey: true });
-    expect(screen.getByText("Recently viewed")).toBeInTheDocument();
+    expect(screen.getByText("Open chats")).toBeInTheDocument();
+    expect(screen.queryByText("closed recent")).not.toBeInTheDocument();
     let buttons = screen.getAllByRole("button");
     expect(buttons[1]).toHaveClass("bg-muted/55");
 
@@ -114,9 +125,9 @@ describe("RecentChatSwitcherController", () => {
   });
 
   it("cycles backward with Ctrl+Shift+Tab", async () => {
-    seed({ id: "chat-a", lastViewedAt: 300, createdAt: 300, updatedAt: 300 });
-    seed({ id: "chat-b", lastViewedAt: 200, createdAt: 200, updatedAt: 200 });
-    seed({ id: "chat-c", lastViewedAt: 100, createdAt: 100, updatedAt: 100 });
+    seedOpenTab({ id: "chat-a", title: "first tab" });
+    seedOpenTab({ id: "chat-b", title: "second tab" });
+    seedOpenTab({ id: "chat-c", title: "third tab" });
     useChatStore.setState({ currentId: "chat-b" });
     const onActivateConversation = vi.fn(async () => {});
 
@@ -134,9 +145,42 @@ describe("RecentChatSwitcherController", () => {
     expect(onActivateConversation).toHaveBeenCalledWith("chat-a");
   });
 
+  it("includes an empty worktree tab in the cycle", async () => {
+    seedOpenTab({
+      id: "chat-a",
+      title: "primary",
+      lastViewedAt: 300,
+    });
+    seedOpenTab({
+      id: "worktree-chat",
+      title: "isolated fix",
+      draft: true,
+      messageCount: 0,
+      lastViewedAt: undefined,
+      codingWorkspace: {
+        repoName: "screenpipe",
+        branch: "screenpipe/chat-worktree-chat",
+        worktreePath: "/worktrees/worktree-chat",
+      },
+    });
+    useChatStore.setState({ currentId: "chat-a" });
+    const onActivateConversation = vi.fn(async () => {});
+
+    render(<RecentChatSwitcherController onActivateConversation={onActivateConversation} />);
+
+    fireEvent.keyDown(window, { key: "Tab", ctrlKey: true });
+    expect(screen.getByText("isolated fix")).toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.keyUp(window, { key: "Control" });
+    });
+
+    expect(onActivateConversation).toHaveBeenCalledWith("worktree-chat");
+  });
+
   it("ignores Cmd+Tab so the app does not steal OS window switching", () => {
-    seed({ id: "chat-a", lastViewedAt: 200, createdAt: 200, updatedAt: 200 });
-    seed({ id: "chat-b", lastViewedAt: 100, createdAt: 100, updatedAt: 100 });
+    seedOpenTab({ id: "chat-a" });
+    seedOpenTab({ id: "chat-b" });
     useChatStore.setState({ currentId: "chat-a" });
     const onActivateConversation = vi.fn(async () => {});
 
@@ -145,13 +189,13 @@ describe("RecentChatSwitcherController", () => {
     fireEvent.keyDown(window, { key: "Tab", ctrlKey: true, metaKey: true });
     fireEvent.keyUp(window, { key: "Control" });
 
-    expect(screen.queryByText("Recently viewed")).not.toBeInTheDocument();
+    expect(screen.queryByText("Open chats")).not.toBeInTheDocument();
     expect(onActivateConversation).not.toHaveBeenCalled();
   });
 
   it("opens from a chat-origin search handoff and commits on Control release", async () => {
-    seed({ id: "chat-a", lastViewedAt: 300, createdAt: 300, updatedAt: 300 });
-    seed({ id: "chat-b", lastViewedAt: 200, createdAt: 200, updatedAt: 200 });
+    seedOpenTab({ id: "chat-a" });
+    seedOpenTab({ id: "chat-b" });
     useChatStore.setState({ currentId: "chat-a" });
     const onActivateConversation = vi.fn(async () => {});
 
@@ -163,7 +207,7 @@ describe("RecentChatSwitcherController", () => {
       });
     });
 
-    expect(screen.getByText("Recently viewed")).toBeInTheDocument();
+    expect(screen.getByText("Open chats")).toBeInTheDocument();
     const buttons = screen.getAllByRole("button");
     expect(buttons[1]).toHaveClass("bg-muted/55");
 
@@ -174,9 +218,9 @@ describe("RecentChatSwitcherController", () => {
     expect(onActivateConversation).toHaveBeenCalledWith("chat-b");
   });
 
-  it("commits a command-menu recent-chat action without waiting for Control", async () => {
-    seed({ id: "chat-a", lastViewedAt: 300, createdAt: 300, updatedAt: 300 });
-    seed({ id: "chat-b", lastViewedAt: 200, createdAt: 200, updatedAt: 200 });
+  it("commits a command-menu chat-tab action without waiting for Control", async () => {
+    seedOpenTab({ id: "chat-a" });
+    seedOpenTab({ id: "chat-b" });
     useChatStore.setState({ currentId: "chat-a" });
     const onActivateConversation = vi.fn(async () => {});
 
@@ -191,33 +235,28 @@ describe("RecentChatSwitcherController", () => {
       await Promise.resolve();
     });
     expect(onActivateConversation).toHaveBeenCalledWith("chat-b");
-    expect(screen.queryByText("Recently viewed")).not.toBeInTheDocument();
+    expect(screen.queryByText("Open chats")).not.toBeInTheDocument();
   });
 
-  it("opens an empty state when no sessions are available", () => {
+  it("does nothing when fewer than two chat tabs are open", async () => {
     const onActivateConversation = vi.fn(async () => {});
 
     render(<RecentChatSwitcherController onActivateConversation={onActivateConversation} />);
 
     fireEvent.keyDown(window, { key: "Tab", ctrlKey: true });
-    expect(screen.queryByText("Recently viewed")).not.toBeInTheDocument();
-    expect(screen.getByText("No recently viewed chats")).toBeInTheDocument();
-  });
+    expect(screen.queryByText("Open chats")).not.toBeInTheDocument();
+    expect(screen.queryByText("No open chats")).not.toBeInTheDocument();
 
-  it("opens even when only one session exists (and does not re-activate current on release)", async () => {
-    seed({ id: "chat-a", lastViewedAt: 200, createdAt: 200, updatedAt: 200 });
-    useChatStore.setState({ currentId: "chat-a" });
-    const onActivateConversation = vi.fn(async () => {});
-
-    render(<RecentChatSwitcherController onActivateConversation={onActivateConversation} />);
-
+    await act(async () => {
+      seedOpenTab({ id: "chat-a" });
+      useChatStore.setState({ currentId: "chat-a" });
+    });
     fireEvent.keyDown(window, { key: "Tab", ctrlKey: true });
-    expect(screen.getByText("Recently viewed")).toBeInTheDocument();
-
     await act(async () => {
       fireEvent.keyUp(window, { key: "Control" });
     });
 
+    expect(screen.queryByText("Open chats")).not.toBeInTheDocument();
     expect(onActivateConversation).not.toHaveBeenCalled();
   });
 });

@@ -1288,6 +1288,31 @@ export function selectRecentSwitcherSessions(
     .sort((a, b) => (b.lastViewedAt ?? 0) - (a.lastViewedAt ?? 0));
 }
 
+/** Visible chat-tab strip order, including empty or worktree-backed tabs. */
+export function selectVisibleOpenChatTabs(state: {
+  sessions: Record<string, SessionRecord>;
+  openChatIds: string[];
+}): SessionRecord[] {
+  return state.openChatIds
+    .map((id) => state.sessions[id])
+    .filter((session): session is SessionRecord =>
+      Boolean(session && !session.hidden),
+    );
+}
+
+export function nextOpenChatTabId(
+  tabIds: string[],
+  currentId: string | null,
+  direction: 1 | -1,
+): string | null {
+  if (tabIds.length < 2) return null;
+  const currentIndex = currentId ? tabIds.indexOf(currentId) : -1;
+  if (currentIndex < 0) {
+    return direction === 1 ? tabIds[0] : tabIds[tabIds.length - 1];
+  }
+  return tabIds[(currentIndex + direction + tabIds.length) % tabIds.length];
+}
+
 /**
  * Stable hook returning the ordered session list. Subscribes to the raw
  * `sessions` map (referentially stable across no-op updates) and memoizes

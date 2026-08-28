@@ -169,8 +169,8 @@ export function buildPaletteEntries(
       ? [
           {
             id: "next_recent_chat" as const,
-            label: "switch recent chat",
-            keywords: "conversation previous recent mru cycle",
+            label: "next chat tab",
+            keywords: "conversation previous recent mru cycle tab worktree",
             group: "navigation" as const,
             hint: inAppShortcutLabel("next_recent_chat", isMac),
             icon: History,
@@ -178,8 +178,8 @@ export function buildPaletteEntries(
           },
           {
             id: "previous_recent_chat" as const,
-            label: "switch recent chat backward",
-            keywords: "conversation previous recent mru reverse",
+            label: "previous chat tab",
+            keywords: "conversation previous recent mru reverse tab worktree",
             group: "navigation" as const,
             hint: inAppShortcutLabel("previous_recent_chat", isMac),
             icon: History,

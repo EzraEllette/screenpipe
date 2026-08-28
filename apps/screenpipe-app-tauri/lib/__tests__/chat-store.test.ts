@@ -13,6 +13,8 @@ import {
   useChatStore,
   selectOrderedSessions,
   selectRecentSwitcherSessions,
+  selectVisibleOpenChatTabs,
+  nextOpenChatTabId,
   getOrCreateEmptyChatId,
   isReusableBlankChatSession,
   isEmptyChatShell,
@@ -70,6 +72,34 @@ describe("chat-store: tab and split working set", () => {
     actions.drop("B");
     expect(useChatStore.getState().splitChatId).toBeNull();
     expect(useChatStore.getState().openChatIds).toEqual(["A"]);
+  });
+
+  it("lists open tabs in strip order, including empty worktree chats", () => {
+    const actions = useChatStore.getState().actions;
+    actions.upsert(baseRecord({ id: "closed", lastViewedAt: 90 }));
+    actions.upsert(baseRecord({ id: "A", lastViewedAt: 10 }));
+    actions.upsert(
+      baseRecord({
+        id: "worktree",
+        draft: true,
+        messageCount: 0,
+        lastViewedAt: undefined,
+        codingWorkspace: {
+          repoName: "screenpipe",
+          branch: "screenpipe/chat-worktree",
+          worktreePath: "/worktrees/worktree",
+        },
+      }),
+    );
+    actions.openChat("A");
+    actions.openChat("worktree");
+
+    expect(
+      selectVisibleOpenChatTabs(useChatStore.getState()).map((session) => session.id),
+    ).toEqual(["A", "worktree"]);
+    expect(nextOpenChatTabId(["A", "worktree"], "A", 1)).toBe("worktree");
+    expect(nextOpenChatTabId(["A", "worktree"], "worktree", 1)).toBe("A");
+    expect(nextOpenChatTabId(["A"], "A", 1)).toBeNull();
   });
 });
 

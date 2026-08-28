@@ -79,11 +79,11 @@ export function RecentChatSwitcher({
           >
             {hasSessions ? (
               <div className="px-4 pb-1.5 pt-3 text-[12px] font-normal text-muted-foreground/70">
-                Recently viewed
+                Open chats
               </div>
             ) : (
               <div className="px-4 pb-1.5 pt-3 text-[12px] font-normal text-muted-foreground/70">
-                No recently viewed chats
+                No open chats
               </div>
             )}
             <div

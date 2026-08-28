@@ -57,7 +57,7 @@ describe("ShortcutSection experimental rollout", () => {
 
     expect(screen.getByText("Keyboard shortcuts and hotkeys")).toBeVisible();
     expect(screen.queryByText("in app")).toBeNull();
-    expect(screen.queryByText("switch recent chat")).toBeNull();
+    expect(screen.queryByText("next chat tab")).toBeNull();
     expect(screen.getByText("toggle screenpipe overlay")).toBeVisible();
   });
 
@@ -67,6 +67,6 @@ describe("ShortcutSection experimental rollout", () => {
 
     expect(screen.getByText("in-app commands and global hotkeys")).toBeVisible();
     expect(screen.getByText("in app")).toBeVisible();
-    expect(screen.getByText("switch recent chat")).toBeVisible();
+    expect(screen.getByText("next chat tab")).toBeVisible();
   });
 });
