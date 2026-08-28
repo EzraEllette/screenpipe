@@ -7,9 +7,9 @@ import { useEffect, useState } from "react";
 import { getMediaFile } from "@/lib/actions/video-actions";
 import { imageMimeFromName } from "@/components/meeting-notes/image-utils";
 
-function bytesFromBase64(data: string): Uint8Array {
+function bytesFromBase64(data: string): Uint8Array<ArrayBuffer> {
   const binary = atob(data);
-  const bytes = new Uint8Array(binary.length);
+  const bytes = new Uint8Array(new ArrayBuffer(binary.length));
   for (let i = 0; i < binary.length; i++) {
     bytes[i] = binary.charCodeAt(i);
   }
