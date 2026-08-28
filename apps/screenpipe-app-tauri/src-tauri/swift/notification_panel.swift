@@ -1116,13 +1116,26 @@ class NotificationPanelController: NSObject {
         isHovered = true
         // Snapshot elapsed time
         elapsedBeforePause += Date().timeIntervalSince(resumedAt) * 1000
-        updateContent()
+        if currentPayloadUsesHoverFeedback {
+            updateContent()
+        }
     }
 
     func handleMouseExited() {
         isHovered = false
         resumedAt = Date()
-        updateContent()
+        if currentPayloadUsesHoverFeedback {
+            updateContent()
+        }
+    }
+
+    /// Only feedback-enabled notifications change content on panel hover.
+    /// Replacing an NSHostingView root while macOS performs accessibility hit
+    /// testing can trap inside SwiftUI; ordinary action notifications must keep
+    /// a stable view tree from presentation through click handling.
+    private var currentPayloadUsesHoverFeedback: Bool {
+        guard let payload = currentPayload else { return false }
+        return payload.type == "pipe" || payload.pipe_name != nil || payload.source_session_id != nil
     }
 
     private func createPanel() {

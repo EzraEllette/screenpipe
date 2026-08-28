@@ -189,10 +189,6 @@ export function StandaloneChat({
     () => filterAcpPresets(settings.aiPresets, acpEnabled),
     [settings.aiPresets, acpEnabled],
   );
-  const rolloutSettings = React.useMemo(
-    () => ({ ...settings, aiPresets: availableAiPresets }) as typeof settings,
-    [settings, availableAiPresets],
-  );
   const { isMac, isWindows, isLoading: isPlatformLoading } = usePlatform();
   const hardcodedConnectionTiles = useHardcodedTiles();
   // Drop the macOS traffic-light reservation when the window is fullscreen
