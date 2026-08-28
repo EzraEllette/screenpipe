@@ -1512,7 +1512,7 @@
       "criticality": "high",
       "confidence": "strong",
       "ux": "real-user-flow",
-      "notes": "Opens Chat and focuses the composer for typing."
+      "notes": "Opens Chat and focuses the composer for typing. A chat saved from the floating window syncs into Home's Recents without becoming a second Home working tab."
     },
     {
       "spec": "chat-within-session-context-loss.spec.ts",

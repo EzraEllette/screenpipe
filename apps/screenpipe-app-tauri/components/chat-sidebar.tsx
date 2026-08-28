@@ -13,7 +13,7 @@
  *   ┌────────────────────────┐  emit chat-load-conversation  ┌───────────┐
  *   │ ChatSidebar (this file)├──────────────────────────────▶│ Standalone│
  *   │                        │                                │ Chat      │
- *   │  reads chat-store      │  emit chat-current-session     │           │
+ *   │  reads chat-store      │  sync matching panel session   │           │
  *   │  emits user actions    │◀──────────────────────────────┤ (mounts   │
  *   │                        │                                │  Pi via   │
  *   │                        │                                │  piStart) │
@@ -481,12 +481,13 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
   // mirroring the html/body `scrollbar-hide` convention in globals.css.
   const { isMac } = usePlatform();
 
-  // Sync currentId from standalone-chat. Whenever the chat panel switches
-  // its piSessionIdRef (new chat, prefill auto-send, history click in the
-  // panel itself), it emits this event so the sidebar can highlight the
-  // matching row. Without this the sidebar would silently disagree with
-  // the chat about "which session is current".
+  // Tauri events are app-global, while each WebView owns a separate chat
+  // store. Only let this WebView's panel select a working tab. A floating
+  // Chat session still reaches Home's Recents through chat-conversation-saved,
+  // but must not become a second Home tab merely because it became current in
+  // the floating window.
   useTauriEvent<{ id: string }>("chat-current-session", (e) => {
+    if (useChatStore.getState().panelSessionId !== e.payload.id) return;
     actions.setCurrent(e.payload.id);
   });
 
