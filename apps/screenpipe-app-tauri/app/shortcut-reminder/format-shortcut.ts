@@ -4,7 +4,7 @@
 
 export type ShortcutPlatform = "macos" | "windows" | "linux" | "unknown";
 
-/** Render saved shortcuts with familiar, platform-native modifier notation. */
+/** Render saved shortcuts with readable, platform-specific modifier notation. */
 export function formatShortcut(
   shortcut: string,
   platform: ShortcutPlatform,
@@ -24,29 +24,30 @@ export function formatShortcut(
     .filter(Boolean);
 
   if (platform === "macos") {
-    const macSymbols: Record<string, string> = {
-      super: "⌘",
-      command: "⌘",
-      cmd: "⌘",
-      meta: "⌘",
-      ctrl: "⌃",
-      control: "⌃",
-      alt: "⌥",
-      option: "⌥",
-      shift: "⇧",
+    const macLabels: Record<string, string> = {
+      super: "Cmd",
+      command: "Cmd",
+      cmd: "Cmd",
+      meta: "Cmd",
+      ctrl: "Ctrl",
+      control: "Ctrl",
+      alt: "Opt",
+      option: "Opt",
+      opt: "Opt",
+      shift: "Shift",
     };
-    const modifierOrder = ["⌘", "⌃", "⌥", "⇧"];
+    const modifierOrder = ["Cmd", "Ctrl", "Opt", "Shift"];
     const modifiers = new Set(
-      parts.flatMap((part) => macSymbols[part] ? [macSymbols[part]] : []),
+      parts.flatMap((part) => macLabels[part] ? [macLabels[part]] : []),
     );
     const keys = parts
-      .filter((part) => !macSymbols[part])
+      .filter((part) => !macLabels[part])
       .map((part) => part.toUpperCase());
-    return [...modifierOrder.filter((modifier) => modifiers.has(modifier)), ...keys].join("");
+    return [...modifierOrder.filter((modifier) => modifiers.has(modifier)), ...keys].join("+");
   }
 
-  // macOS has standard modifier glyphs. Windows and Linux conventionally keep
-  // Ctrl/Alt/Shift as words, with the OS modifier first in the chord.
+  // Windows and Linux conventionally keep Ctrl/Alt/Shift as words, with the OS
+  // modifier first in the chord.
   const systemModifier = platform === "windows" ? "⊞" : "Super";
   const otherLabels: Record<string, string> = {
     super: systemModifier,

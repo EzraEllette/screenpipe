@@ -512,8 +512,12 @@ describe("recording health hover detail", () => {
 });
 
 describe("shortcut display ordering", () => {
-  it("renders familiar modifier notation in a stable platform order", () => {
-    expect(formatShortcut("Control+Super+s", "macos")).toBe("⌘⌃S");
+  it("renders readable modifier notation in a stable platform order", () => {
+    expect(formatShortcut("Control+Super+s", "macos")).toBe("Cmd+Ctrl+S");
+    expect(formatShortcut("⌘⌃S", "macos")).toBe("Cmd+Ctrl+S");
+    expect(formatShortcut("Shift+Option+Command+k", "macos")).toBe(
+      "Cmd+Opt+Shift+K",
+    );
     expect(formatShortcut("Control+Super+s", "windows")).toBe("⊞+Ctrl+S");
     expect(formatShortcut("Control+Super+s", "linux")).toBe("Super+Ctrl+S");
     expect(formatShortcut("Shift+Alt+Control+Super+k", "windows")).toBe(

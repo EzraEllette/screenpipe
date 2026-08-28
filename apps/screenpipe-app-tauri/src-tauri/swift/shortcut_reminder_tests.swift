@@ -390,20 +390,20 @@ private func testWireContract() {
     expect(actual == expected, "anchor raw values drifted: \(actual)")
 }
 
-/// The native overlay must use the same compact key notation as the webview
-/// fallback. Word labels made a two-modifier shortcut wider than its action.
-private func testShortcutGlyphs() {
+/// The native overlay and webview fallback must use the same readable macOS
+/// labels while preserving one stable modifier order.
+private func testShortcutLabels() {
     expect(
-        prettifyShortcut("Control+Super+s") == "⌘⌃S",
-        "shortcut should render Command and Control as glyphs"
+        prettifyShortcut("Control+Super+s") == "Cmd+Ctrl+S",
+        "shortcut should render readable Command and Control labels"
     )
     expect(
-        prettifyShortcut("Shift+Option+Command+k") == "⌘⌥⇧K",
-        "shortcut should keep a stable macOS glyph order"
+        prettifyShortcut("Shift+Option+Command+k") == "Cmd+Opt+Shift+K",
+        "shortcut should keep a stable macOS label order"
     )
     expect(
-        prettifyShortcut("⌘⌃S") == "⌘⌃S",
-        "shortcut glyph input should be idempotent"
+        prettifyShortcut("⌘⌃S") == "Cmd+Ctrl+S",
+        "shortcut glyph input should normalize to readable labels"
     )
 }
 
@@ -531,7 +531,7 @@ struct ShortcutReminderTests {
         testAttachmentStacking()
         testAttachmentStaysOnScreen()
         testWireContract()
-        testShortcutGlyphs()
+        testShortcutLabels()
         testClampLeavesOnScreenDragsAlone()
         testClampKeepsPillOnDesktop()
         testClampPicksNearestDisplay()
