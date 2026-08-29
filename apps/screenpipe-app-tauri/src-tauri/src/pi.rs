@@ -37,6 +37,17 @@ pub(crate) fn subscribe_internal_agent_events(
         .subscribe()
 }
 
+fn broadcast_internal_agent_event(session_id: &str, event: Value) {
+    let internal_events =
+        INTERNAL_AGENT_EVENTS.get_or_init(|| tokio::sync::broadcast::channel(256).0);
+    if internal_events.receiver_count() > 0 {
+        let _ = internal_events.send(InternalAgentEvent {
+            session_id: session_id.to_string(),
+            event,
+        });
+    }
+}
+
 /// Read lines from a byte stream using lossy UTF-8 conversion.
 /// Unlike `BufReader::lines()`, this never fails on invalid UTF-8 —
 /// invalid bytes are replaced with U+FFFD instead of crashing the reader.
@@ -204,14 +215,7 @@ fn emit_agent_event(
     session_id: &str,
     event: Value,
 ) -> Result<(), tauri::Error> {
-    let internal_events =
-        INTERNAL_AGENT_EVENTS.get_or_init(|| tokio::sync::broadcast::channel(256).0);
-    if internal_events.receiver_count() > 0 {
-        let _ = internal_events.send(InternalAgentEvent {
-            session_id: session_id.to_string(),
-            event: event.clone(),
-        });
-    }
+    broadcast_internal_agent_event(session_id, event.clone());
     app.emit(
         "agent_event",
         json!({
@@ -3934,6 +3938,13 @@ pub async fn pi_start_inner(
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
         {
+            broadcast_internal_agent_event(
+                &sid_clone,
+                json!({
+                    "type": "agent_terminated",
+                    "pid": pid,
+                }),
+            );
             // Stage 5 cleanup: legacy `pi_terminated` topic removed.
             // Consumers read from `agent_terminated` via the bus.
             let _ = app_handle.emit(
@@ -6309,6 +6320,29 @@ mod tests {
             !state.is_agent_active(),
             "terminal agent_end releases the queue"
         );
+    }
+
+    #[tokio::test]
+    async fn internal_agent_bus_receives_process_termination() {
+        let mut events = super::subscribe_internal_agent_events();
+        let session_id = format!("activity-test-session-{}", uuid::Uuid::new_v4());
+        super::broadcast_internal_agent_event(
+            &session_id,
+            json!({ "type": "agent_terminated", "pid": 42 }),
+        );
+
+        let envelope = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                let envelope = events.recv().await.unwrap();
+                if envelope.session_id == session_id {
+                    break envelope;
+                }
+            }
+        })
+        .await
+        .expect("process termination should reach the internal agent bus");
+        assert_eq!(envelope.event["type"], "agent_terminated");
+        assert_eq!(envelope.event["pid"], 42);
     }
 
     #[test]
