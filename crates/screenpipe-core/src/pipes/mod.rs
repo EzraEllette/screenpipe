@@ -9295,6 +9295,75 @@ mod tests {
     }
 
     #[test]
+    fn explicit_install_migrates_existing_meeting_speaker_rules_end_to_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let pipe_dir = dir.path().join("meeting-summary");
+        std::fs::create_dir_all(&pipe_dir).unwrap();
+        let bundled = BUNDLED_BUILTIN_PIPES
+            .iter()
+            .find_map(|(name, source)| (*name == "meeting-summary").then_some(*source))
+            .expect("meeting-summary should be bundled");
+        let naming_start = bundled
+            .find("step 2d — give every distinct speaker")
+            .expect("bundled naming step should start");
+        let naming_end = naming_start
+            + bundled[naming_start..]
+                .find("step 3 — write the summary")
+                .expect("bundled naming step should end");
+        let audio_shape = bundled
+            .lines()
+            .find(|line| line.starts_with("  - audio `content`:"))
+            .expect("bundled audio shape should exist");
+        let audio_render = bundled
+            .lines()
+            .find(|line| line.starts_with("  bun -e 'const d=await Bun.file(\"/tmp/audio.json\")"))
+            .expect("bundled audio renderer should exist");
+        let stale = format!(
+            "{}{}{}",
+            &bundled[..naming_start],
+            builtin_migrations::LEGACY_ACTIVE_SPEAKER_ONLY_MEETING_NAMING,
+            &bundled[naming_end..]
+        )
+        .replace(
+            audio_shape,
+            builtin_migrations::LEGACY_DEVICELESS_MEETING_AUDIO_SHAPE,
+        )
+        .replace(
+            audio_render,
+            builtin_migrations::LEGACY_DEVICELESS_MEETING_AUDIO_RENDER,
+        );
+        std::fs::write(pipe_dir.join("pipe.md"), stale).unwrap();
+        std::fs::write(
+            pipe_dir.join("memory.md"),
+            "# memory\n\n## Lessons\n- user note\n",
+        )
+        .unwrap();
+
+        assert!(!install_bundled_pipe(dir.path(), "meeting-summary").unwrap());
+
+        let installed = std::fs::read_to_string(pipe_dir.join("pipe.md")).unwrap();
+        assert!(installed.contains("`device_type` (`Input` or `Output`)"));
+        assert!(installed.contains(r#"id=${c.speaker?.id??"?"}"#));
+        assert!(installed.contains("deterministic call topology"));
+        assert!(installed.contains("`device_type=Input` rows as the local participant"));
+        assert!(installed.contains("never emit an unnamed, blank, `unknown`"));
+        assert!(!installed.contains("leave the speaker unnamed"));
+        assert!(!installed.contains("\n  jq "));
+        assert_eq!(
+            std::fs::read_to_string(pipe_dir.join("memory.md")).unwrap(),
+            "# memory\n\n## Lessons\n- user note\n"
+        );
+
+        // A second install is a no-op, proving startup-safe idempotence.
+        let once = installed.clone();
+        assert!(!install_bundled_pipe(dir.path(), "meeting-summary").unwrap());
+        assert_eq!(
+            std::fs::read_to_string(pipe_dir.join("pipe.md")).unwrap(),
+            once
+        );
+    }
+
+    #[test]
     fn speaker_reconciliation_bundle_is_preview_only_by_default() {
         let source = BUNDLED_BUILTIN_PIPES
             .iter()
