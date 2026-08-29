@@ -46,7 +46,6 @@ const MCP_OAUTH_PROVIDERS: Record<string, string> = {
   confluence: "https://mcp.atlassian.com/v1/mcp",
   jira: "https://mcp.atlassian.com/v1/mcp",
   notion: "https://mcp.notion.com/mcp",
-  littlebird: "https://mcp.littlebird.ai/mcp",
 };
 
 async function fetchConnections(signal?: AbortSignal): Promise<ConnectionItem[]> {

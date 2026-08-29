@@ -34,7 +34,6 @@ export const CONNECTION_CATEGORY_BY_ID: Record<string, string> = {
   ollama: "AI",
   lmstudio: "AI",
   msty: "AI",
-  littlebird: "AI",
   "custom-mcp": "AI",
 
   // Agent — autonomous agents & skills
@@ -201,7 +200,6 @@ export const CONNECTION_HARDCODED_DESCRIPTIONS: Record<string, string> = {
   "notion": "Search Notion pages with your screen context",
   "linear": "Search Linear issues from your screen context",
   "perplexity": "Search the web with Perplexity AI",
-  "littlebird": "Search your existing Littlebird memory during migration",
   "krisp": "Search Krisp meeting transcripts and notes",
   "plaud": "Search Plaud recordings and transcripts",
   "excalidraw": "Search and edit your Excalidraw+ whiteboards",
@@ -262,7 +260,6 @@ export const DEVICE_CONNECTION_ORDER = [
   "ollama",
   "lmstudio",
   "msty",
-  "littlebird",
   "krisp",
   // Plumbing last.
   "custom-mcp",
