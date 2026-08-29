@@ -1451,6 +1451,115 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
     });
   };
 
+  const handleArchiveAllRecents = async () => {
+    const store = useChatStore.getState();
+    const snapshots = recents.flatMap((recent) => {
+      const session = store.sessions[recent.id];
+      if (
+        !session ||
+        session.hidden ||
+        session.pinned ||
+        session.draft ||
+        isEmptyChatShell(session) ||
+        isMachineOnlyImportedConversation(session) ||
+        session.kind === "pipe-watch" ||
+        session.kind === "pipe-run"
+      ) {
+        return [];
+      }
+      return [
+        {
+          id: session.id,
+          wasCurrent: session.id === currentId,
+          wasOpen: store.openChatIds.includes(session.id),
+        },
+      ];
+    });
+    if (snapshots.length === 0) return;
+
+    // Apply the full visible-state transition before choosing a fallback so
+    // another recent chat cannot briefly become current while it is archived.
+    for (const { id } of snapshots) {
+      commands.piAbort(id).catch(() => {});
+      actions.patch(id, { hidden: true, pinned: false, unread: false });
+    }
+    setArchivedCollapsed(true);
+
+    const previousCurrent = snapshots.find(({ wasCurrent }) => wasCurrent);
+    const fallbackId =
+      previousCurrent && currentId
+        ? fallbackOpenChatId(useChatStore.getState(), currentId)
+        : null;
+    for (const { id } of snapshots) actions.closeChat(id);
+
+    if (previousCurrent) {
+      if (fallbackId) {
+        actions.setCurrent(fallbackId);
+        emit("chat-load-conversation", { conversationId: fallbackId });
+      } else {
+        const fresh = crypto.randomUUID();
+        actions.upsert({
+          id: fresh,
+          title: "untitled",
+          preview: "",
+          status: "idle",
+          messageCount: 0,
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+          pinned: false,
+          unread: false,
+          draft: true,
+          messages: [],
+        });
+        actions.setCurrent(fresh);
+        emit("chat-load-conversation", { conversationId: fresh });
+      }
+    }
+
+    await Promise.all(
+      snapshots.map(async ({ id }) => {
+        try {
+          await updateConversationFlags(id, { hidden: true, pinned: false });
+        } catch {
+          // The in-memory archive remains immediately useful.
+        }
+        try {
+          await emit("chat-visibility-changed", { id, hidden: true });
+        } catch {
+          // A later hydration pass can reconcile another window.
+        }
+      }),
+    );
+
+    showChatArchiveUndoToast({
+      count: snapshots.length,
+      onUndo: async () => {
+        for (const { id, wasOpen } of snapshots) {
+          actions.patch(id, { hidden: false, pinned: false, unread: false });
+          if (wasOpen) actions.openChat(id);
+        }
+        await Promise.all(
+          snapshots.map(async ({ id }) => {
+            try {
+              await updateConversationFlags(id, {
+                hidden: false,
+                pinned: false,
+              });
+            } catch {
+              // The in-memory restore still gives the user an immediate path back.
+            }
+            try {
+              await emit("chat-visibility-changed", { id, hidden: false });
+            } catch {
+              // ignore
+            }
+          }),
+        );
+        if (previousCurrent) await handleSelect(previousCurrent.id);
+      },
+    });
+  };
+
   const handleBranch = async (id: string) => {
     setOpenConversationMenuId(null);
     const executionMetadata = executionMetadataRef.current.get(id);
@@ -1756,6 +1865,18 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
                           </DropdownMenuShortcut>
                         </DropdownMenuRadioItem>
                       </DropdownMenuRadioGroup>
+                      <DropdownMenuSeparator />
+                      <DropdownMenuItem
+                        data-testid="archive-all-recent-chats"
+                        disabled={recents.length === 0}
+                        onSelect={() => void handleArchiveAllRecents()}
+                      >
+                        <Archive
+                          className="mr-2 h-3.5 w-3.5 text-muted-foreground"
+                          aria-hidden
+                        />
+                        Archive all recent chats
+                      </DropdownMenuItem>
                     </DropdownMenuContent>
                   </DropdownMenu>
                   <ContextMenu>
@@ -1829,6 +1950,18 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
                           </ContextMenuShortcut>
                         </ContextMenuRadioItem>
                       </ContextMenuRadioGroup>
+                      <ContextMenuSeparator />
+                      <ContextMenuItem
+                        data-testid="archive-all-recent-chats-context"
+                        disabled={recents.length === 0}
+                        onSelect={() => void handleArchiveAllRecents()}
+                      >
+                        <Archive
+                          className="mr-2 h-3.5 w-3.5 text-muted-foreground"
+                          aria-hidden
+                        />
+                        Archive all recent chats
+                      </ContextMenuItem>
                     </ContextMenuContent>
                   </ContextMenu>
                 </div>
