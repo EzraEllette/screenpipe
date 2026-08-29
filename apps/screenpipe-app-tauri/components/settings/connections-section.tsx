@@ -817,7 +817,7 @@ function tryInChat(tile: ConnectionTile) {
 }
 
 // Horizontal list row with description — used in the browse section
-function ListRow({ tile, selected, onClick, onTryInChat }: {
+export function ListRow({ tile, selected, onClick, onTryInChat }: {
   tile: ConnectionTile;
   selected: boolean;
   onClick: () => void;
@@ -845,7 +845,12 @@ function ListRow({ tile, selected, onClick, onTryInChat }: {
       <div className="flex flex-1 min-w-0 flex-col gap-1.5">
         <p className="text-sm font-semibold leading-tight text-foreground">{tile.name}</p>
         {tile.description && (
-          <p className="text-xs leading-snug text-muted-foreground truncate">{tile.description}</p>
+          <p
+            className="text-xs leading-snug text-muted-foreground line-clamp-2"
+            title={tile.description}
+          >
+            {tile.description}
+          </p>
         )}
       </div>
       <div className="relative h-7 w-7 shrink-0">
@@ -2270,9 +2275,10 @@ export function getOAuthFallbackMessage(
   return "Zendesk OAuth failed. Use advanced: connect with a token instead.";
 }
 
-function OAuthPanel({
+export function OAuthPanel({
   integrationId,
   integrationName,
+  description,
   supportsOAuthInstances,
   initialScopeVariant,
   onConnected,
@@ -2280,6 +2286,7 @@ function OAuthPanel({
 }: {
   integrationId: string;
   integrationName: string;
+  description?: string;
   supportsOAuthInstances: boolean;
   initialScopeVariant?: string | null;
   onConnected?: () => void;
@@ -2427,7 +2434,7 @@ function OAuthPanel({
   return (
     <div className="space-y-3">
       <p className="text-xs text-muted-foreground">
-        {panelCopy.description}
+        {description ?? panelCopy.description}
       </p>
       {connected && (
         <div className="space-y-2">
@@ -4362,6 +4369,7 @@ export function ConnectionsSection({
                 <OAuthPanel
                   integrationId={selectedIntegration.id}
                   integrationName={selectedIntegration.name}
+                  description={selectedIntegration.description}
                   supportsOAuthInstances={!!selectedIntegration.supports_oauth_instances}
                   initialScopeVariant={selectedScopeVariant}
                   onConnected={() => refreshIntegrationConnection(selectedIntegration.id, true)}
