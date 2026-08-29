@@ -165,7 +165,7 @@ const LEGACY_BEFORE_SAVING_ENDING: &str = r#"step 3 — before saving, write the
 if your summary is worth saving, append it to the meeting note (and refresh the title in the same call) via:
 
   curl -s -X PUT "http://localhost:3030/meetings/<MEETING_ID>" \
-    -H "Authorization: Bearer $SCREE..._KEY" \
+    -H "Authorization: Bearer $SCREENPIPE_API_KEY" \
     -H "Content-Type: application/json" \
     -d '{"title": "<NEW_TITLE_OR_OMIT>", "note": "<EXISTING_NOTE>\n\n## Summary\n<YOUR_SUMMARY>"}'
 
@@ -476,7 +476,7 @@ mod tests {
 if your summary is worth saving, append it to the meeting note (and refresh the title in the same call) via:
 
   curl -s -X PUT "http://localhost:3030/meetings/<MEETING_ID>" \
-    -H "Authorization: Bearer $SCREE..._KEY" \
+    -H "Authorization: Bearer $SCREENPIPE_API_KEY" \
     -H "Content-Type: application/json" \
     -d '{"title": "<NEW_TITLE_OR_OMIT>", "note": "<EXISTING_NOTE>\n\n## Summary\n<YOUR_SUMMARY>"}'
 
