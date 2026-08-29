@@ -886,7 +886,6 @@ export function StandaloneChat({
     attachedDocs,
     pendingDocs,
     clearConnectionChip,
-    refreshConnectionState,
     prefillSource,
     setPrefillContext,
     setPrefillFrameId,
@@ -980,6 +979,7 @@ export function StandaloneChat({
     startNewConversation,
     tryInChatStartNewRef,
     piSessionIdRef,
+    renderedMessagesRef: messagesRef,
     focusMessageById,
     openFilePreview,
   });

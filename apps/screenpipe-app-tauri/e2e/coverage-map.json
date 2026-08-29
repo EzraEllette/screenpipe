@@ -833,6 +833,27 @@
       "notes": "A real Tauri chat session keeps a short answer at the top of the message rail without exposing an interactive jump-to-latest control."
     },
     {
+      "spec": "chat-renderer-reload-hydration.spec.ts",
+      "platforms": [
+        "windows",
+        "macos",
+        "linux"
+      ],
+      "layers": [
+        "chat-ai",
+        "window-lifecycle",
+        "real-ui-e2e"
+      ],
+      "features": [
+        "chat",
+        "window-lifecycle"
+      ],
+      "criticality": "high",
+      "confidence": "strong",
+      "ux": "mixed",
+      "notes": "A real Tauri WebView loads two saved transcripts, survives a full renderer reload, switches between them repeatedly without refetching connections, then repeats the same-id route and proves both message rows remain rendered."
+    },
+    {
       "spec": "chat-jump-to-latest.spec.ts",
       "platforms": [
         "windows",

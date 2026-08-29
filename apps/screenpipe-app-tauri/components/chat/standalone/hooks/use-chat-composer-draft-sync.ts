@@ -15,7 +15,6 @@ interface UseChatComposerDraftSyncOptions {
   attachedDocs: ExtractedDoc[];
   pendingDocs: PendingDoc[];
   clearConnectionChip: () => void;
-  refreshConnectionState: () => void | Promise<void>;
   prefillSource: string;
   setPrefillContext: React.Dispatch<React.SetStateAction<string | null>>;
   setPrefillFrameId: React.Dispatch<React.SetStateAction<number | null>>;
@@ -29,7 +28,6 @@ export function useChatComposerDraftSync({
   attachedDocs,
   pendingDocs,
   clearConnectionChip,
-  refreshConnectionState,
   prefillSource,
   setPrefillContext,
   setPrefillFrameId,
@@ -71,10 +69,6 @@ export function useChatComposerDraftSync({
     setPrefillFrameId,
     setPrefillSource,
   ]);
-
-  useEffect(() => {
-    void refreshConnectionState();
-  }, [conversationId, refreshConnectionState]);
 
   useEffect(() => {
     if (!conversationId) return;

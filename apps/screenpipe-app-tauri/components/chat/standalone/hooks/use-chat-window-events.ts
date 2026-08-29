@@ -18,8 +18,8 @@ import { normalizeImageDataUrls } from "@/lib/chat/image-content";
 import type { ChatConversation } from "@/lib/hooks/use-settings";
 import type { AIPreset } from "@/lib/utils/tauri";
 import {
-  isEphemeralSideConversation,
   useChatStore,
+  type SessionRecord,
 } from "@/lib/stores/chat-store";
 import { useChatPrefillEvents } from "@/components/chat/standalone/hooks/use-chat-prefill-events";
 
@@ -255,8 +255,24 @@ interface UseChatConversationRoutingEventsOptions {
   startNewConversation: (conversationId?: string) => Promise<void>;
   tryInChatStartNewRef: React.MutableRefObject<(() => Promise<void> | void) | null>;
   piSessionIdRef: React.MutableRefObject<string>;
+  renderedMessagesRef: React.MutableRefObject<Message[]>;
   focusMessageById: (messageId: string) => void;
   openFilePreview: (path: string, previousMode?: "browser" | "hidden", targetConversationId?: string | null) => void;
+}
+
+export function hasRenderableConversationState(
+  session:
+    | Pick<SessionRecord, "hydratedAt" | "messageCount" | "messages">
+    | undefined,
+  renderedMessageCount: number,
+): boolean {
+  if (renderedMessageCount > 0) return true;
+  if (!session) return false;
+  return Boolean(
+    session.hydratedAt &&
+      session.messageCount === 0 &&
+      Array.isArray(session.messages),
+  );
 }
 
 export function useChatConversationRoutingEvents({
@@ -264,6 +280,7 @@ export function useChatConversationRoutingEvents({
   startNewConversation,
   tryInChatStartNewRef,
   piSessionIdRef,
+  renderedMessagesRef,
   focusMessageById,
   openFilePreview,
 }: UseChatConversationRoutingEventsOptions) {
@@ -275,9 +292,20 @@ export function useChatConversationRoutingEvents({
 
   const openConversationLocally = useCallback(async (convId: string) => {
     const { loadConversationFile } = await import("@/lib/chat-storage");
+    const state = useChatStore.getState();
+    const currentSession = state.sessions[convId];
 
-    if (convId === piSessionIdRef.current) {
-      useChatStore.getState().actions.setCurrent(convId);
+    // A renderer reload can restore the tab/sidebar metadata before the
+    // transcript. Do not treat matching ids as proof that the message pane is
+    // ready: doing so permanently strands a saved chat on the blank shell.
+    if (
+      convId === piSessionIdRef.current &&
+      hasRenderableConversationState(
+        currentSession,
+        renderedMessagesRef.current.length,
+      )
+    ) {
+      state.actions.setCurrent(convId);
       emit("chat-current-session", { id: convId });
       return;
     }
@@ -289,10 +317,7 @@ export function useChatConversationRoutingEvents({
     }
 
     const session = useChatStore.getState().sessions[convId];
-    if (
-      isEphemeralSideConversation(session) ||
-      (session?.messages && session.messages.length > 0)
-    ) {
+    if (session) {
       loadConversationRef.current({
         id: convId,
         title: session.title || "untitled",
@@ -305,7 +330,7 @@ export function useChatConversationRoutingEvents({
 
     await startNewConversationRef.current(convId);
     emit("chat-current-session", { id: convId });
-  }, [piSessionIdRef]);
+  }, [piSessionIdRef, renderedMessagesRef]);
 
   useEffect(() => {
     const unlisten = listen<ChatLoadConversationPayload>("chat-load-conversation", async (event) => {
