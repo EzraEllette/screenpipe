@@ -209,6 +209,29 @@ describe("ReplayStrip", () => {
     expect(container.querySelector("audio, video")).toBeNull();
   });
 
+  it("reserves a separate row for controls below the captured frame", async () => {
+    mocks.fetchFrameSamples.mockResolvedValue([
+      { frameId: 1, timestamp: transcriptAt },
+      { frameId: 2, timestamp: secondFrameAt },
+    ]);
+
+    renderReplayStrip();
+
+    await waitFor(() =>
+      expect(screen.getByTestId("replay-active-frame")).toHaveAttribute(
+        "data-frame-id",
+        "1",
+      ),
+    );
+
+    const viewport = screen.getByTestId("replay-frame-viewport");
+    const controls = screen.getByTestId("replay-controls");
+    expect(viewport.parentElement).toBe(controls.parentElement);
+    expect(viewport.className).toContain("flex-1");
+    expect(controls.className).toContain("shrink-0");
+    expect(controls.className).not.toContain("absolute");
+  });
+
   it("still shows the earliest frame when the cursor precedes the first capture", async () => {
     // Meeting bounds are padded (meeting_start can be minutes before the
     // first captured frame). Seeking to the very start must not blank the
