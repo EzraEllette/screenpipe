@@ -10,9 +10,9 @@ and layer declared in the manifest, weighted by confidence and criticality.
 
 - Manifest: `e2e/coverage-map.json`
 - Specs directory: `e2e/specs`
-- Mapped specs: 136
-- Declared test blocks: 390
-- Weighted coverage points: 311.1
+- Mapped specs: 137
+- Declared test blocks: 391
+- Weighted coverage points: 312.1
 
 Confidence weights: strong=1.0, partial=0.7, conditional=0.4, smoke=0.3.
 Criticality weights: high=1.0, medium=0.7, low=0.4.
@@ -23,9 +23,9 @@ can execute more runtime cases than this number shows.
 
 | Platform | Specs | Declared tests | Weighted points | Layers | Features | Critical score |
 | --- | --- | --- | --- | --- | --- | --- |
-| windows | 105 | 333 | 276.1 | 15 | 118 | 88% |
-| macos | 132 | 352 | 280.9 | 17 | 126 | 87% |
-| linux | 93 | 291 | 245.5 | 14 | 115 | 84% |
+| windows | 106 | 334 | 277.1 | 15 | 118 | 88% |
+| macos | 133 | 353 | 281.9 | 17 | 126 | 87% |
+| linux | 94 | 292 | 246.5 | 14 | 115 | 84% |
 
 ## Runtime Results
 
@@ -41,7 +41,7 @@ pass/fail/skip counts.
 | auth | - | 1 specs / 1 tests / 1.0 pts | - |
 | billing | 4 specs / 6 tests / 5.7 pts | 4 specs / 6 tests / 5.7 pts | 4 specs / 6 tests / 5.7 pts |
 | capture-ocr | 2 specs / 16 tests / 6.4 pts | 8 specs / 12 tests / 4.8 pts | 1 specs / 3 tests / 1.2 pts |
-| chat-ai | 36 specs / 83 tests / 67.3 pts | 50 specs / 112 tests / 86.8 pts | 34 specs / 82 tests / 66.8 pts |
+| chat-ai | 37 specs / 84 tests / 68.3 pts | 51 specs / 113 tests / 87.8 pts | 35 specs / 83 tests / 67.8 pts |
 | entitlement | - | 1 specs / 1 tests / 1.0 pts | - |
 | local-api | 28 specs / 117 tests / 98.0 pts | 37 specs / 110 tests / 93.5 pts | 23 specs / 85 tests / 76.2 pts |
 | notifications | 4 specs / 26 tests / 17.3 pts | 3 specs / 5 tests / 3.4 pts | 2 specs / 4 tests / 3.1 pts |
@@ -49,11 +49,11 @@ pass/fail/skip counts.
 | os-integration | 7 specs / 32 tests / 26.9 pts | 14 specs / 29 tests / 17.4 pts | 2 specs / 15 tests / 10.8 pts |
 | performance | 3 specs / 45 tests / 45.0 pts | 5 specs / 36 tests / 31.8 pts | 2 specs / 30 tests / 30.0 pts |
 | pipes | 6 specs / 20 tests / 20.0 pts | 8 specs / 26 tests / 26.0 pts | 6 specs / 20 tests / 20.0 pts |
-| real-ui-e2e | 78 specs / 231 tests / 194.9 pts | 94 specs / 245 tests / 205.9 pts | 72 specs / 207 tests / 180.9 pts |
+| real-ui-e2e | 79 specs / 232 tests / 195.9 pts | 95 specs / 246 tests / 206.9 pts | 73 specs / 208 tests / 181.9 pts |
 | settings | 15 specs / 42 tests / 39.0 pts | 17 specs / 36 tests / 31.7 pts | 14 specs / 33 tests / 30.0 pts |
 | storage-privacy | 10 specs / 44 tests / 35.3 pts | 10 specs / 29 tests / 28.1 pts | 7 specs / 22 tests / 21.1 pts |
 | tauri-command | 22 specs / 60 tests / 46.9 pts | 32 specs / 78 tests / 60.3 pts | 21 specs / 61 tests / 47.8 pts |
-| window-lifecycle | 21 specs / 69 tests / 57.5 pts | 21 specs / 49 tests / 34.9 pts | 15 specs / 42 tests / 32.4 pts |
+| window-lifecycle | 22 specs / 70 tests / 58.5 pts | 22 specs / 50 tests / 35.9 pts | 16 specs / 43 tests / 33.4 pts |
 
 ## Critical Feature Matrix
 
