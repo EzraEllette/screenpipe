@@ -1274,6 +1274,10 @@ export function StandaloneChat({
     (window as any).__e2eReadChatSession = (id: string) => {
       const session = useChatStore.getState().sessions[id];
       if (!session) return null;
+      const sessionMessages = (session.messages ?? []) as Array<{
+        id?: string;
+        content?: unknown;
+      }>;
       return {
         id: session.id,
         ephemeral: session.ephemeral === true,
@@ -1281,6 +1285,8 @@ export function StandaloneChat({
         sideConversationParentId: session.sideConversationParentId ?? null,
         draft: session.draft === true,
         messageCount: session.messageCount,
+        messageIds: sessionMessages.map((message) => message.id),
+        messageContents: sessionMessages.map((message) => message.content),
       };
     };
   }

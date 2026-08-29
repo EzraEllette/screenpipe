@@ -1035,6 +1035,29 @@
       "notes": "The real new-chat shortcut opens a fresh chat from non-empty conversations and reuses one blank chat when pressed repeatedly."
     },
     {
+      "spec": "chat-overlapping-switch-isolation.spec.ts",
+      "platforms": [
+        "windows",
+        "macos",
+        "linux"
+      ],
+      "layers": [
+        "chat-ai",
+        "real-ui-e2e",
+        "window-lifecycle"
+      ],
+      "features": [
+        "chat",
+        "chat-context",
+        "chat-navigation",
+        "chat-session-activity"
+      ],
+      "criticality": "high",
+      "confidence": "strong",
+      "ux": "mixed",
+      "notes": "Two native chat-load events overlap while the Home panel still renders the outgoing transcript; the newest navigation wins and reopening plus persisting the intermediate chat preserves its own title, identity, and message ids."
+    },
+    {
       "spec": "chat-parallel-jobs-duplicate.spec.ts",
       "platforms": [
         "windows",

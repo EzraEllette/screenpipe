@@ -207,6 +207,10 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
   // Run migration from store.bin on mount, then load conversations from files
   const migrationDoneRef = useRef(false);
   const historyRequestRef = useRef(0);
+  // Conversation loads can overlap when two tab/sidebar events arrive before
+  // the first disk read finishes. Only the newest navigation may commit panel
+  // state; older loads may otherwise finish last and move the UI backwards.
+  const loadConversationRequestRef = useRef(0);
   const lastHistoryQueryRef = useRef<string | null>(null);
   const [historyReady, setHistoryReady] = useState(false);
   const historyRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1244,7 +1248,11 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
   //      tokens). Fall back to disk only when the store is cold for
   //      this id.
   const loadConversation = async (conv: ChatConversation | ConversationMeta) => {
+    const requestId = ++loadConversationRequestRef.current;
+    const isLatestRequest = () =>
+      loadConversationRequestRef.current === requestId;
     const { useChatStore } = await import("@/lib/stores/chat-store");
+    if (!isLatestRequest()) return;
     const store = useChatStore.getState();
 
     // Closing a temporary side chat leaves a session-lifetime tombstone. A
@@ -1257,7 +1265,13 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
       return;
     }
 
-    const outgoingSid = piSessionIdRef.current;
+    // `piSessionIdRef` moves eagerly to the requested chat, while React's
+    // `messages` and `conversationId` still describe the rendered chat until
+    // the load commits. A second load in that window must snapshot the panel
+    // under the rendered id, not the first request's eager ref.
+    const outgoingSid =
+      currentConversationIdRef.current || piSessionIdRef.current;
+    const outgoingMessages = currentMessagesRef.current;
     const viewedAt = Date.now();
 
     // (1) Snapshot OUTGOING session — atomic so router writes that
@@ -1272,7 +1286,7 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
       const outgoingKind = store.sessions[outgoingSid].kind;
       if (outgoingKind !== "pipe-watch") {
         store.actions.snapshotSession(outgoingSid, {
-          messages: messages as any,
+          messages: outgoingMessages as any,
           streamingText: piStreamingTextRef.current,
           streamingMessageId: piMessageIdRef.current,
           contentBlocks: [...piContentBlocksRef.current],
@@ -1356,7 +1370,9 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
 
     if (needsPersistedSync) {
       const { loadConversationFile } = await import("@/lib/chat-storage");
+      if (!isLatestRequest()) return;
       persisted = await loadConversationFile(conv.id);
+      if (!isLatestRequest()) return;
       // Seed the prior ACP session id so the first cold-start spawn for this
       // reopened chat reattaches (session/resume) instead of starting fresh.
       const priorAcpSessionId =
@@ -1545,6 +1561,11 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
       }
     }
 
+    // A newer tab/sidebar event arrived while this request was reading disk or
+    // updating metadata. Its eager session ref already owns the foreground;
+    // do not let this older request overwrite the panel when it resumes.
+    if (!isLatestRequest()) return;
+
     setMessages(messagesForPanel);
     setConversationId(conv.id);
     setShowHistory(false);
@@ -1577,8 +1598,11 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
     if (!isEphemeralSideChat) {
       try {
         const { getStore } = await import("@/lib/hooks/use-settings");
+        if (!isLatestRequest()) return;
         const store = await getStore();
+        if (!isLatestRequest()) return;
         const freshSettings = await store.get<any>("settings");
+        if (!isLatestRequest()) return;
         if (freshSettings?.chatHistory) {
           await store.set("settings", {
             ...freshSettings,
@@ -1587,6 +1611,7 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
               activeConversationId: conv.id,
             }
           });
+          if (!isLatestRequest()) return;
           await store.save();
         }
       } catch (e) {
@@ -1597,7 +1622,7 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
     // Emit the preset ID so the chat panel can restore the model selection.
     // This ensures the model selector reflects the preset used in this chat.
     const presetId = persisted?.presetId ?? (conv as ChatConversation).presetId;
-    if (presetId) {
+    if (presetId && isLatestRequest()) {
       try {
         await emit("chat-preset-restore", { presetId });
       } catch {

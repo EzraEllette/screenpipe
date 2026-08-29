@@ -83,6 +83,7 @@ vi.mock("@/lib/chat-storage", () => ({
   searchConversations: vi.fn(async () => []),
   migrateFromStoreBin: vi.fn(async () => undefined),
   conversationDedupIdentity: vi.fn(() => null),
+  updateConversationFlags: vi.fn(async () => undefined),
   CHAT_HISTORY_INITIAL_LIMIT: 50,
 }));
 
@@ -105,7 +106,7 @@ vi.mock("@/lib/hooks/use-settings", () => ({
 
 // ── Import under test (after mocks) ───────────────────────────────────
 import { useChatConversations } from "../../components/hooks/use-chat-conversations";
-import { loadConversationFile } from "@/lib/chat-storage";
+import { loadConversationFile, updateConversationFlags } from "@/lib/chat-storage";
 import { useChatStore } from "../stores/chat-store";
 
 // Test harness: thin component that wires up the refs/state the hook
@@ -169,6 +170,7 @@ beforeEach(() => {
     currentId: null,
     panelSessionId: null,
   });
+  vi.mocked(updateConversationFlags).mockResolvedValue(undefined);
 });
 
 afterEach(() => {
@@ -548,5 +550,92 @@ describe("saveConversation race (PR #3600 / issue #3636 candidate)", () => {
     expect(saveCalls).toHaveLength(1);
     expect(saveCalls[0].id).toBe("turn-1");
     expect(new Set(saveCalls.map((c) => c.id)).size).toBe(1);
+  });
+
+  it("keeps the rendered transcript isolated and lets the newest overlapping load win", async () => {
+    const messagesA = [
+      { id: "a-user", role: "user" as const, content: "chat A", timestamp: 1 },
+      { id: "a-agent", role: "assistant" as const, content: "answer A", timestamp: 2 },
+    ];
+    const messagesB = [
+      { id: "b-user", role: "user" as const, content: "chat B", timestamp: 3 },
+    ];
+    const messagesC = [
+      { id: "c-user", role: "user" as const, content: "chat C", timestamp: 4 },
+    ];
+    const seedSession = (id: string, title: string, sessionMessages: any[]) => {
+      useChatStore.getState().actions.upsert({
+        id,
+        title,
+        titleSource: "user",
+        preview: "",
+        status: "idle",
+        messageCount: sessionMessages.length,
+        messages: sessionMessages,
+        createdAt: 1,
+        updatedAt: 4,
+        pinned: false,
+        unread: false,
+      });
+      useChatStore.getState().actions.markHydrated(id);
+    };
+    seedSession("chat-A", "A", messagesA);
+    seedSession("chat-B", "B", messagesB);
+    seedSession("chat-C", "C", messagesC);
+    useChatStore.getState().actions.setCurrent("chat-A");
+
+    let releaseChatB!: () => void;
+    const chatBGate = new Promise<void>((resolve) => {
+      releaseChatB = resolve;
+    });
+    vi.mocked(updateConversationFlags).mockImplementation(async (id) => {
+      if (id === "chat-B") await chatBGate;
+    });
+
+    const { result } = renderHook(() =>
+      useHarness({
+        initialMessages: messagesA,
+        initialConversationId: "chat-A",
+        initialPiSessionId: "chat-A",
+      }),
+    );
+
+    const loadB = result.current.hook.loadConversation({
+      id: "chat-B",
+      title: "B",
+      titleSource: "user",
+      createdAt: 1,
+      updatedAt: 3,
+      messages: messagesB,
+    } as any);
+    await vi.waitFor(() =>
+      expect(updateConversationFlags).toHaveBeenCalledWith(
+        "chat-B",
+        expect.objectContaining({ lastViewedAt: expect.any(Number) }),
+      ),
+    );
+
+    // B has moved the eager Pi ref and is paused before its React commit. A
+    // second request must still bind the rendered A messages to chat A, and C
+    // must remain foreground even when B finishes last.
+    await act(async () => {
+      await result.current.hook.loadConversation({
+        id: "chat-C",
+        title: "C",
+        titleSource: "user",
+        createdAt: 1,
+        updatedAt: 4,
+        messages: messagesC,
+      } as any);
+    });
+    releaseChatB();
+    await act(async () => {
+      await loadB;
+    });
+
+    expect(useChatStore.getState().sessions["chat-B"].messages).toEqual(messagesB);
+    expect(result.current.messagesRef.current).toEqual(messagesC);
+    expect(result.current.conversationIdRef.current).toBe("chat-C");
+    expect(result.current.piSessionIdRef.current).toBe("chat-C");
   });
 });
