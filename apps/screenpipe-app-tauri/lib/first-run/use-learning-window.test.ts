@@ -39,6 +39,7 @@ function nativeStatus(
       firstRunSummaryChatId: chatId,
       firstRunSummaryNotificationSentAt: null,
       firstRunSummaryError: null,
+      firstRunSummaryTelemetryVersion: 2,
     },
   };
 }
@@ -78,9 +79,9 @@ describe("native first-run summary projection", () => {
 
     await waitFor(() => expect(result.current.phase).toBe("ready"));
     expect(result.current.chatId).toBe("first-run-native-chat");
-    expect(mocks.capture).toHaveBeenCalledWith(
+    expect(mocks.capture).not.toHaveBeenCalledWith(
       "first_run_learning_resolved",
-      { summary_source: "ai", owner: "native" },
+      expect.anything(),
     );
   });
 });

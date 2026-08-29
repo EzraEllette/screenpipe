@@ -60,6 +60,7 @@ export const useOnboarding = create<OnboardingState>((set, get) => ({
     firstRunSummaryNotificationSentAt: null,
     firstRunSummaryNotificationId: null,
     firstRunSummaryError: null,
+    firstRunSummaryTelemetryVersion: 0,
   },
   isLoading: true,
   error: null,

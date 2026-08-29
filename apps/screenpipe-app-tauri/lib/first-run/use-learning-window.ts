@@ -4,7 +4,7 @@
 
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import posthog from "posthog-js";
 
@@ -53,8 +53,6 @@ export function useLearningWindow(
   const [remainingMs, setRemainingMs] = useState(() =>
     learningWindowRemainingMs(readLearningWindow().startedAt),
   );
-  const lastStartedAt = useRef<string | null>(null);
-  const lastReadyChatId = useRef<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -69,10 +67,6 @@ export function useLearningWindow(
         const stored = readLearningWindow();
         if (stored.startedAt !== startedAt || stored.phase === "idle" || stored.phase === "writing") {
           setState(beginLearningWindow(startedAt, true));
-          if (lastStartedAt.current !== startedAt) {
-            lastStartedAt.current = startedAt;
-            posthog.capture("first_run_learning_started", { opening: "native" });
-          }
         }
         return;
       }
@@ -91,13 +85,6 @@ export function useLearningWindow(
           (stored.phase !== "done" && stored.phase !== "ready")
         ) {
           setState(markLearningReady(native.firstRunSummaryChatId));
-        }
-        if (lastReadyChatId.current !== native.firstRunSummaryChatId) {
-          lastReadyChatId.current = native.firstRunSummaryChatId;
-          posthog.capture("first_run_learning_resolved", {
-            summary_source: "ai",
-            owner: "native",
-          });
         }
         return;
       }

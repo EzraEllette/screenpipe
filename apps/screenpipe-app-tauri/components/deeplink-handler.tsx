@@ -35,6 +35,7 @@ import {
   markLearningSummaryOpened,
   readLearningWindow,
 } from "@/lib/first-run/learning-window";
+import { trackFirstRunSummaryNotificationOpened } from "@/lib/first-run/telemetry";
 import {
   artifactOpenRequestFromUrl,
   OPEN_BRAIN_ARTIFACT_EVENT,
@@ -122,6 +123,7 @@ export function DeeplinkHandler() {
         posthog.capture("first_run_summary_opened", {
           source: "notification",
         });
+        trackFirstRunSummaryNotificationOpened();
         return;
       }
 

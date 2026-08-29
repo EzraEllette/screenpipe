@@ -999,6 +999,8 @@ pub struct OnboardingStore {
     pub first_run_summary_notification_id: Option<String>,
     #[serde(rename = "firstRunSummaryError", default)]
     pub first_run_summary_error: Option<String>,
+    #[serde(rename = "firstRunSummaryTelemetryVersion", default)]
+    pub first_run_summary_telemetry_version: u8,
 }
 
 impl Default for OnboardingStore {
@@ -1013,6 +1015,7 @@ impl Default for OnboardingStore {
             first_run_summary_notification_sent_at: None,
             first_run_summary_notification_id: None,
             first_run_summary_error: None,
+            first_run_summary_telemetry_version: 0,
         }
     }
 }
@@ -1083,6 +1086,7 @@ impl OnboardingStore {
         self.first_run_summary_notification_sent_at = None;
         self.first_run_summary_notification_id = None;
         self.first_run_summary_error = None;
+        self.first_run_summary_telemetry_version = 0;
     }
 }
 
