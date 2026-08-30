@@ -1978,12 +1978,20 @@ async fn main() {
                                             format!("Bearer {}", key),
                                         );
                                     }
-                                    request.send().await.is_ok()
+                                    let response = match request.send().await {
+                                        Ok(response) => response,
+                                        Err(_) => return false,
+                                    };
+                                    let status = response.status().as_u16();
+                                    match response.json::<serde_json::Value>().await {
+                                        Ok(payload) => screenpipe_engine::health_identity::is_screenpipe_health_response(status, &payload),
+                                        Err(_) => false,
+                                    }
                                 }
                             ).await.unwrap_or(false);
 
                             if server_running {
-                                info!("Server already running, skipping startup");
+                                info!("Healthy screenpipe server already running, skipping startup");
                                 is_starting_clone.store(false, std::sync::atomic::Ordering::SeqCst);
                                 return;
                             }

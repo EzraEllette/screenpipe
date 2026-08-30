@@ -240,14 +240,9 @@ pub struct RecordingState {
     pub capture: Arc<Mutex<Option<CaptureSession>>>,
     /// True while a server start is in progress (prevents race between main.rs boot and frontend)
     pub is_starting: Arc<AtomicBool>,
-    /// True while a `start_capture` invocation is in flight. The frontend
-    /// mounts `<DeeplinkHandler />` in every webview window, and the tray
-    /// emits `shortcut-start-recording` app-wide — every listening window
-    /// fires `commands.startCapture()` simultaneously. Without this guard,
-    /// concurrent calls both pass the is_some() check, both build a
-    /// CaptureSession, and the second clobbers the first — dropping the
-    /// first runs its shutdown handlers and tears down workers shared with
-    /// the second, surfacing as a PoolClosed cascade and lost audio chunks.
+    /// True while the caller holding `capture` is building a capture session.
+    /// Duplicate app-wide start requests wait on that mutex, then observe the
+    /// installed session instead of starting another one.
     pub is_starting_capture: Arc<AtomicBool>,
     /// Epoch seconds of last successful spawn — enforces cooldown between restarts
     pub last_spawn_epoch: Arc<AtomicU64>,
@@ -635,21 +630,33 @@ async fn probe_server_health(health_url: &str, api_key: Option<&str>) -> bool {
         if let Some(key) = api_key {
             req = req.header("Authorization", format!("Bearer {}", key));
         }
-        match req.send().await {
-            Ok(r) if r.status().is_success() => return true,
-            _ => {
-                warn!(
-                    "health probe {} failed (timeout {}s), {}",
-                    health_url,
-                    timeout_secs,
-                    if timeout_secs == 2 {
-                        "retrying once before declaring the server dead"
-                    } else {
-                        "server considered dead"
-                    }
-                );
+        let healthy = match req.send().await {
+            Ok(r) => {
+                let status = r.status().as_u16();
+                r.json::<serde_json::Value>()
+                    .await
+                    .map(|payload| {
+                        screenpipe_engine::health_identity::is_screenpipe_health_response(
+                            status, &payload,
+                        )
+                    })
+                    .unwrap_or(false)
             }
+            Err(_) => false,
+        };
+        if healthy {
+            return true;
         }
+        warn!(
+            "health probe {} failed identity check (timeout {}s), {}",
+            health_url,
+            timeout_secs,
+            if timeout_secs == 2 {
+                "retrying once before declaring the server dead"
+            } else {
+                "server considered dead"
+            }
+        );
     }
     false
 }
@@ -670,20 +677,21 @@ pub async fn start_capture(
     // of treating the absence of capture as a deliberate stop.
     state.set_capture_intent(true);
 
-    // Race guard: short-circuit duplicate invocations.
+    // Serialize duplicate invocations on the capture slot.
     //
     // `<DeeplinkHandler />` is mounted in every non-overlay webview, and the
     // tray emits `shortcut-start-recording` app-wide — every listening window
-    // fires `commands.startCapture()` simultaneously. Without this guard, two
-    // concurrent calls both pass the `is_some()` check, both build a
-    // CaptureSession (~290ms), and the second clobbers the first. Dropping
-    // the first runs its shutdown handlers, which tear down workers shared
-    // with the second — surfacing as a PoolClosed cascade and silently lost
-    // audio chunks.
-    if state.is_starting_capture.swap(true, Ordering::SeqCst) {
-        info!("Capture start already in progress, skipping duplicate");
+    // fires `commands.startCapture()` simultaneously. Holding this lock through
+    // the session build makes later calls wait for the winning call. On success
+    // they observe the installed session and return success only after capture
+    // is actually running, so their webviews cannot toast success prematurely.
+    let mut capture_guard = state.capture.lock().await;
+    if capture_guard.is_some() {
+        info!("Capture session already running");
         return Ok(());
     }
+
+    state.is_starting_capture.store(true, Ordering::SeqCst);
     struct ResetGuard<'a>(&'a AtomicBool);
     impl Drop for ResetGuard<'_> {
         fn drop(&mut self) {
@@ -691,15 +699,6 @@ pub async fn start_capture(
         }
     }
     let _reset = ResetGuard(&state.is_starting_capture);
-
-    // Hold the capture lock from the is_some check through the assign so a
-    // concurrent `start_capture_internal` (called from spawn_screenpipe's
-    // existing-server path, not gated by is_starting_capture) can't race us.
-    let mut capture_guard = state.capture.lock().await;
-    if capture_guard.is_some() {
-        info!("Capture session already running");
-        return Ok(());
-    }
 
     // `state.server.is_some()` only means ServerCore was constructed once; it
     // does NOT mean the HTTP serve task is still alive. Long-running sessions
@@ -709,7 +708,9 @@ pub async fn start_capture(
     let (port, api_key) = {
         let server_guard = state.server.lock().await;
         let Some(ref core) = *server_guard else {
-            return Err("Server not running — cannot start capture".to_string());
+            warn!("Server not running — requesting full restart");
+            let _ = app.emit("request-server-restart", ());
+            return Err("Server not running — full restart requested".to_string());
         };
         (core.port, core.local_api_key.clone())
     };

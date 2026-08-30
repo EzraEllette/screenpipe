@@ -83,8 +83,11 @@ async fn probe_health(port: u16) -> (Option<Value>, Option<String>) {
         Err(error) => return (None, Some(format!("health check failed: {error}"))),
     };
 
+    let status = response.status().as_u16();
     match response.json::<Value>().await {
-        Ok(payload) if is_screenpipe_health(&payload) => (Some(payload), None),
+        Ok(payload) if crate::health_identity::is_screenpipe_health_response(status, &payload) => {
+            (Some(payload), None)
+        }
         Ok(_) => (
             None,
             Some(format!(
@@ -98,13 +101,6 @@ async fn probe_health(port: u16) -> (Option<Value>, Option<String>) {
             )),
         ),
     }
-}
-
-fn is_screenpipe_health(payload: &Value) -> bool {
-    payload.get("status").and_then(Value::as_str).is_some()
-        && (payload.get("frame_status").is_some()
-            || payload.get("audio_status").is_some()
-            || payload.get("version").is_some())
 }
 
 async fn read_database_stats(db_path: &Path) -> DatabaseStats {
@@ -674,11 +670,18 @@ mod tests {
 
     #[test]
     fn screenpipe_health_requires_capture_specific_fields() {
-        assert!(!is_screenpipe_health(&json!({ "status": "ok" })));
-        assert!(is_screenpipe_health(&json!({
-            "status": "healthy",
-            "frame_status": "ok"
-        })));
+        assert!(!crate::health_identity::is_screenpipe_health_response(
+            200,
+            &json!({ "status": "ok" }),
+        ));
+        assert!(crate::health_identity::is_screenpipe_health_response(
+            200,
+            &json!({
+                "status": "healthy",
+                "frame_status": "ok",
+                "audio_status": "ok",
+            }),
+        ));
     }
 
     #[test]

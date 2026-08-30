@@ -580,7 +580,16 @@ export function DeeplinkHandler() {
       }),
 
       listen("shortcut-start-recording", async () => {
-        await commands.startCapture();
+        const result = await commands.startCapture();
+
+        if (result.status === "error") {
+          toast({
+            title: "recording could not start",
+            description: result.error,
+            variant: "destructive",
+          });
+          return;
+        }
 
         toast({
           title: "recording started",
