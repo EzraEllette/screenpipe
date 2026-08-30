@@ -1763,6 +1763,8 @@ export function BrainOverview({
           ? { id: reference.id, revision: reference.revision }
           : null,
         targetBlockId: target.scope === "block" ? target.block.id : null,
+        replaceExisting:
+          target.scope === "dashboard" && target.operation === "replace",
         signal: controller.signal,
         onPhase: (phase) =>
           setBuilderFeedback({

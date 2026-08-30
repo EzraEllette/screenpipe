@@ -347,6 +347,51 @@ describe("parseGeneratedLiveView", () => {
       ),
     ).toThrow("targeted Live View changes");
   });
+
+  it("accepts a complete Block list for an explicit replacement", () => {
+    const result = parseGeneratedLiveView(
+      {
+        title: "Replacement",
+        timeRange: "7d",
+        blocks: [
+          {
+            id: "new-focus",
+            title: "New focus",
+            intent: "Show the replacement focus view.",
+            component: "table.v1",
+            width: 12,
+          },
+        ],
+        note: "Replaces the dashboard with a focused table.",
+      },
+      [],
+      "dashboard",
+      {
+        title: "Existing",
+        timeRange: "today",
+        blocks: [
+          {
+            id: "old-focus",
+            title: "Old focus",
+            intent: "Show the old focus view.",
+            component: "metric.v1",
+            width: 6,
+            pipeName: null,
+          },
+        ],
+      },
+      null,
+      true,
+    );
+
+    expect(result).toEqual(
+      expect.objectContaining({
+        title: "Replacement",
+        timeRange: "7d",
+        blocks: [expect.objectContaining({ id: "new-focus" })],
+      }),
+    );
+  });
 });
 
 describe("buildLiveViewGenerationPrompt", () => {
@@ -369,6 +414,23 @@ describe("buildLiveViewGenerationPrompt", () => {
     expect(prompt).not.toContain("Current Live View:\n{");
     // The reference is an id and revision, never the view's Block list.
     expect(prompt).not.toContain('"blocks":[');
+  });
+
+  it("asks for a complete Block list when replacing a dashboard", () => {
+    const prompt = buildLiveViewGenerationPrompt({
+      prompt: "replace this with a weekly review",
+      scope: "dashboard",
+      preset: {} as any,
+      userToken: null,
+      pipes: [],
+      currentViewRef: { id: "daily", revision: 7 },
+      replaceExisting: true,
+    });
+
+    expect(prompt).toContain("complete replacement Live View");
+    expect(prompt).toContain("complete new Block list in blocks, not operations");
+    expect(prompt).not.toContain("Do not restate, remove, or update unrelated Blocks");
+    expect(prompt).not.toContain("action=values");
   });
 
   it("looks installed scheduled tasks up on demand instead of injecting them", () => {
