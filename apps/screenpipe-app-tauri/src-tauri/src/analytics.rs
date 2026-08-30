@@ -210,7 +210,12 @@ impl AnalyticsManager {
                     "os_name": os_name,
                     "os_version": os_version,
                 },
-                "$set_once": {},
+                // A successful desktop launch is direct evidence that this is a
+                // real Screenpipe user. Set it once so a server-side fraud
+                // decision (`bot`) always remains authoritative.
+                "$set_once": {
+                    "screenpipe_user_type": "real",
+                },
             },
         });
 
