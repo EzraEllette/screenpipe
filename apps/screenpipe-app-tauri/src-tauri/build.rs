@@ -528,6 +528,7 @@ const E2E_COMMANDS: &[&str] = &[
     "low_disk_guard_enabled",
     "set_tray_recording_status",
     "installed_tray_recording_status",
+    "trigger_tray_recording_toggle",
     "shortcut_reminder_visible",
     "open_auto_meeting",
     "simulate_calendar_meeting_match",

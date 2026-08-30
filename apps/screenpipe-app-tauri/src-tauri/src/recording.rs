@@ -680,7 +680,7 @@ pub async fn start_capture(
     // Serialize duplicate invocations on the capture slot.
     //
     // `<DeeplinkHandler />` is mounted in every non-overlay webview, and the
-    // tray emits `shortcut-start-recording` app-wide — every listening window
+    // global shortcut emits `shortcut-start-recording` app-wide — every listening window
     // fires `commands.startCapture()` simultaneously. Holding this lock through
     // the session build makes later calls wait for the winning call. On success
     // they observe the installed session and return success only after capture

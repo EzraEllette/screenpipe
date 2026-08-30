@@ -269,6 +269,19 @@
       ]
     },
     {
+      "id": "tray-recording-toggle",
+      "label": "Native tray recording pause and resume",
+      "platforms": [
+        "windows",
+        "macos",
+        "linux"
+      ],
+      "layers": [
+        "os-integration",
+        "capture-ocr"
+      ]
+    },
+    {
       "id": "storage-retention",
       "label": "Storage retention safety UX",
       "platforms": [
@@ -2773,6 +2786,24 @@
       "confidence": "strong",
       "ux": "command",
       "notes": "Drives Starting to Recording and reads back the status item from the successfully installed native tray menu."
+    },
+    {
+      "spec": "tray-recording-toggle.spec.ts",
+      "platforms": [
+        "macos"
+      ],
+      "layers": [
+        "os-integration",
+        "tauri-command",
+        "capture-ocr"
+      ],
+      "features": [
+        "tray-recording-toggle"
+      ],
+      "criticality": "high",
+      "confidence": "strong",
+      "ux": "command",
+      "notes": "Runs the tray's shared native action and proves a real CaptureSession pauses and resumes without the frontend shortcut-event path."
     },
     {
       "spec": "tray-search.spec.ts",

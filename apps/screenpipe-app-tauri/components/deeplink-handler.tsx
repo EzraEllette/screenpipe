@@ -606,6 +606,19 @@ export function DeeplinkHandler() {
         });
       }),
 
+      // The native tray owns the capture action. This event only mirrors the
+      // completed state into any mounted UI; it must never be required for the
+      // tray click itself to work.
+      listen<string>("tray-recording-state-changed", (event) => {
+        const started = event.payload === "started";
+        toast({
+          title: started ? "recording started" : "recording paused",
+          description: started
+            ? "screen recording has been initiated"
+            : "capture paused — scheduled tasks and search still available",
+        });
+      }),
+
       listen("shortcut-start-audio", async () => {
         await commands.stopScreenpipe();
         await commands.spawnScreenpipe(null);

@@ -10,9 +10,9 @@ and layer declared in the manifest, weighted by confidence and criticality.
 
 - Manifest: `e2e/coverage-map.json`
 - Specs directory: `e2e/specs`
-- Mapped specs: 137
-- Declared test blocks: 394
-- Weighted coverage points: 315.1
+- Mapped specs: 138
+- Declared test blocks: 395
+- Weighted coverage points: 316.1
 
 Confidence weights: strong=1.0, partial=0.7, conditional=0.4, smoke=0.3.
 Criticality weights: high=1.0, medium=0.7, low=0.4.
@@ -23,9 +23,9 @@ can execute more runtime cases than this number shows.
 
 | Platform | Specs | Declared tests | Weighted points | Layers | Features | Critical score |
 | --- | --- | --- | --- | --- | --- | --- |
-| windows | 106 | 337 | 280.1 | 15 | 120 | 88% |
-| macos | 133 | 356 | 284.9 | 17 | 128 | 87% |
-| linux | 94 | 295 | 249.5 | 14 | 117 | 84% |
+| windows | 106 | 337 | 280.1 | 15 | 120 | 85% |
+| macos | 134 | 357 | 285.9 | 17 | 129 | 87% |
+| linux | 94 | 295 | 249.5 | 14 | 117 | 80% |
 
 ## Runtime Results
 
@@ -40,19 +40,19 @@ pass/fail/skip counts.
 | audio-device | 4 specs / 32 tests / 21.8 pts | 4 specs / 6 tests / 2.9 pts | - |
 | auth | - | 1 specs / 1 tests / 1.0 pts | - |
 | billing | 4 specs / 6 tests / 5.7 pts | 4 specs / 6 tests / 5.7 pts | 4 specs / 6 tests / 5.7 pts |
-| capture-ocr | 2 specs / 16 tests / 6.4 pts | 8 specs / 12 tests / 4.8 pts | 1 specs / 3 tests / 1.2 pts |
+| capture-ocr | 2 specs / 16 tests / 6.4 pts | 9 specs / 13 tests / 5.8 pts | 1 specs / 3 tests / 1.2 pts |
 | chat-ai | 37 specs / 87 tests / 71.3 pts | 51 specs / 116 tests / 90.8 pts | 35 specs / 86 tests / 70.8 pts |
 | entitlement | - | 1 specs / 1 tests / 1.0 pts | - |
 | local-api | 28 specs / 117 tests / 98.0 pts | 37 specs / 110 tests / 93.5 pts | 23 specs / 85 tests / 76.2 pts |
 | notifications | 4 specs / 26 tests / 17.3 pts | 3 specs / 5 tests / 3.4 pts | 2 specs / 4 tests / 3.1 pts |
 | onboarding | 9 specs / 38 tests / 33.8 pts | 11 specs / 42 tests / 37.2 pts | 9 specs / 38 tests / 33.8 pts |
-| os-integration | 7 specs / 32 tests / 26.9 pts | 14 specs / 29 tests / 17.4 pts | 2 specs / 15 tests / 10.8 pts |
+| os-integration | 7 specs / 32 tests / 26.9 pts | 15 specs / 30 tests / 18.4 pts | 2 specs / 15 tests / 10.8 pts |
 | performance | 3 specs / 45 tests / 45.0 pts | 5 specs / 36 tests / 31.8 pts | 2 specs / 30 tests / 30.0 pts |
 | pipes | 6 specs / 20 tests / 20.0 pts | 8 specs / 26 tests / 26.0 pts | 6 specs / 20 tests / 20.0 pts |
 | real-ui-e2e | 79 specs / 235 tests / 198.9 pts | 95 specs / 249 tests / 209.9 pts | 73 specs / 211 tests / 184.9 pts |
 | settings | 15 specs / 42 tests / 39.0 pts | 17 specs / 36 tests / 31.7 pts | 14 specs / 33 tests / 30.0 pts |
 | storage-privacy | 10 specs / 44 tests / 35.3 pts | 10 specs / 29 tests / 28.1 pts | 7 specs / 22 tests / 21.1 pts |
-| tauri-command | 22 specs / 60 tests / 46.9 pts | 32 specs / 78 tests / 60.3 pts | 21 specs / 61 tests / 47.8 pts |
+| tauri-command | 22 specs / 60 tests / 46.9 pts | 33 specs / 79 tests / 61.3 pts | 21 specs / 61 tests / 47.8 pts |
 | window-lifecycle | 22 specs / 70 tests / 58.5 pts | 22 specs / 50 tests / 35.9 pts | 16 specs / 43 tests / 33.4 pts |
 
 ## Critical Feature Matrix
@@ -81,6 +81,7 @@ pass/fail/skip counts.
 | Conversation-owned coding worktrees | chat-ai | gap | gap | gap |
 | Tray/search window behavior | window-lifecycle | covered (strong; window-lifecycle, tray-search) | covered (strong; window-lifecycle, tray-search) | covered (strong; window-lifecycle, tray-search) |
 | Native tray recording status refresh | os-integration | covered (strong; tray-recording-status) | - | - |
+| Native tray recording pause and resume | os-integration, capture-ocr | gap | covered (strong; tray-recording-toggle) | gap |
 | Storage retention safety UX | storage-privacy | covered (strong; settings-sections, windows-user-journey) | covered (strong; settings-sections) | covered (strong; settings-sections) |
 | Screenpipe data stays out of macOS Spotlight | storage-privacy, os-integration | - | covered (strong; spotlight-exclusion) | - |
 | Updater install and rollback safety | os-integration | gap | gap | gap |
@@ -89,9 +90,9 @@ pass/fail/skip counts.
 
 ## Critical Gaps
 
-- windows: Real capture, OCR, and indexing (weak); Meetings-only audio device ownership (weak); Conversation-owned coding worktrees (gap); Updater install and rollback safety (gap).
+- windows: Real capture, OCR, and indexing (weak); Meetings-only audio device ownership (weak); Conversation-owned coding worktrees (gap); Native tray recording pause and resume (gap); Updater install and rollback safety (gap).
 - macos: Real capture, OCR, and indexing (weak); Audio device health (weak); Meetings-only audio device ownership (weak); Conversation-owned coding worktrees (gap); Updater install and rollback safety (gap).
-- linux: Real capture, OCR, and indexing (weak); Audio device health (gap); Conversation-owned coding worktrees (gap); Updater install and rollback safety (gap).
+- linux: Real capture, OCR, and indexing (weak); Audio device health (gap); Conversation-owned coding worktrees (gap); Native tray recording pause and resume (gap); Updater install and rollback safety (gap).
 
 ## Execution Integrity
 
@@ -225,6 +226,7 @@ pass/fail/skip counts.
 | timeline-daily-summary.spec.ts | windows, macos, linux | real-ui-e2e | timeline, settings-ai | medium | strong | real-user-flow | 1 | Opens a cached Pi-generated daily summary in Timeline, checks its bounded scrolling layout, captures a screenshot, and closes it. |
 | timeline.spec.ts | windows, macos, linux | real-ui-e2e, capture-ocr | timeline, capture-ocr | high | conditional | real-user-flow | 3 | Timeline shell always runs; seeded frame assertion skips under no-recording. |
 | tray-recording-status.spec.ts | windows | os-integration, tauri-command | tray-recording-status | high | strong | command | 1 | Drives Starting to Recording and reads back the status item from the successfully installed native tray menu. |
+| tray-recording-toggle.spec.ts | macos | os-integration, tauri-command, capture-ocr | tray-recording-toggle | high | strong | command | 1 | Runs the tray's shared native action and proves a real CaptureSession pauses and resumes without the frontend shortcut-event path. |
 | tray-search.spec.ts | windows, macos, linux | window-lifecycle, tauri-command, real-ui-e2e | tray-search, home-search, window-lifecycle | high | partial | command | 2 | Invokes open_search_window and verifies focused floating Search. |
 | updater-banner.spec.ts | windows, macos, linux | real-ui-e2e, settings | update-surfacing, settings-persistence | high | partial | mixed | 2 | Synthetic update-available event surfaces the restart-to-update banner. A real Auto-update toggle plus delayed store save verifies restart waits for preference persistence and survives settings-store re-hydration; an E2E-only handoff suppresses the destructive relaunch. Real check/download/install + rollback stay manual via e2e/mock-updates because the debug E2E build disables updater checks. |
 | viewer-deeplink.spec.ts | windows, macos, linux | window-lifecycle, tauri-command | viewer-deeplink, window-lifecycle | medium | partial | command | 3 | Viewer window creation and per-path dedupe. |

@@ -290,6 +290,133 @@ fn send_notify(title: impl Into<String>, body: impl Into<String>) {
     crate::notifications::client::send(title, body);
 }
 
+#[derive(Clone, Copy, Debug)]
+enum TrayRecordingAction {
+    Start,
+    Stop,
+}
+
+impl TrayRecordingAction {
+    fn optimistic_status(self) -> RecordingStatus {
+        match self {
+            Self::Start => RecordingStatus::Starting,
+            Self::Stop => RecordingStatus::Paused,
+        }
+    }
+
+    fn event_payload(self) -> &'static str {
+        match self {
+            Self::Start => "started",
+            Self::Stop => "paused",
+        }
+    }
+
+    fn failure_copy(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Start => ("recording could not resume", "resume"),
+            Self::Stop => ("recording could not pause", "pause"),
+        }
+    }
+}
+
+fn clear_optimistic_status() {
+    let mut status = OPTIMISTIC_STATUS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    *status = None;
+}
+
+async fn run_tray_recording_action(
+    app: &AppHandle,
+    action: TrayRecordingAction,
+) -> Result<(), String> {
+    info!(?action, "handling recording action from native tray");
+    let state = app.state::<RecordingState>();
+    match action {
+        TrayRecordingAction::Start => crate::recording::start_capture(state, app.clone()).await?,
+        TrayRecordingAction::Stop => crate::recording::stop_capture(state, app.clone()).await?,
+    }
+
+    // This event is UI-only. The native action above is authoritative so tray
+    // controls continue working when every webview is closed or still loading.
+    let _ = app.emit("tray-recording-state-changed", action.event_payload());
+    Ok(())
+}
+
+fn rebuild_tray_after_recording_action(app: &AppHandle) {
+    let app_for_rebuild = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if let Err(error) = force_tray_rebuild(&app_for_rebuild) {
+            error!("tray rebuild failed: {}", error);
+        }
+    });
+}
+
+fn dispatch_tray_recording_action(
+    app: AppHandle,
+    action: TrayRecordingAction,
+    success_notification: Option<(&'static str, &'static str)>,
+) {
+    set_optimistic_status(action.optimistic_status());
+    rebuild_tray_after_recording_action(&app);
+
+    tauri::async_runtime::spawn(async move {
+        let result = run_tray_recording_action(&app, action).await;
+        clear_optimistic_status();
+
+        match result {
+            Ok(()) => {
+                if let Some((title, body)) = success_notification {
+                    send_notify(title, body);
+                }
+            }
+            Err(error) => {
+                let (title, verb) = action.failure_copy();
+                tracing::error!(?action, %error, "native tray recording action failed");
+                send_notify(
+                    title,
+                    format!("screenpipe could not {verb} capture: {error}"),
+                );
+            }
+        }
+
+        rebuild_tray_after_recording_action(&app);
+    });
+}
+
+fn next_tray_recording_action(capture_session_running: bool) -> TrayRecordingAction {
+    if capture_session_running {
+        TrayRecordingAction::Stop
+    } else {
+        TrayRecordingAction::Start
+    }
+}
+
+async fn tray_recording_action(app: &AppHandle) -> TrayRecordingAction {
+    let state = app.state::<RecordingState>();
+    let capture_session_running = state.capture.lock().await.is_some();
+    next_tray_recording_action(capture_session_running)
+}
+
+fn toggle_recording_from_tray(app: &AppHandle) {
+    cancel_pause_timer();
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let action = tray_recording_action(&app).await;
+        dispatch_tray_recording_action(app, action, None);
+    });
+}
+
+#[cfg(feature = "e2e")]
+pub(crate) async fn toggle_recording_from_harness(app: AppHandle) -> Result<(), String> {
+    cancel_pause_timer();
+    let action = tray_recording_action(&app).await;
+    set_optimistic_status(action.optimistic_status());
+    let result = run_tray_recording_action(&app, action).await;
+    clear_optimistic_status();
+    result
+}
+
 /// Immediately rebuild the tray menu (called from main thread after optimistic status set).
 pub(crate) fn force_tray_rebuild(app: &AppHandle) -> Result<()> {
     let update_item = UPDATE_MENU_ITEM
@@ -1535,28 +1662,11 @@ fn handle_menu_event(app_handle: &AppHandle, event: tauri::menu::MenuEvent) {
             });
         }
         "start_recording" | "stop_recording" | "toggle_recording" => {
-            // Manual toggle cancels any pending auto-resume — otherwise a user
-            // who paused for 30 min and then resumed early would get re-paused
-            // when the original timer fires.
-            cancel_pause_timer();
-            let status = get_effective_recording_status();
-            let is_recording = status == RecordingStatus::Recording;
-            let (optimistic, event) = if is_recording {
-                (RecordingStatus::Paused, "shortcut-stop-recording")
-            } else {
-                (RecordingStatus::Starting, "shortcut-start-recording")
-            };
-            set_optimistic_status(optimistic);
-            let app = app_handle.clone();
-            tauri::async_runtime::spawn(async move {
-                let _ = app.emit(event, ());
-            });
-            let app2 = app_handle.clone();
-            let _ = app_handle.run_on_main_thread(move || {
-                if let Err(e) = force_tray_rebuild(&app2) {
-                    error!("tray rebuild failed: {}", e);
-                }
-            });
+            // Native tray controls must not depend on a mounted webview. The
+            // disk-pressure stop leaves the server and tray alive even when
+            // Home failed to load, which is exactly when an emitted frontend
+            // shortcut event has no listener and silently loses the click.
+            toggle_recording_from_tray(app_handle);
         }
         id if id.starts_with("pause_") => {
             let mins: u64 = id
@@ -1566,19 +1676,18 @@ fn handle_menu_event(app_handle: &AppHandle, event: tauri::menu::MenuEvent) {
             let total = std::time::Duration::from_secs(mins * 60);
             // Cancel any in-flight pause timer before scheduling a new one.
             cancel_pause_timer();
-            // Pause now (same path as the manual toggle).
-            set_optimistic_status(RecordingStatus::Paused);
-            let app_for_stop = app_handle.clone();
-            tauri::async_runtime::spawn(async move {
-                let _ = app_for_stop.emit("shortcut-stop-recording", ());
-            });
+            // Pause now through the same native path as the manual toggle.
+            dispatch_tray_recording_action(app_handle.clone(), TrayRecordingAction::Stop, None);
             // Schedule auto-resume — also fires a notification so the user knows
             // recording is back on without having to open the menu.
             let app_for_resume = app_handle.clone();
             let handle = tauri::async_runtime::spawn(async move {
                 tokio::time::sleep(total).await;
-                let _ = app_for_resume.emit("shortcut-start-recording", ());
-                send_notify("Recording resumed", "screenpipe is recording again.");
+                dispatch_tray_recording_action(
+                    app_for_resume,
+                    TrayRecordingAction::Start,
+                    Some(("Recording resumed", "screenpipe is recording again.")),
+                );
             });
             *PAUSE_TIMER.lock().unwrap_or_else(|e| e.into_inner()) = Some(PauseTimer {
                 handle,
@@ -2122,6 +2231,22 @@ fn to_accelerator(shortcut: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stopped_capture_session_toggles_to_start() {
+        assert!(matches!(
+            next_tray_recording_action(false),
+            TrayRecordingAction::Start
+        ));
+    }
+
+    #[test]
+    fn running_capture_session_toggles_to_stop() {
+        assert!(matches!(
+            next_tray_recording_action(true),
+            TrayRecordingAction::Stop
+        ));
+    }
 
     #[test]
     fn recording_status_text_distinguishes_meetings_only_audio_states() {

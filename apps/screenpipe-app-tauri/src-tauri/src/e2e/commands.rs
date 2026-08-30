@@ -239,6 +239,14 @@ fn installed_tray_recording_status() -> Result<Option<String>, String> {
     crate::tray::installed_recording_status_text().map_err(|e| e.to_string())
 }
 
+/// E2E helper: run the same native recording toggle as the tray menu and wait
+/// for completion. No frontend shortcut event is involved, so this proves the
+/// tray remains authoritative when no webview listener is mounted.
+#[command]
+async fn trigger_tray_recording_toggle(app_handle: tauri::AppHandle) -> Result<(), String> {
+    crate::tray::toggle_recording_from_harness(app_handle).await
+}
+
 /// E2E helper: report whether the shortcut reminder overlay is visibly shown.
 ///
 /// The reminder window is hidden rather than destroyed, so WebDriver can keep a
@@ -855,6 +863,7 @@ pub(super) fn plugin() -> TauriPlugin<Wry> {
             low_disk_guard_enabled,
             set_tray_recording_status,
             installed_tray_recording_status,
+            trigger_tray_recording_toggle,
             shortcut_reminder_visible,
             open_auto_meeting,
             simulate_calendar_meeting_match,

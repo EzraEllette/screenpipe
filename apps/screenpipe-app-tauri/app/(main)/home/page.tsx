@@ -728,6 +728,10 @@ function HomeContent() {
     void refreshRecordingDevices();
   });
 
+  useTauriEvent("tray-recording-state-changed", () => {
+    void refreshRecordingDevices();
+  });
+
   const pauseRecording = useCallback(async () => {
     await emit("shortcut-stop-recording", {});
     window.setTimeout(() => {
