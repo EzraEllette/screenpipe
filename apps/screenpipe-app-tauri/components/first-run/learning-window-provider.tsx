@@ -14,6 +14,7 @@ import {
   useLearningWindow,
   type LearningWindowView,
 } from "@/lib/first-run/use-learning-window";
+import { TrialActivationPaywall } from "@/components/first-run/trial-activation-paywall";
 
 type FirstRunLearningContextValue = {
   learning: LearningWindowView;
@@ -47,6 +48,13 @@ export function FirstRunLearningWindowProvider({
   return (
     <FirstRunLearningContext.Provider value={value}>
       {children}
+      <TrialActivationPaywall
+        open={learning.activationState === "paywall"}
+        locked={
+          learning.activationState === "summary" ||
+          learning.activationState === "paywall"
+        }
+      />
     </FirstRunLearningContext.Provider>
   );
 }
@@ -59,4 +67,8 @@ export function useFirstRunLearningWindow(): FirstRunLearningContextValue {
     );
   }
   return value;
+}
+
+export function useOptionalFirstRunLearningWindow(): FirstRunLearningContextValue | null {
+  return useContext(FirstRunLearningContext);
 }

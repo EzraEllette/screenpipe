@@ -6,13 +6,17 @@ import "@testing-library/jest-dom/vitest";
 import React from "react";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { FirstRunLearningBanner } from "./learning-banner";
+import {
+  FirstRunLearningBanner,
+  TrialActivationSummaryExperience,
+} from "./learning-banner";
 import { FIRST_RUN_SEARCH_SHORTCUT_STORAGE_KEY } from "./search-shortcut-practice";
 import type { LearningWindowView } from "@/lib/first-run/use-learning-window";
 
 const mocks = vi.hoisted(() => ({
   view: {} as LearningWindowView,
   emit: vi.fn().mockResolvedValue(undefined),
+  completeOnboarding: vi.fn().mockResolvedValue(undefined),
   handoff: {
     targets: [],
     resolved: false,
@@ -44,6 +48,9 @@ vi.mock("@tauri-apps/api/event", () => ({
   emit: mocks.emit,
   listen: vi.fn(async () => () => {}),
 }));
+vi.mock("@/lib/utils/tauri", () => ({
+  commands: { completeOnboarding: mocks.completeOnboarding },
+}));
 
 vi.mock("@/lib/hooks/use-settings", () => ({
   useSettings: () => ({
@@ -68,7 +75,9 @@ function view(over: Partial<LearningWindowView> = {}): LearningWindowView {
     emptyReason: null,
     capturedApps: [],
     remainingMs: 5 * 60 * 1_000,
+    activationState: "inactive",
     markSummaryOpened: vi.fn(),
+    markSummaryRendered: vi.fn().mockResolvedValue(undefined),
     markNotificationSent: vi.fn(),
     dismiss: vi.fn(),
     ...over,
@@ -77,6 +86,18 @@ function view(over: Partial<LearningWindowView> = {}): LearningWindowView {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  if (!window.localStorage) {
+    const values = new Map<string, string>();
+    Object.defineProperty(window, "localStorage", {
+      configurable: true,
+      value: {
+        clear: () => values.clear(),
+        getItem: (key: string) => values.get(key) ?? null,
+        setItem: (key: string, value: string) => values.set(key, value),
+        removeItem: (key: string) => values.delete(key),
+      },
+    });
+  }
   window.localStorage.clear();
   // Default: no connected agent. Every handoff assertion opts in explicitly so
   // the fallback path is what the other tests exercise.
@@ -87,6 +108,63 @@ beforeEach(() => {
     hint: null,
     askAgent: vi.fn().mockResolvedValue(undefined),
   };
+});
+
+describe("trial activation summary experience", () => {
+  it("makes the timer primary and keeps the summary CTA disabled while learning", () => {
+    mocks.view = view({
+      activationState: "summary",
+      remainingMs: 120_000,
+    });
+    render(
+      <TrialActivationSummaryExperience
+        onOpenConnections={vi.fn()}
+        onOpenSettings={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("trial-activation-countdown")).toHaveTextContent("2:00");
+    expect(screen.getByTestId("trial-activation-view-summary")).toBeDisabled();
+    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+  });
+
+  it("opens only a ready valid summary", async () => {
+    const markSummaryOpened = vi.fn();
+    mocks.view = view({
+      activationState: "summary",
+      phase: "ready",
+      chatId: "first-run-ready",
+      markSummaryOpened,
+    });
+    render(
+      <TrialActivationSummaryExperience
+        onOpenConnections={vi.fn()}
+        onOpenSettings={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId("trial-activation-view-summary"));
+    await waitFor(() =>
+      expect(mocks.emit).toHaveBeenCalledWith("chat-load-conversation", {
+        conversationId: "first-run-ready",
+      }),
+    );
+    expect(markSummaryOpened).toHaveBeenCalledTimes(1);
+  });
+
+  it("offers recovery instead of payment after an empty summary", async () => {
+    mocks.view = view({ activationState: "summary", phase: "empty" });
+    render(
+      <TrialActivationSummaryExperience
+        onOpenConnections={vi.fn()}
+        onOpenSettings={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "retry summary" }));
+    await waitFor(() => expect(mocks.completeOnboarding).toHaveBeenCalled());
+    expect(screen.queryByTestId("trial-activation-paywall")).not.toBeInTheDocument();
+  });
 });
 
 describe("first-run learning banner", () => {

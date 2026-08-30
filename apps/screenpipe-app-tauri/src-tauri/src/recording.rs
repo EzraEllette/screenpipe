@@ -12,7 +12,7 @@ use crate::capture_session::CaptureSession;
 use crate::config;
 use crate::permissions::{do_permissions_check, OSPermissionStatus};
 use crate::server_core::ServerCore;
-use crate::store::{LocalPlanPolicy, SettingsStore};
+use crate::store::{LocalPlanPolicy, OnboardingStore, SettingsStore};
 use screenpipe_engine::RecordingConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -127,7 +127,11 @@ fn recording_access_policy(
     has_verified_local_plan: bool,
     enterprise_authorized: bool,
     consumer_requires_enterprise_app: bool,
+    trial_activation_paywall: bool,
 ) -> bool {
+    if trial_activation_paywall {
+        return false;
+    }
     if dev_bypass {
         return true;
     }
@@ -146,18 +150,25 @@ fn recording_access_policy(
 /// Consumer builds allow signed-in accounts to record on the free plan.
 /// Enterprise builds keep their native entitlement guard, and consumer builds
 /// still reject accounts that are required to use an enterprise binary.
-pub(crate) fn recording_access_allowed(store: &SettingsStore) -> bool {
+pub(crate) fn recording_access_allowed(app: &tauri::AppHandle, store: &SettingsStore) -> bool {
+    let trial_activation_paywall = !crate::should_skip_onboarding()
+        && OnboardingStore::get(app)
+            .ok()
+            .flatten()
+            .unwrap_or_default()
+            .blocks_trial_activation_recording();
     recording_access_policy(
         cfg!(feature = "enterprise-build"),
         cfg!(debug_assertions),
         store.local_plan_policy() != LocalPlanPolicy::Unknown,
         crate::enterprise_policy::recording_authorized(),
         !cfg!(debug_assertions) && store.requires_enterprise_app_for_consumer(),
+        trial_activation_paywall,
     )
 }
 
-fn require_recording_access(store: &SettingsStore) -> Result<(), String> {
-    if recording_access_allowed(store) {
+fn require_recording_access(app: &tauri::AppHandle, store: &SettingsStore) -> Result<(), String> {
+    if recording_access_allowed(app, store) {
         return Ok(());
     }
 
@@ -670,7 +681,7 @@ pub async fn start_capture(
 ) -> Result<(), String> {
     info!("Starting capture session");
     let store = SettingsStore::get(&app).ok().flatten().unwrap_or_default();
-    require_recording_access(&store)?;
+    require_recording_access(&app, &store)?;
 
     // Capture is now intended to run (tray/shortcut start, mic-grant reinit, …)
     // — record it so the health watchdog will respawn a crashed engine instead
@@ -861,6 +872,12 @@ pub async fn spawn_screenpipe(
     app: tauri::AppHandle,
     _override_args: Option<Vec<String>>,
 ) -> Result<(), String> {
+    // Reject the durable summary paywall before publishing capture intent.
+    // Otherwise the health watchdog would keep trying to resurrect capture
+    // behind checkout.
+    let store = SettingsStore::get(&app).ok().flatten().unwrap_or_default();
+    require_recording_access(&app, &store)?;
+
     // Mark recording as intended-ON up front (even if the start below fails or
     // is deferred by cooldown) so the health watchdog will keep trying to bring
     // a crashed/failed server back instead of treating it as a user stop.
@@ -943,7 +960,7 @@ async fn spawn_screenpipe_inner(
     }
 
     let store = SettingsStore::get(&app).ok().flatten().unwrap_or_default();
-    if let Err(err) = require_recording_access(&store) {
+    if let Err(err) = require_recording_access(&app, &store) {
         state.is_starting.store(false, Ordering::SeqCst);
         state.is_starting_capture.store(false, Ordering::SeqCst);
         return Err(err);
@@ -1475,7 +1492,7 @@ async fn start_capture_internal(
     app: &tauri::AppHandle,
 ) -> Result<(), String> {
     let store = SettingsStore::get(app).ok().flatten().unwrap_or_default();
-    require_recording_access(&store)?;
+    require_recording_access(app, &store)?;
 
     let mut capture_guard = state.capture.lock().await;
     if capture_guard.is_some() {
@@ -1568,34 +1585,41 @@ mod recording_access_tests {
     #[test]
     fn verified_free_consumer_can_record_without_a_paid_entitlement() {
         assert!(recording_access_policy(
-            false, false, true, false, false
+            false, false, true, false, false, false
         ));
     }
 
     #[test]
     fn consumer_with_unknown_plan_cannot_record() {
         assert!(!recording_access_policy(
-            false, false, false, false, false
+            false, false, false, false, false, false
         ));
     }
 
     #[test]
     fn signed_out_consumer_cannot_start_recording() {
         assert!(!recording_access_policy(
-            false, false, false, false, false
+            false, false, false, false, false, false
         ));
     }
 
     #[test]
     fn enterprise_build_requires_verified_enterprise_session() {
-        assert!(!recording_access_policy(true, false, true, false, false));
-        assert!(recording_access_policy(true, false, false, true, false));
+        assert!(!recording_access_policy(true, false, true, false, false, false));
+        assert!(recording_access_policy(true, false, false, true, false, false));
     }
 
     #[test]
     fn mandatory_enterprise_org_cannot_record_from_consumer_binary() {
         assert!(!recording_access_policy(
-            false, false, true, true, true
+            false, false, true, true, true, false
+        ));
+    }
+
+    #[test]
+    fn summary_paywall_blocks_capture_even_in_debug_builds() {
+        assert!(!recording_access_policy(
+            false, true, true, false, false, true
         ));
     }
 }

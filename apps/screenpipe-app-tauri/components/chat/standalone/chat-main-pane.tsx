@@ -17,6 +17,8 @@ import type { ConversationMeta } from "@/lib/chat-storage";
 import { cn } from "@/lib/utils";
 import type { Message } from "@/lib/chat/types";
 import type { ContinuousPipeChatPolicy } from "@/lib/pipe-chat-policy";
+import { useOptionalFirstRunLearningWindow } from "@/components/first-run/learning-window-provider";
+import { hasRenderableAssistantBody } from "@/lib/chat/message-rendering";
 
 const CHAT_RAIL_CLASS = "max-w-4xl mx-auto w-full";
 
@@ -102,6 +104,39 @@ export function ChatMainPane({
   messageListProps,
   pendingSend,
 }: ChatMainPaneProps) {
+  const firstRun = useOptionalFirstRunLearningWindow();
+  const learning = firstRun?.learning;
+  const summaryRenderedRef = React.useRef<string | null>(null);
+  React.useEffect(() => {
+    if (
+      !firstRunLearningEnabled ||
+      learning?.activationState !== "summary" ||
+      !learning.chatId ||
+      conversationId !== learning.chatId ||
+      isLoading ||
+      !messages.some(
+        (message) =>
+          message.role === "assistant" && hasRenderableAssistantBody(message),
+      ) ||
+      summaryRenderedRef.current === learning.chatId
+    ) {
+      return;
+    }
+    summaryRenderedRef.current = learning.chatId;
+    const frame = requestAnimationFrame(() => {
+      void learning.markSummaryRendered().catch(() => {
+        summaryRenderedRef.current = null;
+      });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [
+    conversationId,
+    firstRunLearningEnabled,
+    isLoading,
+    learning,
+    messages,
+  ]);
+
   const homeStarter =
     messages.length === 0 &&
     !pendingSend &&

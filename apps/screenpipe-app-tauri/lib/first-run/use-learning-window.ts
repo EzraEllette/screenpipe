@@ -27,10 +27,17 @@ import {
   type FirstRunLearningState,
 } from "@/lib/first-run/learning-window";
 import { fetchRecentActivity } from "@/lib/first-run/recent-activity";
+import {
+  TRIAL_ACTIVATION_PAYWALL_STEP,
+  trialActivationState,
+  type TrialActivationState,
+} from "@/lib/first-run/trial-activation";
 
 export type LearningWindowView = FirstRunLearningState & {
   remainingMs: number;
+  activationState: TrialActivationState;
   markSummaryOpened: () => void;
+  markSummaryRendered: () => Promise<void>;
   markNotificationSent: () => void;
   dismiss: () => void;
 };
@@ -53,6 +60,8 @@ export function useLearningWindow(
   const [remainingMs, setRemainingMs] = useState(() =>
     learningWindowRemainingMs(readLearningWindow().startedAt),
   );
+  const [activationState, setActivationState] =
+    useState<TrialActivationState>("inactive");
 
   useEffect(() => {
     let cancelled = false;
@@ -60,6 +69,7 @@ export function useLearningWindow(
       const result = await commands.getOnboardingStatus();
       if (cancelled || result.status !== "ok" || !result.data.isCompleted) return;
       const native = result.data;
+      setActivationState(trialActivationState(native.currentStep));
       const startedAt = native.firstRunSummaryStartedAt ?? native.completedAt;
       const phase = native.firstRunSummaryPhase ?? "idle";
 
@@ -134,6 +144,16 @@ export function useLearningWindow(
   }, []);
 
   const markSummaryOpened = useCallback(() => setState(markLearningSummaryOpened()), []);
+  const markSummaryRendered = useCallback(async () => {
+    if (activationState !== "summary") return;
+    await commands.setOnboardingStep(TRIAL_ACTIVATION_PAYWALL_STEP);
+    posthog.capture("first_run_summary_rendered", {
+      experiment: "first-summary-card-trial-v1",
+      variant: "summary_first",
+      eligible_new_install: true,
+    });
+    setActivationState("paywall");
+  }, [activationState]);
   // Notification persistence is native; retained for the existing view contract.
   const markNotificationSent = useCallback(() => {}, []);
   const dismiss = useCallback(() => {
@@ -148,7 +168,9 @@ export function useLearningWindow(
     ...state,
     capturedApps,
     remainingMs,
+    activationState,
     markSummaryOpened,
+    markSummaryRendered,
     markNotificationSent,
     dismiss,
   };

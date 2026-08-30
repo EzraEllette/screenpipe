@@ -1001,6 +1001,11 @@ pub struct OnboardingStore {
     pub first_run_summary_error: Option<String>,
     #[serde(rename = "firstRunSummaryTelemetryVersion", default)]
     pub first_run_summary_telemetry_version: u8,
+    /// Written only when this app version creates the install's first
+    /// onboarding record. Existing records deserialize to false, and reset
+    /// clears it, so onboarding replay can never enter the experiment.
+    #[serde(rename = "trialActivationFreshInstall", default)]
+    pub trial_activation_fresh_install: bool,
 }
 
 impl Default for OnboardingStore {
@@ -1016,6 +1021,7 @@ impl Default for OnboardingStore {
             first_run_summary_notification_id: None,
             first_run_summary_error: None,
             first_run_summary_telemetry_version: 0,
+            trial_activation_fresh_install: false,
         }
     }
 }
@@ -1024,15 +1030,61 @@ fn default_first_run_summary_phase() -> String {
     "idle".to_string()
 }
 
+pub const TRIAL_ACTIVATION_SUMMARY_STEP: &str = "trial-activation-v1-summary";
+pub const TRIAL_ACTIVATION_PAYWALL_STEP: &str = "trial-activation-v1-paywall";
+pub const TRIAL_ACTIVATION_UNLOCKED_STEP: &str = "trial-activation-v1-unlocked";
+// Set false in a later release to migrate every persisted treatment install
+// out of the gate, including offline users who cannot receive the PostHog
+// force-unlock flag.
+pub const TRIAL_ACTIVATION_ROLLOUT_ENABLED: bool = true;
+
 impl OnboardingStore {
+    fn new_install() -> Self {
+        Self {
+            trial_activation_fresh_install: true,
+            ..Self::default()
+        }
+    }
+
+    /// The summary-first trial treatment keeps product surfaces behind the
+    /// first valid summary and the card-backed trial. Settings and connection
+    /// setup are explicitly exempted by the window/router callers.
+    pub fn blocks_trial_activation_app(&self) -> bool {
+        self.trial_activation_fresh_install
+            && self.is_completed
+            && matches!(
+                self.current_step.as_deref(),
+                Some(TRIAL_ACTIVATION_SUMMARY_STEP | TRIAL_ACTIVATION_PAYWALL_STEP)
+            )
+    }
+
+    /// Capture is required while the first result is being built. It stops
+    /// only after that result has actually rendered and the durable paywall
+    /// sentinel is written.
+    pub fn blocks_trial_activation_recording(&self) -> bool {
+        self.trial_activation_fresh_install
+            && self.is_completed
+            && self.current_step.as_deref() == Some(TRIAL_ACTIVATION_PAYWALL_STEP)
+    }
+
+    fn apply_trial_activation_rollout(&mut self, enabled: bool) -> bool {
+        if enabled
+            || (!self.blocks_trial_activation_app()
+                && !self.blocks_trial_activation_recording())
+        {
+            return false;
+        }
+        self.current_step = Some(TRIAL_ACTIVATION_UNLOCKED_STEP.to_string());
+        true
+    }
+
     pub fn get(app: &AppHandle) -> Result<Option<Self>, String> {
         let store = get_store(app, None).map_err(|e| e.to_string())?;
 
-        match store.is_empty() {
-            true => Ok(None),
-            false => {
-                let onboarding =
-                    serde_json::from_value(store.get("onboarding").unwrap_or(Value::Null));
+        match store.get("onboarding") {
+            None => Ok(None),
+            Some(value) => {
+                let onboarding = serde_json::from_value(value);
                 match onboarding {
                     Ok(onboarding) => Ok(onboarding),
                     Err(e) => {
@@ -1080,6 +1132,7 @@ impl OnboardingStore {
         self.is_completed = false;
         self.completed_at = None;
         self.current_step = None;
+        self.trial_activation_fresh_install = false;
         self.first_run_summary_phase = "idle".to_string();
         self.first_run_summary_started_at = None;
         self.first_run_summary_chat_id = None;
@@ -1088,6 +1141,16 @@ impl OnboardingStore {
         self.first_run_summary_error = None;
         self.first_run_summary_telemetry_version = 0;
     }
+}
+
+fn trial_activation_is_confirmed_fresh_install(app: &AppHandle) -> bool {
+    let Some(settings) = SettingsStore::get(app).ok().flatten() else {
+        return false;
+    };
+    let Ok((data_dir, _)) = crate::config::resolve_data_dir(&settings.data_dir) else {
+        return false;
+    };
+    !data_dir.join("db.sqlite").exists()
 }
 
 fn deserialize_null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
@@ -2561,14 +2624,28 @@ pub fn init_onboarding_store(app: &AppHandle) -> Result<OnboardingStore, String>
     println!("Initializing onboarding store");
 
     let (onboarding, should_save) = match OnboardingStore::get(app) {
-        Ok(Some(onboarding)) => (onboarding, false),
-        Ok(None) => (OnboardingStore::default(), true),
+        Ok(Some(mut onboarding)) => {
+            let should_save =
+                onboarding.apply_trial_activation_rollout(TRIAL_ACTIVATION_ROLLOUT_ENABLED);
+            (onboarding, should_save)
+        }
+        Ok(None) => {
+            let onboarding = if trial_activation_is_confirmed_fresh_install(app) {
+                OnboardingStore::new_install()
+            } else {
+                tracing::info!(
+                    "missing onboarding record with existing app data — trial activation disabled"
+                );
+                OnboardingStore::default()
+            };
+            (onboarding, true)
+        }
         Err(e) => {
             // Defaults mean "onboarding not completed", so an unreadable store
-            // silently replays setup for someone who already finished it — and
-            // setup now ends at a mandatory card ask. Still not saved, so the
-            // original file survives for recovery, but this is a user-visible
-            // reset rather than a routine miss and must be reported as one.
+            // silently replays setup for someone who already finished it. The
+            // fail-closed fresh-install marker prevents that recovery path from
+            // entering trial activation. The original file still survives for
+            // recovery, but this is a user-visible reset and must be reported.
             tracing::error!(
                 "failed to deserialize onboarding store, falling back to defaults \
                  (file preserved) — setup will replay for this install: {}",
@@ -2825,6 +2902,72 @@ mod tests {
     use serde_json::json;
 
     const FALLBACK_ENGINE: &str = "whisper-large-v3-turbo-quantized";
+
+    #[test]
+    fn trial_activation_blocks_product_but_not_capture_until_paywall() {
+        let mut onboarding = OnboardingStore::new_install();
+        onboarding.complete();
+
+        // Existing installs may retain any historical onboarding step. Only
+        // the versioned treatment sentinels can enroll them into this gate.
+        for legacy_step in ["engine", "timeline", "acquisition", "summary", "paywall"] {
+            onboarding.current_step = Some(legacy_step.to_string());
+            assert!(!onboarding.blocks_trial_activation_app());
+            assert!(!onboarding.blocks_trial_activation_recording());
+        }
+
+        onboarding.current_step = Some(TRIAL_ACTIVATION_SUMMARY_STEP.to_string());
+
+        assert!(onboarding.blocks_trial_activation_app());
+        assert!(!onboarding.blocks_trial_activation_recording());
+
+        onboarding.current_step = Some(TRIAL_ACTIVATION_PAYWALL_STEP.to_string());
+        assert!(onboarding.blocks_trial_activation_app());
+        assert!(onboarding.blocks_trial_activation_recording());
+
+        onboarding.current_step = Some(TRIAL_ACTIVATION_UNLOCKED_STEP.to_string());
+        assert!(!onboarding.blocks_trial_activation_app());
+        assert!(!onboarding.blocks_trial_activation_recording());
+    }
+
+    #[test]
+    fn upgraded_and_reset_installs_never_become_trial_activation_eligible() {
+        let mut upgraded: OnboardingStore = serde_json::from_value(json!({
+            "isCompleted": true,
+            "completedAt": "2026-08-01T00:00:00Z",
+            "currentStep": TRIAL_ACTIVATION_PAYWALL_STEP
+        }))
+        .unwrap();
+
+        assert!(!upgraded.trial_activation_fresh_install);
+        assert!(!upgraded.blocks_trial_activation_app());
+        assert!(!upgraded.blocks_trial_activation_recording());
+
+        upgraded.reset();
+        assert!(!upgraded.trial_activation_fresh_install);
+
+        let mut fresh = OnboardingStore::new_install();
+        fresh.reset();
+        assert!(!fresh.trial_activation_fresh_install);
+    }
+
+    #[test]
+    fn disabling_trial_activation_rollout_durably_unlocks_enrolled_installs() {
+        for step in [TRIAL_ACTIVATION_SUMMARY_STEP, TRIAL_ACTIVATION_PAYWALL_STEP] {
+            let mut onboarding = OnboardingStore::new_install();
+            onboarding.complete();
+            onboarding.current_step = Some(step.to_string());
+
+            assert!(onboarding.apply_trial_activation_rollout(false));
+            assert_eq!(
+                onboarding.current_step.as_deref(),
+                Some(TRIAL_ACTIVATION_UNLOCKED_STEP)
+            );
+            assert!(!onboarding.blocks_trial_activation_app());
+            assert!(!onboarding.blocks_trial_activation_recording());
+            assert!(!onboarding.apply_trial_activation_rollout(false));
+        }
+    }
 
     #[test]
     fn auto_update_defaults_to_enabled() {

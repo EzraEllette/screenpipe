@@ -12,6 +12,7 @@ import PermissionsStep from "@/components/onboarding/permissions-step";
 import TimelineChoice from "@/components/onboarding/timeline-choice";
 import EngineStartup from "@/components/onboarding/engine-startup";
 import PlanSelectionStep from "@/components/onboarding/plan-selection-step";
+import { useFeatureFlagVariantKey } from "posthog-js/react";
 import FinalSetupStep from "@/components/onboarding/final-setup-step";
 import { useOnboarding } from "@/lib/hooks/use-onboarding";
 import { useManagedPolicy } from "@/lib/hooks/use-managed-policy";
@@ -21,6 +22,11 @@ import posthog from "posthog-js";
 import { commands } from "@/lib/utils/tauri";
 import { onboardingFunnel } from "@/lib/analytics/onboarding-funnel";
 import type { AppUser } from "@/lib/app-entitlement";
+import {
+  TRIAL_ACTIVATION_EXPERIMENT_FLAG,
+  TRIAL_ACTIVATION_SUMMARY_STEP,
+  TRIAL_ACTIVATION_TREATMENT,
+} from "@/lib/first-run/trial-activation";
 import { readOnboardingCheckoutStatus } from "@/lib/onboarding-checkout-navigation";
 import { requiresOnboardingCheckout } from "@/lib/onboarding-checkout";
 
@@ -45,6 +51,16 @@ type SlideKey =
 // Must match the inner_size the Rust side creates the window at, in
 // window/show.rs, so opening onboarding doesn't resize on first paint.
 const ONBOARDING_WINDOW_SIZE = { width: 500, height: 680 };
+
+function TrialActivationFlagAssignment({
+  onVariant,
+}: {
+  onVariant: (variant: string | boolean | undefined) => void;
+}) {
+  const variant = useFeatureFlagVariantKey(TRIAL_ACTIVATION_EXPERIMENT_FLAG);
+  useEffect(() => onVariant(variant), [onVariant, variant]);
+  return null;
+}
 
 // When shown, the timeline choice sits before "engine" so disableTimeline is
 // persisted before the engine spawns and reads it — no restart needed.
@@ -181,10 +197,21 @@ export default function OnboardingPage() {
     settings.deviceTier === "high"
       ? settings.deviceTier
       : "unknown";
-  const needsOnboardingCheckout = requiresOnboardingCheckout(user);
+  const needsOnboardingCheckout =
+    onboardingData.trialActivationFreshInstall === true &&
+    requiresOnboardingCheckout(user);
+  const [trialActivationVariant, setTrialActivationVariant] = useState<
+    string | boolean | undefined
+  >(undefined);
+  const usesSummaryFirstTrial =
+    needsOnboardingCheckout &&
+    trialActivationVariant === TRIAL_ACTIVATION_TREATMENT;
+  const wasTrialActivationEligible =
+    needsOnboardingCheckout || checkoutReturnStatus !== null;
   const shouldShowPlanSelection =
     !isManagedDeployment &&
-    (checkoutReturnStatus !== null || needsOnboardingCheckout);
+    (checkoutReturnStatus !== null ||
+      (needsOnboardingCheckout && !usesSummaryFirstTrial));
   // Only a fully resolved new consumer account enters mandatory checkout.
   // Manual grants, lifetime ownership, Enterprise membership, subscriptions,
   // and partially hydrated account responses all stay out. A later contextual
@@ -433,6 +460,21 @@ export default function OnboardingPage() {
         (s !== "plan" || canAdvanceIntoPlanSelection),
     );
     if (!nextSlide) {
+      if (wasTrialActivationEligible) {
+        posthog.capture("trial_activation_experiment_enrolled", {
+          experiment: TRIAL_ACTIVATION_EXPERIMENT_FLAG,
+          variant:
+            typeof trialActivationVariant === "string"
+              ? trialActivationVariant
+              : "control",
+          eligible_new_install: true,
+          email: user?.email ?? null,
+          decision_metric: "mrr_per_eligible_new_install_day_12",
+        });
+      }
+      if (usesSummaryFirstTrial) {
+        await commands.setOnboardingStep(TRIAL_ACTIVATION_SUMMARY_STEP);
+      }
       await completeOnboarding({ method: "setup_finished" });
       transitioningRef.current = false;
       setIsTransitioning(false);
@@ -459,7 +501,11 @@ export default function OnboardingPage() {
     isManagedDeployment,
     timelineChoiceLocked,
     timelineChoiceVisible,
+    trialActivationVariant,
+    usesSummaryFirstTrial,
+    user?.email,
     visibleOrder,
+    wasTrialActivationEligible,
   ]);
 
   // Enterprise authentication owns the onboarding login step. Existing saved
@@ -493,6 +539,9 @@ export default function OnboardingPage() {
 
   return (
     <div className="flex flex-col w-full h-screen overflow-hidden bg-background">
+      {wasTrialActivationEligible && (
+        <TrialActivationFlagAssignment onVariant={setTrialActivationVariant} />
+      )}
       {/* Drag region */}
       <div className="w-full bg-background p-3" data-tauri-drag-region />
 

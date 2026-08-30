@@ -9,6 +9,7 @@ import { emit } from "@tauri-apps/api/event";
 import posthog from "posthog-js";
 import { Clock, ListChecks, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { commands } from "@/lib/utils/tauri";
 import {
   formatCountdown,
   type FirstRunCapturedApp,
@@ -352,5 +353,100 @@ export function FirstRunLearningBanner(
         <FirstRunSetupReadyPanel onDismiss={() => dismiss()} />
       )}
     </section>
+  );
+}
+
+export function TrialActivationSummaryExperience({
+  onOpenSettings,
+  onOpenConnections,
+}: {
+  onOpenSettings: () => void;
+  onOpenConnections: () => void;
+}) {
+  const { learning } = useFirstRunLearningWindow();
+  const { phase, remainingMs, chatId, markSummaryOpened } = learning;
+
+  const openSummary = async () => {
+    if (!chatId || phase !== "ready") return;
+    posthog.capture("first_run_summary_opened", {
+      experiment: "first-summary-card-trial-v1",
+      variant: "summary_first",
+      source: "home_cta",
+    });
+    try {
+      await emit("chat-load-conversation", { conversationId: chatId });
+      markSummaryOpened();
+    } catch {
+      // Keep the ready action available until the chat really opens.
+    }
+  };
+
+  const retry = async () => {
+    posthog.capture("first_run_summary_retry_clicked", {
+      experiment: "first-summary-card-trial-v1",
+      variant: "summary_first",
+    });
+    await commands.completeOnboarding();
+  };
+
+  return (
+    <main
+      className="flex h-full w-full items-center justify-center bg-background px-8"
+      data-testid="trial-activation-summary-experience"
+      data-phase={phase}
+    >
+      <section className="w-full max-w-2xl border border-border bg-background p-10 text-center">
+        <div className="mx-auto flex h-20 w-20 items-center justify-center border border-border">
+          {phase === "learning" ? (
+            <span
+              className="font-mono text-2xl tabular-nums"
+              data-testid="trial-activation-countdown"
+            >
+              {formatCountdown(remainingMs)}
+            </span>
+          ) : (
+            <Loader2 className="h-7 w-7 animate-spin text-muted-foreground" />
+          )}
+        </div>
+        <h1 className="mt-7 text-2xl font-semibold lowercase">
+          {phase === "ready"
+            ? "your first summary is ready"
+            : phase === "empty"
+              ? "we need another try"
+              : phase === "writing"
+                ? "writing your first summary"
+                : "building your first summary"}
+        </h1>
+        <p className="mx-auto mt-3 max-w-lg text-sm leading-relaxed text-muted-foreground">
+          {phase === "empty"
+            ? "Screenpipe did not capture enough valid activity to show you a useful result. Keep working normally, then retry."
+            : phase === "ready"
+              ? "Open the result to see what Screenpipe understood from your work."
+              : "Keep working normally while Screenpipe records only what it needs to build this result."}
+        </p>
+        {phase === "empty" ? (
+          <Button className="mt-8 h-12 px-8 text-sm" onClick={() => void retry()}>
+            retry summary
+          </Button>
+        ) : (
+          <Button
+            className="mt-8 h-12 min-w-56 px-8 text-sm"
+            disabled={phase !== "ready" || !chatId}
+            onClick={() => void openSummary()}
+            data-testid="trial-activation-view-summary"
+          >
+            view summary
+          </Button>
+        )}
+        <div className="mt-8 flex items-center justify-center gap-5 text-xs text-muted-foreground">
+          <button type="button" onClick={onOpenConnections} className="underline underline-offset-4">
+            connections
+          </button>
+          <button type="button" onClick={onOpenSettings} className="underline underline-offset-4">
+            settings
+          </button>
+        </div>
+      </section>
+    </main>
   );
 }

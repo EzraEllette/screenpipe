@@ -16,7 +16,7 @@ use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut};
 use tracing::{error, info};
 
 use crate::commands::{hide_main_window, show_main_window};
-use crate::store::{get_store, SettingsStore};
+use crate::store::{get_store, OnboardingStore, SettingsStore};
 use crate::window::ShowRewindWindow;
 
 #[derive(Clone, Serialize)]
@@ -159,6 +159,16 @@ async fn register_shortcut(
     global_shortcut
         .on_shortcut(shortcut, move |app, _shortcut, event| {
             if matches!(event.state, ShortcutState::Pressed) {
+                let trial_locked = !crate::should_skip_onboarding()
+                    && OnboardingStore::get(app)
+                        .ok()
+                        .flatten()
+                        .unwrap_or_default()
+                        .blocks_trial_activation_app();
+                if trial_locked {
+                    info!("trial activation: suppressed global shortcut");
+                    return;
+                }
                 if let Err(e) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     handler(app);
                 })) {
