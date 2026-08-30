@@ -432,3 +432,50 @@ describe("AIPresetsSelector agent presets", () => {
     );
   });
 });
+
+describe("AIPresetsSelector preset deletion", () => {
+  const localPreset: AIPreset = {
+    ...originalPreset,
+    id: "local",
+    provider: "native-ollama",
+    model: "qwen3",
+    url: "http://localhost:11434",
+    defaultPreset: false,
+  };
+
+  beforeEach(() => {
+    mocks.settings.listeners.clear();
+    mocks.updateSettings.mockClear();
+    mocks.controlledSelect.mockClear();
+    mocks.acpEnabled.current = false;
+  });
+
+  it("deletes the cloud preset when a local preset remains", () => {
+    mocks.settings.current = {
+      aiPresets: [originalPreset, localPreset],
+      user: { token: "test-token", cloud_subscribed: true },
+    };
+    render(<AIPresetsSelector compact showModelOnly />);
+
+    fireEvent.click(screen.getByRole("combobox"));
+    fireEvent.click(screen.getByRole("button", { name: "Delete original" }));
+
+    expect(mocks.updateSettings).toHaveBeenCalledWith({
+      aiPresets: [{ ...localPreset, defaultPreset: true }],
+    });
+  });
+
+  it("does not offer deletion for the sole remaining preset", () => {
+    mocks.settings.current = {
+      aiPresets: [originalPreset],
+      user: { token: "test-token", cloud_subscribed: true },
+    };
+    render(<AIPresetsSelector compact showModelOnly />);
+
+    fireEvent.click(screen.getByRole("combobox"));
+
+    expect(
+      screen.queryByRole("button", { name: "Delete original" }),
+    ).not.toBeInTheDocument();
+  });
+});

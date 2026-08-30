@@ -1778,12 +1778,11 @@ export const AIPresetsSelector = ({
       return;
     }
 
-    // Safety net: prevent deletion of the last screenpipe-cloud preset for subscribers
-    if (preset.provider === "screenpipe-cloud" && settings.user?.cloud_subscribed) {
-      const cloudPresets = settings.aiPresets.filter((p) => p.provider === "screenpipe-cloud");
-      if (cloudPresets.length <= 1) {
-        return;
-      }
+    if (settings.aiPresets.length <= 1) {
+      toast.error("Cannot delete preset", {
+        description: "At least one AI preset is required",
+      });
+      return;
     }
 
     let updatedPresets = settings.aiPresets.filter((p) => p.id !== preset.id);
@@ -1801,13 +1800,7 @@ export const AIPresetsSelector = ({
     });
   };
 
-  // Hide delete button on the last remaining screenpipe-cloud preset for subscribers
-  const cloudPresetCount = useMemo(
-    () => (settings?.aiPresets || []).filter((p) => p.provider === "screenpipe-cloud").length,
-    [settings?.aiPresets]
-  );
-  const isLastCloudPreset = (preset: AIPreset) =>
-    preset.provider === "screenpipe-cloud" && settings.user?.cloud_subscribed && cloudPresetCount <= 1;
+  const isOnlyPreset = (settings?.aiPresets || []).length <= 1;
   const selectedProviderName =
     selectedPresetData?.provider === "acp"
       ? acpAdapterInfo(selectedPresetData.acpAgent?.id).name
@@ -2217,10 +2210,11 @@ export const AIPresetsSelector = ({
                                 <Star className="h-3.5 w-3.5" />
                               </Button>
                             )}
-                            {canManageEmployeePresets && !isEnterpriseManagedPreset(preset) && !isLastCloudPreset(preset) && (
+                            {canManageEmployeePresets && !isEnterpriseManagedPreset(preset) && !isOnlyPreset && (
                               <Button
                                 variant="ghost"
                                 size="icon"
+                                aria-label={`Delete ${preset.id}`}
                                 className="h-6 w-6 shrink-0"
                                 onClick={(e) => {
                                   e.stopPropagation();

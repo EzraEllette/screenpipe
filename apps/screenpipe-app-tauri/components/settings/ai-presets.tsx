@@ -2149,7 +2149,14 @@ function SortablePresetCard({
             </TooltipProvider>
           )}
           {!readOnly && onDelete && (
-            <Button variant="ghost" size="sm" className="text-[11px] h-6 px-2 text-destructive hover:text-destructive ml-auto" onClick={(e) => { e.stopPropagation(); onDelete(); }} disabled={isLoading}>
+            <Button
+              aria-label={`Delete ${preset.id}`}
+              variant="ghost"
+              size="sm"
+              className="text-[11px] h-6 px-2 text-destructive hover:text-destructive ml-auto"
+              onClick={(e) => { e.stopPropagation(); onDelete(); }}
+              disabled={isLoading}
+            >
               <Trash2 className="w-3 h-3" />
             </Button>
           )}
@@ -2248,7 +2255,6 @@ useEffect(() => {
   const removePreset = async (id: string) => {
     setIsLoading(true);
     try {
-      // Prevent deletion of screenpipe-cloud preset for Pro subscribers
       const presetToRemove = settings.aiPresets.find((preset) => preset.id === id);
       if (
         isManagedDeployment &&
@@ -2261,16 +2267,13 @@ useEffect(() => {
         });
         return;
       }
-      if (presetToRemove?.provider === "screenpipe-cloud" && settings.user?.cloud_subscribed) {
-        const cloudPresets = settings.aiPresets.filter((p) => p.provider === "screenpipe-cloud");
-        if (cloudPresets.length <= 1) {
-          toast({
-            title: "Cannot delete cloud preset",
-            description: "This preset is included with your Business subscription",
-            variant: "destructive",
-          });
-          return;
-        }
+      if (settings.aiPresets.length <= 1) {
+        toast({
+          title: "Cannot delete preset",
+          description: "At least one AI preset is required",
+          variant: "destructive",
+        });
+        return;
       }
 
       const wasDefault = settings.aiPresets.find(
@@ -2470,13 +2473,11 @@ useEffect(() => {
         >
           <div className="w-full grid grid-cols-1 md:grid-cols-2 gap-3">
             {(() => {
-              const cloudPresetCount = (settings.aiPresets || []).filter((p) => p.provider === "screenpipe-cloud").length;
+              const isOnlyPreset = settings.aiPresets.length <= 1;
               return visiblePresets.map((preset) => {
                 const readOnly =
                   isManagedDeployment &&
                   (!aiPresetPolicy.allow_employee_custom_presets || isEnterpriseManagedPreset(preset));
-                const isLastCloudPreset =
-                  preset.provider === "screenpipe-cloud" && settings.user?.cloud_subscribed && cloudPresetCount <= 1;
                 return (
                   <SortablePresetCard
                     key={preset.id}
@@ -2493,7 +2494,7 @@ useEffect(() => {
                     }}
                     onDuplicate={() => duplicatePreset(preset.id)}
                     onSetDefault={() => setPresetToSetDefault(preset.id)}
-                    onDelete={isLastCloudPreset ? undefined : () => setPresetToDelete(preset.id)}
+                    onDelete={isOnlyPreset ? undefined : () => setPresetToDelete(preset.id)}
                     onShareToTeam={isTeamAdmin ? () => sharePresetToTeam(preset) : undefined}
                     isLoading={isLoading}
                     isTeamAdmin={isTeamAdmin}
