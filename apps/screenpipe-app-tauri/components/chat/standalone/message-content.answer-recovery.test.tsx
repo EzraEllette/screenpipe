@@ -29,7 +29,7 @@ const completedTool = (id: string): ContentBlock => ({
 });
 
 describe("MessageContent assistant answer recovery", () => {
-  it("shows the last assistant text when a completed turn ends on a tool", () => {
+  it("keeps every progress update visible when a completed turn ends on a tool", () => {
     const message = assistantMessage("m-recovered-answer", [
       { type: "text", text: "First I will inspect the files." },
       completedTool("tool-1"),
@@ -40,7 +40,8 @@ describe("MessageContent assistant answer recovery", () => {
     render(<MessageContent message={message} />);
 
     expect(screen.getByText("The final answer remains visible.")).toBeInTheDocument();
-    expect(screen.queryByText("First I will inspect the files.")).not.toBeInTheDocument();
+    expect(screen.getByText("First I will inspect the files.")).toBeInTheDocument();
+    expect(screen.getAllByTestId("assistant-commentary")).toHaveLength(2);
   });
 
   it("prefers final text emitted after the last tool", () => {
@@ -53,10 +54,18 @@ describe("MessageContent assistant answer recovery", () => {
     render(<MessageContent message={message} />);
 
     expect(screen.getByText("This is the actual final answer.")).toBeInTheDocument();
-    expect(screen.queryByText("This is intermediate narration.")).not.toBeInTheDocument();
+    expect(screen.getByText("This is intermediate narration.")).toBeInTheDocument();
+    expect(screen.getByText("This is intermediate narration.").closest("[data-message-phase]")).toHaveAttribute(
+      "data-message-phase",
+      "commentary",
+    );
+    expect(screen.getByText("This is the actual final answer.").closest("[data-message-phase]")).toHaveAttribute(
+      "data-message-phase",
+      "final_answer",
+    );
   });
 
-  it("does not promote intermediate text while the turn is still running", () => {
+  it("shows unresolved progress while the turn is still running", () => {
     const message = assistantMessage("m-running-answer", [
       { type: "text", text: "Still working on this." },
       {
@@ -72,6 +81,7 @@ describe("MessageContent assistant answer recovery", () => {
 
     render(<MessageContent message={message} isGenerating />);
 
-    expect(screen.queryByText("Still working on this.")).not.toBeInTheDocument();
+    expect(screen.getByText("Still working on this.")).toBeInTheDocument();
+    expect(screen.getByTestId("assistant-commentary")).toBeInTheDocument();
   });
 });

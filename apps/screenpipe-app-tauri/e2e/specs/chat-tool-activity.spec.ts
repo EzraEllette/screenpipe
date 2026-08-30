@@ -21,6 +21,9 @@ type SeedAssistantPayload = {
   content?: string;
   contentBlocks?: unknown[];
   storeOnlyActive?: boolean;
+  stoppedByUser?: boolean;
+  interruptedByQuit?: boolean;
+  workDurationMs?: number;
 };
 
 async function waitForChatSeedHooks(): Promise<void> {
@@ -88,6 +91,12 @@ async function lastSummary() {
   return summary;
 }
 
+async function lastActivityWidget() {
+  const widget = await $('(//*[@data-testid="tool-activity-widget"])[last()]');
+  await widget.waitForExist({ timeout: t(8_000) });
+  return widget;
+}
+
 async function visibleBodyText(): Promise<string> {
   return (await browser.execute(() => document.body.innerText)) as string;
 }
@@ -116,6 +125,11 @@ describe("Chat tool activity progressive disclosure", function () {
     await seedConversation(randomUUID(), "Please review the relevant information.", {
       content: "",
       contentBlocks: [
+        {
+          type: "text",
+          text: "I loaded the workflow and I’m running the checks now.",
+          phase: "commentary",
+        },
         {
           type: "tool",
           toolCall: {
@@ -176,6 +190,7 @@ describe("Chat tool activity progressive disclosure", function () {
             args: { command: "bunx vitest run private-regression-file.test.ts" },
             isRunning: true,
             startedAtMs,
+            progress: "tests: 18 passed, 2 still running",
           },
         },
       ],
@@ -197,6 +212,7 @@ describe("Chat tool activity progressive disclosure", function () {
     expect((await $$('[data-testid="tool-activity-list"]')).length).toBe(0);
 
     const body = await visibleBodyText();
+    expect(body).toContain("I loaded the workflow and I’m running the checks now.");
     expect(body).not.toContain("python3");
     expect(body).not.toContain("node -e");
     expect(body).not.toContain(RAW_PYTHON_MARKER);
@@ -209,29 +225,39 @@ describe("Chat tool activity progressive disclosure", function () {
   });
 
   it("reveals only friendly activity labels on the first expansion", async () => {
-    const summary = await lastSummary();
-    await summary.click();
+    await browser.execute(() => {
+      (window as typeof window & { __e2eExpandToolActivity?: boolean })
+        .__e2eExpandToolActivity = true;
+    });
+    try {
+      const summary = await lastSummary();
+      await summary.click();
 
-    const list = await $('[data-testid="tool-activity-list"]');
-    await list.waitForExist({ timeout: t(5_000) });
-    const listText = await list.getText();
-    expect(listText).toContain("Loaded PDF skill");
-    expect(listText).toContain("Checked available automations");
-    expect(listText).toContain("Analyzed information");
-    expect(listText).toContain("Checking the work");
+      const list = await $('[data-testid="tool-activity-list"]');
+      await list.waitForExist({ timeout: t(5_000) });
+      const listText = await list.getText();
+      expect(listText).toContain("Loaded PDF skill");
+      expect(listText).toContain("Checked available automations");
+      expect(listText).toContain("Analyzed information");
+      expect(listText).toContain("Checking the work");
+      expect(listText).toContain("tests: 18 passed, 2 still running");
 
-    const body = await visibleBodyText();
-    expect(body).not.toContain("python3");
-    expect(body).not.toContain("node -e");
-    expect(body).not.toContain(RAW_PYTHON_MARKER);
-    expect(body).not.toContain(RAW_JAVASCRIPT_MARKER);
+      const body = await visibleBodyText();
+      expect(body).not.toContain("python3");
+      expect(body).not.toContain("node -e");
+      expect(body).not.toContain(RAW_PYTHON_MARKER);
+      expect(body).not.toContain(RAW_JAVASCRIPT_MARKER);
 
-    const skillIcon = await list.$('[data-activity-kind="skill"]');
-    expect(await skillIcon.isDisplayed()).toBe(true);
-
-    await browser.pause(500);
-    const filepath = await saveScreenshot("chat-tool-activity-running-expanded");
-    expect(existsSync(filepath)).toBe(true);
+      const skillIcon = await list.$('[data-activity-kind="skill"]');
+      await skillIcon.waitForDisplayed({ timeout: t(5_000) });
+      const filepath = await saveScreenshot("chat-tool-activity-running-expanded");
+      expect(existsSync(filepath)).toBe(true);
+    } finally {
+      await browser.execute(() => {
+        (window as typeof window & { __e2eExpandToolActivity?: boolean })
+          .__e2eExpandToolActivity = false;
+      });
+    }
   });
 
   it("keeps store-routed tool work active until the outer Pi turn ends", async () => {
@@ -344,7 +370,7 @@ describe("Chat tool activity progressive disclosure", function () {
     expect(existsSync(filepath)).toBe(true);
   });
 
-  it("keeps the final assistant answer visible when a tool finishes afterward", async () => {
+  it("keeps ordered commentary visible when a verification tool follows prose", async () => {
     const startedAtMs = Date.now() - 8_000;
     const finalAnswer =
       "The renderer now keeps the assistant’s final answer visible, even when a completed tool event arrives afterward.";
@@ -394,12 +420,154 @@ describe("Chat tool activity progressive disclosure", function () {
 
     const body = await visibleBodyText();
     expect(body).toContain(finalAnswer);
-    expect(body).not.toContain("I will inspect the relevant files before answering.");
+    expect(body).toContain("I will inspect the relevant files before answering.");
+    expect((await $$('[data-testid="assistant-commentary"]')).length).toBe(2);
 
     const filepath = await saveScreenshot(
       "chat-tool-activity-trailing-tool-answer",
     );
     expect(existsSync(filepath)).toBe(true);
+  });
+
+  it("renders commentary, tool work, and the final answer in transcript order", async () => {
+    const startedAtMs = Date.now() - 9_000;
+    const firstUpdate = "I found the relevant events; I’m checking the renderer now.";
+    const secondUpdate = "The renderer is fixed. I’m running the regression test next.";
+    const finalAnswer = "The progress updates now remain visible around tool activity.";
+
+    await seedConversation(randomUUID(), "Keep me updated while you verify this.", {
+      content: finalAnswer,
+      contentBlocks: [
+        { type: "text", text: firstUpdate, phase: "commentary" },
+        {
+          type: "tool",
+          toolCall: {
+            id: "inspect-renderer",
+            toolName: "read",
+            args: { path: "/private/workspace/message-content.tsx" },
+            result: "renderer inspected",
+            isRunning: false,
+            startedAtMs,
+            endedAtMs: startedAtMs + 2_000,
+          },
+        },
+        { type: "text", text: secondUpdate, phase: "commentary" },
+        {
+          type: "tool",
+          toolCall: {
+            id: "run-regression",
+            toolName: "bash",
+            args: { command: "bun run test -- commentary-regression" },
+            result: "passed",
+            isRunning: false,
+            startedAtMs: startedAtMs + 2_100,
+            endedAtMs: startedAtMs + 9_000,
+          },
+        },
+        { type: "text", text: finalAnswer, phase: "final_answer" },
+      ],
+    });
+
+    await browser.waitUntil(
+      async () => (await visibleBodyText()).includes(finalAnswer),
+      { timeout: t(5_000), timeoutMsg: "settled final answer never appeared" },
+    );
+
+    const orderedText = await browser.execute(
+      (needles: string[]) => {
+        const text = document.body.innerText;
+        return needles.map((needle) => text.indexOf(needle));
+      },
+      [firstUpdate, secondUpdate, finalAnswer],
+    );
+    expect(orderedText[0]).toBeGreaterThanOrEqual(0);
+    expect(orderedText[0]).toBeLessThan(orderedText[1]);
+    expect(orderedText[1]).toBeLessThan(orderedText[2]);
+    expect((await $$('[data-testid="assistant-commentary"]')).length).toBe(2);
+    expect((await $$('[data-message-phase="final_answer"]')).length).toBe(1);
+
+    const filepath = await saveScreenshot("chat-commentary-completed-final");
+    expect(existsSync(filepath)).toBe(true);
+  });
+
+  it("shows an unrecovered tool failure without hiding prior commentary", async () => {
+    const startedAtMs = Date.now() - 6_000;
+    const update = "The first check failed; I’m leaving the failure visible for review.";
+    await seedConversation(randomUUID(), "Run the fragile check.", {
+      content: update,
+      contentBlocks: [
+        { type: "text", text: update, phase: "commentary" },
+        {
+          type: "tool",
+          toolCall: {
+            id: "failed-check",
+            toolName: "bash",
+            args: { command: "run-fragile-check" },
+            result: "exit code 1",
+            isError: true,
+            isRunning: false,
+            startedAtMs,
+            endedAtMs: startedAtMs + 6_000,
+          },
+        },
+      ],
+    });
+
+    expect(await visibleBodyText()).toContain(update);
+    expect(await (await lastActivityWidget()).getAttribute("data-activity-state")).toBe("error");
+    const filepath = await saveScreenshot("chat-commentary-tool-failed");
+    expect(existsSync(filepath)).toBe(true);
+  });
+
+  it("labels user-stopped and app-interrupted work honestly", async () => {
+    const stoppedStart = Date.now() - 12_000;
+    await seedConversation(randomUUID(), "Stop after the first check.", {
+      content: "I reached the safe stopping point.",
+      stoppedByUser: true,
+      workDurationMs: 12_000,
+      contentBlocks: [
+        { type: "text", text: "I reached the safe stopping point.", phase: "commentary" },
+        {
+          type: "tool",
+          toolCall: {
+            id: "stopped-check",
+            toolName: "read",
+            args: { path: "/private/workspace/state.json" },
+            result: "stopped",
+            isRunning: false,
+            startedAtMs: stoppedStart,
+            endedAtMs: stoppedStart + 12_000,
+          },
+        },
+      ],
+    });
+    expect(await (await lastSummary()).getText()).toContain("You stopped after 12s");
+    expect(existsSync(await saveScreenshot("chat-commentary-stopped"))).toBe(true);
+
+    const interruptedStart = Date.now() - 14_000;
+    await seedConversation(randomUUID(), "Continue the background check.", {
+      content: "The app closed before the check returned.",
+      interruptedByQuit: true,
+      workDurationMs: 14_000,
+      contentBlocks: [
+        { type: "text", text: "The app closed before the check returned.", phase: "commentary" },
+        {
+          type: "tool",
+          toolCall: {
+            id: "interrupted-check",
+            toolName: "bash",
+            args: { command: "long-running-check" },
+            result: "interrupted — the app closed before this finished",
+            isError: true,
+            isRunning: false,
+            startedAtMs: interruptedStart,
+            endedAtMs: interruptedStart + 14_000,
+          },
+        },
+      ],
+    });
+    expect(await (await lastSummary()).getText()).toContain("interrupted — app closed mid-task");
+    expect(existsSync(await saveScreenshot("chat-commentary-interrupted"))).toBe(true);
   });
 
   it("keeps MCP startup health out of the chat transcript", async () => {

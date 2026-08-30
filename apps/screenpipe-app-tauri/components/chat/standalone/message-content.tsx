@@ -22,6 +22,7 @@ import { IntegrationIcon } from "@/components/settings/connections-section";
 import { useFeedbackStore } from "@/lib/stores/feedback-store";
 import { cn } from "@/lib/utils";
 import type { Message, ToolCall, ContentBlock } from "@/lib/chat/types";
+import { resolveAssistantTextPhase } from "@/lib/chat/assistant-text-phases";
 import type { ConnectionListItem } from "@/lib/chat/connection-suggestions";
 import type { InlineConnectStatus } from "@/lib/connections/inline-connect";
 import { formatDurationParts, formatStoppedWorkDuration, formatWorkDuration, hasAssistantTextBody, hasAssistantToolWorkBody } from "@/lib/chat/message-rendering";
@@ -893,7 +894,7 @@ function AppStatsBlock({ content }: { content: string }) {
 
 // Groups consecutive tool blocks into a single group for collapsible rendering
 type GroupedBlock =
-  | { type: "text"; text: string; key: number }
+  | { type: "text"; text: string; phase: "commentary" | "final_answer"; key: number }
   | { type: "thinking"; text: string; isThinking: boolean; durationMs?: number; key: number }
   | { type: "connection-action"; block: Extract<ContentBlock, { type: "connection_action" }>; key: number }
   | { type: "agent-action"; block: Extract<ContentBlock, { type: "agent_action" }>; key: number }
@@ -901,7 +902,7 @@ type GroupedBlock =
   | { type: "plan"; block: Extract<ContentBlock, { type: "plan" }>; key: number }
   | { type: "work-group"; toolCalls: ToolCall[]; durationMs: number; key: number };
 
-function groupContentBlocks(blocks: ContentBlock[]): GroupedBlock[] {
+function groupContentBlocks(blocks: ContentBlock[], isGenerating: boolean): GroupedBlock[] {
   const result: GroupedBlock[] = [];
   let currentToolGroup: ToolCall[] = [];
 
@@ -915,7 +916,12 @@ function groupContentBlocks(blocks: ContentBlock[]): GroupedBlock[] {
         currentToolGroup = [];
       }
       if (block.type === "text" && block.text.trim()) {
-        result.push({ type: "text", text: block.text, key: result.length });
+        result.push({
+          type: "text",
+          text: block.text,
+          phase: resolveAssistantTextPhase(blocks, i, isGenerating),
+          key: result.length,
+        });
       } else if (block.type === "thinking") {
         result.push({ type: "thinking", text: block.text, isThinking: block.isThinking, durationMs: block.durationMs, key: result.length });
       } else if (block.type === "connection_action") {
@@ -991,86 +997,6 @@ function collapseHiddenWorkGroups(grouped: GroupedBlock[]): GroupedBlock[] {
 
   flushPending();
   return out;
-}
-
-/**
- * Merge all tool/work groups into a single "Worked for Xs" rail at the top.
- * Intermediate narration text between tool calls is dropped. Prefer prose
- * after the final tool; when a completed turn ends on a tool, keep its last
- * non-empty text block so the assistant answer does not disappear.
- * Connection-action blocks always render outside.
- */
-function mergeWorkAndIntermediateText(
-  groups: GroupedBlock[],
-  promoteLastTextFallback: boolean,
-): GroupedBlock[] {
-  // Find the last work/tool group — everything up to that boundary is
-  // "work". Text after is the final response.
-  let lastWorkIdx = -1;
-  for (let i = groups.length - 1; i >= 0; i--) {
-    if (groups[i].type === "work-group" || groups[i].type === "tool-group") {
-      lastWorkIdx = i;
-      break;
-    }
-  }
-
-  // No tool calls at all → nothing to merge, show text as-is.
-  if (lastWorkIdx === -1) return groups;
-
-  // Accumulate all tool calls and duration into one work group.
-  // Intermediate text (model narration between tools) is dropped.
-  const allToolCalls: ToolCall[] = [];
-  let totalDurationMs = 0;
-  let firstKey: number | null = null;
-  const finalBlocks: GroupedBlock[] = [];
-  let lastTextFallback: Extract<GroupedBlock, { type: "text" }> | null = null;
-
-  for (let i = 0; i <= lastWorkIdx; i++) {
-    const g = groups[i];
-    if (g.type === "work-group") {
-      firstKey ??= g.key;
-      allToolCalls.push(...g.toolCalls);
-      totalDurationMs += g.durationMs;
-    } else if (g.type === "tool-group") {
-      firstKey ??= g.key;
-      allToolCalls.push(...g.toolCalls);
-    } else if (g.type === "text") {
-      lastTextFallback = g;
-    } else if (
-      g.type === "connection-action" ||
-      g.type === "agent-action" ||
-      // The plan is not narration — it is the agent's stated intent for the
-      // work being summarized, and the common ACP turn is "make a plan, then
-      // use tools". Dropping it here would hide the plan on exactly the turns
-      // that have one.
-      g.type === "plan"
-    ) {
-      finalBlocks.push(g);
-    }
-    // thinking blocks and all but the last text fallback are dropped
-  }
-
-  // Build the merged work group
-  if (allToolCalls.length > 0) {
-    finalBlocks.unshift({
-      type: "work-group",
-      toolCalls: allToolCalls,
-      durationMs: totalDurationMs,
-      key: firstKey ?? 0,
-    });
-  }
-
-  // Everything after lastWorkIdx is the final response
-  for (let i = lastWorkIdx + 1; i < groups.length; i++) {
-    finalBlocks.push(groups[i]);
-  }
-
-  const hasFinalText = finalBlocks.some((group) => group.type === "text");
-  if (promoteLastTextFallback && !hasFinalText && lastTextFallback) {
-    finalBlocks.push(lastTextFallback);
-  }
-
-  return finalBlocks;
 }
 
 function InlineConnectionActionCard({
@@ -1886,9 +1812,9 @@ export function MessageContent({
   // If we have content blocks (Pi messages with tool calls), render them in order
   // Group consecutive tool blocks into collapsible containers
   if (message.contentBlocks && message.contentBlocks.length > 0) {
-    const grouped = groupContentBlocks(message.contentBlocks);
+    const grouped = groupContentBlocks(message.contentBlocks, isGenerating);
     const collapsed = collapseHiddenWorkGroups(grouped);
-    const displayGroups = mergeWorkAndIntermediateText(collapsed, !isGenerating);
+    const displayGroups = collapsed;
     const parsedTextByKey = new Map<number, ReturnType<typeof parseChatRichResults>>();
     const directiveResults: ChatRichResult[] = [];
     for (const group of displayGroups) {
@@ -1921,7 +1847,9 @@ export function MessageContent({
       ? "interrupted — app closed mid-task"
       : undefined;
     const workSummaryOverride = stoppedSummary || interruptedSummary;
-    const recoveredWithAnswer = !isGenerating && hasAssistantTextBody(message);
+    const recoveredWithAnswer = !isGenerating && displayGroups.some(
+      (group) => group.type === "text" && group.phase === "final_answer",
+    );
     return (
       <div className="space-y-2 min-w-0 w-full overflow-hidden">
         {displayGroups.map((group, groupIndex) => {
@@ -1940,23 +1868,30 @@ export function MessageContent({
               );
             }
             return (
-              <MarkdownBlock
-                {...markdownOptions}
+              <div
                 key={`text-${group.key}`}
-                text={text}
-                isUser={isUser}
-                streaming={isGenerating && groupIndex === displayGroups.length - 1}
-                onOpenViewerPath={onOpenViewerPath}
-                renderSpecialCodeBlock={(language, content) => {
-                  if (language === "mermaid") {
-                    return <MermaidDiagramBlock chart={content} />;
-                  }
-                  if (language === "app-stats") {
-                    return <AppStatsBlock content={content} />;
-                  }
-                  return renderChartFence(language, content, chartPromptSender);
-                }}
-              />
+                data-message-phase={group.phase}
+                data-testid={!isUser && group.phase === "commentary" ? "assistant-commentary" : undefined}
+                aria-label={!isUser && group.phase === "commentary" ? "Assistant progress update" : undefined}
+                className={!isUser && group.phase === "commentary" ? "text-foreground/75" : undefined}
+              >
+                <MarkdownBlock
+                  {...markdownOptions}
+                  text={text}
+                  isUser={isUser}
+                  streaming={isGenerating && groupIndex === displayGroups.length - 1}
+                  onOpenViewerPath={onOpenViewerPath}
+                  renderSpecialCodeBlock={(language, content) => {
+                    if (language === "mermaid") {
+                      return <MermaidDiagramBlock chart={content} />;
+                    }
+                    if (language === "app-stats") {
+                      return <AppStatsBlock content={content} />;
+                    }
+                    return renderChartFence(language, content, chartPromptSender);
+                  }}
+                />
+              </div>
             );
           }
           if (group.type === "thinking") {

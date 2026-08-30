@@ -487,6 +487,9 @@ export function useChatE2EGlobals({
           contentBlocks?: Message["contentBlocks"];
           sourceCitations?: unknown[];
           storeOnlyActive?: boolean;
+          stoppedByUser?: boolean;
+          interruptedByQuit?: boolean;
+          workDurationMs?: number;
         },
       ) => void;
     }).__e2eSeedAssistantMessage = (
@@ -496,6 +499,9 @@ export function useChatE2EGlobals({
         contentBlocks?: Message["contentBlocks"];
         sourceCitations?: unknown[];
         storeOnlyActive?: boolean;
+        stoppedByUser?: boolean;
+        interruptedByQuit?: boolean;
+        workDurationMs?: number;
       },
     ) => {
       const id = `e2e-assistant-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -508,6 +514,9 @@ export function useChatE2EGlobals({
           contentBlocks: payload.contentBlocks,
           timestamp: Date.now(),
           sourceCitations: payload.sourceCitations as Message["sourceCitations"],
+          stoppedByUser: payload.stoppedByUser,
+          interruptedByQuit: payload.interruptedByQuit,
+          workDurationMs: payload.workDurationMs,
         },
         (payload.content ?? "").slice(0, 60),
       );

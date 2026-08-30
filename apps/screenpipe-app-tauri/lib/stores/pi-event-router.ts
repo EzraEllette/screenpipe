@@ -92,6 +92,10 @@ import {
 import { connectionActionFromToolResult } from "@/components/chat/standalone/hooks/pi-event-handlers";
 import { normalizePlanEntries, upsertPlanBlock } from "@/lib/chat/acp-plan";
 import type { ContentBlock } from "@/lib/chat/types";
+import {
+  finalizeAssistantTextPhases,
+  markPendingAssistantTextAsCommentary,
+} from "@/lib/chat/assistant-text-phases";
 import { commands } from "@/lib/utils/tauri";
 
 // Module-level state — the router is a singleton process-wide.
@@ -813,7 +817,10 @@ function applyEventToSessionContent(sid: string, payload: PiInnerEvent) {
         : {}),
       ...((payload as any).subagent === true ? { subagent: true } : {}),
     };
-    const blocks = [...((cur.contentBlocks as any[]) ?? []), { type: "tool", toolCall: tool }];
+    const phasedBlocks = markPendingAssistantTextAsCommentary(
+      (cur.contentBlocks as ContentBlock[] | undefined) ?? [],
+    );
+    const blocks = [...phasedBlocks, { type: "tool" as const, toolCall: tool }];
     store.actions.setStreaming(sid, { contentBlocks: blocks });
     store.actions.patchMessage(sid, msgId, (m: any) => ({
       ...m,
@@ -950,8 +957,18 @@ function applyEventToSessionContent(sid: string, payload: PiInnerEvent) {
   // a chat that completes while the user is looking elsewhere still
   // ends up on disk and survives a restart.
   if (t === "agent_end") {
-    store.actions.endTurn(sid);
     const willRetry = (payload as { willRetry?: boolean }).willRetry === true;
+    const active = store.sessions[sid];
+    if (!willRetry && active?.streamingMessageId) {
+      const blocks = finalizeAssistantTextPhases(
+        (active.contentBlocks as ContentBlock[] | undefined) ?? [],
+      );
+      store.actions.patchMessage(sid, active.streamingMessageId, (message: any) => ({
+        ...message,
+        contentBlocks: blocks,
+      }));
+    }
+    store.actions.endTurn(sid);
     void persistBackgroundSession(sid).finally(() => {
       // A hidden conversation may finish after its panel's unmount cleanup saw
       // it as busy. Re-check atomically once its transcript is durable, then

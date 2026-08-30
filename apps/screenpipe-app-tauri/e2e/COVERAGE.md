@@ -11,8 +11,8 @@ and layer declared in the manifest, weighted by confidence and criticality.
 - Manifest: `e2e/coverage-map.json`
 - Specs directory: `e2e/specs`
 - Mapped specs: 137
-- Declared test blocks: 391
-- Weighted coverage points: 312.1
+- Declared test blocks: 394
+- Weighted coverage points: 315.1
 
 Confidence weights: strong=1.0, partial=0.7, conditional=0.4, smoke=0.3.
 Criticality weights: high=1.0, medium=0.7, low=0.4.
@@ -23,9 +23,9 @@ can execute more runtime cases than this number shows.
 
 | Platform | Specs | Declared tests | Weighted points | Layers | Features | Critical score |
 | --- | --- | --- | --- | --- | --- | --- |
-| windows | 106 | 334 | 277.1 | 15 | 118 | 88% |
-| macos | 133 | 353 | 281.9 | 17 | 126 | 87% |
-| linux | 94 | 292 | 246.5 | 14 | 115 | 84% |
+| windows | 106 | 337 | 280.1 | 15 | 120 | 88% |
+| macos | 133 | 356 | 284.9 | 17 | 128 | 87% |
+| linux | 94 | 295 | 249.5 | 14 | 117 | 84% |
 
 ## Runtime Results
 
@@ -41,7 +41,7 @@ pass/fail/skip counts.
 | auth | - | 1 specs / 1 tests / 1.0 pts | - |
 | billing | 4 specs / 6 tests / 5.7 pts | 4 specs / 6 tests / 5.7 pts | 4 specs / 6 tests / 5.7 pts |
 | capture-ocr | 2 specs / 16 tests / 6.4 pts | 8 specs / 12 tests / 4.8 pts | 1 specs / 3 tests / 1.2 pts |
-| chat-ai | 37 specs / 84 tests / 68.3 pts | 51 specs / 113 tests / 87.8 pts | 35 specs / 83 tests / 67.8 pts |
+| chat-ai | 37 specs / 87 tests / 71.3 pts | 51 specs / 116 tests / 90.8 pts | 35 specs / 86 tests / 70.8 pts |
 | entitlement | - | 1 specs / 1 tests / 1.0 pts | - |
 | local-api | 28 specs / 117 tests / 98.0 pts | 37 specs / 110 tests / 93.5 pts | 23 specs / 85 tests / 76.2 pts |
 | notifications | 4 specs / 26 tests / 17.3 pts | 3 specs / 5 tests / 3.4 pts | 2 specs / 4 tests / 3.1 pts |
@@ -49,7 +49,7 @@ pass/fail/skip counts.
 | os-integration | 7 specs / 32 tests / 26.9 pts | 14 specs / 29 tests / 17.4 pts | 2 specs / 15 tests / 10.8 pts |
 | performance | 3 specs / 45 tests / 45.0 pts | 5 specs / 36 tests / 31.8 pts | 2 specs / 30 tests / 30.0 pts |
 | pipes | 6 specs / 20 tests / 20.0 pts | 8 specs / 26 tests / 26.0 pts | 6 specs / 20 tests / 20.0 pts |
-| real-ui-e2e | 79 specs / 232 tests / 195.9 pts | 95 specs / 246 tests / 206.9 pts | 73 specs / 208 tests / 181.9 pts |
+| real-ui-e2e | 79 specs / 235 tests / 198.9 pts | 95 specs / 249 tests / 209.9 pts | 73 specs / 211 tests / 184.9 pts |
 | settings | 15 specs / 42 tests / 39.0 pts | 17 specs / 36 tests / 31.7 pts | 14 specs / 33 tests / 30.0 pts |
 | storage-privacy | 10 specs / 44 tests / 35.3 pts | 10 specs / 29 tests / 28.1 pts | 7 specs / 22 tests / 21.1 pts |
 | tauri-command | 22 specs / 60 tests / 46.9 pts | 32 specs / 78 tests / 60.3 pts | 21 specs / 61 tests / 47.8 pts |
@@ -77,7 +77,7 @@ pass/fail/skip counts.
 | Window lifecycle, focus, and dedupe | window-lifecycle | covered (strong; windows-system-integration, window-lifecycle) | covered (strong; window-lifecycle, chat-window) | covered (strong; window-lifecycle, chat-window) |
 | Meeting note creation and editing | real-ui-e2e | covered (strong; windows-user-journey, meeting-note-bottom-click) | covered (strong; meeting-note-bottom-click, meeting-chat-panel) | covered (strong; meeting-note-bottom-click, meeting-replay-player) |
 | Pipes discover, install, and play | pipes | covered (strong; pipes, brain-overview) | covered (strong; pipes, brain-overview) | covered (strong; pipes, brain-overview) |
-| Chat window, composer, and streaming state | chat-ai | covered (strong; acp-backend, chat-selected-text-side-chat) | covered (strong; acp-backend, chat-selected-text-side-chat) | covered (strong; acp-backend, chat-selected-text-side-chat) |
+| Chat window, composer, and streaming state | chat-ai | covered (strong; acp-backend, chat-tool-activity) | covered (strong; acp-backend, chat-tool-activity) | covered (strong; acp-backend, chat-tool-activity) |
 | Conversation-owned coding worktrees | chat-ai | gap | gap | gap |
 | Tray/search window behavior | window-lifecycle | covered (strong; window-lifecycle, tray-search) | covered (strong; window-lifecycle, tray-search) | covered (strong; window-lifecycle, tray-search) |
 | Native tray recording status refresh | os-integration | covered (strong; tray-recording-status) | - | - |
@@ -160,7 +160,7 @@ pass/fail/skip counts.
 | chat-stuck-queue-guard.spec.ts | windows, macos, linux | chat-ai | chat | high | partial | synthetic | 1 | A turn that ends while the panel does not own the session on the agent-event bus must still release the composer dispatch guards and must not duplicate the user message; regression for the stuck 'analyzing…' chat whose later messages all piled into QUEUED. |
 | chat-subagent-async-completion.spec.ts | windows, macos, linux | chat-ai, real-ui-e2e, tauri-command | chat, chat-streaming, async-subagents | high | strong | real-user-flow | 1 | Verifies an asynchronous subagent completion appears as a distinct second assistant turn after the original answer settles, without another user prompt. |
 | chat-switch-context-loss.spec.ts | windows, macos, linux | chat-ai | chat, chat-context | medium | partial | synthetic | 1 | Switching conversations during streaming must not corrupt state. |
-| chat-tool-activity.spec.ts | windows, macos, linux | chat-ai, real-ui-e2e | chat, chat-answer-rendering, chat-tools, mcp-startup-filtering, pi-tool-activity, progressive-disclosure | high | strong | mixed | 6 | Mixed Python, JavaScript, Screenpipe API, file, test, recovered-error, and optional live Pi tool flows stay collapsed by default, expose only friendly activity on first expansion, and keep completed tools active while the shared Pi turn is still streaming. A completed turn preserves its last assistant answer when a tool event follows it while earlier narration stays hidden. Synthetic MCP startup events stay out of the transcript so the answer remains primary, connection diagnostics never leak into chat, and startup failures never inflate the command rail's failure count. |
+| chat-tool-activity.spec.ts | windows, macos, linux | chat-ai, real-ui-e2e | chat, chat-answer-rendering, chat-commentary, chat-long-tool-liveness, chat-tools, mcp-startup-filtering, pi-tool-activity, progressive-disclosure | high | strong | mixed | 9 | Mixed Python, JavaScript, Screenpipe API, file, test, recovered-error, and optional live Pi tool flows stay collapsed by default, expose only friendly activity on first expansion, and keep completed tools active while the shared Pi turn is still streaming. Commentary remains visible in transcript order around live and completed tool groups; settled final answers remain distinct from progress, so unrecovered failure, user-stop, and app-interruption states stay truthful. Synthetic MCP startup events stay out of the transcript so the answer remains primary, connection diagnostics never leak into chat, and startup failures never inflate the command rail's failure count. |
 | chat-turn-liveness.spec.ts | windows, macos, linux | chat-ai, real-ui-e2e | chat, chat-streaming, offline-recovery | high | strong | real-user-flow | 1 | The real desktop chat turns off its active phosphor signal and explains that a message is saved when WebView connectivity drops, restores active state on reconnect, and exposes a silent harness after the bounded no-event deadline. |
 | chat-window.spec.ts | windows, macos, linux | chat-ai, window-lifecycle, real-ui-e2e | chat, window-lifecycle | high | strong | real-user-flow | 2 | Opens Chat and focuses the composer for typing. A chat saved from the floating window syncs into Home's Recents without becoming a second Home working tab. |
 | chat-within-session-context-loss.spec.ts | macos | chat-ai | chat, chat-context | medium | conditional | synthetic | 5 | macOS-only within-chat context retention regression. |
