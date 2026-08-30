@@ -844,6 +844,37 @@ fn e2e_set_activation_allowed(allowed: bool) {
     let _ = allowed;
 }
 
+/// E2E helper: make the next visible-window probe take the exact production
+/// renderer-recovery path without deliberately deadlocking WebKit or the GPU.
+#[command]
+fn arm_renderer_stalls(label: String, count: u32) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    return crate::window::renderer_watchdog::arm_forced_stalls(&label, count);
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (label, count);
+        Err("renderer recovery harness is macOS-only".to_string())
+    }
+}
+
+/// E2E helper: inspect native recovery progress from the newly-created webview.
+#[command]
+fn renderer_recovery_state(app_handle: tauri::AppHandle) -> serde_json::Value {
+    #[cfg(target_os = "macos")]
+    return crate::window::renderer_watchdog::snapshot(&app_handle);
+
+    #[cfg(not(target_os = "macos"))]
+    serde_json::json!({
+        "processId": std::process::id(),
+        "recoveryCount": 0,
+        "recoveryActive": false,
+        "consecutiveRecoveries": 0,
+        "lastRecoveredLabel": null,
+        "windowLabels": app_handle.webview_windows().into_keys().collect::<Vec<_>>(),
+    })
+}
+
 pub(super) fn plugin() -> TauriPlugin<Wry> {
     Builder::<Wry>::new("e2e")
         // build.rs verifies this inventory matches the feature-only plugin ACL.
@@ -893,6 +924,8 @@ pub(super) fn plugin() -> TauriPlugin<Wry> {
             capture_pi_start_error,
             set_onboarding_completed_ago,
             e2e_set_activation_allowed,
+            arm_renderer_stalls,
+            renderer_recovery_state,
         ])
         .build()
 }

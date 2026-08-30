@@ -103,6 +103,24 @@ export default function RootLayout({
 
     const uninstallBrowserLogBridge = installBrowserLogBridge();
 
+    // A native foreground watchdog requires a heartbeat from WebKit's main
+    // event loop. When paint submission wedges in the GPU-process IPC path,
+    // the page cannot run this callback; the shell then rebuilds the stale UI
+    // webviews while the capture engine and local API keep running.
+    let rendererHeartbeatInFlight = false;
+    const sendRendererHeartbeat = () => {
+      if (rendererHeartbeatInFlight) return;
+      rendererHeartbeatInFlight = true;
+      void commands.webviewRendererHeartbeat().finally(() => {
+        rendererHeartbeatInFlight = false;
+      });
+    };
+    const rendererHeartbeatTimer = window.setInterval(
+      sendRendererHeartbeat,
+      1_000,
+    );
+    sendRendererHeartbeat();
+
     // Patch Tauri event listener race condition (APP-2/5/9/W, 69 users)
     // Tauri's unregisterListener doesn't null-check listeners[eventId]
     // causing TypeError when unlisten is called on already-removed listener
@@ -223,6 +241,7 @@ export default function RootLayout({
       window.removeEventListener("error", handleWindowError);
       window.removeEventListener("unhandledrejection", handleUnhandled);
       clearInterval(focusWatchdog);
+      window.clearInterval(rendererHeartbeatTimer);
     };
   }, []);
 

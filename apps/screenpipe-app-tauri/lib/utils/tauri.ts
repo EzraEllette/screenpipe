@@ -1890,7 +1890,9 @@ async piStop(sessionId: string | null) : Promise<Result<PiInfo, string>> {
  * Chat panels call this when they give up foreground ownership. Keeping every
  * completed ACP conversation resident leaves a full Bun/Node/agent process
  * tree behind for each chat. The busy check and removal happen under the pool
- * lock, so a prompt cannot race between the check and teardown.
+ * lock, so a prompt cannot race between the check and teardown. Sessions that
+ * are still initializing are kept until they report ready; if the panel
+ * already released them, a deferred reap runs after the first prompt can land.
  */
 async piStopIfIdle(sessionId: string | null) : Promise<Result<PiInfo, string>> {
     try {
@@ -2967,6 +2969,17 @@ async vaultUnlock(password: string) : Promise<Result<null, string>> {
 }
 },
 /**
+ * Record that a webview renderer's main event loop is responsive.
+ *
+ * The macOS renderer watchdog compares this monotonic heartbeat with the
+ * moment a window was shown. If WebKit wedges while submitting a paint to its
+ * GPU process, JavaScript cannot advance its event loop and the native shell
+ * can rebuild the stale UI without restarting capture.
+ */
+async webviewRendererHeartbeat() : Promise<void> {
+    await TAURI_INVOKE("webview_renderer_heartbeat");
+},
+/**
  * Write the exclusion list atomically (write-to-tmp + rename) so the
  * engine's 500 ms mtime poll never observes a half-written file. The
  * engine picks up the new list on the next tick subject to its
@@ -3346,8 +3359,9 @@ acpCompatible: boolean }
 export type PiImageContent = { type: string; mimeType: string; data: string }
 export type PiInfo = { running: boolean;
 /**
- * True while this session has a prompt, queued follow-up, or pending RPC
- * response. Destructive settings use it to avoid clearing live context.
+ * True while this session is still initializing, or has a prompt, queued
+ * follow-up, or pending RPC response. Destructive settings use it to
+ * avoid clearing live context.
  */
 busy: boolean; projectDir: string | null; pid: number | null; sessionId: string | null;
 /**

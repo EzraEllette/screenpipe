@@ -6,7 +6,15 @@ import { spawn, execSync, type ChildProcess } from 'node:child_process';
 import { homedir } from 'node:os';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { existsSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { removeSpotlightExclusion } from './spotlight.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -67,6 +75,8 @@ export const E2E_DATA_DIR = resolve(
 );
 export const E2E_EXTERNAL_CHAT_HOME = resolve(E2E_DATA_DIR, 'external-chat-home');
 const APP_PID_FILE = resolve(E2E_DATA_DIR, 'app.pid');
+export const E2E_APP_LOG_FILE = resolve(E2E_DATA_DIR, 'app.log');
+const persistAppLogs = process.env.SCREENPIPE_E2E_PERSIST_APP_LOGS === 'true';
 
 // `onboarding` marks the onboarding store complete so the app drops straight
 // into the home window. `no-recording` disables vision + audio so the server
@@ -371,11 +381,18 @@ export async function startApp(port = WEBDRIVER_PORT): Promise<ReturnType<typeof
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   appProcess = launchedProcess;
+  if (persistAppLogs) writeFileSync(E2E_APP_LOG_FILE, '');
 
-  if (process.env.SCREENPIPE_E2E_QUIET_APP_LOGS !== 'true') {
-    launchedProcess.stdout?.on('data', (d) => process.stdout.write(`[app] ${d}`));
-  }
-  launchedProcess.stderr?.on('data', (d) => process.stderr.write(`[app] ${d}`));
+  launchedProcess.stdout?.on('data', (d) => {
+    if (persistAppLogs) appendFileSync(E2E_APP_LOG_FILE, d);
+    if (process.env.SCREENPIPE_E2E_QUIET_APP_LOGS !== 'true') {
+      process.stdout.write(`[app] ${d}`);
+    }
+  });
+  launchedProcess.stderr?.on('data', (d) => {
+    if (persistAppLogs) appendFileSync(E2E_APP_LOG_FILE, d);
+    process.stderr.write(`[app] ${d}`);
+  });
   launchedProcess.on('error', (err) => console.error('[app error]', err));
   launchedProcess.on('exit', (code) => {
     if (code != null && code !== 0) console.warn(`[app] exited ${code}`);

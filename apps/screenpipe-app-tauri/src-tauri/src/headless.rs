@@ -64,7 +64,7 @@ pub fn set_enterprise_hidden(app: &AppHandle, hidden: bool) -> bool {
 }
 
 #[cfg(target_os = "macos")]
-fn prepare_window_for_destroy(
+pub(crate) fn prepare_window_for_destroy(
     app: &AppHandle,
     label: &str,
     window: &tauri::WebviewWindow,

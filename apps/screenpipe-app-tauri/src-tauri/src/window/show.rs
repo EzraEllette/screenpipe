@@ -473,6 +473,17 @@ impl ShowRewindWindow {
         app: &AppHandle,
         search_origin: Option<&str>,
     ) -> tauri::Result<WebviewWindow> {
+        let window = self.show_with_search_origin_inner(app, search_origin)?;
+        #[cfg(target_os = "macos")]
+        super::watch_visible(&window, self.clone());
+        Ok(window)
+    }
+
+    fn show_with_search_origin_inner(
+        &self,
+        app: &AppHandle,
+        search_origin: Option<&str>,
+    ) -> tauri::Result<WebviewWindow> {
         let id = self.id();
         let onboarding_store = OnboardingStore::get(app)
             .unwrap_or_else(|_| None)

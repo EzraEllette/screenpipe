@@ -948,6 +948,7 @@ async fn main() {
         .on_window_event(|window, event| match event {
             #[cfg(target_os = "macos")]
             tauri::WindowEvent::Focused(true) => {
+                crate::window::watch_focused(window);
                 let app = window.app_handle().clone();
                 tauri::async_runtime::spawn(async move {
                     let capture_intended = app

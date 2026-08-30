@@ -210,6 +210,7 @@
         "src/recording_config.rs",
         "src/schedule_monitor.rs",
         "src/sleep_monitor.rs",
+        "src/health_identity.rs",
         "src/logging.rs",
         "src/power/profile.rs",
         "src/power/manager.rs",
@@ -237,7 +238,7 @@
       "criticality": "high",
       "confidence": "strong",
       "kind": "mixed",
-      "notes": "Fast logic coverage for the config bridge, tray health debounce, sleep/power policies, and queue backpressure."
+      "notes": "Fast logic coverage for the config bridge, health-endpoint identity, tray health debounce, sleep/power policies, and queue backpressure."
     },
     {
       "id": "engine-capture-timeline",
