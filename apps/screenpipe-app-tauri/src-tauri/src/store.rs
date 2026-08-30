@@ -3166,6 +3166,41 @@ mod tests {
         );
     }
 
+    /// Regression for DM/KE/KF: the auth-token migration intentionally scrubs
+    /// a JWT-shaped legacy `settings.userId` to JSON null. That compatibility
+    /// value must not make the entire persisted settings object unreadable and
+    /// turn an otherwise verified account into the recording gate's Unknown
+    /// state.
+    #[test]
+    fn scrubbed_legacy_user_id_keeps_verified_recording_access() {
+        let mut persisted = SettingsStore::default();
+        persisted.user.id = Some("user_free".to_string());
+        persisted.user.subscription_plan = Some("none".to_string());
+        persisted.user.entitlement = Some(json!({
+            "active": true,
+            "plan": "none",
+            "source": "free",
+            "checked_at": chrono::Utc::now().to_rfc3339(),
+            "features": { "app": true, "cloud": false }
+        }));
+        persisted.recording.audio_transcription_engine = "parakeet".to_string();
+
+        let mut settings_json = serde_json::to_value(&persisted).unwrap();
+        settings_json["userId"] = Value::Null;
+
+        let recovered: SettingsStore = serde_json::from_value(settings_json.clone())
+            .expect("a store with only the proven legacy userId null must deserialize");
+        assert_eq!(recovered.recording.user_id, "");
+        assert_eq!(recovered.recording.audio_transcription_engine, "parakeet");
+        assert_eq!(recovered.local_plan_policy(), LocalPlanPolicy::VerifiedFree);
+
+        settings_json["userId"] = json!({ "unexpected": true });
+        assert!(
+            serde_json::from_value::<SettingsStore>(settings_json).is_err(),
+            "malformed non-null userId must remain an error"
+        );
+    }
+
     /// Regression for the Windows 2.6.20+ onboarding outage: a torn `store.bin`
     /// must be recovered, not converted into a permanent recording lockout.
     ///
