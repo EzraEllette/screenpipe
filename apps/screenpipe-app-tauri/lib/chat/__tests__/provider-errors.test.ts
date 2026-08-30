@@ -219,6 +219,23 @@ describe("provider error copy", () => {
     expect(msg).toContain("Test Connection");
   });
 
+  it("maps the opaque custom-provider 400 to safe preset guidance", () => {
+    expect(
+      buildProviderErrorMessage("400 status code (no body)", {
+        provider: "custom",
+        model: "gemini-2.5-flash",
+      }),
+    ).toBe(
+      "The custom AI provider rejected the request. Verify the endpoint, model, and API key in Settings → AI.",
+    );
+    expect(
+      buildProviderErrorMessage("400 status code (no body)", {
+        provider: "screenpipe-cloud",
+        model: "auto",
+      }),
+    ).toBeNull();
+  });
+
   it("maps the ChatGPT missing-account-id error to reconnect guidance", () => {
     // exact string thrown by pi's openai-codex-responses provider when the
     // OAuth access token lacks the chatgpt_account_id claim (Enterprise/
