@@ -1663,6 +1663,54 @@ describe("BrainOverview", () => {
     );
   });
 
+  it("hands an explicit template replacement to the generator as a replacement", async () => {
+    mocks.listBrainViewTemplateKits.mockResolvedValue({
+      status: "ok",
+      data: [dailyMemoryTemplate],
+    });
+    mocks.listBrainViews.mockResolvedValue({
+      status: "ok",
+      data: [populatedView],
+    });
+    mocks.generateLiveViewWithPi.mockResolvedValue({
+      title: "Daily memory, personalized",
+      timeRange: "today",
+      periodPolicy: populatedView.periodPolicy,
+      note: "Replaced the dashboard.",
+      blocks: [
+        {
+          id: "today-in-brief",
+          title: "Today in brief",
+          intent: "Summarize today's source-backed work.",
+          component: "markdown.v1",
+          width: 12,
+          pipeName: "daily-summary",
+        },
+      ],
+    });
+    render(<BrainOverview />);
+
+    await openDashboardMenu();
+    fireEvent.click(await screen.findByTestId("overview-templates"));
+    fireEvent.click(
+      await screen.findByTestId("preview-live-view-template-daily-memory"),
+    );
+    fireEvent.click(await screen.findByTestId("overview-destination-replace"));
+    fireEvent.click(screen.getByTestId("overview-apply-template"));
+    fireEvent.click(await screen.findByTestId("overview-confirm-replace"));
+
+    await waitFor(() =>
+      expect(mocks.generateLiveViewWithPi).toHaveBeenCalledWith(
+        expect.objectContaining({
+          scope: "dashboard",
+          currentViewRef: { id: "my-overview", revision: 3 },
+          replaceExisting: true,
+        }),
+      ),
+    );
+    expect(await screen.findByTestId("live-view-ai-review")).toBeTruthy();
+  });
+
   it("edits the real dashboard, reorders with the keyboard, and resizes without losing its Pipe", async () => {
     const secondSlot = {
       ...populatedView.slots[0],

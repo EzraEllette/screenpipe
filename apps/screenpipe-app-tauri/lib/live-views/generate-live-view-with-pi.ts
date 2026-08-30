@@ -79,6 +79,7 @@ type GenerateLiveViewOptions = {
     revision: number;
   } | null;
   targetBlockId?: string | null;
+  replaceExisting?: boolean;
   signal?: AbortSignal;
   onPhase?: (phase: "starting" | "working" | "reviewing") => void;
 };
@@ -139,6 +140,7 @@ export function parseGeneratedLiveView(
   scope: LiveViewGenerationScope,
   currentView: GenerateLiveViewOptions["currentView"] = null,
   targetBlockId: string | null = null,
+  replaceExisting = false,
 ): GeneratedLiveView {
   const parsed = asRecord(proposal);
   if (!parsed) throw new Error("AI returned an invalid Live View proposal");
@@ -180,7 +182,7 @@ export function parseGeneratedLiveView(
 
   let blocks: GeneratedLiveViewBlock[];
   let operationCount = 0;
-  if (currentView) {
+  if (currentView && !replaceExisting) {
     if (!Array.isArray(parsed.operations)) {
       throw new Error("AI did not return targeted Live View changes");
     }
@@ -304,11 +306,14 @@ export function buildLiveViewGenerationPrompt(
   options: GenerateLiveViewOptions,
 ): string {
   const editing = Boolean(options.currentViewRef);
+  const replacing = editing && options.replaceExisting === true;
   const scopeInstruction =
     options.scope === "block"
       ? options.currentViewRef
         ? `Propose exactly one update operation for Block id ${JSON.stringify(options.targetBlockId)}. Do not add, remove, or change any other Block.`
         : "Create exactly one new section to add to the existing Live View."
+      : replacing
+        ? "Create a complete replacement Live View with 4 to 7 useful, visually varied sections. Submit the complete new Block list in blocks, not operations; the app will show the replacement as reversible changes for review."
       : options.currentViewRef
         ? "Edit the referenced Live View with the smallest explicit operation set. Do not restate, remove, or update unrelated Blocks."
         : "Create a complete Live View with 4 to 7 useful, visually varied sections.";
@@ -334,14 +339,14 @@ Find scheduled tasks with screenpipe_live_view action=pipes and a short query. B
 ${scopeInstruction}
 
 Work in this order:
-1. ${editing ? `Call screenpipe_live_view action=values for ${JSON.stringify(options.currentViewRef?.id ?? "")} to see what the Blocks currently render. A Block shows its bound task's last payload, so an intent-only edit changes nothing the user can see.` : "Decide the outcomes the user wants to see."}
+1. ${editing && !replacing ? `Call screenpipe_live_view action=values for ${JSON.stringify(options.currentViewRef?.id ?? "")} to see what the Blocks currently render. A Block shows its bound task's last payload, so an intent-only edit changes nothing the user can see.` : "Decide the outcomes the user wants to see."}
 2. ${options.pipeAvailability === "store" ? "Choose from the installable tasks listed below." : "Look up scheduled tasks only if a section needs one."}
 3. Call screenpipe_live_view_propose once with the finished change. Fix and retry if it reports problems.
 
 Each Block needs a precise, source-backed intent covering the selected period and how missing evidence is handled. Avoid duplicate Blocks. Reuse the id of every Block you edit.
 ${storeCandidates}
 
-${editing ? EDIT_EXAMPLES : ""}
+${editing && !replacing ? EDIT_EXAMPLES : ""}
 
 User request:
 ${options.prompt.trim()}
@@ -553,6 +558,7 @@ export async function generateLiveViewWithPi(
     options.scope,
     options.currentView,
     options.targetBlockId ?? null,
+    options.replaceExisting ?? false,
   );
   const selectedPipes = new Set(
     generated.blocks
