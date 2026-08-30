@@ -17,8 +17,9 @@ mod quarantine;
 pub use quarantine::{
     archive_resolved_sqlite_quarantine, persist_sqlite_quarantine,
     prepare_sqlite_quarantine_reserve, read_sqlite_quarantine, resolve_verified_sqlite_quarantine,
-    sqlite_file_identity, sqlite_quarantine_exists, sqlite_quarantine_is_self_healable,
-    sqlite_quarantine_marker_path, SqliteFileIdentity, SqliteQuarantineMarker,
+    sqlite_file_identity, sqlite_quarantine_exists, sqlite_quarantine_marker_path,
+    sqlite_quarantine_self_heal_prerequisite, SqliteFileIdentity, SqliteQuarantineMarker,
+    SqliteQuarantineSelfHealPrerequisite,
 };
 
 pub const FIRST_WAL_RESET_SAFE_SQLITE: i32 = 3_051_003;

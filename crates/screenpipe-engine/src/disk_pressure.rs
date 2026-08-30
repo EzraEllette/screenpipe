@@ -158,7 +158,12 @@ fn start_disk_pressure_monitor_with(
     })
 }
 
-fn available_space_for_path(path: &Path) -> Option<u64> {
+/// Available bytes on the most specific mounted volume containing `path`.
+///
+/// The launch-time SQLite quarantine gate reuses this exact probe so a stale
+/// `SQLITE_FULL` marker cannot be cleared using a different notion of disk
+/// recovery than the active-capture guard.
+pub fn available_space_for_path(path: &Path) -> Option<u64> {
     let resolved_path = canonicalize_nearest_existing(path);
     let mut system = System::new();
     system.refresh_disks_list();
