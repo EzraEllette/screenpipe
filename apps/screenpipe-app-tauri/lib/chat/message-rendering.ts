@@ -78,9 +78,8 @@ export function hasPendingPermissionRequest(messages: Message[]): boolean {
 export function hasAssistantTextBody(message: Message): boolean {
   if (message.role !== "assistant") return false;
   if (message.contentBlocks?.length) {
-    // Completed turns promote their last non-empty text when a trailing tool
-    // would otherwise hide the entire assistant answer. Any non-empty prose
-    // therefore survives rendering and should keep the toolbar available.
+    // Completed turns preserve non-empty commentary around tool activity and
+    // keep the final answer distinct. Either kind of prose keeps the toolbar.
     return message.contentBlocks.some(
       (block) => block.type === "text" && Boolean(block.text.trim()),
     );

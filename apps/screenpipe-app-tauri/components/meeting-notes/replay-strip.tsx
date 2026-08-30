@@ -528,27 +528,35 @@ export function ReplayStrip({ meetingId, segments, timeRange }: ReplayStripProps
 
       <div className="border border-border bg-muted/10">
         {/* Big active frame */}
-        <div className="relative aspect-video bg-background flex items-center justify-center overflow-hidden border-b border-border">
-          {framesLoading ? (
-            <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
-          ) : activeFrame ? (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img
-              key={activeFrame.frameId}
-              data-testid="replay-active-frame"
-              data-frame-id={activeFrame.frameId}
-              src={appendAuthToken(`${getApiBaseUrl()}/frames/${activeFrame.frameId}`)}
-              alt={`screen at ${formatClock(activeFrame.timestamp)}`}
-              className="max-w-full max-h-full object-contain"
-              onError={() => markFrameUnavailable(activeFrame.frameId)}
-            />
-          ) : (
-            <span className="text-[11px] text-muted-foreground p-6">
-              no screen images available during this meeting
-            </span>
-          )}
+        <div className="relative aspect-video bg-background flex flex-col overflow-hidden border-b border-border">
+          <div
+            data-testid="replay-frame-viewport"
+            className="flex min-h-0 flex-1 items-center justify-center overflow-hidden"
+          >
+            {framesLoading ? (
+              <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+            ) : activeFrame ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                key={activeFrame.frameId}
+                data-testid="replay-active-frame"
+                data-frame-id={activeFrame.frameId}
+                src={appendAuthToken(`${getApiBaseUrl()}/frames/${activeFrame.frameId}`)}
+                alt={`screen at ${formatClock(activeFrame.timestamp)}`}
+                className="max-w-full max-h-full object-contain"
+                onError={() => markFrameUnavailable(activeFrame.frameId)}
+              />
+            ) : (
+              <span className="text-[11px] text-muted-foreground p-6">
+                no screen images available during this meeting
+              </span>
+            )}
+          </div>
 
-          <div className="absolute inset-x-0 bottom-0 flex h-10 items-center gap-2 border-t border-white/15 bg-black/75 px-2.5 text-white backdrop-blur-sm">
+          <div
+            data-testid="replay-controls"
+            className="flex h-10 shrink-0 items-center gap-2 border-t border-white/15 bg-black/75 px-2.5 text-white backdrop-blur-sm"
+          >
             <button
               type="button"
               data-testid="replay-play-toggle"

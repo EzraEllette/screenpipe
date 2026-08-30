@@ -180,6 +180,38 @@ describe("historical meeting silent replay player", function () {
     }, player)) as { audio: number; video: number; silentLabel: boolean };
     expect(media).toEqual({ audio: 0, video: 0, silentLabel: true });
 
+    const replayLayout = (await browser.execute((element: HTMLElement) => {
+      const frame = element.querySelector<HTMLElement>(
+        '[data-testid="replay-active-frame"]',
+      );
+      const viewport = element.querySelector<HTMLElement>(
+        '[data-testid="replay-frame-viewport"]',
+      );
+      const controls = element.querySelector<HTMLElement>(
+        '[data-testid="replay-controls"]',
+      );
+      if (!frame || !viewport || !controls) return null;
+      const frameRect = frame.getBoundingClientRect();
+      const viewportRect = viewport.getBoundingClientRect();
+      const controlsRect = controls.getBoundingClientRect();
+      return {
+        frameBottom: frameRect.bottom,
+        viewportBottom: viewportRect.bottom,
+        controlsTop: controlsRect.top,
+      };
+    }, player)) as {
+      frameBottom: number;
+      viewportBottom: number;
+      controlsTop: number;
+    } | null;
+    expect(replayLayout).not.toBeNull();
+    expect(replayLayout!.frameBottom).toBeLessThanOrEqual(
+      replayLayout!.controlsTop + 1,
+    );
+    expect(replayLayout!.viewportBottom).toBeLessThanOrEqual(
+      replayLayout!.controlsTop + 1,
+    );
+
     const thumbnailIds = (await browser.execute((element: HTMLElement) => {
       return Array.from(
         element.querySelectorAll<HTMLElement>("[data-replay-thumbnail]"),

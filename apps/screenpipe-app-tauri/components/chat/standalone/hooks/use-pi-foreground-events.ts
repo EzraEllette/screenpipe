@@ -38,6 +38,10 @@ import { optimisticAssistantForUserEcho } from "@/lib/chat/cross-window-transcri
 import { qualifiedValue } from "@/lib/analytics/qualified-value";
 import { acpAdapterInfo } from "@/lib/utils/preset-appearance";
 import { normalizePlanEntries, upsertPlanBlock } from "@/lib/chat/acp-plan";
+import {
+  finalizeAssistantTextPhases,
+  markPendingAssistantTextAsCommentary,
+} from "@/lib/chat/assistant-text-phases";
 import { useAcpBootState } from "@/lib/stores/acp-boot-state";
 import { toast } from "@/components/ui/use-toast";
 import { registerPiLogListener } from "@/components/chat/standalone/hooks/pi-log-listener";
@@ -568,7 +572,11 @@ export function usePiForegroundEvents({
               ...(parentToolCallId ? { parentToolCallId } : {}),
               ...(data.subagent === true ? { subagent: true } : {}),
             };
-            // Add tool block (text before it is already its own block)
+            // Seal prose before the tool as visible progress, then keep the
+            // tool in the same ordered transcript.
+            piContentBlocksRef.current = markPendingAssistantTextAsCommentary(
+              piContentBlocksRef.current,
+            );
             piContentBlocksRef.current.push({ type: "tool", toolCall });
             const contentBlocks = [...piContentBlocksRef.current];
             setMessages((prev) =>
@@ -1202,7 +1210,10 @@ export function usePiForegroundEvents({
 
             // Snapshot refs BEFORE setMessages — React's batching may defer the
             // functional updater until after the refs are cleared below.
-            const blocksSnapshot = [...piContentBlocksRef.current];
+            const blocksSnapshot = finalizeAssistantTextPhases(
+              piContentBlocksRef.current,
+            );
+            piContentBlocksRef.current = blocksSnapshot;
             const streamedText = piStreamingTextRef.current;
             const wasStoppedByUser = piActiveStopRequestedRef.current;
             const hasNonEmptyChatResult =

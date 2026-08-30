@@ -507,7 +507,14 @@ describe("pi-event-router: background content accumulation (the parallel-chat re
       "tool",
       "text",
     ]);
+    expect(assistant.contentBlocks[0].phase).toBe("commentary");
+    expect(assistant.contentBlocks[2].phase).toBeUndefined();
     expect(assistant.contentBlocks[1].toolCall.result).toBe("hi");
+
+    await handlePiEvent(piEvt("A", { type: "agent_end" }));
+    const settledAssistant = useChatStore.getState().sessions.A.messages![0] as any;
+    expect(settledAssistant.contentBlocks[0].phase).toBe("commentary");
+    expect(settledAssistant.contentBlocks[2].phase).toBe("final_answer");
   });
 
   it("keeps accumulating during the switch-back gap after currentId flips", async () => {

@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "suite": "screenpipe-app-coding-agent-regressions",
-  "dataset_version": "2026-08-28.1",
+  "dataset_version": "2026-08-29.1",
   "suite_type": "regression",
   "owner": "screenpipe engineering",
   "policy": {
@@ -734,6 +734,39 @@
           }
         ],
         "command": "cd apps/screenpipe-app-tauri && NODE_OPTIONS=--localstorage-file=.eval-localstorage bun x vitest run --config vitest.config.ts lib/__tests__/pi-event-router.pool-eviction-eval.test.ts lib/__tests__/pi-event-router.test.ts components/chat/standalone/hooks/use-chat-session-runtime.test.tsx lib/__tests__/chat-store.test.ts"
+      }
+    },
+    {
+      "id": "app-chat-overlapping-load-isolation",
+      "name": "Keep overlapping chat loads isolated",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "3aa56c5a12d7797f83d523ffdd045fa17ac232cf",
+        "pull_request": "https://github.com/screenpipe/screenpipe/pull/6772"
+      },
+      "base_ref": "10ae49880fcb8d072bc17b2c08522f1e4ec1f1d1",
+      "oracle_ref": "3aa56c5a12d7797f83d523ffdd045fa17ac232cf",
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/components/hooks/use-chat-conversations.ts"
+      ],
+      "gate": "advisory",
+      "trigger_paths": [
+        "apps/screenpipe-app-tauri/components/hooks/use-chat-conversations.ts",
+        "apps/screenpipe-app-tauri/lib/stores/chat-store.ts",
+        "apps/screenpipe-app-tauri/lib/chat-storage.ts"
+      ],
+      "tags": ["regression", "escaped-failure", "chat", "navigation", "concurrency", "data-corruption", "state-isolation"],
+      "prompt": "Rapid chat navigation can start a second conversation load while the first still awaits metadata or disk work. The eager session reference then points at the requested chat while the rendered transcript still belongs to the outgoing chat, so the wrong messages can be saved under another conversation and a stale request can reclaim the foreground. Bind every outgoing snapshot to the conversation and messages still rendered, and allow only the newest navigation to commit panel, current-session, settings, and preset state after asynchronous work. Keep each conversation's stored messages unchanged, leave the newest chat in the foreground when an older load finishes late, and preserve single-load behavior, temporary side-chat boundaries, stable ID fallbacks, concurrent save merging, browser state, and user-message timestamps.",
+      "agent_timeout_seconds": 1200,
+      "grader_dependency_links": [
+        { "source_path": "apps/screenpipe-app-tauri/node_modules", "destination_path": "apps/screenpipe-app-tauri/node_modules" }
+      ],
+      "grader": {
+        "timeout_seconds": 420,
+        "fixtures": [
+          { "source_path": "apps/screenpipe-app-tauri/lib/__tests__/save-conversation-race.test.tsx" }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && NODE_OPTIONS=--localstorage-file=.eval-localstorage bun x vitest run --config vitest.config.ts lib/__tests__/save-conversation-race.test.tsx"
       }
     }
   ]
