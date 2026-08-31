@@ -4332,6 +4332,13 @@ export type SyncDeviceInfo = { id: string; deviceId: string; deviceName: string 
  * Sync status response.
  */
 export type SyncStatusResponse = { enabled: boolean; isSyncing: boolean; lastSync: string | null; lastError: string | null; storageUsed: number | null; storageLimit: number | null; deviceCount: number | null; deviceLimit: number | null; syncTier: string | null; machineId: string }
+export type UnfinishedOpportunity = { id: string; revision: number; status: UnfinishedOpportunityStatus; title: string; description: string; goal: string; leftOff: string; lastSeenAt: string; agentSteps: string[]; notes: string; evidence: OpportunityEvidence[]; conversationId?: string | null }
+export type UnfinishedOpportunityStatus = "pending" | "dismissed" | "handed_off"
+export type UpdateActivityOpportunityRequest = { kind: OpportunityKind; id: string; revision: number; name?: string | null; title?: string | null; description?: string | null; goal?: string | null; notes?: string | null; trigger?: string | null; steps?: string[] | null; verification?: string | null; leftOff?: string | null; agentSteps?: string[] | null; excludedActivityIds?: string[] | null;
+/**
+ * `true` dismisses and `false` undoes a dismissal.
+ */
+dismissed?: boolean | null }
 /**
  * A browser URL block rule.
  *
@@ -4340,13 +4347,6 @@ export type SyncStatusResponse = { enabled: boolean; isSyncing: boolean; lastSyn
  * subdomain, and exception semantics without introducing a second setting.
  */
 export type UrlRule = string | DomainRule
-export type UnfinishedOpportunity = { id: string; revision: number; status: UnfinishedOpportunityStatus; title: string; description: string; goal: string; leftOff: string; lastSeenAt: string; agentSteps: string[]; notes: string; evidence: OpportunityEvidence[]; conversationId?: string | null }
-export type UnfinishedOpportunityStatus = "pending" | "dismissed" | "handed_off"
-export type UpdateActivityOpportunityRequest = { kind: OpportunityKind; id: string; revision: number; name?: string | null; title?: string | null; description?: string | null; goal?: string | null; notes?: string | null; trigger?: string | null; steps?: string[] | null; verification?: string | null; leftOff?: string | null; agentSteps?: string[] | null; excludedActivityIds?: string[] | null;
-/**
- * `true` dismisses and `false` undoes a dismissal.
- */
-dismissed?: boolean | null }
 export type User = { id: string | null; name: string | null; email: string | null; image: string | null; token: string | null; clerk_id: string | null; api_key: string | null; credits: Credits | null; stripe_connected: boolean | null; stripe_account_status: string | null; github_username: string | null; bio: string | null; website: string | null; contact: string | null; cloud_subscribed: boolean | null; credits_balance: number | null; app_entitled: boolean | null; subscription_plan: string | null; entitlement: JsonValue | null; enterprise_account: JsonValue | null }
 export type ViewerContent = { kind: "text"; text: string; name: string; path: string; truncated: boolean; total_bytes: number } | { kind: "image"; data_url: string; name: string; path: string } |
 /**
