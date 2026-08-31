@@ -11,7 +11,7 @@
 use crate::activity_history;
 use crate::analytics::AnalyticsManager;
 use crate::recording::local_api_context_from_app;
-use crate::store::OnboardingStore;
+use crate::store::{OnboardingStore, SettingsStore};
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 use std::collections::HashSet;
@@ -309,6 +309,28 @@ fn validate_candidate(raw: &str) -> Result<String, String> {
     Ok(text.to_string())
 }
 
+fn dev_summary(snapshot: &Value) -> String {
+    let apps = snapshot
+        .get("apps")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .take(2)
+        .filter_map(|app| app.get("name").and_then(Value::as_str))
+        .map(|name| clipped(Some(name), 80))
+        .filter(|name| !name.is_empty())
+        .collect::<Vec<_>>();
+    let activity = match apps.as_slice() {
+        [] => "the work on your screen".to_string(),
+        [app] => format!("your work in {app}"),
+        [first, second] => format!("your work across {first} and {second}"),
+        _ => unreachable!("at most two app names are collected"),
+    };
+    format!(
+        "You spent the first few minutes after setup on {activity}. Screenpipe has started building a private, searchable record of that activity. Ask me about anything it captured."
+    )
+}
+
 fn update_state(
     app: &AppHandle,
     phase: &str,
@@ -467,17 +489,29 @@ async fn tick(app: &AppHandle, state: &FirstRunSummaryState) -> Result<(), Strin
     info!(elapsed_seconds, "first-run summary: evidence ready; starting native generation");
     update_state(app, "writing", None, None)?;
     let facts = build_facts(&snapshot, elapsed_seconds);
-    let result = activity_history::run_background_pi(
-        app,
-        "first-run",
-        "pi-first-run",
-        prompt(&facts),
-        None,
-        None,
-        SYSTEM_PROMPT,
-    )
-    .await
-    .and_then(|raw| validate_candidate(&raw));
+    let settings = SettingsStore::get(app)?.unwrap_or_default();
+    let has_cloud_auth = settings
+        .user
+        .token
+        .as_deref()
+        .is_some_and(|token| !token.is_empty())
+        || crate::auth_token::cached_cloud_token().is_some();
+    let result = if crate::store::trial_activation_dev_force_enabled() && !has_cloud_auth {
+        info!("first-run summary: using account-free development fixture");
+        validate_candidate(&dev_summary(&snapshot))
+    } else {
+        activity_history::run_background_pi(
+            app,
+            "first-run",
+            "pi-first-run",
+            prompt(&facts),
+            None,
+            None,
+            SYSTEM_PROMPT,
+        )
+        .await
+        .and_then(|raw| validate_candidate(&raw))
+    };
     let summary = match result {
         Ok(summary) => summary,
         Err(error) => {
@@ -540,6 +574,17 @@ mod tests {
             "Based on screens_indexed, you did some work and can ask me about it later."
         )
         .is_err());
+    }
+
+    #[test]
+    fn development_summary_is_valid_and_uses_observed_apps() {
+        let snapshot = json!({
+            "apps": [{ "name": "Arc" }, { "name": "Terminal" }],
+        });
+        let summary = dev_summary(&snapshot);
+
+        assert!(validate_candidate(&summary).is_ok());
+        assert!(summary.contains("Arc and Terminal"));
     }
 
     #[test]

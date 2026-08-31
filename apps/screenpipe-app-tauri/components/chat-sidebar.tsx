@@ -50,6 +50,7 @@ import {
   Terminal,
   MoreHorizontal,
   GitBranch,
+  LockKeyhole,
 } from "lucide-react";
 import { usePlatform } from "@/lib/hooks/use-platform";
 import { emit, listen } from "@tauri-apps/api/event";
@@ -363,7 +364,12 @@ function persistDeletedPipeExecutionIds(ids: Set<string>): void {
 interface ChatSidebarProps {
   className?: string;
   onViewAll?: () => void;
+  /** When set, every chat except this conversation remains visible but inert. */
+  allowedConversationId?: string | null;
 }
+
+const ChatSidebarAllowedConversationContext =
+  React.createContext<string | null | undefined>(undefined);
 
 function readCollapsedPref(key: string, defaultValue = false): boolean {
   try {
@@ -461,7 +467,12 @@ function useQueueDepths(): Map<string, number> {
  * vertical scroll for the conversation list. Does NOT add a width / border /
  * background — those belong to the parent.
  */
-export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
+export function ChatSidebar({
+  className,
+  onViewAll,
+  allowedConversationId,
+}: ChatSidebarProps) {
+  const conversationRestrictionActive = allowedConversationId !== undefined;
   const currentId = useChatStore(selectDisplayedChatId);
   // Reactive group key for the current session — re-evaluates when the
   // session appears in the store (handles the race where currentId is set
@@ -1761,6 +1772,9 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
         if (openConversationMenuId) setOpenConversationMenuId(null);
       }}
     >
+      <ChatSidebarAllowedConversationContext.Provider
+        value={allowedConversationId}
+      >
       <div className="flex flex-col gap-1">
         <div className="min-h-0 flex flex-col">
           {pinned.length > 0 && (
@@ -1805,6 +1819,7 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
                     <DropdownMenuTrigger asChild>
                       <button
                         type="button"
+                        disabled={conversationRestrictionActive}
                         className="inline-flex h-5 w-5 items-center justify-center rounded opacity-0 transition-opacity hover:bg-muted/40 focus-visible:opacity-100 group-hover:opacity-100"
                         aria-label="organize recents"
                         title="organize recents"
@@ -2206,6 +2221,7 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
         </DialogContent>
       </Dialog>
 
+      </ChatSidebarAllowedConversationContext.Provider>
     </div>
   );
 }
@@ -3111,6 +3127,12 @@ export function SidebarChatRow({
   openConversationMenuId,
   setOpenConversationMenuId,
 }: ChatRowProps) {
+  const allowedConversationId = React.useContext(
+    ChatSidebarAllowedConversationContext,
+  );
+  const conversationRestrictionActive = allowedConversationId !== undefined;
+  const interactionDisabled =
+    conversationRestrictionActive && session.id !== allowedConversationId;
   const isLive =
     session.status === "streaming" ||
     session.status === "thinking" ||
@@ -3119,7 +3141,8 @@ export function SidebarChatRow({
   const isUnread = session.unread && !isCurrent;
   const showCurrentLabel =
     isCurrent && !isLive && !isError && queuedCount === 0;
-  const canShowActions = showActions && !disableHover;
+  const canShowActions =
+    showActions && !disableHover && !conversationRestrictionActive;
   const activityAt = session.lastUserMessageAt ?? session.updatedAt ?? session.createdAt;
   const now = useMinuteTick(!isLive && !isUnread && !isError && queuedCount === 0);
   const age = formatCompactAge(activityAt, now);
@@ -3197,7 +3220,8 @@ export function SidebarChatRow({
               : "border-transparent sidebar-text-secondary"
             : tone === "subtle"
               ? "border-transparent sidebar-text-tertiary hover:bg-muted/12"
-              : "border-transparent sidebar-text-secondary hover:bg-muted/20"
+              : "border-transparent sidebar-text-secondary hover:bg-muted/20",
+        interactionDisabled && "cursor-not-allowed"
       )}
       data-testid={`chat-row-${session.id}`}
       data-current={isCurrent ? "true" : undefined}
@@ -3205,8 +3229,9 @@ export function SidebarChatRow({
     >
       <button
         type="button"
-        className="min-w-0 flex-1 flex items-center gap-2 text-left"
+        className="min-w-0 flex-1 flex items-center gap-2 text-left disabled:cursor-not-allowed"
         aria-current={isCurrent ? "page" : undefined}
+        disabled={interactionDisabled}
         onClick={() => {
           setOpenConversationMenuId?.(null);
           onSelect(session.id);
@@ -3257,7 +3282,12 @@ export function SidebarChatRow({
               menuOpen && "opacity-0"
             )}
           >
-            {showCurrentLabel ? (
+            {interactionDisabled ? (
+              <LockKeyhole
+                aria-label="locked during trial"
+                className="h-3 w-3 text-muted-foreground"
+              />
+            ) : showCurrentLabel ? (
               <span className="text-[9px] font-medium uppercase tracking-[0.08em] text-foreground/70">
                 current
               </span>

@@ -14,7 +14,7 @@ use tracing::warn;
 use crate::speaker::{
     embedding::EmbeddingExtractor,
     embedding_manager::EmbeddingManager,
-    models::{get_or_download_model, PyannoteModel},
+    models::{get_cached_model_or_start_download, get_or_download_model, PyannoteModel},
 };
 
 pub struct SegmentationManager {
@@ -39,22 +39,23 @@ impl SegmentationManager {
             });
         }
 
-        let embedding_model_path = match get_or_download_model(PyannoteModel::Embedding).await {
-            Ok(model) => Some(model.path),
-            Err(e) => {
-                warn!("embedding model unavailable at startup: {e}");
-                None
-            }
-        };
+        let embedding_model_path =
+            match get_cached_model_or_start_download(PyannoteModel::Embedding).await {
+                Ok(path) => Some(path),
+                Err(e) => {
+                    warn!("embedding model unavailable at startup: {e}");
+                    None
+                }
+            };
 
-        let segmentation_model_path = match get_or_download_model(PyannoteModel::Segmentation).await
-        {
-            Ok(model) => Some(model.path),
-            Err(e) => {
-                warn!("segmentation model unavailable at startup: {e}");
-                None
-            }
-        };
+        let segmentation_model_path =
+            match get_cached_model_or_start_download(PyannoteModel::Segmentation).await {
+                Ok(path) => Some(path),
+                Err(e) => {
+                    warn!("segmentation model unavailable at startup: {e}");
+                    None
+                }
+            };
 
         let embedding_extractor = if let Some(ref embedding_path) = embedding_model_path {
             match EmbeddingExtractor::new(

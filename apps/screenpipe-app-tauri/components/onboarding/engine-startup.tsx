@@ -90,16 +90,20 @@ type BootPhaseSnapshot = {
 const BOOT_PHASE_POLL_MS = 500;
 
 type EngineHealthPayload = {
-  audio_status?: unknown;
-  frame_status?: unknown;
+  audio_status: string;
+  frame_status: string;
 };
+
+type EngineHealthSnapshot = EngineHealthPayload | "auth_required";
 
 // `/health` deliberately returns 503 when a capture pipeline has not produced
 // data yet. That is expected for meetings-only audio while no meeting is in
 // progress, so HTTP success cannot be used as an engine-liveness check here.
 // Validate the response shape instead so an unrelated service on the port does
 // not let onboarding advance.
-// Onboarding needs to know the engine is *up*, not that capture is warm.
+// Onboarding needs to know the engine is up, not that capture is warm. Silent
+// audio devices and a visual pipeline waiting for its first frame are both
+// valid immediately after initialization.
 //
 // Requiring the health payload's shape meant any response that was not that
 // payload read as "not ready" forever. The important such response is a 401:
@@ -114,8 +118,10 @@ type EngineHealthPayload = {
 // connection refused and never reaches here. We still require either the health
 // payload or an auth rejection, so an unrelated process on the port cannot be
 // mistaken for the engine — that case stays with the port-conflict boot phase.
-async function isEngineHealthResponse(response: Response): Promise<boolean> {
-  if (response.status === 401 || response.status === 403) return true;
+async function readEngineHealth(
+  response: Response,
+): Promise<EngineHealthSnapshot | null> {
+  if (response.status === 401 || response.status === 403) return "auth_required";
   try {
     const data = (await response.json()) as EngineHealthPayload;
     const conforms =
@@ -130,12 +136,12 @@ async function isEngineHealthResponse(response: Response): Promise<boolean> {
         keys: Object.keys(data ?? {}).slice(0, 20).join(","),
       });
     }
-    return conforms;
+    return conforms ? data : null;
   } catch {
     posthog.capture("onboarding_engine_health_unparseable", {
       http_status: response.status,
     });
-    return false;
+    return null;
   }
 }
 
@@ -174,6 +180,8 @@ export default function EngineStartup({ handleNextSlide }: EngineStartupProps) {
   const hasAdvancedRef = useRef(false);
   const hasReportedReadyRef = useRef(false);
   const mountTimeRef = useRef(Date.now());
+  const captureSetupPromiseRef = useRef<Promise<void> | null>(null);
+  const captureSetupInFlightRef = useRef(false);
   // Once per mount: the health poll used to swallow its own failure, which is
   // how a 95%-to-11% collapse produced no telemetry at all.
   const hasReportedPollFailureRef = useRef(false);
@@ -216,6 +224,27 @@ export default function EngineStartup({ handleNextSlide }: EngineStartupProps) {
     setAudioReady(true);
     setVisionReady(true);
     setState("running");
+  }, []);
+
+  // Ensure ServerCore also has a CaptureSession. This is idempotent: an
+  // existing session is left alone, while a server that came up before the
+  // permissions flow gets capture started with the settings that flow saved.
+  // Do not stop a live session here: tearing it down during onboarding can
+  // wedge OS capture devices, and readiness must not depend on incoming media.
+  const ensureCaptureSession = useCallback(() => {
+    if (captureSetupPromiseRef.current) return captureSetupPromiseRef.current;
+
+    captureSetupInFlightRef.current = true;
+    captureSetupPromiseRef.current = (async () => {
+      try {
+        const startResult = await commands.startCapture();
+        if (startResult.status === "error") throw new Error(startResult.error);
+      } finally {
+        captureSetupInFlightRef.current = false;
+      }
+    })();
+
+    return captureSetupPromiseRef.current;
   }, []);
 
   // Assigned during render, per the ref-mirror rule in CLAUDE.md.
@@ -278,12 +307,13 @@ export default function EngineStartup({ handleNextSlide }: EngineStartupProps) {
           signal: AbortSignal.timeout(3000),
         }).catch(() => null);
 
-        if (
-          healthCheck &&
-          (await isEngineHealthResponse(healthCheck))
-        ) {
-          markEngineReady();
-          return;
+        if (healthCheck) {
+          const health = await readEngineHealth(healthCheck);
+          if (health) {
+            await ensureCaptureSession();
+            markEngineReady();
+            return;
+          }
         }
 
         const SPAWN_TIMED_OUT = Symbol("spawn-timed-out");
@@ -315,10 +345,10 @@ export default function EngineStartup({ handleNextSlide }: EngineStartupProps) {
           throw new Error(result.error);
         }
 
-        // spawn_screenpipe resolves only after ServerCore and CaptureSession
-        // have initialized. Audio capture itself starts asynchronously and may
-        // intentionally remain idle until a meeting, which is still ready.
-        markEngineReady();
+        // `spawn_screenpipe` may return early when native auto-start already
+        // owns the lifecycle lock. The health poll below will see ServerCore,
+        // apply the final settings through ensureCaptureSession, and only then
+        // mark the step ready.
       } catch (err) {
         const message =
           typeof err === "string"
@@ -345,7 +375,7 @@ export default function EngineStartup({ handleNextSlide }: EngineStartupProps) {
       }
     };
     start();
-  }, [markEngineReady]);
+  }, [ensureCaptureSession, markEngineReady]);
 
   // Poll health
   useEffect(() => {
@@ -356,7 +386,12 @@ export default function EngineStartup({ handleNextSlide }: EngineStartupProps) {
         const res = await localFetch("/health", {
           signal: AbortSignal.timeout(2000),
         });
-        if (await isEngineHealthResponse(res)) {
+        const health = await readEngineHealth(res);
+        if (health) {
+          setServerStarted(true);
+          setAudioReady(true);
+
+          await ensureCaptureSession();
           markEngineReady();
         }
       } catch (pollError) {
@@ -402,7 +437,7 @@ export default function EngineStartup({ handleNextSlide }: EngineStartupProps) {
     const interval = setInterval(poll, 500);
     poll();
     return () => clearInterval(interval);
-  }, [state, markEngineReady]);
+  }, [state, ensureCaptureSession, markEngineReady]);
 
   // Poll boot phase via Tauri IPC — available before HTTP server binds.
   // Crucial on large-db migrations where /health is unreachable for minutes.
@@ -524,7 +559,8 @@ export default function EngineStartup({ handleNextSlide }: EngineStartupProps) {
         "starting_pipes",
       ];
       const stillProgressing =
-        bootPhase !== null && activePhases.includes(bootPhase.phase);
+        captureSetupInFlightRef.current ||
+        (bootPhase !== null && activePhases.includes(bootPhase.phase));
       const withinBudget =
         Date.now() - mountTimeRef.current < MAX_ENGINE_WAIT_MS;
 

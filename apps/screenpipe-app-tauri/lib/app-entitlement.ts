@@ -130,6 +130,13 @@ export function isDevBillingBypassEnabled() {
   );
 }
 
+// Deliberately separate from the broader dev billing bypass. Most local and
+// preview builds should still exercise login unless this test-only affordance
+// was explicitly compiled into the frontend.
+export function isDevLoginSkipEnabled() {
+  return process.env.NEXT_PUBLIC_SCREENPIPE_DEV_LOGIN_SKIP === "true";
+}
+
 // Show the dev-only login helper (paste a token / screenpipe:// URL) when we are
 // not in a plain production build, i.e. dev, a forced gate, or pointed at a
 // non-prod website. Never shows in a normal prod release.

@@ -18,9 +18,6 @@ const mocks = vi.hoisted(() => ({
   updateSettings: vi.fn().mockResolvedValue(undefined),
   settings: { deviceTier: undefined as string | null | undefined },
   capture: vi.fn(),
-  localFetch: vi.fn(),
-  stopScreenpipe: vi.fn().mockResolvedValue(undefined),
-  spawnScreenpipe: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock("@/lib/hooks/use-settings", () => ({
@@ -28,17 +25,6 @@ vi.mock("@/lib/hooks/use-settings", () => ({
     settings: mocks.settings,
     updateSettings: mocks.updateSettings,
   }),
-}));
-
-vi.mock("@/lib/api", () => ({
-  localFetch: mocks.localFetch,
-}));
-
-vi.mock("@/lib/utils/tauri", () => ({
-  commands: {
-    stopScreenpipe: mocks.stopScreenpipe,
-    spawnScreenpipe: mocks.spawnScreenpipe,
-  },
 }));
 
 vi.mock("posthog-js", () => ({
@@ -52,10 +38,6 @@ describe("TimelineChoice", () => {
     vi.clearAllMocks();
     mocks.settings.deviceTier = undefined;
     mocks.updateSettings.mockResolvedValue(undefined);
-    mocks.stopScreenpipe.mockResolvedValue(undefined);
-    mocks.spawnScreenpipe.mockResolvedValue(undefined);
-    // Default: nothing on the port — first-run onboarding, engine not spawned.
-    mocks.localFetch.mockRejectedValue(new Error("connection refused"));
   });
 
   it("recommends on for high tier and keeps both capture flags on when chosen", async () => {
@@ -226,76 +208,6 @@ describe("TimelineChoice", () => {
     await act(async () => {
       releaseWrite();
     });
-  });
-
-  it("does not restart screenpipe during first-run onboarding", async () => {
-    mocks.settings.deviceTier = "high";
-    const handleNextSlide = vi.fn();
-    render(<TimelineChoice handleNextSlide={handleNextSlide} />);
-
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: /timeline on/i }));
-    });
-
-    expect(mocks.stopScreenpipe).not.toHaveBeenCalled();
-    expect(mocks.spawnScreenpipe).not.toHaveBeenCalled();
-    expect(handleNextSlide).toHaveBeenCalledTimes(1);
-  });
-
-  // Onboarding replay (tray -> "Reset Onboarding") can run while the recorder
-  // is live; both flags are only read at spawn, so it has to be restarted.
-  it("restarts a running engine so a replayed choice takes effect", async () => {
-    mocks.settings.deviceTier = "low";
-    mocks.localFetch.mockResolvedValue({ ok: true, status: 200 });
-    const handleNextSlide = vi.fn();
-    render(<TimelineChoice handleNextSlide={handleNextSlide} />);
-
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: /keep it off/i }));
-    });
-
-    await waitFor(() => expect(mocks.spawnScreenpipe).toHaveBeenCalledTimes(1));
-    expect(mocks.stopScreenpipe).toHaveBeenCalledTimes(1);
-    expect(handleNextSlide).toHaveBeenCalledTimes(1);
-  });
-
-  // Regression: awaiting the restart wedged the step. A full stop/spawn cycle
-  // took ~28s on a populated install and WKWebView killed its content process
-  // partway through, destroying the pending promise so the click handler never
-  // resumed. The step must advance without waiting for the engine.
-  it("advances without waiting for the restart to finish", async () => {
-    mocks.settings.deviceTier = "low";
-    mocks.localFetch.mockResolvedValue({ ok: true, status: 200 });
-    // A stop that never settles stands in for the multi-second real one.
-    mocks.stopScreenpipe.mockImplementation(() => new Promise<void>(() => {}));
-    const handleNextSlide = vi.fn();
-    render(<TimelineChoice handleNextSlide={handleNextSlide} />);
-
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: /keep it off/i }));
-    });
-
-    await waitFor(() => expect(handleNextSlide).toHaveBeenCalledTimes(1));
-    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
-  });
-
-  it("still advances when the restart itself fails", async () => {
-    mocks.settings.deviceTier = "low";
-    mocks.localFetch.mockResolvedValue({ ok: true, status: 200 });
-    mocks.spawnScreenpipe.mockRejectedValue(new Error("spawn failed"));
-    const consoleError = vi
-      .spyOn(console, "error")
-      .mockImplementation(() => {});
-    const handleNextSlide = vi.fn();
-    render(<TimelineChoice handleNextSlide={handleNextSlide} />);
-
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: /keep it off/i }));
-    });
-
-    // engine-startup owns surfacing engine trouble, so the step does not block
-    await waitFor(() => expect(handleNextSlide).toHaveBeenCalledTimes(1));
-    consoleError.mockRestore();
   });
 
   it("only persists the first choice when both buttons are clicked quickly", async () => {

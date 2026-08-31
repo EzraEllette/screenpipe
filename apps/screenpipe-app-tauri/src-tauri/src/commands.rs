@@ -2817,7 +2817,7 @@ pub async fn set_onboarding_step(app_handle: tauri::AppHandle, step: String) -> 
 
     if !crate::should_skip_onboarding() && step == TRIAL_ACTIVATION_PAYWALL_STEP {
         let state = app_handle.state::<crate::recording::RecordingState>();
-        crate::stop_screenpipe(state, app_handle.clone()).await?;
+        crate::recording::stop_capture(state, app_handle.clone()).await?;
         let _ = app_handle.emit("trial-activation-state", "paywall");
     } else if step == TRIAL_ACTIVATION_UNLOCKED_STEP
         && previous_step.as_deref() == Some(TRIAL_ACTIVATION_PAYWALL_STEP)

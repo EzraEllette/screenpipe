@@ -41,6 +41,7 @@ import {
   Eye,
   EyeOff,
   GripVertical,
+  LockKeyhole,
   MoreHorizontal,
   RotateCcw,
 } from "lucide-react";
@@ -65,6 +66,7 @@ export type SidebarNavItem = {
   id: SidebarNavId;
   label: string;
   icon: React.ReactNode;
+  disabled?: boolean;
   /** Right-aligned adornment (running-pipe count, meeting recording dot). */
   trailing?: React.ReactNode;
 };
@@ -193,7 +195,7 @@ function SortableRow({
   | "onReset"
 >) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
-    useSortable({ id: item.id });
+    useSortable({ id: item.id, disabled: item.disabled });
   const isActive = activeId === item.id;
   const menuProps = {
     index,
@@ -209,6 +211,14 @@ function SortableRow({
       <ContextMenuTrigger asChild>
         <div
           ref={setNodeRef}
+          onContextMenu={
+            item.disabled
+              ? (event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                }
+              : undefined
+          }
           style={{
             // Lock horizontal travel without pulling in @dnd-kit/modifiers:
             // a vertical list should never slide sideways under the cursor.
@@ -226,12 +236,17 @@ function SortableRow({
             data-testid={`nav-${item.id}`}
             data-announcement-anchor={`sidebar-${item.id}`}
             onClick={() => onSelect(item.id)}
-            onMouseEnter={() => onIntent?.(item.id)}
-            onFocus={() => onIntent?.(item.id)}
+            onMouseEnter={() => !item.disabled && onIntent?.(item.id)}
+            onFocus={() => !item.disabled && onIntent?.(item.id)}
             aria-current={isActive ? "page" : undefined}
+            disabled={item.disabled}
             className={cn(
               rowClassName(isActive, isTranslucent),
-              isDragging ? "cursor-grabbing" : "cursor-pointer",
+              item.disabled
+                ? "cursor-not-allowed"
+                : isDragging
+                  ? "cursor-grabbing"
+                  : "cursor-pointer",
             )}
             {...attributes}
             {...listeners}
@@ -268,6 +283,13 @@ function SortableRow({
             >
               {item.label}
             </span>
+            {item.disabled && (
+              <LockKeyhole
+                aria-hidden="true"
+                className="h-3 w-3 shrink-0 text-muted-foreground"
+                data-testid={`nav-${item.id}-disabled`}
+              />
+            )}
             {/* The adornment yields to the "…" while hovered — same trade the
                 chat rows make between unread state and row actions. */}
             {item.trailing && (
@@ -284,9 +306,11 @@ function SortableRow({
                 aria-label={`${item.label} options`}
                 data-testid={`nav-${item.id}-options`}
                 onClick={(event) => event.stopPropagation()}
+                disabled={item.disabled}
                 className={cn(
                   "absolute right-1.5 top-1/2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-sm text-muted-foreground opacity-0 transition-opacity duration-150 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-signal motion-reduce:transition-none",
                   "hover:text-foreground focus-visible:opacity-100 group-hover/navrow:opacity-100 data-[state=open]:opacity-100",
+                  item.disabled && "hidden",
                 )}
               >
                 <MoreHorizontal className="h-3.5 w-3.5" />

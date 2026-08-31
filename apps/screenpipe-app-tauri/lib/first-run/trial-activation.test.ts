@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   bypassesTrialActivation,
+  isTrialActivationEligible,
   TRIAL_ACTIVATION_PAYWALL_STEP,
   TRIAL_ACTIVATION_SUMMARY_STEP,
   TRIAL_ACTIVATION_UNLOCKED_STEP,
@@ -55,5 +56,17 @@ describe("trial activation persisted state", () => {
         true,
       );
     }
+  });
+
+  it("lets only the debug-force path exercise activation without an account", () => {
+    expect(isTrialActivationEligible(true, null, false)).toBe(false);
+    expect(isTrialActivationEligible(false, null, true)).toBe(true);
+    expect(
+      isTrialActivationEligible(
+        false,
+        { token: "", entitlement_source: "subscription" } as AppUser,
+        true,
+      ),
+    ).toBe(false);
   });
 });

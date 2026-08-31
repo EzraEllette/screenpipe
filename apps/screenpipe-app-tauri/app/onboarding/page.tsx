@@ -24,7 +24,7 @@ import { commands } from "@/lib/utils/tauri";
 import { onboardingFunnel } from "@/lib/analytics/onboarding-funnel";
 import type { AppUser } from "@/lib/app-entitlement";
 import {
-  bypassesTrialActivation,
+  isTrialActivationEligible,
   TRIAL_ACTIVATION_EXPERIMENT_FLAG,
   TRIAL_ACTIVATION_DEV_FORCE,
   TRIAL_ACTIVATION_PAYWALL_STEP,
@@ -55,6 +55,26 @@ type SlideKey =
 // Must match the inner_size the Rust side creates the window at, in
 // window/show.rs, so opening onboarding doesn't resize on first paint.
 const ONBOARDING_WINDOW_SIZE = { width: 500, height: 680 };
+const FINAL_STEP_RETRY_DELAY_MS = 300;
+
+const persistOnboardingStepWithRetry = async (step: string) => {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const result = await commands.setOnboardingStep(step);
+      if (result?.status === "error") throw new Error(result.error);
+      return;
+    } catch (error) {
+      lastError = error;
+      if (attempt === 0) {
+        await new Promise((resolve) =>
+          window.setTimeout(resolve, FINAL_STEP_RETRY_DELAY_MS),
+        );
+      }
+    }
+  }
+  throw lastError;
+};
 
 function TrialActivationFlagAssignment({
   onVariant,
@@ -202,11 +222,10 @@ export default function OnboardingPage() {
     settings.deviceTier === "high"
       ? settings.deviceTier
       : "unknown";
-  const needsOnboardingCheckout =
-    (onboardingData.trialActivationFreshInstall === true ||
-      TRIAL_ACTIVATION_DEV_FORCE) &&
-    Boolean(user?.token) &&
-    !bypassesTrialActivation(user);
+  const needsOnboardingCheckout = isTrialActivationEligible(
+    onboardingData.trialActivationFreshInstall === true,
+    user,
+  );
   const [trialActivationVariant, setTrialActivationVariant] = useState<
     string | boolean | undefined
   >(undefined);
@@ -497,24 +516,34 @@ export default function OnboardingPage() {
         (s !== "plan" || canAdvanceIntoPlanSelection),
     );
     if (!nextSlide) {
-      if (wasTrialActivationEligible) {
-        posthog.capture("trial_activation_experiment_enrolled", {
-          experiment: TRIAL_ACTIVATION_EXPERIMENT_FLAG,
-          variant:
-            typeof trialActivationVariant === "string"
-              ? trialActivationVariant
-              : "control",
-          eligible_new_install: true,
-          email: user?.email ?? null,
-          decision_metric: "mrr_per_eligible_new_install_day_12",
-        });
+      try {
+        if (wasTrialActivationEligible) {
+          posthog.capture("trial_activation_experiment_enrolled", {
+            experiment: TRIAL_ACTIVATION_EXPERIMENT_FLAG,
+            variant:
+              typeof trialActivationVariant === "string"
+                ? trialActivationVariant
+                : "control",
+            eligible_new_install: true,
+            email: user?.email ?? null,
+            decision_metric: "mrr_per_eligible_new_install_day_12",
+          });
+        }
+        if (usesSummaryFirstTrial) {
+          await persistOnboardingStepWithRetry(
+            TRIAL_ACTIVATION_SUMMARY_STEP,
+          );
+        }
+        await completeOnboarding({ method: "setup_finished" });
+      } catch (error) {
+        console.error("failed to finish onboarding:", error);
+      } finally {
+        // A transient store/IPC failure must not permanently consume the
+        // user's click. The automatic retry above handles the common case;
+        // releasing this guard keeps a later manual click retryable too.
+        transitioningRef.current = false;
+        setIsTransitioning(false);
       }
-      if (usesSummaryFirstTrial) {
-        await commands.setOnboardingStep(TRIAL_ACTIVATION_SUMMARY_STEP);
-      }
-      await completeOnboarding({ method: "setup_finished" });
-      transitioningRef.current = false;
-      setIsTransitioning(false);
       return;
     }
     try {

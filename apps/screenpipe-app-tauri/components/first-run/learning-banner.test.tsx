@@ -163,6 +163,23 @@ describe("trial activation summary experience", () => {
     fireEvent.click(screen.getByTestId("trial-activation-start-trial"));
 
     expect(onStartTrial).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId("trial-activation-summary-lock")).toHaveClass(
+      "pointer-events-none",
+    );
+    expect(
+      screen.getByTestId("trial-activation-start-trial").parentElement,
+    ).toHaveClass("pointer-events-auto");
+  });
+
+  it("supports an inline CTA beside native product surfaces", () => {
+    render(
+      <TrialActivationUnlockPrompt onStartTrial={vi.fn()} inline />,
+    );
+
+    const prompt = screen.getByTestId("trial-activation-summary-lock");
+    expect(prompt).toHaveAttribute("data-layout", "inline");
+    expect(prompt).toHaveClass("shrink-0", "border-t");
+    expect(prompt).not.toHaveClass("absolute", "pointer-events-none");
   });
 });
 

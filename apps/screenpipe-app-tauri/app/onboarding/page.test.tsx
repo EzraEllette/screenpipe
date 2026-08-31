@@ -449,6 +449,56 @@ describe("enterprise onboarding authentication", () => {
     });
   });
 
+  it("retries a transient summary-step write before completing onboarding", async () => {
+    mocks.enterprisePolicy.isManagedDeployment = false;
+    mocks.trialActivationVariant = "summary_first";
+    onboardingData.trialActivationFreshInstall = true;
+    mocks.settings.user = { token: "tok" };
+    onboardingData.currentStep = "recommended-setup";
+    mocks.setOnboardingStep
+      .mockResolvedValueOnce({ status: "error", error: "store busy" } as never)
+      .mockResolvedValueOnce({ status: "ok", data: null } as never);
+
+    render(<OnboardingPage />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "finish recommended setup" }),
+    );
+
+    await waitFor(() =>
+      expect(mocks.setOnboardingStep).toHaveBeenCalledTimes(2),
+    );
+    expect(mocks.completeOnboarding).toHaveBeenCalledWith({
+      method: "setup_finished",
+    });
+  });
+
+  it("releases the final-step click lock when both automatic attempts fail", async () => {
+    mocks.enterprisePolicy.isManagedDeployment = false;
+    mocks.trialActivationVariant = "summary_first";
+    onboardingData.trialActivationFreshInstall = true;
+    mocks.settings.user = { token: "tok" };
+    onboardingData.currentStep = "recommended-setup";
+    mocks.setOnboardingStep
+      .mockResolvedValueOnce({ status: "error", error: "store busy" } as never)
+      .mockResolvedValueOnce({ status: "error", error: "store busy" } as never)
+      .mockResolvedValueOnce({ status: "ok", data: null } as never);
+    vi.spyOn(console, "error").mockImplementation(() => {});
+
+    render(<OnboardingPage />);
+    const finish = await screen.findByRole("button", {
+      name: "finish recommended setup",
+    });
+    fireEvent.click(finish);
+
+    await waitFor(() =>
+      expect(mocks.setOnboardingStep).toHaveBeenCalledTimes(2),
+    );
+    expect(mocks.completeOnboarding).not.toHaveBeenCalled();
+
+    fireEvent.click(finish);
+    await waitFor(() => expect(mocks.completeOnboarding).toHaveBeenCalled());
+  });
+
   it("uses a paid account only as a fresh-install bypass", async () => {
     mocks.enterprisePolicy.isManagedDeployment = false;
     mocks.trialActivationVariant = "summary_first";

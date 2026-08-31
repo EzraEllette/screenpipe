@@ -36,6 +36,18 @@ pub async fn get_or_download_model(model_type: PyannoteModel) -> Result<LoadedMo
     get_or_download_model_with_retries(model_type, MAX_RECOVERY_RETRIES).await
 }
 
+/// Return a cached model file or start its download and return immediately.
+///
+/// Fresh-install startup must not wait for speaker models: capture and the
+/// Timeline are useful before diarization is ready. The device monitor's
+/// existing refresh path installs these capabilities after the background
+/// download completes.
+pub async fn get_cached_model_or_start_download(model_type: PyannoteModel) -> Result<PathBuf> {
+    model_downloader(model_type)?
+        .ensure_model_downloaded()
+        .await
+}
+
 /// Ensure the model file is on disk without building an ORT session for it.
 ///
 /// Callers that only want the file warmed in cache (e.g. main.rs's opportunistic
@@ -50,16 +62,19 @@ pub async fn get_or_download_model(model_type: PyannoteModel) -> Result<LoadedMo
 /// on-demand session builds for the same model pushed session build time from
 /// the normal sub-second range past the 30s watchdog).
 pub async fn ensure_model_file(model_type: PyannoteModel) -> Result<PathBuf> {
+    model_downloader(model_type)?.ensure_model_available().await
+}
+
+fn model_downloader(model_type: PyannoteModel) -> Result<ModelDownloader> {
     let (url, filename, model_path_lock, downloading_flag) = model_state(model_type);
     let cache_dir = get_cache_dir()?;
-    let downloader = ModelDownloader::new(
+    Ok(ModelDownloader::new(
         url.to_string(),
         filename.to_string(),
         cache_dir,
         downloading_flag,
         model_path_lock,
-    );
-    downloader.ensure_model_available().await
+    ))
 }
 
 async fn get_or_download_model_with_retries(

@@ -127,6 +127,7 @@ describe("AppEntitlementGate", () => {
     // Production-like env so the dev billing bypass stays off and the gate runs.
     vi.stubEnv("TAURI_ENV_DEBUG", "false");
     vi.stubEnv("NEXT_PUBLIC_SCREENPIPE_DEV_BILLING_BYPASS", "false");
+    vi.stubEnv("NEXT_PUBLIC_SCREENPIPE_DEV_LOGIN_SKIP", "false");
     mocks.state = { isSettingsLoaded: true, user: null };
     mocks.enterpriseResolutionError = false;
     mocks.windowLabel = "home";
@@ -137,6 +138,26 @@ describe("AppEntitlementGate", () => {
       authenticationError: null,
       isManagedAuthenticated: true,
     };
+  });
+
+  it("lets the explicit dev login-skip build reach the app without a user", () => {
+    vi.stubEnv("NEXT_PUBLIC_SCREENPIPE_DEV_LOGIN_SKIP", "true");
+
+    render(<AppEntitlementGate>{protectedApp}</AppEntitlementGate>);
+
+    expect(screen.getByTestId("protected-app")).toBeInTheDocument();
+    expect(mocks.stopScreenpipe).not.toHaveBeenCalled();
+  });
+
+  it("lets the dev login-skip build through with partial tokenless user state", () => {
+    vi.stubEnv("NEXT_PUBLIC_SCREENPIPE_DEV_LOGIN_SKIP", "true");
+    mocks.state.user = { id: "dev-partial-user" };
+
+    render(<AppEntitlementGate>{protectedApp}</AppEntitlementGate>);
+
+    expect(screen.getByTestId("protected-app")).toBeInTheDocument();
+    expect(screen.queryByText(/sign in required/i)).not.toBeInTheDocument();
+    expect(mocks.stopScreenpipe).not.toHaveBeenCalled();
   });
 
   afterEach(() => {
