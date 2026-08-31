@@ -1723,6 +1723,7 @@ export function ActivityLedger({
         const result = await commands.generateActivityHistory(
           generationRange.start.toISOString(),
           generationRange.end.toISOString(),
+          preset,
         );
         if (result.status === "error") throw new Error(result.error);
         const persisted = result.data;

@@ -501,9 +501,9 @@ async forceRegenerateSuggestions() : Promise<Result<CachedSuggestions, string>> 
     else return { status: "error", error: e  as any };
 }
 },
-async generateActivityHistory(start: string, end: string) : Promise<Result<PersistedActivityHistory, string>> {
+async generateActivityHistory(start: string, end: string, idempotencyKey: string) : Promise<Result<PersistedActivityHistory, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("generate_activity_history", { start, end }) };
+    return { status: "ok", data: await TAURI_INVOKE("generate_activity_history", { start, end, idempotencyKey }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
