@@ -52,6 +52,7 @@ export type AppEnterpriseAccount = {
   org_name?: string | null;
   role?: string | null;
   requires_enterprise_app?: boolean | null;
+  restrict_consumer_build_access?: boolean | null;
   is_screenpipe_user?: boolean | null;
 };
 

@@ -247,8 +247,9 @@ export function AppEntitlementGate({
     !devBypass &&
     !isManagedDeployment &&
     Boolean(user?.token) &&
-    !hasConsumerSubscription &&
-    enterpriseAccount?.requires_enterprise_app === true;
+    enterpriseAccount?.requires_enterprise_app === true &&
+    (!hasConsumerSubscription ||
+      enterpriseAccount.restrict_consumer_build_access === true);
   const shouldGateForEntitlement = shouldGateForUnknownConsumerPolicy;
   const shouldGate = isOnboardingRoute
     ? false
@@ -307,8 +308,7 @@ export function AppEntitlementGate({
       // Must follow the same precedence as the render branches below (and as
       // `gate_path`). Checking unknown-policy before enterprise-app reported
       // "plan_verification_required" for users who were actually looking at the
-      // "enterprise app required" screen — both flags are true at once, since an
-      // unknown plan is what clears hasConsumerAppSubscription in the first place.
+      // "enterprise app required" screen — both flags can be true at once.
       reason: shouldGateForEnterpriseLogin
         ? "enterprise_login_required"
         : shouldGateForEnterpriseApp

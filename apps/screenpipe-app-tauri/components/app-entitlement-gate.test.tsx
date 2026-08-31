@@ -833,6 +833,32 @@ describe("AppEntitlementGate", () => {
     expect(mocks.stopScreenpipe).not.toHaveBeenCalled();
   });
 
+  it("routes restricted enterprise members away even with a consumer subscription", () => {
+    mocks.state.user = baseUser({
+      app_entitled: true,
+      cloud_subscribed: true,
+      subscription_plan: "pro",
+      enterprise_account: {
+        org_name: "Bungalow",
+        role: "member",
+        requires_enterprise_app: true,
+        restrict_consumer_build_access: true,
+      },
+      entitlement: {
+        active: true,
+        plan: "pro",
+        source: "subscription",
+        checked_at: minsAgo(1),
+        features: { app: true, cloud: true },
+      },
+    });
+
+    render(<AppEntitlementGate>{protectedApp}</AppEntitlementGate>);
+
+    expect(screen.getByText(/enterprise app required/i)).toBeInTheDocument();
+    expect(screen.queryByTestId("protected-app")).not.toBeInTheDocument();
+  });
+
   it.each(["pro_max", "pro_ultra"] as const)(
     "does not route an enterprise workspace admin with a %s consumer plan away",
     (plan) => {
