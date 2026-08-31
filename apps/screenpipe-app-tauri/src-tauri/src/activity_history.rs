@@ -15,8 +15,8 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use specta::Type;
-use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::collections::{BTreeMap, HashSet};
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::Mutex;
@@ -189,6 +189,37 @@ impl QualityAudit {
 #[derive(Default)]
 pub struct ActivityHistoryState {
     run_lock: Arc<Mutex<()>>,
+    active_idempotency_keys: Arc<StdMutex<HashSet<String>>>,
+}
+
+struct ActivityGenerationKeyGuard {
+    active_idempotency_keys: Arc<StdMutex<HashSet<String>>>,
+    key: String,
+}
+
+impl Drop for ActivityGenerationKeyGuard {
+    fn drop(&mut self) {
+        self.active_idempotency_keys
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&self.key);
+    }
+}
+
+impl ActivityHistoryState {
+    fn try_begin(&self, key: String) -> Option<ActivityGenerationKeyGuard> {
+        let mut active = self
+            .active_idempotency_keys
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !active.insert(key.clone()) {
+            return None;
+        }
+        Some(ActivityGenerationKeyGuard {
+            active_idempotency_keys: Arc::clone(&self.active_idempotency_keys),
+            key,
+        })
+    }
 }
 
 fn track_generation_event(app: &AppHandle, event: &'static str, properties: Value) {
@@ -1278,7 +1309,16 @@ async fn generate(
     start: DateTime<Utc>,
     end: DateTime<Utc>,
     source: &'static str,
+    idempotency_key: String,
 ) -> Result<PersistedActivityHistory, String> {
+    let Some(_idempotency_guard) = state.try_begin(idempotency_key.clone()) else {
+        info!(
+            activity_source = source,
+            %idempotency_key,
+            "activity generation: matching interval is already running; skipping duplicate"
+        );
+        return Ok(history_in_range(read_all(app)?, start, end));
+    };
     let run_id = uuid::Uuid::new_v4().to_string();
     let started_at = Instant::now();
     track_generation_event(
@@ -1610,13 +1650,22 @@ pub async fn generate_activity_history(
     state: tauri::State<'_, ActivityHistoryState>,
     start: String,
     end: String,
+    idempotency_key: String,
 ) -> Result<PersistedActivityHistory, String> {
     let (start, end) = requested_range(start, end)?;
     let restricted = activity_history_is_restricted(&app);
     let Some((start, end)) = activity_access_range(start, end, Utc::now(), restricted) else {
         return Ok(PersistedActivityHistory::default());
     };
-    let history = generate(&app, state.inner(), start, end, "manual").await?;
+    let history = generate(
+        &app,
+        state.inner(),
+        start,
+        end,
+        "manual",
+        format!("manual:{idempotency_key}"),
+    )
+    .await?;
     Ok(if restricted {
         restricted_history_in_range(history, start, end)
     } else {
@@ -1732,7 +1781,16 @@ pub fn start(app: AppHandle) {
                 automatic_generation_start(next_uncovered_start(&app, now), now, interval_minutes);
             if start < now {
                 info!(%start, %now, "activity history: running scheduled generation");
-                if let Err(error) = generate(&app, state.inner(), start, now, "automatic").await {
+                if let Err(error) = generate(
+                    &app,
+                    state.inner(),
+                    start,
+                    now,
+                    "automatic",
+                    "automatic".to_string(),
+                )
+                .await
+                {
                     warn!(%error, "activity history: scheduled generation failed");
                 }
             }
@@ -1747,6 +1805,24 @@ pub fn start(app: AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn duplicate_selected_interval_is_a_noop_until_the_original_finishes() {
+        let state = ActivityHistoryState::default();
+        let today = state
+            .try_begin("manual:today".to_string())
+            .expect("first Today generation should start");
+
+        assert!(state.try_begin("manual:today".to_string()).is_none());
+
+        let last_24_hours = state
+            .try_begin("manual:24h".to_string())
+            .expect("a different selected interval should keep its own key");
+        drop(last_24_hours);
+        drop(today);
+
+        assert!(state.try_begin("manual:today".to_string()).is_some());
+    }
 
     #[test]
     fn coverage_merges_touching_ranges() {

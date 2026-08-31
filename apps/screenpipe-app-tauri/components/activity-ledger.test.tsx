@@ -2131,6 +2131,7 @@ describe("ActivityLedger", () => {
     expect(mocks.generateActivityHistory).toHaveBeenCalledWith(
       expect.any(String),
       expect.any(String),
+      "today",
     );
   });
 
