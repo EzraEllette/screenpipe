@@ -1250,12 +1250,17 @@ async fn spawn_screenpipe_inner(
         );
     }
 
-    // Resolve the API auth key exactly once per process via the shared
-    // helper and seed the cache before `to_recording_config` reads it. The
-    // helper handles env var / settings / secret-store / auth.json lookup
+    // Build the effective config before deciding whether auth needs a key.
+    // `from_settings` force-enables auth when LAN access is enabled, even if
+    // the persisted `apiAuth` field is false. Checking the persisted field
+    // here used to start an auth-enforcing server without any accepted key.
+    let mut recording_config = store.to_recording_config(data_dir.clone());
+
+    // Resolve the API auth key exactly once per process via the shared helper.
+    // The helper handles env var / settings / secret-store / auth.json lookup
     // and persists auto-generated keys to the secret store itself, so every
     // reader (server, MCP, auth CLI) sees the same value.
-    if store.recording.api_auth {
+    if recording_config.api_auth {
         let settings_key_opt = if store.recording.api_key.is_empty() {
             None
         } else {
@@ -1267,13 +1272,15 @@ async fn spawn_screenpipe_inner(
         )
         .await
         {
-            Ok(key) => crate::store::seed_api_auth_key(key),
+            Ok(key) => {
+                crate::store::seed_api_auth_key(key.clone());
+                recording_config.api_auth_key = Some(key);
+            }
             Err(e) => tracing::error!("failed to resolve api auth key: {}", e),
         }
     }
 
     notify_audio_engine_fallback(&store);
-    let recording_config = store.to_recording_config(data_dir);
 
     let server_arc = state.server.clone();
     let capture_arc = state.capture.clone();
@@ -1575,6 +1582,28 @@ mod capture_intent_tests {
         wants_recording.store(false, Ordering::SeqCst);
 
         assert!(!capture_intended_now(&wants_recording));
+    }
+}
+
+#[cfg(test)]
+mod local_api_auth_tests {
+    use super::SettingsStore;
+    use serde_json::json;
+
+    #[test]
+    fn managed_lan_access_requires_a_key_when_persisted_api_auth_is_false() {
+        // This is the exact flattened store shape produced when enterprise
+        // policy enables LAN access on a device that previously disabled API
+        // auth. Startup must follow the effective config, not `apiAuth` alone.
+        let store: SettingsStore = serde_json::from_value(json!({
+            "apiAuth": false,
+            "listenOnLan": true
+        }))
+        .expect("managed settings shape should deserialize");
+
+        let config = store.to_recording_config(std::path::PathBuf::from("test-data"));
+
+        assert!(config.api_auth);
     }
 }
 
