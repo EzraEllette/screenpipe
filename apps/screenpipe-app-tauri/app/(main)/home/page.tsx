@@ -55,6 +55,7 @@ import {
 import { CommandPalette } from "@/components/command-palette";
 import { useToast } from "@/components/ui/use-toast";
 import { ToastAction } from "@/components/ui/toast";
+import { Button } from "@/components/ui/button";
 import { AppSidebar, useSidebarContext } from "@/components/app-sidebar";
 import { UpdateBanner } from "@/components/update-banner";
 import { usePlatform } from "@/lib/hooks/use-platform";
@@ -123,6 +124,12 @@ import {
   inAppShortcutLabel,
   matchesInAppShortcut,
 } from "@/lib/shortcuts";
+import { useFirstRunLearningWindow } from "@/components/first-run/learning-window-provider";
+import {
+  TrialActivationSummaryExperience,
+  TrialActivationUnlockPrompt,
+} from "@/components/first-run/learning-banner";
+import { blocksTrialActivationApp } from "@/lib/first-run/trial-activation";
 
 type MainSection = "home" | "timeline" | "activity" | "brain" | "pipes" | "connections" | "meetings" | "help";
 type ConnectionFocusRequest = {
@@ -149,6 +156,13 @@ const isSettingsRoute = (value: string) => resolveSettingsSection(value) !== nul
 
 function HomeContent() {
   const router = useRouter();
+  const {
+    learning: firstRunLearning,
+    openTrialActivationPaywall,
+  } = useFirstRunLearningWindow();
+  const trialActivationLocked = blocksTrialActivationApp(
+    firstRunLearning.activationState,
+  );
   const { isMac } = usePlatform();
   const experimentalFeaturesEnabled = useExperimentalFeaturesEnabled();
   const [shortcutGuideOpen, setShortcutGuideOpen] = useState(false);
@@ -191,6 +205,20 @@ function HomeContent() {
     }
   }, [activeSection, activityReturnVisible]);
   const [connectionFocusRequest, setConnectionFocusRequest] = useState<ConnectionFocusRequest | null>(null);
+
+  useEffect(() => {
+    if (!trialActivationLocked) return;
+    if (activeSection !== "home") {
+      setActiveSection("home", { history: "replace" });
+    }
+    const blockShortcut = (event: KeyboardEvent) => {
+      if (!event.metaKey && !event.ctrlKey && !event.altKey) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    };
+    window.addEventListener("keydown", blockShortcut, true);
+    return () => window.removeEventListener("keydown", blockShortcut, true);
+  }, [activeSection, setActiveSection, trialActivationLocked]);
 
   const { settings, updateSettings, isSettingsLoaded } = useSettings();
   const { toast } = useToast();
@@ -1183,6 +1211,41 @@ function HomeContent() {
     activeSection === "meetings" ||
     activeSection === "history" ||
     activeSection === "brain";
+
+  if (trialActivationLocked) {
+    if (firstRunLearning.phase === "ready" && firstRunLearning.summaryOpenedAt) {
+      const summaryLocked = firstRunLearning.activationState === "paywall";
+      return (
+        <div
+          className="relative h-full min-h-0 flex-1 bg-background"
+          data-testid="trial-activation-summary-chat"
+        >
+          <div
+            className={cn(
+              "h-full",
+              summaryLocked && "pointer-events-none select-none",
+            )}
+            aria-hidden={summaryLocked || undefined}
+            inert={summaryLocked || undefined}
+          >
+            <StandaloneChat
+              className="h-full"
+              hideInlineHistory
+              chatShortcutsEnabled={false}
+              sidebarCollapsed
+              firstRunLearningEnabled
+            />
+          </div>
+          {summaryLocked && (
+            <TrialActivationUnlockPrompt
+              onStartTrial={openTrialActivationPaywall}
+            />
+          )}
+        </div>
+      );
+    }
+    return <TrialActivationSummaryExperience />;
+  }
 
   // The outer flex row (sidebar shell + content column) lives in the shared
   // (main)/layout.tsx so the sidebar width survives navigation to /settings.

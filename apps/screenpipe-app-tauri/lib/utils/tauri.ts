@@ -3329,7 +3329,13 @@ export type OnboardingStore = { isCompleted: boolean; completedAt: string | null
  * Current step in onboarding flow (login, intro, usecases, status)
  * Used to resume after app restart (e.g., after granting permissions)
  */
-currentStep?: string | null; firstRunSummaryPhase?: string; firstRunSummaryStartedAt?: string | null; firstRunSummaryChatId?: string | null; firstRunSummaryNotificationSentAt?: string | null; firstRunSummaryNotificationId?: string | null; firstRunSummaryError?: string | null; firstRunSummaryTelemetryVersion?: number }
+currentStep?: string | null; firstRunSummaryPhase?: string; firstRunSummaryStartedAt?: string | null; firstRunSummaryChatId?: string | null; firstRunSummaryNotificationSentAt?: string | null; firstRunSummaryNotificationId?: string | null; firstRunSummaryError?: string | null; firstRunSummaryTelemetryVersion?: number;
+/**
+ * Written only when this app version creates the install's first
+ * onboarding record. Existing records deserialize to false, and reset
+ * clears it, so onboarding replay can never enter the experiment.
+ */
+trialActivationFreshInstall?: boolean }
 /**
  * Snapshot of a pending update, exposed to the frontend via
  * `get_pending_update`. The banner queries this on mount so it can hydrate

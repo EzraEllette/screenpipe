@@ -12,7 +12,10 @@ pub(crate) mod overlay_anchor;
 use crate::{
     analytics::{AnalyticsManager, Attribution},
     native_notification, native_shortcut_reminder,
-    store::{OnboardingStore, SettingsStore},
+    store::{
+        OnboardingStore, SettingsStore, TRIAL_ACTIVATION_PAYWALL_STEP,
+        TRIAL_ACTIVATION_SUMMARY_STEP, TRIAL_ACTIVATION_UNLOCKED_STEP,
+    },
     updates::is_enterprise_build,
     window::{RewindWindowId, ShowRewindWindow},
 };
@@ -2750,6 +2753,7 @@ pub async fn complete_onboarding(app_handle: tauri::AppHandle) -> Result<(), Str
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
     close_window(app_handle.clone(), ShowRewindWindow::Onboarding).await?;
     crate::first_run_summary::arm(&app_handle)?;
+    let _ = refresh_tray_menu(app_handle.clone()).await;
 
     // Hidden UI applies to the main app, but incomplete onboarding remains
     // visible long enough to finish permissions. Once onboarding completes,
@@ -2797,9 +2801,36 @@ pub async fn reset_onboarding(app_handle: tauri::AppHandle) -> Result<(), String
 #[tauri::command]
 #[specta::specta]
 pub async fn set_onboarding_step(app_handle: tauri::AppHandle, step: String) -> Result<(), String> {
+    let previous_step = OnboardingStore::get(&app_handle)
+        .ok()
+        .flatten()
+        .and_then(|onboarding| onboarding.current_step);
     OnboardingStore::update(&app_handle, |onboarding| {
-        onboarding.current_step = Some(step);
+        onboarding.current_step = Some(step.clone());
+        if step == TRIAL_ACTIVATION_SUMMARY_STEP
+            && crate::store::trial_activation_dev_force_enabled()
+        {
+            onboarding.trial_activation_fresh_install = true;
+        }
     })?;
+    let _ = refresh_tray_menu(app_handle.clone()).await;
+
+    if !crate::should_skip_onboarding() && step == TRIAL_ACTIVATION_PAYWALL_STEP {
+        let state = app_handle.state::<crate::recording::RecordingState>();
+        crate::stop_screenpipe(state, app_handle.clone()).await?;
+        let _ = app_handle.emit("trial-activation-state", "paywall");
+    } else if step == TRIAL_ACTIVATION_UNLOCKED_STEP
+        && previous_step.as_deref() == Some(TRIAL_ACTIVATION_PAYWALL_STEP)
+    {
+        let _ = app_handle.emit("trial-activation-state", "trial-unlocked");
+        let recording_app = app_handle.clone();
+        tauri::async_runtime::spawn(async move {
+            let state = recording_app.state::<crate::recording::RecordingState>();
+            if let Err(error) = crate::spawn_screenpipe(state, recording_app.clone(), None).await {
+                warn!("failed to restart capture after trial activation: {error}");
+            }
+        });
+    }
     Ok(())
 }
 
@@ -3257,6 +3288,17 @@ pub(crate) async fn show_shortcut_reminder_impl(
     let label = "shortcut-reminder";
 
     info!("show_shortcut_reminder called");
+
+    let trial_locked = !crate::should_skip_onboarding()
+        && OnboardingStore::get(&app_handle)
+            .ok()
+            .flatten()
+            .unwrap_or_default()
+            .blocks_trial_activation_app();
+    if trial_locked {
+        info!("trial activation: suppressed shortcut reminder overlay");
+        return Ok(());
+    }
 
     // The screenpipe shortcut only opens the timeline/rewind overlay, so the
     // reminder is pointless when the timeline is disabled. Suppress it here so

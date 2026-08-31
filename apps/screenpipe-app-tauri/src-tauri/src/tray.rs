@@ -43,6 +43,7 @@ pub use crate::process_exit::QUIT_REQUESTED;
 #[derive(Clone)]
 struct TrayMenuData {
     onboarding_completed: bool,
+    trial_activation_locked: bool,
     show_shortcut: String,
     search_shortcut: String,
     chat_shortcut: String,
@@ -59,11 +60,13 @@ struct TrayMenuData {
 /// Gather all data needed by `create_dynamic_menu` on the current (non-main)
 /// thread so the main-thread closure does zero I/O.
 fn prefetch_tray_menu_data(app: &AppHandle) -> TrayMenuData {
-    let onboarding_completed = OnboardingStore::get(app)
+    let onboarding = OnboardingStore::get(app)
         .ok()
         .flatten()
-        .map(|o| o.is_completed)
-        .unwrap_or(false);
+        .unwrap_or_default();
+    let onboarding_completed = onboarding.is_completed;
+    let trial_activation_locked =
+        !crate::should_skip_onboarding() && onboarding.blocks_trial_activation_app();
 
     let (default_show, default_search, default_chat) = if cfg!(target_os = "windows") {
         ("Alt+S", "Alt+K", "Alt+L")
@@ -137,6 +140,7 @@ fn prefetch_tray_menu_data(app: &AppHandle) -> TrayMenuData {
 
     TrayMenuData {
         onboarding_completed,
+        trial_activation_locked,
         show_shortcut,
         search_shortcut,
         chat_shortcut,
@@ -1157,9 +1161,9 @@ fn create_dynamic_menu(
 ) -> Result<tauri::menu::Menu<Wry>> {
     let mut menu_builder = MenuBuilder::new(app);
 
-    // During onboarding: show only version and quit. Setup cannot be bypassed
-    // from the tray.
-    if !data.onboarding_completed && !data.app_ui_hidden {
+    // During setup or summary-first activation, expose only the safe return
+    // path, Settings, version, and Quit. Product entry points stay unavailable.
+    if (!data.onboarding_completed || data.trial_activation_locked) && !data.app_ui_hidden {
         menu_builder = menu_builder
             .item(
                 &MenuItemBuilder::with_id(
@@ -1173,7 +1177,14 @@ fn create_dynamic_menu(
                 .enabled(false)
                 .build(app)?,
             )
-            .item(&PredefinedMenuItem::separator(app)?)
+            .item(&PredefinedMenuItem::separator(app)?);
+        if data.trial_activation_locked {
+            menu_builder = menu_builder
+                .item(&MenuItemBuilder::with_id("open_app", "Open first summary").build(app)?)
+                .item(&MenuItemBuilder::with_id("settings", "Settings...").build(app)?)
+                .item(&PredefinedMenuItem::separator(app)?);
+        }
+        menu_builder = menu_builder
             .item(&MenuItemBuilder::with_id("quit", "Quit screenpipe").build(app)?);
 
         return menu_builder.build().map_err(Into::into);

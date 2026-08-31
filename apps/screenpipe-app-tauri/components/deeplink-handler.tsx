@@ -112,6 +112,10 @@ export function DeeplinkHandler() {
           }
         }
         if (!chatId) return;
+        // The trial-activation screen does not mount Chat until the summary is
+        // opened. Preserve the requested conversation across that remount so
+        // a notification can never land on the generic Chat starter.
+        localStorage.setItem("pending-chat-conversation", chatId);
         await commands.showWindowActivated({ Home: { page: "home" } });
         await new Promise((resolve) => setTimeout(resolve, 150));
         await emit("chat-load-conversation", {

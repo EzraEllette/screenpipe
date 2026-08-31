@@ -4,7 +4,7 @@
 
 "use client";
 
-import React, { createContext, useContext, useMemo } from "react";
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 
 import {
   useAgentHandoff,
@@ -14,10 +14,12 @@ import {
   useLearningWindow,
   type LearningWindowView,
 } from "@/lib/first-run/use-learning-window";
+import { TrialActivationPaywall } from "@/components/first-run/trial-activation-paywall";
 
 type FirstRunLearningContextValue = {
   learning: LearningWindowView;
   handoff: AgentHandoffView;
+  openTrialActivationPaywall: () => void;
 };
 
 const FirstRunLearningContext =
@@ -37,16 +39,43 @@ export function FirstRunLearningWindowProvider({
   children: React.ReactNode;
 }) {
   const learning = useLearningWindow();
+  const [trialActivationPaywallOpen, setTrialActivationPaywallOpen] =
+    useState(false);
   const handoff = useAgentHandoff(
     learning.phase === "ready" && !learning.summaryOpenedAt,
     learning.capturedApps,
   );
 
-  const value = useMemo(() => ({ learning, handoff }), [handoff, learning]);
+  useEffect(() => {
+    if (learning.activationState !== "paywall") {
+      setTrialActivationPaywallOpen(false);
+    }
+  }, [learning.activationState]);
+
+  const openTrialActivationPaywall = useCallback(() => {
+    if (learning.activationState === "paywall") {
+      setTrialActivationPaywallOpen(true);
+    }
+  }, [learning.activationState]);
+
+  const value = useMemo(
+    () => ({ learning, handoff, openTrialActivationPaywall }),
+    [handoff, learning, openTrialActivationPaywall],
+  );
 
   return (
     <FirstRunLearningContext.Provider value={value}>
       {children}
+      <TrialActivationPaywall
+        open={
+          learning.activationState === "paywall" &&
+          trialActivationPaywallOpen
+        }
+        locked={
+          learning.activationState === "summary" ||
+          learning.activationState === "paywall"
+        }
+      />
     </FirstRunLearningContext.Provider>
   );
 }
@@ -59,4 +88,8 @@ export function useFirstRunLearningWindow(): FirstRunLearningContextValue {
     );
   }
   return value;
+}
+
+export function useOptionalFirstRunLearningWindow(): FirstRunLearningContextValue | null {
+  return useContext(FirstRunLearningContext);
 }

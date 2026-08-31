@@ -61,6 +61,7 @@ export const useOnboarding = create<OnboardingState>((set, get) => ({
     firstRunSummaryNotificationId: null,
     firstRunSummaryError: null,
     firstRunSummaryTelemetryVersion: 0,
+    trialActivationFreshInstall: false,
   },
   isLoading: true,
   error: null,

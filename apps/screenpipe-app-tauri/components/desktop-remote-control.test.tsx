@@ -15,7 +15,10 @@ const mocks = vi.hoisted(() => ({
   isCapturePaused: vi.fn(),
   stopScreenpipe: vi.fn(),
   spawnScreenpipe: vi.fn(),
+  getOnboardingStatus: vi.fn(),
+  setOnboardingStep: vi.fn(),
   payloads: {} as Record<string, unknown>,
+  flags: {} as Record<string, string | boolean | undefined>,
   capture: vi.fn(),
   reloadFeatureFlags: vi.fn(),
   enterpriseBuildStatus: {
@@ -46,6 +49,8 @@ vi.mock("@/lib/utils/tauri", () => ({
     isCapturePaused: mocks.isCapturePaused,
     stopScreenpipe: mocks.stopScreenpipe,
     spawnScreenpipe: mocks.spawnScreenpipe,
+    getOnboardingStatus: mocks.getOnboardingStatus,
+    setOnboardingStep: mocks.setOnboardingStep,
   },
 }));
 
@@ -58,6 +63,7 @@ vi.mock("posthog-js", () => ({
     getFeatureFlagResult: vi.fn((key: string) => ({
       payload: mocks.payloads[key],
     })),
+    getFeatureFlag: vi.fn((key: string) => mocks.flags[key]),
     has_opted_out_capturing: vi.fn(() => false),
     capture: mocks.capture,
     reloadFeatureFlags: mocks.reloadFeatureFlags,
@@ -85,6 +91,7 @@ describe("DesktopRemoteControl", () => {
       remoteControlPolicy: LOCAL_DESKTOP_REMOTE_POLICY,
     };
     mocks.payloads = {};
+    mocks.flags = {};
     mocks.enterpriseBuildStatus = {
       isEnterprise: false,
       resolved: true,
@@ -94,6 +101,31 @@ describe("DesktopRemoteControl", () => {
     mocks.isCapturePaused.mockResolvedValue(false);
     mocks.stopScreenpipe.mockResolvedValue({ status: "ok", data: null });
     mocks.spawnScreenpipe.mockResolvedValue({ status: "ok", data: null });
+    mocks.getOnboardingStatus.mockResolvedValue({
+      status: "ok",
+      data: { currentStep: null },
+    });
+    mocks.setOnboardingStep.mockResolvedValue({ status: "ok", data: null });
+  });
+
+  it("durably unlocks a targeted trial activation without re-enrolling it", async () => {
+    mocks.flags["first-summary-card-trial-v1-force-unlock"] = true;
+    mocks.getOnboardingStatus.mockResolvedValue({
+      status: "ok",
+      data: { currentStep: "trial-activation-v1-paywall" },
+    });
+
+    render(<DesktopRemoteControl enabled />);
+
+    await waitFor(() =>
+      expect(mocks.setOnboardingStep).toHaveBeenCalledWith(
+        "trial-activation-v1-unlocked",
+      ),
+    );
+    expect(mocks.capture).toHaveBeenCalledWith(
+      "trial_activation_force_unlocked",
+      { source: "posthog_feature_flag" },
+    );
   });
 
   it("applies independently targeted defaults with one settings write and restart", async () => {

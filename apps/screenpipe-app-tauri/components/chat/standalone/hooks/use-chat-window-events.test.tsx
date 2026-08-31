@@ -89,6 +89,18 @@ function renderRoutingHook(
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.listeners.clear();
+  if (!window.localStorage) {
+    const values = new Map<string, string>();
+    Object.defineProperty(window, "localStorage", {
+      configurable: true,
+      value: {
+        clear: () => values.clear(),
+        getItem: (key: string) => values.get(key) ?? null,
+        setItem: (key: string, value: string) => values.set(key, value),
+        removeItem: (key: string) => values.delete(key),
+      },
+    });
+  }
   localStorage.clear();
   useChatStore.setState({
     sessions: {},
@@ -103,6 +115,19 @@ beforeEach(() => {
 });
 
 describe("current conversation routing", () => {
+  it("loads a pending conversation when Chat mounts after navigation", async () => {
+    localStorage.setItem("pending-chat-conversation", savedConversation.id);
+    mocks.loadConversationFile.mockResolvedValue(savedConversation);
+    const loadConversation = vi.fn(async () => undefined);
+
+    renderRoutingHook(loadConversation, []);
+
+    await waitFor(() =>
+      expect(loadConversation).toHaveBeenCalledWith(savedConversation),
+    );
+    expect(localStorage.getItem("pending-chat-conversation")).toBeNull();
+  });
+
   it("hydrates a metadata-only current tab after a renderer reload", async () => {
     seedSession();
     mocks.loadConversationFile.mockResolvedValue(savedConversation);
