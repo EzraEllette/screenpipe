@@ -227,6 +227,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn activity_preview_uses_linked_event_when_frame_attribution_is_blank() {
+        let (app, db) = setup_test_app().await;
+        let temp_dir = tempfile::tempdir().unwrap();
+        let media_path = temp_dir.path().join("preview-linked-event.mp4");
+        std::fs::write(&media_path, b"existing-compacted-media").unwrap();
+        let chunk_id = db
+            .insert_video_chunk_with_fps(
+                media_path.to_string_lossy().as_ref(),
+                "preview-monitor",
+                2.0,
+            )
+            .await
+            .unwrap();
+        let frame_id = sqlx::query(
+            "INSERT INTO frames \
+             (timestamp, app_name, video_chunk_id, offset_index, focused) \
+             VALUES ('2026-08-20T10:00:10Z', '', ?1, 4, 0)",
+        )
+        .bind(chunk_id)
+        .execute(&db.pool)
+        .await
+        .unwrap()
+        .last_insert_rowid();
+        sqlx::query(
+            "INSERT INTO ui_events \
+             (timestamp, event_type, app_name, browser_url, frame_id) \
+             VALUES ('2026-08-20T10:00:10Z', 'window_focus', 'Arc', \
+                     'https://example.com/work', ?1)",
+        )
+        .bind(frame_id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+        let samples = app
+            .oneshot(
+                Request::builder()
+                    .uri("/frames/preview-samples?start_time=2026-08-20T10%3A00%3A00Z&end_time=2026-08-20T10%3A01%3A00Z&app_name=Arc&browser_domain=example.com&limit=6")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(samples.status(), StatusCode::OK);
+        let payload: serde_json::Value =
+            serde_json::from_slice(&to_bytes(samples.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(payload["frames"][0]["frame_id"], frame_id);
+        assert_eq!(payload["frames"][0]["source"], "video");
+        assert_eq!(payload["frames"][0]["video_chunk_id"], chunk_id);
+        assert_eq!(payload["frames"][0]["video_offset_seconds"], "2.000000");
+    }
+
+    #[tokio::test]
     async fn frame_thumbnail_endpoint_can_disable_nearby_fallback() {
         let (app, db) = setup_test_app().await;
         let temp_dir = tempfile::tempdir().unwrap();

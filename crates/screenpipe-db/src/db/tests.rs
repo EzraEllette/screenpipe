@@ -697,12 +697,36 @@ async fn frame_preview_candidates_are_bucketed_indexed_and_reuse_existing_media(
     .execute(&db.pool)
     .await
     .unwrap();
+    let fallback_frame_id = sqlx::query(
+        "INSERT INTO frames (timestamp, video_chunk_id, offset_index, focused) \
+         VALUES ('2026-08-20T10:00:47Z', ?1, 2, 0)",
+    )
+    .bind(chunk_id)
+    .execute(&db.pool)
+    .await
+    .unwrap()
+    .last_insert_rowid();
+    sqlx::query(
+        "INSERT INTO ui_events (timestamp, event_type, app_name, browser_url, frame_id) \
+         VALUES ('2026-08-20T10:00:47Z', 'window_focus', 'Arc', \
+                 'https://github.com/linked-event', ?1)",
+    )
+    .bind(fallback_frame_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
 
     let app_candidates = db
         .get_frame_preview_candidates(start, end, "Arc", None)
         .await
         .unwrap();
-    assert_eq!(app_candidates.len(), 4);
+    assert_eq!(app_candidates.len(), 5);
+    let fallback = app_candidates
+        .iter()
+        .find(|candidate| candidate.0 == fallback_frame_id)
+        .unwrap();
+    assert_eq!(fallback.4, Some(chunk_id));
+    assert_eq!(fallback.5, Some(1.0));
     let video = app_candidates.last().unwrap();
     assert_eq!(video.4, Some(chunk_id));
     assert_eq!(video.5, Some(2.0));
@@ -713,7 +737,7 @@ async fn frame_preview_candidates_are_bucketed_indexed_and_reuse_existing_media(
         .unwrap();
     // The SQL predicate is deliberately coarse and index-friendly; the HTTP
     // layer parses these URLs and removes the path-only false positive.
-    assert_eq!(domain_candidates.len(), 5);
+    assert_eq!(domain_candidates.len(), 6);
     assert!(domain_candidates
         .iter()
         .all(|(_, _, url, _, _, _)| url.as_deref().unwrap().contains("github.com")));
