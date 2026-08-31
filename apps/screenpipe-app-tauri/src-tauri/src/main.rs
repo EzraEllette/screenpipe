@@ -43,6 +43,7 @@ mod activity_history;
 mod first_run_summary;
 mod analytics;
 mod auth_session;
+mod focus_handoff;
 #[allow(deprecated)]
 mod icons;
 use crate::analytics::start_analytics;
@@ -603,6 +604,14 @@ async fn main() {
         let launch_exe = std::env::current_exe()
             .ok()
             .map(|path| path.to_string_lossy().to_string());
+        #[cfg(target_os = "macos")]
+        // A LaunchAgent receives its plist Label here. LaunchServices starts
+        // deliberate Dock/Finder opens under an `application.<bundle-id>...`
+        // service instead, so the receiver can distinguish the two without
+        // treating every macOS process whose parent is launchd as autostart.
+        let launchd_job_label = std::env::var("XPC_SERVICE_NAME").ok();
+        #[cfg(not(target_os = "macos"))]
+        let launchd_job_label: Option<String> = None;
 
         let focus_port: u16 = std::env::var("SCREENPIPE_FOCUS_PORT")
             .ok()
@@ -615,6 +624,7 @@ async fn main() {
                 "args": args,
                 "deep_link_url": deep_link_url,
                 "launch_exe": launch_exe,
+                "launchd_job_label": launchd_job_label,
             }))
             .send()
             .await
