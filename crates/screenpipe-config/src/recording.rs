@@ -6,6 +6,16 @@
 
 use serde::{Deserialize, Deserializer, Serialize};
 
+/// The auth-token migration scrubs a JWT-shaped legacy `userId` by persisting
+/// JSON `null`. Keep the historical empty-string sentinel when that store is
+/// read back without accepting nulls for unrelated recording settings.
+fn deserialize_null_user_id_as_default<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_default())
+}
+
 /// Older desktop builds persisted a single selected monitor as a string, while
 /// current builds persist an array. Accept both shapes so an upgrade preserves
 /// the user's selection instead of rejecting the entire settings store.
@@ -712,7 +722,10 @@ pub struct RecordingSettings {
     // ── Cloud / Auth ───────────────────────────────────────────────────
     /// Screenpipe cloud user ID. Empty string means not logged in.
     /// Kept as String (not Option) to match existing store.bin schema.
-    #[serde(rename = "userId")]
+    #[serde(
+        rename = "userId",
+        deserialize_with = "deserialize_null_user_id_as_default"
+    )]
     pub user_id: String,
 
     /// Display name for speaker identification.
@@ -1298,6 +1311,33 @@ mod tests {
         assert!(settings.vocabulary.is_empty()); // default
         assert_eq!(settings.audio_capture_mode, "always"); // backward-compatible default
         assert!(!settings.enhanced_incognito_detection); // old stores stay permission-free
+    }
+
+    #[test]
+    fn scrubbed_legacy_user_id_null_uses_empty_string_sentinel() {
+        let settings: RecordingSettings = serde_json::from_str(
+            r#"{
+            "disableAudio": false,
+            "audioTranscriptionEngine": "whisper-large-v3-turbo",
+            "audioDevices": ["default"],
+            "monitorIds": ["default"],
+            "videoQuality": "balanced",
+            "userId": null
+        }"#,
+        )
+        .expect("the auth-token scrubbed store must remain readable");
+
+        assert_eq!(settings.user_id, "");
+        assert_eq!(
+            settings.audio_transcription_engine,
+            "whisper-large-v3-turbo"
+        );
+
+        let malformed = serde_json::from_str::<RecordingSettings>(r#"{"userId": 42}"#);
+        assert!(
+            malformed.is_err(),
+            "non-null malformed userId must still fail"
+        );
     }
 
     #[test]
