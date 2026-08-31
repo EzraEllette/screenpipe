@@ -95,6 +95,8 @@ struct FocusPayload {
     target: Option<String>,
     #[serde(default)]
     launch_exe: Option<String>,
+    #[serde(default)]
+    launchd_job_label: Option<String>,
 }
 
 fn normalize_exe_path(path: &Path) -> PathBuf {
@@ -162,7 +164,14 @@ async fn handle_focus(
         }
     }
 
-    let startup_handoff = crate::should_suppress_startup_handoff(&payload.args);
+    let startup_handoff = crate::should_suppress_startup_handoff(&payload.args)
+        || crate::focus_handoff::should_suppress_legacy_launchagent_focus(
+            payload.launchd_job_label.as_deref(),
+            &state.app_handle.package_info().name,
+            &payload.args,
+            payload.deep_link_url.as_deref(),
+            payload.target.as_deref(),
+        );
     if startup_handoff {
         info!("autostart: ignored duplicate OS startup focus handoff");
     } else if payload.target.as_deref() == Some("browser_pairing") {
