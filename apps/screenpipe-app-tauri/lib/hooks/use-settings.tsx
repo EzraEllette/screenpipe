@@ -667,10 +667,6 @@ export function makeDefaultPresets(isPro: boolean): AIPreset[] {
 	];
 }
 
-// Seed value — module load can't know pro status yet, so fall back to non-pro.
-// ensureDefaultPreset() re-seeds with pro status once settings.user is loaded.
-const DEFAULT_CLOUD_PRESET: AIPreset = makeDefaultPresets(false)[0];
-
 const DEFAULT_AUDIO_ENGINE = "whisper-large-v3-turbo-quantized";
 
 // "Paid" = any active app entitlement (Basic / Business / Enterprise / Lifetime)
@@ -892,14 +888,29 @@ export function normalizeSettingsArrays(settings: Settings): boolean {
 		aiPresets: makeDefaultPresets(settings.user?.cloud_subscribed === true),
 	};
 	let changed = false;
+	const presets = settings.aiPresets;
+	if (!Array.isArray(presets) || presets.length === 0) {
+		settings.aiPresets = [defaults.aiPresets[0]] as any;
+		changed = true;
+	}
 
 	for (const [key, fallback] of Object.entries(defaults)) {
+		if (key === "aiPresets") continue;
 		if (!Array.isArray(fallback) || Array.isArray(settings[key])) continue;
 		settings[key] = [...fallback];
 		changed = true;
 	}
 
 	return changed;
+}
+
+export function assertValidAiPresetUpdate(value: Partial<Settings>): void {
+	if (
+		"aiPresets" in value &&
+		(!Array.isArray(value.aiPresets) || value.aiPresets.length === 0)
+	) {
+		throw new Error("At least one AI preset is required");
+	}
 }
 
 // Store singleton
@@ -1204,13 +1215,6 @@ function createSettingsStore() {
 		// installs default to "meetings-only" (via createDefaultSettingsObject, which
 		// get() returns directly when there are no stored settings).
 
-		// Migration: Add default presets if user has none
-		if (!Array.isArray(settings.aiPresets) || settings.aiPresets.length === 0) {
-			const isPro = settings.user?.cloud_subscribed === true;
-			settings.aiPresets = makeDefaultPresets(isPro) as any;
-			needsUpdate = true;
-		}
-
 		// b2 seed: the first time we see a logged-in user, replace the anonymous
 		// "screenpipe" placeholder with the pro pair (chat + pipes) IF they're pro.
 		// Anonymous users keep the placeholder forever (which is correct — non-pro
@@ -1243,18 +1247,6 @@ function createSettingsStore() {
 			settings.aiPresets = settings.aiPresets.map((p: any) =>
 				p.id === "pi-agent" ? { ...p, id: "screenpipe-cloud" } : p
 			);
-			needsUpdate = true;
-		}
-
-		// Migration: Add screenpipe-cloud preset for existing users (without touching their existing presets)
-		const hasCloudPreset = settings.aiPresets?.some(
-			(p: any) => p.id === "screenpipe-cloud" || p.provider === "screenpipe-cloud"
-		);
-		if (settings.aiPresets && settings.aiPresets.length > 0 && !hasCloudPreset) {
-			// Only set as default if no other preset is already default
-			const hasDefault = settings.aiPresets.some((p: any) => p.defaultPreset);
-			const cloudPreset = { ...DEFAULT_CLOUD_PRESET, defaultPreset: !hasDefault };
-			settings.aiPresets = [cloudPreset as any, ...settings.aiPresets];
 			needsUpdate = true;
 		}
 
@@ -1429,6 +1421,7 @@ function createSettingsStore() {
 
 	const set = (value: Partial<Settings>) =>
 		enqueueSettingsStoreWrite(async () => {
+			assertValidAiPresetUpdate(value);
 			const store = await getStore();
 			const current = await get();
 			const managedValues = await activeManagedValues(current);
@@ -1791,6 +1784,7 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 	}, [settings.fontSize]);
 
 	const updateSettings = async (updates: Partial<Settings>) => {
+		assertValidAiPresetUpdate(updates);
 		const updateGeneration = ++settingsUpdateGenerationRef.current;
 		const settingsBeforeUpdate = settingsRef.current;
 
