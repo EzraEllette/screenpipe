@@ -2078,6 +2078,11 @@ impl SettingsStore {
             .or_else(|| cached_token.filter(|token| !token.is_empty()))
     }
 
+    pub(crate) fn has_cloud_authentication(&self) -> bool {
+        self.resolved_cloud_auth_token(crate::auth_token::cached_cloud_token())
+            .is_some()
+    }
+
     pub fn to_recording_settings(&self) -> screenpipe_config::RecordingSettings {
         let mut settings = self.recording.clone();
         // Override user_id with the Clerk JWT token from the auth user object.
