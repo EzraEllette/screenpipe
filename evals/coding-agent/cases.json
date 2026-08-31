@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "suite": "screenpipe-app-coding-agent-regressions",
-  "dataset_version": "2026-08-30.1",
+  "dataset_version": "2026-08-31.1",
   "suite_type": "regression",
   "owner": "screenpipe engineering",
   "policy": {
@@ -802,6 +802,37 @@
           { "source_path": "apps/screenpipe-app-tauri/components/chat/standalone/hooks/use-chat-window-events.test.tsx" }
         ],
         "command": "cd apps/screenpipe-app-tauri && NODE_OPTIONS=--localstorage-file=.eval-localstorage bun x vitest run --config vitest.config.ts components/chat/standalone/hooks/use-chat-window-events.test.tsx"
+      }
+    },
+    {
+      "id": "app-pipe-history-tool-call-rendering",
+      "name": "Render tool activity from saved pipe history",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "ce59063b095bc54ddad910938b0c77bcd9a46a24"
+      },
+      "base_ref": "d0b2d298c1c5167eb843b32f8e08939ee54badce",
+      "oracle_ref": "ce59063b095bc54ddad910938b0c77bcd9a46a24",
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/lib/pipe-ndjson-to-chat.ts"
+      ],
+      "gate": "advisory",
+      "trigger_paths": [
+        "apps/screenpipe-app-tauri/lib/pipe-ndjson-to-chat.ts",
+        "apps/screenpipe-app-tauri/components/chat/**"
+      ],
+      "tags": ["regression", "escaped-failure", "pipes", "chat", "tool-call", "rendering", "false-empty", "ndjson"],
+      "prompt": "Saved pipe execution history can contain valid assistant tool calls and results, but the chat view renders empty bubbles instead of showing what the pipe did. Make each parsed completed tool call render with its name and structured arguments, and attach its result to the same tool activity. Recover the name and arguments when streaming deltas are thin but the completed event contains them, and keep oversized results bounded. Preserve ordinary text, thinking, multi-turn ordering, agent-end fallback, malformed or truncated input, empty input, tool-result deduplication, unique message IDs, and conversation metadata.",
+      "agent_timeout_seconds": 900,
+      "grader_dependency_links": [
+        { "source_path": "apps/screenpipe-app-tauri/node_modules", "destination_path": "apps/screenpipe-app-tauri/node_modules" }
+      ],
+      "grader": {
+        "timeout_seconds": 420,
+        "fixtures": [
+          { "source_path": "apps/screenpipe-app-tauri/components/__tests__/pipe-ndjson-to-chat.test.ts" }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && bun x vitest run --config vitest.config.ts components/__tests__/pipe-ndjson-to-chat.test.ts"
       }
     }
   ]
