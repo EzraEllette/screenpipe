@@ -1630,8 +1630,8 @@ function MemorySyncSubsection({
       <div className="space-y-0.5">
         <p className="text-xs font-medium text-foreground">memory sync (beta)</p>
         <p className="text-xs text-muted-foreground">
-          writes your screenpipe memories into {targetFilename} so {assistantName} sees them
-          in every new session. updates automatically every 5 minutes.
+          writes safe recall instructions into {targetFilename} so {assistantName} can retrieve
+          relevant memories through screenpipe MCP. updates automatically every 5 minutes.
         </p>
       </div>
 

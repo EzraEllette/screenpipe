@@ -13,7 +13,7 @@ static DEF: IntegrationDef = IntegrationDef {
     name: "Codex CLI",
     icon: "openai",
     category: Category::Productivity,
-    description: "Continuously sync a compact, high-signal screenpipe memory snapshot into the OpenAI Codex CLI's startup instructions (CODEX_HOME/AGENTS.md by default). Screenpipe rewrites only its own marker block, leaves hand-edited content outside it alone, and removes the block on disconnect. Leave home_path empty to use the default ($CODEX_HOME or ~/.codex).",
+    description: "Continuously sync static Screenpipe MCP recall guidance into the OpenAI Codex CLI's startup instructions (CODEX_HOME/AGENTS.md by default). Raw memory text is retrieved only when relevant through MCP and is never embedded in AGENTS.md. Screenpipe rewrites only its own marker block, leaves hand-edited content outside it alone, and removes the block on disconnect. Leave home_path empty to use the default ($CODEX_HOME or ~/.codex).",
     fields: &[FieldDef {
         key: "home_path",
         label: "Codex home directory (optional)",

@@ -378,8 +378,9 @@ pub(crate) async fn delete_memory_handler(
     Ok(JsonResponse(json!({"ok": true})))
 }
 
-/// Trigger an immediate sync of `memories` out to every enabled
-/// external destination (Claude Code's CLAUDE.md, Codex's AGENTS.md).
+/// Trigger an immediate sync to every enabled external destination. Agent
+/// startup files receive static MCP recall guidance; human exports receive the
+/// memory digest.
 ///
 /// The background scheduler in `external_memory_sync` runs this every
 /// 5 minutes; this handler exists so the app's "sync now" button and
