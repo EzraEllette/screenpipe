@@ -1859,7 +1859,7 @@ async fn main() {
                 }
                 let store_clone = store.clone();
                 let data_dir_clone = data_dir.clone();
-                if !crate::recording::recording_access_allowed(&app_handle, &store_clone) {
+                if !crate::recording::server_access_allowed(&store_clone) {
                     info!("Skipping server auto-start: screenpipe account access required");
                     crate::health::set_recording_status(crate::health::RecordingStatus::Paused);
                     let _ = app_handle.emit("app-entitlement-required", ());
@@ -1870,7 +1870,12 @@ async fn main() {
                 // spawn_screenpipe command. DB-wedge recovery consults this
                 // shared flag so it can rebuild the server without silently
                 // leaving a normally auto-started recording paused.
-                recording_state.set_capture_intent(true);
+                let capture_allowed =
+                    crate::recording::recording_access_allowed(&app_handle, &store_clone);
+                recording_state.set_capture_intent(capture_allowed);
+                if !capture_allowed {
+                    info!("Starting local read server without capture for trial activation");
+                }
                 // Reserve the lifecycle slot before publishing is_starting or
                 // spawning the OS thread. Otherwise a frontend spawn can win
                 // the scheduling gap, hold this lock while waiting on

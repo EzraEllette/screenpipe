@@ -447,13 +447,20 @@ export function TrialActivationSummaryExperience() {
 
 export function TrialActivationUnlockPrompt({
   onStartTrial,
+  inline = false,
 }: {
   onStartTrial: () => void;
+  inline?: boolean;
 }) {
   return (
     <div
-      className="absolute inset-0 z-40 flex items-end justify-center p-8"
+      className={
+        inline
+          ? "z-40 flex shrink-0 justify-center border-t border-border bg-background p-4"
+          : "pointer-events-none absolute inset-0 z-40 flex items-end justify-center p-8"
+      }
       data-testid="trial-activation-summary-lock"
+      data-layout={inline ? "inline" : "overlay"}
     >
       <div className="pointer-events-auto w-full max-w-xl border border-border bg-background p-5 text-center shadow-lg">
         <Button

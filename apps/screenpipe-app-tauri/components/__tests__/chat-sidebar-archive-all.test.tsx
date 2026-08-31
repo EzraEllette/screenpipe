@@ -121,6 +121,18 @@ beforeAll(() => {
 });
 
 beforeEach(() => {
+  if (!window.localStorage) {
+    const values = new Map<string, string>();
+    Object.defineProperty(window, "localStorage", {
+      configurable: true,
+      value: {
+        clear: () => values.clear(),
+        getItem: (key: string) => values.get(key) ?? null,
+        setItem: (key: string, value: string) => values.set(key, value),
+        removeItem: (key: string) => values.delete(key),
+      },
+    });
+  }
   localStorage.clear();
   localStorage.setItem("screenpipe:recents-hidden-sources", '["codex"]');
   localStorage.setItem("screenpipe:pipes-collapsed", "true");
@@ -142,6 +154,36 @@ afterEach(() => {
 });
 
 describe("archive all recent chats", () => {
+  it("allows only the current summary chat during the trial restriction", () => {
+    render(
+      <TooltipProvider>
+        <ChatSidebar
+          allowedConversationId="pinned-chat"
+          onViewAll={undefined}
+        />
+      </TooltipProvider>,
+    );
+
+    const currentButton = screen
+      .getByTestId("chat-row-pinned-chat")
+      .querySelector("button");
+    const otherButton = screen
+      .getByTestId("chat-row-recent-open")
+      .querySelector("button");
+
+    expect(currentButton).toBeEnabled();
+    expect(otherButton).toBeDisabled();
+    expect(screen.getAllByLabelText("locked during trial").length).toBeGreaterThan(0);
+    expect(
+      screen.getByRole("button", { name: "organize recents" }),
+    ).toBeDisabled();
+
+    fireEvent.click(currentButton!);
+    expect(mocks.emit).toHaveBeenCalledWith("chat-load-conversation", {
+      conversationId: "pinned-chat",
+    });
+  });
+
   it(
     "archives every recent source, preserves pinned chats and runs, and offers one undo",
     async () => {

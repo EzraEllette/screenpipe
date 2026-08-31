@@ -17,6 +17,7 @@ import {
   hasVerifiedPaidPlan,
   isAuthenticatedFreeUser,
   isFreeOrUnattributedUser,
+  isDevLoginSkipEnabled,
   isSignedInCloudSubscriber,
   isTokenHydrationCandidate,
   isTokenHydrationPending,
@@ -45,6 +46,15 @@ describe("app entitlement", () => {
     vi.setSystemTime(NOW);
     vi.stubEnv("TAURI_ENV_DEBUG", "false");
     vi.stubEnv("NEXT_PUBLIC_SCREENPIPE_DEV_BILLING_BYPASS", "false");
+    vi.stubEnv("NEXT_PUBLIC_SCREENPIPE_DEV_LOGIN_SKIP", "false");
+  });
+
+  it("shows the login skip only when its dedicated build flag is enabled", () => {
+    vi.stubEnv("TAURI_ENV_DEBUG", "true");
+    expect(isDevLoginSkipEnabled()).toBe(false);
+
+    vi.stubEnv("NEXT_PUBLIC_SCREENPIPE_DEV_LOGIN_SKIP", "true");
+    expect(isDevLoginSkipEnabled()).toBe(true);
   });
 
   afterEach(() => {

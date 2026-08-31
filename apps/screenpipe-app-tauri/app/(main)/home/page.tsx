@@ -132,6 +132,11 @@ import {
 import { blocksTrialActivationApp } from "@/lib/first-run/trial-activation";
 
 type MainSection = "home" | "timeline" | "activity" | "brain" | "pipes" | "connections" | "meetings" | "help";
+const TRIAL_ACTIVATION_ALLOWED_SECTIONS = new Set<MainSection>([
+  "home",
+  "timeline",
+  "connections",
+]);
 type ConnectionFocusRequest = {
   id: string | null;
   category: string | null;
@@ -208,7 +213,7 @@ function HomeContent() {
 
   useEffect(() => {
     if (!trialActivationLocked) return;
-    if (activeSection !== "home") {
+    if (!TRIAL_ACTIVATION_ALLOWED_SECTIONS.has(activeSection as MainSection)) {
       setActiveSection("home", { history: "replace" });
     }
     const blockShortcut = (event: KeyboardEvent) => {
@@ -1039,10 +1044,21 @@ function HomeContent() {
         // The native window replaces the React timeline where it can run; the
         // webview one stays as the fallback for hosts without it.
         return (
-          <NativeTimeline
-            fallback={<Timeline embedded />}
-            showActivityReturn={activityReturnVisible}
-          />
+          <div className="flex h-full min-h-0 flex-col">
+            <div className="min-h-0 flex-1">
+              <NativeTimeline
+                fallback={<Timeline embedded />}
+                showActivityReturn={activityReturnVisible}
+              />
+            </div>
+            {trialActivationLocked &&
+              firstRunLearning.activationState === "paywall" && (
+                <TrialActivationUnlockPrompt
+                  onStartTrial={openTrialActivationPaywall}
+                  inline
+                />
+              )}
+          </div>
         );
       case "activity":
         return (
@@ -1163,6 +1179,9 @@ function HomeContent() {
     id,
     label: SIDEBAR_SECTION_DEFS[id].label,
     icon: SIDEBAR_SECTION_DEFS[id].icon,
+    disabled:
+      trialActivationLocked &&
+      !TRIAL_ACTIVATION_ALLOWED_SECTIONS.has(id as MainSection),
     trailing:
       id === "pipes" && runningPipeCount > 0 ? (
         <PipeActivityIndicator
@@ -1212,7 +1231,8 @@ function HomeContent() {
     activeSection === "history" ||
     activeSection === "brain";
 
-  if (trialActivationLocked) {
+  const trialActivationContent = (() => {
+    if (!trialActivationLocked || activeSection !== "home") return null;
     if (firstRunLearning.phase === "ready" && firstRunLearning.summaryOpenedAt) {
       const summaryLocked = firstRunLearning.activationState === "paywall";
       return (
@@ -1245,7 +1265,7 @@ function HomeContent() {
       );
     }
     return <TrialActivationSummaryExperience />;
-  }
+  })();
 
   // The outer flex row (sidebar shell + content column) lives in the shared
   // (main)/layout.tsx so the sidebar width survives navigation to /settings.
@@ -1366,7 +1386,7 @@ function HomeContent() {
               </TooltipContent>
             </Tooltip>
 
-            {!sidebarCollapsed && experimentalFeaturesEnabled && (
+            {!trialActivationLocked && !sidebarCollapsed && experimentalFeaturesEnabled && (
               <Tooltip>
                 <TooltipTrigger asChild>
                   <button
@@ -1397,7 +1417,7 @@ function HomeContent() {
               </Tooltip>
             )}
 
-            {!sidebarCollapsed && (
+            {!trialActivationLocked && !sidebarCollapsed && (
               <SidebarCustomizationMenu
                 hiddenItems={hiddenSidebarIds.map((id) => ({
                   id,
@@ -1426,10 +1446,12 @@ function HomeContent() {
                     onClick={() => setActiveSection("meetings")}
                     aria-label={meetingState.active ? "meetings — recording" : "meetings"}
                     aria-current={activeSection === "meetings" ? "page" : undefined}
+                    disabled={trialActivationLocked}
                     data-testid="nav-meetings"
                     data-announcement-anchor="top-meetings"
                     className={cn(
                       "relative p-1 rounded-md transition-colors",
+                      trialActivationLocked && "cursor-not-allowed",
                       activeSection === "meetings"
                         ? isTranslucent
                           ? "vibrant-nav-active"
@@ -1491,10 +1513,16 @@ function HomeContent() {
                 isTranslucent={isTranslucent}
                 canReset={!isSidebarNavLayoutDefault(sidebarLayout)}
                 onSelect={(id) => {
+                  if (
+                    trialActivationLocked &&
+                    !TRIAL_ACTIVATION_ALLOWED_SECTIONS.has(id as MainSection)
+                  ) {
+                    return;
+                  }
                   setActiveSection(id);
                   // The "home" slot is the New Chat affordance — clicking it
                   // (from any view) always spawns a new chat session.
-                  if (id === "home") startNewChat();
+                  if (id === "home" && !trialActivationLocked) startNewChat();
                 }}
                 onMove={(id, toIndex) =>
                   persistSidebarLayout(
@@ -1532,19 +1560,34 @@ function HomeContent() {
                   isTranslucent ? "vibrant-sidebar-border" : "border-border/50"
                 )}
               >
-                <ChatSidebar onViewAll={() => setActiveSection("history")} />
+                <ChatSidebar
+                  allowedConversationId={
+                    trialActivationLocked ? firstRunLearning.chatId : undefined
+                  }
+                  onViewAll={
+                    trialActivationLocked
+                      ? undefined
+                      : () => setActiveSection("history")
+                  }
+                />
               </div>
 
-              <PlanExpirationNotice
-                user={settings.user as AppUser | null}
-                onClick={() => openSettings("account")}
-              />
+              <div
+                className={cn(trialActivationLocked && "pointer-events-none")}
+                aria-disabled={trialActivationLocked || undefined}
+                inert={trialActivationLocked || undefined}
+              >
+                <PlanExpirationNotice
+                  user={settings.user as AppUser | null}
+                  onClick={() => openSettings("account")}
+                />
 
-              <UpdateBanner variant="sidebar" className="mb-2" />
+                <UpdateBanner variant="sidebar" className="mb-2" />
 
-              {/* Remote surveys use this quiet, non-blocking slot when their
-                  signed payload selects surface=sidebar. */}
-              <div id="announcement-sidebar-slot" />
+                {/* Remote surveys use this quiet, non-blocking slot when their
+                    signed payload selects surface=sidebar. */}
+                <div id="announcement-sidebar-slot" />
+              </div>
 
               {/* Bottom items */}
               <div className={cn("flex items-center gap-1 border-t pt-2", isTranslucent ? "vibrant-sidebar-border" : "border-border")}>
@@ -1580,11 +1623,13 @@ function HomeContent() {
                           data-testid="nav-help"
                           data-announcement-anchor="sidebar-help"
                           aria-label="Help"
+                          disabled={trialActivationLocked}
                           onClick={() => {
                             setActiveSection("help");
                           }}
                           className={cn(
                             "flex h-8 w-8 shrink-0 items-center justify-center rounded-lg transition-all duration-150",
+                            trialActivationLocked && "cursor-not-allowed",
                             isActive
                               ? isTranslucent
                                 ? "vibrant-nav-active"
@@ -1630,20 +1675,22 @@ function HomeContent() {
                 of the chat panel, so background sessions keep pulsing in the
                 sidebar even on non-chat views — though the sidebar itself is
                 only visible when the user navigates back to the chat. */}
-            <div
-              className={cn(
-                "flex-1 min-h-0 overflow-hidden",
-                activeSection !== "home" && "hidden"
-              )}
-            >
-              <StandaloneChat
-                className="h-full"
-                hideInlineHistory
-                chatShortcutsEnabled={activeSection === "home"}
-                sidebarCollapsed={sidebarCollapsed}
-                firstRunLearningEnabled
-              />
-            </div>
+            {trialActivationContent ?? (
+              <div
+                className={cn(
+                  "flex-1 min-h-0 overflow-hidden",
+                  activeSection !== "home" && "hidden"
+                )}
+              >
+                <StandaloneChat
+                  className="h-full"
+                  hideInlineHistory
+                  chatShortcutsEnabled={activeSection === "home"}
+                  sidebarCollapsed={sidebarCollapsed}
+                  firstRunLearningEnabled
+                />
+              </div>
+            )}
 
             {/* Non-chat sections render on top when active. */}
             {activeSection !== "home" && (

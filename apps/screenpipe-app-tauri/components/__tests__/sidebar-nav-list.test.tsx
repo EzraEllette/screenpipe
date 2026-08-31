@@ -103,6 +103,27 @@ describe("SidebarNavList", () => {
     expect(handlers.onSelect).toHaveBeenCalledWith("brain");
   });
 
+  it("disables selection, intent, dragging, and row options together", () => {
+    const onIntent = vi.fn();
+    const handlers = renderList({
+      items: [{ ...ITEMS[1], disabled: true }],
+      onIntent,
+    });
+    const row = screen.getByTestId("nav-brain");
+
+    fireEvent.click(row);
+    fireEvent.mouseEnter(row);
+    fireEvent.focus(row);
+
+    expect(row).toBeDisabled();
+    expect(row).toHaveClass("cursor-not-allowed");
+    expect(row).not.toHaveClass("opacity-40");
+    expect(screen.getByTestId("nav-brain-disabled")).toBeInTheDocument();
+    expect(screen.getByTestId("nav-brain-options")).toBeDisabled();
+    expect(handlers.onSelect).not.toHaveBeenCalled();
+    expect(onIntent).not.toHaveBeenCalled();
+  });
+
   it("signals hover and keyboard intent before a section opens", () => {
     const onIntent = vi.fn();
     renderList({ onIntent });

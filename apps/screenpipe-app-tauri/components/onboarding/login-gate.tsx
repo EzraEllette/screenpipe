@@ -8,7 +8,7 @@ import { useSettings } from "@/lib/hooks/use-settings";
 import { commands } from "@/lib/utils/tauri";
 import { motion, AnimatePresence } from "framer-motion";
 import posthog from "posthog-js";
-import { isDevBillingBypassEnabled } from "@/lib/app-entitlement";
+import { isDevLoginSkipEnabled } from "@/lib/app-entitlement";
 import { ArrowRight } from "lucide-react";
 import { LOCALITY_DETAIL } from "./trust-disclosure";
 
@@ -246,7 +246,7 @@ const OnboardingLogin: React.FC<OnboardingLoginProps> = ({
   const [browserFailure, setBrowserFailure] = useState<string | null>(null);
   const bgRef = useRef<HTMLCanvasElement>(null);
   const btnRef = useRef<HTMLCanvasElement>(null);
-  const canSkipLogin = isDevBillingBypassEnabled();
+  const canSkipLogin = isDevLoginSkipEnabled();
 
   const isLoggedIn = !!settings.user?.token;
   // null until settings hydrate — SettingsProvider starts from defaults (no

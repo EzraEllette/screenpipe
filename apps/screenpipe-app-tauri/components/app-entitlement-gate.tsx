@@ -23,6 +23,7 @@ import {
   hasAppEntitlement,
   hasConsumerAppSubscription,
   isDevBillingBypassEnabled,
+  isDevLoginSkipEnabled,
   isDevLoginEnabled,
   isTokenHydrationCandidate,
   isTokenHydrationPending,
@@ -142,6 +143,7 @@ export function AppEntitlementGate({
   const [, setPaidPolicyExpiryTick] = useState(0);
   const user = settings.user as AppUser | null | undefined;
   const devBypass = isDevBillingBypassEnabled();
+  const devLoginSkip = isDevLoginSkipEnabled();
   // Compute the wake-up first. If the boundary passes during this render, the
   // later classifiers either gate immediately or this deadline still rerenders
   // them; computing it last could observe "expired" after they observed paid.
@@ -237,14 +239,20 @@ export function AppEntitlementGate({
   const shouldGateForEnterpriseLogin =
     isManagedDeployment && authenticationState === "account";
   const shouldGateForConsumerLogin =
-    !devBypass && !isManagedDeployment && !user?.token && !tokenPending;
+    !devBypass &&
+    !devLoginSkip &&
+    !isManagedDeployment &&
+    !user?.token &&
+    !tokenPending;
   const shouldGateForUnknownConsumerPolicy =
     !devBypass &&
+    !devLoginSkip &&
     !isManagedDeployment &&
     Boolean(user) &&
     localPlanPolicy === "unknown";
   const shouldGateForEnterpriseApp =
     !devBypass &&
+    !devLoginSkip &&
     !isManagedDeployment &&
     Boolean(user?.token) &&
     !hasConsumerSubscription &&

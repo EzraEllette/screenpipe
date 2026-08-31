@@ -132,6 +132,22 @@ fn recording_access_policy(
     if trial_activation_paywall {
         return false;
     }
+    server_access_policy(
+        is_enterprise_build,
+        dev_bypass,
+        has_verified_local_plan,
+        enterprise_authorized,
+        consumer_requires_enterprise_app,
+    )
+}
+
+fn server_access_policy(
+    is_enterprise_build: bool,
+    dev_bypass: bool,
+    has_verified_local_plan: bool,
+    enterprise_authorized: bool,
+    consumer_requires_enterprise_app: bool,
+) -> bool {
     if dev_bypass {
         return true;
     }
@@ -145,6 +161,16 @@ fn recording_access_policy(
         return enterprise_authorized;
     }
     has_verified_local_plan
+}
+
+pub(crate) fn server_access_allowed(store: &SettingsStore) -> bool {
+    server_access_policy(
+        cfg!(feature = "enterprise-build"),
+        cfg!(debug_assertions),
+        store.local_plan_policy() != LocalPlanPolicy::Unknown,
+        crate::enterprise_policy::recording_authorized(),
+        !cfg!(debug_assertions) && store.requires_enterprise_app_for_consumer(),
+    )
 }
 
 /// Consumer builds allow signed-in accounts to record on the free plan.
@@ -174,6 +200,15 @@ fn require_recording_access(app: &tauri::AppHandle, store: &SettingsStore) -> Re
 
     crate::health::set_recording_status(crate::health::RecordingStatus::Paused);
     Err("account_required: sign in to start screenpipe recording".to_string())
+}
+
+fn require_server_access(store: &SettingsStore) -> Result<(), String> {
+    if server_access_allowed(store) {
+        return Ok(());
+    }
+
+    crate::health::set_recording_status(crate::health::RecordingStatus::Paused);
+    Err("account_required: sign in to start screenpipe".to_string())
 }
 
 pub fn notify_audio_engine_fallback(store: &SettingsStore) {
@@ -872,16 +907,16 @@ pub async fn spawn_screenpipe(
     app: tauri::AppHandle,
     _override_args: Option<Vec<String>>,
 ) -> Result<(), String> {
-    // Reject the durable summary paywall before publishing capture intent.
-    // Otherwise the health watchdog would keep trying to resurrect capture
-    // behind checkout.
+    // A summary-paywall install still needs the long-lived local read server
+    // for Timeline, but it must not publish capture intent or restart capture.
     let store = SettingsStore::get(&app).ok().flatten().unwrap_or_default();
-    require_recording_access(&app, &store)?;
+    require_server_access(&store)?;
+    let capture_allowed = recording_access_allowed(&app, &store);
 
-    // Mark recording as intended-ON up front (even if the start below fails or
-    // is deferred by cooldown) so the health watchdog will keep trying to bring
-    // a crashed/failed server back instead of treating it as a user stop.
-    state.set_capture_intent(true);
+    // Normal starts publish capture intent before touching lifecycle state.
+    // The paywall deliberately leaves it OFF, so the same server startup path
+    // cannot accidentally create a CaptureSession.
+    state.set_capture_intent(capture_allowed);
 
     // Do not wait for the lifecycle lock. It is held across a full stop/start,
     // so when the app is already bringing the server up — the ordinary case
@@ -960,7 +995,7 @@ async fn spawn_screenpipe_inner(
     }
 
     let store = SettingsStore::get(&app).ok().flatten().unwrap_or_default();
-    if let Err(err) = require_recording_access(&app, &store) {
+    if let Err(err) = require_server_access(&store) {
         state.is_starting.store(false, Ordering::SeqCst);
         state.is_starting_capture.store(false, Ordering::SeqCst);
         return Err(err);
@@ -1609,7 +1644,7 @@ mod local_api_auth_tests {
 
 #[cfg(test)]
 mod recording_access_tests {
-    use super::recording_access_policy;
+    use super::{recording_access_policy, server_access_policy};
 
     #[test]
     fn verified_free_consumer_can_record_without_a_paid_entitlement() {
@@ -1650,6 +1685,12 @@ mod recording_access_tests {
         assert!(!recording_access_policy(
             false, true, true, false, false, true
         ));
+    }
+
+    #[test]
+    fn summary_paywall_keeps_the_local_read_server_available() {
+        assert!(server_access_policy(false, true, true, false, false));
+        assert!(server_access_policy(false, false, true, false, false));
     }
 }
 
