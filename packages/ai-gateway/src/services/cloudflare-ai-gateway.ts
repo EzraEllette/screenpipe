@@ -7,12 +7,14 @@ import { isFrontierModel } from './cost-tracker';
 import { getHostedAiPlan } from './hosted-ai-policy';
 
 export type HostedChatGatewayMode = 'legacy' | 'cloudflare';
-export type HostedChatPlan = 'free' | 'basic' | 'business' | 'business_max' | 'business_ultra' | 'internal';
+export type HostedChatPlan = 'free' | 'basic' | 'business' | 'business_max' | 'business_ultra' | 'super_admin' | 'internal';
 export type HostedChatLane = 'auto' | 'explicit' | 'frontier';
 export type HostedChatRequestLane = Exclude<HostedChatLane, 'frontier'>;
 export type HostedChatWorkload = 'interactive' | 'background';
 export type CloudflareGatewayProvider = 'openai' | 'anthropic';
 export type HostedChatLimitScope = 'combined' | 'frontier' | 'unknown';
+
+const SUPER_ADMIN_ACTOR_ID = 'f0d67846f15d207818a4016c5f12edac415d35adf8084792fec508554def5906';
 
 export interface HostedChatGatewayContext {
 	user_id: string;
@@ -113,9 +115,11 @@ export async function buildHostedChatGatewayContext(
 	model: string,
 	workload: HostedChatWorkload,
 ): Promise<HostedChatGatewayContext> {
+	const userId = await hostedChatActorId(auth);
+	const plan = collapsePlan(auth);
 	return {
-		user_id: await hostedChatActorId(auth),
-		plan: collapsePlan(auth),
+		user_id: userId,
+		plan: userId === SUPER_ADMIN_ACTOR_ID ? 'super_admin' : plan,
 		lane: hostedChatLaneForModel(
 			model,
 			model.toLowerCase() === 'auto' ? 'auto' : 'explicit',
