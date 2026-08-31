@@ -125,7 +125,10 @@ import {
   matchesInAppShortcut,
 } from "@/lib/shortcuts";
 import { useFirstRunLearningWindow } from "@/components/first-run/learning-window-provider";
-import { TrialActivationSummaryExperience } from "@/components/first-run/learning-banner";
+import {
+  TrialActivationSummaryExperience,
+  TrialActivationUnlockPrompt,
+} from "@/components/first-run/learning-banner";
 import { blocksTrialActivationApp } from "@/lib/first-run/trial-activation";
 
 type MainSection = "home" | "timeline" | "activity" | "brain" | "pipes" | "connections" | "meetings" | "help";
@@ -153,7 +156,10 @@ const isSettingsRoute = (value: string) => resolveSettingsSection(value) !== nul
 
 function HomeContent() {
   const router = useRouter();
-  const { learning: firstRunLearning } = useFirstRunLearningWindow();
+  const {
+    learning: firstRunLearning,
+    openTrialActivationPaywall,
+  } = useFirstRunLearningWindow();
   const trialActivationLocked = blocksTrialActivationApp(
     firstRunLearning.activationState,
   );
@@ -202,7 +208,7 @@ function HomeContent() {
 
   useEffect(() => {
     if (!trialActivationLocked) return;
-    if (activeSection !== "home" && activeSection !== "connections") {
+    if (activeSection !== "home") {
       setActiveSection("home", { history: "replace" });
     }
     const blockShortcut = (event: KeyboardEvent) => {
@@ -1207,42 +1213,38 @@ function HomeContent() {
     activeSection === "brain";
 
   if (trialActivationLocked) {
-    if (activeSection === "connections") {
-      return (
-        <div className="flex h-full min-h-0 flex-1 flex-col bg-background p-6" data-testid="trial-activation-connections">
-          <Button
-            variant="ghost"
-            className="mb-4 w-fit"
-            onClick={() => setActiveSection("home")}
-          >
-            <ArrowLeft className="mr-2 h-4 w-4" />
-            first summary
-          </Button>
-          <div className="min-h-0 flex-1 overflow-y-auto">
-            <ConnectionsSection />
-          </div>
-        </div>
-      );
-    }
     if (firstRunLearning.phase === "ready" && firstRunLearning.summaryOpenedAt) {
+      const summaryLocked = firstRunLearning.activationState === "paywall";
       return (
-        <div className="h-full min-h-0 flex-1 bg-background" data-testid="trial-activation-summary-chat">
-          <StandaloneChat
-            className="h-full"
-            hideInlineHistory
-            chatShortcutsEnabled={false}
-            sidebarCollapsed
-            firstRunLearningEnabled
-          />
+        <div
+          className="relative h-full min-h-0 flex-1 bg-background"
+          data-testid="trial-activation-summary-chat"
+        >
+          <div
+            className={cn(
+              "h-full",
+              summaryLocked && "pointer-events-none select-none",
+            )}
+            aria-hidden={summaryLocked || undefined}
+            inert={summaryLocked || undefined}
+          >
+            <StandaloneChat
+              className="h-full"
+              hideInlineHistory
+              chatShortcutsEnabled={false}
+              sidebarCollapsed
+              firstRunLearningEnabled
+            />
+          </div>
+          {summaryLocked && (
+            <TrialActivationUnlockPrompt
+              onStartTrial={openTrialActivationPaywall}
+            />
+          )}
         </div>
       );
     }
-    return (
-      <TrialActivationSummaryExperience
-        onOpenConnections={() => setActiveSection("connections")}
-        onOpenSettings={() => router.push("/settings")}
-      />
-    );
+    return <TrialActivationSummaryExperience />;
   }
 
   // The outer flex row (sidebar shell + content column) lives in the shared

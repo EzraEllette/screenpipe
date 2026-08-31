@@ -18,11 +18,15 @@ import { Button } from "@/components/ui/button";
 import { useSettings } from "@/lib/hooks/use-settings";
 import type { AppUser } from "@/lib/app-entitlement";
 import { commands } from "@/lib/utils/tauri";
-import { screenpipeWebBase } from "@/lib/web-url";
+import { screenpipeWebUrl } from "@/lib/web-url";
 import { isOnboardingCheckoutResolved } from "@/lib/onboarding-checkout";
+import { submitHostedCheckoutStart } from "@/lib/onboarding-checkout-navigation";
 import { TRIAL_ACTIVATION_UNLOCKED_STEP } from "@/lib/first-run/trial-activation";
 
-const CHECKOUT_URL = `${screenpipeWebBase("https://screenpipe.com")}/business-trial/checkout?embedded=1&origin=desktop_summary_activation&source_tracking_id=desktop-summary-activation-v1`;
+const HOSTED_CHECKOUT_URL = screenpipeWebUrl(
+  "/onboarding/checkout",
+  "https://screenpipe.com",
+);
 
 export function TrialActivationPaywall({
   open,
@@ -31,105 +35,107 @@ export function TrialActivationPaywall({
   open: boolean;
   locked: boolean;
 }) {
-  const { settings, loadUser } = useSettings();
+  const { settings } = useSettings();
   const user = settings.user as AppUser | null | undefined;
-  const frameRef = React.useRef<HTMLIFrameElement | null>(null);
-  const [loaded, setLoaded] = React.useState(false);
-  const [error, setError] = React.useState(false);
-  const [frameKey, setFrameKey] = React.useState(0);
+  const [checkoutToken, setCheckoutToken] = React.useState<string | null>(
+    user?.token ?? null,
+  );
+  const [tokenResolved, setTokenResolved] = React.useState(Boolean(user?.token));
+  const [error, setError] = React.useState<string | null>(null);
+  const submissionStartedRef = React.useRef(false);
 
   React.useEffect(() => {
     if (!locked || !isOnboardingCheckoutResolved(user)) return;
     void commands.setOnboardingStep(TRIAL_ACTIVATION_UNLOCKED_STEP);
   }, [locked, user]);
-  const sendToken = React.useCallback(() => {
-    if (!user?.token) return;
-    frameRef.current?.contentWindow?.postMessage(
-      { type: "screenpipe-business-trial:init", token: user.token },
-      new URL(CHECKOUT_URL).origin,
-    );
+
+  const resolveCheckoutToken = React.useCallback(async () => {
+    setTokenResolved(false);
+    try {
+      const token = user?.token ?? (await commands.getCloudToken());
+      setCheckoutToken(token);
+    } catch {
+      setCheckoutToken(null);
+    } finally {
+      setTokenResolved(true);
+    }
   }, [user?.token]);
 
   React.useEffect(() => {
-    const token = user?.token;
-    if (!open || !token) return;
-    const origin = new URL(CHECKOUT_URL).origin;
-    const receive = (event: MessageEvent) => {
-      if (event.origin !== origin || event.source !== frameRef.current?.contentWindow) return;
-      const type = (event.data as { type?: unknown } | null)?.type;
-      if (type === "screenpipe-business-trial:ready") sendToken();
-      if (type === "screenpipe-business-trial:loaded") {
-        setLoaded(true);
-        setError(false);
-        posthog.capture("trial_activation_paywall_rendered", {
-          experiment: "first-summary-card-trial-v1",
-          variant: "summary_first",
-          destination_type: "stripe_payment_element",
-        });
-      }
-      if (type === "screenpipe-business-trial:fatal") {
-        setError(true);
-        setLoaded(false);
-      }
-      if (type === "screenpipe-business-trial:complete") {
-        posthog.capture("trial_activation_card_trial_completed", {
-          experiment: "first-summary-card-trial-v1",
-          variant: "summary_first",
-          origin: "desktop_summary_activation",
-        });
-        void loadUser(token, true).catch(() => {});
-        void commands.setOnboardingStep(TRIAL_ACTIVATION_UNLOCKED_STEP);
-      }
-    };
-    window.addEventListener("message", receive);
-    return () => window.removeEventListener("message", receive);
-  }, [loadUser, open, sendToken, user?.token]);
+    if (!open) return;
+    void resolveCheckoutToken();
+  }, [open, resolveCheckoutToken]);
+
+  const startCheckout = React.useCallback(() => {
+    if (submissionStartedRef.current || !checkoutToken) return;
+    submissionStartedRef.current = true;
+    setError(null);
+    try {
+      posthog.capture("trial_activation_card_checkout_started", {
+        experiment: "first-summary-card-trial-v1",
+        variant: "summary_first",
+        destination_type: "hosted_stripe_payment_element",
+      });
+      submitHostedCheckoutStart({
+        hostedCheckoutUrl: HOSTED_CHECKOUT_URL,
+        token: checkoutToken,
+        currentHref: window.location.href,
+      });
+    } catch (checkoutError) {
+      submissionStartedRef.current = false;
+      setError(
+        checkoutError instanceof Error
+          ? checkoutError.message
+          : "secure checkout could not be opened",
+      );
+    }
+  }, [checkoutToken]);
+
+  React.useEffect(() => {
+    if (!open || !tokenResolved || !checkoutToken) return;
+    startCheckout();
+  }, [checkoutToken, open, startCheckout, tokenResolved]);
 
   if (!open) return null;
   return (
     <Dialog open>
       <DialogContent
-        className="max-h-[92vh] overflow-y-auto sm:max-w-[560px]"
+        className="sm:max-w-[480px]"
         data-testid="trial-activation-paywall"
         onEscapeKeyDown={(event) => event.preventDefault()}
         onPointerDownOutside={(event) => event.preventDefault()}
       >
         <DialogHeader>
-          <DialogTitle>start your 7-day Business trial</DialogTitle>
+          <DialogTitle>opening secure checkout</DialogTitle>
           <DialogDescription>
-            Add a card to unlock the complete app. Nothing is charged today,
-            and you can cancel before the trial ends.
+            Using the account you already signed into during onboarding.
+            Nothing is charged today.
           </DialogDescription>
         </DialogHeader>
-        {!user?.token ? (
+        {!tokenResolved ? (
           <p className="py-8 text-center text-sm text-muted-foreground">
-            Sign in again from Settings to continue.
+            loading your authenticated checkout
           </p>
+        ) : !checkoutToken ? (
+          <div className="space-y-4 py-8 text-center">
+            <p className="text-sm text-muted-foreground">
+              couldn&apos;t load your saved session
+            </p>
+            <Button variant="outline" onClick={() => void resolveCheckoutToken()}>
+              retry
+            </Button>
+          </div>
+        ) : error ? (
+          <div className="space-y-4 py-6 text-center">
+            <p className="text-sm text-destructive">{error}</p>
+            <Button variant="outline" onClick={startCheckout}>
+              retry
+            </Button>
+          </div>
         ) : (
-          <iframe
-            key={frameKey}
-            ref={frameRef}
-            src={CHECKOUT_URL}
-            title="secure Business trial card form"
-            allow="payment"
-            className="h-[440px] w-full border-0 bg-background"
-            data-testid="trial-activation-checkout-frame"
-            onLoad={sendToken}
-          />
-        )}
-        {!loaded && !error && user?.token && (
-          <p className="text-center text-xs text-muted-foreground">loading secure checkout</p>
-        )}
-        {error && (
-          <Button
-            variant="outline"
-            onClick={() => {
-              setError(false);
-              setFrameKey((value) => value + 1);
-            }}
-          >
-            retry checkout
-          </Button>
+          <p className="py-8 text-center text-sm text-muted-foreground">
+            loading screenpipe.com
+          </p>
         )}
       </DialogContent>
     </Dialog>

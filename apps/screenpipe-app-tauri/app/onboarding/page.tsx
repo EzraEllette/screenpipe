@@ -5,6 +5,7 @@
 "use client";
 
 import React, { useState, useEffect, useCallback, useMemo } from "react";
+import { useRouter } from "next/navigation";
 import { useToast } from "@/components/ui/use-toast";
 import OnboardingLogin from "@/components/onboarding/login-gate";
 import AcquisitionStep from "@/components/onboarding/acquisition-step";
@@ -23,12 +24,15 @@ import { commands } from "@/lib/utils/tauri";
 import { onboardingFunnel } from "@/lib/analytics/onboarding-funnel";
 import type { AppUser } from "@/lib/app-entitlement";
 import {
+  bypassesTrialActivation,
   TRIAL_ACTIVATION_EXPERIMENT_FLAG,
+  TRIAL_ACTIVATION_DEV_FORCE,
+  TRIAL_ACTIVATION_PAYWALL_STEP,
   TRIAL_ACTIVATION_SUMMARY_STEP,
   TRIAL_ACTIVATION_TREATMENT,
+  TRIAL_ACTIVATION_UNLOCKED_STEP,
 } from "@/lib/first-run/trial-activation";
 import { readOnboardingCheckoutStatus } from "@/lib/onboarding-checkout-navigation";
-import { requiresOnboardingCheckout } from "@/lib/onboarding-checkout";
 
 type SlideKey =
   | "login"
@@ -141,6 +145,7 @@ const applyOnboardingWindowSize = async () => {
 };
 
 export default function OnboardingPage() {
+  const router = useRouter();
   const { toast } = useToast();
   const [checkoutReturnStatus] = useState(() =>
     typeof window === "undefined"
@@ -198,14 +203,17 @@ export default function OnboardingPage() {
       ? settings.deviceTier
       : "unknown";
   const needsOnboardingCheckout =
-    onboardingData.trialActivationFreshInstall === true &&
-    requiresOnboardingCheckout(user);
+    (onboardingData.trialActivationFreshInstall === true ||
+      TRIAL_ACTIVATION_DEV_FORCE) &&
+    Boolean(user?.token) &&
+    !bypassesTrialActivation(user);
   const [trialActivationVariant, setTrialActivationVariant] = useState<
     string | boolean | undefined
   >(undefined);
   const usesSummaryFirstTrial =
     needsOnboardingCheckout &&
-    trialActivationVariant === TRIAL_ACTIVATION_TREATMENT;
+    (TRIAL_ACTIVATION_DEV_FORCE ||
+      trialActivationVariant === TRIAL_ACTIVATION_TREATMENT);
   const wasTrialActivationEligible =
     needsOnboardingCheckout || checkoutReturnStatus !== null;
   const shouldShowPlanSelection =
@@ -261,13 +269,24 @@ export default function OnboardingPage() {
       const { loadOnboardingStatus } = useOnboarding.getState();
       await loadOnboardingStatus();
       const { onboardingData } = useOnboarding.getState();
+      const returnsToTrialActivation =
+        onboardingData.currentStep === TRIAL_ACTIVATION_PAYWALL_STEP;
 
       // Hosted checkout temporarily replaces this webview's local document.
       // Its explicit complete/cancel return always resumes the plan controller,
       // even if a stale persisted step predates the outbound navigation.
       if (checkoutReturnStatus && !isManagedDeployment) {
+        if (
+          returnsToTrialActivation &&
+          checkoutReturnStatus === "cancelled"
+        ) {
+          router.replace("/home");
+          return;
+        }
         try {
-          await commands.setOnboardingStep("plan");
+          if (!returnsToTrialActivation) {
+            await commands.setOnboardingStep("plan");
+          }
         } catch {
           // non-critical: the in-memory restore below is enough for this run
         }
@@ -329,6 +348,7 @@ export default function OnboardingPage() {
     isManagedDeployment,
     isManagedDeploymentResolved,
     isSettingsLoaded,
+    router,
     shouldShowPlanSelection,
   ]);
 
@@ -406,6 +426,23 @@ export default function OnboardingPage() {
       card_ask_arm: "required",
       card_ask_placement_active: true,
     });
+
+    if (
+      currentSlide === "plan" &&
+      checkoutReturnStatus === "complete" &&
+      onboardingData.currentStep === TRIAL_ACTIVATION_PAYWALL_STEP
+    ) {
+      posthog.capture("trial_activation_card_trial_completed", {
+        experiment: TRIAL_ACTIVATION_EXPERIMENT_FLAG,
+        variant: TRIAL_ACTIVATION_TREATMENT,
+        origin: "desktop_summary_activation",
+      });
+      await commands.setOnboardingStep(TRIAL_ACTIVATION_UNLOCKED_STEP);
+      router.replace("/home");
+      transitioningRef.current = false;
+      setIsTransitioning(false);
+      return;
+    }
 
     // Hidden enterprise deployments only need authentication + permissions.
     // Their engine and integration screens depend on app UI that headless mode
@@ -499,6 +536,8 @@ export default function OnboardingPage() {
     currentSlide,
     deviceTierForAnalytics,
     isManagedDeployment,
+    onboardingData.currentStep,
+    router,
     timelineChoiceLocked,
     timelineChoiceVisible,
     trialActivationVariant,

@@ -1038,6 +1038,10 @@ pub const TRIAL_ACTIVATION_UNLOCKED_STEP: &str = "trial-activation-v1-unlocked";
 // force-unlock flag.
 pub const TRIAL_ACTIVATION_ROLLOUT_ENABLED: bool = true;
 
+pub fn trial_activation_dev_force_enabled() -> bool {
+    cfg!(debug_assertions) && option_env!("SCREENPIPE_TRIAL_ACTIVATION_DEV") == Some("1")
+}
+
 impl OnboardingStore {
     fn new_install() -> Self {
         Self {
@@ -1143,14 +1147,40 @@ impl OnboardingStore {
     }
 }
 
-fn trial_activation_is_confirmed_fresh_install(app: &AppHandle) -> bool {
-    let Some(settings) = SettingsStore::get(app).ok().flatten() else {
+const TRIAL_ACTIVATION_INSTALL_MARKER: &str = "trialActivationFreshInstallV1";
+
+fn initialize_trial_activation_install_marker(
+    settings: &mut SettingsStore,
+    is_new_store: bool,
+    can_run_migrations: bool,
+) -> bool {
+    if !can_run_migrations || settings.extra.contains_key(TRIAL_ACTIVATION_INSTALL_MARKER) {
+        return false;
+    }
+    settings.extra.insert(
+        TRIAL_ACTIVATION_INSTALL_MARKER.to_string(),
+        Value::Bool(is_new_store),
+    );
+    true
+}
+
+fn take_trial_activation_fresh_install_marker(app: &AppHandle) -> bool {
+    let Some(mut settings) = SettingsStore::get(app).ok().flatten() else {
         return false;
     };
-    let Ok((data_dir, _)) = crate::config::resolve_data_dir(&settings.data_dir) else {
+    if settings
+        .extra
+        .get(TRIAL_ACTIVATION_INSTALL_MARKER)
+        .and_then(Value::as_bool)
+        != Some(true)
+    {
         return false;
-    };
-    !data_dir.join("db.sqlite").exists()
+    }
+    settings.extra.insert(
+        TRIAL_ACTIVATION_INSTALL_MARKER.to_string(),
+        Value::Bool(false),
+    );
+    settings.save(app).is_ok()
 }
 
 fn deserialize_null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
@@ -2504,6 +2534,18 @@ pub fn init_store(app: &AppHandle) -> Result<SettingsStore, String> {
         }
     };
 
+    // Installation provenance is decided exactly once, where we still know
+    // whether this app created the settings store. Existing stores migrate to
+    // false; new stores receive a one-shot marker consumed by onboarding.
+    // Account plan, database timing, and onboarding replay cannot create it.
+    if initialize_trial_activation_install_marker(
+        &mut store,
+        is_new_store,
+        can_run_settings_migrations,
+    ) {
+        should_save = true;
+    }
+
     // Tier detection. Two cases:
     // - New install: detect tier AND apply tier defaults (video_quality, power_mode, etc.)
     // - Existing user upgrading: detect tier for DB/channel config but do NOT override
@@ -2630,7 +2672,7 @@ pub fn init_onboarding_store(app: &AppHandle) -> Result<OnboardingStore, String>
             (onboarding, should_save)
         }
         Ok(None) => {
-            let onboarding = if trial_activation_is_confirmed_fresh_install(app) {
+            let onboarding = if take_trial_activation_fresh_install_marker(app) {
                 OnboardingStore::new_install()
             } else {
                 tracing::info!(
@@ -2949,6 +2991,40 @@ mod tests {
         let mut fresh = OnboardingStore::new_install();
         fresh.reset();
         assert!(!fresh.trial_activation_fresh_install);
+    }
+
+    #[test]
+    fn trial_activation_install_marker_is_true_only_for_a_new_settings_store() {
+        let mut fresh = SettingsStore::default();
+        assert!(initialize_trial_activation_install_marker(
+            &mut fresh, true, true
+        ));
+        assert_eq!(
+            fresh
+                .extra
+                .get(TRIAL_ACTIVATION_INSTALL_MARKER)
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+
+        let mut upgraded = SettingsStore::default();
+        assert!(initialize_trial_activation_install_marker(
+            &mut upgraded,
+            false,
+            true
+        ));
+        assert_eq!(
+            upgraded
+                .extra
+                .get(TRIAL_ACTIVATION_INSTALL_MARKER)
+                .and_then(Value::as_bool),
+            Some(false)
+        );
+        assert!(!initialize_trial_activation_install_marker(
+            &mut upgraded,
+            true,
+            true
+        ));
     }
 
     #[test]

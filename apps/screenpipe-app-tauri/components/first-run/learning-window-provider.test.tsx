@@ -4,12 +4,13 @@
 
 import React from "react";
 import "@testing-library/jest-dom/vitest";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   useLearningWindow: vi.fn(),
   useAgentHandoff: vi.fn(),
+  paywallProps: vi.fn(),
 }));
 
 vi.mock("@/lib/hooks/use-settings", () => ({
@@ -26,15 +27,26 @@ vi.mock("@/lib/first-run/use-learning-window", () => ({
 vi.mock("@/lib/first-run/use-agent-handoff", () => ({
   useAgentHandoff: (...args: unknown[]) => mocks.useAgentHandoff(...args),
 }));
+vi.mock("@/components/first-run/trial-activation-paywall", () => ({
+  TrialActivationPaywall: (props: { open: boolean; locked: boolean }) => {
+    mocks.paywallProps(props);
+    return props.open ? <div data-testid="trial-activation-paywall" /> : null;
+  },
+}));
 
-import { FirstRunLearningWindowProvider } from "./learning-window-provider";
+import {
+  FirstRunLearningWindowProvider,
+  useFirstRunLearningWindow,
+} from "./learning-window-provider";
 
 beforeEach(() => {
   vi.clearAllMocks();
+  window.history.replaceState({}, "", "/home");
   mocks.useLearningWindow.mockReturnValue({
     phase: "learning",
     summaryOpenedAt: null,
     capturedApps: [],
+    activationState: "inactive",
   });
   mocks.useAgentHandoff.mockReturnValue({ targets: [], resolved: false });
 });
@@ -60,4 +72,29 @@ describe("first-run learning provider", () => {
 
     expect(mocks.useAgentHandoff).toHaveBeenCalledWith(false, []);
   });
+
+  it("keeps checkout closed until the locked-summary CTA opens it", () => {
+    mocks.useLearningWindow.mockReturnValue({
+      phase: "ready",
+      summaryOpenedAt: "2026-08-30T23:00:00.000Z",
+      capturedApps: [],
+      activationState: "paywall",
+    });
+
+    function OpenCheckout() {
+      const { openTrialActivationPaywall } = useFirstRunLearningWindow();
+      return <button onClick={openTrialActivationPaywall}>start trial</button>;
+    }
+
+    render(
+      <FirstRunLearningWindowProvider>
+        <OpenCheckout />
+      </FirstRunLearningWindowProvider>,
+    );
+
+    expect(screen.queryByTestId("trial-activation-paywall")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "start trial" }));
+    expect(screen.getByTestId("trial-activation-paywall")).toBeInTheDocument();
+  });
+
 });

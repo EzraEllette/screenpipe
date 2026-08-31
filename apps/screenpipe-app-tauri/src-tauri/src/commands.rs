@@ -14,7 +14,7 @@ use crate::{
     native_notification, native_shortcut_reminder,
     store::{
         OnboardingStore, SettingsStore, TRIAL_ACTIVATION_PAYWALL_STEP,
-        TRIAL_ACTIVATION_UNLOCKED_STEP,
+        TRIAL_ACTIVATION_SUMMARY_STEP, TRIAL_ACTIVATION_UNLOCKED_STEP,
     },
     updates::is_enterprise_build,
     window::{RewindWindowId, ShowRewindWindow},
@@ -2807,6 +2807,11 @@ pub async fn set_onboarding_step(app_handle: tauri::AppHandle, step: String) -> 
         .and_then(|onboarding| onboarding.current_step);
     OnboardingStore::update(&app_handle, |onboarding| {
         onboarding.current_step = Some(step.clone());
+        if step == TRIAL_ACTIVATION_SUMMARY_STEP
+            && crate::store::trial_activation_dev_force_enabled()
+        {
+            onboarding.trial_activation_fresh_install = true;
+        }
     })?;
     let _ = refresh_tray_menu(app_handle.clone()).await;
 

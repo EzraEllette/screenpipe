@@ -20,6 +20,7 @@ const mocks = vi.hoisted(() => ({
   showWindow: vi.fn(async () => undefined),
   applyEnterpriseUiVisibility: vi.fn(async () => false),
   completeOnboarding: vi.fn(async () => undefined),
+  routerReplace: vi.fn(),
   capture: vi.fn(),
   trialActivationVariant: undefined as string | undefined,
   isSettingLocked: vi.fn((_key: string) => false),
@@ -50,6 +51,10 @@ const onboardingData = {
 vi.mock("@/components/ui/use-toast", () => ({
   useToast: () => ({ toast: vi.fn() }),
 }));
+vi.mock("next/navigation", () => {
+  const router = { replace: mocks.routerReplace };
+  return { useRouter: () => router };
+});
 vi.mock("@/lib/hooks/use-onboarding", () => {
   const useOnboarding = () => ({
     onboardingData,
@@ -225,6 +230,51 @@ describe("enterprise onboarding authentication", () => {
     );
   });
 
+  it("returns a completed summary checkout to Home and unlocks the app", async () => {
+    window.history.replaceState({}, "", "/onboarding?checkout=complete");
+    mocks.enterprisePolicy.isManagedDeployment = false;
+    mocks.settings.user = {
+      token: "token-1",
+      has_payment_method: true,
+      entitlement_source: "subscription",
+    };
+    onboardingData.currentStep = "trial-activation-v1-paywall";
+
+    render(<OnboardingPage />);
+
+    expect(screen.getByText("plan selection")).toBeInTheDocument();
+    expect(mocks.setOnboardingStep).not.toHaveBeenCalledWith("plan");
+    fireEvent.click(
+      screen.getByRole("button", { name: "continue free plan" }),
+    );
+
+    await waitFor(() =>
+      expect(mocks.setOnboardingStep).toHaveBeenCalledWith(
+        "trial-activation-v1-unlocked",
+      ),
+    );
+    expect(mocks.routerReplace).toHaveBeenCalledWith("/home");
+  });
+
+  it("returns a cancelled summary checkout to the locked summary", async () => {
+    window.history.replaceState({}, "", "/onboarding?checkout=cancelled");
+    mocks.enterprisePolicy.isManagedDeployment = false;
+    mocks.settings.user = {
+      token: "token-1",
+      has_payment_method: false,
+      entitlement_source: "none",
+    };
+    onboardingData.currentStep = "trial-activation-v1-paywall";
+
+    render(<OnboardingPage />);
+
+    await waitFor(() => expect(mocks.routerReplace).toHaveBeenCalledWith("/home"));
+    expect(mocks.setOnboardingStep).not.toHaveBeenCalledWith("plan");
+    expect(mocks.setOnboardingStep).not.toHaveBeenCalledWith(
+      "trial-activation-v1-unlocked",
+    );
+  });
+
   it("leaves login completion analytics to the login gate", async () => {
     mocks.enterprisePolicy.isManagedDeployment = false;
     render(<OnboardingPage />);
@@ -360,13 +410,11 @@ describe("enterprise onboarding authentication", () => {
     );
   });
 
-  it("assigns eligible treatment users to the locked summary before checkout", async () => {
+  it("assigns a fresh-install treatment user regardless of a missing plan", async () => {
     mocks.enterprisePolicy.isManagedDeployment = false;
     mocks.trialActivationVariant = "summary_first";
     onboardingData.trialActivationFreshInstall = true;
     mocks.settings.user = {
-      has_payment_method: false,
-      entitlement_source: "none",
       token: "tok",
       email: "new@example.com",
     };
@@ -399,6 +447,33 @@ describe("enterprise onboarding authentication", () => {
     expect(mocks.completeOnboarding).toHaveBeenCalledWith({
       method: "setup_finished",
     });
+  });
+
+  it("uses a paid account only as a fresh-install bypass", async () => {
+    mocks.enterprisePolicy.isManagedDeployment = false;
+    mocks.trialActivationVariant = "summary_first";
+    onboardingData.trialActivationFreshInstall = true;
+    mocks.settings.user = {
+      has_payment_method: true,
+      entitlement_source: "subscription",
+      token: "tok",
+      email: "paid@example.com",
+    };
+    onboardingData.currentStep = "engine";
+
+    render(<OnboardingPage />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "finish engine" }),
+    );
+    expect(await screen.findByText("recommended setup")).toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", { name: "finish recommended setup" }),
+    );
+
+    await waitFor(() => expect(mocks.completeOnboarding).toHaveBeenCalled());
+    expect(mocks.setOnboardingStep).not.toHaveBeenCalledWith(
+      "trial-activation-v1-summary",
+    );
   });
 
   it("never enrolls an upgraded free install after onboarding reset", async () => {

@@ -356,13 +356,7 @@ export function FirstRunLearningBanner(
   );
 }
 
-export function TrialActivationSummaryExperience({
-  onOpenSettings,
-  onOpenConnections,
-}: {
-  onOpenSettings: () => void;
-  onOpenConnections: () => void;
-}) {
+export function TrialActivationSummaryExperience() {
   const { learning } = useFirstRunLearningWindow();
   const { phase, remainingMs, chatId, markSummaryOpened } = learning;
 
@@ -374,8 +368,16 @@ export function TrialActivationSummaryExperience({
       source: "home_cta",
     });
     try {
-      await emit("chat-load-conversation", { conversationId: chatId });
+      // This CTA replaces the locked summary screen with StandaloneChat, so
+      // there is no chat-load-conversation listener until after this state
+      // change mounts Chat. Persist the handoff before mounting it; the chat
+      // routing hook consumes this key on mount.
+      localStorage.setItem("pending-chat-conversation", chatId);
       markSummaryOpened();
+      await emit("chat-load-conversation", {
+        conversationId: chatId,
+        targetWindow: "home",
+      });
     } catch {
       // Keep the ready action available until the chat really opens.
     }
@@ -438,15 +440,30 @@ export function TrialActivationSummaryExperience({
             view summary
           </Button>
         )}
-        <div className="mt-8 flex items-center justify-center gap-5 text-xs text-muted-foreground">
-          <button type="button" onClick={onOpenConnections} className="underline underline-offset-4">
-            connections
-          </button>
-          <button type="button" onClick={onOpenSettings} className="underline underline-offset-4">
-            settings
-          </button>
-        </div>
       </section>
     </main>
+  );
+}
+
+export function TrialActivationUnlockPrompt({
+  onStartTrial,
+}: {
+  onStartTrial: () => void;
+}) {
+  return (
+    <div
+      className="absolute inset-0 z-40 flex items-end justify-center p-8"
+      data-testid="trial-activation-summary-lock"
+    >
+      <div className="pointer-events-auto w-full max-w-xl border border-border bg-background p-5 text-center shadow-lg">
+        <Button
+          className="h-12 w-full px-8 text-sm"
+          data-testid="trial-activation-start-trial"
+          onClick={onStartTrial}
+        >
+          start your 7-day free trial to unlock full access
+        </Button>
+      </div>
+    </div>
   );
 }

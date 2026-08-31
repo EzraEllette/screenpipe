@@ -4,6 +4,11 @@
 
 export const TRIAL_ACTIVATION_EXPERIMENT_FLAG =
   "first-summary-card-trial-v1";
+// Build-time only, and paired with Rust's debug_assertions guard. This lets a
+// local dev bundle exercise the treatment without PostHog or a blank data dir;
+// a release build cannot enable it.
+export const TRIAL_ACTIVATION_DEV_FORCE =
+  process.env.NEXT_PUBLIC_SCREENPIPE_TRIAL_ACTIVATION_DEV === "1";
 // One-way emergency release valve. Target one PostHog person or every person;
 // once observed, the native persisted state is unlocked and flag removal
 // cannot put that installation back behind the trial gate.
@@ -23,6 +28,41 @@ export type TrialActivationState =
   | "paywall"
   | "unlocked";
 
+const TRIAL_ACTIVATION_BYPASS_SOURCES = new Set([
+  "subscription",
+  "enterprise",
+  "lifetime",
+  "dev",
+]);
+
+/** Account state can only exempt an install; it never establishes eligibility. */
+export function bypassesTrialActivation(
+  user: AppUser | null | undefined,
+): boolean {
+  if (!user) return false;
+  if (user.has_payment_method === true) return true;
+  if (
+    user.enterprise_account &&
+    typeof user.enterprise_account === "object" &&
+    !Array.isArray(user.enterprise_account)
+  ) {
+    return true;
+  }
+  const entitlement =
+    user.entitlement &&
+    typeof user.entitlement === "object" &&
+    !Array.isArray(user.entitlement)
+      ? user.entitlement
+      : null;
+  const source =
+    typeof user.entitlement_source === "string"
+      ? user.entitlement_source.trim().toLowerCase()
+      : typeof entitlement?.source === "string"
+        ? entitlement.source.trim().toLowerCase()
+        : null;
+  return source !== null && TRIAL_ACTIVATION_BYPASS_SOURCES.has(source);
+}
+
 export function trialActivationState(
   currentStep: string | null | undefined,
 ): TrialActivationState {
@@ -41,3 +81,4 @@ export function trialActivationState(
 export function blocksTrialActivationApp(state: TrialActivationState): boolean {
   return state === "summary" || state === "paywall";
 }
+import type { AppUser } from "@/lib/app-entitlement";

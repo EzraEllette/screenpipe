@@ -5,11 +5,13 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  bypassesTrialActivation,
   TRIAL_ACTIVATION_PAYWALL_STEP,
   TRIAL_ACTIVATION_SUMMARY_STEP,
   TRIAL_ACTIVATION_UNLOCKED_STEP,
   trialActivationState,
 } from "./trial-activation";
+import type { AppUser } from "@/lib/app-entitlement";
 
 describe("trial activation persisted state", () => {
   it("does not enroll completed installs with historical onboarding steps", () => {
@@ -31,5 +33,27 @@ describe("trial activation persisted state", () => {
     expect(trialActivationState(TRIAL_ACTIVATION_UNLOCKED_STEP)).toBe(
       "unlocked",
     );
+  });
+
+  it("uses account state only for explicit ownership bypasses", () => {
+    const user = (overrides: Partial<AppUser>) =>
+      ({ token: "token", ...overrides }) as AppUser;
+
+    expect(bypassesTrialActivation(user({ subscription_plan: "none" }))).toBe(
+      false,
+    );
+    expect(
+      bypassesTrialActivation(
+        user({ entitlement_source: "manual", has_payment_method: false }),
+      ),
+    ).toBe(false);
+    expect(
+      bypassesTrialActivation(user({ has_payment_method: true })),
+    ).toBe(true);
+    for (const source of ["subscription", "lifetime", "enterprise", "dev"]) {
+      expect(bypassesTrialActivation(user({ entitlement_source: source }))).toBe(
+        true,
+      );
+    }
   });
 });
