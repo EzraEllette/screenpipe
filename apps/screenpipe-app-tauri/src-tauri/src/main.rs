@@ -2294,11 +2294,10 @@ async fn main() {
             crate::db_recovery_notifications::start(app_handle.clone());
             if launch_db_quarantined {
                 // A new process must preserve the same fail-closed state as the
-                // process that observed the hard fault — unless the fault was
-                // the transient I/O family and this generation still verifies
-                // healthy, in which case the fresh WAL index already undid the
-                // damage and parking recording until a human intervenes costs
-                // hours of capture for nothing. Verification runs off the setup
+                // process that observed the hard fault — unless its exact
+                // prerequisite has cleared (fresh process for SHORT_READ,
+                // recovered volume headroom for FULL) and this unchanged
+                // generation verifies healthy. Verification runs off the setup
                 // thread: it reads the whole file, which is seconds on a large
                 // database, and the UI must not wait for it.
                 let self_heal_app = app_handle.clone();

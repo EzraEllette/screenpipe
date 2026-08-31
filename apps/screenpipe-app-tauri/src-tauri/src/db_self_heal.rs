@@ -21,13 +21,14 @@
 //! recording stayed off — hours, in the 2026-08-11 case, because nothing resumes
 //! until a human notices the tray and runs a repair.
 //!
-//! So: verify instead of assume, but only for the exact failure supported by
-//! that evidence. If the marker records `SQLITE_IOERR_SHORT_READ` (522) and the
-//! installed generation passes a read-only health check, resolve the quarantine
-//! and start recording. Missing/generic result codes, other IOERR variants,
-//! corruption (`SQLITE_CORRUPT`, `SQLITE_NOTADB`), and a full disk
-//! (`SQLITE_FULL`) keep the existing fail-closed path and require a verified
-//! replacement generation.
+//! So: verify instead of assume, but only for failures with a cause-specific
+//! cleared prerequisite. `SQLITE_IOERR_SHORT_READ` (522) requires a fresh
+//! process. `SQLITE_FULL` (13) requires the database volume to regain the same
+//! 25 GiB headroom used by the capture guard. The unchanged generation must
+//! then pass a read-only health check before quarantine is resolved and
+//! recording starts. Missing/generic result codes, other IOERR variants, and
+//! corruption (`SQLITE_CORRUPT`, `SQLITE_NOTADB`) keep the fail-closed path and
+//! require a verified replacement generation.
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -48,10 +49,12 @@ pub enum SelfHealSkip {
     /// semaphore, and it cannot be reopened, so clearing the marker would
     /// leave every writer blocked with no visible reason.
     AlreadyLatchedThisProcess,
-    /// Anything other than exact IOERR_SHORT_READ (522). The result is missing
-    /// or does not carry the same no-byte-damage evidence, so it needs the
-    /// verified-replacement path.
+    /// A result code without its own positively verifiable recovery
+    /// prerequisite, including READ/FSTAT and corruption.
     NotSelfHealable { code: i32 },
+    /// SQLITE_FULL is eligible only after the volume has regained the existing
+    /// low-disk recovery headroom. An unknown result is unsafe too.
+    DiskSpaceNotRecovered { available_bytes: Option<u64> },
     /// The marker exists but could not be parsed. Fail closed: damaged recovery
     /// metadata is not permission to reopen SQLite.
     UnreadableMarker,
@@ -68,6 +71,7 @@ impl SelfHealSkip {
             Self::NotQuarantined => "not_quarantined",
             Self::AlreadyLatchedThisProcess => "already_latched_this_process",
             Self::NotSelfHealable { .. } => "not_self_healable",
+            Self::DiskSpaceNotRecovered { .. } => "disk_space_not_recovered",
             Self::UnreadableMarker => "unreadable_marker",
             Self::FailedHealthCheck => "failed_health_check",
             Self::ResolveFailed => "resolve_failed",
@@ -91,6 +95,19 @@ fn archive_path_for(database_path: &Path, detected_at_unix_ms: u64) -> PathBuf {
 /// Returns `Ok(())` when the marker was resolved and the database is safe to
 /// open; `Err(reason)` when the caller must keep the fail-closed path.
 pub async fn try_resolve_quarantine(database_path: &Path) -> Result<(), SelfHealSkip> {
+    try_resolve_quarantine_with(database_path, |path| {
+        screenpipe_engine::disk_pressure::available_space_for_path(path)
+    })
+    .await
+}
+
+async fn try_resolve_quarantine_with<F>(
+    database_path: &Path,
+    available_space_for_path: F,
+) -> Result<(), SelfHealSkip>
+where
+    F: FnOnce(&Path) -> Option<u64>,
+{
     if !screenpipe_db::sqlite_quarantine_exists(database_path) {
         return Err(SelfHealSkip::NotQuarantined);
     }
@@ -112,17 +129,42 @@ pub async fn try_resolve_quarantine(database_path: &Path) -> Result<(), SelfHeal
     };
 
     // A marker with no recorded code is represented by generic IOERR elsewhere
-    // in the coordinator. Generic IOERR is deliberately not self-healable: only
-    // exact IOERR_SHORT_READ (522) has the required incident evidence.
+    // in the coordinator. Generic IOERR is deliberately not self-healable.
     let code = marker.sqlite_code.unwrap_or(10);
-    if !screenpipe_db::sqlite_quarantine_is_self_healable(code) {
+    let prerequisite = match screenpipe_db::sqlite_quarantine_self_heal_prerequisite(code) {
+        Some(prerequisite) => prerequisite,
+        None => {
+            info!(
+                sqlite_extended_code = code,
+                sqlite_primary_code = code & 0xff,
+                database = %database_path.display(),
+                "db self-heal: hard fault needs a verified replacement generation — not probing"
+            );
+            return Err(SelfHealSkip::NotSelfHealable { code });
+        }
+    };
+
+    if prerequisite == screenpipe_db::SqliteQuarantineSelfHealPrerequisite::RecoveredDiskSpace {
+        let available_bytes = available_space_for_path(database_path);
+        if !available_bytes.is_some_and(|available| {
+            available >= screenpipe_events::LOW_DISK_RECOVERY_THRESHOLD_BYTES
+        }) {
+            warn!(
+                sqlite_extended_code = code,
+                ?available_bytes,
+                required_bytes = screenpipe_events::LOW_DISK_RECOVERY_THRESHOLD_BYTES,
+                database = %database_path.display(),
+                "db self-heal: disk-full prerequisite has not cleared — staying fail-closed"
+            );
+            return Err(SelfHealSkip::DiskSpaceNotRecovered { available_bytes });
+        }
         info!(
             sqlite_extended_code = code,
-            sqlite_primary_code = code & 0xff,
+            available_bytes = available_bytes.unwrap_or_default(),
+            required_bytes = screenpipe_events::LOW_DISK_RECOVERY_THRESHOLD_BYTES,
             database = %database_path.display(),
-            "db self-heal: hard fault needs a verified replacement generation — not probing"
+            "db self-heal: disk-full prerequisite cleared"
         );
-        return Err(SelfHealSkip::NotSelfHealable { code });
     }
 
     info!(
@@ -248,6 +290,9 @@ mod tests {
             SelfHealSkip::NotQuarantined,
             SelfHealSkip::AlreadyLatchedThisProcess,
             SelfHealSkip::NotSelfHealable { code: 11 },
+            SelfHealSkip::DiskSpaceNotRecovered {
+                available_bytes: None,
+            },
             SelfHealSkip::UnreadableMarker,
             SelfHealSkip::FailedHealthCheck,
             SelfHealSkip::ResolveFailed,
@@ -264,7 +309,7 @@ mod tests {
     #[tokio::test]
     async fn launch_path_refuses_every_unproven_io_error_code() {
         // None; generic IOERR; READ, WRITE, FSYNC, TRUNCATE, DATA, and
-        // CORRUPTFS extended IOERRs; then CORRUPT, FULL, and NOTADB.
+        // CORRUPTFS extended IOERRs; then CORRUPT and NOTADB.
         for (recorded, expected) in [
             (None, 10),
             (Some(10), 10),
@@ -275,7 +320,6 @@ mod tests {
             (Some(8202), 8202),
             (Some(8458), 8458),
             (Some(11), 11),
-            (Some(13), 13),
             (Some(26), 26),
         ] {
             let dir = tempfile::tempdir().expect("tempdir");
@@ -290,5 +334,63 @@ mod tests {
             );
             assert!(screenpipe_db::sqlite_quarantine_exists(&db));
         }
+    }
+
+    #[tokio::test]
+    async fn disk_full_resolves_after_space_and_health_are_verified() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("db.sqlite");
+        let connection = rusqlite::Connection::open(&db).expect("create healthy database");
+        connection
+            .execute("CREATE TABLE healthy (id INTEGER PRIMARY KEY)", [])
+            .expect("seed healthy database");
+        connection.close().expect("close healthy database");
+        screenpipe_db::persist_sqlite_quarantine(&db, Some(13), "database or disk is full")
+            .expect("persist quarantine");
+
+        try_resolve_quarantine_with(&db, |_| {
+            Some(screenpipe_events::LOW_DISK_RECOVERY_THRESHOLD_BYTES)
+        })
+        .await
+        .expect("space and health checks should resolve the stale marker");
+
+        assert!(!screenpipe_db::sqlite_quarantine_exists(&db));
+    }
+
+    #[tokio::test]
+    async fn disk_full_stays_quarantined_until_space_recovers() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("db.sqlite");
+        std::fs::write(&db, b"health probe must not run").expect("write fixture");
+        screenpipe_db::persist_sqlite_quarantine(&db, Some(13), "database or disk is full")
+            .expect("persist quarantine");
+        for available_bytes in [
+            Some(screenpipe_events::LOW_DISK_RECOVERY_THRESHOLD_BYTES - 1),
+            None,
+        ] {
+            assert_eq!(
+                try_resolve_quarantine_with(&db, |_| available_bytes).await,
+                Err(SelfHealSkip::DiskSpaceNotRecovered { available_bytes })
+            );
+            assert!(screenpipe_db::sqlite_quarantine_exists(&db));
+        }
+    }
+
+    #[tokio::test]
+    async fn disk_full_stays_quarantined_when_health_check_fails() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("db.sqlite");
+        std::fs::write(&db, b"not a healthy SQLite generation").expect("write fixture");
+        screenpipe_db::persist_sqlite_quarantine(&db, Some(13), "database or disk is full")
+            .expect("persist quarantine");
+
+        assert_eq!(
+            try_resolve_quarantine_with(&db, |_| {
+                Some(screenpipe_events::LOW_DISK_RECOVERY_THRESHOLD_BYTES)
+            })
+            .await,
+            Err(SelfHealSkip::FailedHealthCheck)
+        );
+        assert!(screenpipe_db::sqlite_quarantine_exists(&db));
     }
 }

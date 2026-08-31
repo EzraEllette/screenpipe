@@ -414,7 +414,19 @@ pub fn archive_resolved_sqlite_quarantine(
     Ok(Some(archive_path.to_path_buf()))
 }
 
-/// True only for the hard fault proven not to damage bytes on disk.
+/// Prerequisite that must be positively verified before the same physical
+/// SQLite generation may leave quarantine.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SqliteQuarantineSelfHealPrerequisite {
+    /// All handles from the faulted process are gone, so SQLite rebuilds its
+    /// disposable WAL index before the read-only health check.
+    FreshProcess,
+    /// The volume has recovered the established capture-safety headroom.
+    RecoveredDiskSpace,
+}
+
+/// Return the exact prerequisite for hard faults with evidence-backed,
+/// same-generation recovery.
 ///
 /// `SQLITE_IOERR_SHORT_READ` (522) is the exact extended result code
 /// screenpipe has hit under heavy concurrent load: the WAL index desyncs in
@@ -425,15 +437,26 @@ pub fn archive_resolved_sqlite_quarantine(
 ///
 /// The generic `SQLITE_IOERR` primary code and every other extended IOERR
 /// variant remain fail-closed: WRITE, FSYNC, and TRUNCATE can describe failed
-/// persistence rather than a transient in-memory index. Missing result codes,
-/// `SQLITE_CORRUPT` (11), `SQLITE_FULL` (13), and `SQLITE_NOTADB` (26) also
-/// require the existing verified-replacement recovery path.
-pub fn sqlite_quarantine_is_self_healable(code: i32) -> bool {
-    code == libsqlite3_sys::SQLITE_IOERR_SHORT_READ
+/// persistence rather than a transient in-memory index. `SQLITE_FULL` (13) is
+/// recoverable only after the caller proves that the volume has regained safe
+/// write headroom. Missing result codes, `SQLITE_CORRUPT` (11), and
+/// `SQLITE_NOTADB` (26) require the verified-replacement recovery path.
+pub fn sqlite_quarantine_self_heal_prerequisite(
+    code: i32,
+) -> Option<SqliteQuarantineSelfHealPrerequisite> {
+    match code {
+        libsqlite3_sys::SQLITE_IOERR_SHORT_READ => {
+            Some(SqliteQuarantineSelfHealPrerequisite::FreshProcess)
+        }
+        libsqlite3_sys::SQLITE_FULL => {
+            Some(SqliteQuarantineSelfHealPrerequisite::RecoveredDiskSpace)
+        }
+        _ => None,
+    }
 }
 
 /// Resolve a quarantine on the *same* physical generation, after the caller
-/// has independently verified that generation is healthy.
+/// has independently verified its cause-specific prerequisite and health.
 ///
 /// Sibling of [`archive_resolved_sqlite_quarantine`], which deliberately
 /// refuses this case: it exists for recovery, where a new file replaces the
@@ -443,7 +466,8 @@ pub fn sqlite_quarantine_is_self_healable(code: i32) -> bool {
 /// must be exactly the one the marker recorded. A generation that changed
 /// under us was not the thing that got verified.
 ///
-/// Callers must have proven health first; this function only moves metadata.
+/// Callers must have proven the prerequisite and health first; this function
+/// only moves metadata.
 pub fn resolve_verified_sqlite_quarantine(
     database_path: impl AsRef<Path>,
     archive_path: impl AsRef<Path>,
@@ -463,7 +487,7 @@ pub fn resolve_verified_sqlite_quarantine(
         )
     })?;
     let code = marker.sqlite_code.unwrap_or(10);
-    if !sqlite_quarantine_is_self_healable(code) {
+    if sqlite_quarantine_self_heal_prerequisite(code).is_none() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("SQLite hard fault {code} is not self-healable; it needs a verified replacement generation"),
@@ -531,21 +555,27 @@ mod tests {
         assert!(sqlite_quarantine_exists(&db));
     }
 
-    /// Only the observed SHORT_READ result self-heals. Generic IOERR and other
-    /// extended IOERR variants can represent failed persistence and must stay
-    /// fail-closed alongside corruption, disk-full, and not-a-database.
+    /// Only prerequisites backed by a cause-specific recovery signal are
+    /// eligible. Generic IOERR and other extended IOERR variants can represent
+    /// failed persistence and stay fail-closed alongside corruption and
+    /// not-a-database.
     #[test]
-    fn only_short_read_is_self_healable() {
-        assert!(sqlite_quarantine_is_self_healable(
-            libsqlite3_sys::SQLITE_IOERR_SHORT_READ
-        ));
+    fn self_heal_prerequisites_are_cause_specific() {
+        assert_eq!(
+            sqlite_quarantine_self_heal_prerequisite(libsqlite3_sys::SQLITE_IOERR_SHORT_READ),
+            Some(SqliteQuarantineSelfHealPrerequisite::FreshProcess)
+        );
+        assert_eq!(
+            sqlite_quarantine_self_heal_prerequisite(libsqlite3_sys::SQLITE_FULL),
+            Some(SqliteQuarantineSelfHealPrerequisite::RecoveredDiskSpace)
+        );
 
         // SQLITE_IOERR, IOERR_READ, IOERR_WRITE, IOERR_FSYNC, and
         // IOERR_TRUNCATE respectively, followed by the other hard-fault
         // primary/extended codes handled by the quarantine gate.
-        for code in [10, 266, 778, 1034, 1546, 8202, 8458, 11, 13, 26, 267, 779] {
+        for code in [10, 266, 778, 1034, 1546, 8202, 8458, 11, 26, 267, 779] {
             assert!(
-                !sqlite_quarantine_is_self_healable(code),
+                sqlite_quarantine_self_heal_prerequisite(code).is_none(),
                 "{code} must not self-heal"
             );
         }

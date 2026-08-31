@@ -60,8 +60,8 @@ pub use screenpipe_sqlite_coordinator::{
     archive_resolved_sqlite_quarantine, persist_sqlite_quarantine,
     prepare_sqlite_quarantine_reserve, read_sqlite_quarantine, resolve_verified_sqlite_quarantine,
     sqlite_file_identity, sqlite_hard_fault_latched, sqlite_quarantine_exists,
-    sqlite_quarantine_is_self_healable, sqlite_quarantine_marker_path, SqliteFileIdentity,
-    SqliteQuarantineMarker,
+    sqlite_quarantine_marker_path, sqlite_quarantine_self_heal_prerequisite, SqliteFileIdentity,
+    SqliteQuarantineMarker, SqliteQuarantineSelfHealPrerequisite,
 };
 pub use text_normalizer::{expand_search_query, sanitize_fts5_query};
 pub use types::*;
