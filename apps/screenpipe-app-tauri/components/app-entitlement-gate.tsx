@@ -46,6 +46,11 @@ const E2E_ACCOUNT_SEED_ENABLED =
   process.env.NEXT_PUBLIC_SCREENPIPE_E2E === "true";
 const POLICY_CLOCK_CHECK_INTERVAL_MS = 60_000;
 
+export type StartupAuthenticationStatus =
+  | "authenticated"
+  | "logged_out"
+  | "not_required";
+
 function getDownloadPlatform(): string | null {
   try {
     const os = getOsPlatform();
@@ -102,8 +107,10 @@ function EntitlementShell({
 
 export function AppEntitlementGate({
   children,
+  authenticationStatus = "authenticated",
 }: {
   children: React.ReactNode;
+  authenticationStatus?: StartupAuthenticationStatus;
 }) {
   const { settings, updateSettings, loadUser, isSettingsLoaded } =
     useSettings();
@@ -259,7 +266,9 @@ export function AppEntitlementGate({
     (!hasConsumerSubscription ||
       enterpriseAccount.restrict_consumer_build_access === true);
   const shouldGateForEntitlement = shouldGateForUnknownConsumerPolicy;
-  const shouldGate = isOnboardingRoute
+  const shouldGate = authenticationStatus === "not_required"
+    ? false
+    : isOnboardingRoute
     ? false
     : !isManagedDeploymentResolved
       ? true
@@ -343,6 +352,7 @@ export function AppEntitlementGate({
     shouldGateForUnknownConsumerPolicy,
     shouldGateForEnterpriseApp,
     isManagedDeployment,
+    authenticationStatus,
     enterpriseAuthenticationPending,
     tokenPending,
     user?.app_entitled,

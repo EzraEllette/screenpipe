@@ -166,6 +166,17 @@ describe("AppEntitlementGate", () => {
     vi.unstubAllEnvs();
   });
 
+  it("starts the application without an account when authentication is not required", () => {
+    render(
+      <AppEntitlementGate authenticationStatus="not_required">
+        {protectedApp}
+      </AppEntitlementGate>,
+    );
+
+    expect(screen.getByTestId("protected-app")).toBeInTheDocument();
+    expect(mocks.stopScreenpipe).not.toHaveBeenCalled();
+  });
+
   it("leaves enterprise authentication on the onboarding login step", () => {
     window.history.replaceState({}, "", "/onboarding");
     mocks.enterprise = {

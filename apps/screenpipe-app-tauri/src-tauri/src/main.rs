@@ -132,6 +132,7 @@ mod tray;
 #[cfg(target_os = "macos")]
 mod staged_update;
 mod stale_tier;
+mod startup_auth;
 mod updates;
 mod voice_training;
 mod window;
@@ -1403,9 +1404,6 @@ async fn main() {
             // Autostart setup
             let autostart_manager = app.autolaunch();
 
-            // Install Pi coding agent in background (fire-and-forget, never crashes)
-            crate::pi::ensure_pi_installed_background();
-
             info!("App version: {}", env!("CARGO_PKG_VERSION"));
             info!("Local data directory: {}", base_dir.display());
 
@@ -1435,6 +1433,15 @@ async fn main() {
             e2e::seeds::apply_settings(app.handle(), &mut store);
 
             app.manage(store.clone());
+
+            // Resolve authentication at the first point its settings
+            // prerequisite is available, before beginning any application
+            // runtime. Consumer and Enterprise builds deliberately share these
+            // two sequential steps; only the credential check inside the
+            // resolver varies by build. `SCREENPIPE_SKIP_ONBOARDING` returns
+            // `NotRequired` without invoking either checker.
+            startup_auth::bootstrap(&app_handle, &store);
+
             crate::recording::refresh_history_access_policy(
                 &app.state::<RecordingState>().history_access,
                 &store,
@@ -1565,6 +1572,10 @@ async fn main() {
 
             #[cfg(feature = "e2e")]
             e2e::seeds::apply_onboarding(app.handle());
+
+            // Install Pi only after the shared authentication bootstrap has
+            // resolved and application initialization has begun.
+            crate::pi::ensure_pi_installed_background();
 
             // Escape hatch: SCREENPIPE_SKIP_ONBOARDING=1 marks onboarding complete
             // at startup so corp/VDI/headless environments (where the interactive

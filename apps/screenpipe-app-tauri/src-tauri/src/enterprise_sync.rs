@@ -1139,6 +1139,98 @@ mod imp {
         NativeAuthorizationResult::Unavailable("enterprise policy could not be verified".into())
     }
 
+    /// Resolve Enterprise credentials before the shared application bootstrap
+    /// proceeds. Tauri's setup callback is synchronous and already runs under
+    /// the main Tokio runtime, so the network check owns a small worker runtime
+    /// instead of nesting `block_on` on the setup thread.
+    pub(crate) fn authorize_startup(app: &tauri::AppHandle) -> bool {
+        let app = app.clone();
+        let worker = std::thread::Builder::new()
+            .name("enterprise-startup-auth".to_string())
+            .spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|error| format!("enterprise startup auth runtime: {error}"))?;
+                runtime.block_on(async move {
+                    let (policy_url, heartbeat_url) = authorization_endpoint_urls();
+                    let http = reqwest::Client::builder()
+                        .timeout(std::time::Duration::from_secs(9))
+                        .redirect(reqwest::redirect::Policy::none())
+                        .build()
+                        .map_err(|error| format!("enterprise startup auth client: {error}"))?;
+                    let device_id =
+                        settings_device_id(&app).unwrap_or_else(|| "unknown".to_string());
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(12),
+                        resolve_native_authorization(
+                            &http,
+                            &policy_url,
+                            &heartbeat_url,
+                            &device_id,
+                        ),
+                    )
+                    .await
+                    .map_err(|_| "enterprise startup authorization timed out".to_string())
+                })
+            });
+
+        let result = match worker {
+            Ok(worker) => match worker.join() {
+                Ok(Ok(result)) => result,
+                Ok(Err(error)) => {
+                    warn!("enterprise: startup authorization unavailable: {error}");
+                    return false;
+                }
+                Err(_) => {
+                    warn!("enterprise: startup authorization worker panicked");
+                    return false;
+                }
+            },
+            Err(error) => {
+                warn!("enterprise: failed to start authorization worker: {error}");
+                return false;
+            }
+        };
+
+        match result {
+            NativeAuthorizationResult::Authorized(policy) => {
+                policy.sync_streams.apply();
+                crate::enterprise_policy::set_enterprise_policy(
+                    policy.hidden_sections,
+                    policy.enforce_auto_start,
+                );
+                crate::enterprise_policy::update_recording_authorized(true);
+                info!("enterprise: startup authentication completed");
+                true
+            }
+            NativeAuthorizationResult::RecordingDisabled => {
+                // The credential was accepted; recording authorization is a
+                // separate policy decision and deliberately remains closed.
+                info!(
+                    "enterprise: startup authenticated; recording is paused by workspace admin"
+                );
+                true
+            }
+            NativeAuthorizationResult::RequiresAccount => {
+                info!("enterprise: startup requires account sign-in");
+                false
+            }
+            NativeAuthorizationResult::Rejected => {
+                warn!("enterprise: saved startup credentials were rejected");
+                false
+            }
+            NativeAuthorizationResult::NoCredential => {
+                info!("enterprise: startup has no saved credential");
+                false
+            }
+            NativeAuthorizationResult::Unavailable(error) => {
+                warn!("enterprise: startup authentication unavailable: {error}");
+                false
+            }
+        }
+    }
+
     pub(crate) async fn verify_recording_authorization(
         app: &tauri::AppHandle,
         credential_type: Option<&str>,
@@ -1914,7 +2006,7 @@ mod imp {
 pub use imp::{configure_telemetry_context, spawn};
 
 #[cfg(feature = "enterprise-build")]
-pub(crate) use imp::verify_recording_authorization;
+pub(crate) use imp::{authorize_startup, verify_recording_authorization};
 
 #[cfg(not(feature = "enterprise-build"))]
 pub fn configure_telemetry_context(_app: &tauri::AppHandle) {}
@@ -1926,6 +2018,11 @@ pub(crate) async fn verify_recording_authorization(
     _credential: Option<&str>,
 ) -> Result<(), String> {
     Err("enterprise recording authorization requires an Enterprise build".to_string())
+}
+
+#[cfg(not(feature = "enterprise-build"))]
+pub(crate) fn authorize_startup(_app: &tauri::AppHandle) -> bool {
+    unreachable!("consumer startup authentication does not use Enterprise policy")
 }
 
 /// No-op stub for non-enterprise builds. Returns None so callers can ignore.

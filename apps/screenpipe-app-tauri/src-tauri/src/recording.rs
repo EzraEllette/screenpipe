@@ -128,9 +128,16 @@ fn recording_access_policy(
     enterprise_authorized: bool,
     consumer_requires_enterprise_app: bool,
     trial_activation_paywall: bool,
+    authentication_status: crate::startup_auth::AuthenticationStatus,
 ) -> bool {
+    if authentication_status == crate::startup_auth::AuthenticationStatus::LoggedOut {
+        return false;
+    }
     if trial_activation_paywall {
         return false;
+    }
+    if authentication_status == crate::startup_auth::AuthenticationStatus::NotRequired {
+        return true;
     }
     server_access_policy(
         is_enterprise_build,
@@ -183,6 +190,26 @@ pub(crate) fn recording_access_allowed(app: &tauri::AppHandle, store: &SettingsS
             .flatten()
             .unwrap_or_default()
             .blocks_trial_activation_recording();
+    let resolved_authentication = app
+        .try_state::<crate::startup_auth::AuthenticationStatus>()
+        .map(|status| *status)
+        .unwrap_or(crate::startup_auth::AuthenticationStatus::LoggedOut);
+    // The bootstrap result owns initial startup ordering. A later successful
+    // sign-in may open recording without relaunching the already-initialized
+    // app, so derive the current authenticated state from the same native
+    // authorities used by the runtime guards.
+    let authentication_status = if resolved_authentication
+        == crate::startup_auth::AuthenticationStatus::LoggedOut
+        && if cfg!(feature = "enterprise-build") {
+            crate::enterprise_policy::recording_authorized()
+        } else {
+            store.has_cloud_authentication()
+        }
+    {
+        crate::startup_auth::AuthenticationStatus::Authenticated
+    } else {
+        resolved_authentication
+    };
     recording_access_policy(
         cfg!(feature = "enterprise-build"),
         cfg!(debug_assertions),
@@ -190,6 +217,7 @@ pub(crate) fn recording_access_allowed(app: &tauri::AppHandle, store: &SettingsS
         crate::enterprise_policy::recording_authorized(),
         !cfg!(debug_assertions) && store.requires_enterprise_app_for_consumer(),
         trial_activation_paywall,
+        authentication_status,
     )
 }
 
@@ -1645,45 +1673,114 @@ mod local_api_auth_tests {
 #[cfg(test)]
 mod recording_access_tests {
     use super::{recording_access_policy, server_access_policy};
+    use crate::startup_auth::AuthenticationStatus;
 
     #[test]
     fn verified_free_consumer_can_record_without_a_paid_entitlement() {
         assert!(recording_access_policy(
-            false, false, true, false, false, false
+            false,
+            false,
+            true,
+            false,
+            false,
+            false,
+            AuthenticationStatus::Authenticated,
         ));
     }
 
     #[test]
     fn consumer_with_unknown_plan_cannot_record() {
         assert!(!recording_access_policy(
-            false, false, false, false, false, false
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            AuthenticationStatus::Authenticated,
         ));
     }
 
     #[test]
     fn signed_out_consumer_cannot_start_recording() {
         assert!(!recording_access_policy(
-            false, false, false, false, false, false
+            false,
+            false,
+            true,
+            false,
+            false,
+            false,
+            AuthenticationStatus::LoggedOut,
         ));
     }
 
     #[test]
     fn enterprise_build_requires_verified_enterprise_session() {
-        assert!(!recording_access_policy(true, false, true, false, false, false));
-        assert!(recording_access_policy(true, false, false, true, false, false));
+        assert!(!recording_access_policy(
+            true,
+            false,
+            true,
+            false,
+            false,
+            false,
+            AuthenticationStatus::Authenticated,
+        ));
+        assert!(recording_access_policy(
+            true,
+            false,
+            false,
+            true,
+            false,
+            false,
+            AuthenticationStatus::Authenticated,
+        ));
     }
 
     #[test]
     fn mandatory_enterprise_org_cannot_record_from_consumer_binary() {
         assert!(!recording_access_policy(
-            false, false, true, true, true, false
+            false,
+            false,
+            true,
+            true,
+            true,
+            false,
+            AuthenticationStatus::Authenticated,
         ));
     }
 
     #[test]
     fn summary_paywall_blocks_capture_even_in_debug_builds() {
         assert!(!recording_access_policy(
-            false, true, true, false, false, true
+            false,
+            true,
+            true,
+            false,
+            false,
+            true,
+            AuthenticationStatus::Authenticated,
+        ));
+    }
+
+    #[test]
+    fn signup_free_startup_does_not_require_account_or_enterprise_auth() {
+        assert!(recording_access_policy(
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            AuthenticationStatus::NotRequired,
+        ));
+        assert!(recording_access_policy(
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            AuthenticationStatus::NotRequired,
         ));
     }
 
