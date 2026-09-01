@@ -27,6 +27,12 @@ describe("enterprise MDM dashboard contract", () => {
   test("selects only the opt-in persistent packages", () => {
     expect(manifest.schemaVersion).toBe(1);
     expect(manifest.macos.artifactSuffix).toBe("-persistent.pkg");
+    expect(manifest.macos.persistenceOnlyRemovalCommand).toContain(
+      "pkgutil --forget screenpi.pe.enterprise.persistence",
+    );
+    expect(manifest.macos.fullRemovalCommand).toContain(
+      "pkgutil --forget screenpi.pe.enterprise.persistence",
+    );
     expect(manifest.macos.permissions.inputMonitoring).toBe(
       "user_consent_required",
     );

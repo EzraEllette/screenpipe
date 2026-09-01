@@ -20,8 +20,8 @@
     "deploymentChannel": "device",
     "installCommand": "/usr/sbin/installer -pkg {{PACKAGE_PATH}} -target /",
     "updateStrategy": "in_place",
-    "persistenceOnlyRemovalCommand": "/Library/PrivilegedHelperTools/screenpipe-persistence-uninstall",
-    "fullRemovalCommand": "/Library/PrivilegedHelperTools/screenpipe-persistence-uninstall && /bin/rm -rf '/Applications/screenpipe enterprise.app'",
+    "persistenceOnlyRemovalCommand": "/Library/PrivilegedHelperTools/screenpipe-persistence-uninstall && /usr/sbin/pkgutil --forget screenpi.pe.enterprise.persistence",
+    "fullRemovalCommand": "/Library/PrivilegedHelperTools/screenpipe-persistence-uninstall && /bin/rm -rf '/Applications/screenpipe enterprise.app' && /usr/sbin/pkgutil --forget screenpi.pe.enterprise.persistence",
     "detection": {
       "packageId": "screenpi.pe.enterprise.persistence",
       "appPath": "/Applications/screenpipe enterprise.app",

@@ -14,6 +14,10 @@ Deploy `macos/screenpipe-enterprise.mobileconfig` through the device channel,
 then deploy the matching `-persistent.pkg`. The same `.mobileconfig` works with
 Intune, Jamf Pro, Kandji, Mosyle, and other Apple MDM services.
 
+Use the manifest's removal commands rather than deleting only the app bundle;
+they remove the persistence jobs and forget the package receipt so MDM
+detection does not leave a deleted device in an installed state.
+
 The profile approves Accessibility, managed background services, and
 MDM-managed update detection. Apple does not allow a PPPC profile to silently
 grant Screen Recording, Input Monitoring, or Microphone access. Screen Recording
