@@ -13,12 +13,31 @@ pub(crate) enum AutoStartOutcome {
     Failed,
 }
 
+pub(crate) fn episode_start_utc(
+    first_seen_at: Instant,
+    action_now: Instant,
+    action_now_utc: DateTime<Utc>,
+) -> DateTime<Utc> {
+    let elapsed = action_now.saturating_duration_since(first_seen_at);
+    match chrono::Duration::from_std(elapsed) {
+        Ok(elapsed) => action_now_utc - elapsed,
+        Err(error) => {
+            warn!(
+                "audio-process meeting detector: failed to convert episode duration: {}",
+                error
+            );
+            action_now_utc
+        }
+    }
+}
+
 pub(crate) async fn start_or_adopt_auto_meeting(
     db: &DatabaseManager,
     manual_meeting: &tokio::sync::RwLock<Option<i64>>,
     platform: &str,
     calendar: Option<&CalendarBinding>,
     last_explicit_stop_id: Option<i64>,
+    meeting_start: DateTime<Utc>,
 ) -> AutoStartOutcome {
     let title = calendar.map(|c| c.title.as_str());
     let attendees = calendar.and_then(|c| c.attendees.as_deref());
@@ -94,16 +113,16 @@ pub(crate) async fn start_or_adopt_auto_meeting(
                     "audio-process meeting detector: failed to reopen meeting {}: {}",
                     recent.id, e
                 );
-                insert_new_audio_process_meeting(db, platform, calendar).await
+                insert_new_audio_process_meeting(db, platform, calendar, meeting_start).await
             }
         },
-        Ok(None) => insert_new_audio_process_meeting(db, platform, calendar).await,
+        Ok(None) => insert_new_audio_process_meeting(db, platform, calendar, meeting_start).await,
         Err(e) => {
             warn!(
                 "audio-process meeting detector: failed to find recent meeting: {}",
                 e
             );
-            insert_new_audio_process_meeting(db, platform, calendar).await
+            insert_new_audio_process_meeting(db, platform, calendar, meeting_start).await
         }
     }
 }
@@ -112,16 +131,18 @@ pub(crate) async fn insert_new_audio_process_meeting(
     db: &DatabaseManager,
     platform: &str,
     calendar: Option<&CalendarBinding>,
+    meeting_start: DateTime<Utc>,
 ) -> AutoStartOutcome {
     let title = calendar.map(|c| c.title.as_str());
     let attendees = calendar.and_then(|c| c.attendees.as_deref());
     match db
-        .insert_meeting_with_calendar(
+        .insert_meeting_with_calendar_at(
             platform,
             "audio_process",
             title,
             attendees,
             calendar.map(|c| c.key.as_str()),
+            meeting_start,
         )
         .await
     {
@@ -248,6 +269,7 @@ pub(crate) async fn apply_state_action(
     last_explicit_stop_id: Option<i64>,
     calendar_events: &[CalendarEventSignal],
     now: Instant,
+    action_now_utc: DateTime<Utc>,
 ) {
     match action {
         AudioProcessStateAction::StartMeeting {
@@ -259,15 +281,21 @@ pub(crate) async fn apply_state_action(
             pid,
             bundle_id,
         } => {
-            let calendar =
-                resolve_calendar_binding(db, calendar_events, Utc::now(), meeting_url.as_deref())
-                    .await;
+            let calendar = resolve_calendar_binding(
+                db,
+                calendar_events,
+                action_now_utc,
+                meeting_url.as_deref(),
+            )
+            .await;
+            let meeting_start = episode_start_utc(first_seen_at, now, action_now_utc);
             let outcome = start_or_adopt_auto_meeting(
                 db,
                 manual_meeting,
                 &platform,
                 calendar.as_ref(),
                 last_explicit_stop_id,
+                meeting_start,
             )
             .await;
             match outcome {
@@ -329,7 +357,7 @@ pub(crate) async fn apply_state_action(
             if let Some(session) = suppressed_session {
                 suppress_session(suppressed_sessions, session);
             }
-            let now_ts = Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+            let now_ts = action_now_utc.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
             match db
                 .end_meeting_with_typed_text(meeting_id, &now_ts, true, None)
                 .await

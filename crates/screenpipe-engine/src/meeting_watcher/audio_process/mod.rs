@@ -17,7 +17,7 @@ use crate::meeting_watcher::shared::telemetry::{
     capture_detection_decision, capture_detection_outcome,
 };
 use crate::routes::meetings::{emit_meeting_status_changed, resolve_meeting_status_from};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use futures::{FutureExt, StreamExt};
 use screenpipe_audio::meeting_detector::MeetingDetector;
 use screenpipe_audio::meeting_processes::{self, AudioInputProcess};
@@ -253,6 +253,7 @@ pub async fn run_audio_process_meeting_detection_loop(
             }
         };
         let now = Instant::now();
+        let now_utc = Utc::now();
 
         let (candidates, live_candidates) = build_candidates(
             &db,
@@ -322,6 +323,7 @@ pub async fn run_audio_process_meeting_detection_loop(
                 last_explicit_stop_id,
                 &calendar_events,
                 now,
+                now_utc,
             )
             .await;
         }
