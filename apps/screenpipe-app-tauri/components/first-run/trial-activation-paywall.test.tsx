@@ -9,7 +9,7 @@
 
 import React from "react";
 import "@testing-library/jest-dom/vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
@@ -57,6 +57,7 @@ vi.mock("@/components/ui/dialog", () => ({
 }));
 
 import { TrialActivationPaywall } from "./trial-activation-paywall";
+import { TRIAL_ACTIVATION_CHECKOUT_STATE_KEY } from "@/lib/first-run/trial-activation";
 
 let submitSpy: ReturnType<typeof vi.spyOn>;
 
@@ -64,6 +65,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   window.history.replaceState({}, "", "/home");
   document.querySelectorAll("form").forEach((form) => form.remove());
+  window.sessionStorage.clear();
   mocks.user = null;
   mocks.loadUser.mockResolvedValue(undefined);
   submitSpy = vi
@@ -119,4 +121,39 @@ describe("TrialActivationPaywall", () => {
     expect(mocks.getCloudToken).not.toHaveBeenCalled();
   });
 
+  it("makes a browser-back return observable and requires an explicit retry", async () => {
+    mocks.user = {
+      token: "in-memory-token",
+      has_payment_method: false,
+      entitlement_source: "none",
+    };
+    window.sessionStorage.setItem(
+      TRIAL_ACTIVATION_CHECKOUT_STATE_KEY,
+      "pending",
+    );
+
+    render(<TrialActivationPaywall open locked />);
+
+    expect(
+      await screen.findByText("checkout closed before payment was confirmed"),
+    ).toBeInTheDocument();
+    expect(submitSpy).not.toHaveBeenCalled();
+    expect(mocks.capture).toHaveBeenCalledWith(
+      "trial_activation_card_checkout_returned_without_status",
+      {
+        experiment: "first-summary-card-trial-v1",
+        variant: "summary_first",
+      },
+    );
+    expect(
+      window.sessionStorage.getItem(TRIAL_ACTIVATION_CHECKOUT_STATE_KEY),
+    ).toBe("returned");
+
+    fireEvent.click(screen.getByRole("button", { name: "try checkout again" }));
+
+    await waitFor(() => expect(submitSpy).toHaveBeenCalledOnce());
+    expect(
+      window.sessionStorage.getItem(TRIAL_ACTIVATION_CHECKOUT_STATE_KEY),
+    ).toBe("pending");
+  });
 });

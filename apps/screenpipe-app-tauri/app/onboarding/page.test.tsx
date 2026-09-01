@@ -153,12 +153,14 @@ vi.mock("posthog-js/react", () => ({
 }));
 
 import OnboardingPage from "./page";
+import { TRIAL_ACTIVATION_CHECKOUT_STATE_KEY } from "@/lib/first-run/trial-activation";
 
 describe("enterprise onboarding authentication", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.trialActivationVariant = undefined;
     window.history.replaceState({}, "", "/onboarding");
+    window.sessionStorage.clear();
     mocks.enterprisePolicy = {
       isManagedDeployment: true,
       isManagedDeploymentResolved: true,
@@ -258,6 +260,10 @@ describe("enterprise onboarding authentication", () => {
 
   it("returns a cancelled summary checkout to the locked summary", async () => {
     window.history.replaceState({}, "", "/onboarding?checkout=cancelled");
+    window.sessionStorage.setItem(
+      TRIAL_ACTIVATION_CHECKOUT_STATE_KEY,
+      "pending",
+    );
     mocks.enterprisePolicy.isManagedDeployment = false;
     mocks.settings.user = {
       token: "token-1",
@@ -268,7 +274,12 @@ describe("enterprise onboarding authentication", () => {
 
     render(<OnboardingPage />);
 
-    await waitFor(() => expect(mocks.routerReplace).toHaveBeenCalledWith("/home"));
+    await waitFor(() =>
+      expect(mocks.routerReplace).toHaveBeenCalledWith("/home"),
+    );
+    expect(
+      window.sessionStorage.getItem(TRIAL_ACTIVATION_CHECKOUT_STATE_KEY),
+    ).toBeNull();
     expect(mocks.setOnboardingStep).not.toHaveBeenCalledWith("plan");
     expect(mocks.setOnboardingStep).not.toHaveBeenCalledWith(
       "trial-activation-v1-unlocked",

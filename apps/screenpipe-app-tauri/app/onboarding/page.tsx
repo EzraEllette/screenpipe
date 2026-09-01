@@ -27,6 +27,7 @@ import {
   isTrialActivationEligible,
   TRIAL_ACTIVATION_EXPERIMENT_FLAG,
   TRIAL_ACTIVATION_DEV_FORCE,
+  TRIAL_ACTIVATION_CHECKOUT_STATE_KEY,
   TRIAL_ACTIVATION_PAYWALL_STEP,
   TRIAL_ACTIVATION_SUMMARY_STEP,
   TRIAL_ACTIVATION_TREATMENT,
@@ -172,6 +173,10 @@ export default function OnboardingPage() {
       ? null
       : readOnboardingCheckoutStatus(window.location.search),
   );
+  useEffect(() => {
+    if (!checkoutReturnStatus) return;
+    window.sessionStorage.removeItem(TRIAL_ACTIVATION_CHECKOUT_STATE_KEY);
+  }, [checkoutReturnStatus]);
   const [currentSlide, setCurrentSlide] = useState<SlideKey>(() =>
     checkoutReturnStatus ? "plan" : "login",
   );
