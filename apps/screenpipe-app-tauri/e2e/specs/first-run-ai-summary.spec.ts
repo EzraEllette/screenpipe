@@ -583,7 +583,7 @@ describe("First-run summary is written by the model", function () {
           await browser.execute(
             (key: string) => {
               const stored = JSON.parse(localStorage.getItem(key) ?? "{}");
-              return stored.summaryOpenedAt;
+              return stored.phase === "done";
             },
             LEARNING_STORAGE_KEY,
           ),

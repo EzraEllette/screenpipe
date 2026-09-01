@@ -70,6 +70,8 @@ export type FirstRunLearningState = {
   /** Set once a summary lands, so a reload cannot re-seed a second chat. */
   seededAt: string | null;
   chatId: string | null;
+  /** Set when Home has rendered the ready card at least once. */
+  readyShownAt: string | null;
   /**
    * Set after the user opens the summary.
    *
@@ -172,6 +174,7 @@ const EMPTY_STATE: FirstRunLearningState = {
   showProgress: false,
   seededAt: null,
   chatId: null,
+  readyShownAt: null,
   summaryOpenedAt: null,
   notificationSentAt: null,
   emptyReason: null,
@@ -581,6 +584,8 @@ function normalize(value: unknown): FirstRunLearningState {
     showProgress: state.showProgress === true,
     seededAt: typeof state.seededAt === "string" ? state.seededAt : null,
     chatId: typeof state.chatId === "string" ? state.chatId : null,
+    readyShownAt:
+      typeof state.readyShownAt === "string" ? state.readyShownAt : null,
     summaryOpenedAt:
       typeof state.summaryOpenedAt === "string"
         ? state.summaryOpenedAt
@@ -673,7 +678,21 @@ export function markLearningWriting(): FirstRunLearningState {
 
 export function markLearningReady(chatId: string): FirstRunLearningState {
   const current = readLearningWindow();
-  return writeLearningWindow({ ...current, phase: "ready", chatId });
+  return writeLearningWindow({
+    ...current,
+    phase: "ready",
+    chatId,
+    readyShownAt: current.chatId === chatId ? current.readyShownAt : null,
+  });
+}
+
+/** Persist that the one-shot ready card reached the user's Home surface. */
+export function markLearningReadyShown(
+  shownAt = new Date().toISOString(),
+): FirstRunLearningState {
+  const current = readLearningWindow();
+  if (current.phase !== "ready" || current.readyShownAt) return current;
+  return writeLearningWindow({ ...current, readyShownAt: shownAt });
 }
 
 /**

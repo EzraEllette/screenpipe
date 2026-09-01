@@ -25,8 +25,7 @@
 //   2. The probe cannot break the banner. It touches the filesystem several
 //      times on mount, and a throw there must degrade to "no handoff", never
 //      to a dead ready state or an unclickable summary.
-//   3. Clicking the summary still opens it and collapses the large result into
-//      the compact setup dock with the handoff wired in.
+//   3. Clicking the summary still opens it and retires the one-shot banner.
 //
 // Does NOT assert which agent is offered. `detectAiTools()` runs in the
 // webview and resolves the REAL home directory: `SCREENPIPE_E2E_AI_TOOLS_HOME`
@@ -239,9 +238,6 @@ describeOrSkip("first-run agent handoff", () => {
     const summary = await browser.$(SUMMARY);
     await summary.click();
 
-    // Opening the result deliberately keeps optional setup in a compact dock.
-    // The old oracle expected the whole banner to disappear, contradicting
-    // the current product contract and reporting a working click as a failure.
     await browser.waitUntil(
       async () =>
         Boolean(
@@ -249,8 +245,8 @@ describeOrSkip("first-run agent handoff", () => {
             (key: string) => {
               const state = JSON.parse(localStorage.getItem(key) ?? "{}");
               return (
-                state.summaryOpenedAt &&
-                document.querySelector('[data-testid="first-run-setup-dock"]') &&
+                state.phase === "done" &&
+                !document.querySelector('[data-testid="first-run-learning-banner"]') &&
                 !document.querySelector('[data-testid="first-run-open-summary"]')
               );
             },
@@ -259,7 +255,7 @@ describeOrSkip("first-run agent handoff", () => {
         ),
       {
       timeout: t(10_000),
-        timeoutMsg: "summary did not open into the compact setup dock",
+        timeoutMsg: "summary did not open and retire the ready banner",
       },
     );
   });

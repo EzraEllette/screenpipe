@@ -21,6 +21,7 @@ import {
   markLearningDone,
   markLearningEmpty,
   markLearningReady,
+  markLearningReadyShown,
   markLearningSummaryOpened,
   markLearningWriting,
   normalizeEmptyReason,
@@ -390,6 +391,18 @@ describe("window lifecycle", () => {
     claimLearningSeed();
     expect(markLearningReady("chat-1").chatId).toBe("chat-1");
     expect(readLearningWindow().chatId).toBe("chat-1");
+  });
+
+  it("persists when the ready card was shown", () => {
+    beginLearningWindow();
+    markLearningReady("chat-1");
+
+    const shown = markLearningReadyShown("2026-08-19T16:00:00.000Z");
+
+    expect(shown.readyShownAt).toBe("2026-08-19T16:00:00.000Z");
+    expect(readLearningWindow().readyShownAt).toBe(
+      "2026-08-19T16:00:00.000Z",
+    );
   });
 
   it("keeps setup alive after the summary opens", () => {
