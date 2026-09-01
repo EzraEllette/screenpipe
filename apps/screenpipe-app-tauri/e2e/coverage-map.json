@@ -1832,6 +1832,7 @@
       "features": [
         "app-launch",
         "home-navigation",
+        "sidebar-collapse",
         "timeline",
         "settings-recording",
         "pipes"
@@ -1839,7 +1840,7 @@
       "criticality": "high",
       "confidence": "strong",
       "ux": "real-user-flow",
-      "notes": "Clicks through Home, Pipes, Timeline, Help, and Settings."
+      "notes": "Clicks through Home, Pipes, Timeline, Help, and Settings; verifies collapsed sidebar chrome hides recording status and restores it on expand."
     },
     {
       "spec": "html-artifact-render.spec.ts",

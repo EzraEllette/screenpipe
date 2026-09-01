@@ -11,8 +11,8 @@ and layer declared in the manifest, weighted by confidence and criticality.
 - Manifest: `e2e/coverage-map.json`
 - Specs directory: `e2e/specs`
 - Mapped specs: 139
-- Declared test blocks: 398
-- Weighted coverage points: 319.1
+- Declared test blocks: 399
+- Weighted coverage points: 320.1
 
 Confidence weights: strong=1.0, partial=0.7, conditional=0.4, smoke=0.3.
 Criticality weights: high=1.0, medium=0.7, low=0.4.
@@ -23,9 +23,9 @@ can execute more runtime cases than this number shows.
 
 | Platform | Specs | Declared tests | Weighted points | Layers | Features | Critical score |
 | --- | --- | --- | --- | --- | --- | --- |
-| windows | 106 | 337 | 280.1 | 15 | 120 | 85% |
-| macos | 135 | 360 | 288.9 | 17 | 130 | 88% |
-| linux | 94 | 295 | 249.5 | 14 | 117 | 80% |
+| windows | 106 | 338 | 281.1 | 15 | 121 | 85% |
+| macos | 135 | 361 | 289.9 | 17 | 131 | 88% |
+| linux | 94 | 296 | 250.5 | 14 | 118 | 80% |
 
 ## Runtime Results
 
@@ -49,19 +49,19 @@ pass/fail/skip counts.
 | os-integration | 7 specs / 32 tests / 26.9 pts | 15 specs / 30 tests / 18.4 pts | 2 specs / 15 tests / 10.8 pts |
 | performance | 3 specs / 45 tests / 45.0 pts | 5 specs / 36 tests / 31.8 pts | 2 specs / 30 tests / 30.0 pts |
 | pipes | 6 specs / 20 tests / 20.0 pts | 8 specs / 26 tests / 26.0 pts | 6 specs / 20 tests / 20.0 pts |
-| real-ui-e2e | 79 specs / 235 tests / 198.9 pts | 96 specs / 252 tests / 212.9 pts | 73 specs / 211 tests / 184.9 pts |
+| real-ui-e2e | 79 specs / 236 tests / 199.9 pts | 96 specs / 253 tests / 213.9 pts | 73 specs / 212 tests / 185.9 pts |
 | settings | 15 specs / 42 tests / 39.0 pts | 17 specs / 36 tests / 31.7 pts | 14 specs / 33 tests / 30.0 pts |
 | storage-privacy | 10 specs / 44 tests / 35.3 pts | 10 specs / 29 tests / 28.1 pts | 7 specs / 22 tests / 21.1 pts |
 | tauri-command | 22 specs / 60 tests / 46.9 pts | 34 specs / 82 tests / 64.3 pts | 21 specs / 61 tests / 47.8 pts |
-| window-lifecycle | 22 specs / 70 tests / 58.5 pts | 23 specs / 53 tests / 38.9 pts | 16 specs / 43 tests / 33.4 pts |
+| window-lifecycle | 22 specs / 71 tests / 59.5 pts | 23 specs / 54 tests / 39.9 pts | 16 specs / 44 tests / 34.4 pts |
 
 ## Critical Feature Matrix
 
 | Feature | Required layers | windows | macos | linux |
 | --- | --- | --- | --- | --- |
-| App launch and Home shell | real-ui-e2e | covered (strong; app-lifecycle, onboarding-redirect) | covered (strong; app-lifecycle, renderer-recovery) | covered (strong; app-lifecycle, onboarding-redirect) |
+| App launch and Home shell | real-ui-e2e | covered (strong; app-lifecycle, home-window) | covered (strong; app-lifecycle, renderer-recovery) | covered (strong; app-lifecycle, home-window) |
 | Home to floating Search | real-ui-e2e | covered (strong; windows-user-journey, tray-search) | covered (partial; tray-search, search-request-priority) | covered (partial; tray-search, search-request-priority) |
-| Timeline navigation and frames | real-ui-e2e | covered (strong; windows-user-journey, windows-core-recording) | covered (strong; timeline, home-window) | covered (strong; timeline, home-window) |
+| Timeline navigation and frames | real-ui-e2e | covered (strong; windows-user-journey, windows-core-recording) | covered (strong; home-window, timeline) | covered (strong; home-window, timeline) |
 | Real capture, OCR, and indexing | capture-ocr | weak (conditional; windows-core-recording, timeline) | weak (conditional; capture-stall-recovery, timeline) | weak (conditional; timeline) |
 | Local API auth enforcement | local-api | covered (strong; api-search-stress, windows-system-integration) | covered (strong; api-search-stress, api) | covered (strong; api-search-stress, api) |
 | Local API search stability | local-api | covered (strong; api-search-stress, windows-core-recording) | covered (strong; api-search-stress, search-request-priority) | covered (strong; api-search-stress, search-request-priority) |
@@ -178,7 +178,7 @@ pass/fail/skip counts.
 | hd-recording-pipeline.spec.ts | macos | capture-ocr, local-api, performance | capture-ocr, hd-recording, timeline | high | conditional | api | 1 | Opt-in macOS HD capture and OCR indexing. |
 | help-discord-link.spec.ts | windows, macos, linux | real-ui-e2e | help | low | smoke | real-user-flow | 2 | Help section Discord invite link. |
 | history-swipe-navigation.spec.ts | windows, macos | real-ui-e2e, window-lifecycle, tauri-command | home-navigation, window-lifecycle | medium | partial | real-user-flow | 2 | Reads back the real WKWebView/WebView2 history-swipe setting, verifies top-level UI sections are browser-history entries, proves Back to app consumes Settings so the next back action restores the prior Home state, and captures every destination plus the production back/forward gesture-arrow design. Physical OS trackpad input remains manual. |
-| home-window.spec.ts | windows, macos, linux | real-ui-e2e, window-lifecycle | app-launch, home-navigation, timeline, settings-recording, pipes | high | strong | real-user-flow | 1 | Clicks through Home, Pipes, Timeline, Help, and Settings. |
+| home-window.spec.ts | windows, macos, linux | real-ui-e2e, window-lifecycle | app-launch, home-navigation, sidebar-collapse, timeline, settings-recording, pipes | high | strong | real-user-flow | 2 | Clicks through Home, Pipes, Timeline, Help, and Settings; verifies collapsed sidebar chrome hides recording status and restores it on expand. |
 | html-artifact-render.spec.ts | windows, macos, linux | real-ui-e2e | brain, artifacts, html-sandbox | high | strong | real-user-flow | 1 | Registers an HTML artifact, opens it in Brain, and asserts it renders inside a sandboxed allow-scripts iframe (CSP default-src 'none') whose global <style> never leaks into the host app DOM (regression: rehype-raw repainting the whole window). |
 | live-view-item-actions.spec.ts | windows, macos, linux | real-ui-e2e, local-api, pipes | brain-overview, live-view-item-actions, artifacts, pipes | high | strong | real-user-flow | 1 | Installs the generic Commitments and Accounting Live View kits, shows Done, Later, and Not right without hover, persists snooze, correction, resolve, dismiss, and reopen decisions through the local API, verifies receipts survive reload, and captures real product screenshots. |
 | live-view-pinch-zoom.spec.ts | macos, linux | real-ui-e2e, tauri-command | brain-overview, live-view-canvas-pinch-zoom, live-view-canvas-click-stability | medium | strong | real-user-flow | 4 | Drives the Live View canvas with the same window-scoped native-magnify payload the macOS magnification gesture recognizer emits. Asserts pinch works even when WKWebView lacks DOM focus, the recognizer takes ownership so WebKit's duplicate ctrl+wheel stops zooming while plain scroll still pans, ordinary pane, Block, and double clicks do not change the viewport, and canvas zoom stays anchored, clamped at 25%, and persisted through load_brain_view_canvas. |
