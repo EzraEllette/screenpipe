@@ -2237,7 +2237,7 @@
       "criticality": "high",
       "confidence": "strong",
       "ux": "real-user-flow",
-      "notes": "Isolated agent-home CI lane verifies private native config writes, the resolved local API credential, a real authenticated MCP tool call, skills setup, and removal of the connection slide."
+      "notes": "Isolated agent-home CI lane verifies private native config writes, the resolved local API credential, a real authenticated MCP tool call, skills setup, and migration from the removed connection slide through engine startup to optional recommended setup and completion."
     },
     {
       "spec": "onboarding-first-run.spec.ts",
