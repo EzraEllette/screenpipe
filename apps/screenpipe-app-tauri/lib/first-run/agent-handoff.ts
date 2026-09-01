@@ -116,6 +116,38 @@ const HANDOFF_TARGETS: AgentHandoffTarget[] = [
   },
 ];
 
+/**
+ * Rebuild a verified target with a caller-provided prompt.
+ *
+ * Home cards reuse the same protocol routes as first-run, but each card has a
+ * different short task. Keeping URL construction here means every surface
+ * inherits the same allowlisted schemes and Cursor cold-start replay instead
+ * of growing a second deep-link registry.
+ */
+export function agentHandoffTargetForPrompt(
+  target: AgentHandoffTarget,
+  prompt: string,
+): AgentHandoffTarget {
+  const encodedPrompt = encodeURIComponent(prompt);
+  let deeplink: string | undefined;
+
+  switch (target.id) {
+    case "claude":
+      deeplink = `claude://claude.ai/new?q=${encodedPrompt}`;
+      break;
+    case "cursor":
+      deeplink = `cursor://anysphere.cursor-deeplink/prompt?text=${encodedPrompt}`;
+      break;
+    case "codex":
+      deeplink = `codex://threads/new?prompt=${encodedPrompt}`;
+      break;
+    default:
+      deeplink = undefined;
+  }
+
+  return { ...target, deeplink };
+}
+
 const wait = (ms: number) =>
   new Promise<void>((resolve) => globalThis.setTimeout(resolve, ms));
 
@@ -182,10 +214,11 @@ export async function performAgentHandoff(
     openUrl: (url: string) => Promise<void>;
     delay?: (ms: number) => Promise<void>;
   },
+  prompt: string = HANDOFF_PROMPT,
 ): Promise<AgentHandoffResult> {
   let copied = false;
   try {
-    await deps.copyText(HANDOFF_PROMPT);
+    await deps.copyText(prompt);
     copied = true;
   } catch {
     // The prompt is also encoded in every supported deeplink, so clipboard is
@@ -193,7 +226,7 @@ export async function performAgentHandoff(
   }
 
   const opened = await openAgentHandoffDeeplink(
-    target,
+    agentHandoffTargetForPrompt(target, prompt),
     deps.openUrl,
     deps.delay,
   );

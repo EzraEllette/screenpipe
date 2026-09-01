@@ -5,6 +5,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  agentHandoffTargetForPrompt,
   CURSOR_DEEPLINK_REPLAY_DELAY_MS,
   HANDOFF_PROMPT,
   handoffTargets,
@@ -80,6 +81,23 @@ describe("pickHandoffTarget", () => {
       expect(target.label.length).toBeGreaterThan(0);
       expect(target.hint).toMatch(/review and send/i);
     }
+  });
+
+  it("rebuilds allowlisted routes for a caller-provided prompt", () => {
+    const prompt = "Run the Day Recap with Screenpipe.";
+    const encoded = encodeURIComponent(prompt);
+    expect(
+      Object.fromEntries(
+        handoffTargets().map((target) => [
+          target.id,
+          agentHandoffTargetForPrompt(target, prompt).deeplink,
+        ]),
+      ),
+    ).toEqual({
+      claude: `claude://claude.ai/new?q=${encoded}`,
+      cursor: `cursor://anysphere.cursor-deeplink/prompt?text=${encoded}`,
+      codex: `codex://threads/new?prompt=${encoded}`,
+    });
   });
 });
 
@@ -161,6 +179,20 @@ describe("notification handoff recovery", () => {
   it("rejects unknown target ids instead of opening attacker-selected schemes", () => {
     expect(handoffTargetById("terminal")).toBeNull();
     expect(handoffTargetById(null)).toBeNull();
+  });
+
+  it("copies and opens a caller-provided prompt instead of the first-run prompt", async () => {
+    const claude = handoffTargetById("claude")!;
+    const prompt = "Use Screenpipe to find my missed to-dos.";
+    const copyText = vi.fn(async () => {});
+    const openUrl = vi.fn(async () => {});
+
+    await performAgentHandoff(claude, { copyText, openUrl }, prompt);
+
+    expect(copyText).toHaveBeenCalledWith(prompt);
+    expect(openUrl).toHaveBeenCalledWith(
+      `claude://claude.ai/new?q=${encodeURIComponent(prompt)}`,
+    );
   });
 });
 
