@@ -59,6 +59,45 @@ pub(crate) enum AudioProcessStateAction {
     },
 }
 
+/// A low-volume diagnostic emitted only when an active meeting crosses the
+/// ending grace boundary in either direction. Keeping this classification in
+/// the pure state-machine module makes the instrumentation testable without
+/// running the detector loop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AudioProcessTransitionDiagnostic {
+    pub transition: &'static str,
+    pub meeting_id: i64,
+    pub platform: String,
+}
+
+pub(crate) fn active_ending_transition(
+    was_active: bool,
+    was_ending: bool,
+    next: &AudioProcessMeetingState,
+) -> Option<AudioProcessTransitionDiagnostic> {
+    match next {
+        AudioProcessMeetingState::Ending {
+            meeting_id,
+            platform,
+            ..
+        } if was_active => Some(AudioProcessTransitionDiagnostic {
+            transition: "active_to_ending",
+            meeting_id: *meeting_id,
+            platform: platform.clone(),
+        }),
+        AudioProcessMeetingState::Active {
+            meeting_id,
+            platform,
+            ..
+        } if was_ending => Some(AudioProcessTransitionDiagnostic {
+            transition: "ending_to_active",
+            meeting_id: *meeting_id,
+            platform: platform.clone(),
+        }),
+        _ => None,
+    }
+}
+
 pub(crate) fn advance_audio_process_state(
     state: AudioProcessMeetingState,
     live_candidates: &[ResolvedMeetingCandidate],
@@ -556,5 +595,51 @@ mod tests {
             }
             other => panic!("expected StartMeeting, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn classifies_only_active_ending_edges() {
+        let now = Instant::now();
+        let key = ProcessKey::from_process(&zoom_process()).unwrap();
+        let ending = AudioProcessMeetingState::Ending {
+            meeting_id: 7,
+            platform: "zoom".into(),
+            session_key: key.clone(),
+            meeting_url: None,
+            first_seen_at: now,
+            since: now,
+            is_browser: false,
+        };
+        assert_eq!(
+            active_ending_transition(true, false, &ending),
+            Some(AudioProcessTransitionDiagnostic {
+                transition: "active_to_ending",
+                meeting_id: 7,
+                platform: "zoom".into(),
+            })
+        );
+
+        let active = AudioProcessMeetingState::Active {
+            meeting_id: 7,
+            platform: "zoom".into(),
+            session_key: key,
+            meeting_url: None,
+            first_seen_at: now,
+            last_seen_at: now,
+            is_browser: false,
+        };
+        assert_eq!(
+            active_ending_transition(false, true, &active),
+            Some(AudioProcessTransitionDiagnostic {
+                transition: "ending_to_active",
+                meeting_id: 7,
+                platform: "zoom".into(),
+            })
+        );
+        assert_eq!(active_ending_transition(true, false, &active), None);
+        assert_eq!(
+            active_ending_transition(false, false, &AudioProcessMeetingState::Idle),
+            None
+        );
     }
 }
