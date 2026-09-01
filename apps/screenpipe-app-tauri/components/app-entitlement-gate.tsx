@@ -266,10 +266,13 @@ export function AppEntitlementGate({
     (!hasConsumerSubscription ||
       enterpriseAccount.restrict_consumer_build_access === true);
   const shouldGateForEntitlement = shouldGateForUnknownConsumerPolicy;
+  // Onboarding owns ordinary consumer sign-in and Enterprise-build auth.
+  // Once build detection confirms this is the consumer app, however, a
+  // restricted enterprise member must not advance into consumer setup.
   const shouldGate = authenticationStatus === "not_required"
     ? false
     : isOnboardingRoute
-    ? false
+    ? isManagedDeploymentResolved && shouldGateForEnterpriseApp
     : !isManagedDeploymentResolved
       ? true
       : isManagedDeployment
