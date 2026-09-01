@@ -19,6 +19,7 @@ use crate::analytics;
 fn posthog_event_name(bus_name: &str) -> Option<&'static str> {
     match bus_name {
         "piggyback_meeting_summary" => Some("piggyback_meeting_summary"),
+        "piggyback_capture_transition" => Some("piggyback_capture_transition"),
         "audio_capture_health_mic_capture_failed" => {
             Some("audio_capture_health_mic_capture_failed")
         }
@@ -45,10 +46,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn allowlist_maps_exactly_the_two_names() {
+    fn allowlist_maps_exactly_the_piggyback_telemetry_names() {
         assert_eq!(
             posthog_event_name("piggyback_meeting_summary"),
             Some("piggyback_meeting_summary")
+        );
+        assert_eq!(
+            posthog_event_name("piggyback_capture_transition"),
+            Some("piggyback_capture_transition")
         );
         assert_eq!(
             posthog_event_name("audio_capture_health_mic_capture_failed"),

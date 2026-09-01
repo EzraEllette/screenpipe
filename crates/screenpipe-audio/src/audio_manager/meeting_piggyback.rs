@@ -912,6 +912,38 @@ pub(crate) fn captured_no_audio(t: &MeetingTelemetry) -> bool {
     t.meeting_seen && t.tap_streaming_ticks == 0 && !t.mic_session_started
 }
 
+pub(crate) fn piggyback_stop_reason(
+    flag_on: bool,
+    meeting_seen: bool,
+    meeting_pid_count: usize,
+    tap_available: bool,
+) -> &'static str {
+    if !flag_on {
+        "flag_disabled"
+    } else if !meeting_seen {
+        "meeting_unpublished"
+    } else if meeting_pid_count == 0 {
+        "meeting_pid_missing"
+    } else if !tap_available {
+        "tap_unavailable"
+    } else {
+        "unknown"
+    }
+}
+
+#[derive(Debug, serde::Serialize)]
+struct PiggybackCaptureTransition {
+    transition: &'static str,
+    reason: &'static str,
+    meeting_seen: bool,
+    pid_known: bool,
+    tap_available: bool,
+    tap_was_streaming: bool,
+    tap_started_count: u32,
+    tap_strikes: u32,
+    platform: &'static str,
+}
+
 pub(crate) fn classify_outcome(t: &MeetingTelemetry) -> &'static str {
     if t.unavailable {
         return "unavailable";
@@ -1479,6 +1511,32 @@ pub(crate) async fn run_meeting_piggyback_sweep(
     //    so the next meeting starts fresh. `warned_unavailable` is per-boot and
     //    deliberately NOT reset here.
     if state.was_piggybacking && !piggybacking_now {
+        let reason = piggyback_stop_reason(engaged, meeting_seen, meeting_pids.len(), tap_avail);
+        info!(
+            "[MEETING_PIGGYBACK] capture disengaged (reason={}, meeting_seen={}, pid_count={}, \
+             tap_available={}, tap_was_streaming={}, tap_started_count={}, tap_strikes={})",
+            reason,
+            meeting_seen,
+            meeting_pids.len(),
+            tap_avail,
+            tap_streaming,
+            state.telemetry.tap_started_count,
+            state.tap_strikes,
+        );
+        let _ = screenpipe_events::send_event(
+            "piggyback_capture_transition",
+            PiggybackCaptureTransition {
+                transition: "engaged_to_disengaged",
+                reason,
+                meeting_seen,
+                pid_known: !meeting_pids.is_empty(),
+                tap_available: tap_avail,
+                tap_was_streaming: tap_streaming,
+                tap_started_count: state.telemetry.tap_started_count,
+                tap_strikes: state.tap_strikes,
+                platform: std::env::consts::OS,
+            },
+        );
         // Fold the volatile counters into the telemetry accumulator BEFORE the
         // resets below zero them — this edge can fire mid-meeting on a pid
         // flap, well before the meeting actually ends (see module docs on
@@ -2439,6 +2497,23 @@ mod tests {
         t.unavailable = true;
         t.tap_streaming_ticks = 900;
         assert_eq!(classify_outcome(&t), "unavailable");
+    }
+
+    #[test]
+    fn piggyback_stop_reason_identifies_the_disengagement_gate() {
+        assert_eq!(
+            piggyback_stop_reason(true, true, 0, true),
+            "meeting_pid_missing"
+        );
+        assert_eq!(
+            piggyback_stop_reason(true, false, 0, true),
+            "meeting_unpublished"
+        );
+        assert_eq!(piggyback_stop_reason(false, true, 1, true), "flag_disabled");
+        assert_eq!(
+            piggyback_stop_reason(true, true, 1, false),
+            "tap_unavailable"
+        );
     }
 
     #[test]
