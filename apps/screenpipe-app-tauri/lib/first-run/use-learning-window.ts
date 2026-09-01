@@ -19,6 +19,7 @@ import {
   markLearningDone,
   markLearningEmpty,
   markLearningReady,
+  markLearningReadyShown,
   markLearningSummaryOpened,
   markLearningWriting,
   resetLearningWindow,
@@ -39,6 +40,7 @@ export type LearningWindowView = FirstRunLearningState & {
   markSummaryOpened: () => void;
   markSummaryRendered: () => Promise<void>;
   markNotificationSent: () => void;
+  markReadyShown: () => void;
   dismiss: () => void;
 };
 
@@ -53,9 +55,14 @@ export type LearningWindowOptions = {
 export function useLearningWindow(
   _options: LearningWindowOptions = {},
 ): LearningWindowView {
-  const [state, setState] = useState<FirstRunLearningState>(() =>
-    readLearningWindow(),
-  );
+  const [state, setState] = useState<FirstRunLearningState>(() => {
+    const stored = readLearningWindow();
+    // A ready card is a one-session announcement, not a replacement for the
+    // normal Home starter on every later app launch. The chat remains durable.
+    return stored.phase === "ready" && stored.readyShownAt
+      ? markLearningDone()
+      : stored;
+  });
   const [capturedApps, setCapturedApps] = useState<FirstRunCapturedApp[]>([]);
   const [remainingMs, setRemainingMs] = useState(() =>
     learningWindowRemainingMs(readLearningWindow().startedAt),
@@ -90,9 +97,12 @@ export function useLearningWindow(
       }
       if (phase === "ready" && native.firstRunSummaryChatId) {
         const stored = readLearningWindow();
+        // Local dismissal is final for this first-run result. `done` clears the
+        // chat id, so comparing ids first would revive the card every second.
+        if (stored.phase === "done") return;
         if (
           stored.chatId !== native.firstRunSummaryChatId ||
-          (stored.phase !== "done" && stored.phase !== "ready")
+          stored.phase !== "ready"
         ) {
           setState(markLearningReady(native.firstRunSummaryChatId));
         }
@@ -156,6 +166,9 @@ export function useLearningWindow(
   }, [activationState]);
   // Notification persistence is native; retained for the existing view contract.
   const markNotificationSent = useCallback(() => {}, []);
+  const markReadyShown = useCallback(() => {
+    markLearningReadyShown();
+  }, []);
   const dismiss = useCallback(() => {
     posthog.capture("first_run_learning_dismissed", {
       phase: state.phase,
@@ -172,6 +185,7 @@ export function useLearningWindow(
     markSummaryOpened,
     markSummaryRendered,
     markNotificationSent,
+    markReadyShown,
     dismiss,
   };
 }

@@ -27,6 +27,12 @@ vi.mock("@/lib/first-run/recent-activity", () => ({
 }));
 
 import { useLearningWindow } from "./use-learning-window";
+import {
+  beginLearningWindow,
+  markLearningReady,
+  markLearningReadyShown,
+  readLearningWindow,
+} from "./learning-window";
 
 function nativeStatus(
   phase: string,
@@ -88,6 +94,20 @@ describe("native first-run summary projection", () => {
       "first_run_learning_resolved",
       expect.anything(),
     );
+  });
+
+  it("retires a ready card that was already shown before restart", async () => {
+    beginLearningWindow();
+    markLearningReady("first-run-native-chat");
+    markLearningReadyShown("2026-08-27T07:05:00.000Z");
+    mocks.getOnboardingStatus.mockResolvedValue(
+      nativeStatus("ready", "first-run-native-chat"),
+    );
+
+    const { result } = renderHook(() => useLearningWindow());
+
+    await waitFor(() => expect(result.current.phase).toBe("done"));
+    expect(readLearningWindow().phase).toBe("done");
   });
 
   it("persists the paywall only after the treatment summary reports a render", async () => {

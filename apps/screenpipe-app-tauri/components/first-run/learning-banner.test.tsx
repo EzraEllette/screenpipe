@@ -11,7 +11,6 @@ import {
   TrialActivationSummaryExperience,
   TrialActivationUnlockPrompt,
 } from "./learning-banner";
-import { FIRST_RUN_SEARCH_SHORTCUT_STORAGE_KEY } from "./search-shortcut-practice";
 import type { LearningWindowView } from "@/lib/first-run/use-learning-window";
 
 const mocks = vi.hoisted(() => ({
@@ -80,6 +79,7 @@ function view(over: Partial<LearningWindowView> = {}): LearningWindowView {
     markSummaryOpened: vi.fn(),
     markSummaryRendered: vi.fn().mockResolvedValue(undefined),
     markNotificationSent: vi.fn(),
+    markReadyShown: vi.fn(),
     dismiss: vi.fn(),
     ...over,
   } as LearningWindowView;
@@ -213,6 +213,15 @@ describe("first-run learning banner", () => {
     expect(
       screen.getByText("screenpipe learned enough to help"),
     ).toBeInTheDocument();
+    expect(mocks.view.markReadyShown).toHaveBeenCalledTimes(1);
+
+    mocks.view = view({ phase: "done" });
+    rerender(
+      <FirstRunLearningBanner
+        fallback={<div data-testid="normal-home">How can I help today?</div>}
+      />,
+    );
+    expect(screen.getByTestId("normal-home")).toBeInTheDocument();
   });
 
   it("shows the countdown while learning", () => {
@@ -251,14 +260,12 @@ describe("first-run learning banner", () => {
     expect(screen.queryByText("Reading from")).not.toBeInTheDocument();
   });
 
-  it("opens the seeded chat without dismissing the learning result", async () => {
+  it("opens the seeded chat and retires the learning result", async () => {
     const dismiss = vi.fn();
-    const markSummaryOpened = vi.fn();
     mocks.view = view({
       phase: "ready",
       chatId: "first-run-1",
       dismiss,
-      markSummaryOpened,
     });
     render(<FirstRunLearningBanner />);
 
@@ -269,42 +276,7 @@ describe("first-run learning banner", () => {
         conversationId: "first-run-1",
       }),
     );
-    expect(markSummaryOpened).toHaveBeenCalledTimes(1);
-    expect(dismiss).not.toHaveBeenCalled();
-  });
-
-  it("keeps compact first-summary tips over the opened summary", async () => {
-    const dismiss = vi.fn();
-    mocks.view = view({
-      phase: "ready",
-      chatId: "first-run-1",
-      summaryOpenedAt: "2026-08-19T17:00:00.000Z",
-      dismiss,
-    });
-    render(<FirstRunLearningBanner />);
-
-    await waitFor(() =>
-      expect(
-        screen.getByTestId("first-run-search-shortcut-start"),
-      ).toBeEnabled(),
-    );
-
-    expect(screen.getByTestId("first-run-setup-dock")).toBeInTheDocument();
-    expect(
-      screen.queryByText("screenpipe learned enough to help"),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.queryByTestId("first-run-next-steps"),
-    ).not.toBeInTheDocument();
-
-    fireEvent.click(screen.getByTestId("first-run-hide-setup"));
     expect(dismiss).toHaveBeenCalledTimes(1);
-    expect(
-      JSON.parse(
-        window.localStorage.getItem(FIRST_RUN_SEARCH_SHORTCUT_STORAGE_KEY) ||
-          "{}",
-      ),
-    ).toMatchObject({ status: "dismissed" });
   });
 
   it("does not repeat onboarding setup after learning resolves", () => {

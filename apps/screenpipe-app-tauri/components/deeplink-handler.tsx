@@ -32,7 +32,7 @@ import {
 } from "@/lib/first-run/agent-handoff";
 import {
   LEARNING_SUMMARY_OPENED_EVENT,
-  markLearningSummaryOpened,
+  markLearningDone,
   readLearningWindow,
 } from "@/lib/first-run/learning-window";
 import { trackFirstRunSummaryNotificationOpened } from "@/lib/first-run/telemetry";
@@ -122,7 +122,7 @@ export function DeeplinkHandler() {
           conversationId: chatId,
           targetWindow: "home",
         });
-        markLearningSummaryOpened();
+        markLearningDone();
         await emit(LEARNING_SUMMARY_OPENED_EVENT);
         posthog.capture("first_run_summary_opened", {
           source: "notification",
