@@ -21,6 +21,10 @@ import {
   serializeSkillDraftDocument,
   type SkillDraftDocument,
 } from "@/components/skills/skill-draft-document";
+import {
+  SkillSourceList,
+  type SkillSource,
+} from "@/components/skills/skill-source-list";
 import { cn } from "@/lib/utils";
 
 export type SkillDraftPhase = "running" | "ready" | "error";
@@ -44,6 +48,7 @@ export interface SkillDraftEditorProps {
   onOpenCurrent?: () => void | Promise<void>;
   detached?: boolean;
   onOpenDraftChat?: () => void | Promise<void>;
+  sources?: SkillSource[];
   className?: string;
 }
 
@@ -83,6 +88,7 @@ export function SkillDraftEditor({
   onOpenCurrent,
   detached = false,
   onOpenDraftChat,
+  sources = [],
   className,
 }: SkillDraftEditorProps) {
   const [testOpen, setTestOpen] = useState(false);
@@ -351,6 +357,7 @@ export function SkillDraftEditor({
             className="select-text px-5 py-4 [&_.ProseMirror]:!min-h-[18rem] [&_.ProseMirror]:text-[14px] [&_.ProseMirror]:leading-6"
           />
         </div>
+        <SkillSourceList sources={sources} />
       </div>
 
       {testOpen && ready ? (

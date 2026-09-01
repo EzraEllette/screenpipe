@@ -5,10 +5,8 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import {
-  CreatedSkillEditor,
-  type CreatedSkillSource,
-} from "@/components/skills/created-skill-editor";
+import { CreatedSkillEditor } from "@/components/skills/created-skill-editor";
+import { activityOpportunitySkillSources } from "@/components/skills/activity-opportunity-sources";
 import { toast } from "@/components/ui/use-toast";
 import { openChatConversationInCurrentChatSurface } from "@/lib/chat-utils";
 import {
@@ -71,69 +69,6 @@ async function commandData<T>(request: Promise<CommandResult<T>>): Promise<T> {
   return result.data;
 }
 
-function evidenceHref(evidence: SkillOpportunity["evidence"][number]): string {
-  const meetingId = evidence.meetingIds[0];
-  if (meetingId) {
-    const params = new URLSearchParams({
-      section: "meetings",
-      meetingId: String(meetingId),
-      meetingView: "best",
-    });
-    return `/home?${params.toString()}`;
-  }
-  const frameId = evidence.frameIds[0];
-  if (frameId) {
-    return `screenpipe://frame/${frameId}?timestamp=${encodeURIComponent(evidence.startAt)}`;
-  }
-  return `screenpipe://timeline?timestamp=${encodeURIComponent(evidence.startAt)}`;
-}
-
-function sourceMoment(value: string): string {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return new Intl.DateTimeFormat(undefined, {
-    month: "short",
-    day: "numeric",
-  }).format(date);
-}
-
-function searchContextHref(
-  context: NonNullable<SkillOpportunity["supportingContexts"]>[number],
-): string {
-  if (context.representativeFrameId) {
-    return `screenpipe://frame/${context.representativeFrameId}?timestamp=${encodeURIComponent(context.representativeTimestamp)}`;
-  }
-  return `screenpipe://timeline?timestamp=${encodeURIComponent(context.startAt)}`;
-}
-
-function createdSkillSources(
-  opportunity: SkillOpportunity,
-): CreatedSkillSource[] {
-  const activitySources = opportunity.evidence
-    .filter((evidence) => !evidence.excluded)
-    .map((evidence) => ({
-      id: evidence.activityId,
-      label: evidence.title,
-      detail: [sourceMoment(evidence.startAt), evidence.apps.join(", ")]
-        .filter(Boolean)
-        .join(" / "),
-      href: evidenceHref(evidence),
-    }));
-
-  const searchContexts = (opportunity.supportingContexts ?? []).map(
-    (context) => ({
-      id: context.id,
-      label: context.windowName.trim() || context.query,
-      detail: ["search context", sourceMoment(context.startAt), context.appName]
-        .filter(Boolean)
-        .join(" / "),
-      href: searchContextHref(context),
-    }),
-  );
-
-  return [...activitySources, ...searchContexts];
-}
-
 export function ActivityOpportunityCreatedSkill({
   match,
 }: {
@@ -144,7 +79,7 @@ export function ActivityOpportunityCreatedSkill({
   const [pending, setPending] = useState(false);
   const opportunityRevisionRef = useRef(opportunity.revision);
   const sources = useMemo(
-    () => createdSkillSources(opportunity),
+    () => activityOpportunitySkillSources(opportunity),
     [opportunity],
   );
 
@@ -222,14 +157,28 @@ export function ActivityOpportunityCreatedSkill({
     [latestOpportunity, pending],
   );
 
+  const revealInstallLocation = useCallback(async () => {
+    try {
+      await commandData(commands.revealInDefaultBrowser(createdSkill.path));
+    } catch (error) {
+      toast({
+        title: "skill location could not be opened",
+        description: errorMessage(error),
+        variant: "destructive",
+      });
+    }
+  }, [createdSkill.path]);
+
   return (
     <CreatedSkillEditor
       value={createdSkill.skillMd}
       createdAt={createdSkill.createdAt}
       enabled={enabled}
+      installPath={createdSkill.path}
       sources={sources}
       disabled={pending}
       onEnabledChange={setSkillEnabled}
+      onRevealInstallLocation={revealInstallLocation}
       onRequestChange={requestChange}
       className="min-h-0 flex-1"
     />

@@ -19,6 +19,7 @@ import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { normalizeActivityOpportunityCreatedSkill } from "@/components/skills/activity-opportunity-created-skill";
+import { ActivityOpportunitySourceArtifacts } from "@/components/skills/activity-opportunity-sources";
 import {
   openChatConversationInCurrentChatSurface,
   showChatWithPrefill,
@@ -265,6 +266,7 @@ function EvidenceRow({
         </p>
       </div>
       <div className="flex items-start gap-1 sm:justify-end">
+        <ActivityOpportunitySourceArtifacts source={evidence} />
         <button
           type="button"
           onClick={onToggle}
@@ -343,6 +345,7 @@ function SearchContextRow({
         )}
       </div>
       <div className="flex items-start gap-1 sm:justify-end">
+        <ActivityOpportunitySourceArtifacts source={context} />
         <button
           type="button"
           onClick={onRemove}

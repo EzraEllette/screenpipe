@@ -103,7 +103,7 @@ function historyDocumentFromNative(
     : null;
 }
 
-type ActivityLedgerArtifactEvidence = {
+export type ActivityLedgerArtifactEvidence = {
   source_type: string;
   source_id: number;
   occurred_at: string;
@@ -112,7 +112,7 @@ type ActivityLedgerArtifactEvidence = {
   window_title?: string | null;
   browser_url?: string | null;
 };
-type ActivityLedgerArtifactInterval = {
+export type ActivityLedgerArtifactInterval = {
   start_at: string;
   end_at: string;
   app_name: string | null;
@@ -135,7 +135,7 @@ function noActivityMessage(dataStatus: string): string {
   }
 }
 
-type ActivityArtifact = ActivityHistoryEvidence & {
+export type ActivityArtifact = ActivityHistoryEvidence & {
   browser_url?: string | null;
   preview?: ActivityArtifactPreview;
 };
@@ -1159,7 +1159,7 @@ function ArtifactPreviewTooltip({
   );
 }
 
-function ActivityEntryArtifacts({
+export function ActivityEntryArtifacts({
   entry,
   intervals,
   artifactsLoading,
@@ -1168,7 +1168,7 @@ function ActivityEntryArtifacts({
   entry: ActivityHistoryEntry;
   intervals: ActivityLedgerArtifactInterval[];
   artifactsLoading: boolean;
-  openEvidence: (evidence: ActivityArtifact) => void;
+  openEvidence?: (evidence: ActivityArtifact) => void;
 }) {
   const artifacts = useMemo(
     () => artifactsForHistoryEntry(entry, intervals),
@@ -1253,6 +1253,7 @@ function ActivityEntryArtifacts({
               <a
                 href={evidenceHref(evidence)}
                 onClick={(event) => {
+                  if (!openEvidence) return;
                   event.preventDefault();
                   openEvidence(evidence);
                 }}

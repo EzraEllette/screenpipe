@@ -75,4 +75,19 @@ describe("ChatSplitPane", () => {
       "border-r",
     );
   });
+
+  it("shows an explicit path back to the owning skill chat", () => {
+    const onPromote = vi.fn();
+    render(
+      <ChatSplitPane
+        sessionId="split-chat"
+        promoteLabel="back to skill chat"
+        onPromote={onPromote}
+        onClose={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "back to skill chat" }));
+    expect(onPromote).toHaveBeenCalledWith("split-chat");
+  });
 });

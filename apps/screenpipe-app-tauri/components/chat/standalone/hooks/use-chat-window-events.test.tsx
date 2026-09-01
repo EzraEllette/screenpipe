@@ -9,6 +9,8 @@ const mocks = vi.hoisted(() => ({
   emit: vi.fn(async () => undefined),
   listeners: new Map<string, (event: { payload: any }) => void | Promise<void>>(),
   loadConversationFile: vi.fn(),
+  getActivityOpportunities: vi.fn(),
+  claimPrefillHandling: vi.fn(),
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({
@@ -36,11 +38,21 @@ vi.mock("@/lib/api", () => ({ localFetch: vi.fn() }));
 vi.mock("@/lib/chat-storage", () => ({
   loadConversationFile: mocks.loadConversationFile,
 }));
+vi.mock("@/lib/utils/tauri", () => ({
+  commands: {
+    getActivityOpportunities: mocks.getActivityOpportunities,
+  },
+}));
 vi.mock("@/components/chat/standalone/hooks/use-chat-prefill-events", () => ({
-  useChatPrefillEvents: () => ({ claimPrefillHandling: vi.fn() }),
+  useChatPrefillEvents: () => ({
+    claimPrefillHandling: mocks.claimPrefillHandling,
+  }),
 }));
 
-import { useChatConversationRoutingEvents } from "./use-chat-window-events";
+import {
+  useChatConversationRoutingEvents,
+  useChatPrefillListener,
+} from "./use-chat-window-events";
 import { useChatStore } from "@/lib/stores/chat-store";
 
 const savedConversation = {
@@ -72,6 +84,7 @@ function seedSession(overrides: Record<string, unknown> = {}) {
 function renderRoutingHook(
   loadConversation: ReturnType<typeof vi.fn>,
   renderedMessages = savedConversation.messages,
+  openFilePreview = vi.fn(),
 ) {
   return renderHook(() =>
     useChatConversationRoutingEvents({
@@ -81,7 +94,7 @@ function renderRoutingHook(
       piSessionIdRef: { current: savedConversation.id },
       renderedMessagesRef: { current: renderedMessages },
       focusMessageById: vi.fn(),
-      openFilePreview: vi.fn(),
+      openFilePreview,
     }),
   );
 }
@@ -102,6 +115,16 @@ beforeEach(() => {
     });
   }
   localStorage.clear();
+  mocks.getActivityOpportunities.mockResolvedValue({
+    status: "ok",
+    data: {
+      analysisState: "ready",
+      generatedAt: "2026-09-01T12:00:00Z",
+      skills: [],
+      unfinished: [],
+    },
+  });
+  mocks.claimPrefillHandling.mockResolvedValue({ claimed: true });
   useChatStore.setState({
     sessions: {},
     ephemeralSideConversationIds: {},
@@ -111,6 +134,58 @@ beforeEach(() => {
     diskHydrated: false,
     currentId: null,
     panelSessionId: null,
+  });
+});
+
+describe("chat prefill return path", () => {
+  it("restores the owning skill chat after a routed test handoff", async () => {
+    const sendMessage = vi.fn(async () => undefined);
+    const textarea = document.createElement("textarea");
+
+    renderHook(() =>
+      useChatPrefillListener({
+        setIsPreparingPrefill: vi.fn(),
+        setPrefillContext: vi.fn(),
+        setPrefillFrameId: vi.fn(),
+        setPrefillSource: vi.fn(),
+        setPastedImages: vi.fn(),
+        setInput: vi.fn(),
+        inputRef: { current: textarea },
+        piStreamingTextRef: { current: "" },
+        piMessageIdRef: { current: null },
+        piContentBlocksRef: { current: [] },
+        optimisticSteerRef: { current: null },
+        piLastErrorRef: { current: null },
+        piSessionIdRef: { current: "new-chat" },
+        piSessionSyncedRef: { current: false },
+        autoSendBypassRef: { current: false },
+        sendMessageRef: { current: sendMessage },
+        setIsLoading: vi.fn(),
+        setIsStreaming: vi.fn(),
+        setMessages: vi.fn(),
+        setConversationId: vi.fn(),
+        openFilePreview: vi.fn(),
+      }),
+    );
+
+    await waitFor(() => expect(mocks.listeners.has("chat-prefill")).toBe(true));
+    act(() => {
+      mocks.listeners.get("chat-prefill")?.({
+        payload: {
+          context: "skill context",
+          prompt: "Test objective: check MRR",
+          autoSend: true,
+          targetWindow: "home",
+          conversationId: "skill-test-chat",
+          returnConversationId: "skill-draft-owner",
+        },
+      });
+    });
+
+    await waitFor(() => expect(sendMessage).toHaveBeenCalledOnce());
+    expect(useChatStore.getState().splitChatId).toBe("skill-draft-owner");
+    expect(useChatStore.getState().splitChatPosition).toBe("left");
+    expect(useChatStore.getState().openChatIds).toContain("skill-draft-owner");
   });
 });
 
@@ -171,5 +246,95 @@ describe("current conversation routing", () => {
     expect(mocks.emit).toHaveBeenCalledWith("chat-current-session", {
       id: savedConversation.id,
     });
+  });
+
+  it("restores a skill draft preview when its owning chat is opened from recents", async () => {
+    const conversationId = "skill-draft-owner";
+    const path = "/data/skill-drafts/opportunity-1/draft-1/SKILL.md";
+    const loadConversation = vi.fn(async () => undefined);
+    const openFilePreview = vi.fn();
+    mocks.loadConversationFile.mockResolvedValue({
+      ...savedConversation,
+      id: conversationId,
+    });
+    mocks.getActivityOpportunities.mockResolvedValue({
+      status: "ok",
+      data: {
+        analysisState: "ready",
+        generatedAt: "2026-09-01T12:00:00Z",
+        skills: [
+          {
+            id: "opportunity-1",
+            drafts: [{ conversationId, path }],
+          },
+        ],
+        unfinished: [],
+      },
+    });
+    renderRoutingHook(loadConversation, [], openFilePreview);
+
+    await waitFor(() =>
+      expect(mocks.listeners.has("chat-load-conversation")).toBe(true),
+    );
+    await act(async () => {
+      await mocks.listeners.get("chat-load-conversation")?.({
+        payload: { conversationId, targetWindow: "home" },
+      });
+    });
+
+    expect(mocks.getActivityOpportunities).toHaveBeenCalledOnce();
+    expect(openFilePreview).toHaveBeenCalledWith(path, "hidden", conversationId);
+  });
+
+  it("restores created-skill actions for the chat that installed the skill", async () => {
+    const conversationId = "skill-draft-installed";
+    const draftPath = "/data/skill-drafts/opportunity-1/draft-1/SKILL.md";
+    const createdSkillPath = "/data/skills/review-mrr/SKILL.md";
+    const loadConversation = vi.fn(async () => undefined);
+    const openFilePreview = vi.fn();
+    mocks.loadConversationFile.mockResolvedValue({
+      ...savedConversation,
+      id: conversationId,
+    });
+    mocks.getActivityOpportunities.mockResolvedValue({
+      status: "ok",
+      data: {
+        analysisState: "ready",
+        generatedAt: "2026-09-01T12:00:00Z",
+        skills: [
+          {
+            id: "opportunity-1",
+            drafts: [
+              {
+                id: "draft-1",
+                conversationId,
+                path: draftPath,
+              },
+            ],
+            createdSkill: {
+              installedDraftId: "draft-1",
+              path: createdSkillPath,
+            },
+          },
+        ],
+        unfinished: [],
+      },
+    });
+    renderRoutingHook(loadConversation, [], openFilePreview);
+
+    await waitFor(() =>
+      expect(mocks.listeners.has("chat-load-conversation")).toBe(true),
+    );
+    await act(async () => {
+      await mocks.listeners.get("chat-load-conversation")?.({
+        payload: { conversationId, targetWindow: "home" },
+      });
+    });
+
+    expect(openFilePreview).toHaveBeenCalledWith(
+      createdSkillPath,
+      "hidden",
+      conversationId,
+    );
   });
 });

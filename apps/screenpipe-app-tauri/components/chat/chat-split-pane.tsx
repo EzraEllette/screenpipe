@@ -18,6 +18,7 @@ import { cn } from "@/lib/utils";
 interface ChatSplitPaneProps {
   sessionId: string;
   side?: SplitChatPosition;
+  promoteLabel?: string;
   onPromote: (id: string) => void | Promise<void>;
   onClose: () => void;
 }
@@ -35,6 +36,7 @@ function isMessage(value: unknown): value is Message {
 export function ChatSplitPane({
   sessionId,
   side = "right",
+  promoteLabel,
   onPromote,
   onClose,
 }: ChatSplitPaneProps) {
@@ -155,7 +157,7 @@ export function ChatSplitPane({
         className="shrink-0 border-t border-border/50 px-4 py-2.5 text-left text-xs text-muted-foreground transition-colors hover:bg-muted/40 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
         onClick={() => void onPromote(sessionId)}
       >
-        Select this pane to write or steer
+        {promoteLabel ?? "Select this pane to write or steer"}
       </button>
     </section>
   );

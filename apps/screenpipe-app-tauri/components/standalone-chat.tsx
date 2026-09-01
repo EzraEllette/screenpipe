@@ -128,6 +128,7 @@ import { AGENT_TOPICS, type AgentEventEnvelope } from "@/lib/events/types";
 import { listenTyped, TAURI_EVENTS } from "@/lib/events/tauri-events";
 import { localFetch } from "@/lib/api";
 import { presentSkillDraftChatMessages } from "@/components/skills/skill-draft-chat-presentation";
+import { isActivityOpportunitySkillDraftConversation } from "@/lib/activity-opportunity-skill-chat";
 
 // Session ID is per-conversation — set on mount (new conv) and updated on load/new.
 // Stored as a ref so event listeners always see the current value without stale closures.
@@ -694,7 +695,7 @@ export function StandaloneChat({
     initialSessionIdRef.current,
   );
   const isActivityOpportunitySkillDraft =
-    conversationId?.startsWith("skill-draft-") ?? false;
+    isActivityOpportunitySkillDraftConversation(conversationId);
   const isTemporarySideConversation = useChatStore((state) =>
     conversationId
       ? isEphemeralSideConversation(state.sessions[conversationId])
@@ -2559,6 +2560,12 @@ export function StandaloneChat({
         <ChatSplitPane
           sessionId={splitChatId}
           side={splitChatPosition}
+          promoteLabel={
+            !isActivityOpportunitySkillDraft &&
+            isActivityOpportunitySkillDraftConversation(splitChatId)
+              ? "back to skill chat"
+              : undefined
+          }
           onPromote={activateChatTab}
           onClose={() => useChatStore.getState().actions.setSplitChat(null)}
         />

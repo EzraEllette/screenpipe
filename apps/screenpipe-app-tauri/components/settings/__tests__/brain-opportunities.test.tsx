@@ -860,6 +860,39 @@ describe("BrainOpportunities", () => {
     expect(
       await within(sourceEvidence).findByText("search context"),
     ).toBeTruthy();
+    expect(
+      within(sourceEvidence).getByRole("link", {
+        name: /Open Stripe .* in Timeline/i,
+      }),
+    ).toHaveAttribute(
+      "href",
+      "screenpipe://timeline?timestamp=2026-08-22T17%3A00%3A00.000Z",
+    );
+    expect(
+      within(sourceEvidence).getByRole("link", {
+        name: /Open dashboard\.stripe\.com .* in Timeline/i,
+      }),
+    ).toBeInTheDocument();
+  });
+
+  it("uses Activity ledger source affordances for suggestion evidence", async () => {
+    render(<BrainOpportunities />);
+    fireEvent.click(
+      await screen.findByTestId("skill-opportunity-feedback-to-fix"),
+    );
+    const sourceEvidence = screen.getByTestId("skill-source-evidence");
+    fireEvent.click(within(sourceEvidence).getByText("activity evidence"));
+
+    expect(
+      within(sourceEvidence).getByRole("link", {
+        name: /Open Slack .* in Timeline/i,
+      }),
+    ).toHaveAttribute("href", "screenpipe://frame/101");
+    expect(
+      within(sourceEvidence).getByRole("link", {
+        name: /Open Cursor .* in Timeline/i,
+      }),
+    ).toHaveAttribute("href", "screenpipe://frame/102");
   });
 
   it("allows a user to start drafting after removing every evidence row", async () => {

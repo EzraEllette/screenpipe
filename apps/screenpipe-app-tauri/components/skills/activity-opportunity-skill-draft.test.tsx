@@ -11,6 +11,7 @@ import {
   waitFor,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { ReactNode } from "react";
 
 const mocks = vi.hoisted(() => ({
   getActivityOpportunities: vi.fn(),
@@ -19,6 +20,7 @@ const mocks = vi.hoisted(() => ({
   startActivityOpportunitySkillDraft: vi.fn(),
   showChatWithPrefill: vi.fn(),
   openChatConversationInCurrentChatSurface: vi.fn(),
+  getAppServerBaseUrl: vi.fn(),
   toast: vi.fn(),
   openChat: vi.fn(),
   setSplitChat: vi.fn(),
@@ -40,6 +42,10 @@ vi.mock("@/lib/chat-utils", () => ({
   showChatWithPrefill: mocks.showChatWithPrefill,
   openChatConversationInCurrentChatSurface:
     mocks.openChatConversationInCurrentChatSurface,
+}));
+
+vi.mock("@/lib/notifications/app-server", () => ({
+  getAppServerBaseUrl: mocks.getAppServerBaseUrl,
 }));
 
 vi.mock("@/lib/hooks/use-tauri-event", () => ({
@@ -82,6 +88,11 @@ vi.mock("@/components/skills/skill-draft-editor", () => ({
     detached?: boolean;
     onOpenCurrent?: () => void;
     onOpenDraftChat?: () => void;
+    sources?: Array<{
+      id: string;
+      label: string;
+      artifacts?: ReactNode;
+    }>;
   }) => (
     <div
       data-testid="skill-draft-editor"
@@ -129,6 +140,12 @@ vi.mock("@/components/skills/skill-draft-editor", () => ({
       {props.onOpenDraftChat ? (
         <button onClick={props.onOpenDraftChat}>open draft chat</button>
       ) : null}
+      {props.sources?.map((source) => (
+        <div key={source.id} data-testid={`draft-source-${source.id}`}>
+          {source.label}
+          {source.artifacts}
+        </div>
+      ))}
     </div>
   ),
 }));
@@ -224,6 +241,9 @@ describe("activity opportunity skill draft", () => {
     mocks.openChatConversationInCurrentChatSurface
       .mockReset()
       .mockResolvedValue(undefined);
+    mocks.getAppServerBaseUrl
+      .mockReset()
+      .mockResolvedValue("http://localhost:11535");
     mocks.toast.mockReset();
     mocks.openChat.mockReset();
     mocks.setSplitChat.mockReset();
@@ -247,6 +267,47 @@ describe("activity opportunity skill draft", () => {
         "/data/skill-drafts/opportunity-1/draft-10/SKILL.md",
       ),
     ).toBeNull();
+  });
+
+  it("keeps Activity ledger source affordances beside the draft", async () => {
+    const draft = skillDraft();
+    const sourcedOpportunity = {
+      ...opportunity(4, draft),
+      evidence: [
+        {
+          activityId: "activity-1",
+          startAt: "2026-08-29T12:00:00Z",
+          endAt: "2026-08-29T12:05:00Z",
+          title: "Compare weekly revenue",
+          summary: "Checked both revenue views.",
+          apps: ["Stripe"],
+          frameIds: [42],
+          meetingIds: [],
+          excluded: false,
+        },
+      ],
+    };
+
+    render(
+      <ActivityOpportunitySkillDraft
+        conversationId={draft.conversationId}
+        match={{ opportunity: sourcedOpportunity as never, draft }}
+      />,
+    );
+
+    expect(screen.getByTestId("draft-source-activity-1")).toHaveTextContent(
+      "Compare weekly revenue",
+    );
+    const artifact = screen.getByRole("link", {
+      name: /Open Stripe .* in Timeline/i,
+    });
+    expect(artifact).toHaveAttribute("href", "screenpipe://frame/42");
+    await waitFor(() =>
+      expect(artifact.querySelector("img")).toHaveAttribute(
+        "src",
+        "http://localhost:11535/app-icon?name=Stripe",
+      ),
+    );
   });
 
   it("updates a preview from the persisted opportunities event", async () => {
@@ -601,6 +662,7 @@ describe("activity opportunity skill draft", () => {
         source: "activity-opportunity-skill-test",
         useHomeChat: true,
         conversationId: expect.any(String),
+        returnConversationId: "skill-draft-chat",
       }),
     );
     expect(mocks.setSplitChat).toHaveBeenLastCalledWith(

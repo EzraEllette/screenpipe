@@ -5,9 +5,13 @@
 "use client";
 
 import { useCallback, useMemo, useState } from "react";
-import { ArrowUp, ExternalLink } from "lucide-react";
+import { ArrowUp, FolderOpen } from "lucide-react";
 import { NoteEditor } from "@/components/meeting-notes/note-editor";
 import { parseSkillDraftDocument } from "@/components/skills/skill-draft-document";
+import {
+  SkillSourceList,
+  type SkillSource,
+} from "@/components/skills/skill-source-list";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
@@ -17,19 +21,16 @@ export interface CreatedSkillEditorProps {
   value: string;
   createdAt: string;
   enabled: boolean;
+  installPath?: string;
   sources?: CreatedSkillSource[];
   onEnabledChange: (enabled: boolean) => void | Promise<void>;
+  onRevealInstallLocation?: () => void | Promise<void>;
   onRequestChange: (text: string) => void | Promise<void>;
   disabled?: boolean;
   className?: string;
 }
 
-export interface CreatedSkillSource {
-  id: string;
-  label: string;
-  detail: string;
-  href: string;
-}
+export type CreatedSkillSource = SkillSource;
 
 function formatCreatedAt(value: string): string {
   const date = new Date(value);
@@ -51,8 +52,10 @@ export function CreatedSkillEditor({
   value,
   createdAt,
   enabled,
+  installPath,
   sources = [],
   onEnabledChange,
+  onRevealInstallLocation,
   onRequestChange,
   disabled = false,
   className,
@@ -78,11 +81,25 @@ export function CreatedSkillEditor({
       )}
     >
       <header className="flex min-h-11 shrink-0 items-center justify-between gap-4 border-b border-border px-4 py-2">
-        <p className="font-mono text-[10px] uppercase tracking-wide text-muted-foreground">
-          {createdAt
-            ? `created ${formatCreatedAt(createdAt)}`
-            : "created skill"}
-        </p>
+        <div className="flex min-w-0 items-center gap-3">
+          <p className="shrink-0 font-mono text-[10px] uppercase tracking-wide text-muted-foreground">
+            {createdAt
+              ? `created ${formatCreatedAt(createdAt)}`
+              : "created skill"}
+          </p>
+          {installPath ? (
+            <button
+              type="button"
+              title={`Installed at ${installPath}`}
+              aria-label="show installed skill in Finder"
+              onClick={() => void onRevealInstallLocation?.()}
+              className="flex min-w-0 items-center gap-1.5 truncate font-mono text-[9px] uppercase tracking-wide text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-foreground"
+            >
+              <FolderOpen className="h-3 w-3 shrink-0" aria-hidden="true" />
+              <span className="truncate">screenpipe chats</span>
+            </button>
+          ) : null}
+        </div>
 
         <label className="flex shrink-0 cursor-pointer items-center gap-2 font-mono text-[10px] uppercase tracking-wide">
           <span>{enabled ? "enabled" : "disabled"}</span>
@@ -125,36 +142,7 @@ export function CreatedSkillEditor({
           className="select-text px-5 py-4 [&_.ProseMirror]:!min-h-[14rem] [&_.ProseMirror]:text-[14px] [&_.ProseMirror]:leading-6"
         />
 
-        {sources.length > 0 ? (
-          <details className="group mx-5 mb-5 border-t border-border pt-3">
-            <summary className="flex cursor-pointer list-none items-center justify-between gap-3 py-1 font-mono text-[9px] uppercase tracking-wide text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-foreground">
-              <span>source activity</span>
-              <span className="tabular-nums">{sources.length}</span>
-            </summary>
-            <div className="mt-2 border-y border-border">
-              {sources.map((source) => (
-                <a
-                  key={source.id}
-                  href={source.href}
-                  className="flex items-start justify-between gap-3 border-b border-border px-1 py-2.5 text-xs last:border-b-0 hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-foreground"
-                >
-                  <span className="min-w-0">
-                    <span className="block truncate text-foreground">
-                      {source.label}
-                    </span>
-                    <span className="mt-0.5 block truncate font-mono text-[9px] uppercase tracking-wide text-muted-foreground">
-                      {source.detail}
-                    </span>
-                  </span>
-                  <ExternalLink
-                    className="mt-0.5 h-3 w-3 shrink-0 text-muted-foreground"
-                    aria-hidden="true"
-                  />
-                </a>
-              ))}
-            </div>
-          </details>
-        ) : null}
+        <SkillSourceList sources={sources} />
       </div>
 
       <form

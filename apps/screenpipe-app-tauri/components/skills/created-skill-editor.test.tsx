@@ -42,17 +42,30 @@ afterEach(cleanup);
 
 describe("CreatedSkillEditor", () => {
   it("shows the installed definition without exposing frontmatter for editing", () => {
+    const onRevealInstallLocation = vi.fn();
     render(
       <CreatedSkillEditor
         value={SKILL_MD}
         createdAt="2026-08-30T12:00:00.000Z"
         enabled
+        installPath="/Users/screenpipe/.screenpipe/skills/review-mrr/SKILL.md"
         onEnabledChange={vi.fn()}
+        onRevealInstallLocation={onRevealInstallLocation}
         onRequestChange={vi.fn()}
       />,
     );
 
     expect(screen.getByText(/created Aug 30, 2026/i)).toBeVisible();
+    const installLocation = screen.getByRole("button", {
+      name: "show installed skill in Finder",
+    });
+    expect(installLocation).toHaveTextContent("screenpipe chats");
+    expect(installLocation).toHaveAttribute(
+      "title",
+      "Installed at /Users/screenpipe/.screenpipe/skills/review-mrr/SKILL.md",
+    );
+    fireEvent.click(installLocation);
+    expect(onRevealInstallLocation).toHaveBeenCalledOnce();
     expect(screen.getByLabelText("skill name")).toHaveValue("Review MRR");
     expect(screen.getByLabelText("skill name")).toHaveAttribute("readonly");
     expect(screen.getByLabelText("skill description")).toHaveValue(

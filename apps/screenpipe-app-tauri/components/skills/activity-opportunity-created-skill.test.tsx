@@ -15,7 +15,9 @@ const mocks = vi.hoisted(() => ({
   getActivityOpportunities: vi.fn(),
   setActivityOpportunitySkillEnabled: vi.fn(),
   startActivityOpportunitySkillDraft: vi.fn(),
+  revealInDefaultBrowser: vi.fn(),
   openChatConversationInCurrentChatSurface: vi.fn(),
+  getAppServerBaseUrl: vi.fn(),
   toast: vi.fn(),
 }));
 
@@ -26,12 +28,17 @@ vi.mock("@/lib/utils/tauri", () => ({
       mocks.setActivityOpportunitySkillEnabled,
     startActivityOpportunitySkillDraft:
       mocks.startActivityOpportunitySkillDraft,
+    revealInDefaultBrowser: mocks.revealInDefaultBrowser,
   },
 }));
 
 vi.mock("@/lib/chat-utils", () => ({
   openChatConversationInCurrentChatSurface:
     mocks.openChatConversationInCurrentChatSurface,
+}));
+
+vi.mock("@/lib/notifications/app-server", () => ({
+  getAppServerBaseUrl: mocks.getAppServerBaseUrl,
 }));
 
 vi.mock("@/components/ui/use-toast", () => ({ toast: mocks.toast }));
@@ -136,6 +143,13 @@ describe("ActivityOpportunityCreatedSkill", () => {
     mocks.openChatConversationInCurrentChatSurface
       .mockReset()
       .mockResolvedValue(undefined);
+    mocks.getAppServerBaseUrl
+      .mockReset()
+      .mockResolvedValue("http://localhost:11535");
+    mocks.revealInDefaultBrowser.mockReset().mockResolvedValue({
+      status: "ok",
+      data: null,
+    });
     mocks.toast.mockReset();
   });
 
@@ -167,6 +181,22 @@ describe("ActivityOpportunityCreatedSkill", () => {
     expect(
       screen.getByText(/search context \/ Aug 28 \/ PostHog/i),
     ).toBeInTheDocument();
+    fireEvent.click(screen.getByText("source activity"));
+    const stripeSource = screen.getByRole("link", {
+      name: /Open Stripe .* in Timeline/i,
+    });
+    expect(stripeSource).toHaveAttribute("href", "screenpipe://frame/42");
+    expect(
+      screen.getByRole("link", {
+        name: /Open us\.posthog\.com .* in Timeline/i,
+      }),
+    ).toBeInTheDocument();
+    await waitFor(() =>
+      expect(stripeSource.querySelector("img")).toHaveAttribute(
+        "src",
+        "http://localhost:11535/app-icon?name=Stripe",
+      ),
+    );
     fireEvent.click(screen.getByRole("switch", { name: "disable skill" }));
 
     await waitFor(() =>
@@ -179,6 +209,26 @@ describe("ActivityOpportunityCreatedSkill", () => {
     expect(screen.getByText("disabled")).toBeVisible();
     expect(screen.getByLabelText("markdown editor")).toHaveAttribute(
       "readonly",
+    );
+  });
+
+  it("identifies Screenpipe chats as the install target and reveals the file", async () => {
+    render(
+      <ActivityOpportunityCreatedSkill
+        match={{ opportunity: opportunity as never, createdSkill }}
+      />,
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "show installed skill in Finder",
+      }),
+    );
+
+    await waitFor(() =>
+      expect(mocks.revealInDefaultBrowser).toHaveBeenCalledWith(
+        createdSkill.path,
+      ),
     );
   });
 

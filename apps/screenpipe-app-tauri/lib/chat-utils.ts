@@ -137,6 +137,8 @@ export interface ChatPrefillData {
   filePreviewPath?: string;
   /** Pin an auto-send handoff to this fresh conversation ID. */
   conversationId?: string;
+  /** Keep this owning chat visible as the left-side return path after handoff. */
+  returnConversationId?: string;
 }
 
 export type ChatTargetWindow = "home" | "chat";

@@ -9,6 +9,10 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import posthog from "posthog-js";
 import { localFetch } from "@/lib/api";
 import {
+  findActivityOpportunitySkillDraftPath,
+  isActivityOpportunitySkillDraftConversation,
+} from "@/lib/activity-opportunity-skill-chat";
+import {
   type ChatLoadConversationPayload,
   shouldHandleChatLoadConversationForWindow,
   shouldHandleChatPrefillForWindow,
@@ -16,7 +20,7 @@ import {
 import type { ContentBlock, Message, OptimisticSteerPayload } from "@/lib/chat/types";
 import { normalizeImageDataUrls } from "@/lib/chat/image-content";
 import type { ChatConversation } from "@/lib/hooks/use-settings";
-import type { AIPreset } from "@/lib/utils/tauri";
+import { commands, type AIPreset } from "@/lib/utils/tauri";
 import {
   useChatStore,
   type SessionRecord,
@@ -149,6 +153,7 @@ export function useChatPrefillListener({
       targetWindow?: string;
       filePreviewPath?: string;
       conversationId?: string;
+      returnConversationId?: string;
     }>("chat-prefill", (event) => {
       const {
         context,
@@ -161,6 +166,7 @@ export function useChatPrefillListener({
         targetWindow,
         filePreviewPath,
         conversationId,
+        returnConversationId,
       } = event.payload;
       const prefillImages = normalizeImageDataUrls(images);
 
@@ -207,7 +213,13 @@ export function useChatPrefillListener({
             // race. `panelSessionId` follows `conversationId` via
             // useChatConversationEvents, so setting currentId here keeps all
             // four id sources in lockstep from message 0.
-            useChatStore.getState().actions.setCurrent(newSid);
+            const chatActions = useChatStore.getState().actions;
+            chatActions.setCurrent(newSid);
+            const returnId = returnConversationId?.trim();
+            if (returnId && returnId !== newSid) {
+              chatActions.openChat(returnId);
+              chatActions.setSplitChat(returnId, "left");
+            }
             piSessionSyncedRef.current = true;
             autoSendBypassRef.current = true;
             await new Promise((resolve) => setTimeout(resolve, 200));
@@ -275,6 +287,21 @@ export function hasRenderableConversationState(
       session.messageCount === 0 &&
       Array.isArray(session.messages),
   );
+}
+
+async function activityOpportunitySkillDraftPreviewPath(
+  conversationId: string,
+): Promise<string | null> {
+  if (!isActivityOpportunitySkillDraftConversation(conversationId)) return null;
+  try {
+    const result = await commands.getActivityOpportunities();
+    if (result.status === "error") return null;
+    return findActivityOpportunitySkillDraftPath(result.data, conversationId);
+  } catch {
+    // Chat history must remain usable when Activities are disabled or its
+    // opportunity snapshot cannot be read.
+    return null;
+  }
 }
 
 export function useChatConversationRoutingEvents({
@@ -351,8 +378,10 @@ export function useChatConversationRoutingEvents({
       if (focusMessageId) {
         focusMessageById(focusMessageId);
       }
-      if (filePreviewPath) {
-        openFilePreview(filePreviewPath, "hidden", convId);
+      const restoredFilePreviewPath = filePreviewPath
+        ?? await activityOpportunitySkillDraftPreviewPath(convId);
+      if (restoredFilePreviewPath) {
+        openFilePreview(restoredFilePreviewPath, "hidden", convId);
       }
     });
     return () => {

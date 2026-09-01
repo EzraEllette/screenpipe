@@ -6,6 +6,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { SkillDraftEditor } from "@/components/skills/skill-draft-editor";
+import { activityOpportunitySkillSources } from "@/components/skills/activity-opportunity-sources";
 import { toast } from "@/components/ui/use-toast";
 import {
   openChatConversationInCurrentChatSurface,
@@ -116,6 +117,10 @@ export function ActivityOpportunitySkillDraft({
   match: SkillDraftMatch;
 }) {
   const { opportunity, draft } = match;
+  const sources = useMemo(
+    () => activityOpportunitySkillSources(opportunity),
+    [opportunity],
+  );
   const [markdown, setMarkdown] = useState(draft.skillMd ?? "");
   const [saveState, setSaveState] = useState<
     "idle" | "saving" | "saved" | "error"
@@ -290,6 +295,7 @@ export function ActivityOpportunitySkillDraft({
           source: "activity-opportunity-skill-test",
           useHomeChat: true,
           conversationId: testConversationId,
+          returnConversationId: draftConversationId,
         });
         if (!openedConversationId) {
           throw new Error("The test chat was not created");
@@ -460,6 +466,7 @@ export function ActivityOpportunitySkillDraft({
       onOpenCurrent={currentDraft ? openCurrentDraft : undefined}
       detached={detached}
       onOpenDraftChat={openDraftChat}
+      sources={sources}
       installed={
         isCurrentDraft &&
         (justInstalled ||
