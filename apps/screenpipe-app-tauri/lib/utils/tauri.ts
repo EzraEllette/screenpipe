@@ -2246,6 +2246,18 @@ async restartAfterScreenRecordingPermission() : Promise<void> {
     await TAURI_INVOKE("restart_after_screen_recording_permission");
 },
 /**
+ * Restart the app after an explicit user action so an exact short-read
+ * quarantine can be verified in a fresh process before recording resumes.
+ */
+async restartDatabaseVerification() : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("restart_database_verification") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Banner-click restart. Mirror the auto-update path: gate, stop server, then
  * spawn the replacement app and `_exit` the old process so C/C++ atexit
  * handlers cannot abort during restart. See 2026-06-10 and 2026-07-02 reports.

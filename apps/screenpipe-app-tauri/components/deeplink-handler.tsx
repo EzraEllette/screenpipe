@@ -177,6 +177,17 @@ export function DeeplinkHandler() {
       }
 
       if (
+        parsedUrl.host === "database-restart-verification" ||
+        parsedUrl.pathname === "database-restart-verification"
+      ) {
+        const result = await commands.restartDatabaseVerification();
+        if (result.status === "error") {
+          throw new Error(result.error);
+        }
+        return;
+      }
+
+      if (
         parsedUrl.host === "database-recovery" ||
         parsedUrl.pathname === "database-recovery"
       ) {

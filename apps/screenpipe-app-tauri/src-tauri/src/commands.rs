@@ -540,6 +540,14 @@ pub fn start_database_recovery(app_handle: tauri::AppHandle) -> Result<(), Strin
     crate::db_recovery_notifications::start_quarantined_database_recovery(app_handle)
 }
 
+/// Restart the app after an explicit user action so an exact short-read
+/// quarantine can be verified in a fresh process before recording resumes.
+#[tauri::command]
+#[specta::specta]
+pub fn restart_database_verification(app_handle: tauri::AppHandle) -> Result<(), String> {
+    crate::db_recovery_notifications::restart_quarantined_database_verification(app_handle)
+}
+
 /// Pure JSON shape used by the cold-spawn fallback. Extracted so the contract
 /// is covered by a unit test without needing a tauri::AppHandle. Port is the
 /// same effective port that the server config will use, including settings and

@@ -19,6 +19,7 @@ struct DatabaseStats {
     audio_transcriptions: i64,
     last_frame: Option<String>,
     last_audio: Option<String>,
+    counts_available: bool,
     error: Option<String>,
 }
 
@@ -41,7 +42,9 @@ pub async fn handle_status_command(
     let base_dir = get_base_dir(data_dir)?;
     let db_path = base_dir.join("db.sqlite");
     let (health, health_probe_error) = probe_health(port).await;
-    let database = read_database_stats(&db_path).await;
+    let daemon_may_be_running = health.is_some() || health_probe_error.is_some();
+    let database =
+        database_stats_for_status(&db_path, health.as_ref(), daemon_may_be_running).await;
     let media_size_bytes = dir_size(&base_dir.join("data")).unwrap_or(0);
     let database_size_bytes = database_files_size(&base_dir);
 
@@ -65,6 +68,31 @@ pub async fn handle_status_command(
     }
 
     Ok(())
+}
+
+async fn database_stats_for_status(
+    db_path: &Path,
+    health: Option<&Value>,
+    daemon_may_be_running: bool,
+) -> DatabaseStats {
+    if daemon_may_be_running {
+        // The recorder owns the live WAL with the macOS unix-excl VFS. Opening
+        // it from a second process with SQLite's default VFS can give the two
+        // processes incompatible WAL-index views and poison the writer with
+        // SQLITE_IOERR_SHORT_READ (522). Live freshness is already available
+        // from the daemon; inspect full history only when the daemon is absent.
+        return DatabaseStats {
+            last_frame: health
+                .and_then(|value| health_timestamp_value(value, "last_frame_timestamp"))
+                .map(str::to_owned),
+            last_audio: health
+                .and_then(|value| health_timestamp_value(value, "last_audio_timestamp"))
+                .map(str::to_owned),
+            ..Default::default()
+        };
+    }
+
+    read_database_stats(db_path).await
 }
 
 async fn probe_health(port: u16) -> (Option<Value>, Option<String>) {
@@ -105,13 +133,24 @@ async fn probe_health(port: u16) -> (Option<Value>, Option<String>) {
 
 async fn read_database_stats(db_path: &Path) -> DatabaseStats {
     if !db_path.exists() {
-        return DatabaseStats::default();
+        return DatabaseStats {
+            counts_available: true,
+            ..Default::default()
+        };
     }
 
     let connect_options = SqliteConnectOptions::new()
         .filename(db_path)
-        .read_only(true)
         .disable_statement_logging();
+    #[cfg(target_os = "macos")]
+    let connect_options = connect_options.vfs("unix-excl").pragma("query_only", "ON");
+    #[cfg(not(target_os = "macos"))]
+    let connect_options = connect_options.read_only(true);
+
+    // On macOS the fallback must participate in the recorder's unix-excl
+    // locking regime too. If a health probe missed a live recorder (wrong port,
+    // startup race, or connection reset), the query fails locked instead of a
+    // default-VFS handle bypassing and weakening the recorder's process lock.
     let pool = match SqlitePoolOptions::new()
         .max_connections(1)
         .connect_with(connect_options)
@@ -126,42 +165,61 @@ async fn read_database_stats(db_path: &Path) -> DatabaseStats {
         }
     };
 
-    let frames = sqlx::query("SELECT COUNT(*) as cnt FROM frames")
+    let frames = match sqlx::query("SELECT COUNT(*) as cnt FROM frames")
         .fetch_one(&pool)
         .await
-        .map(|row| row.get::<i64, _>("cnt"))
-        .unwrap_or(0);
-    let audio_transcriptions = sqlx::query("SELECT COUNT(*) as cnt FROM audio_transcriptions")
+    {
+        Ok(row) => row.get::<i64, _>("cnt"),
+        Err(error) => return database_read_error(error),
+    };
+    let audio_transcriptions = match sqlx::query("SELECT COUNT(*) as cnt FROM audio_transcriptions")
         .fetch_one(&pool)
         .await
-        .map(|row| row.get::<i64, _>("cnt"))
-        .unwrap_or(0);
-    let last_frame = latest_timestamp(&pool, "frames").await;
-    let last_audio = latest_timestamp(&pool, "audio_transcriptions").await;
+    {
+        Ok(row) => row.get::<i64, _>("cnt"),
+        Err(error) => return database_read_error(error),
+    };
+    let last_frame = match latest_timestamp(&pool, "frames").await {
+        Ok(timestamp) => timestamp,
+        Err(error) => return database_read_error(error),
+    };
+    let last_audio = match latest_timestamp(&pool, "audio_transcriptions").await {
+        Ok(timestamp) => timestamp,
+        Err(error) => return database_read_error(error),
+    };
 
     DatabaseStats {
         frames,
         audio_transcriptions,
         last_frame,
         last_audio,
+        counts_available: true,
         error: None,
     }
 }
 
-async fn latest_timestamp(pool: &sqlx::SqlitePool, table: &str) -> Option<String> {
+fn database_read_error(error: sqlx::Error) -> DatabaseStats {
+    DatabaseStats {
+        error: Some(format!("could not read database: {error}")),
+        ..Default::default()
+    }
+}
+
+async fn latest_timestamp(
+    pool: &sqlx::SqlitePool,
+    table: &str,
+) -> Result<Option<String>, sqlx::Error> {
     let query: &'static str = match table {
         "frames" => "SELECT timestamp FROM frames ORDER BY timestamp DESC LIMIT 1",
         "audio_transcriptions" => {
             "SELECT timestamp FROM audio_transcriptions ORDER BY timestamp DESC LIMIT 1"
         }
-        _ => return None,
+        _ => return Ok(None),
     };
     sqlx::query(query)
         .fetch_optional(pool)
         .await
-        .ok()
-        .flatten()
-        .map(|row| row.get::<String, _>("timestamp"))
+        .map(|row| row.map(|row| row.get::<String, _>("timestamp")))
 }
 
 fn snapshot_json(snapshot: &StatusSnapshot) -> Value {
@@ -190,6 +248,7 @@ fn snapshot_json(snapshot: &StatusSnapshot) -> Value {
         "storage_size_bytes": total_size_bytes,
         "storage_size": format_bytes(total_size_bytes),
         "database_error": snapshot.database.error.as_deref(),
+        "database_counts_available": snapshot.database.counts_available,
         "health_probe_error": snapshot.health_probe_error.as_deref(),
         "health": snapshot.health.as_ref(),
     })
@@ -237,7 +296,12 @@ fn format_status_report(snapshot: &StatusSnapshot, now: DateTime<Utc>) -> String
         ),
     ));
 
-    if let Some(error) = snapshot.database.error.as_deref() {
+    if !snapshot.database.counts_available && snapshot.database.error.is_none() {
+        output.push_str(&status_line(
+            "history",
+            "counts unavailable while recorder may be running",
+        ));
+    } else if let Some(error) = snapshot.database.error.as_deref() {
         output.push_str(&status_line("history", "database unavailable"));
         output.push_str(&status_line("attention", error));
     } else {
@@ -496,6 +560,7 @@ mod tests {
                 audio_transcriptions: 12_440,
                 last_frame: Some("2026-08-21T16:59:55Z".to_string()),
                 last_audio: Some("2026-08-21T16:58:00Z".to_string()),
+                counts_available: true,
                 error: None,
             },
             media_size_bytes: 9 * 1024 * 1024 * 1024,
@@ -576,7 +641,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reads_live_wal_database_through_a_read_only_connection() {
+    async fn reads_offline_wal_database_through_a_read_only_connection() {
         let temp_dir = tempfile::tempdir().unwrap();
         let db_path = temp_dir.path().join("db.sqlite");
         let writer_options = SqliteConnectOptions::new()
@@ -608,12 +673,47 @@ mod tests {
             .execute(&writer)
             .await
             .unwrap();
+        writer.close().await;
 
         let stats = read_database_stats(&db_path).await;
         assert_eq!(stats.frames, 1);
         assert_eq!(stats.audio_transcriptions, 1);
         assert_eq!(stats.last_frame.as_deref(), Some("2026-08-21T16:59:57Z"));
         assert_eq!(stats.last_audio.as_deref(), Some("2026-08-21T16:59:28Z"));
+        assert!(stats.counts_available);
+        assert!(stats.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn running_status_never_opens_the_database_out_of_process() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("db.sqlite");
+        std::fs::write(&db_path, b"not a sqlite database").unwrap();
+        let health = json!({
+            "status": "healthy",
+            "frame_status": "ok",
+            "audio_status": "ok",
+            "last_frame_timestamp": "2026-09-01T17:40:00Z",
+            "last_audio_timestamp": "2026-09-01T17:39:58Z"
+        });
+
+        let stats = database_stats_for_status(&db_path, Some(&health), true).await;
+
+        assert!(!stats.counts_available);
+        assert!(stats.error.is_none());
+        assert_eq!(stats.last_frame.as_deref(), Some("2026-09-01T17:40:00Z"));
+        assert_eq!(stats.last_audio.as_deref(), Some("2026-09-01T17:39:58Z"));
+    }
+
+    #[tokio::test]
+    async fn failed_health_probe_also_keeps_the_database_closed() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("db.sqlite");
+        std::fs::write(&db_path, b"not a sqlite database").unwrap();
+
+        let stats = database_stats_for_status(&db_path, None, true).await;
+
+        assert!(!stats.counts_available);
         assert!(stats.error.is_none());
     }
 
@@ -659,6 +759,7 @@ mod tests {
         assert_eq!(payload["schema_version"], 1);
         assert_eq!(payload["running"], true);
         assert_eq!(payload["frames"], 842_019);
+        assert_eq!(payload["database_counts_available"], true);
         assert_eq!(payload["last_capture"], "2026-08-21T16:59:57Z");
         assert_eq!(payload["last_audio_capture"], "2026-08-21T16:59:28Z");
         assert_eq!(

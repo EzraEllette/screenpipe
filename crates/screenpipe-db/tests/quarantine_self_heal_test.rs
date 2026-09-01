@@ -24,6 +24,10 @@ use screenpipe_db::{
 use sqlx::sqlite::{SqliteConnectOptions, SqliteConnection};
 use sqlx::{ConnectOptions, Connection, Executor};
 use std::path::{Path, PathBuf};
+use std::process::Command;
+
+const PROCESS_CHILD_ENV: &str = "SCREENPIPE_QUARANTINE_SELF_HEAL_CHILD";
+const PROCESS_DB_ENV: &str = "SCREENPIPE_QUARANTINE_SELF_HEAL_DB";
 
 /// Build a small WAL-mode database with real content, then leave the WAL pair
 /// on disk exactly as a running engine would.
@@ -60,6 +64,16 @@ async fn seed_open_wal_database(path: &Path) -> SqliteConnection {
 async fn seed_wal_database(path: &Path) {
     let connection = seed_open_wal_database(path).await;
     connection.close().await.expect("close seed database");
+}
+
+#[test]
+fn process_child_persists_short_read_quarantine() {
+    if std::env::var(PROCESS_CHILD_ENV).as_deref() != Ok("mark-short-read") {
+        return;
+    }
+    let db = PathBuf::from(std::env::var(PROCESS_DB_ENV).expect("child database path"));
+    persist_sqlite_quarantine(&db, Some(522), "SQLITE_IOERR_SHORT_READ")
+        .expect("persist child-process quarantine");
 }
 
 fn sqlite_sidecar(database_path: &Path, suffix: &str) -> PathBuf {
@@ -106,6 +120,58 @@ async fn healthy_generation_under_an_ioerr_marker_self_resolves() {
         .await
         .expect("read the preserved rows");
     assert_eq!(rows, 256, "self-heal must not lose a single row");
+    connection.close().await.expect("close");
+}
+
+#[tokio::test]
+async fn fresh_process_resolves_short_read_without_replacing_the_database() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("db.sqlite");
+    seed_wal_database(&db).await;
+    let identity_before = sqlite_file_identity(&db).expect("identity before child fault");
+
+    let output = Command::new(std::env::current_exe().expect("current test binary"))
+        .args([
+            "--exact",
+            "process_child_persists_short_read_quarantine",
+            "--nocapture",
+        ])
+        .env(PROCESS_CHILD_ENV, "mark-short-read")
+        .env(PROCESS_DB_ENV, &db)
+        .output()
+        .expect("run faulted-process helper");
+    assert!(
+        output.status.success(),
+        "faulted-process helper failed: stdout={}, stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(sqlite_quarantine_exists(&db));
+
+    let probe = probe_quarantined_generation_health(&db)
+        .await
+        .expect("fresh process must verify the unchanged healthy generation");
+    assert_eq!(probe.file_identity, identity_before);
+    let archive = dir
+        .path()
+        .join("db.sqlite.quarantine.self-healed-process.json");
+    resolve_verified_sqlite_quarantine(&db, &archive)
+        .expect("fresh process resolves verified quarantine");
+
+    assert!(!sqlite_quarantine_exists(&db));
+    assert_eq!(
+        sqlite_file_identity(&db).expect("identity after self-heal"),
+        identity_before,
+        "self-heal must not replace the database generation"
+    );
+    let mut connection = SqliteConnection::connect(db.to_str().expect("utf-8 path"))
+        .await
+        .expect("reopen verified generation");
+    let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM frames")
+        .fetch_one(&mut connection)
+        .await
+        .expect("read preserved rows");
+    assert_eq!(rows, 256);
     connection.close().await.expect("close");
 }
 
