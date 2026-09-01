@@ -68,6 +68,39 @@ fn audio_capture_mode_setting(settings: &serde_json::Value) -> &'static str {
     }
 }
 
+/// Report the backend the engine will actually use without forwarding an
+/// arbitrary persisted string to PostHog. `cloud` and `enclave` are legacy
+/// aliases that still select Tinfoil in `server_core`; every other value
+/// follows the engine's local fallback.
+fn effective_pii_backend_setting(settings: &serde_json::Value) -> &'static str {
+    match settings.get("piiBackend").and_then(|value| value.as_str()) {
+        Some("tinfoil" | "cloud" | "enclave") => "tinfoil",
+        _ => "local",
+    }
+}
+
+fn smart_pii_settings(settings: &serde_json::Value) -> serde_json::Value {
+    let text_enabled = settings
+        .get("asyncPiiRedaction")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    let image_enabled = settings
+        .get("asyncImagePiiRedaction")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    let backend = effective_pii_backend_setting(settings);
+
+    json!({
+        "setting_async_pii_redaction": text_enabled,
+        "setting_async_image_pii_redaction": image_enabled,
+        "setting_pii_backend": backend,
+        // A backend choice alone does not generate enclave traffic. This
+        // derived field identifies installs where at least one Smart PII
+        // worker is enabled and will therefore use Tinfoil.
+        "setting_tinfoil_pii_active": backend == "tinfoil" && (text_enabled || image_enabled),
+    })
+}
+
 impl AnalyticsManager {
     pub fn new(
         posthog_api_key: String,
@@ -389,7 +422,7 @@ impl AnalyticsManager {
                 .unwrap_or(0)
         };
 
-        json!({
+        let mut feature_config = json!({
             // Screen capture
             "setting_disable_vision": get_bool("disableVision").unwrap_or(false),
             "setting_ocr_engine": get_str("ocrEngine").unwrap_or("unknown"),
@@ -414,7 +447,16 @@ impl AnalyticsManager {
             "setting_use_pii_removal": get_bool("usePiiRemoval").unwrap_or(true),
             "setting_auto_update": get_bool("autoUpdate").unwrap_or(true),
             "setting_languages_count": get_arr_len("languages"),
-        })
+        });
+
+        let pii_settings = smart_pii_settings(settings);
+        if let (Some(feature_config), Some(pii_settings)) =
+            (feature_config.as_object_mut(), pii_settings.as_object())
+        {
+            feature_config.extend(pii_settings.clone());
+        }
+
+        feature_config
     }
 
     async fn check_recording_health(
@@ -654,6 +696,78 @@ mod tests {
             audio_capture_mode_setting(&json!({"audioCaptureMode": false})),
             "always"
         );
+    }
+
+    #[test]
+    fn smart_pii_settings_track_effective_backend_and_enabled_workers() {
+        assert_eq!(
+            smart_pii_settings(&json!({
+                "asyncPiiRedaction": true,
+                "asyncImagePiiRedaction": false,
+                "piiBackend": "tinfoil",
+            })),
+            json!({
+                "setting_async_pii_redaction": true,
+                "setting_async_image_pii_redaction": false,
+                "setting_pii_backend": "tinfoil",
+                "setting_tinfoil_pii_active": true,
+            })
+        );
+    }
+
+    #[test]
+    fn smart_pii_settings_match_engine_defaults_and_legacy_aliases() {
+        assert_eq!(effective_pii_backend_setting(&json!({})), "local");
+        assert_eq!(
+            effective_pii_backend_setting(&json!({"piiBackend": "cloud"})),
+            "tinfoil"
+        );
+        assert_eq!(
+            effective_pii_backend_setting(&json!({"piiBackend": "enclave"})),
+            "tinfoil"
+        );
+        assert_eq!(
+            smart_pii_settings(&json!({"piiBackend": "tinfoil"}))["setting_tinfoil_pii_active"],
+            false
+        );
+        assert_eq!(
+            effective_pii_backend_setting(&json!({"piiBackend": "unexpected"})),
+            "local"
+        );
+    }
+
+    #[test]
+    fn feature_config_includes_smart_pii_settings_from_store() {
+        let dir = tempfile::tempdir().expect("temporary screenpipe data directory");
+        std::fs::write(
+            dir.path().join("store.bin"),
+            json!({
+                "settings": {
+                    "asyncPiiRedaction": false,
+                    "asyncImagePiiRedaction": true,
+                    "piiBackend": "tinfoil",
+                }
+            })
+            .to_string(),
+        )
+        .expect("write settings store");
+        let manager = AnalyticsManager::new(
+            "posthog-key".to_string(),
+            "analytics-id".to_string(),
+            String::new(),
+            1,
+            "http://127.0.0.1:3030".to_string(),
+            None,
+            dir.path().to_path_buf(),
+            false,
+        );
+
+        let config = manager.read_feature_config();
+
+        assert_eq!(config["setting_async_pii_redaction"], false);
+        assert_eq!(config["setting_async_image_pii_redaction"], true);
+        assert_eq!(config["setting_pii_backend"], "tinfoil");
+        assert_eq!(config["setting_tinfoil_pii_active"], true);
     }
 
     #[tokio::test]
