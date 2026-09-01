@@ -35,7 +35,9 @@ export interface SkillDraftEditorProps {
   onTest: (prompt: string) => void | Promise<void>;
   onInstall: () => void | Promise<void>;
   onRequestChange: (text: string) => void | Promise<void>;
-  onRetry: () => void | Promise<void>;
+  onRetry: (changeRequest?: string) => void | Promise<void>;
+  retryRequiresChange?: boolean;
+  installing?: boolean;
   readOnly?: boolean;
   installed?: boolean;
   historical?: boolean;
@@ -73,6 +75,8 @@ export function SkillDraftEditor({
   onInstall,
   onRequestChange,
   onRetry,
+  retryRequiresChange = false,
+  installing = false,
   readOnly = false,
   installed = false,
   historical = false,
@@ -90,16 +94,28 @@ export function SkillDraftEditor({
   const lastValueRef = useRef(value);
   const lastEmittedValueRef = useRef<string | null>(null);
   const ready =
-    phase === "ready" && !readOnly && !installed && !historical && !detached;
+    phase === "ready" &&
+    !readOnly &&
+    !installed &&
+    !historical &&
+    !detached &&
+    !installing;
   const editorReadOnly =
-    readOnly || installed || historical || detached || phase !== "ready";
-  const statusLabel = historical
-    ? "previous draft"
-    : detached
-      ? "skill draft"
-      : installed
-        ? "skill installed"
-        : PHASE_LABELS[phase];
+    readOnly ||
+    installed ||
+    historical ||
+    detached ||
+    installing ||
+    phase !== "ready";
+  const statusLabel = installing
+    ? "installing skill"
+    : historical
+      ? "previous draft"
+      : detached
+        ? "skill draft"
+        : installed
+          ? "skill installed"
+          : PHASE_LABELS[phase];
 
   if (lastValueRef.current !== value) {
     if (lastEmittedValueRef.current !== value) {
@@ -145,9 +161,12 @@ export function SkillDraftEditor({
 
   const retryDraft = async () => {
     if (retrying) return;
+    const text = changeRequest.trim();
+    if (retryRequiresChange && !text) return;
     setRetrying(true);
     try {
-      await onRetry();
+      await onRetry(retryRequiresChange ? text : undefined);
+      if (retryRequiresChange) setChangeRequest("");
     } finally {
       setRetrying(false);
     }
@@ -168,7 +187,12 @@ export function SkillDraftEditor({
           aria-label={statusLabel}
           className="flex min-w-0 items-center gap-2 font-mono text-[11px] uppercase tracking-wide"
         >
-          {phase === "running" && !installed && !historical && !detached ? (
+          {installing ? (
+            <LoaderCircle
+              className="h-3.5 w-3.5 shrink-0 animate-spin motion-reduce:animate-none"
+              aria-hidden="true"
+            />
+          ) : phase === "running" && !installed && !historical && !detached ? (
             <span className="relative flex h-2 w-2 shrink-0" aria-hidden="true">
               <span className="absolute inline-flex h-full w-full animate-ping bg-phosphor opacity-50 motion-reduce:animate-none" />
               <span className="relative inline-flex h-2 w-2 bg-phosphor" />
@@ -192,7 +216,7 @@ export function SkillDraftEditor({
           <span className="truncate">{statusLabel}</span>
         </div>
 
-        {SAVE_LABELS[saveState] ? (
+        {!installing && SAVE_LABELS[saveState] ? (
           <span
             className={cn(
               "flex shrink-0 items-center gap-1.5 font-mono text-[10px] uppercase tracking-wide text-muted-foreground",
@@ -213,27 +237,66 @@ export function SkillDraftEditor({
       {phase === "error" && !historical && !detached && !installed ? (
         <div
           role="alert"
-          className="flex shrink-0 items-center justify-between gap-3 border-b border-border px-4 py-2"
+          className={cn(
+            "shrink-0 border-b border-border px-4 py-2",
+            !retryRequiresChange && "flex items-center justify-between gap-3",
+          )}
         >
-          <span className="min-w-0 font-mono text-xs text-foreground">
+          <p className="min-w-0 font-mono text-xs text-foreground">
             {errorMessage ?? "the agent stopped before the draft was ready"}
-          </span>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            disabled={retrying}
-            onClick={() => void retryDraft().catch(() => undefined)}
-            className="h-7 shrink-0 px-2.5"
-          >
-            {retrying ? (
-              <LoaderCircle
-                className="mr-1.5 h-3 w-3 animate-spin motion-reduce:animate-none"
-                aria-hidden="true"
+          </p>
+          {retryRequiresChange ? (
+            <form
+              aria-label="retry skill draft"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void retryDraft().catch(() => undefined);
+              }}
+              className="mt-2 flex items-center gap-2"
+            >
+              <Input
+                autoFocus
+                aria-label="retry change request"
+                value={changeRequest}
+                onChange={(event) => setChangeRequest(event.target.value)}
+                placeholder="what should change?"
+                disabled={retrying}
+                className="h-7 min-w-0 flex-1 border-0 bg-muted/40 px-2 shadow-none focus-visible:border-transparent"
               />
-            ) : null}
-            {retrying ? "starting" : "try again"}
-          </Button>
+              <Button
+                type="submit"
+                variant="outline"
+                size="sm"
+                disabled={retrying || !changeRequest.trim()}
+                className="h-7 shrink-0 px-2.5"
+              >
+                {retrying ? (
+                  <LoaderCircle
+                    className="mr-1.5 h-3 w-3 animate-spin motion-reduce:animate-none"
+                    aria-hidden="true"
+                  />
+                ) : null}
+                {retrying ? "starting" : "try again"}
+              </Button>
+            </form>
+          ) : (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={retrying}
+              onClick={() => void retryDraft().catch(() => undefined)}
+              className="h-7 shrink-0 px-2.5"
+            >
+              {retrying ? (
+                <LoaderCircle
+                  className="mr-1.5 h-3 w-3 animate-spin motion-reduce:animate-none"
+                  aria-hidden="true"
+                />
+              ) : null}
+              {retrying ? "starting" : "try again"}
+            </Button>
+          )}
         </div>
       ) : null}
 
@@ -361,52 +424,52 @@ export function SkillDraftEditor({
         </footer>
       ) : phase === "error" ? null : (
         <footer className="shrink-0 border-t border-border bg-background">
-        <div className="flex h-12 items-center justify-end gap-2 px-3">
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            disabled={!ready}
-            aria-expanded={testOpen}
-            onClick={() => setTestOpen((open) => !open)}
-          >
-            <FlaskConical className="mr-2 h-3.5 w-3.5" aria-hidden="true" />
-            test skill
-          </Button>
-          <Button
-            type="button"
-            size="sm"
-            disabled={!ready}
-            onClick={() => void onInstall()}
-          >
-            install skill
-          </Button>
-        </div>
+          <div className="flex h-12 items-center justify-end gap-2 px-3">
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              disabled={!ready}
+              aria-expanded={testOpen}
+              onClick={() => setTestOpen((open) => !open)}
+            >
+              <FlaskConical className="mr-2 h-3.5 w-3.5" aria-hidden="true" />
+              test skill
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              disabled={!ready}
+              onClick={() => void onInstall()}
+            >
+              install skill
+            </Button>
+          </div>
 
-        <form
-          aria-label="change skill"
-          onSubmit={submitChange}
-          className="flex h-11 items-center gap-2 border-t border-border px-3"
-        >
-          <Input
-            aria-label="change request"
-            value={changeRequest}
-            onChange={(event) => setChangeRequest(event.target.value)}
-            placeholder="change something..."
-            disabled={!ready}
-            className="h-8 min-w-0 flex-1 border-0 bg-transparent px-1 shadow-none focus-visible:border-transparent"
-          />
-          <Button
-            type="submit"
-            variant="ghost"
-            size="icon"
-            aria-label="request change"
-            disabled={!ready || !changeRequest.trim()}
-            className="h-7 w-7"
+          <form
+            aria-label="change skill"
+            onSubmit={submitChange}
+            className="flex h-11 items-center gap-2 border-t border-border px-3"
           >
-            <ArrowUp className="h-3.5 w-3.5" aria-hidden="true" />
-          </Button>
-        </form>
+            <Input
+              aria-label="change request"
+              value={changeRequest}
+              onChange={(event) => setChangeRequest(event.target.value)}
+              placeholder="change something..."
+              disabled={!ready}
+              className="h-8 min-w-0 flex-1 border-0 bg-transparent px-1 shadow-none focus-visible:border-transparent"
+            />
+            <Button
+              type="submit"
+              variant="ghost"
+              size="icon"
+              aria-label="request change"
+              disabled={!ready || !changeRequest.trim()}
+              className="h-7 w-7"
+            >
+              <ArrowUp className="h-3.5 w-3.5" aria-hidden="true" />
+            </Button>
+          </form>
         </footer>
       )}
     </section>

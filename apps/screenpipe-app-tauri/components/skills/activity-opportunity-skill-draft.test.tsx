@@ -73,7 +73,9 @@ vi.mock("@/components/skills/skill-draft-editor", () => ({
     onTest: (prompt: string) => void;
     onInstall: () => void;
     onRequestChange: (request: string) => void;
-    onRetry: () => void;
+    onRetry: (changeRequest?: string) => void;
+    retryRequiresChange?: boolean;
+    installing?: boolean;
     readOnly?: boolean;
     installed?: boolean;
     historical?: boolean;
@@ -85,22 +87,42 @@ vi.mock("@/components/skills/skill-draft-editor", () => ({
       data-testid="skill-draft-editor"
       data-phase={props.phase}
       data-installed={String(props.installed ?? false)}
+      data-installing={String(props.installing ?? false)}
       data-historical={String(props.historical ?? false)}
       data-detached={String(props.detached ?? false)}
     >
       <textarea
         aria-label="draft markdown"
         value={props.value}
-        disabled={props.readOnly}
+        disabled={props.readOnly || props.installing}
         onChange={(event) => props.onChange(event.target.value)}
       />
       <span data-testid="save-state">{props.saveState}</span>
-      <button onClick={() => props.onTest("verify today's MRR")}>test</button>
-      <button onClick={props.onInstall}>install</button>
-      <button onClick={() => props.onRequestChange("include weekly growth")}>
+      <button
+        disabled={props.installing}
+        onClick={() => props.onTest("verify today's MRR")}
+      >
+        test
+      </button>
+      <button disabled={props.installing} onClick={props.onInstall}>
+        install
+      </button>
+      <button
+        disabled={props.installing}
+        onClick={() => props.onRequestChange("include weekly growth")}
+      >
         change
       </button>
-      <button onClick={props.onRetry}>retry</button>
+      <button
+        disabled={props.installing}
+        onClick={() =>
+          props.onRetry(
+            props.retryRequiresChange ? "include weekly growth" : undefined,
+          )
+        }
+      >
+        retry
+      </button>
       {props.onOpenCurrent ? (
         <button onClick={props.onOpenCurrent}>open current</button>
       ) : null}
@@ -248,6 +270,26 @@ describe("activity opportunity skill draft", () => {
     expect(screen.getByTestId("matched-draft")).toHaveTextContent("draft-1");
   });
 
+  it("refreshes the opportunity snapshot when a chat hands off a new draft path", async () => {
+    mocks.getActivityOpportunities
+      .mockReset()
+      .mockResolvedValueOnce({ status: "ok", data: snapshot([]) })
+      .mockResolvedValueOnce({ status: "ok", data: snapshot() });
+    const view = render(<HookHarness path="/skills/review-mrr/SKILL.md" />);
+    await waitFor(() =>
+      expect(screen.getByTestId("matched-draft")).toHaveTextContent("none"),
+    );
+
+    view.rerender(
+      <HookHarness path="/data/skill-drafts/opportunity-1/draft-1/SKILL.md" />,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByTestId("matched-draft")).toHaveTextContent("draft-1"),
+    );
+    expect(mocks.getActivityOpportunities).toHaveBeenCalledTimes(2);
+  });
+
   it("flushes an edit before installing with the latest revision", async () => {
     const edited = `${SKILL_MD}\n\nCheck the weekly change.`;
     mocks.getActivityOpportunities.mockResolvedValueOnce({
@@ -290,6 +332,135 @@ describe("activity opportunity skill draft", () => {
       "data-installed",
       "true",
     );
+  });
+
+  it("freezes the shown draft and every action for the full install request", async () => {
+    const edited = `${SKILL_MD}\n\nCheck the weekly change.`;
+    const racedEdit = `${edited}\n\nThis must not enter the install.`;
+    let resolveInstall:
+      | ((value: {
+          status: "ok";
+          data: { path: string; skillMd: string };
+        }) => void)
+      | undefined;
+    mocks.getActivityOpportunities.mockResolvedValueOnce({
+      status: "ok",
+      data: snapshot([opportunity(5, skillDraft({ skillMd: edited }))]),
+    });
+    mocks.installActivityOpportunitySkillDraft
+      .mockReset()
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveInstall = resolve;
+          }),
+      );
+    render(
+      <ActivityOpportunitySkillDraft
+        conversationId="skill-draft-chat"
+        match={{
+          opportunity: opportunity() as never,
+          draft: skillDraft() as never,
+        }}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText("draft markdown"), {
+      target: { value: edited },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "install" }));
+
+    await waitFor(() =>
+      expect(mocks.installActivityOpportunitySkillDraft).toHaveBeenCalledOnce(),
+    );
+    expect(screen.getByTestId("skill-draft-editor")).toHaveAttribute(
+      "data-installing",
+      "true",
+    );
+    expect(screen.getByLabelText("draft markdown")).toBeDisabled();
+
+    fireEvent.change(screen.getByLabelText("draft markdown"), {
+      target: { value: racedEdit },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "test" }));
+    fireEvent.click(screen.getByRole("button", { name: "change" }));
+    fireEvent.click(screen.getByRole("button", { name: "install" }));
+
+    expect(screen.getByLabelText("draft markdown")).toHaveValue(edited);
+    expect(mocks.saveActivityOpportunitySkillDraft).toHaveBeenCalledOnce();
+    expect(mocks.saveActivityOpportunitySkillDraft).toHaveBeenCalledWith({
+      id: "opportunity-1",
+      draftId: "draft-1",
+      skillMd: edited,
+    });
+    expect(mocks.installActivityOpportunitySkillDraft).toHaveBeenCalledOnce();
+    expect(mocks.showChatWithPrefill).not.toHaveBeenCalled();
+    expect(mocks.startActivityOpportunitySkillDraft).not.toHaveBeenCalled();
+
+    await act(async () => {
+      resolveInstall?.({
+        status: "ok",
+        data: { path: "/skills/review-mrr/SKILL.md", skillMd: edited },
+      });
+    });
+
+    expect(screen.getByTestId("skill-draft-editor")).toHaveAttribute(
+      "data-installed",
+      "true",
+    );
+    expect(screen.getByTestId("skill-draft-editor")).toHaveAttribute(
+      "data-installing",
+      "false",
+    );
+    expect(screen.getByLabelText("draft markdown")).toHaveValue(edited);
+  });
+
+  it("keeps a created-skill revision reviewable until that exact draft is installed", () => {
+    const installed = skillDraft({
+      id: "draft-installed",
+      conversationId: "skill-draft-installed",
+      path: "/data/skill-drafts/opportunity-1/draft-installed/SKILL.md",
+    });
+    const revision = skillDraft({
+      id: "draft-revision",
+      conversationId: "skill-draft-revision",
+      path: "/data/skill-drafts/opportunity-1/draft-revision/SKILL.md",
+    });
+    const createdOpportunity = {
+      ...opportunity(8, revision),
+      status: "created",
+      drafts: [installed, revision],
+      currentDraftId: revision.id,
+      createdSkill: {
+        key: "review-mrr",
+        path: "/skills/review-mrr/SKILL.md",
+        skillMd: installed.skillMd,
+        sha256: "a".repeat(64),
+        createdAt: "2026-08-30T12:00:00Z",
+        enabled: true,
+        installedDraftId: installed.id,
+      },
+    };
+
+    render(
+      <ActivityOpportunitySkillDraft
+        conversationId={revision.conversationId}
+        match={{
+          opportunity: createdOpportunity as never,
+          draft: revision as never,
+        }}
+      />,
+    );
+
+    expect(screen.getByTestId("skill-draft-editor")).toHaveAttribute(
+      "data-installed",
+      "false",
+    );
+    expect(screen.getByTestId("skill-draft-editor")).toHaveAttribute(
+      "data-historical",
+      "false",
+    );
+    expect(screen.getByLabelText("draft markdown")).toBeEnabled();
   });
 
   it("debounces a ready draft edit", async () => {
@@ -520,6 +691,65 @@ describe("activity opportunity skill draft", () => {
     ).not.toHaveProperty("changeRequest");
   });
 
+  it("requires the user change again when retrying a failed created-skill revision", async () => {
+    const installedDraft = skillDraft({
+      id: "draft-installed",
+      conversationId: "skill-installed-chat",
+      path: "/data/skill-drafts/opportunity-1/draft-installed/SKILL.md",
+    });
+    const failedDraft = skillDraft({
+      id: "draft-failed-revision",
+      conversationId: "skill-failed-chat",
+      path: "/data/skill-drafts/opportunity-1/draft-failed-revision/SKILL.md",
+      phase: "error",
+      error: "the agent stopped",
+      skillMd: "",
+    });
+    const createdOpportunity = {
+      ...opportunity(4, failedDraft),
+      status: "created",
+      drafts: [installedDraft, failedDraft],
+      currentDraftId: failedDraft.id,
+      createdSkill: {
+        key: "review-mrr",
+        path: "/skills/review-mrr/SKILL.md",
+        skillMd: installedDraft.skillMd,
+        sha256: "a".repeat(64),
+        createdAt: "2026-08-30T12:00:00Z",
+        enabled: true,
+        installedDraftId: installedDraft.id,
+      },
+    };
+    mocks.getActivityOpportunities.mockResolvedValueOnce({
+      status: "ok",
+      data: snapshot([{ ...createdOpportunity, revision: 9 }]),
+    });
+
+    render(
+      <ActivityOpportunitySkillDraft
+        conversationId={failedDraft.conversationId}
+        match={{
+          opportunity: createdOpportunity as never,
+          draft: failedDraft as never,
+        }}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "retry" }));
+
+    await waitFor(() =>
+      expect(mocks.startActivityOpportunitySkillDraft).toHaveBeenCalledWith({
+        id: "opportunity-1",
+        revision: 9,
+        changeRequest: "include weekly growth",
+      }),
+    );
+    expect(mocks.openChatConversationInCurrentChatSurface).toHaveBeenCalledWith(
+      "skill-revision-chat",
+      "/data/skill-drafts/opportunity-1/draft-2/SKILL.md",
+    );
+  });
+
   it("renders an installed current draft as read-only", () => {
     render(
       <ActivityOpportunitySkillDraft
@@ -528,6 +758,15 @@ describe("activity opportunity skill draft", () => {
           opportunity: {
             ...opportunity(),
             status: "created",
+            createdSkill: {
+              key: "review-mrr",
+              path: "/skills/review-mrr/SKILL.md",
+              skillMd: SKILL_MD,
+              sha256: "a".repeat(64),
+              createdAt: "2026-08-30T12:00:00Z",
+              enabled: true,
+              installedDraftId: "draft-1",
+            },
           } as never,
           draft: skillDraft() as never,
         }}
@@ -559,7 +798,10 @@ describe("activity opportunity skill draft", () => {
     render(
       <ActivityOpportunitySkillDraft
         conversationId="skill-old-chat"
-        match={{ opportunity: oldOpportunity as never, draft: oldDraft as never }}
+        match={{
+          opportunity: oldOpportunity as never,
+          draft: oldDraft as never,
+        }}
       />,
     );
 
@@ -569,7 +811,9 @@ describe("activity opportunity skill draft", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: "open current" }));
     await waitFor(() =>
-      expect(mocks.openChatConversationInCurrentChatSurface).toHaveBeenCalledWith(
+      expect(
+        mocks.openChatConversationInCurrentChatSurface,
+      ).toHaveBeenCalledWith(
         "skill-current-chat",
         "/data/skill-drafts/opportunity-1/draft-current/SKILL.md",
       ),
@@ -593,7 +837,9 @@ describe("activity opportunity skill draft", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: "open draft chat" }));
     await waitFor(() =>
-      expect(mocks.openChatConversationInCurrentChatSurface).toHaveBeenCalledWith(
+      expect(
+        mocks.openChatConversationInCurrentChatSurface,
+      ).toHaveBeenCalledWith(
         "skill-draft-chat",
         "/data/skill-drafts/opportunity-1/draft-1/SKILL.md",
       ),

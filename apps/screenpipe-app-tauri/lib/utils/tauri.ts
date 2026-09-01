@@ -2419,6 +2419,14 @@ async searchNavigateToTimeline(timestamp: string, frameId: number | null, search
     else return { status: "error", error: e  as any };
 }
 },
+async setActivityOpportunitySkillEnabled(request: SetActivityOpportunitySkillEnabledRequest) : Promise<Result<CreatedSkill, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_activity_opportunity_skill_enabled", { request }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 /**
  * Persist the user's explicit Settings choice. Automatic launch reconciliation
  * skips opted-out targets until the user explicitly connects them again.
@@ -3271,7 +3279,7 @@ error: string | null }
 export type CodingWorkspace = { version: number; conversationId: string; repoRoot: string; gitCommonDir: string; worktreePath: string; branch: string; baseCommit: string; sourceDirty: boolean; createdAt: string }
 export type CodingWorkspacePreparation = { status: string; workspace: CodingWorkspace | null; candidates: string[]; reason: string | null; routeSessionId: string | null }
 export type CreateActivityOpportunitySkillRequest = { id: string; revision: number }
-export type CreatedSkill = { path: string; skillMd: string }
+export type CreatedSkill = { key?: string; path: string; skillMd: string; sha256?: string; createdAt?: string; enabled?: boolean; installedDraftId?: string | null }
 export type Credits = { amount: number }
 /**
  * A skill folder discovered somewhere on the user's device.
@@ -3657,6 +3665,7 @@ export type ScreenCaptureProtectionStatus = { requestedHidden: boolean; effectiv
  * recorder or stores a duplicate raw accessibility tree.
  */
 export type SemanticContextMode = "memory" | "computerUse" | "both"
+export type SetActivityOpportunitySkillEnabledRequest = { id: string; revision: number; enabled: boolean }
 export type SettingsStore =
 /**
  * All recording/capture config lives here. Flattened so the JSON shape

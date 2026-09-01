@@ -52,9 +52,9 @@ export function findActivityOpportunitySkillDraft(
   return null;
 }
 
-export function useActivityOpportunitySkillDraft(
-  path: string,
-): SkillDraftMatch | null {
+export function useActivityOpportunitySnapshot(
+  refreshKey?: string,
+): ActivityOpportunitySnapshot | null {
   const [snapshot, setSnapshot] = useState<ActivityOpportunitySnapshot | null>(
     null,
   );
@@ -75,7 +75,7 @@ export function useActivityOpportunitySkillDraft(
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [refreshKey]);
 
   useTauriEvent<ActivityOpportunitySnapshot>(
     "activity-opportunities-updated",
@@ -84,6 +84,14 @@ export function useActivityOpportunitySkillDraft(
       setSnapshot(event.payload);
     },
   );
+
+  return snapshot;
+}
+
+export function useActivityOpportunitySkillDraft(
+  path: string,
+): SkillDraftMatch | null {
+  const snapshot = useActivityOpportunitySnapshot(path);
 
   return useMemo(
     () => findActivityOpportunitySkillDraft(snapshot, path),
@@ -123,6 +131,8 @@ export function ActivityOpportunitySkillDraft({
   >(() => Promise.resolve());
   const draftPhaseRef = useRef(draft.phase);
   const [justInstalled, setJustInstalled] = useState(false);
+  const [installing, setInstalling] = useState(false);
+  const installingRef = useRef(false);
 
   markdownRef.current = markdown;
   draftPhaseRef.current = draft.phase;
@@ -194,7 +204,9 @@ export function ActivityOpportunitySkillDraft({
         draftPhaseRef.current === "ready" &&
         pendingMarkdown !== lastQueuedMarkdownRef.current
       ) {
-        void queueSaveRef.current(pendingMarkdown, false).catch(() => undefined);
+        void queueSaveRef
+          .current(pendingMarkdown, false)
+          .catch(() => undefined);
       }
     },
     [],
@@ -241,6 +253,7 @@ export function ActivityOpportunitySkillDraft({
 
   const editMarkdown = useCallback(
     (nextMarkdown: string) => {
+      if (installingRef.current) return;
       setMarkdown(nextMarkdown);
       if (
         draft.phase === "ready" &&
@@ -254,6 +267,7 @@ export function ActivityOpportunitySkillDraft({
 
   const testSkill = useCallback(
     async (objective: string) => {
+      if (installingRef.current) return;
       const draftConversationId = draft.conversationId || conversationId;
       if (!draftConversationId) {
         toast({
@@ -296,6 +310,9 @@ export function ActivityOpportunitySkillDraft({
   );
 
   const installSkill = useCallback(async () => {
+    if (installingRef.current) return;
+    installingRef.current = true;
+    setInstalling(true);
     try {
       await flushDraft();
       const latest = await latestOpportunity();
@@ -317,11 +334,15 @@ export function ActivityOpportunitySkillDraft({
         description: errorMessage(error),
         variant: "destructive",
       });
+    } finally {
+      installingRef.current = false;
+      setInstalling(false);
     }
   }, [draft.id, flushDraft, latestOpportunity, opportunity.id]);
 
   const requestChange = useCallback(
     async (changeRequest: string) => {
+      if (installingRef.current) return;
       try {
         await flushDraft();
         const latest = await latestOpportunity();
@@ -347,27 +368,33 @@ export function ActivityOpportunitySkillDraft({
     [flushDraft, latestOpportunity, opportunity.id],
   );
 
-  const retryDraft = useCallback(async () => {
-    try {
-      const latest = await latestOpportunity();
-      const nextDraft = await commandData(
-        commands.startActivityOpportunitySkillDraft({
-          id: opportunity.id,
-          revision: latest.revision,
-        }),
-      );
-      await openChatConversationInCurrentChatSurface(
-        nextDraft.conversationId,
-        nextDraft.path,
-      );
-    } catch (error) {
-      toast({
-        title: "skill draft could not restart",
-        description: errorMessage(error),
-        variant: "destructive",
-      });
-    }
-  }, [latestOpportunity, opportunity.id]);
+  const retryDraft = useCallback(
+    async (changeRequest?: string) => {
+      const requestedChange = changeRequest?.trim();
+      if (opportunity.status === "created" && !requestedChange) return;
+      try {
+        const latest = await latestOpportunity();
+        const nextDraft = await commandData(
+          commands.startActivityOpportunitySkillDraft({
+            id: opportunity.id,
+            revision: latest.revision,
+            ...(requestedChange ? { changeRequest: requestedChange } : {}),
+          }),
+        );
+        await openChatConversationInCurrentChatSurface(
+          nextDraft.conversationId,
+          nextDraft.path,
+        );
+      } catch (error) {
+        toast({
+          title: "skill draft could not restart",
+          description: errorMessage(error),
+          variant: "destructive",
+        });
+      }
+    },
+    [latestOpportunity, opportunity.id, opportunity.status],
+  );
 
   const currentDraft = opportunity.drafts?.find(
     (candidate) => candidate.id === opportunity.currentDraftId,
@@ -407,6 +434,13 @@ export function ActivityOpportunitySkillDraft({
 
   const historical = !isCurrentDraft;
   const detached = isCurrentDraft && !isDraftConversation;
+  const installedDraftId = opportunity.createdSkill?.installedDraftId;
+  const legacyInstalledCurrentDraft =
+    opportunity.status === "created" &&
+    !installedDraftId &&
+    draft.phase === "ready" &&
+    opportunity.createdSkill?.skillMd === draft.skillMd &&
+    (opportunity.drafts?.length ?? 0) <= 1;
 
   return (
     <SkillDraftEditor
@@ -419,13 +453,18 @@ export function ActivityOpportunitySkillDraft({
       onInstall={installSkill}
       onRequestChange={requestChange}
       onRetry={retryDraft}
+      retryRequiresChange={opportunity.status === "created"}
+      installing={installing}
       readOnly={historical || detached}
       historical={historical}
       onOpenCurrent={currentDraft ? openCurrentDraft : undefined}
       detached={detached}
       onOpenDraftChat={openDraftChat}
       installed={
-        isCurrentDraft && (justInstalled || opportunity.status === "created")
+        isCurrentDraft &&
+        (justInstalled ||
+          installedDraftId === draft.id ||
+          legacyInstalledCurrentDraft)
       }
       className="min-h-0 flex-1"
     />

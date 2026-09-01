@@ -14,8 +14,13 @@ import {
 } from "@/components/file-viewer";
 import {
   ActivityOpportunitySkillDraft,
-  useActivityOpportunitySkillDraft,
+  findActivityOpportunitySkillDraft,
+  useActivityOpportunitySnapshot,
 } from "@/components/skills/activity-opportunity-skill-draft";
+import {
+  ActivityOpportunityCreatedSkill,
+  findActivityOpportunityCreatedSkill,
+} from "@/components/skills/activity-opportunity-created-skill";
 import { commands } from "@/lib/utils/tauri";
 
 interface FilePreviewSidebarProps {
@@ -133,14 +138,27 @@ export function FilePreviewSidebar({
   conversationId,
   onReplacePath,
 }: FilePreviewSidebarProps) {
-  const skillDraft = useActivityOpportunitySkillDraft(path);
+  const opportunities = useActivityOpportunitySnapshot(path);
+  const createdSkill = useMemo(
+    () => findActivityOpportunityCreatedSkill(opportunities, path),
+    [opportunities, path],
+  );
+  const skillDraft = useMemo(
+    () => findActivityOpportunitySkillDraft(opportunities, path),
+    [opportunities, path],
+  );
 
   return (
     <div
       data-testid="file-preview-sidebar"
       className="flex flex-col flex-1 min-h-0"
     >
-      {skillDraft ? (
+      {createdSkill ? (
+        <ActivityOpportunityCreatedSkill
+          key={createdSkill.createdSkill.key}
+          match={createdSkill}
+        />
+      ) : skillDraft ? (
         <ActivityOpportunitySkillDraft
           key={skillDraft.draft.id}
           conversationId={conversationId}

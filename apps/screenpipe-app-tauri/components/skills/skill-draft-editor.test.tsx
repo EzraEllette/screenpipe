@@ -291,6 +291,34 @@ describe("SkillDraftEditor", () => {
     expect(screen.getByRole("button", { name: "try again" })).toBeEnabled();
   });
 
+  it("requires the requested change again before retrying a created-skill revision", async () => {
+    const onRetry = vi.fn();
+    render(
+      <SkillDraftEditor
+        phase="error"
+        value=""
+        onChange={vi.fn()}
+        onTest={vi.fn()}
+        onInstall={vi.fn()}
+        onRequestChange={vi.fn()}
+        onRetry={onRetry}
+        retryRequiresChange
+      />,
+    );
+
+    const retry = screen.getByRole("button", { name: "try again" });
+    expect(retry).toBeDisabled();
+
+    fireEvent.change(screen.getByLabelText("retry change request"), {
+      target: { value: "  include weekly growth  " },
+    });
+    await act(async () => {
+      fireEvent.click(retry);
+    });
+
+    expect(onRetry).toHaveBeenCalledWith("include weekly growth");
+  });
+
   it("turns an installed draft into a quiet read-only result", () => {
     render(
       <SkillDraftEditor
@@ -314,6 +342,33 @@ describe("SkillDraftEditor", () => {
     expect(screen.queryByLabelText("change request")).not.toBeInTheDocument();
   });
 
+  it("locks editing and actions while installation is in flight", () => {
+    render(
+      <SkillDraftEditor
+        phase="ready"
+        value={SKILL_MD}
+        installing
+        onChange={vi.fn()}
+        onTest={vi.fn()}
+        onInstall={vi.fn()}
+        onRequestChange={vi.fn()}
+        onRetry={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("status")).toHaveAccessibleName("installing skill");
+    expect(screen.getByLabelText("skill name")).toBeDisabled();
+    expect(screen.getByLabelText("skill description")).toBeDisabled();
+    expect(screen.getByLabelText("markdown editor")).toHaveAttribute(
+      "readonly",
+    );
+    expect(screen.getByRole("button", { name: "test skill" })).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "install skill" }),
+    ).toBeDisabled();
+    expect(screen.getByLabelText("change request")).toBeDisabled();
+  });
+
   it("labels an earlier draft and routes back to the current one", () => {
     const onOpenCurrent = vi.fn();
     render(
@@ -333,9 +388,7 @@ describe("SkillDraftEditor", () => {
     expect(screen.getByRole("status")).toHaveAccessibleName("previous draft");
     expect(screen.getByText("this earlier draft is read-only")).toBeVisible();
     expect(screen.getByLabelText("skill name")).toBeDisabled();
-    fireEvent.click(
-      screen.getByRole("button", { name: "open current draft" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "open current draft" }));
     expect(onOpenCurrent).toHaveBeenCalledOnce();
   });
 });

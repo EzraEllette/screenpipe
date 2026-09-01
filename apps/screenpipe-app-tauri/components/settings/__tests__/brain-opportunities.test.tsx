@@ -31,7 +31,9 @@ const mocks = vi.hoisted(() => ({
   startActivityOpportunitySkillDraft: vi.fn(),
   saveActivityOpportunitySkillDraft: vi.fn(),
   installActivityOpportunitySkillDraft: vi.fn(),
+  setActivityOpportunitySkillEnabled: vi.fn(),
   handoffActivityOpportunity: vi.fn(),
+  showChatWithPrefill: vi.fn(async () => null),
   eventHandlers: new Map<string, (event: { payload: unknown }) => void>(),
 }));
 
@@ -50,6 +52,8 @@ vi.mock("@/lib/utils/tauri", async (importOriginal) => {
         mocks.saveActivityOpportunitySkillDraft,
       installActivityOpportunitySkillDraft:
         mocks.installActivityOpportunitySkillDraft,
+      setActivityOpportunitySkillEnabled:
+        mocks.setActivityOpportunitySkillEnabled,
       handoffActivityOpportunity: mocks.handoffActivityOpportunity,
     },
   };
@@ -63,6 +67,14 @@ vi.mock("@/lib/hooks/use-tauri-event", () => ({
     mocks.eventHandlers.set(event, handler);
   },
 }));
+
+vi.mock("@/lib/chat-utils", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/chat-utils")>();
+  return {
+    ...actual,
+    showChatWithPrefill: mocks.showChatWithPrefill,
+  };
+});
 
 vi.mock("../activity-context-picker", () => ({
   ActivityContextPicker: ({
@@ -280,6 +292,39 @@ function readySnapshot(): ActivityOpportunitySnapshot {
   };
 }
 
+function addCreatedSkill(
+  snapshot: ActivityOpportunitySnapshot,
+  enabled = true,
+) {
+  const skill = snapshot.skills[0];
+  const installedDraft = {
+    id: "installed-draft",
+    conversationId: "skill-draft-installed",
+    path: `/Users/screenpipe/.screenpipe/skill-drafts/${skill.id}/installed-draft/SKILL.md`,
+    phase: "ready" as const,
+    skillMd:
+      '---\nname: "verified-fix"\ndescription: "Turn feedback into a verified fix."\n---\n\nFollow the repeated workflow.\n',
+    startedAt: "2026-08-30T12:00:00Z",
+    updatedAt: "2026-08-30T12:02:00Z",
+    completedAt: "2026-08-30T12:02:00Z",
+  };
+  skill.status = "created";
+  skill.name = "verified fix";
+  skill.description = "Turn feedback into a verified fix.";
+  skill.drafts = [installedDraft];
+  skill.currentDraftId = installedDraft.id;
+  skill.createdSkill = {
+    key: "verified-fix",
+    path: "/Users/screenpipe/.screenpipe/skills/verified-fix/SKILL.md",
+    skillMd: installedDraft.skillMd,
+    sha256: "a".repeat(64),
+    createdAt: "2026-08-30T12:03:00Z",
+    enabled,
+    installedDraftId: installedDraft.id,
+  } as never;
+  return { skill, installedDraft };
+}
+
 function clone<T>(value: T): T {
   return structuredClone(value);
 }
@@ -416,6 +461,20 @@ function installStatefulCommands(snapshot: ActivityOpportunitySnapshot) {
       return { status: "ok", data: clone(createdSkill) };
     },
   );
+  mocks.setActivityOpportunitySkillEnabled.mockImplementation(
+    async (request: { id: string; revision: number; enabled: boolean }) => {
+      const skill = snapshot.skills.find((item) => item.id === request.id);
+      if (!skill?.createdSkill || skill.revision !== request.revision) {
+        return { status: "error", error: "revision mismatch" };
+      }
+      skill.createdSkill = {
+        ...skill.createdSkill,
+        enabled: request.enabled,
+      } as never;
+      skill.revision += 1;
+      return { status: "ok", data: clone(skill.createdSkill) };
+    },
+  );
   mocks.handoffActivityOpportunity.mockImplementation(
     async (request: HandoffActivityOpportunityRequest) => {
       const task = snapshot.unfinished.find((item) => item.id === request.id);
@@ -452,7 +511,7 @@ describe("BrainOpportunities", () => {
     expect(screen.getByTestId("opportunities-tab-ideas")).toHaveTextContent(
       "3",
     );
-    expect(onCountChange).toHaveBeenLastCalledWith(5);
+    await waitFor(() => expect(onCountChange).toHaveBeenLastCalledWith(5));
   });
 
   it("ranks skills by occurrences instead of supporting activity rows", async () => {
@@ -985,6 +1044,229 @@ describe("BrainOpportunities", () => {
     expect(onOpenSkillDraftChat).toHaveBeenCalledWith(
       draft.conversationId,
       draft.path,
+    );
+  });
+
+  it("keeps the created list minimal and opens the live skill beside its installed chat", async () => {
+    const { skill, installedDraft } = addCreatedSkill(backendSnapshot);
+    const onOpenSkillDraftChat = vi.fn(async () => undefined);
+    render(<BrainOpportunities onOpenSkillDraftChat={onOpenSkillDraftChat} />);
+
+    await screen.findByTestId("skill-opportunity-review-brief");
+    fireEvent.click(screen.getByTestId("opportunities-tab-created"));
+
+    const row = screen.getByTestId(`skill-opportunity-${skill.id}`);
+    expect(row).toHaveTextContent("verified fix");
+    expect(row).toHaveTextContent("Turn feedback into a verified fix.");
+    expect(row).toHaveTextContent("Aug 30, 2026");
+    expect(screen.getByText("enabled")).toBeVisible();
+    expect(row).not.toHaveTextContent("Follow the repeated workflow");
+
+    fireEvent.click(row);
+    expect(onOpenSkillDraftChat).toHaveBeenCalledWith(
+      installedDraft.conversationId,
+      "/Users/screenpipe/.screenpipe/skills/verified-fix/SKILL.md",
+    );
+  });
+
+  it("reopens the current uninstalled revision from the created row", async () => {
+    const { skill, installedDraft } = addCreatedSkill(backendSnapshot);
+    const revisionDraft = {
+      ...installedDraft,
+      id: "draft-revision",
+      conversationId: "skill-draft-revision",
+      path: `/Users/screenpipe/.screenpipe/skill-drafts/${skill.id}/draft-revision/SKILL.md`,
+      phase: "running" as const,
+      skillMd: "",
+      completedAt: undefined,
+    };
+    skill.drafts.push(revisionDraft);
+    skill.currentDraftId = revisionDraft.id;
+    const onOpenSkillDraftChat = vi.fn(async () => undefined);
+    render(<BrainOpportunities onOpenSkillDraftChat={onOpenSkillDraftChat} />);
+
+    await screen.findByTestId("skill-opportunity-review-brief");
+    fireEvent.click(screen.getByTestId("opportunities-tab-created"));
+    fireEvent.click(screen.getByTestId(`skill-opportunity-${skill.id}`));
+
+    expect(onOpenSkillDraftChat).toHaveBeenCalledWith(
+      revisionDraft.conversationId,
+      revisionDraft.path,
+    );
+  });
+
+  it("opens a legacy created skill without a draft chat in the editable side panel", async () => {
+    const skill = backendSnapshot.skills[0];
+    const path =
+      "/Users/screenpipe/.screenpipe/skills/legacy-verified-fix/SKILL.md";
+    skill.status = "created";
+    skill.name = "legacy verified fix";
+    skill.description = "Turn feedback into a verified fix.";
+    skill.drafts = [];
+    skill.currentDraftId = undefined;
+    skill.createdSkill = {
+      path,
+      skillMd:
+        '---\nname: "legacy verified fix"\ndescription: "Turn feedback into a verified fix."\n---\n\nFollow the repeated workflow.\n',
+    } as never;
+
+    render(<BrainOpportunities />);
+
+    await screen.findByTestId("skill-opportunity-review-brief");
+    fireEvent.click(screen.getByTestId("opportunities-tab-created"));
+    fireEvent.click(screen.getByTestId(`skill-opportunity-${skill.id}`));
+
+    await waitFor(() =>
+      expect(mocks.showChatWithPrefill).toHaveBeenCalledWith({
+        context: "",
+        source: "activity-opportunity-created-skill",
+        useHomeChat: true,
+        filePreviewPath: path,
+      }),
+    );
+  });
+
+  it("lets the user quietly disable a created skill", async () => {
+    const { skill } = addCreatedSkill(backendSnapshot);
+    render(<BrainOpportunities />);
+
+    await screen.findByTestId("skill-opportunity-review-brief");
+    fireEvent.click(screen.getByTestId("opportunities-tab-created"));
+    fireEvent.click(
+      screen.getByRole("switch", { name: "disable verified fix" }),
+    );
+
+    await waitFor(() =>
+      expect(mocks.setActivityOpportunitySkillEnabled).toHaveBeenCalledWith({
+        id: skill.id,
+        revision: 1,
+        enabled: false,
+      }),
+    );
+    expect(
+      screen.getByRole("switch", { name: "enable verified fix" }),
+    ).not.toBeChecked();
+    expect(screen.getByText("disabled")).toBeVisible();
+  });
+
+  it("does not invent a revision for an idempotent toggle response", async () => {
+    const { skill } = addCreatedSkill(backendSnapshot);
+    mocks.setActivityOpportunitySkillEnabled.mockImplementation(
+      async (request: { id: string; revision: number; enabled: boolean }) => ({
+        status: "ok",
+        data: { ...skill.createdSkill!, enabled: request.enabled },
+      }),
+    );
+    render(<BrainOpportunities />);
+
+    await screen.findByTestId("skill-opportunity-review-brief");
+    fireEvent.click(screen.getByTestId("opportunities-tab-created"));
+    const staleEnabledSwitch = screen.getByRole("switch", {
+      name: "disable verified fix",
+    });
+    const next = clone(backendSnapshot);
+    const nextSkill = next.skills.find((item) => item.id === skill.id)!;
+    nextSkill.revision = 2;
+    nextSkill.createdSkill = {
+      ...nextSkill.createdSkill!,
+      enabled: false,
+    } as never;
+    act(() => {
+      mocks.eventHandlers.get("activity-opportunities-updated")?.({
+        payload: next,
+      });
+      fireEvent.click(staleEnabledSwitch);
+    });
+
+    await waitFor(() =>
+      expect(mocks.setActivityOpportunitySkillEnabled).toHaveBeenCalledWith({
+        id: skill.id,
+        revision: 2,
+        enabled: false,
+      }),
+    );
+    fireEvent.click(
+      screen.getByRole("switch", { name: "enable verified fix" }),
+    );
+    await waitFor(() =>
+      expect(mocks.setActivityOpportunitySkillEnabled).toHaveBeenLastCalledWith(
+        {
+          id: skill.id,
+          revision: 2,
+          enabled: true,
+        },
+      ),
+    );
+  });
+
+  it("does not let a stale toggle response replace a newer installed revision", async () => {
+    const { skill, installedDraft } = addCreatedSkill(backendSnapshot);
+    const staleCreatedSkill = clone(skill.createdSkill!);
+    let resolveToggle:
+      | ((value: { status: "ok"; data: typeof staleCreatedSkill }) => void)
+      | null = null;
+    mocks.setActivityOpportunitySkillEnabled.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveToggle = resolve;
+        }),
+    );
+    const onOpenSkillDraftChat = vi.fn(async () => undefined);
+    render(<BrainOpportunities onOpenSkillDraftChat={onOpenSkillDraftChat} />);
+
+    await screen.findByTestId("skill-opportunity-review-brief");
+    fireEvent.click(screen.getByTestId("opportunities-tab-created"));
+    fireEvent.click(
+      screen.getByRole("switch", { name: "disable verified fix" }),
+    );
+    await waitFor(() =>
+      expect(mocks.setActivityOpportunitySkillEnabled).toHaveBeenCalled(),
+    );
+
+    const next = clone(backendSnapshot);
+    const nextSkill = next.skills.find((item) => item.id === skill.id)!;
+    const nextDraft = {
+      ...installedDraft,
+      id: "installed-revision",
+      conversationId: "skill-draft-installed-revision",
+      path: `/Users/screenpipe/.screenpipe/skill-drafts/${skill.id}/installed-revision/SKILL.md`,
+      skillMd: installedDraft.skillMd.replace(
+        "Follow the repeated workflow.",
+        "Follow the revised workflow.",
+      ),
+    };
+    nextSkill.revision = skill.revision + 1;
+    nextSkill.drafts.push(nextDraft);
+    nextSkill.currentDraftId = nextDraft.id;
+    nextSkill.createdSkill = {
+      ...nextSkill.createdSkill!,
+      path: "/Users/screenpipe/.screenpipe/skills/verified-fix/SKILL.md",
+      skillMd: nextDraft.skillMd,
+      sha256: "b".repeat(64),
+      enabled: true,
+      installedDraftId: nextDraft.id,
+    } as never;
+    act(() => {
+      mocks.eventHandlers.get("activity-opportunities-updated")?.({
+        payload: next,
+      });
+    });
+
+    await act(async () => {
+      resolveToggle?.({
+        status: "ok",
+        data: { ...staleCreatedSkill, enabled: false } as never,
+      });
+      await Promise.resolve();
+    });
+
+    expect(
+      screen.getByRole("switch", { name: "disable verified fix" }),
+    ).toBeChecked();
+    fireEvent.click(screen.getByTestId(`skill-opportunity-${skill.id}`));
+    expect(onOpenSkillDraftChat).toHaveBeenCalledWith(
+      nextDraft.conversationId,
+      nextSkill.createdSkill!.path,
     );
   });
 

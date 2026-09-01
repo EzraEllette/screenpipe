@@ -24,15 +24,27 @@ type BrowserSkillDraft = {
   completedAt?: string | null;
 };
 
+type BrowserCreatedSkill = CreatedSkill & {
+  key: string;
+  sha256: string;
+  createdAt: string;
+  enabled: boolean;
+  installedDraftId?: string | null;
+};
+
 type BrowserOpportunitySnapshot = Omit<
   ActivityOpportunitySnapshot,
   "skills"
 > & {
   skills: Array<
-    Omit<ActivityOpportunitySnapshot["skills"][number], "status"> & {
+    Omit<
+      ActivityOpportunitySnapshot["skills"][number],
+      "status" | "createdSkill"
+    > & {
       status: "pending" | "drafting" | "dismissed" | "created";
       drafts: BrowserSkillDraft[];
       currentDraftId?: string | null;
+      createdSkill?: BrowserCreatedSkill | null;
     }
   >;
 };
@@ -255,6 +267,7 @@ describe("browser development runtime", () => {
       apps: ["Stripe", "PostHog"],
       excluded: false,
     });
+    const readyDraftPath = ready.skills[0].drafts[0].path;
     expect(ready.skills[0]).toMatchObject({
       id: "check-mrr",
       status: "drafting",
@@ -271,9 +284,45 @@ describe("browser development runtime", () => {
       ],
     });
     expect(ready.skills.some((skill) => skill.status === "pending")).toBe(true);
+    const created = ready.skills.find(
+      (skill) => skill.id === "daily-activity-brief",
+    )!;
+    const createdConversationId = created.drafts[0].conversationId;
+    expect(created).toMatchObject({
+      status: "created",
+      currentDraftId: "browser-installed-daily-brief-draft",
+      createdSkill: {
+        installedDraftId: "browser-installed-daily-brief-draft",
+      },
+      drafts: [
+        expect.objectContaining({
+          id: "browser-installed-daily-brief-draft",
+          phase: "ready",
+          conversationId: "skill-draft-browser-installed-daily-brief-draft",
+        }),
+      ],
+    });
+    const createdChatBytes = readyInvoke("plugin:fs|read_text_file", {
+      path: `/Users/screenpipe/.screenpipe/chats/${createdConversationId}.json`,
+    }) as Uint8Array;
+    const createdChat = JSON.parse(
+      new TextDecoder().decode(createdChatBytes),
+    ) as { messages: Array<{ role: string; content: string }> };
+    expect(createdChat.messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: "user",
+          content: "Create this skill",
+        }),
+        expect.objectContaining({
+          role: "assistant",
+          content: expect.stringContaining("# Daily activity brief"),
+        }),
+      ]),
+    );
     expect(
       readyInvoke("read_viewer_file", {
-        path: ready.skills[0].drafts[0].path,
+        path: readyDraftPath,
       }),
     ).toMatchObject({
       kind: "text",
@@ -444,6 +493,49 @@ describe("browser development runtime", () => {
     ).toEqual(created);
   });
 
+  it("rejects a draft that collides with an already installed skill", () => {
+    const invoke = createBrowserIpcMock({
+      mode: "mock",
+      scenario: "ready",
+      apiPort: 3030,
+    });
+    const initial = invoke(
+      "get_activity_opportunities",
+    ) as BrowserOpportunitySnapshot;
+    const skill = initial.skills.find(
+      (candidate) => candidate.id === "check-mrr",
+    )!;
+    const draft = skill.drafts.find(
+      (candidate) => candidate.id === skill.currentDraftId,
+    )!;
+    invoke("save_activity_opportunity_skill_draft", {
+      request: {
+        id: skill.id,
+        draftId: draft.id,
+        skillMd:
+          "---\nname: daily-activity-brief\ndescription: Conflicting replacement.\n---\n\nDo something else.\n",
+      },
+    });
+    const saved = invoke(
+      "get_activity_opportunities",
+    ) as BrowserOpportunitySnapshot;
+    const savedSkill = saved.skills.find(
+      (candidate) => candidate.id === skill.id,
+    )!;
+
+    expect(
+      commandError(() =>
+        invoke("install_activity_opportunity_skill_draft", {
+          request: {
+            id: savedSkill.id,
+            revision: savedSkill.revision,
+            draftId: draft.id,
+          },
+        }),
+      ),
+    ).toContain("already exists");
+  });
+
   it("moves a skill draft from running to ready, saves it, and installs only on request", async () => {
     const invoke = createBrowserIpcMock({
       mode: "mock",
@@ -606,6 +698,129 @@ List each decision, owner, and next action. Keep open questions explicit.
         },
       }),
     ).toEqual(created);
+  });
+
+  it("keeps the live skill active while a revision is drafted, then replaces it on install", async () => {
+    const invoke = createBrowserIpcMock({
+      mode: "mock",
+      scenario: "ready",
+      apiPort: 3030,
+    });
+    const initial = invoke(
+      "get_activity_opportunities",
+    ) as BrowserOpportunitySnapshot;
+    const created = initial.skills.find(
+      (candidate) => candidate.id === "daily-activity-brief",
+    )!;
+    const original = created.createdSkill!;
+    expect(
+      commandError(() =>
+        invoke("save_activity_opportunity_skill_draft", {
+          request: {
+            id: created.id,
+            draftId: original.installedDraftId,
+            skillMd: original.skillMd,
+          },
+        }),
+      ),
+    ).toBe(
+      "An installed skill draft is immutable. Start a revision to change it.",
+    );
+
+    const disabled = invoke("set_activity_opportunity_skill_enabled", {
+      request: {
+        id: created.id,
+        revision: created.revision,
+        enabled: false,
+      },
+    }) as BrowserCreatedSkill;
+    expect(disabled).toMatchObject({
+      key: original.key,
+      skillMd: original.skillMd,
+      enabled: false,
+    });
+
+    const idempotentDisable = invoke("set_activity_opportunity_skill_enabled", {
+      request: {
+        id: created.id,
+        revision: created.revision,
+        enabled: false,
+      },
+    }) as BrowserCreatedSkill;
+    expect(idempotentDisable).toEqual(disabled);
+
+    const afterToggle = invoke(
+      "get_activity_opportunities",
+    ) as BrowserOpportunitySnapshot;
+    const toggled = afterToggle.skills.find(
+      (candidate) => candidate.id === created.id,
+    )!;
+    expect(toggled.revision).toBe(created.revision + 1);
+    const running = invoke("start_activity_opportunity_skill_draft", {
+      request: {
+        id: toggled.id,
+        revision: toggled.revision,
+        changeRequest: "Include the weekly growth delta.",
+      },
+    }) as BrowserSkillDraft;
+    const revisionChatBytes = invoke("plugin:fs|read_text_file", {
+      path: `/Users/screenpipe/.screenpipe/chats/${running.conversationId}.json`,
+    }) as Uint8Array;
+    const revisionChat = JSON.parse(
+      new TextDecoder().decode(revisionChatBytes),
+    ) as {
+      title: string;
+      messages: Array<{ role: string; content: string }>;
+    };
+    expect(revisionChat.title).toBe(
+      "Revise write a daily activity brief skill",
+    );
+    expect(
+      revisionChat.messages.find((message) => message.role === "user")?.content,
+    ).toBe("Revise this skill: Include the weekly growth delta.");
+    const whileDrafting = invoke(
+      "get_activity_opportunities",
+    ) as BrowserOpportunitySnapshot;
+    expect(
+      whileDrafting.skills.find((candidate) => candidate.id === created.id),
+    ).toMatchObject({
+      status: "created",
+      currentDraftId: running.id,
+      createdSkill: {
+        skillMd: original.skillMd,
+        enabled: false,
+      },
+    });
+
+    await Promise.resolve();
+    const readySnapshot = invoke(
+      "get_activity_opportunities",
+    ) as BrowserOpportunitySnapshot;
+    const readySkill = readySnapshot.skills.find(
+      (candidate) => candidate.id === created.id,
+    )!;
+    const readyDraft = readySkill.drafts.find(
+      (candidate) => candidate.id === running.id,
+    )!;
+    const installed = invoke("install_activity_opportunity_skill_draft", {
+      request: {
+        id: readySkill.id,
+        revision: readySkill.revision,
+        draftId: readyDraft.id,
+      },
+    }) as BrowserCreatedSkill;
+
+    expect(installed).toMatchObject({
+      key: original.key,
+      path: original.path,
+      createdAt: original.createdAt,
+      enabled: false,
+      installedDraftId: readyDraft.id,
+    });
+    expect(installed.skillMd).toContain(
+      "Requested adjustment: Include the weekly growth delta.",
+    );
+    expect(installed.sha256).not.toBe(original.sha256);
   });
 
   it("records an idempotent unfinished-work handoff to one chat", () => {

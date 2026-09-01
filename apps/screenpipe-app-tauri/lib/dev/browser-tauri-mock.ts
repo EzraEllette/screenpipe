@@ -275,13 +275,22 @@ type BrowserSkillDraft = {
   completedAt?: string | null;
 };
 
+type BrowserCreatedSkill = CreatedSkill & {
+  key: string;
+  sha256: string;
+  createdAt: string;
+  enabled: boolean;
+  installedDraftId?: string | null;
+};
+
 type BrowserSkillOpportunity = Omit<
   SkillOpportunity,
-  "status" | "drafts" | "currentDraftId"
+  "status" | "drafts" | "currentDraftId" | "createdSkill"
 > & {
   status: SkillOpportunity["status"] | "drafting";
   drafts: BrowserSkillDraft[];
   currentDraftId?: string | null;
+  createdSkill?: BrowserCreatedSkill | null;
 };
 
 type BrowserActivityOpportunitySnapshot = Omit<
@@ -309,11 +318,22 @@ type InstallSkillDraftRequest = {
   draftId: string;
 };
 
+type SetSkillEnabledRequest = {
+  id: string;
+  revision: number;
+  enabled: boolean;
+};
+
 const BROWSER_READY_DRAFT_ID = "browser-ready-mrr-draft";
 const BROWSER_READY_DRAFT_CONVERSATION_ID =
   "skill-draft-browser-ready-mrr-draft";
 const BROWSER_READY_DRAFT_PATH =
   "/Users/screenpipe/.screenpipe/skill-drafts/check-mrr/browser-ready-mrr-draft/SKILL.md";
+const BROWSER_CREATED_DRAFT_ID = "browser-installed-daily-brief-draft";
+const BROWSER_CREATED_DRAFT_CONVERSATION_ID =
+  "skill-draft-browser-installed-daily-brief-draft";
+const BROWSER_CREATED_DRAFT_PATH =
+  "/Users/screenpipe/.screenpipe/skill-drafts/daily-activity-brief/browser-installed-daily-brief-draft/SKILL.md";
 const BROWSER_READY_DRAFT_MARKDOWN = `---
 name: "check MRR across Stripe and PostHog"
 description: "Compare current MRR across Stripe and PostHog, then report any mismatch."
@@ -327,6 +347,8 @@ description: "Compare current MRR across Stripe and PostHog, then report any mis
 
 The check is complete when both sources and the comparison period are named.
 `;
+const BROWSER_CREATED_SKILL_MARKDOWN =
+  "---\nname: daily-activity-brief\ndescription: Turn the day into a concise source-backed recap.\n---\n\n# Daily activity brief\n\nReview the day, group completed outcomes, and link each claim to source activity.\n";
 
 function cloneActivityOpportunitySnapshot(
   snapshot: BrowserActivityOpportunitySnapshot,
@@ -513,6 +535,13 @@ function createBrowserDevActivityOpportunities(
     "Summarized the shipped change, checks, and review evidence.",
     ["GitHub", "Cursor"],
   );
+  addEvidence(
+    "browser-dev-daily-brief",
+    1_440,
+    "Write a daily activity brief",
+    "Grouped the day's completed outcomes and linked them to source activity.",
+    ["screenpipe"],
+  );
   const evidence = (...activityIds: string[]) =>
     activityIds.map((activityId) => structuredClone(evidenceById[activityId]));
 
@@ -684,15 +713,31 @@ function createBrowserDevActivityOpportunities(
           steps: ["Review activity", "Group outcomes", "Write the recap"],
           verification: "Each outcome links back to its source activity.",
         },
-        occurrences: [],
-        evidence: [],
+        occurrences: [{ activityIds: ["browser-dev-daily-brief"] }],
+        evidence: evidence("browser-dev-daily-brief"),
         supportingContexts: [],
         createdSkill: {
+          key: "daily-activity-brief",
           path: "/Users/screenpipe/.screenpipe/skills/daily-activity-brief/SKILL.md",
-          skillMd:
-            "---\nname: daily-activity-brief\ndescription: Turn the day into a concise source-backed recap.\n---\n\n# Daily activity brief\n\nReview the day, group completed outcomes, and link each claim to source activity.\n",
+          skillMd: BROWSER_CREATED_SKILL_MARKDOWN,
+          sha256: browserSkillSha256(BROWSER_CREATED_SKILL_MARKDOWN),
+          createdAt: at(1_440),
+          enabled: true,
+          installedDraftId: BROWSER_CREATED_DRAFT_ID,
         },
-        drafts: [],
+        drafts: [
+          {
+            id: BROWSER_CREATED_DRAFT_ID,
+            conversationId: BROWSER_CREATED_DRAFT_CONVERSATION_ID,
+            path: BROWSER_CREATED_DRAFT_PATH,
+            phase: "ready",
+            skillMd: BROWSER_CREATED_SKILL_MARKDOWN,
+            startedAt: at(1_445),
+            updatedAt: at(1_440),
+            completedAt: at(1_440),
+          },
+        ],
+        currentDraftId: BROWSER_CREATED_DRAFT_ID,
         edited: true,
       },
     ],
@@ -814,6 +859,18 @@ function browserDraftMarkdown(
   item: BrowserSkillOpportunity,
   changeRequest?: string | null,
 ) {
+  if (item.status === "created" && item.createdSkill) {
+    const current = parseBrowserSkillDraft(item.createdSkill.skillMd);
+    return parseBrowserSkillDraft(`---
+name: ${JSON.stringify(current.name)}
+description: ${JSON.stringify(current.description)}
+---
+
+${current.instructions}
+
+Requested adjustment: ${changeRequest?.trim() ?? ""}
+`).skillMd;
+  }
   const steps = item.blueprint.steps
     .map((step, index) => `${index + 1}. ${step.trim()}`)
     .join("\n");
@@ -985,15 +1042,37 @@ function browserSkillKey(name: string): string {
     .replace(/^-+|-+$/g, "");
 }
 
-function createBrowserDevSkill(item: BrowserSkillOpportunity): CreatedSkill {
+function browserSkillSha256(content: string): string {
+  let hash = 2166136261;
+  for (let index = 0; index < content.length; index += 1) {
+    hash ^= content.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return Array.from({ length: 8 }, (_, index) =>
+    ((hash ^ Math.imul(index + 1, 0x9e3779b1)) >>> 0)
+      .toString(16)
+      .padStart(8, "0")
+      .slice(-8),
+  ).join("");
+}
+
+function createBrowserDevSkill(
+  item: BrowserSkillOpportunity,
+  createdAt = new Date().toISOString(),
+): BrowserCreatedSkill {
   if (item.evidence.every((source) => source.excluded)) {
     throwCommandError("At least one activity must remain included");
   }
   const instructions = activityOpportunitySkillInstructions(item);
   const skillMd = `---\nname: ${JSON.stringify(item.name.trim())}\ndescription: ${JSON.stringify(item.description.trim())}\n---\n\n${instructions}\n`;
+  const key = browserSkillKey(item.name);
   return {
-    path: `/Users/screenpipe/.screenpipe/skills/${browserSkillKey(item.name)}/SKILL.md`,
+    key,
+    path: `/Users/screenpipe/.screenpipe/skills/${key}/SKILL.md`,
     skillMd,
+    sha256: browserSkillSha256(skillMd),
+    createdAt,
+    enabled: true,
   };
 }
 
@@ -1367,7 +1446,7 @@ export function createBrowserIpcMock(options: BrowserIpcMockOptions) {
         {
           id: `${BROWSER_READY_DRAFT_CONVERSATION_ID}-user`,
           role: "user",
-          content: "Create the check MRR across Stripe and PostHog skill",
+          content: "Create this skill",
           timestamp: readyDraftChatTimestamp - 1,
         },
         {
@@ -1387,8 +1466,41 @@ export function createBrowserIpcMock(options: BrowserIpcMockOptions) {
       rev: 2,
     }),
   );
+  const createdDraftChatTimestamp =
+    Date.parse(initialTimestamp) - 1_440 * 60_000;
+  chatFixtures.set(
+    `${chatsDir}/${BROWSER_CREATED_DRAFT_CONVERSATION_ID}.json`,
+    JSON.stringify({
+      id: BROWSER_CREATED_DRAFT_CONVERSATION_ID,
+      title: "Create write a daily activity brief skill",
+      titleSource: "fallback",
+      messages: [
+        {
+          id: `${BROWSER_CREATED_DRAFT_CONVERSATION_ID}-user`,
+          role: "user",
+          content: "Create this skill",
+          timestamp: createdDraftChatTimestamp - 1,
+        },
+        {
+          id: `${BROWSER_CREATED_DRAFT_CONVERSATION_ID}-assistant`,
+          role: "assistant",
+          content: BROWSER_CREATED_SKILL_MARKDOWN,
+          timestamp: createdDraftChatTimestamp,
+        },
+      ],
+      createdAt: createdDraftChatTimestamp - 1,
+      updatedAt: createdDraftChatTimestamp,
+      lastUserMessageAt: createdDraftChatTimestamp - 1,
+      lastContentAt: createdDraftChatTimestamp,
+      lastViewedAt: 0,
+      kind: "chat",
+      presetId: "screenpipe-cloud",
+      rev: 2,
+    }),
+  );
   const skillDraftFiles = new Map<string, string>([
     [BROWSER_READY_DRAFT_PATH, BROWSER_READY_DRAFT_MARKDOWN],
+    [BROWSER_CREATED_DRAFT_PATH, BROWSER_CREATED_SKILL_MARKDOWN],
   ]);
   let nextSkillDraftNumber = 1;
   let liveViews =
@@ -1405,8 +1517,16 @@ export function createBrowserIpcMock(options: BrowserIpcMockOptions) {
   );
   const createdSkills = new Map<
     string,
-    { created: CreatedSkill; content: string }
+    { created: BrowserCreatedSkill; content: string }
   >();
+  for (const item of activityOpportunities.skills) {
+    const created = item.createdSkill;
+    if (!created?.key) continue;
+    createdSkills.set(created.key, {
+      created: structuredClone(created),
+      content: created.skillMd,
+    });
+  }
 
   const getStore = (resourceId: number) => {
     let store = stores.get(resourceId);
@@ -1650,15 +1770,19 @@ export function createBrowserIpcMock(options: BrowserIpcMockOptions) {
         return chatsDir;
       case "read_viewer_file": {
         const path = String(input.path ?? "");
-        const skillDraft = skillDraftFiles.get(path);
-        if (skillDraft !== undefined) {
+        const skillDocument =
+          skillDraftFiles.get(path) ??
+          activityOpportunities.skills.find(
+            (skill) => skill.createdSkill?.path === path,
+          )?.createdSkill?.skillMd;
+        if (skillDocument !== undefined) {
           return {
             kind: "text",
-            text: skillDraft,
+            text: skillDocument,
             name: "SKILL.md",
             path,
             truncated: false,
-            total_bytes: new TextEncoder().encode(skillDraft).byteLength,
+            total_bytes: new TextEncoder().encode(skillDocument).byteLength,
           };
         }
         if (!path.endsWith("/imessage-sync/output/sync-summary.md")) {
@@ -1931,9 +2055,19 @@ export function createBrowserIpcMock(options: BrowserIpcMockOptions) {
             "Opportunity changed; reload it before starting the draft",
           );
         }
-        if (item.status !== "pending" && item.status !== "drafting") {
+        const revisingCreatedSkill = item.status === "created";
+        if (revisingCreatedSkill && !request.changeRequest?.trim()) {
           throwCommandError(
-            "Only pending or drafting skill opportunities can start a draft",
+            "A change request is required to revise a created skill",
+          );
+        }
+        if (
+          item.status !== "pending" &&
+          item.status !== "drafting" &&
+          !revisingCreatedSkill
+        ) {
+          throwCommandError(
+            "Only pending, drafting, or created skill opportunities can start a draft",
           );
         }
         requiredText("name", item.name);
@@ -1955,13 +2089,15 @@ export function createBrowserIpcMock(options: BrowserIpcMockOptions) {
         };
         const chatTimestamp = Date.now();
         const displayMessage = request.changeRequest?.trim()
-          ? `Revise the ${item.name.trim()} skill: ${request.changeRequest.trim()}`
-          : `Create the ${item.name.trim()} skill`;
+          ? `Revise this skill: ${request.changeRequest.trim()}`
+          : "Create this skill";
         chatFixtures.set(
           `${chatsDir}/${conversationId}.json`,
           JSON.stringify({
             id: conversationId,
-            title: `Create ${item.name.trim()} skill`,
+            title: request.changeRequest?.trim()
+              ? `Revise ${item.name.trim()} skill`
+              : `Create ${item.name.trim()} skill`,
             titleSource: "fallback",
             messages: [
               {
@@ -1987,7 +2123,7 @@ export function createBrowserIpcMock(options: BrowserIpcMockOptions) {
             rev: 1,
           }),
         );
-        item.status = "drafting";
+        if (!revisingCreatedSkill) item.status = "drafting";
         item.edited = true;
         item.currentDraftId = draftId;
         item.drafts.push(draft);
@@ -2044,8 +2180,18 @@ export function createBrowserIpcMock(options: BrowserIpcMockOptions) {
           (candidate) => candidate.id === request.id,
         );
         if (!item) throwCommandError("Skill opportunity was not found");
-        if (item.status !== "drafting") {
+        if (item.status !== "drafting" && item.status !== "created") {
           throwCommandError("Only an unfinished skill draft can be saved");
+        }
+        if (item.currentDraftId !== request.draftId) {
+          throwCommandError(
+            "Only the current skill draft can be changed or installed",
+          );
+        }
+        if (item.createdSkill?.installedDraftId === request.draftId) {
+          throwCommandError(
+            "An installed skill draft is immutable. Start a revision to change it.",
+          );
         }
         const draft = item.drafts.find(
           (candidate) => candidate.id === request.draftId,
@@ -2069,14 +2215,21 @@ export function createBrowserIpcMock(options: BrowserIpcMockOptions) {
           (candidate) => candidate.id === request.id,
         );
         if (!item) throwCommandError("Skill opportunity was not found");
-        if (item.createdSkill) return structuredClone(item.createdSkill);
+        if (item.createdSkill?.installedDraftId === request.draftId) {
+          return structuredClone(item.createdSkill);
+        }
         if (item.revision !== request.revision) {
           throwCommandError(
             "Opportunity changed; reload it before installing the skill",
           );
         }
-        if (item.status !== "drafting") {
+        if (item.status !== "drafting" && item.status !== "created") {
           throwCommandError("Only a reviewed skill draft can be installed");
+        }
+        if (item.currentDraftId !== request.draftId) {
+          throwCommandError(
+            "Only the current skill draft can be changed or installed",
+          );
         }
         const draft = item.drafts.find(
           (candidate) => candidate.id === request.draftId,
@@ -2088,18 +2241,26 @@ export function createBrowserIpcMock(options: BrowserIpcMockOptions) {
         const parsed = parseBrowserSkillDraft(
           skillDraftFiles.get(draft.path) ?? draft.skillMd,
         );
-        const key = browserSkillKey(parsed.name);
-        const created: CreatedSkill = {
-          path: `/Users/screenpipe/.screenpipe/skills/${key}/SKILL.md`,
+        const previous = item.createdSkill;
+        const key = previous?.key ?? browserSkillKey(parsed.name);
+        const created: BrowserCreatedSkill = {
+          key,
+          path:
+            previous?.path ??
+            `/Users/screenpipe/.screenpipe/skills/${key}/SKILL.md`,
           skillMd: parsed.skillMd,
+          sha256: browserSkillSha256(parsed.skillMd),
+          createdAt: previous?.createdAt ?? new Date().toISOString(),
+          enabled: previous?.enabled ?? true,
+          installedDraftId: draft.id,
         };
         const existing = createdSkills.get(key);
-        if (existing && existing.content !== created.skillMd) {
+        if (!previous && existing && existing.content !== created.skillMd) {
           throwCommandError(
             `skill '${key}' already exists; read it before deciding whether it is agent-owned and patchable`,
           );
         }
-        const result = existing?.created ?? created;
+        const result = previous ? created : (existing?.created ?? created);
         createdSkills.set(key, {
           created: structuredClone(result),
           content: result.skillMd,
@@ -2110,6 +2271,26 @@ export function createBrowserIpcMock(options: BrowserIpcMockOptions) {
         item.createdSkill = structuredClone(result);
         item.revision += 1;
         return structuredClone(result);
+      }
+      case "set_activity_opportunity_skill_enabled": {
+        const request = input.request as SetSkillEnabledRequest;
+        const item = activityOpportunities.skills.find(
+          (candidate) => candidate.id === request.id,
+        );
+        if (!item?.createdSkill || item.status !== "created") {
+          throwCommandError("Created skill was not found");
+        }
+        if (item.createdSkill.enabled === request.enabled) {
+          return structuredClone(item.createdSkill);
+        }
+        if (item.revision !== request.revision) {
+          throwCommandError(
+            "Opportunity changed; reload it before changing the skill",
+          );
+        }
+        item.createdSkill.enabled = request.enabled;
+        item.revision += 1;
+        return structuredClone(item.createdSkill);
       }
       case "create_activity_opportunity_skill": {
         const request = input.request as CreateActivityOpportunitySkillRequest;

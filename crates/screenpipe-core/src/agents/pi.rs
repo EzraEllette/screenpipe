@@ -20,6 +20,21 @@ use tracing::{debug, error, info, warn};
 
 static USER_SKILL_SYNC_LOCK: Mutex<()> = Mutex::new(());
 
+/// A regular marker file in a canonical skill directory disables that skill
+/// without deleting its document or provenance.
+pub const USER_SKILL_DISABLED_MARKER: &str = ".screenpipe-disabled";
+
+/// Names installed by Screenpipe itself in every Pi project. Canonical skill
+/// stores must reject the same names so an installed skill is never silently
+/// shadowed by a baseline copy.
+pub const PI_BASELINE_SKILL_NAMES: &[&str] = &[
+    "screenpipe-api",
+    "screenpipe-cli",
+    "screenpipe-chats",
+    "screenpipe-team",
+    "render-html-report",
+];
+
 fn user_skill_fingerprint(root: &Path) -> std::io::Result<String> {
     fn hash_dir(root: &Path, dir: &Path, hasher: &mut Sha256) -> std::io::Result<()> {
         let mut entries = std::fs::read_dir(dir)?.collect::<std::io::Result<Vec<_>>>()?;
@@ -882,21 +897,9 @@ impl PiExecutor {
     /// baseline (`screenpipe-api`/`-cli`/`-team`) and hand-authored skills and
     /// safely remove ones the user has since deleted from the store.
     const USER_SKILL_MARKER: &'static str = ".screenpipe-managed";
-
-    /// Baseline skills screenpipe writes into every session itself
-    /// ([`Self::ensure_screenpipe_skill`]).
-    /// A store entry under one of these names must never be mirrored: it would
-    /// clobber the real baseline and, once stamped with
-    /// [`Self::USER_SKILL_MARKER`], be deleted by a later sync. The desktop
-    /// importer already rejects these names; this guards any folder that reaches
-    /// the store another way.
-    const BASELINE_SKILL_NAMES: [&'static str; 5] = [
-        "screenpipe-api",
-        "screenpipe-cli",
-        "screenpipe-chats",
-        "screenpipe-team",
-        "render-html-report",
-    ];
+    const USER_SKILL_MARKER_LEGACY: &'static str = "mirrored from <data>/skills by screenpipe\n";
+    const USER_SKILL_MARKER_FINGERPRINT_PREFIX: &'static str =
+        "mirrored from <data>/skills by screenpipe\nfingerprint=";
 
     /// Mirror the user's imported skills from the global store
     /// (`<data_dir>/skills/<name>/`) into `project_dir/.pi/skills/` so every
@@ -913,6 +916,216 @@ impl PiExecutor {
     pub fn sync_user_skills(project_dir: &Path) -> Result<()> {
         let store = crate::paths::default_screenpipe_data_dir().join("skills");
         Self::sync_user_skills_from(&store, project_dir)
+    }
+
+    /// Immediately synchronize one canonical skill into an active Pi project.
+    /// Unlike the startup-wide best-effort pass, this user-triggered path
+    /// returns the relevant copy/removal failure so callers can avoid
+    /// persisting a toggle whose active mirror was not updated.
+    pub fn sync_user_skill_strict(project_dir: &Path, key: &str) -> Result<()> {
+        let store = crate::paths::default_screenpipe_data_dir().join("skills");
+        Self::sync_user_skill_strict_from(&store, project_dir, key)
+    }
+
+    fn mirror_user_skill(src: &Path, dest: &Path) -> std::io::Result<()> {
+        Self::mirror_user_skill_with_copy(src, dest, crate::paths::copy_dir_all)
+    }
+
+    fn mirror_user_skill_with_copy<Copy>(src: &Path, dest: &Path, copy: Copy) -> std::io::Result<()>
+    where
+        Copy: FnOnce(&Path, &Path) -> std::io::Result<()>,
+    {
+        let fingerprint = user_skill_fingerprint(src)?;
+        let marker = format!(
+            "{}{fingerprint}\n",
+            Self::USER_SKILL_MARKER_FINGERPRINT_PREFIX
+        );
+        let existing_marker = Self::verified_managed_user_skill_marker(dest)?;
+        if existing_marker.as_deref() == Some(marker.as_str()) {
+            return Ok(());
+        }
+
+        let parent = dest.parent().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "user skill mirror has no parent directory",
+            )
+        })?;
+        std::fs::create_dir_all(parent)?;
+        let key = dest.file_name().and_then(OsStr::to_str).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "user skill mirror has an invalid name",
+            )
+        })?;
+        let nonce = uuid::Uuid::new_v4().simple().to_string();
+        let staging = parent.join(format!(".{key}.screenpipe-stage-{nonce}"));
+        let backup = parent.join(format!(".{key}.screenpipe-backup-{nonce}"));
+        let staged = (|| -> std::io::Result<()> {
+            copy(src, &staging)?;
+            std::fs::write(staging.join(Self::USER_SKILL_MARKER), &marker)?;
+            Ok(())
+        })();
+        if let Err(error) = staged {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(error);
+        }
+
+        let had_destination = existing_marker.is_some();
+        if had_destination {
+            if let Err(error) = std::fs::rename(dest, &backup) {
+                let _ = std::fs::remove_dir_all(&staging);
+                return Err(error);
+            }
+        }
+        if let Err(error) = std::fs::rename(&staging, dest) {
+            let rollback = if had_destination {
+                std::fs::rename(&backup, dest)
+            } else {
+                Ok(())
+            };
+            let _ = std::fs::remove_dir_all(&staging);
+            return match rollback {
+                Ok(()) => Err(error),
+                Err(rollback_error) => Err(std::io::Error::other(format!(
+                    "{error}; restoring the previous managed mirror also failed: {rollback_error}"
+                ))),
+            };
+        }
+        if had_destination {
+            std::fs::remove_dir_all(backup)?;
+        }
+        Ok(())
+    }
+
+    fn verified_managed_user_skill_marker(dest: &Path) -> std::io::Result<Option<String>> {
+        let metadata = match std::fs::symlink_metadata(dest) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "user skill mirror destination is not a regular managed directory",
+            ));
+        }
+
+        let marker_path = dest.join(Self::USER_SKILL_MARKER);
+        let marker_metadata = match std::fs::symlink_metadata(&marker_path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    "user skill mirror destination is not screenpipe-managed",
+                ));
+            }
+            Err(error) => return Err(error),
+        };
+        if marker_metadata.file_type().is_symlink() || !marker_metadata.is_file() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "user skill mirror marker is not a regular file",
+            ));
+        }
+        let marker = std::fs::read_to_string(marker_path)?;
+        let valid = marker == Self::USER_SKILL_MARKER_LEGACY
+            || marker
+                .strip_prefix(Self::USER_SKILL_MARKER_FINGERPRINT_PREFIX)
+                .and_then(|value| value.strip_suffix('\n'))
+                .is_some_and(|fingerprint| {
+                    fingerprint.len() == 64
+                        && fingerprint
+                            .bytes()
+                            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                });
+        if !valid {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "user skill mirror marker is invalid",
+            ));
+        }
+        Ok(Some(marker))
+    }
+
+    fn remove_managed_user_skill(dest: &Path) -> std::io::Result<()> {
+        if Self::verified_managed_user_skill_marker(dest)?.is_some() {
+            std::fs::remove_dir_all(dest)?;
+        }
+        Ok(())
+    }
+
+    fn sync_user_skill_strict_from(store: &Path, project_dir: &Path, key: &str) -> Result<()> {
+        Self::sync_user_skill_strict_from_with(
+            store,
+            project_dir,
+            key,
+            Self::mirror_user_skill,
+            Self::remove_managed_user_skill,
+        )
+    }
+
+    fn sync_user_skill_strict_from_with<Copy, Remove>(
+        store: &Path,
+        project_dir: &Path,
+        key: &str,
+        copy: Copy,
+        remove: Remove,
+    ) -> Result<()>
+    where
+        Copy: FnOnce(&Path, &Path) -> std::io::Result<()>,
+        Remove: FnOnce(&Path) -> std::io::Result<()>,
+    {
+        if key.is_empty()
+            || key.starts_with('.')
+            || Path::new(key).components().count() != 1
+            || Path::new(key).file_name() != Some(OsStr::new(key))
+        {
+            return Err(anyhow!("invalid user skill key"));
+        }
+        if PI_BASELINE_SKILL_NAMES.contains(&key) {
+            return Err(anyhow!("baseline skill '{key}' cannot be synchronized"));
+        }
+
+        let _sync_guard = USER_SKILL_SYNC_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let src = store.join(key);
+        let dest = project_dir.join(".pi").join("skills").join(key);
+        let src_metadata = match std::fs::symlink_metadata(&src) {
+            Ok(metadata) => Some(metadata),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+        let enabled_source = if let Some(metadata) = src_metadata {
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(anyhow!(
+                    "canonical user skill '{key}' is not a regular directory"
+                ));
+            }
+            let skill_path = src.join("SKILL.md");
+            let skill_metadata = std::fs::symlink_metadata(&skill_path)?;
+            if skill_metadata.file_type().is_symlink() || !skill_metadata.is_file() {
+                return Err(anyhow!(
+                    "canonical user skill '{key}' has no regular SKILL.md"
+                ));
+            }
+            match std::fs::symlink_metadata(src.join(USER_SKILL_DISABLED_MARKER)) {
+                Ok(_) => false,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+                Err(error) => return Err(error.into()),
+            }
+        } else {
+            false
+        };
+
+        if enabled_source {
+            copy(&src, &dest)
+                .map_err(|error| anyhow!("failed to mirror user skill '{key}': {error}"))
+        } else {
+            remove(&dest)
+                .map_err(|error| anyhow!("failed to remove mirrored user skill '{key}': {error}"))
+        }
     }
 
     /// Implementation of [`Self::sync_user_skills`] with the store path passed
@@ -938,28 +1151,19 @@ impl PiExecutor {
                 // Never let a store entry shadow a baseline skill screenpipe
                 // writes itself — that would clobber it and, once marked, risk
                 // its deletion on a later sync.
-                if Self::BASELINE_SKILL_NAMES.contains(&key.as_str()) {
+                if PI_BASELINE_SKILL_NAMES.contains(&key.as_str()) {
+                    continue;
+                }
+                // Disabled store skills remain installed and reviewable, but
+                // must not be copied into a Pi session. Treat any filesystem
+                // entry at the marker path as disabled so a malformed or
+                // symlinked marker fails closed.
+                if std::fs::symlink_metadata(src.join(USER_SKILL_DISABLED_MARKER)).is_ok() {
                     continue;
                 }
                 store_keys.insert(key.clone());
                 let dest = dest_root.join(&key);
-                let copy = (|| -> std::io::Result<()> {
-                    let fingerprint = user_skill_fingerprint(&src)?;
-                    let marker = format!(
-                        "mirrored from <data>/skills by screenpipe\nfingerprint={fingerprint}\n"
-                    );
-                    if std::fs::read_to_string(dest.join(Self::USER_SKILL_MARKER))
-                        .is_ok_and(|existing| existing == marker)
-                    {
-                        return Ok(());
-                    }
-                    if dest.exists() {
-                        std::fs::remove_dir_all(&dest)?;
-                    }
-                    crate::paths::copy_dir_all(&src, &dest)?;
-                    std::fs::write(dest.join(Self::USER_SKILL_MARKER), marker)?;
-                    Ok(())
-                })();
+                let copy = Self::mirror_user_skill(&src, &dest);
                 match copy {
                     Ok(()) => {}
                     Err(e) => warn!("failed to mirror user skill {:?}: {}", src, e),
@@ -981,10 +1185,20 @@ impl PiExecutor {
                 if store_keys.contains(&key) {
                     continue;
                 }
-                if dir.join(Self::USER_SKILL_MARKER).exists() {
-                    if let Err(e) = std::fs::remove_dir_all(&dir) {
-                        warn!("failed to remove stale user skill {:?}: {}", dir, e);
+                // Most Pi projects also contain baseline or hand-authored
+                // directories. Only attempt stale cleanup when a managed
+                // marker exists; strict user-triggered removal still validates
+                // that marker and surfaces ownership conflicts.
+                match std::fs::symlink_metadata(dir.join(Self::USER_SKILL_MARKER)) {
+                    Ok(_) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(error) => {
+                        warn!("failed to inspect stale user skill {:?}: {}", dir, error);
+                        continue;
                     }
+                }
+                if let Err(e) = Self::remove_managed_user_skill(&dir) {
+                    warn!("failed to remove stale user skill {:?}: {}", dir, e);
                 }
             }
         }
@@ -4785,6 +4999,429 @@ mod tests {
 
         // Missing store dir is a no-op, not an error.
         PiExecutor::sync_user_skills_from(&tmp.path().join("nope"), &project).unwrap();
+    }
+
+    #[test]
+    fn startup_skill_sync_skips_a_foreign_same_key_destination() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = tmp.path().join("skills");
+        let project = tmp.path().join("project");
+        let source = store.join("review");
+        let destination = project.join(".pi").join("skills").join("review");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("SKILL.md"), "canonical").unwrap();
+        std::fs::create_dir_all(&destination).unwrap();
+        std::fs::write(destination.join("SKILL.md"), "hand-authored").unwrap();
+
+        PiExecutor::sync_user_skills_from(&store, &project).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(destination.join("SKILL.md")).unwrap(),
+            "hand-authored"
+        );
+        assert!(!destination.join(PiExecutor::USER_SKILL_MARKER).exists());
+    }
+
+    #[test]
+    fn startup_stale_cleanup_skips_unmarked_and_invalidly_marked_foreign_skills() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = tmp.path().join("skills");
+        let project = tmp.path().join("project");
+        let skills = project.join(".pi").join("skills");
+        let unmarked = skills.join("hand-authored");
+        let invalidly_marked = skills.join("forged");
+        std::fs::create_dir_all(&store).unwrap();
+        std::fs::create_dir_all(&unmarked).unwrap();
+        std::fs::write(unmarked.join("SKILL.md"), "keep unmarked").unwrap();
+        std::fs::create_dir_all(&invalidly_marked).unwrap();
+        std::fs::write(invalidly_marked.join("SKILL.md"), "keep forged").unwrap();
+        std::fs::write(
+            invalidly_marked.join(PiExecutor::USER_SKILL_MARKER),
+            "not a screenpipe marker",
+        )
+        .unwrap();
+
+        PiExecutor::sync_user_skills_from(&store, &project).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(unmarked.join("SKILL.md")).unwrap(),
+            "keep unmarked"
+        );
+        assert_eq!(
+            std::fs::read_to_string(invalidly_marked.join("SKILL.md")).unwrap(),
+            "keep forged"
+        );
+    }
+
+    #[test]
+    fn sync_user_skills_updates_an_existing_active_chat_mirror_on_toggle() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = tmp.path().join("skills");
+        let active_chat = tmp.path().join("pi-chat");
+        let source = store.join("review");
+        let mirrored = active_chat.join(".pi").join("skills").join("review");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("SKILL.md"), "---\nname: review\n---\noriginal").unwrap();
+
+        PiExecutor::sync_user_skill_strict_from(&store, &active_chat, "review").unwrap();
+        assert!(mirrored.join("SKILL.md").is_file());
+
+        std::fs::write(
+            source.join(USER_SKILL_DISABLED_MARKER),
+            "disabled by screenpipe\n",
+        )
+        .unwrap();
+        PiExecutor::sync_user_skill_strict_from(&store, &active_chat, "review").unwrap();
+        assert!(!mirrored.exists());
+
+        std::fs::remove_file(source.join(USER_SKILL_DISABLED_MARKER)).unwrap();
+        std::fs::write(source.join("SKILL.md"), "---\nname: review\n---\nrefreshed").unwrap();
+        PiExecutor::sync_user_skill_strict_from(&store, &active_chat, "review").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(mirrored.join("SKILL.md")).unwrap(),
+            "---\nname: review\n---\nrefreshed"
+        );
+    }
+
+    #[test]
+    fn strict_reenable_preserves_a_foreign_skill_directory() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = tmp.path().join("skills");
+        let active_chat = tmp.path().join("pi-chat");
+        let source = store.join("review");
+        let destination = active_chat.join(".pi").join("skills").join("review");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("SKILL.md"), "canonical").unwrap();
+        std::fs::create_dir_all(&destination).unwrap();
+        std::fs::write(destination.join("SKILL.md"), "hand-authored").unwrap();
+        std::fs::write(destination.join("keep.txt"), "keep").unwrap();
+
+        let error =
+            PiExecutor::sync_user_skill_strict_from(&store, &active_chat, "review").unwrap_err();
+
+        assert!(error.to_string().contains("not screenpipe-managed"));
+        assert_eq!(
+            std::fs::read_to_string(destination.join("SKILL.md")).unwrap(),
+            "hand-authored"
+        );
+        assert_eq!(
+            std::fs::read_to_string(destination.join("keep.txt")).unwrap(),
+            "keep"
+        );
+    }
+
+    #[test]
+    fn strict_reenable_preserves_a_foreign_skill_file() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = tmp.path().join("skills");
+        let active_chat = tmp.path().join("pi-chat");
+        let source = store.join("review");
+        let destination = active_chat.join(".pi").join("skills").join("review");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("SKILL.md"), "canonical").unwrap();
+        std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        std::fs::write(&destination, "hand-authored file").unwrap();
+
+        let error =
+            PiExecutor::sync_user_skill_strict_from(&store, &active_chat, "review").unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("not a regular managed directory"));
+        assert_eq!(
+            std::fs::read_to_string(&destination).unwrap(),
+            "hand-authored file"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn strict_reenable_preserves_a_foreign_skill_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = tmp.path().join("skills");
+        let active_chat = tmp.path().join("pi-chat");
+        let source = store.join("review");
+        let destination = active_chat.join(".pi").join("skills").join("review");
+        let foreign = tmp.path().join("foreign-review");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("SKILL.md"), "canonical").unwrap();
+        std::fs::create_dir_all(&foreign).unwrap();
+        std::fs::write(foreign.join("SKILL.md"), "hand-authored").unwrap();
+        std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        symlink(&foreign, &destination).unwrap();
+
+        let error =
+            PiExecutor::sync_user_skill_strict_from(&store, &active_chat, "review").unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("not a regular managed directory"));
+        assert!(std::fs::symlink_metadata(&destination)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            std::fs::read_to_string(foreign.join("SKILL.md")).unwrap(),
+            "hand-authored"
+        );
+    }
+
+    #[test]
+    fn strict_disable_preserves_a_directory_with_an_invalid_managed_marker() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = tmp.path().join("skills");
+        let active_chat = tmp.path().join("pi-chat");
+        let source = store.join("review");
+        let destination = active_chat.join(".pi").join("skills").join("review");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("SKILL.md"), "canonical").unwrap();
+        std::fs::write(
+            source.join(USER_SKILL_DISABLED_MARKER),
+            "disabled by screenpipe\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(&destination).unwrap();
+        std::fs::write(destination.join("SKILL.md"), "hand-authored").unwrap();
+        std::fs::write(
+            destination.join(PiExecutor::USER_SKILL_MARKER),
+            "forged marker",
+        )
+        .unwrap();
+
+        let error =
+            PiExecutor::sync_user_skill_strict_from(&store, &active_chat, "review").unwrap_err();
+
+        assert!(error.to_string().contains("marker is invalid"));
+        assert_eq!(
+            std::fs::read_to_string(destination.join("SKILL.md")).unwrap(),
+            "hand-authored"
+        );
+        assert!(destination.join(PiExecutor::USER_SKILL_MARKER).is_file());
+    }
+
+    #[test]
+    fn strict_disable_preserves_a_foreign_skill_file() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = tmp.path().join("skills");
+        let active_chat = tmp.path().join("pi-chat");
+        let source = store.join("review");
+        let destination = active_chat.join(".pi").join("skills").join("review");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("SKILL.md"), "canonical").unwrap();
+        std::fs::write(
+            source.join(USER_SKILL_DISABLED_MARKER),
+            "disabled by screenpipe\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        std::fs::write(&destination, "hand-authored file").unwrap();
+
+        let error =
+            PiExecutor::sync_user_skill_strict_from(&store, &active_chat, "review").unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("not a regular managed directory"));
+        assert_eq!(
+            std::fs::read_to_string(&destination).unwrap(),
+            "hand-authored file"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn strict_disable_preserves_a_foreign_skill_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = tmp.path().join("skills");
+        let active_chat = tmp.path().join("pi-chat");
+        let source = store.join("review");
+        let destination = active_chat.join(".pi").join("skills").join("review");
+        let foreign = tmp.path().join("foreign-review");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("SKILL.md"), "canonical").unwrap();
+        std::fs::write(
+            source.join(USER_SKILL_DISABLED_MARKER),
+            "disabled by screenpipe\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(&foreign).unwrap();
+        std::fs::write(foreign.join("SKILL.md"), "hand-authored").unwrap();
+        std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        symlink(&foreign, &destination).unwrap();
+
+        let error =
+            PiExecutor::sync_user_skill_strict_from(&store, &active_chat, "review").unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("not a regular managed directory"));
+        assert!(std::fs::symlink_metadata(&destination)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            std::fs::read_to_string(foreign.join("SKILL.md")).unwrap(),
+            "hand-authored"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn strict_disable_preserves_a_directory_with_a_symlinked_managed_marker() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = tmp.path().join("skills");
+        let active_chat = tmp.path().join("pi-chat");
+        let source = store.join("review");
+        let destination = active_chat.join(".pi").join("skills").join("review");
+        let marker_target = tmp.path().join("marker-target");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("SKILL.md"), "canonical").unwrap();
+        std::fs::write(
+            source.join(USER_SKILL_DISABLED_MARKER),
+            "disabled by screenpipe\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(&destination).unwrap();
+        std::fs::write(destination.join("SKILL.md"), "hand-authored").unwrap();
+        std::fs::write(&marker_target, PiExecutor::USER_SKILL_MARKER_LEGACY).unwrap();
+        symlink(
+            &marker_target,
+            destination.join(PiExecutor::USER_SKILL_MARKER),
+        )
+        .unwrap();
+
+        let error =
+            PiExecutor::sync_user_skill_strict_from(&store, &active_chat, "review").unwrap_err();
+
+        assert!(error.to_string().contains("marker is not a regular file"));
+        assert_eq!(
+            std::fs::read_to_string(destination.join("SKILL.md")).unwrap(),
+            "hand-authored"
+        );
+    }
+
+    #[test]
+    fn strict_reenable_replaces_a_verified_managed_mirror() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = tmp.path().join("skills");
+        let active_chat = tmp.path().join("pi-chat");
+        let source = store.join("review");
+        let destination = active_chat.join(".pi").join("skills").join("review");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("SKILL.md"), "original").unwrap();
+        PiExecutor::sync_user_skill_strict_from(&store, &active_chat, "review").unwrap();
+        std::fs::write(destination.join("stale.txt"), "remove me").unwrap();
+        std::fs::write(
+            destination.join(PiExecutor::USER_SKILL_MARKER),
+            PiExecutor::USER_SKILL_MARKER_LEGACY,
+        )
+        .unwrap();
+        std::fs::write(source.join("SKILL.md"), "updated").unwrap();
+
+        PiExecutor::sync_user_skill_strict_from(&store, &active_chat, "review").unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(destination.join("SKILL.md")).unwrap(),
+            "updated"
+        );
+        assert!(!destination.join("stale.txt").exists());
+        assert!(destination.join(PiExecutor::USER_SKILL_MARKER).is_file());
+    }
+
+    #[test]
+    fn partial_copy_failure_preserves_managed_mirror_and_retry_succeeds() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = tmp.path().join("skills");
+        let active_chat = tmp.path().join("pi-chat");
+        let source = store.join("review");
+        let destination = active_chat.join(".pi").join("skills").join("review");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("SKILL.md"), "original").unwrap();
+        PiExecutor::sync_user_skill_strict_from(&store, &active_chat, "review").unwrap();
+        std::fs::write(source.join("SKILL.md"), "updated").unwrap();
+
+        let error =
+            PiExecutor::mirror_user_skill_with_copy(&source, &destination, |_source, staging| {
+                std::fs::create_dir_all(staging)?;
+                std::fs::write(staging.join("SKILL.md"), "partial")?;
+                Err(std::io::Error::other("injected partial copy failure"))
+            })
+            .unwrap_err();
+
+        assert!(error.to_string().contains("injected partial copy failure"));
+        assert_eq!(
+            std::fs::read_to_string(destination.join("SKILL.md")).unwrap(),
+            "original"
+        );
+        assert!(destination.join(PiExecutor::USER_SKILL_MARKER).is_file());
+        assert!(std::fs::read_dir(destination.parent().unwrap())
+            .unwrap()
+            .all(|entry| !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains("screenpipe-stage")));
+
+        PiExecutor::sync_user_skill_strict_from(&store, &active_chat, "review").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(destination.join("SKILL.md")).unwrap(),
+            "updated"
+        );
+    }
+
+    #[test]
+    fn strict_user_skill_sync_propagates_enable_copy_failure() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = tmp.path().join("skills");
+        let active_chat = tmp.path().join("pi-chat");
+        let source = store.join("review");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("SKILL.md"), "---\nname: review\n---\noriginal").unwrap();
+
+        let error = PiExecutor::sync_user_skill_strict_from_with(
+            &store,
+            &active_chat,
+            "review",
+            |_source, _destination| Err(std::io::Error::other("injected enable copy failure")),
+            |_destination| panic!("enabled skill must not use the removal path"),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("injected enable copy failure"));
+    }
+
+    #[test]
+    fn strict_user_skill_sync_propagates_disable_removal_failure() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = tmp.path().join("skills");
+        let active_chat = tmp.path().join("pi-chat");
+        let source = store.join("review");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("SKILL.md"), "---\nname: review\n---\noriginal").unwrap();
+        std::fs::write(
+            source.join(USER_SKILL_DISABLED_MARKER),
+            "disabled by screenpipe\n",
+        )
+        .unwrap();
+
+        let error = PiExecutor::sync_user_skill_strict_from_with(
+            &store,
+            &active_chat,
+            "review",
+            |_source, _destination| panic!("disabled skill must not use the copy path"),
+            |_destination| Err(std::io::Error::other("injected disable removal failure")),
+        )
+        .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("injected disable removal failure"));
     }
 
     /// Verifies that `from_utf8_lossy` handles invalid UTF-8 gracefully.

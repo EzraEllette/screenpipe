@@ -16,9 +16,12 @@ import {
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
+import { normalizeActivityOpportunityCreatedSkill } from "@/components/skills/activity-opportunity-created-skill";
 import {
   openChatConversationInCurrentChatSurface,
+  showChatWithPrefill,
   type ChatPrefillData,
 } from "@/lib/chat-utils";
 import { useTauriEvent } from "@/lib/hooks/use-tauri-event";
@@ -144,6 +147,19 @@ function currentSkillDraft(skill: SkillOpportunity) {
   );
 }
 
+function managedCreatedSkill(skill: SkillOpportunity) {
+  return normalizeActivityOpportunityCreatedSkill(skill.createdSkill);
+}
+
+function installedSkillDraft(skill: SkillOpportunity) {
+  const created = managedCreatedSkill(skill);
+  const drafts = skill.drafts ?? [];
+  return (
+    drafts.find((draft) => draft.id === created?.installedDraftId) ??
+    currentSkillDraft(skill)
+  );
+}
+
 function formatMoment(value: string): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
@@ -152,6 +168,16 @@ function formatMoment(value: string): string {
     day: "numeric",
     hour: "numeric",
     minute: "2-digit",
+  }).format(date);
+}
+
+function formatCreatedDate(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
   }).format(date);
 }
 
@@ -465,6 +491,9 @@ export function BrainOpportunities({
     Record<string, Promise<ActivityOpportunitySnapshot | null>>
   >({});
   const [creatingSkillId, setCreatingSkillId] = useState<string | null>(null);
+  const [updatingCreatedSkillIds, setUpdatingCreatedSkillIds] = useState<
+    Set<string>
+  >(() => new Set());
   const [startingTaskId, setStartingTaskId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
 
@@ -813,8 +842,40 @@ export function BrainOpportunities({
     );
   };
 
+  const openCreatedSkill = async (filePreviewPath: string) => {
+    await showChatWithPrefill({
+      context: "",
+      source: "activity-opportunity-created-skill",
+      useHomeChat: true,
+      filePreviewPath,
+    });
+  };
+
   const openSkillDetail = (id: string) => {
     const skill = snapshotRef.current?.skills.find((item) => item.id === id);
+    const created = skill ? managedCreatedSkill(skill) : null;
+    if (skill?.status === "created" && created) {
+      const activeDraft = currentSkillDraft(skill);
+      if (activeDraft && activeDraft.id !== created.installedDraftId) {
+        void openSkillDraftChat(
+          activeDraft.conversationId,
+          activeDraft.path,
+        ).catch((error) => setActionError(errorMessage(error)));
+        return;
+      }
+      const installedDraft = installedSkillDraft(skill);
+      if (installedDraft) {
+        void openSkillDraftChat(
+          installedDraft.conversationId,
+          created.path,
+        ).catch((error) => setActionError(errorMessage(error)));
+      } else {
+        void openCreatedSkill(created.path).catch((error) =>
+          setActionError(errorMessage(error)),
+        );
+      }
+      return;
+    }
     const activeDraft = skill ? currentSkillDraft(skill) : undefined;
     if (skill?.status === "drafting" && activeDraft) {
       void openSkillDraftChat(activeDraft.conversationId, activeDraft.path);
@@ -987,6 +1048,54 @@ export function BrainOpportunities({
       setActionError(errorMessage(error));
     } finally {
       setCreatingSkillId(null);
+    }
+  };
+
+  const setCreatedSkillEnabled = async (
+    skill: SkillOpportunity,
+    enabled: boolean,
+  ) => {
+    setUpdatingCreatedSkillIds((current) => new Set(current).add(skill.id));
+    setActionError(null);
+    try {
+      const current = snapshotRef.current?.skills.find(
+        (item) => item.id === skill.id,
+      );
+      if (!current) throw new Error("Created skill was not found");
+      const currentCreatedSkill = managedCreatedSkill(current);
+      if (!currentCreatedSkill) throw new Error("Created skill was not found");
+      const updated = await commandData(
+        commands.setActivityOpportunitySkillEnabled({
+          id: current.id,
+          revision: current.revision,
+          enabled,
+        }),
+      );
+      const changed =
+        (updated.enabled ?? enabled) !== currentCreatedSkill.enabled;
+      const latest = snapshotRef.current;
+      if (latest) {
+        acceptSnapshot({
+          ...latest,
+          skills: latest.skills.map((item) =>
+            item.id === current.id && item.revision === current.revision
+              ? {
+                  ...item,
+                  revision: item.revision + (changed ? 1 : 0),
+                  createdSkill: updated,
+                }
+              : item,
+          ),
+        });
+      }
+    } catch (error) {
+      setActionError(errorMessage(error));
+    } finally {
+      setUpdatingCreatedSkillIds((current) => {
+        const next = new Set(current);
+        next.delete(skill.id);
+        return next;
+      });
     }
   };
 
@@ -1167,6 +1276,51 @@ export function BrainOpportunities({
     );
   };
 
+  const renderCreatedSkillRow = (skill: SkillOpportunity) => {
+    const created = managedCreatedSkill(skill);
+    if (!created) return null;
+    const updating = updatingCreatedSkillIds.has(skill.id);
+
+    return (
+      <div
+        key={skill.id}
+        className="flex items-stretch border-b border-border bg-background transition-colors duration-150 hover:bg-muted/40"
+      >
+        <button
+          type="button"
+          id={`skill-opportunity-row-${skill.id}`}
+          data-testid={`skill-opportunity-${skill.id}`}
+          onClick={() => openSkillDetail(skill.id)}
+          className="min-w-0 flex-1 px-4 py-3.5 text-left text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-foreground"
+        >
+          <div className="flex items-center justify-between gap-4">
+            <h3 className="truncate text-sm font-medium lowercase leading-snug">
+              {skill.name}
+            </h3>
+            <span className="shrink-0 font-mono text-[9px] uppercase tracking-wide text-muted-foreground">
+              {formatCreatedDate(created.createdAt)}
+            </span>
+          </div>
+          <p className="mt-1 line-clamp-1 max-w-2xl text-xs leading-relaxed text-muted-foreground">
+            {skill.description}
+          </p>
+        </button>
+        <label className="flex w-[92px] shrink-0 cursor-pointer flex-col items-end justify-center gap-1.5 px-3 font-mono text-[9px] uppercase tracking-wide text-muted-foreground">
+          <span>{created.enabled ? "enabled" : "disabled"}</span>
+          <Switch
+            checked={created.enabled}
+            disabled={updating}
+            aria-label={`${created.enabled ? "disable" : "enable"} ${skill.name}`}
+            onCheckedChange={(enabled) =>
+              void setCreatedSkillEnabled(skill, enabled)
+            }
+            className="h-5 w-9 [&>span]:h-3.5 [&>span]:w-3.5 [&>span]:data-[state=checked]:translate-x-4"
+          />
+        </label>
+      </div>
+    );
+  };
+
   return (
     <section
       data-testid="brain-opportunities"
@@ -1180,6 +1334,15 @@ export function BrainOpportunities({
           </h2>
         </div>
       </div>
+
+      {group === "created" && actionError ? (
+        <p
+          role="alert"
+          className="mx-auto mt-2 w-full max-w-3xl text-xs text-destructive"
+        >
+          {actionError}
+        </p>
+      ) : null}
 
       {hasAnyData && analysisState !== "ready" && (
         <p
@@ -1265,7 +1428,7 @@ export function BrainOpportunities({
               )}
             >
               {group === "created" ? (
-                createdSkills.map((skill) => renderSkillRow(skill, false))
+                createdSkills.map(renderCreatedSkillRow)
               ) : (
                 <>
                   {continueSkills.length > 0 && (
