@@ -25,6 +25,8 @@ export const TRIAL_ACTIVATION_UNLOCKED_STEP =
   "trial-activation-v1-unlocked";
 export const TRIAL_ACTIVATION_CHECKOUT_STATE_KEY =
   "screenpipe:trial-activation-checkout-state:v1";
+export const TRIAL_ACTIVATION_ASSIGNMENT_SESSION_KEY =
+  "screenpipe_trial_activation_assignment_v1";
 
 export type TrialActivationState =
   | "inactive"

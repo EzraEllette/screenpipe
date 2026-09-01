@@ -24,6 +24,7 @@ import { onboardingFunnel } from "@/lib/analytics/onboarding-funnel";
 import type { AppUser } from "@/lib/app-entitlement";
 import {
   isTrialActivationEligible,
+  TRIAL_ACTIVATION_ASSIGNMENT_SESSION_KEY,
   TRIAL_ACTIVATION_EXPERIMENT_FLAG,
   TRIAL_ACTIVATION_DEV_FORCE,
   TRIAL_ACTIVATION_CHECKOUT_STATE_KEY,
@@ -57,8 +58,6 @@ type SlideKey =
 const ONBOARDING_WINDOW_SIZE = { width: 500, height: 680 };
 const FINAL_STEP_RETRY_DELAY_MS = 300;
 const TRIAL_ACTIVATION_ASSIGNMENT_TIMEOUT_MS = 5_000;
-const TRIAL_ACTIVATION_ASSIGNMENT_SESSION_KEY =
-  "screenpipe_trial_activation_assignment_v1";
 
 type TrialActivationAssignment = {
   variant: string;
@@ -691,7 +690,6 @@ export default function OnboardingPage() {
                 ? "dev_force"
                 : effectiveTrialActivationAssignment?.source,
               eligible_new_install: true,
-              email: user?.email ?? null,
               decision_metric: "mrr_per_eligible_new_install_day_12",
             },
             { send_instantly: true },
@@ -738,7 +736,6 @@ export default function OnboardingPage() {
     trialActivationAssignmentResolved,
     trialActivationVariant,
     usesSummaryFirstTrial,
-    user?.email,
     visibleOrder,
     wasTrialActivationEligible,
   ]);

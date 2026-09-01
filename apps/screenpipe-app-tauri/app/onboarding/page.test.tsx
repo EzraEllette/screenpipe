@@ -188,7 +188,10 @@ vi.mock("posthog-js", () => ({
 }));
 
 import OnboardingPage from "./page";
-import { TRIAL_ACTIVATION_CHECKOUT_STATE_KEY } from "@/lib/first-run/trial-activation";
+import {
+  TRIAL_ACTIVATION_ASSIGNMENT_SESSION_KEY,
+  TRIAL_ACTIVATION_CHECKOUT_STATE_KEY,
+} from "@/lib/first-run/trial-activation";
 
 describe("enterprise onboarding authentication", () => {
   beforeEach(() => {
@@ -550,7 +553,7 @@ describe("enterprise onboarding authentication", () => {
     mocks.enterprisePolicy.isManagedDeployment = false;
     mocks.trialActivationVariant = "summary_first";
     window.sessionStorage.setItem(
-      "screenpipe_trial_activation_assignment_v1",
+      TRIAL_ACTIVATION_ASSIGNMENT_SESSION_KEY,
       "control",
     );
     onboardingData.trialActivationFreshInstall = true;
@@ -603,10 +606,14 @@ describe("enterprise onboarding authentication", () => {
       expect.objectContaining({
         variant: "summary_first",
         eligible_new_install: true,
-        email: "new@example.com",
       }),
       { send_instantly: true },
     );
+    expect(
+      mocks.capture.mock.calls.find(
+        ([event]) => event === "trial_activation_experiment_enrolled",
+      )?.[1],
+    ).not.toHaveProperty("email");
     expect(mocks.completeOnboarding).toHaveBeenCalledWith({
       method: "setup_finished",
     });
