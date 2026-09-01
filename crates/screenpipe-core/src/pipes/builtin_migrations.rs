@@ -95,6 +95,8 @@ const MEETING_PAYLOAD_BUILDER_START: &str = "  cat > /tmp/title.txt";
 const MEETING_PAYLOAD_BUILDER_END: &str = "  curl -sf -X POST";
 const MEETING_CONNECTION_RENDER_START: &str =
     "  bun -e 'const d=await Bun.file(\"/tmp/conn.json\")";
+const MEETING_REVIEW_ACTION_START: &str = "          {\"label\": \"review in chat\"";
+const MEETING_ACTION_RULE_START: &str = "each button maps to a connection's endpoint";
 const MEETING_MEDIA_START: &str = "step 2c — skip this step";
 const MEETING_MEDIA_END: &str = "step 2d — give every distinct speaker";
 const MEETING_NAMING_START: &str = "step 2d — give every distinct speaker";
@@ -147,6 +149,10 @@ const LEGACY_JQ_PAYLOAD_BUILDER: &str = r#"  jq -n --rawfile s /tmp/summary.md -
     '{summary: $s} + (if $t == "" then {} else {title: $t} end)' > /tmp/summary.json"#;
 
 const LEGACY_JQ_CONNECTION_RENDER: &str = r#"  jq -r '.data[] | select(.connected == true) | "\(.id)\t\(.name)"' /tmp/conn.json   # already fetched in step 1"#;
+
+const LEGACY_MEETING_REVIEW_ACTION: &str = r#"          {"label": "review in chat", "type": "pipe", "pipe": "meeting-summary", "open_in_chat": true, "context": {"meeting_id": <ID>}},"#;
+
+const LEGACY_MEETING_ACTION_RULE: &str = "each button maps to a connection's endpoint from its `/connections` `description` (`POST /connections/<id>/send` for slack/telegram/discord, `POST /connections/<id>/proxy/...` for notion/linear/etc.). when a target needs a destination you can't infer (a Notion parent page, a Slack channel), make that button `\"review in chat\"` so the user confirms specifics before anything leaves the machine. if nothing is connected, skip the notification and just say that connecting an app would let you push summaries next time.";
 
 const LEGACY_MEETING_SCREEN_FETCH: &str = r#"  # the four fetches below are independent — run them in parallel, not one per turn
   curl -s -G -H "$A" --data-urlencode "start_time=$S" --data-urlencode "end_time=$E" \
@@ -415,6 +421,20 @@ fn meeting_summary_swaps() -> Vec<FragmentSwap> {
             new: preset_chain,
         });
     }
+    if let Some(review_action) = meeting_summary_review_action() {
+        swaps.push(FragmentSwap {
+            why: "post-summary review buttons targeted meeting-summary itself, so a click reran the summarizer and emitted a duplicate notification",
+            old: LEGACY_MEETING_REVIEW_ACTION,
+            new: review_action,
+        });
+    }
+    if let Some(action_rule) = meeting_summary_action_rule() {
+        swaps.push(FragmentSwap {
+            why: "make post-summary destinations use direct API or action-specific chat flows instead of recursively running meeting-summary",
+            old: LEGACY_MEETING_ACTION_RULE,
+            new: action_rule,
+        });
+    }
     if let Some(save_step) = meeting_summary_save_step() {
         swaps.push(FragmentSwap {
             why: "a run assembled the PUT body from an unexported shell variable and \
@@ -623,6 +643,20 @@ fn meeting_summary_connection_render() -> Option<&'static str> {
     line_starting_with(
         bundled_prompt("meeting-summary")?,
         MEETING_CONNECTION_RENDER_START,
+    )
+}
+
+fn meeting_summary_review_action() -> Option<&'static str> {
+    line_starting_with(
+        bundled_prompt("meeting-summary")?,
+        MEETING_REVIEW_ACTION_START,
+    )
+}
+
+fn meeting_summary_action_rule() -> Option<&'static str> {
+    line_starting_with(
+        bundled_prompt("meeting-summary")?,
+        MEETING_ACTION_RULE_START,
     )
 }
 
@@ -1065,6 +1099,26 @@ mod tests {
         assert!(migrate_builtin_pipe_text("meeting-summary", &fixed).is_none());
     }
 
+    #[test]
+    fn migrate_builtin_pipe_stops_post_summary_actions_from_rerunning_summary() {
+        let review_action =
+            meeting_summary_review_action().expect("bundled prompt carries review action");
+        let action_rule =
+            meeting_summary_action_rule().expect("bundled prompt carries action routing rule");
+        let stale = bundled("meeting-summary")
+            .replace(review_action, LEGACY_MEETING_REVIEW_ACTION)
+            .replace(action_rule, LEGACY_MEETING_ACTION_RULE);
+
+        assert!(stale.contains(r#""type": "pipe", "pipe": "meeting-summary""#));
+        let fixed = migrate_builtin_pipe_text("meeting-summary", &stale)
+            .expect("recursive post-summary actions should migrate");
+        assert!(fixed.contains(r#""type": "chat""#));
+        assert!(fixed.contains("Do not rerun meeting-summary"));
+        assert!(fixed.contains("never use `type: \"pipe\"` with `pipe: \"meeting-summary\"`"));
+        assert!(!fixed.contains(LEGACY_MEETING_REVIEW_ACTION));
+        assert!(migrate_builtin_pipe_text("meeting-summary", &fixed).is_none());
+    }
+
     /// Latency: the shipped prompt sent the agent to read skill files and left it
     /// to probe endpoint shapes, which cost roughly eight of eighteen turns on a
     /// real 7-minute meeting while the user watched a spinner.
@@ -1113,6 +1167,10 @@ mod tests {
         assert!(body.contains("never run recursive `find` or `grep`"));
         assert!(body.contains("screenpipe bundles `bun`"));
         assert!(body.contains("never require `jq`"));
+        assert!(body.contains(r#""type": "chat""#));
+        assert!(body.contains("Do not rerun meeting-summary"));
+        assert!(body.contains("never use `type: \"pipe\"` with `pipe: \"meeting-summary\"`"));
+        assert!(!body.contains(r#""type": "pipe", "pipe": "meeting-summary""#));
         assert!(!body.contains("$(jq"));
         assert!(!body.contains("\n  jq "));
     }
