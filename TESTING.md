@@ -434,8 +434,8 @@ commits: `87abb00d`, `9464fdc9`, `0f9e43aa`, `7ea15f32`
 - [ ] **onboarding versus existing account destination** — an auth callback during incomplete setup returns to Onboarding and auto-advances after login; an auth callback from an established app returns to Home.
 - [ ] **wrong browser account retry** — when the browser is already signed into the wrong account, sign out on the login page and sign in again. The original build scheme and callback version survive the Clerk round trip.
 - [ ] **blocked automatic protocol launch** — block the browser's automatic custom-protocol launch, then use the visible "open screenpipe" fallback. The callback is delivered once to the correct build.
-- [ ] **default browser unavailable** — make the OS browser launch fail and verify `open_login_window` falls back to the isolated in-app WebView, including "use different account".
-- [ ] **macOS and Linux parity** — macOS ASWebAuthenticationSession and Linux system-browser login use the same versioned callback contract and return to the initiating build.
+- [ ] **default browser unavailable** — make the OS browser launch fail and verify `open_login_window` falls back to ASWebAuthenticationSession on macOS or the isolated in-app WebView on Windows/Linux. "Use different account" must remain isolated on every platform.
+- [ ] **macOS preferred-browser login** — repeat normal login with Safari, Chrome, and Arc selected as the default browser. Existing browser SSO is reused, the versioned callback returns to the initiating build, and a first-touch `screenpipe.com` attribution cookie is linked to the signed-in account.
 - [ ] **CLI login remains separate** — `/login?code=…&redirect=…` completes the device-code flow without attempting a desktop custom-scheme callback.
 
 ### 12. timeline & search

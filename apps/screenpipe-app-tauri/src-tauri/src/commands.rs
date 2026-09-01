@@ -24,7 +24,6 @@ use crate::window::GatedPanelPlacement;
 use crate::window::GatedWindowPlacement;
 use sha2::{Digest, Sha256};
 use tauri::{Emitter, Manager};
-#[cfg(not(target_os = "macos"))]
 use tauri_plugin_opener::OpenerExt;
 use tracing::{debug, error, info, warn};
 
@@ -1921,12 +1920,11 @@ fn reset_existing_login_window<R: tauri::Runtime>(
 }
 
 /// Open the screenpipe.com login page.
-/// macOS: ASWebAuthenticationSession (system-managed sheet, forwards callback).
-/// Windows/Linux: in-app WebView that intercepts the screenpipe:// redirect.
+/// Normal login opens the user's default browser and returns through the
+/// versioned app-specific deep-link callback.
 ///
-/// `fresh_session` is used by "use different account": macOS asks
-/// ASWebAuthenticationSession for an ephemeral browser session instead of
-/// reusing Safari cookies, and Windows/Linux use a throwaway webview profile.
+/// `fresh_session` is used by "use different account": macOS uses an ephemeral
+/// ASWebAuthenticationSession and Windows/Linux use a throwaway webview profile.
 #[tauri::command]
 #[specta::specta]
 /// Returns the device code when this call started the browser device-code flow,
@@ -1946,12 +1944,40 @@ pub async fn open_login_window(
     let fresh_session = fresh_session.unwrap_or(false);
     #[cfg(target_os = "macos")]
     {
-        // ASWebAuthenticationSession intercepts the redirect itself (no OS
-        // scheme routing), but still use the same versioned build scheme as
-        // Windows/Linux so the website contract is identical everywhere.
         let callback_scheme = deep_link_scheme();
+        let login_url = login_url_with_intent(auth_mode, Some(callback_scheme))?;
+
+        // Normal sign-in belongs in the user's preferred browser. It already
+        // has their password manager, passkeys and Google/GitHub sessions, and
+        // it is also where a prior screenpipe.com acquisition cookie is most
+        // likely to live. The website returns the token through the versioned,
+        // build-specific scheme handled by the existing cold/warm deep-link
+        // paths.
+        //
+        // "Use different account" deliberately stays in an ephemeral Apple
+        // auth session so it cannot silently reuse the browser's current user.
+        if !fresh_session {
+            match app_handle
+                .opener()
+                .open_url(login_url.as_str(), None::<&str>)
+            {
+                Ok(()) => {
+                    info!("opened system browser for login");
+                    return Ok(String::new());
+                }
+                Err(e) => {
+                    // Keep the previous, reliable native auth path when macOS
+                    // cannot launch a default browser.
+                    warn!("could not open system browser, falling back to auth session: {e}");
+                }
+            }
+        }
+
+        // ASWebAuthenticationSession intercepts the redirect itself (no OS
+        // scheme routing). It remains the isolated-account path and the
+        // launch-failure fallback.
         let callback_url = match crate::auth_session::start_session(
-            login_url_with_intent(auth_mode, Some(callback_scheme))?,
+            login_url,
             callback_scheme.to_string(),
             fresh_session,
         )

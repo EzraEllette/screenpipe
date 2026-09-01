@@ -285,11 +285,10 @@ const OnboardingLogin: React.FC<OnboardingLoginProps> = ({
   const handleLogin = useCallback(() => {
     posthog.capture("onboarding_login_clicked");
     setBrowserFailure(null);
-    // macOS: ASWebAuthenticationSession (shares Safari's session).
-    // Windows/Linux: the user's real default browser, so the session they
-    // already have with Google/etc. is reused instead of asking them to
-    // re-type credentials into a cold embedded WebView. Either way the token
-    // comes back on the screenpipe:// deep link; nothing is typed by hand.
+    // The user's real default browser reuses the session they already have
+    // with Google/etc. instead of asking them to re-type credentials in a cold
+    // embedded browser. The token comes back on the versioned app-specific
+    // deep link; nothing is typed by hand.
     const authMode = suppressAutoAdvance ? "sign-in" : "sign-up";
     void commands
       .openLoginWindow(null, authMode)
