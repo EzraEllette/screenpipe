@@ -1285,12 +1285,11 @@ async openGoogleCalendarAuthWindow(authUrl: string) : Promise<Result<null, strin
 },
 /**
  * Open the screenpipe.com login page.
- * macOS: ASWebAuthenticationSession (system-managed sheet, forwards callback).
- * Windows/Linux: in-app WebView that intercepts the screenpipe:// redirect.
+ * Normal login opens the user's default browser and returns through the
+ * versioned app-specific deep-link callback.
  *
- * `fresh_session` is used by "use different account": macOS asks
- * ASWebAuthenticationSession for an ephemeral browser session instead of
- * reusing Safari cookies, and Windows/Linux use a throwaway webview profile.
+ * `fresh_session` is used by "use different account": macOS uses an ephemeral
+ * ASWebAuthenticationSession and Windows/Linux use a throwaway webview profile.
  * Returns the device code when this call started the browser device-code flow,
  * and an empty string for every path that needs no out-of-band confirmation
  * (macOS auth session, embedded WebView fallback).

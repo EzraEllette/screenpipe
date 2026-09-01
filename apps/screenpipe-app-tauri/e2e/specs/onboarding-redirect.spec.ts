@@ -89,7 +89,7 @@ const canRun = !seedFlags.includes("onboarding");
 
     // ─── system-browser login handoff ────────────────────────────────────
     //
-    // Windows and Linux do not sign in through a cold embedded WebView.
+    // Normal desktop login does not use a cold embedded WebView.
     // `open_login_window` opens the user's real browser at the ordinary login
     // URL and the website deep-links `screenpipe://auth?api_key=…` back, so
     // the user never reads or types anything.
