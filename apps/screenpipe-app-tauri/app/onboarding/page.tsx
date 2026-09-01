@@ -13,7 +13,6 @@ import PermissionsStep from "@/components/onboarding/permissions-step";
 import TimelineChoice from "@/components/onboarding/timeline-choice";
 import EngineStartup from "@/components/onboarding/engine-startup";
 import PlanSelectionStep from "@/components/onboarding/plan-selection-step";
-import { useFeatureFlagVariantKey } from "posthog-js/react";
 import FinalSetupStep from "@/components/onboarding/final-setup-step";
 import { useOnboarding } from "@/lib/hooks/use-onboarding";
 import { useManagedPolicy } from "@/lib/hooks/use-managed-policy";
@@ -25,8 +24,10 @@ import { onboardingFunnel } from "@/lib/analytics/onboarding-funnel";
 import type { AppUser } from "@/lib/app-entitlement";
 import {
   isTrialActivationEligible,
+  TRIAL_ACTIVATION_ASSIGNMENT_SESSION_KEY,
   TRIAL_ACTIVATION_EXPERIMENT_FLAG,
   TRIAL_ACTIVATION_DEV_FORCE,
+  TRIAL_ACTIVATION_CHECKOUT_STATE_KEY,
   TRIAL_ACTIVATION_PAYWALL_STEP,
   TRIAL_ACTIVATION_SUMMARY_STEP,
   TRIAL_ACTIVATION_TREATMENT,
@@ -56,6 +57,46 @@ type SlideKey =
 // window/show.rs, so opening onboarding doesn't resize on first paint.
 const ONBOARDING_WINDOW_SIZE = { width: 500, height: 680 };
 const FINAL_STEP_RETRY_DELAY_MS = 300;
+const TRIAL_ACTIVATION_ASSIGNMENT_TIMEOUT_MS = 5_000;
+
+type TrialActivationAssignment = {
+  variant: string;
+  source: "posthog" | "fallback" | "persisted_route" | "restored_session";
+};
+
+const readTrialActivationAssignment = ():
+  | TrialActivationAssignment
+  | undefined => {
+  if (typeof window === "undefined") return undefined;
+  try {
+    const variant = window.sessionStorage.getItem(
+      TRIAL_ACTIVATION_ASSIGNMENT_SESSION_KEY,
+    );
+    return variant === "control" || variant === TRIAL_ACTIVATION_TREATMENT
+      ? { variant, source: "restored_session" }
+      : undefined;
+  } catch {
+    return undefined;
+  }
+};
+
+const persistTrialActivationAssignment = (variant: string) => {
+  try {
+    window.sessionStorage.setItem(
+      TRIAL_ACTIVATION_ASSIGNMENT_SESSION_KEY,
+      variant,
+    );
+  } catch {
+    // The native onboarding step still persists the chosen route. This cache
+    // only bridges the same-webview hosted checkout navigation.
+  }
+};
+
+const clearTrialActivationAssignment = () => {
+  try {
+    window.sessionStorage.removeItem(TRIAL_ACTIVATION_ASSIGNMENT_SESSION_KEY);
+  } catch {}
+};
 
 const persistOnboardingStepWithRetry = async (step: string) => {
   let lastError: unknown;
@@ -77,12 +118,88 @@ const persistOnboardingStepWithRetry = async (step: string) => {
 };
 
 function TrialActivationFlagAssignment({
-  onVariant,
+  expectedDistinctId,
+  onAssignment,
 }: {
-  onVariant: (variant: string | boolean | undefined) => void;
+  expectedDistinctId: string | undefined;
+  onAssignment: (assignment: TrialActivationAssignment) => void;
 }) {
-  const variant = useFeatureFlagVariantKey(TRIAL_ACTIVATION_EXPERIMENT_FLAG);
-  useEffect(() => onVariant(variant), [onVariant, variant]);
+  useEffect(() => {
+    let settled = false;
+    let matchingIdentityResponses = 0;
+    let timeout: number | undefined;
+    const settle = (assignment: TrialActivationAssignment) => {
+      if (settled) return;
+      settled = true;
+      if (timeout) window.clearTimeout(timeout);
+      persistTrialActivationAssignment(assignment.variant);
+      onAssignment(assignment);
+    };
+    const fallBackToControl = (
+      reason: "missing_distinct_id" | "load_error" | "timeout",
+    ) => {
+      if (settled) return;
+      posthog.capture(
+        "trial_activation_assignment_failed",
+        { reason, fallback_variant: "control" },
+        { send_instantly: true },
+      );
+      settle({ variant: "control", source: "fallback" });
+    };
+
+    if (!expectedDistinctId) {
+      fallBackToControl("missing_distinct_id");
+      return;
+    }
+
+    timeout = window.setTimeout(
+      () => fallBackToControl("timeout"),
+      TRIAL_ACTIVATION_ASSIGNMENT_TIMEOUT_MS,
+    );
+    const unsubscribe = posthog.onFeatureFlags((_flags, _variants, context) => {
+      if (settled || posthog.get_distinct_id() !== expectedDistinctId) return;
+      if (context?.errorsLoading) {
+        fallBackToControl("load_error");
+        return;
+      }
+
+      // An immediate cached callback and one older request can both arrive
+      // after identify has changed the visible distinct id. Requiring the next
+      // two reload cycles exhausts both stale sources; the third matching
+      // response was requested under the final identity.
+      matchingIdentityResponses += 1;
+      if (matchingIdentityResponses < 3) {
+        posthog.reloadFeatureFlags();
+        return;
+      }
+
+      // Cached flags can belong to the pre-login machine identity. Only a
+      // server response loaded after the authenticated identify is eligible to
+      // choose the checkout route.
+      const value = posthog.getFeatureFlag(TRIAL_ACTIVATION_EXPERIMENT_FLAG, {
+        fresh: true,
+        send_event: false,
+      });
+      if (value === undefined) return;
+
+      // Emit the experiment exposure only after the route is pinned to the
+      // final identity. Reading cached values through the React hook here was
+      // what contaminated both arms.
+      posthog.getFeatureFlag(TRIAL_ACTIVATION_EXPERIMENT_FLAG, {
+        fresh: true,
+      });
+      settle({
+        variant: typeof value === "string" ? value : "control",
+        source: "posthog",
+      });
+    });
+
+    posthog.reloadFeatureFlags();
+    return () => {
+      window.clearTimeout(timeout);
+      unsubscribe();
+    };
+  }, [expectedDistinctId, onAssignment]);
   return null;
 }
 
@@ -172,6 +289,10 @@ export default function OnboardingPage() {
       ? null
       : readOnboardingCheckoutStatus(window.location.search),
   );
+  useEffect(() => {
+    if (!checkoutReturnStatus) return;
+    window.sessionStorage.removeItem(TRIAL_ACTIVATION_CHECKOUT_STATE_KEY);
+  }, [checkoutReturnStatus]);
   const [currentSlide, setCurrentSlide] = useState<SlideKey>(() =>
     checkoutReturnStatus ? "plan" : "login",
   );
@@ -226,19 +347,47 @@ export default function OnboardingPage() {
     onboardingData.trialActivationFreshInstall === true,
     user,
   );
-  const [trialActivationVariant, setTrialActivationVariant] = useState<
-    string | boolean | undefined
-  >(undefined);
+  const [trialActivationAssignment, setTrialActivationAssignment] =
+    useState<TrialActivationAssignment | undefined>(
+      readTrialActivationAssignment,
+    );
+  const persistedRouteAssignment = useMemo<
+    TrialActivationAssignment | undefined
+  >(() => {
+    if (onboardingData.currentStep === TRIAL_ACTIVATION_PAYWALL_STEP) {
+      return {
+        variant: TRIAL_ACTIVATION_TREATMENT,
+        source: "persisted_route",
+      };
+    }
+    if (
+      onboardingData.currentStep === "plan" ||
+      checkoutReturnStatus !== null
+    ) {
+      return { variant: "control", source: "persisted_route" };
+    }
+    return undefined;
+  }, [checkoutReturnStatus, onboardingData.currentStep]);
+  const effectiveTrialActivationAssignment =
+    trialActivationAssignment ?? persistedRouteAssignment;
+  const trialActivationVariant = TRIAL_ACTIVATION_DEV_FORCE
+    ? TRIAL_ACTIVATION_TREATMENT
+    : effectiveTrialActivationAssignment?.variant;
+  const trialActivationAssignmentResolved =
+    !needsOnboardingCheckout ||
+    TRIAL_ACTIVATION_DEV_FORCE ||
+    effectiveTrialActivationAssignment !== undefined;
   const usesSummaryFirstTrial =
     needsOnboardingCheckout &&
-    (TRIAL_ACTIVATION_DEV_FORCE ||
-      trialActivationVariant === TRIAL_ACTIVATION_TREATMENT);
+    trialActivationVariant === TRIAL_ACTIVATION_TREATMENT;
   const wasTrialActivationEligible =
     needsOnboardingCheckout || checkoutReturnStatus !== null;
   const shouldShowPlanSelection =
     !isManagedDeployment &&
     (checkoutReturnStatus !== null ||
-      (needsOnboardingCheckout && !usesSummaryFirstTrial));
+      (needsOnboardingCheckout &&
+        trialActivationAssignmentResolved &&
+        !usesSummaryFirstTrial));
   // Only a fully resolved new consumer account enters mandatory checkout.
   // Manual grants, lifetime ownership, Enterprise membership, subscriptions,
   // and partially hydrated account responses all stay out. A later contextual
@@ -431,6 +580,15 @@ export default function OnboardingPage() {
     transitioningRef.current = true;
     setIsTransitioning(true);
 
+    // Never let an eligible install walk past the experiment fork while its
+    // authenticated assignment is unresolved. The pending UI normally makes
+    // this unreachable, but the guard also covers programmatic step advances.
+    if (needsOnboardingCheckout && !trialActivationAssignmentResolved) {
+      transitioningRef.current = false;
+      setIsTransitioning(false);
+      return;
+    }
+
     // The login gate owns this event because only it can distinguish a fresh
     // logged-out -> logged-in transition from resuming a persisted session.
     // Capturing it here as well duplicates every fresh-login completion.
@@ -517,24 +675,28 @@ export default function OnboardingPage() {
     );
     if (!nextSlide) {
       try {
-        if (wasTrialActivationEligible) {
-          posthog.capture("trial_activation_experiment_enrolled", {
-            experiment: TRIAL_ACTIVATION_EXPERIMENT_FLAG,
-            variant:
-              typeof trialActivationVariant === "string"
-                ? trialActivationVariant
-                : "control",
-            eligible_new_install: true,
-            email: user?.email ?? null,
-            decision_metric: "mrr_per_eligible_new_install_day_12",
-          });
-        }
         if (usesSummaryFirstTrial) {
           await persistOnboardingStepWithRetry(
             TRIAL_ACTIVATION_SUMMARY_STEP,
           );
         }
+        if (wasTrialActivationEligible) {
+          posthog.capture(
+            "trial_activation_experiment_enrolled",
+            {
+              experiment: TRIAL_ACTIVATION_EXPERIMENT_FLAG,
+              variant: trialActivationVariant ?? "control",
+              assignment_source: TRIAL_ACTIVATION_DEV_FORCE
+                ? "dev_force"
+                : effectiveTrialActivationAssignment?.source,
+              eligible_new_install: true,
+              decision_metric: "mrr_per_eligible_new_install_day_12",
+            },
+            { send_instantly: true },
+          );
+        }
         await completeOnboarding({ method: "setup_finished" });
+        clearTrialActivationAssignment();
       } catch (error) {
         console.error("failed to finish onboarding:", error);
       } finally {
@@ -564,14 +726,16 @@ export default function OnboardingPage() {
     completeOnboarding,
     currentSlide,
     deviceTierForAnalytics,
+    effectiveTrialActivationAssignment?.source,
     isManagedDeployment,
+    needsOnboardingCheckout,
     onboardingData.currentStep,
     router,
     timelineChoiceLocked,
     timelineChoiceVisible,
+    trialActivationAssignmentResolved,
     trialActivationVariant,
     usesSummaryFirstTrial,
-    user?.email,
     visibleOrder,
     wasTrialActivationEligible,
   ]);
@@ -605,11 +769,28 @@ export default function OnboardingPage() {
     );
   }
 
+  if (needsOnboardingCheckout && !trialActivationAssignmentResolved) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-background">
+        <TrialActivationFlagAssignment
+          expectedDistinctId={user?.clerk_id || settings.analyticsId}
+          onAssignment={setTrialActivationAssignment}
+        />
+        <div
+          className="flex flex-col items-center gap-3"
+          data-testid="trial-activation-assignment-pending"
+        >
+          <div className="h-6 w-6 animate-spin rounded-full border border-foreground border-t-transparent" />
+          <p className="font-mono text-[11px] text-muted-foreground">
+            preparing your setup
+          </p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="flex flex-col w-full h-screen overflow-hidden bg-background">
-      {wasTrialActivationEligible && (
-        <TrialActivationFlagAssignment onVariant={setTrialActivationVariant} />
-      )}
       {/* Drag region */}
       <div className="w-full bg-background p-3" data-tauri-drag-region />
 

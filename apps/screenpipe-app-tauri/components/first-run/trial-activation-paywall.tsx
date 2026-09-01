@@ -21,7 +21,10 @@ import { commands } from "@/lib/utils/tauri";
 import { screenpipeWebUrl } from "@/lib/web-url";
 import { isOnboardingCheckoutResolved } from "@/lib/onboarding-checkout";
 import { submitHostedCheckoutStart } from "@/lib/onboarding-checkout-navigation";
-import { TRIAL_ACTIVATION_UNLOCKED_STEP } from "@/lib/first-run/trial-activation";
+import {
+  TRIAL_ACTIVATION_CHECKOUT_STATE_KEY,
+  TRIAL_ACTIVATION_UNLOCKED_STEP,
+} from "@/lib/first-run/trial-activation";
 
 const HOSTED_CHECKOUT_URL = screenpipeWebUrl(
   "/onboarding/checkout",
@@ -42,7 +45,44 @@ export function TrialActivationPaywall({
   );
   const [tokenResolved, setTokenResolved] = React.useState(Boolean(user?.token));
   const [error, setError] = React.useState<string | null>(null);
+  const [returnedWithoutStatus, setReturnedWithoutStatus] = React.useState(() =>
+    ["pending", "returned"].includes(
+      window.sessionStorage.getItem(TRIAL_ACTIVATION_CHECKOUT_STATE_KEY) ?? "",
+    ),
+  );
   const submissionStartedRef = React.useRef(false);
+
+  React.useEffect(() => {
+    const observeReturnWithoutStatus = () => {
+      const checkoutState = window.sessionStorage.getItem(
+        TRIAL_ACTIVATION_CHECKOUT_STATE_KEY,
+      );
+      if (checkoutState === "returned") {
+        setReturnedWithoutStatus(true);
+        return;
+      }
+      if (checkoutState !== "pending") return;
+
+      window.sessionStorage.setItem(
+        TRIAL_ACTIVATION_CHECKOUT_STATE_KEY,
+        "returned",
+      );
+      submissionStartedRef.current = false;
+      setReturnedWithoutStatus(true);
+      posthog.capture(
+        "trial_activation_card_checkout_returned_without_status",
+        {
+          experiment: "first-summary-card-trial-v1",
+          variant: "summary_first",
+        },
+      );
+    };
+
+    observeReturnWithoutStatus();
+    window.addEventListener("pageshow", observeReturnWithoutStatus);
+    return () =>
+      window.removeEventListener("pageshow", observeReturnWithoutStatus);
+  }, []);
 
   React.useEffect(() => {
     if (!locked || !isOnboardingCheckoutResolved(user)) return;
@@ -69,6 +109,7 @@ export function TrialActivationPaywall({
   const startCheckout = React.useCallback(() => {
     if (submissionStartedRef.current || !checkoutToken) return;
     submissionStartedRef.current = true;
+    setReturnedWithoutStatus(false);
     setError(null);
     try {
       posthog.capture("trial_activation_card_checkout_started", {
@@ -76,12 +117,17 @@ export function TrialActivationPaywall({
         variant: "summary_first",
         destination_type: "hosted_stripe_payment_element",
       });
+      window.sessionStorage.setItem(
+        TRIAL_ACTIVATION_CHECKOUT_STATE_KEY,
+        "pending",
+      );
       submitHostedCheckoutStart({
         hostedCheckoutUrl: HOSTED_CHECKOUT_URL,
         token: checkoutToken,
         currentHref: window.location.href,
       });
     } catch (checkoutError) {
+      window.sessionStorage.removeItem(TRIAL_ACTIVATION_CHECKOUT_STATE_KEY);
       submissionStartedRef.current = false;
       setError(
         checkoutError instanceof Error
@@ -92,9 +138,17 @@ export function TrialActivationPaywall({
   }, [checkoutToken]);
 
   React.useEffect(() => {
-    if (!open || !tokenResolved || !checkoutToken) return;
+    if (!open || !tokenResolved || !checkoutToken || returnedWithoutStatus) {
+      return;
+    }
     startCheckout();
-  }, [checkoutToken, open, startCheckout, tokenResolved]);
+  }, [
+    checkoutToken,
+    open,
+    returnedWithoutStatus,
+    startCheckout,
+    tokenResolved,
+  ]);
 
   if (!open) return null;
   return (
@@ -123,6 +177,15 @@ export function TrialActivationPaywall({
             </p>
             <Button variant="outline" onClick={() => void resolveCheckoutToken()}>
               retry
+            </Button>
+          </div>
+        ) : returnedWithoutStatus ? (
+          <div className="space-y-4 py-6 text-center">
+            <p className="text-sm text-muted-foreground">
+              checkout closed before payment was confirmed
+            </p>
+            <Button variant="outline" onClick={startCheckout}>
+              try checkout again
             </Button>
           </div>
         ) : error ? (
