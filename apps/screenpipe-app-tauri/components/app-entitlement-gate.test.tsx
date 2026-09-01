@@ -193,6 +193,104 @@ describe("AppEntitlementGate", () => {
     expect(screen.queryByText(/enterprise access/i)).not.toBeInTheDocument();
   });
 
+  it("keeps an ordinary signed-in consumer in onboarding", () => {
+    window.history.replaceState({}, "", "/onboarding");
+    mocks.state.user = baseUser();
+
+    render(
+      <AppEntitlementGate authenticationStatus="logged_out">
+        {protectedApp}
+      </AppEntitlementGate>,
+    );
+
+    expect(screen.getByTestId("protected-app")).toBeInTheDocument();
+    expect(
+      screen.queryByText(/enterprise app required/i),
+    ).not.toBeInTheDocument();
+  });
+
+  it("gates a restricted enterprise member as soon as onboarding sign-in resolves", () => {
+    window.history.replaceState({}, "", "/onboarding");
+    mocks.windowLabel = "onboarding";
+
+    const { rerender } = render(
+      <AppEntitlementGate authenticationStatus="logged_out">
+        {protectedApp}
+      </AppEntitlementGate>,
+    );
+
+    expect(screen.getByTestId("protected-app")).toBeInTheDocument();
+
+    mocks.state.user = baseUser({
+      app_entitled: true,
+      cloud_subscribed: true,
+      subscription_plan: "pro",
+      enterprise_account: {
+        org_name: "Bungalow",
+        role: "member",
+        requires_enterprise_app: true,
+        restrict_consumer_build_access: true,
+      },
+      entitlement: {
+        active: true,
+        plan: "pro",
+        source: "subscription",
+        checked_at: minsAgo(1),
+        features: { app: true, cloud: true },
+      },
+    });
+    rerender(
+      <AppEntitlementGate authenticationStatus="logged_out">
+        {protectedApp}
+      </AppEntitlementGate>,
+    );
+
+    expect(screen.getByText(/enterprise app required/i)).toBeInTheDocument();
+    expect(screen.queryByTestId("protected-app")).not.toBeInTheDocument();
+  });
+
+  it("does not misclassify a cached restricted user before build detection resolves", () => {
+    window.history.replaceState({}, "", "/onboarding");
+    mocks.state.user = baseUser({
+      enterprise_account: {
+        org_name: "Bungalow",
+        role: "member",
+        requires_enterprise_app: true,
+        restrict_consumer_build_access: true,
+      },
+    });
+    mocks.enterprise.isManagedDeploymentResolved = false;
+
+    const { rerender } = render(
+      <AppEntitlementGate authenticationStatus="logged_out">
+        {protectedApp}
+      </AppEntitlementGate>,
+    );
+
+    expect(screen.getByTestId("protected-app")).toBeInTheDocument();
+    expect(
+      screen.queryByText(/enterprise app required/i),
+    ).not.toBeInTheDocument();
+
+    mocks.enterprise = {
+      isManagedDeployment: true,
+      isManagedDeploymentResolved: true,
+      authenticationState: "choice",
+      authenticationError: null,
+      isManagedAuthenticated: false,
+    };
+    rerender(
+      <AppEntitlementGate authenticationStatus="logged_out">
+        {protectedApp}
+      </AppEntitlementGate>,
+    );
+
+    expect(screen.getByTestId("protected-app")).toBeInTheDocument();
+    expect(
+      screen.queryByText(/enterprise app required/i),
+    ).not.toBeInTheDocument();
+  });
+
   it("waits for build detection before stopping a gated session", async () => {
     mocks.enterprise.isManagedDeploymentResolved = false;
 
