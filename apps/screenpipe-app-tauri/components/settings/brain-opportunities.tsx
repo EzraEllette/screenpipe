@@ -6,6 +6,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   ArrowRight,
+  ChevronDown,
   ChevronRight,
   ExternalLink,
   MessageSquarePlus,
@@ -28,7 +29,7 @@ import {
   type UpdateActivityOpportunityRequest,
 } from "@/lib/utils/tauri";
 
-type OpportunityGroup = "skills" | "unfinished";
+type OpportunityGroup = "ideas" | "created" | "unfinished";
 
 type SkillDraft = Pick<SkillOpportunity, "name" | "description" | "notes">;
 type TaskDraft = Pick<UnfinishedOpportunity, "description" | "goal">;
@@ -95,20 +96,29 @@ function supportingOccurrenceCount(skill: SkillOpportunity): number {
 
 function visibleSkills(skills: SkillOpportunity[]): SkillOpportunity[] {
   return skills
-    .filter((skill) => skill.status !== "dismissed")
+    .filter((skill) => skill.status === "pending")
     .map((skill, index) => ({ skill, index }))
     .sort((left, right) => {
-      const statusOrder =
-        Number(left.skill.status !== "pending") -
-        Number(right.skill.status !== "pending");
       return (
-        statusOrder ||
         supportingOccurrenceCount(right.skill) -
           supportingOccurrenceCount(left.skill) ||
         left.index - right.index
       );
     })
     .map(({ skill }) => skill);
+}
+
+function hasSkillDraftChanges(
+  skill: SkillOpportunity,
+  draft: SkillDraft | undefined,
+): boolean {
+  return Boolean(
+    skill.edited ||
+      (draft &&
+        (draft.name !== skill.name ||
+          draft.description !== skill.description ||
+          draft.notes !== skill.notes)),
+  );
 }
 
 function formatMoment(value: string): string {
@@ -214,7 +224,7 @@ function EvidenceRow({
           aria-label={
             evidence.excluded
               ? `include ${evidence.title}`
-              : `exclude ${evidence.title}`
+              : `remove ${evidence.title}`
           }
         >
           {evidence.excluded ? (
@@ -223,7 +233,7 @@ function EvidenceRow({
             </>
           ) : (
             <>
-              <X className="h-3 w-3" /> exclude
+              <X className="h-3 w-3" /> remove
             </>
           )}
         </button>
@@ -304,9 +314,11 @@ function EmptyGroup({
         ? "finding opportunities"
         : analysisState === "error"
           ? "couldn’t analyze activity"
-          : group === "skills"
+          : group === "ideas"
             ? "no skill ideas yet"
-            : "nothing unfinished";
+            : group === "created"
+              ? "no created skills yet"
+              : "nothing unfinished";
 
   return (
     <div className="flex min-h-[240px] flex-1 items-center justify-center px-8 py-16">
@@ -339,11 +351,13 @@ export function BrainOpportunities({
   );
   const snapshotRef = useRef<ActivityOpportunitySnapshot | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [group, setGroup] = useState<OpportunityGroup>("skills");
+  const [group, setGroup] = useState<OpportunityGroup>("ideas");
   const [selectedSkillId, setSelectedSkillId] = useState("");
   const [selectedTaskId, setSelectedTaskId] = useState("");
   const [compactSkillDetailOpen, setCompactSkillDetailOpen] = useState(false);
   const [compactTaskDetailOpen, setCompactTaskDetailOpen] = useState(false);
+  const [continueExpanded, setContinueExpanded] = useState(true);
+  const [showAllSuggestions, setShowAllSuggestions] = useState(false);
   const [skillDrafts, setSkillDrafts] = useState<Record<string, SkillDraft>>(
     {},
   );
@@ -640,7 +654,19 @@ export function BrainOpportunities({
     taskDrafts,
   ]);
 
-  const skills = visibleSkills(snapshot?.skills ?? []);
+  const pendingSkills = visibleSkills(snapshot?.skills ?? []);
+  const continueSkills = pendingSkills.filter((skill) =>
+    hasSkillDraftChanges(skill, skillDrafts[skill.id]),
+  );
+  const suggestedSkills = pendingSkills.filter(
+    (skill) => !hasSkillDraftChanges(skill, skillDrafts[skill.id]),
+  );
+  const displayedSuggestions = showAllSuggestions
+    ? suggestedSkills
+    : suggestedSkills.slice(0, 3);
+  const createdSkills =
+    snapshot?.skills.filter((skill) => skill.status === "created") ?? [];
+  const skills = group === "created" ? createdSkills : pendingSkills;
   const pendingTasks =
     snapshot?.unfinished.filter((task) => task.status === "pending") ?? [];
   const dismissedTasks =
@@ -669,15 +695,15 @@ export function BrainOpportunities({
   const selectGroup = (next: OpportunityGroup) => {
     setGroup(next);
     setActionError(null);
-    if (next === "skills") setCompactSkillDetailOpen(false);
-    else setCompactTaskDetailOpen(false);
+    if (next === "unfinished") setCompactTaskDetailOpen(false);
+    else setCompactSkillDetailOpen(false);
   };
 
   const openSkillDetail = (id: string) => {
     setSelectedSkillId(id);
     setCompactSkillDetailOpen(true);
     setActionError(null);
-    const skill = skills.find((item) => item.id === id);
+    const skill = snapshotRef.current?.skills.find((item) => item.id === id);
     if (skill?.status === "created") setPreviewSkillId(id);
     requestAnimationFrame(() => {
       document.getElementById("skill-opportunity-back")?.focus();
@@ -719,14 +745,16 @@ export function BrainOpportunities({
       return;
     }
     event.preventDefault();
+    const groups: OpportunityGroup[] = ["ideas", "created", "unfinished"];
+    const currentIndex = groups.indexOf(current);
     const next =
       event.key === "Home"
-        ? "skills"
+        ? groups[0]
         : event.key === "End"
-          ? "unfinished"
-          : current === "skills"
-            ? "unfinished"
-            : "skills";
+          ? groups[groups.length - 1]
+          : event.key === "ArrowRight"
+            ? groups[(currentIndex + 1) % groups.length]
+            : groups[(currentIndex - 1 + groups.length) % groups.length];
     selectGroup(next);
     requestAnimationFrame(() => {
       document.getElementById(`opportunities-tab-${next}`)?.focus();
@@ -755,6 +783,31 @@ export function BrainOpportunities({
     await queueUpdate(`unfinished:${task.id}`, (current) =>
       buildTaskUpdate(current, task.id, [...excluded]),
     );
+  };
+
+  const dismissSkill = async (skill: SkillOpportunity) => {
+    setActionError(null);
+    try {
+      await queueUpdate(`skill:${skill.id}`, (current) =>
+        buildSkillUpdate(current, skill.id),
+      );
+      const current = snapshotRef.current?.skills.find(
+        (item) => item.id === skill.id,
+      );
+      if (!current) throw new Error("Skill opportunity was not found");
+      const updated = await commandData(
+        commands.updateActivityOpportunity({
+          kind: "skill",
+          id: current.id,
+          revision: current.revision,
+          dismissed: true,
+        }),
+      );
+      acceptSnapshot(updated);
+      if (selectedSkillId === skill.id) setCompactSkillDetailOpen(false);
+    } catch (error) {
+      setActionError(errorMessage(error));
+    }
   };
 
   const createSkill = async (skill: SkillOpportunity) => {
@@ -921,6 +974,47 @@ export function BrainOpportunities({
     }
   };
 
+  const renderSkillRow = (skill: SkillOpportunity, canReject: boolean) => {
+    const draft = skillDrafts[skill.id] ?? skill;
+    return (
+      <div
+        key={skill.id}
+        className="group flex border-b border-border bg-background transition-colors duration-150 hover:bg-muted/40"
+      >
+        <button
+          type="button"
+          id={`skill-opportunity-row-${skill.id}`}
+          data-testid={`skill-opportunity-${skill.id}`}
+          onClick={() => openSkillDetail(skill.id)}
+          className="min-w-0 flex-1 px-4 py-3.5 text-left text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-foreground"
+        >
+          <h3 className="truncate text-sm font-medium lowercase leading-snug">
+            {draft.name}
+          </h3>
+          <p className="mt-1 line-clamp-2 max-w-2xl text-xs leading-relaxed text-muted-foreground">
+            {draft.description}
+          </p>
+        </button>
+        {canReject ? (
+          <button
+            type="button"
+            aria-label={`reject ${draft.name}`}
+            title="not useful"
+            disabled={pendingMutationKeys.has(`skill:${skill.id}`)}
+            onClick={() => void dismissSkill(skill)}
+            className="m-2 inline-flex h-8 w-8 shrink-0 items-center justify-center text-muted-foreground opacity-60 transition-colors hover:bg-background hover:text-foreground focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-foreground disabled:pointer-events-none disabled:opacity-30 sm:opacity-0 sm:group-hover:opacity-100"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        ) : (
+          <span className="mr-3 inline-flex items-center text-muted-foreground">
+            <ChevronRight className="h-3.5 w-3.5" />
+          </span>
+        )}
+      </div>
+    );
+  };
+
   return (
     <section
       data-testid="brain-opportunities"
@@ -951,70 +1045,52 @@ export function BrainOpportunities({
         aria-label="opportunity groups"
         className="mx-auto mt-3 flex w-full max-w-3xl border-b border-border"
       >
-        <button
-          type="button"
-          role="tab"
-          id="opportunities-tab-skills"
-          aria-controls={
-            group === "skills" ? "opportunities-panel-skills" : undefined
-          }
-          aria-selected={group === "skills"}
-          tabIndex={group === "skills" ? 0 : -1}
-          data-testid="opportunities-tab-skills"
-          onClick={() => selectGroup("skills")}
-          onKeyDown={(event) => handleGroupKeyDown(event, "skills")}
-          className={cn(
-            "relative flex min-h-11 items-center gap-2 px-4 font-mono text-[10px] uppercase tracking-wide text-muted-foreground transition-colors duration-150 hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-foreground focus-visible:ring-offset-2",
-            group === "skills" && "text-foreground",
-          )}
-        >
-          skill ideas
-          <span className="tabular-nums text-muted-foreground">
-            {pendingSkillCount}
-          </span>
-          {group === "skills" && (
-            <span className="absolute inset-x-0 -bottom-px h-px bg-foreground" />
-          )}
-        </button>
-        <button
-          type="button"
-          role="tab"
-          id="opportunities-tab-unfinished"
-          aria-controls={
-            group === "unfinished"
-              ? "opportunities-panel-unfinished"
-              : undefined
-          }
-          aria-selected={group === "unfinished"}
-          tabIndex={group === "unfinished" ? 0 : -1}
-          data-testid="opportunities-tab-unfinished"
-          onClick={() => selectGroup("unfinished")}
-          onKeyDown={(event) => handleGroupKeyDown(event, "unfinished")}
-          className={cn(
-            "relative flex min-h-11 items-center gap-2 px-4 font-mono text-[10px] uppercase tracking-wide text-muted-foreground transition-colors duration-150 hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-foreground focus-visible:ring-offset-2",
-            group === "unfinished" && "text-foreground",
-          )}
-        >
-          unfinished work
-          <span className="tabular-nums text-muted-foreground">
-            {pendingTaskCount}
-          </span>
-          {group === "unfinished" && (
-            <span className="absolute inset-x-0 -bottom-px h-px bg-foreground" />
-          )}
-        </button>
+        {(
+          [
+            ["ideas", "skill ideas", pendingSkillCount],
+            ["created", "created skills", createdSkills.length],
+            ["unfinished", "unfinished work", pendingTaskCount],
+          ] as const
+        ).map(([value, label, count]) => (
+          <button
+            key={value}
+            type="button"
+            role="tab"
+            id={`opportunities-tab-${value}`}
+            aria-controls={
+              group === value ? `opportunities-panel-${value}` : undefined
+            }
+            aria-selected={group === value}
+            tabIndex={group === value ? 0 : -1}
+            data-testid={`opportunities-tab-${value}`}
+            onClick={() => selectGroup(value)}
+            onKeyDown={(event) => handleGroupKeyDown(event, value)}
+            className={cn(
+              "relative flex min-h-11 items-center gap-2 px-3 font-mono text-[10px] uppercase tracking-wide text-muted-foreground transition-colors duration-150 hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-foreground focus-visible:ring-offset-2 sm:px-4",
+              group === value && "text-foreground",
+            )}
+          >
+            {label}
+            {count > 0 && (
+              <span className="tabular-nums text-muted-foreground">{count}</span>
+            )}
+            {group === value && (
+              <span className="absolute inset-x-0 -bottom-px h-px bg-foreground" />
+            )}
+          </button>
+        ))}
       </div>
 
-      {group === "skills" ? (
+      {group !== "unfinished" ? (
         skills.length === 0 || !selectedSkill ? (
           <div
             role="tabpanel"
-            id="opportunities-panel-skills"
-            aria-labelledby="opportunities-tab-skills"
+            id={`opportunities-panel-${group}`}
+            aria-labelledby={`opportunities-tab-${group}`}
             className="mx-auto mt-4 flex min-h-0 w-full max-w-3xl flex-1"
           >
             <EmptyGroup
-              group="skills"
+              group={group}
               analysisState={analysisState}
               error={analysisError}
               hasAnyData={hasAnyData}
@@ -1023,8 +1099,8 @@ export function BrainOpportunities({
         ) : (
           <div
             role="tabpanel"
-            id="opportunities-panel-skills"
-            aria-labelledby="opportunities-tab-skills"
+            id={`opportunities-panel-${group}`}
+            aria-labelledby={`opportunities-tab-${group}`}
             data-testid="skill-opportunities-panel"
             className="mx-auto mt-4 grid min-h-0 w-full max-w-3xl flex-1 grid-rows-[minmax(0,1fr)] overflow-hidden border-t border-border bg-background"
           >
@@ -1034,32 +1110,65 @@ export function BrainOpportunities({
                 compactSkillDetailOpen ? "hidden" : "block",
               )}
             >
-              {skills.map((skill) => {
-                const railDraft = skillDrafts[skill.id] ?? skill;
-                return (
-                  <button
-                    type="button"
-                    key={skill.id}
-                    id={`skill-opportunity-row-${skill.id}`}
-                    data-testid={`skill-opportunity-${skill.id}`}
-                    onClick={() => openSkillDetail(skill.id)}
-                    className="block w-full border-b border-border bg-background px-4 py-3 text-left text-foreground transition-colors duration-150 hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-foreground"
-                  >
-                    <div className="flex items-center justify-between gap-4">
-                      <h3 className="min-w-0 truncate text-sm font-medium lowercase leading-snug">
-                        {railDraft.name}
-                      </h3>
-                      <span className="shrink-0 font-mono text-[9px] uppercase tracking-wide text-muted-foreground">
-                        {creatingSkillId === skill.id
-                          ? "creating"
-                          : skill.status === "created"
-                            ? "created"
-                            : `${supportingOccurrenceCount(skill)} repeats`}
-                      </span>
-                    </div>
-                  </button>
-                );
-              })}
+              {group === "created" ? (
+                createdSkills.map((skill) => renderSkillRow(skill, false))
+              ) : (
+                <>
+                  {continueSkills.length > 0 && (
+                    <section aria-labelledby="continue-skills-label">
+                      <button
+                        type="button"
+                        onClick={() => setContinueExpanded((value) => !value)}
+                        className="flex w-full items-center justify-between border-b border-border px-4 py-2 text-left font-mono text-[9px] uppercase tracking-[0.16em] text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-foreground"
+                        aria-expanded={continueExpanded}
+                        aria-controls="continue-skills-list"
+                      >
+                        <span id="continue-skills-label">
+                          continue&nbsp;&nbsp;{continueSkills.length}
+                        </span>
+                        <ChevronDown
+                          className={cn(
+                            "h-3 w-3 transition-transform",
+                            !continueExpanded && "-rotate-90",
+                          )}
+                        />
+                      </button>
+                      {continueExpanded && (
+                        <div id="continue-skills-list">
+                          {continueSkills.map((skill) =>
+                            renderSkillRow(skill, true),
+                          )}
+                        </div>
+                      )}
+                    </section>
+                  )}
+
+                  {suggestedSkills.length > 0 && (
+                    <section aria-labelledby="suggested-skills-label">
+                      <div
+                        id="suggested-skills-label"
+                        className="border-b border-border px-4 py-2 font-mono text-[9px] uppercase tracking-[0.16em] text-muted-foreground"
+                      >
+                        suggested
+                      </div>
+                      {displayedSuggestions.map((skill) =>
+                        renderSkillRow(skill, true),
+                      )}
+                      {suggestedSkills.length > 3 && (
+                        <button
+                          type="button"
+                          onClick={() => setShowAllSuggestions((value) => !value)}
+                          className="w-full border-b border-border px-4 py-3 text-left text-xs text-muted-foreground transition-colors hover:bg-muted/40 hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-foreground"
+                        >
+                          {showAllSuggestions
+                            ? "show less"
+                            : `show ${suggestedSkills.length - 3} more`}
+                        </button>
+                      )}
+                    </section>
+                  )}
+                </>
+              )}
             </aside>
 
             <div
@@ -1196,9 +1305,7 @@ export function BrainOpportunities({
                         className="group mt-6 border-y border-border"
                       >
                         <summary className="flex cursor-pointer list-none items-center justify-between gap-3 py-3 text-sm text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-foreground">
-                          <span>
-                            evidence · {includedOccurrenceCount} repeats
-                          </span>
+                          <span>activity evidence</span>
                           <span className="font-mono text-[9px] uppercase tracking-wide text-muted-foreground group-open:hidden">
                             show
                           </span>

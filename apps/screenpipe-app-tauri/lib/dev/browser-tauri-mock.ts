@@ -362,6 +362,88 @@ function createBrowserDevActivityOpportunities(
       excluded: false,
     },
   };
+  const addEvidence = (
+    activityId: string,
+    minutesAgo: number,
+    title: string,
+    summary: string,
+    apps: string[],
+  ) => {
+    evidenceById[activityId] = {
+      activityId,
+      startAt: at(minutesAgo),
+      endAt: at(minutesAgo - 18),
+      title,
+      summary,
+      apps,
+      frameIds: [93_000 + Object.keys(evidenceById).length],
+      meetingIds: [],
+      excluded: false,
+    };
+  };
+  addEvidence(
+    "browser-dev-mrr-mon",
+    7_200,
+    "Check Monday recurring revenue",
+    "Compared Stripe MRR with the PostHog revenue dashboard.",
+    ["Stripe", "PostHog"],
+  );
+  addEvidence(
+    "browser-dev-mrr-wed",
+    4_320,
+    "Check Wednesday recurring revenue",
+    "Compared Stripe MRR with the PostHog revenue dashboard.",
+    ["Stripe", "PostHog"],
+  );
+  addEvidence(
+    "browser-dev-mrr-fri",
+    1_440,
+    "Check Friday recurring revenue",
+    "Compared Stripe MRR with the PostHog revenue dashboard.",
+    ["Stripe", "PostHog"],
+  );
+  addEvidence(
+    "browser-dev-meeting-one",
+    5_760,
+    "Capture product sync follow-ups",
+    "Turned meeting decisions into owners and next actions.",
+    ["Google Meet", "Notion"],
+  );
+  addEvidence(
+    "browser-dev-meeting-two",
+    2_880,
+    "Capture customer call follow-ups",
+    "Turned meeting decisions into owners and next actions.",
+    ["Zoom", "Notion"],
+  );
+  addEvidence(
+    "browser-dev-metrics-one",
+    10_080,
+    "Prepare weekly growth snapshot",
+    "Collected activation and retention movement for the weekly review.",
+    ["PostHog", "Notion"],
+  );
+  addEvidence(
+    "browser-dev-metrics-two",
+    2_880,
+    "Prepare weekly growth snapshot",
+    "Collected activation and retention movement for the weekly review.",
+    ["PostHog", "Notion"],
+  );
+  addEvidence(
+    "browser-dev-release-one",
+    12_960,
+    "Prepare desktop release handoff",
+    "Summarized the shipped change, checks, and review evidence.",
+    ["GitHub", "Cursor"],
+  );
+  addEvidence(
+    "browser-dev-release-two",
+    6_480,
+    "Prepare desktop release handoff",
+    "Summarized the shipped change, checks, and review evidence.",
+    ["GitHub", "Cursor"],
+  );
   const evidence = (...activityIds: string[]) =>
     activityIds.map((activityId) => structuredClone(evidenceById[activityId]));
 
@@ -370,6 +452,34 @@ function createBrowserDevActivityOpportunities(
     generatedAt: now,
     analysisError: null,
     skills: [
+      {
+        id: "check-mrr",
+        revision: 1,
+        status: "pending",
+        name: "check MRR across Stripe and PostHog",
+        description:
+          "Compare recurring revenue and recent movement across the two dashboards.",
+        notes: "Call out any mismatch before reporting the number.",
+        blueprint: {
+          trigger: "When it is time to check current recurring revenue.",
+          steps: [
+            "Read current MRR in Stripe.",
+            "Compare the same period in PostHog.",
+            "Summarize the number and any mismatch.",
+          ],
+          verification: "The reported MRR is checked in both sources.",
+        },
+        occurrences: [
+          { activityIds: ["browser-dev-mrr-mon"] },
+          { activityIds: ["browser-dev-mrr-wed"] },
+          { activityIds: ["browser-dev-mrr-fri"] },
+        ],
+        evidence: evidence(
+          "browser-dev-mrr-mon",
+          "browser-dev-mrr-wed",
+          "browser-dev-mrr-fri",
+        ),
+      },
       {
         id: "review-pull-request",
         revision: 1,
@@ -398,6 +508,91 @@ function createBrowserDevActivityOpportunities(
           "browser-dev-pr-notifications",
           "browser-dev-pr-timeline",
         ),
+      },
+      {
+        id: "meeting-follow-ups",
+        revision: 1,
+        status: "pending",
+        name: "turn meeting decisions into follow-ups",
+        description: "Extract decisions, owners, and next actions after a call.",
+        notes: "",
+        blueprint: {
+          trigger: "When a meeting ends with decisions.",
+          steps: ["Review the meeting", "List decisions", "Assign next actions"],
+          verification: "Every action has an owner or an explicit open question.",
+        },
+        occurrences: [
+          { activityIds: ["browser-dev-meeting-one"] },
+          { activityIds: ["browser-dev-meeting-two"] },
+        ],
+        evidence: evidence(
+          "browser-dev-meeting-one",
+          "browser-dev-meeting-two",
+        ),
+      },
+      {
+        id: "weekly-growth-snapshot",
+        revision: 1,
+        status: "pending",
+        name: "prepare a weekly growth snapshot",
+        description: "Summarize activation and retention movement for review.",
+        notes: "",
+        blueprint: {
+          trigger: "Before the weekly growth review.",
+          steps: ["Read activation", "Read retention", "Summarize changes"],
+          verification: "Every number names its source and period.",
+        },
+        occurrences: [
+          { activityIds: ["browser-dev-metrics-one"] },
+          { activityIds: ["browser-dev-metrics-two"] },
+        ],
+        evidence: evidence(
+          "browser-dev-metrics-one",
+          "browser-dev-metrics-two",
+        ),
+      },
+      {
+        id: "release-handoff",
+        revision: 2,
+        status: "pending",
+        name: "prepare a release handoff",
+        description: "Summarize what changed, what passed, and what needs review.",
+        notes: "Keep the handoff concise.",
+        blueprint: {
+          trigger: "When a desktop change is ready to hand off.",
+          steps: ["Review the change", "Collect checks", "Write the handoff"],
+          verification: "Each outcome is backed by a check or artifact.",
+        },
+        occurrences: [
+          { activityIds: ["browser-dev-release-one"] },
+          { activityIds: ["browser-dev-release-two"] },
+        ],
+        evidence: evidence(
+          "browser-dev-release-one",
+          "browser-dev-release-two",
+        ),
+        edited: true,
+      },
+      {
+        id: "daily-activity-brief",
+        revision: 3,
+        status: "created",
+        name: "write a daily activity brief",
+        description: "Turn the day into a concise source-backed recap.",
+        notes: "",
+        blueprint: {
+          trigger: "At the end of a work day.",
+          steps: ["Review activity", "Group outcomes", "Write the recap"],
+          verification: "Each outcome links back to its source activity.",
+        },
+        occurrences: [],
+        evidence: [],
+        createdSkill: {
+          path: "/Users/screenpipe/.screenpipe/skills/daily-activity-brief/SKILL.md",
+          skillMd:
+            "---\nname: daily-activity-brief\ndescription: Turn the day into a concise source-backed recap.\n---\n\n# Daily activity brief\n\nReview the day, group completed outcomes, and link each claim to source activity.\n",
+        },
+        edited: true,
       },
     ],
     unfinished: [
@@ -512,6 +707,17 @@ function applyActivityOpportunityUpdate(
         "verification",
         request.verification,
       );
+    }
+    if (
+      typeof request.name === "string" ||
+      typeof request.description === "string" ||
+      typeof request.notes === "string" ||
+      typeof request.trigger === "string" ||
+      Array.isArray(request.steps) ||
+      typeof request.verification === "string" ||
+      Array.isArray(request.excludedActivityIds)
+    ) {
+      item.edited = true;
     }
     updateOpportunityEvidence(item.evidence, request.excludedActivityIds);
     if (typeof request.dismissed === "boolean") {
@@ -1121,6 +1327,8 @@ export function createBrowserIpcMock(options: BrowserIpcMockOptions) {
           port: options.apiPort,
           auth_enabled: options.mode === "live" && Boolean(options.apiKey),
         };
+      case "get_onboarding_status":
+        return { isCompleted: false, completedAt: null };
       case "get_screenpipe_base_dir":
         return "/Users/screenpipe/.screenpipe";
       case "get_chats_dir":

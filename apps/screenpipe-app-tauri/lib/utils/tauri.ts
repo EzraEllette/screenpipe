@@ -4308,7 +4308,7 @@ headlessRecordOnly?: boolean }
 export type ShowRewindWindow = "Main" | { Home: { page: string | null } } | { Search: { query: string | null } } | "Onboarding" | "Chat" | "PermissionRecovery"
 export type SkillBlueprint = { trigger: string; steps: string[]; verification: string }
 export type SkillOccurrence = { activityIds: string[] }
-export type SkillOpportunity = { id: string; revision: number; status: SkillOpportunityStatus; name: string; description: string; notes: string; blueprint: SkillBlueprint; occurrences?: SkillOccurrence[]; evidence: OpportunityEvidence[]; createdSkill?: CreatedSkill | null }
+export type SkillOpportunity = { id: string; revision: number; status: SkillOpportunityStatus; name: string; description: string; notes: string; blueprint: SkillBlueprint; occurrences?: SkillOccurrence[]; evidence: OpportunityEvidence[]; createdSkill?: CreatedSkill | null; edited?: boolean }
 export type SkillOpportunityStatus = "pending" | "dismissed" | "created"
 export type StartExportRecordingResponse = { jobId: string }
 export type Suggestion = { text: string;

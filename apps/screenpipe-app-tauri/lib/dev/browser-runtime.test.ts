@@ -224,11 +224,11 @@ describe("browser development runtime", () => {
       analysisState: "ready",
       analysisError: null,
     });
-    expect(ready.skills).toHaveLength(1);
+    expect(ready.skills).toHaveLength(6);
     expect(ready.unfinished).toHaveLength(2);
     expect(ready.skills[0].evidence[0]).toMatchObject({
-      activityId: "browser-dev-pr-export",
-      apps: ["Arc"],
+      activityId: "browser-dev-mrr-mon",
+      apps: ["Stripe", "PostHog"],
       excluded: false,
     });
 
@@ -361,7 +361,9 @@ describe("browser development runtime", () => {
     const created = invoke("create_activity_opportunity_skill", {
       request: { id: skill.id, revision },
     }) as CreatedSkill;
-    expect(created.path).toMatch(/\/review-a-pull-request\/SKILL\.md$/);
+    expect(created.path).toMatch(
+      /\/check-mrr-across-stripe-and-posthog\/SKILL\.md$/,
+    );
     expect(created.skillMd).toContain(`\`${included}\``);
     expect(created.skillMd).not.toContain(`\`${excluded}\``);
 

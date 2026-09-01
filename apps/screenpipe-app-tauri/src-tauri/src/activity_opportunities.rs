@@ -108,8 +108,8 @@ pub struct SkillOpportunity {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_skill: Option<CreatedSkill>,
     #[serde(default)]
-    #[specta(skip)]
-    edited: bool,
+    #[specta(optional)]
+    pub edited: bool,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Type)]
@@ -804,6 +804,9 @@ fn apply_update(
                 item.blueprint.verification = clean_text(&value);
                 item.edited = true;
             }
+            if request.excluded_activity_ids.is_some() {
+                item.edited = true;
+            }
             update_exclusions(&mut item.evidence, request.excluded_activity_ids)?;
             if let Some(dismissed) = request.dismissed {
                 item.status = if dismissed {
@@ -1230,6 +1233,11 @@ mod tests {
         assert_eq!(snapshot.skills[0].name, "edited");
         assert_eq!(snapshot.skills[0].status, SkillOpportunityStatus::Dismissed);
         assert!(snapshot.skills[0].evidence[0].excluded);
+        assert!(snapshot.skills[0].edited);
+        assert_eq!(
+            serde_json::to_value(&snapshot.skills[0]).unwrap()["edited"],
+            true
+        );
 
         let mut undo = update_request(OpportunityKind::Skill, "skill", 2);
         undo.dismissed = Some(false);

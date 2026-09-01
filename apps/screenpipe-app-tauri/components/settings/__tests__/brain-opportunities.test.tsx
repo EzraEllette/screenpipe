@@ -252,6 +252,14 @@ function installStatefulCommands() {
       }
       if (request.kind === "skill") {
         if (request.name !== undefined) item.name = request.name ?? "";
+        if (
+          request.name !== undefined ||
+          request.description !== undefined ||
+          request.notes !== undefined ||
+          request.excludedActivityIds !== undefined
+        ) {
+          item.edited = true;
+        }
       } else {
         if (request.goal !== undefined) item.goal = request.goal ?? "";
         if (request.agentSteps !== undefined) {
@@ -316,7 +324,7 @@ describe("BrainOpportunities", () => {
     expect(
       await screen.findByTestId("skill-opportunity-feedback-to-fix"),
     ).toBeTruthy();
-    expect(screen.getByTestId("opportunities-tab-skills")).toHaveTextContent(
+    expect(screen.getByTestId("opportunities-tab-ideas")).toHaveTextContent(
       "3",
     );
     expect(onCountChange).toHaveBeenLastCalledWith(5);
@@ -380,16 +388,7 @@ describe("BrainOpportunities", () => {
       "skill-opportunity-review-brief",
       "skill-opportunity-meeting-followups",
     ]);
-    expect(
-      within(screen.getByTestId("skill-opportunity-feedback-to-fix")).getByText(
-        "3 repeats",
-      ),
-    ).toBeTruthy();
-    expect(
-      within(screen.getByTestId("skill-opportunity-review-brief")).getByText(
-        "2 repeats",
-      ),
-    ).toBeTruthy();
+    expect(screen.queryByText(/repeats/)).toBeNull();
   });
 
   it("persists review changes and creates the real skill artifact", async () => {
@@ -407,10 +406,10 @@ describe("BrainOpportunities", () => {
     });
 
     const sourceEvidence = screen.getByTestId("skill-source-evidence");
-    fireEvent.click(within(sourceEvidence).getByText("evidence · 3 repeats"));
+    fireEvent.click(within(sourceEvidence).getByText("activity evidence"));
     fireEvent.click(
       within(sourceEvidence).getByRole("button", {
-        name: "exclude Review sample onboarding issue",
+        name: "remove Review sample onboarding issue",
       }),
     );
     await waitFor(() =>
@@ -420,27 +419,28 @@ describe("BrainOpportunities", () => {
         }),
       ).toBeTruthy(),
     );
-    expect(
-      within(sourceEvidence).getByText("evidence · 2 repeats"),
-    ).toBeTruthy();
 
     fireEvent.click(screen.getByTestId("create-skill-draft"));
     expect(screen.getByTestId("create-skill-draft")).toHaveTextContent(
       "creating…",
     );
-    expect(await screen.findByText("skill created")).toBeTruthy();
-    expect(mocks.createActivityOpportunitySkill).toHaveBeenCalledTimes(1);
+    await waitFor(() =>
+      expect(mocks.createActivityOpportunitySkill).toHaveBeenCalledTimes(1),
+    );
     expect(backendSnapshot.skills[0]).toMatchObject({
       status: "created",
       name: "turn feedback into a verified fix",
       notes: "Keep the final customer reply short.",
     });
     expect(backendSnapshot.skills[0].evidence[0].excluded).toBe(true);
-    expect(screen.getByTestId("opportunities-tab-skills")).toHaveTextContent(
+    expect(screen.getByTestId("opportunities-tab-ideas")).toHaveTextContent(
       "2",
     );
 
-    fireEvent.click(screen.getByRole("button", { name: /open skill/i }));
+    fireEvent.click(screen.getByTestId("opportunities-tab-created"));
+    fireEvent.click(
+      await screen.findByTestId("skill-opportunity-feedback-to-fix"),
+    );
     expect(screen.getByTestId("skill-file-preview")).toHaveTextContent(
       "turn feedback into a verified fix",
     );
@@ -628,16 +628,16 @@ describe("BrainOpportunities", () => {
     });
   });
 
-  it("persists evidence exclusions without marking suggestion copy as edited", async () => {
+  it("persists evidence removals", async () => {
     render(<BrainOpportunities />);
     fireEvent.click(
       await screen.findByTestId("skill-opportunity-feedback-to-fix"),
     );
     const sourceEvidence = screen.getByTestId("skill-source-evidence");
-    fireEvent.click(within(sourceEvidence).getByText("evidence · 3 repeats"));
+    fireEvent.click(within(sourceEvidence).getByText("activity evidence"));
     fireEvent.click(
       within(sourceEvidence).getByRole("button", {
-        name: "exclude Review sample onboarding issue",
+        name: "remove Review sample onboarding issue",
       }),
     );
 
@@ -710,18 +710,93 @@ describe("BrainOpportunities", () => {
     ).toHaveAttribute("role", "alert");
   });
 
+  it("shows three suggestions and promotes the next one after rejection", async () => {
+    const template = backendSnapshot.skills[2];
+    backendSnapshot.skills.push(
+      {
+        ...clone(template),
+        id: "fourth-suggestion",
+        name: "prepare a weekly growth snapshot",
+        description: "Summarize the weekly movement for review.",
+        evidence: [
+          evidence(
+            "activity-110",
+            "Review weekly growth",
+            "PostHog",
+            "2026-08-14T18:03:00Z",
+          ),
+        ],
+      },
+      {
+        ...clone(template),
+        id: "fifth-suggestion",
+        name: "capture meeting follow-ups",
+        description: "Turn meeting decisions into clear next actions.",
+        evidence: [
+          evidence(
+            "activity-111",
+            "Review meeting notes",
+            "Notion",
+            "2026-08-13T18:03:00Z",
+          ),
+        ],
+      },
+    );
+    render(<BrainOpportunities />);
+
+    await screen.findByTestId("skill-opportunity-feedback-to-fix");
+    expect(screen.queryByTestId("skill-opportunity-fourth-suggestion")).toBeNull();
+    expect(screen.getByRole("button", { name: "show 2 more" })).toBeTruthy();
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "reject turn product feedback into a focused fix",
+      }),
+    );
+
+    expect(
+      await screen.findByTestId("skill-opportunity-fourth-suggestion"),
+    ).toBeTruthy();
+    expect(backendSnapshot.skills[0].status).toBe("dismissed");
+  });
+
+  it("moves an idea to Continue only after the first edit", async () => {
+    render(<BrainOpportunities />);
+
+    fireEvent.click(
+      await screen.findByTestId("skill-opportunity-feedback-to-fix"),
+    );
+    expect(screen.queryByRole("region", { name: /continue/i })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "all skill ideas" }));
+    expect(screen.queryByRole("region", { name: /continue/i })).toBeNull();
+
+    fireEvent.click(screen.getByTestId("skill-opportunity-feedback-to-fix"));
+    fireEvent.change(screen.getByTestId("skill-draft-name"), {
+      target: { value: "turn feedback into a verified fix" },
+    });
+    await waitFor(() => expect(backendSnapshot.skills[0].edited).toBe(true));
+    fireEvent.click(screen.getByRole("button", { name: "all skill ideas" }));
+
+    expect(screen.getByRole("region", { name: /continue/i })).toBeTruthy();
+    expect(
+      within(screen.getByRole("region", { name: /continue/i })).getByText(
+        "turn feedback into a verified fix",
+      ),
+    ).toBeTruthy();
+  });
+
   it("supports keyboard tab navigation", async () => {
     render(<BrainOpportunities />);
     await screen.findByTestId("skill-opportunity-feedback-to-fix");
 
-    fireEvent.keyDown(screen.getByTestId("opportunities-tab-skills"), {
+    fireEvent.keyDown(screen.getByTestId("opportunities-tab-ideas"), {
       key: "ArrowRight",
     });
-    expect(screen.getByTestId("opportunities-tab-unfinished")).toHaveAttribute(
+    expect(screen.getByTestId("opportunities-tab-created")).toHaveAttribute(
       "aria-selected",
       "true",
     );
-    expect(screen.getByTestId("opportunities-tab-skills")).not.toHaveAttribute(
+    expect(screen.getByTestId("opportunities-tab-ideas")).not.toHaveAttribute(
       "aria-controls",
     );
   });
