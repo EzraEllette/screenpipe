@@ -212,7 +212,8 @@ const BROWSER_DEV_IMPORTED_SKILLS: ImportedSkill[] = [
 const BROWSER_DEV_PROVIDER_SKILLS: RegistrySkill[] = [
   {
     name: "PDF",
-    description: "Fill, merge, split, and extract text or tables from PDF files.",
+    description:
+      "Fill, merge, split, and extract text or tables from PDF files.",
     repo: "anthropics/skills",
     git_ref: "main",
     path: "skills/pdf",
@@ -231,7 +232,8 @@ const BROWSER_DEV_PROVIDER_SKILLS: RegistrySkill[] = [
   },
   {
     name: "Transcribe",
-    description: "Transcribe audio with optional diarization and speaker hints.",
+    description:
+      "Transcribe audio with optional diarization and speaker hints.",
     repo: "openai/skills",
     git_ref: "main",
     path: "skills/.curated/transcribe",
@@ -259,16 +261,83 @@ const GRANTED_PERMISSION_COMMANDS = new Set([
   "check_screen_recording_permission",
 ]);
 
+type BrowserSkillDraftPhase = "running" | "ready" | "error";
+
+type BrowserSkillDraft = {
+  id: string;
+  conversationId: string;
+  path: string;
+  phase: BrowserSkillDraftPhase;
+  skillMd: string;
+  error?: string | null;
+  startedAt: string;
+  updatedAt: string;
+  completedAt?: string | null;
+};
+
+type BrowserSkillOpportunity = Omit<
+  SkillOpportunity,
+  "status" | "drafts" | "currentDraftId"
+> & {
+  status: SkillOpportunity["status"] | "drafting";
+  drafts: BrowserSkillDraft[];
+  currentDraftId?: string | null;
+};
+
+type BrowserActivityOpportunitySnapshot = Omit<
+  ActivityOpportunitySnapshot,
+  "skills"
+> & {
+  skills: BrowserSkillOpportunity[];
+};
+
+type StartSkillDraftRequest = {
+  id: string;
+  revision: number;
+  changeRequest?: string | null;
+};
+
+type SaveSkillDraftRequest = {
+  id: string;
+  draftId: string;
+  skillMd: string;
+};
+
+type InstallSkillDraftRequest = {
+  id: string;
+  revision: number;
+  draftId: string;
+};
+
+const BROWSER_READY_DRAFT_ID = "browser-ready-mrr-draft";
+const BROWSER_READY_DRAFT_CONVERSATION_ID =
+  "skill-draft-browser-ready-mrr-draft";
+const BROWSER_READY_DRAFT_PATH =
+  "/Users/screenpipe/.screenpipe/skill-drafts/check-mrr/browser-ready-mrr-draft/SKILL.md";
+const BROWSER_READY_DRAFT_MARKDOWN = `---
+name: "check MRR across Stripe and PostHog"
+description: "Compare current MRR across Stripe and PostHog, then report any mismatch."
+---
+
+# Check MRR
+
+1. Read the current MRR and comparison period in Stripe.
+2. Read the matching revenue view in PostHog.
+3. Report the number, period, and any mismatch between the two sources.
+
+The check is complete when both sources and the comparison period are named.
+`;
+
 function cloneActivityOpportunitySnapshot(
-  snapshot: ActivityOpportunitySnapshot,
-): ActivityOpportunitySnapshot {
+  snapshot: BrowserActivityOpportunitySnapshot,
+): BrowserActivityOpportunitySnapshot {
   return structuredClone(snapshot);
 }
 
 function createBrowserDevActivityOpportunities(
   scenario: BrowserDevScenario | undefined,
   now: string,
-): ActivityOpportunitySnapshot {
+): BrowserActivityOpportunitySnapshot {
   if (scenario === "backend-error") {
     return {
       analysisState: "error",
@@ -454,8 +523,8 @@ function createBrowserDevActivityOpportunities(
     skills: [
       {
         id: "check-mrr",
-        revision: 1,
-        status: "pending",
+        revision: 3,
+        status: "drafting",
         name: "check MRR across Stripe and PostHog",
         description:
           "Compare recurring revenue and recent movement across the two dashboards.",
@@ -479,6 +548,21 @@ function createBrowserDevActivityOpportunities(
           "browser-dev-mrr-wed",
           "browser-dev-mrr-fri",
         ),
+        supportingContexts: [],
+        drafts: [
+          {
+            id: BROWSER_READY_DRAFT_ID,
+            conversationId: BROWSER_READY_DRAFT_CONVERSATION_ID,
+            path: BROWSER_READY_DRAFT_PATH,
+            phase: "ready",
+            skillMd: BROWSER_READY_DRAFT_MARKDOWN,
+            startedAt: at(8),
+            updatedAt: at(5),
+            completedAt: at(5),
+          },
+        ],
+        currentDraftId: BROWSER_READY_DRAFT_ID,
+        edited: true,
       },
       {
         id: "review-pull-request",
@@ -508,18 +592,26 @@ function createBrowserDevActivityOpportunities(
           "browser-dev-pr-notifications",
           "browser-dev-pr-timeline",
         ),
+        supportingContexts: [],
+        drafts: [],
       },
       {
         id: "meeting-follow-ups",
         revision: 1,
         status: "pending",
         name: "turn meeting decisions into follow-ups",
-        description: "Extract decisions, owners, and next actions after a call.",
+        description:
+          "Extract decisions, owners, and next actions after a call.",
         notes: "",
         blueprint: {
           trigger: "When a meeting ends with decisions.",
-          steps: ["Review the meeting", "List decisions", "Assign next actions"],
-          verification: "Every action has an owner or an explicit open question.",
+          steps: [
+            "Review the meeting",
+            "List decisions",
+            "Assign next actions",
+          ],
+          verification:
+            "Every action has an owner or an explicit open question.",
         },
         occurrences: [
           { activityIds: ["browser-dev-meeting-one"] },
@@ -529,6 +621,8 @@ function createBrowserDevActivityOpportunities(
           "browser-dev-meeting-one",
           "browser-dev-meeting-two",
         ),
+        supportingContexts: [],
+        drafts: [],
       },
       {
         id: "weekly-growth-snapshot",
@@ -550,13 +644,16 @@ function createBrowserDevActivityOpportunities(
           "browser-dev-metrics-one",
           "browser-dev-metrics-two",
         ),
+        supportingContexts: [],
+        drafts: [],
       },
       {
         id: "release-handoff",
         revision: 2,
         status: "pending",
         name: "prepare a release handoff",
-        description: "Summarize what changed, what passed, and what needs review.",
+        description:
+          "Summarize what changed, what passed, and what needs review.",
         notes: "Keep the handoff concise.",
         blueprint: {
           trigger: "When a desktop change is ready to hand off.",
@@ -571,6 +668,8 @@ function createBrowserDevActivityOpportunities(
           "browser-dev-release-one",
           "browser-dev-release-two",
         ),
+        supportingContexts: [],
+        drafts: [],
         edited: true,
       },
       {
@@ -587,11 +686,13 @@ function createBrowserDevActivityOpportunities(
         },
         occurrences: [],
         evidence: [],
+        supportingContexts: [],
         createdSkill: {
           path: "/Users/screenpipe/.screenpipe/skills/daily-activity-brief/SKILL.md",
           skillMd:
             "---\nname: daily-activity-brief\ndescription: Turn the day into a concise source-backed recap.\n---\n\n# Daily activity brief\n\nReview the day, group completed outcomes, and link each claim to source activity.\n",
         },
+        drafts: [],
         edited: true,
       },
     ],
@@ -651,6 +752,89 @@ function requiredText(label: string, value: string): string {
   return cleaned;
 }
 
+function parseBrowserSkillDraft(raw: string) {
+  const trimmed = raw.trim();
+  if (!trimmed || new TextEncoder().encode(trimmed).byteLength > 64 * 1024) {
+    throwCommandError("Skill draft must contain 1-65536 bytes");
+  }
+  if (trimmed.includes("\0")) {
+    throwCommandError("Skill draft contains an invalid null byte");
+  }
+  const lines = trimmed.split("\n");
+  if (lines[0]?.trim() !== "---") {
+    throwCommandError("Skill draft must start with YAML frontmatter");
+  }
+  const closingIndex = lines.findIndex(
+    (line, index) => index > 0 && line.trim() === "---",
+  );
+  if (closingIndex === -1) {
+    throwCommandError("Skill draft frontmatter is not closed");
+  }
+  const scalar = (value: string) => {
+    const cleaned = value.trim();
+    try {
+      const parsed = JSON.parse(cleaned);
+      return typeof parsed === "string" ? parsed : cleaned;
+    } catch {
+      return cleaned.replace(/^["']|["']$/g, "");
+    }
+  };
+  const frontmatter = lines.slice(1, closingIndex);
+  const name = scalar(
+    frontmatter
+      .find((line) => line.trimStart().startsWith("name:"))
+      ?.trimStart()
+      .slice("name:".length) ?? "",
+  );
+  if (!name) throwCommandError("Skill draft frontmatter requires a name");
+  const description = scalar(
+    frontmatter
+      .find((line) => line.trimStart().startsWith("description:"))
+      ?.trimStart()
+      .slice("description:".length) ?? "",
+  );
+  if (!description) {
+    throwCommandError("Skill draft frontmatter requires a description");
+  }
+  const instructions = requiredText(
+    "Skill draft instructions",
+    lines.slice(closingIndex + 1).join("\n"),
+  );
+  if ([...name].length > 80) {
+    throwCommandError("Skill draft name cannot exceed 80 characters");
+  }
+  if ([...description].length > 500) {
+    throwCommandError("Skill draft description cannot exceed 500 characters");
+  }
+  const skillMd = `---\nname: ${JSON.stringify(name)}\ndescription: ${JSON.stringify(description)}\n---\n\n${instructions}\n`;
+  return { name, description, instructions, skillMd };
+}
+
+function browserDraftMarkdown(
+  item: BrowserSkillOpportunity,
+  changeRequest?: string | null,
+) {
+  const steps = item.blueprint.steps
+    .map((step, index) => `${index + 1}. ${step.trim()}`)
+    .join("\n");
+  const requestedChange = changeRequest?.trim()
+    ? `\n\nRequested adjustment: ${changeRequest.trim()}`
+    : "";
+  return parseBrowserSkillDraft(`---
+name: ${JSON.stringify(item.name.trim())}
+description: ${JSON.stringify(item.description.trim())}
+---
+
+# ${item.name.trim()}
+
+Run this when: ${item.blueprint.trigger.trim()}
+
+${steps}
+
+Done when: ${item.blueprint.verification.trim()}${requestedChange}
+`).skillMd;
+}
+
 function updateOpportunityEvidence(
   evidence: OpportunityEvidence[],
   excludedActivityIds: string[] | null | undefined,
@@ -669,7 +853,7 @@ function updateOpportunityEvidence(
 }
 
 function applyActivityOpportunityUpdate(
-  snapshot: ActivityOpportunitySnapshot,
+  snapshot: BrowserActivityOpportunitySnapshot,
   request: UpdateActivityOpportunityRequest,
 ) {
   if (request.kind === "skill") {
@@ -715,11 +899,15 @@ function applyActivityOpportunityUpdate(
       typeof request.trigger === "string" ||
       Array.isArray(request.steps) ||
       typeof request.verification === "string" ||
-      Array.isArray(request.excludedActivityIds)
+      Array.isArray(request.excludedActivityIds) ||
+      Array.isArray(request.supportingContexts)
     ) {
       item.edited = true;
     }
     updateOpportunityEvidence(item.evidence, request.excludedActivityIds);
+    if (Array.isArray(request.supportingContexts)) {
+      item.supportingContexts = structuredClone(request.supportingContexts);
+    }
     if (typeof request.dismissed === "boolean") {
       item.status = request.dismissed
         ? "dismissed"
@@ -772,7 +960,9 @@ function applyActivityOpportunityUpdate(
   item.revision += 1;
 }
 
-function activityOpportunitySkillInstructions(item: SkillOpportunity): string {
+function activityOpportunitySkillInstructions(
+  item: BrowserSkillOpportunity,
+): string {
   const steps = item.blueprint.steps
     .map((step, index) => `${index + 1}. ${step.trim()}`)
     .join("\n");
@@ -795,7 +985,7 @@ function browserSkillKey(name: string): string {
     .replace(/^-+|-+$/g, "");
 }
 
-function createBrowserDevSkill(item: SkillOpportunity): CreatedSkill {
+function createBrowserDevSkill(item: BrowserSkillOpportunity): CreatedSkill {
   if (item.evidence.every((source) => source.excluded)) {
     throwCommandError("At least one activity must remain included");
   }
@@ -1038,7 +1228,9 @@ export function createBrowserIpcMock(options: BrowserIpcMockOptions) {
   const warned = new Set<string>();
   let nextResourceId = 1;
   let piExtensionPackages: PiExtensionPackage[] = [];
-  let importedSkills = BROWSER_DEV_IMPORTED_SKILLS.map((skill) => ({ ...skill }));
+  let importedSkills = BROWSER_DEV_IMPORTED_SKILLS.map((skill) => ({
+    ...skill,
+  }));
   const providerSkills = BROWSER_DEV_PROVIDER_SKILLS.map((skill) => ({
     ...skill,
   }));
@@ -1046,44 +1238,159 @@ export function createBrowserIpcMock(options: BrowserIpcMockOptions) {
   const chatsDir = "/Users/screenpipe/.screenpipe/chats";
   const chatFixtures = new Map<string, string>(
     [
-      ["browser-chat-1", "Ship Windows capture recovery", "codex", "cursor", true],
-      ["browser-chat-2", "Summarize enterprise interviews", "claude-code", "screenpipe", true],
-      ["browser-chat-3", "Investigate audio device switching", "codex", "github-copilot", false],
-      ["browser-chat-4", "Draft launch announcement", "claude-code", "terminal", false],
-      ["browser-chat-5", "Review onboarding drop-off", "codex", "cursor", false],
-      ["browser-chat-6", "Prepare customer follow-ups", "claude-code", "screenpipe", false],
-      ["browser-chat-7", "Trace duplicate chat sessions", "codex", "terminal", false],
-      ["browser-chat-8", "Analyze weekly product usage", "claude-code", "cursor", false],
-      ["browser-chat-9", "Polish the release checklist", "codex", "screenpipe", false],
-      ["browser-chat-10", "Compare transcription quality", "claude-code", "github-copilot", false],
-      ["browser-chat-11", "Plan the next design sprint", "codex", "terminal", false],
-      ["browser-chat-12", "Find unresolved support threads", "claude-code", "cursor", false],
+      [
+        "browser-chat-1",
+        "Ship Windows capture recovery",
+        "codex",
+        "cursor",
+        true,
+      ],
+      [
+        "browser-chat-2",
+        "Summarize enterprise interviews",
+        "claude-code",
+        "screenpipe",
+        true,
+      ],
+      [
+        "browser-chat-3",
+        "Investigate audio device switching",
+        "codex",
+        "github-copilot",
+        false,
+      ],
+      [
+        "browser-chat-4",
+        "Draft launch announcement",
+        "claude-code",
+        "terminal",
+        false,
+      ],
+      [
+        "browser-chat-5",
+        "Review onboarding drop-off",
+        "codex",
+        "cursor",
+        false,
+      ],
+      [
+        "browser-chat-6",
+        "Prepare customer follow-ups",
+        "claude-code",
+        "screenpipe",
+        false,
+      ],
+      [
+        "browser-chat-7",
+        "Trace duplicate chat sessions",
+        "codex",
+        "terminal",
+        false,
+      ],
+      [
+        "browser-chat-8",
+        "Analyze weekly product usage",
+        "claude-code",
+        "cursor",
+        false,
+      ],
+      [
+        "browser-chat-9",
+        "Polish the release checklist",
+        "codex",
+        "screenpipe",
+        false,
+      ],
+      [
+        "browser-chat-10",
+        "Compare transcription quality",
+        "claude-code",
+        "github-copilot",
+        false,
+      ],
+      [
+        "browser-chat-11",
+        "Plan the next design sprint",
+        "codex",
+        "terminal",
+        false,
+      ],
+      [
+        "browser-chat-12",
+        "Find unresolved support threads",
+        "claude-code",
+        "cursor",
+        false,
+      ],
     ].map(([id, title, source, harness, pinned], index) => {
       const timestamp = Date.now() - index * 7 * 60_000;
-      return [`${chatsDir}/${id}.json`, JSON.stringify({
-        id,
-        title,
-        titleSource: "ai",
-        kind: "chat",
-        pinned,
-        createdAt: timestamp,
-        updatedAt: timestamp,
-        lastUserMessageAt: timestamp,
-        lastContentAt: timestamp,
-        lastViewedAt: timestamp,
-        importedFrom: {
-          source,
-          sourceId: `${source}-browser-dev-${index}`,
-          importedAt: timestamp,
-          harness,
-        },
-        messages: [
-          { id: `${id}-user`, role: "user", content: title, timestamp },
-          { id: `${id}-assistant`, role: "assistant", content: "Browser-dev fixture reply", timestamp: timestamp + 1 },
-        ],
-      })] as const;
+      return [
+        `${chatsDir}/${id}.json`,
+        JSON.stringify({
+          id,
+          title,
+          titleSource: "ai",
+          kind: "chat",
+          pinned,
+          createdAt: timestamp,
+          updatedAt: timestamp,
+          lastUserMessageAt: timestamp,
+          lastContentAt: timestamp,
+          lastViewedAt: timestamp,
+          importedFrom: {
+            source,
+            sourceId: `${source}-browser-dev-${index}`,
+            importedAt: timestamp,
+            harness,
+          },
+          messages: [
+            { id: `${id}-user`, role: "user", content: title, timestamp },
+            {
+              id: `${id}-assistant`,
+              role: "assistant",
+              content: "Browser-dev fixture reply",
+              timestamp: timestamp + 1,
+            },
+          ],
+        }),
+      ] as const;
     }),
   );
+  const readyDraftChatTimestamp = Date.parse(initialTimestamp) - 5 * 60_000;
+  chatFixtures.set(
+    `${chatsDir}/${BROWSER_READY_DRAFT_CONVERSATION_ID}.json`,
+    JSON.stringify({
+      id: BROWSER_READY_DRAFT_CONVERSATION_ID,
+      title: "Create check MRR across Stripe and PostHog skill",
+      titleSource: "fallback",
+      messages: [
+        {
+          id: `${BROWSER_READY_DRAFT_CONVERSATION_ID}-user`,
+          role: "user",
+          content: "Create the check MRR across Stripe and PostHog skill",
+          timestamp: readyDraftChatTimestamp - 1,
+        },
+        {
+          id: `${BROWSER_READY_DRAFT_CONVERSATION_ID}-assistant`,
+          role: "assistant",
+          content: BROWSER_READY_DRAFT_MARKDOWN,
+          timestamp: readyDraftChatTimestamp,
+        },
+      ],
+      createdAt: readyDraftChatTimestamp - 1,
+      updatedAt: readyDraftChatTimestamp,
+      lastUserMessageAt: readyDraftChatTimestamp - 1,
+      lastContentAt: readyDraftChatTimestamp,
+      lastViewedAt: 0,
+      kind: "chat",
+      presetId: "screenpipe-cloud",
+      rev: 2,
+    }),
+  );
+  const skillDraftFiles = new Map<string, string>([
+    [BROWSER_READY_DRAFT_PATH, BROWSER_READY_DRAFT_MARKDOWN],
+  ]);
+  let nextSkillDraftNumber = 1;
   let liveViews =
     options.scenario === "empty"
       ? []
@@ -1295,7 +1602,9 @@ export function createBrowserIpcMock(options: BrowserIpcMockOptions) {
         return null;
       case "plugin:fs|read_file":
       case "plugin:fs|read_text_file": {
-        const contents = chatFixtures.get(String(input.path)) ?? "";
+        const path = String(input.path);
+        const contents =
+          chatFixtures.get(path) ?? skillDraftFiles.get(path) ?? "";
         return new TextEncoder().encode(contents);
       }
       case "plugin:fs|read_dir":
@@ -1308,19 +1617,25 @@ export function createBrowserIpcMock(options: BrowserIpcMockOptions) {
             }))
           : [];
       case "plugin:fs|exists":
-        return String(input.path) === chatsDir || chatFixtures.has(String(input.path));
+        return (
+          String(input.path) === chatsDir ||
+          chatFixtures.has(String(input.path)) ||
+          skillDraftFiles.has(String(input.path))
+        );
       case "plugin:fs|stat":
-      case "plugin:fs|lstat":
+      case "plugin:fs|lstat": {
+        const draft = skillDraftFiles.get(String(input.path));
         return {
-          isFile: false,
+          isFile: draft !== undefined,
           isDirectory: false,
           isSymlink: false,
-          size: 0,
+          size: draft ? new TextEncoder().encode(draft).byteLength : 0,
           mtime: null,
           atime: null,
           birthtime: null,
           readonly: false,
         };
+      }
       case "get_local_api_config":
         return {
           key: options.mode === "live" ? options.apiKey || null : null,
@@ -1335,6 +1650,17 @@ export function createBrowserIpcMock(options: BrowserIpcMockOptions) {
         return chatsDir;
       case "read_viewer_file": {
         const path = String(input.path ?? "");
+        const skillDraft = skillDraftFiles.get(path);
+        if (skillDraft !== undefined) {
+          return {
+            kind: "text",
+            text: skillDraft,
+            name: "SKILL.md",
+            path,
+            truncated: false,
+            total_bytes: new TextEncoder().encode(skillDraft).byteLength,
+          };
+        }
         if (!path.endsWith("/imessage-sync/output/sync-summary.md")) {
           return { kind: "error", message: "mock file not found", path };
         }
@@ -1370,7 +1696,9 @@ export function createBrowserIpcMock(options: BrowserIpcMockOptions) {
       case "pi_install_extension_package": {
         const source = String(input.source ?? "");
         if (!source) return piExtensionPackages.map((pkg) => ({ ...pkg }));
-        const existing = piExtensionPackages.find((pkg) => pkg.source === source);
+        const existing = piExtensionPackages.find(
+          (pkg) => pkg.source === source,
+        );
         if (existing) {
           existing.filtered = false;
           existing.installed = true;
@@ -1387,7 +1715,9 @@ export function createBrowserIpcMock(options: BrowserIpcMockOptions) {
       }
       case "pi_remove_extension_package": {
         const source = String(input.source ?? "");
-        piExtensionPackages = piExtensionPackages.filter((pkg) => pkg.source !== source);
+        piExtensionPackages = piExtensionPackages.filter(
+          (pkg) => pkg.source !== source,
+        );
         return piExtensionPackages.map((pkg) => ({ ...pkg }));
       }
       case "pi_check":
@@ -1459,7 +1789,9 @@ export function createBrowserIpcMock(options: BrowserIpcMockOptions) {
         return providerSkills.map((skill) => ({ ...skill }));
       case "install_registry_skill": {
         const name = String(input.name ?? "");
-        const skill = providerSkills.find((candidate) => candidate.name === name);
+        const skill = providerSkills.find(
+          (candidate) => candidate.name === name,
+        );
         if (!skill) throw new Error("skill is no longer available");
         skill.imported = true;
         const installed = {
@@ -1468,7 +1800,9 @@ export function createBrowserIpcMock(options: BrowserIpcMockOptions) {
           path: `/Users/screenpipe/.screenpipe/skills/${skill.path.split("/").at(-1)}`,
         };
         importedSkills = [
-          ...importedSkills.filter((candidate) => candidate.name !== skill.name),
+          ...importedSkills.filter(
+            (candidate) => candidate.name !== skill.name,
+          ),
           installed,
         ];
         return { ...installed };
@@ -1577,6 +1911,205 @@ export function createBrowserIpcMock(options: BrowserIpcMockOptions) {
         applyActivityOpportunityUpdate(next, request);
         activityOpportunities = next;
         return cloneActivityOpportunitySnapshot(activityOpportunities);
+      }
+      case "start_activity_opportunity_skill_draft": {
+        const request = input.request as StartSkillDraftRequest;
+        if ((request.changeRequest?.length ?? 0) > 4_000) {
+          throwCommandError("changeRequest cannot exceed 4000 bytes");
+        }
+        const item = activityOpportunities.skills.find(
+          (candidate) => candidate.id === request.id,
+        );
+        if (!item) throwCommandError("Skill opportunity was not found");
+        const runningDraft = item.drafts.find(
+          (draft) =>
+            draft.id === item.currentDraftId && draft.phase === "running",
+        );
+        if (runningDraft) return structuredClone(runningDraft);
+        if (item.revision !== request.revision) {
+          throwCommandError(
+            "Opportunity changed; reload it before starting the draft",
+          );
+        }
+        if (item.status !== "pending" && item.status !== "drafting") {
+          throwCommandError(
+            "Only pending or drafting skill opportunities can start a draft",
+          );
+        }
+        requiredText("name", item.name);
+        requiredText("description", item.description);
+
+        const draftNumber = nextSkillDraftNumber++;
+        const draftId = `browser-draft-${item.id}-${draftNumber}`;
+        const conversationId = `skill-draft-${draftId}`;
+        const path = `/Users/screenpipe/.screenpipe/skill-drafts/${item.id}/${draftId}/SKILL.md`;
+        const startedAt = new Date().toISOString();
+        const draft: BrowserSkillDraft = {
+          id: draftId,
+          conversationId,
+          path,
+          phase: "running",
+          skillMd: "",
+          startedAt,
+          updatedAt: startedAt,
+        };
+        const chatTimestamp = Date.now();
+        const displayMessage = request.changeRequest?.trim()
+          ? `Revise the ${item.name.trim()} skill: ${request.changeRequest.trim()}`
+          : `Create the ${item.name.trim()} skill`;
+        chatFixtures.set(
+          `${chatsDir}/${conversationId}.json`,
+          JSON.stringify({
+            id: conversationId,
+            title: `Create ${item.name.trim()} skill`,
+            titleSource: "fallback",
+            messages: [
+              {
+                id: `${conversationId}-user`,
+                role: "user",
+                content: displayMessage,
+                timestamp: chatTimestamp,
+              },
+              {
+                id: `${conversationId}-assistant`,
+                role: "assistant",
+                content: "",
+                timestamp: chatTimestamp,
+              },
+            ],
+            createdAt: chatTimestamp,
+            updatedAt: chatTimestamp,
+            lastUserMessageAt: chatTimestamp,
+            lastContentAt: chatTimestamp,
+            lastViewedAt: 0,
+            kind: "chat",
+            presetId: "screenpipe-cloud",
+            rev: 1,
+          }),
+        );
+        item.status = "drafting";
+        item.edited = true;
+        item.currentDraftId = draftId;
+        item.drafts.push(draft);
+        item.revision += 1;
+
+        queueMicrotask(() => {
+          const savedItem = activityOpportunities.skills.find(
+            (candidate) => candidate.id === request.id,
+          );
+          const savedDraft = savedItem?.drafts.find(
+            (candidate) => candidate.id === draftId,
+          );
+          if (!savedItem || !savedDraft || savedDraft.phase !== "running") {
+            return;
+          }
+          const skillMd = browserDraftMarkdown(
+            savedItem,
+            request.changeRequest,
+          );
+          const completedAt = new Date().toISOString();
+          savedDraft.phase = "ready";
+          savedDraft.skillMd = skillMd;
+          savedDraft.updatedAt = completedAt;
+          savedDraft.completedAt = completedAt;
+          delete savedDraft.error;
+          savedItem.revision += 1;
+          skillDraftFiles.set(savedDraft.path, skillMd);
+
+          const chatPath = `${chatsDir}/${conversationId}.json`;
+          const chatRaw = chatFixtures.get(chatPath);
+          if (!chatRaw) return;
+          const chat = JSON.parse(chatRaw) as {
+            messages: Array<{ id: string; content: string }>;
+            updatedAt: number;
+            lastContentAt: number;
+            rev: number;
+          };
+          const assistant = chat.messages.find(
+            (message) => message.id === `${conversationId}-assistant`,
+          );
+          if (assistant) assistant.content = skillMd;
+          const completedAtMs = Date.now();
+          chat.updatedAt = completedAtMs;
+          chat.lastContentAt = completedAtMs;
+          chat.rev += 1;
+          chatFixtures.set(chatPath, JSON.stringify(chat));
+        });
+        return structuredClone(draft);
+      }
+      case "save_activity_opportunity_skill_draft": {
+        const request = input.request as SaveSkillDraftRequest;
+        const parsed = parseBrowserSkillDraft(request.skillMd);
+        const item = activityOpportunities.skills.find(
+          (candidate) => candidate.id === request.id,
+        );
+        if (!item) throwCommandError("Skill opportunity was not found");
+        if (item.status !== "drafting") {
+          throwCommandError("Only an unfinished skill draft can be saved");
+        }
+        const draft = item.drafts.find(
+          (candidate) => candidate.id === request.draftId,
+        );
+        if (!draft) throwCommandError("Skill draft was not found");
+        if (draft.phase !== "ready") {
+          throwCommandError("The skill draft is not ready to edit");
+        }
+        const updatedAt = new Date().toISOString();
+        draft.skillMd = parsed.skillMd;
+        draft.updatedAt = updatedAt;
+        draft.completedAt = updatedAt;
+        delete draft.error;
+        skillDraftFiles.set(draft.path, parsed.skillMd);
+        item.revision += 1;
+        return structuredClone(draft);
+      }
+      case "install_activity_opportunity_skill_draft": {
+        const request = input.request as InstallSkillDraftRequest;
+        const item = activityOpportunities.skills.find(
+          (candidate) => candidate.id === request.id,
+        );
+        if (!item) throwCommandError("Skill opportunity was not found");
+        if (item.createdSkill) return structuredClone(item.createdSkill);
+        if (item.revision !== request.revision) {
+          throwCommandError(
+            "Opportunity changed; reload it before installing the skill",
+          );
+        }
+        if (item.status !== "drafting") {
+          throwCommandError("Only a reviewed skill draft can be installed");
+        }
+        const draft = item.drafts.find(
+          (candidate) => candidate.id === request.draftId,
+        );
+        if (!draft) throwCommandError("Skill draft was not found");
+        if (draft.phase !== "ready") {
+          throwCommandError("The skill draft is not ready to install");
+        }
+        const parsed = parseBrowserSkillDraft(
+          skillDraftFiles.get(draft.path) ?? draft.skillMd,
+        );
+        const key = browserSkillKey(parsed.name);
+        const created: CreatedSkill = {
+          path: `/Users/screenpipe/.screenpipe/skills/${key}/SKILL.md`,
+          skillMd: parsed.skillMd,
+        };
+        const existing = createdSkills.get(key);
+        if (existing && existing.content !== created.skillMd) {
+          throwCommandError(
+            `skill '${key}' already exists; read it before deciding whether it is agent-owned and patchable`,
+          );
+        }
+        const result = existing?.created ?? created;
+        createdSkills.set(key, {
+          created: structuredClone(result),
+          content: result.skillMd,
+        });
+        item.status = "created";
+        item.name = parsed.name;
+        item.description = parsed.description;
+        item.createdSkill = structuredClone(result);
+        item.revision += 1;
+        return structuredClone(result);
       }
       case "create_activity_opportunity_skill": {
         const request = input.request as CreateActivityOpportunitySkillRequest;

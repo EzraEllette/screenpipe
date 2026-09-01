@@ -276,11 +276,13 @@ export async function waitForChatReady(targetWindow: ChatTargetWindow): Promise<
 
 export async function openChatConversationInCurrentChatSurface(
   conversationId: string,
+  filePreviewPath?: string,
 ): Promise<void> {
   const currentWindowLabel = getCurrentWindow().label;
   const payload: ChatLoadConversationPayload = {
     conversationId,
     targetWindow: currentWindowLabel === "chat" ? "chat" : "home",
+    ...(filePreviewPath ? { filePreviewPath } : {}),
   };
   useChatStore.getState().actions.setCurrent(conversationId);
   await emit("chat-load-conversation", payload);

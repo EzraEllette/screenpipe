@@ -17,6 +17,9 @@ import {
 import type {
   ActivityOpportunitySnapshot,
   HandoffActivityOpportunityRequest,
+  InstallActivityOpportunitySkillDraftRequest,
+  SaveActivityOpportunitySkillDraftRequest,
+  StartActivityOpportunitySkillDraftRequest,
   UpdateActivityOpportunityRequest,
 } from "@/lib/utils/tauri";
 import { BrainOpportunities } from "../brain-opportunities";
@@ -25,6 +28,9 @@ const mocks = vi.hoisted(() => ({
   getActivityOpportunities: vi.fn(),
   updateActivityOpportunity: vi.fn(),
   createActivityOpportunitySkill: vi.fn(),
+  startActivityOpportunitySkillDraft: vi.fn(),
+  saveActivityOpportunitySkillDraft: vi.fn(),
+  installActivityOpportunitySkillDraft: vi.fn(),
   handoffActivityOpportunity: vi.fn(),
   eventHandlers: new Map<string, (event: { payload: unknown }) => void>(),
 }));
@@ -38,6 +44,12 @@ vi.mock("@/lib/utils/tauri", async (importOriginal) => {
       getActivityOpportunities: mocks.getActivityOpportunities,
       updateActivityOpportunity: mocks.updateActivityOpportunity,
       createActivityOpportunitySkill: mocks.createActivityOpportunitySkill,
+      startActivityOpportunitySkillDraft:
+        mocks.startActivityOpportunitySkillDraft,
+      saveActivityOpportunitySkillDraft:
+        mocks.saveActivityOpportunitySkillDraft,
+      installActivityOpportunitySkillDraft:
+        mocks.installActivityOpportunitySkillDraft,
       handoffActivityOpportunity: mocks.handoffActivityOpportunity,
     },
   };
@@ -50,6 +62,50 @@ vi.mock("@/lib/hooks/use-tauri-event", () => ({
   ) => {
     mocks.eventHandlers.set(event, handler);
   },
+}));
+
+vi.mock("../activity-context-picker", () => ({
+  ActivityContextPicker: ({
+    onSelect,
+    disabled,
+  }: {
+    onSelect: (context: {
+      source: "keyword-search";
+      query: string;
+      startAt: string;
+      endAt: string;
+      frameIds: number[];
+      representativeFrameId: number;
+      representativeTimestamp: string;
+      appName: string;
+      windowName: string;
+      snippet: string;
+      url: string;
+    }) => void | Promise<void>;
+    disabled?: boolean;
+  }) => (
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={() =>
+        void onSelect({
+          source: "keyword-search",
+          query: "stripe mrr",
+          startAt: "2026-08-22T17:00:00Z",
+          endAt: "2026-08-22T17:05:00Z",
+          frameIds: [7001, 7002],
+          representativeFrameId: 7001,
+          representativeTimestamp: "2026-08-22T17:02:00Z",
+          appName: "Stripe",
+          windowName: "Revenue overview",
+          snippet: "Monthly recurring revenue and recent movement.",
+          url: "https://dashboard.stripe.com/overview",
+        })
+      }
+    >
+      add activity
+    </button>
+  ),
 }));
 
 function evidence(
@@ -114,6 +170,8 @@ function readySnapshot(): ActivityOpportunitySnapshot {
             "2026-08-21T18:22:00Z",
           ),
         ],
+        supportingContexts: [],
+        drafts: [],
       },
       {
         id: "review-brief",
@@ -135,6 +193,8 @@ function readySnapshot(): ActivityOpportunitySnapshot {
             "2026-08-18T21:08:00Z",
           ),
         ],
+        supportingContexts: [],
+        drafts: [],
       },
       {
         id: "meeting-followups",
@@ -156,6 +216,8 @@ function readySnapshot(): ActivityOpportunitySnapshot {
             "2026-08-15T18:03:00Z",
           ),
         ],
+        supportingContexts: [],
+        drafts: [],
       },
     ],
     unfinished: [
@@ -224,17 +286,15 @@ function clone<T>(value: T): T {
 
 let backendSnapshot: ActivityOpportunitySnapshot;
 
-function installStatefulCommands() {
+function installStatefulCommands(snapshot: ActivityOpportunitySnapshot) {
   mocks.getActivityOpportunities.mockImplementation(async () => ({
     status: "ok",
-    data: clone(backendSnapshot),
+    data: clone(snapshot),
   }));
   mocks.updateActivityOpportunity.mockImplementation(
     async (request: UpdateActivityOpportunityRequest) => {
       const items =
-        request.kind === "skill"
-          ? backendSnapshot.skills
-          : backendSnapshot.unfinished;
+        request.kind === "skill" ? snapshot.skills : snapshot.unfinished;
       const item = items.find((candidate) => candidate.id === request.id);
       if (!item || item.revision !== request.revision) {
         return { status: "error", error: "revision mismatch" };
@@ -251,12 +311,16 @@ function installStatefulCommands() {
         }));
       }
       if (request.kind === "skill") {
+        if (request.supportingContexts !== undefined) {
+          item.supportingContexts = clone(request.supportingContexts);
+        }
         if (request.name !== undefined) item.name = request.name ?? "";
         if (
           request.name !== undefined ||
           request.description !== undefined ||
           request.notes !== undefined ||
-          request.excludedActivityIds !== undefined
+          request.excludedActivityIds !== undefined ||
+          request.supportingContexts !== undefined
         ) {
           item.edited = true;
         }
@@ -270,12 +334,12 @@ function installStatefulCommands() {
         item.status = request.dismissed ? "dismissed" : "pending";
       }
       item.revision += 1;
-      return { status: "ok", data: clone(backendSnapshot) };
+      return { status: "ok", data: clone(snapshot) };
     },
   );
   mocks.createActivityOpportunitySkill.mockImplementation(
     async ({ id, revision }: { id: string; revision: number }) => {
-      const skill = backendSnapshot.skills.find((item) => item.id === id);
+      const skill = snapshot.skills.find((item) => item.id === id);
       if (!skill || skill.revision !== revision) {
         return { status: "error", error: "revision mismatch" };
       }
@@ -289,11 +353,72 @@ function installStatefulCommands() {
       return { status: "ok", data: createdSkill };
     },
   );
+  mocks.startActivityOpportunitySkillDraft.mockImplementation(
+    async (request: StartActivityOpportunitySkillDraftRequest) => {
+      const skill = snapshot.skills.find((item) => item.id === request.id);
+      if (!skill || skill.revision !== request.revision) {
+        return { status: "error", error: "revision mismatch" };
+      }
+      const existing = skill.drafts.find(
+        (draft) =>
+          draft.id === skill.currentDraftId && draft.phase === "running",
+      );
+      if (existing) return { status: "ok", data: clone(existing) };
+      const draft = {
+        id: `draft-${skill.drafts.length + 1}`,
+        conversationId: `skill-draft-${skill.id}-${skill.drafts.length + 1}`,
+        path: `/Users/screenpipe/.screenpipe/skill-drafts/${skill.id}/draft-${skill.drafts.length + 1}/SKILL.md`,
+        phase: "running" as const,
+        skillMd: "",
+        startedAt: "2026-08-22T18:01:00Z",
+        updatedAt: "2026-08-22T18:01:00Z",
+      };
+      skill.status = "drafting";
+      skill.edited = true;
+      skill.drafts.push(draft);
+      skill.currentDraftId = draft.id;
+      skill.revision += 1;
+      return { status: "ok", data: clone(draft) };
+    },
+  );
+  mocks.saveActivityOpportunitySkillDraft.mockImplementation(
+    async (request: SaveActivityOpportunitySkillDraftRequest) => {
+      const skill = snapshot.skills.find((item) => item.id === request.id);
+      const draft = skill?.drafts.find(
+        (candidate) => candidate.id === request.draftId,
+      );
+      if (!skill || !draft) {
+        return { status: "error", error: "draft not found" };
+      }
+      draft.skillMd = request.skillMd;
+      draft.phase = "ready";
+      draft.updatedAt = "2026-08-22T18:02:00Z";
+      skill.revision += 1;
+      return { status: "ok", data: clone(draft) };
+    },
+  );
+  mocks.installActivityOpportunitySkillDraft.mockImplementation(
+    async (request: InstallActivityOpportunitySkillDraftRequest) => {
+      const skill = snapshot.skills.find((item) => item.id === request.id);
+      const draft = skill?.drafts.find(
+        (candidate) => candidate.id === request.draftId,
+      );
+      if (!skill || !draft || skill.revision !== request.revision) {
+        return { status: "error", error: "revision mismatch" };
+      }
+      const createdSkill = {
+        path: `/Users/screenpipe/.screenpipe/skills/${skill.id}/SKILL.md`,
+        skillMd: draft.skillMd,
+      };
+      skill.status = "created";
+      skill.createdSkill = createdSkill;
+      skill.revision += 1;
+      return { status: "ok", data: clone(createdSkill) };
+    },
+  );
   mocks.handoffActivityOpportunity.mockImplementation(
     async (request: HandoffActivityOpportunityRequest) => {
-      const task = backendSnapshot.unfinished.find(
-        (item) => item.id === request.id,
-      );
+      const task = snapshot.unfinished.find((item) => item.id === request.id);
       if (!task || task.revision !== request.revision) {
         return { status: "error", error: "revision mismatch" };
       }
@@ -310,7 +435,7 @@ beforeEach(() => {
   sessionStorage.clear();
   vi.clearAllMocks();
   mocks.eventHandlers.clear();
-  installStatefulCommands();
+  installStatefulCommands(backendSnapshot);
 });
 
 afterEach(() => cleanup());
@@ -391,8 +516,9 @@ describe("BrainOpportunities", () => {
     expect(screen.queryByText(/repeats/)).toBeNull();
   });
 
-  it("persists review changes and creates the real skill artifact", async () => {
-    render(<BrainOpportunities />);
+  it("persists review changes and opens the exact background draft chat", async () => {
+    const onOpenSkillDraftChat = vi.fn(async () => undefined);
+    render(<BrainOpportunities onOpenSkillDraftChat={onOpenSkillDraftChat} />);
 
     fireEvent.click(
       await screen.findByTestId("skill-opportunity-feedback-to-fix"),
@@ -422,29 +548,27 @@ describe("BrainOpportunities", () => {
 
     fireEvent.click(screen.getByTestId("create-skill-draft"));
     expect(screen.getByTestId("create-skill-draft")).toHaveTextContent(
-      "creating…",
+      "starting…",
     );
     await waitFor(() =>
-      expect(mocks.createActivityOpportunitySkill).toHaveBeenCalledTimes(1),
+      expect(mocks.startActivityOpportunitySkillDraft).toHaveBeenCalledTimes(1),
     );
     expect(backendSnapshot.skills[0]).toMatchObject({
-      status: "created",
+      status: "drafting",
       name: "turn feedback into a verified fix",
       notes: "Keep the final customer reply short.",
     });
     expect(backendSnapshot.skills[0].evidence[0].excluded).toBe(true);
+    const createdDraft = backendSnapshot.skills[0].drafts[0];
+    await waitFor(() =>
+      expect(onOpenSkillDraftChat).toHaveBeenCalledWith(
+        createdDraft.conversationId,
+        createdDraft.path,
+      ),
+    );
     expect(screen.getByTestId("opportunities-tab-ideas")).toHaveTextContent(
-      "2",
+      "3",
     );
-
-    fireEvent.click(screen.getByTestId("opportunities-tab-created"));
-    fireEvent.click(
-      await screen.findByTestId("skill-opportunity-feedback-to-fix"),
-    );
-    expect(screen.getByTestId("skill-file-preview")).toHaveTextContent(
-      "turn feedback into a verified fix",
-    );
-    expect(screen.queryByRole("button", { name: /edit skill/i })).toBeNull();
   });
 
   it("requires a goal and hands the finalized brief to one fresh chat", async () => {
@@ -652,6 +776,53 @@ describe("BrainOpportunities", () => {
     });
   });
 
+  it("adds regular-search ranges as context without counting them as occurrences", async () => {
+    render(<BrainOpportunities />);
+    fireEvent.click(
+      await screen.findByTestId("skill-opportunity-feedback-to-fix"),
+    );
+    const sourceEvidence = screen.getByTestId("skill-source-evidence");
+    fireEvent.click(within(sourceEvidence).getByText("activity evidence"));
+    fireEvent.click(
+      within(sourceEvidence).getByRole("button", { name: "add activity" }),
+    );
+
+    await waitFor(() =>
+      expect(backendSnapshot.skills[0].supportingContexts).toHaveLength(1),
+    );
+    expect(backendSnapshot.skills[0].supportingContexts[0]).toMatchObject({
+      source: "keyword-search",
+      query: "stripe mrr",
+      startAt: "2026-08-22T17:00:00Z",
+      endAt: "2026-08-22T17:05:00Z",
+      appName: "Stripe",
+    });
+    expect(backendSnapshot.skills[0].occurrences).toHaveLength(3);
+    expect(
+      await within(sourceEvidence).findByText("search context"),
+    ).toBeTruthy();
+  });
+
+  it("allows a user to start drafting after removing every evidence row", async () => {
+    const onOpenSkillDraftChat = vi.fn(async () => undefined);
+    backendSnapshot.skills[0].evidence = backendSnapshot.skills[0].evidence.map(
+      (source) => ({ ...source, excluded: true }),
+    );
+    render(<BrainOpportunities onOpenSkillDraftChat={onOpenSkillDraftChat} />);
+    fireEvent.click(
+      await screen.findByTestId("skill-opportunity-feedback-to-fix"),
+    );
+
+    const create = screen.getByTestId("create-skill-draft");
+    expect(create).not.toBeDisabled();
+    fireEvent.click(create);
+
+    await waitFor(() =>
+      expect(mocks.startActivityOpportunitySkillDraft).toHaveBeenCalledTimes(1),
+    );
+    expect(onOpenSkillDraftChat).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps a failed chat navigation staged for recovery", async () => {
     const onStartAgentChat = vi.fn(async () => {
       throw new Error("chat navigation failed");
@@ -688,6 +859,7 @@ describe("BrainOpportunities", () => {
       skills: [],
       unfinished: [],
     };
+    installStatefulCommands(backendSnapshot);
     render(<BrainOpportunities />);
 
     expect(await screen.findByText("couldn’t analyze activity")).toBeTruthy();
@@ -745,7 +917,9 @@ describe("BrainOpportunities", () => {
     render(<BrainOpportunities />);
 
     await screen.findByTestId("skill-opportunity-feedback-to-fix");
-    expect(screen.queryByTestId("skill-opportunity-fourth-suggestion")).toBeNull();
+    expect(
+      screen.queryByTestId("skill-opportunity-fourth-suggestion"),
+    ).toBeNull();
     expect(screen.getByRole("button", { name: "show 2 more" })).toBeTruthy();
 
     fireEvent.click(
@@ -783,6 +957,35 @@ describe("BrainOpportunities", () => {
         "turn feedback into a verified fix",
       ),
     ).toBeTruthy();
+  });
+
+  it("reopens an active skill draft as its exact chat", async () => {
+    const skill = backendSnapshot.skills[0];
+    const draft = {
+      id: "draft-ready",
+      conversationId: "skill-draft-ready",
+      path: "/Users/screenpipe/.screenpipe/skill-drafts/feedback-to-fix/draft-ready/SKILL.md",
+      phase: "ready" as const,
+      skillMd:
+        '---\nname: "verified-fix"\ndescription: "Turn feedback into a verified fix."\n---\n\nFollow the repeated workflow.\n',
+      startedAt: "2026-08-22T18:00:00Z",
+      updatedAt: "2026-08-22T18:02:00Z",
+      completedAt: "2026-08-22T18:02:00Z",
+    };
+    skill.status = "drafting";
+    skill.drafts = [draft];
+    skill.currentDraftId = draft.id;
+    const onOpenSkillDraftChat = vi.fn(async () => undefined);
+    render(<BrainOpportunities onOpenSkillDraftChat={onOpenSkillDraftChat} />);
+
+    const row = await screen.findByTestId("skill-opportunity-feedback-to-fix");
+    expect(row).toHaveTextContent("draft ready");
+    fireEvent.click(row);
+
+    expect(onOpenSkillDraftChat).toHaveBeenCalledWith(
+      draft.conversationId,
+      draft.path,
+    );
   });
 
   it("supports keyboard tab navigation", async () => {

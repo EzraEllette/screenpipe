@@ -17,23 +17,31 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import type { ChatPrefillData } from "@/lib/chat-utils";
+import {
+  openChatConversationInCurrentChatSurface,
+  type ChatPrefillData,
+} from "@/lib/chat-utils";
 import { useTauriEvent } from "@/lib/hooks/use-tauri-event";
 import { cn } from "@/lib/utils";
 import {
   commands,
   type ActivityOpportunitySnapshot,
   type OpportunityEvidence,
+  type SkillSearchContext,
   type SkillOpportunity,
   type UnfinishedOpportunity,
   type UpdateActivityOpportunityRequest,
 } from "@/lib/utils/tauri";
+import {
+  ActivityContextPicker,
+  type ActivitySearchContext,
+} from "./activity-context-picker";
 
 type OpportunityGroup = "ideas" | "created" | "unfinished";
 
-type SkillDraft = Pick<SkillOpportunity, "name" | "description" | "notes">;
+type SkillFields = Pick<SkillOpportunity, "name" | "description" | "notes">;
 type TaskDraft = Pick<UnfinishedOpportunity, "description" | "goal">;
-type SkillDraftField = keyof SkillDraft;
+type SkillDraftField = keyof SkillFields;
 type TaskDraftField = keyof TaskDraft;
 
 type BrainOpportunitiesProps = {
@@ -42,6 +50,10 @@ type BrainOpportunitiesProps = {
   onStartAgentChat?: (
     prefill: ChatPrefillData,
   ) => Promise<string | null> | string | null;
+  onOpenSkillDraftChat?: (
+    conversationId: string,
+    filePreviewPath: string,
+  ) => Promise<void> | void;
 };
 
 type CommandResult<T> =
@@ -66,17 +78,18 @@ function sameStrings(left: string[], right: string[]): boolean {
   );
 }
 
+function sameSupportingContexts(
+  left: SkillSearchContext[],
+  right: SkillSearchContext[],
+): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
 function excludedActivityIds(evidence: OpportunityEvidence[]): string[] {
   return evidence
     .filter((item) => item.excluded)
     .map((item) => item.activityId)
     .sort();
-}
-
-function supportingActivityCount(evidence: OpportunityEvidence[]): number {
-  return new Set(
-    evidence.filter((item) => !item.excluded).map((item) => item.activityId),
-  ).size;
 }
 
 function supportingOccurrenceCount(skill: SkillOpportunity): number {
@@ -96,13 +109,14 @@ function supportingOccurrenceCount(skill: SkillOpportunity): number {
 
 function visibleSkills(skills: SkillOpportunity[]): SkillOpportunity[] {
   return skills
-    .filter((skill) => skill.status === "pending")
+    .filter(
+      (skill) => skill.status === "pending" || skill.status === "drafting",
+    )
     .map((skill, index) => ({ skill, index }))
     .sort((left, right) => {
       return (
         supportingOccurrenceCount(right.skill) -
-          supportingOccurrenceCount(left.skill) ||
-        left.index - right.index
+          supportingOccurrenceCount(left.skill) || left.index - right.index
       );
     })
     .map(({ skill }) => skill);
@@ -110,14 +124,23 @@ function visibleSkills(skills: SkillOpportunity[]): SkillOpportunity[] {
 
 function hasSkillDraftChanges(
   skill: SkillOpportunity,
-  draft: SkillDraft | undefined,
+  draft: SkillFields | undefined,
 ): boolean {
   return Boolean(
+    skill.status === "drafting" ||
+    (skill.drafts?.length ?? 0) > 0 ||
     skill.edited ||
-      (draft &&
-        (draft.name !== skill.name ||
-          draft.description !== skill.description ||
-          draft.notes !== skill.notes)),
+    (draft &&
+      (draft.name !== skill.name ||
+        draft.description !== skill.description ||
+        draft.notes !== skill.notes)),
+  );
+}
+
+function currentSkillDraft(skill: SkillOpportunity) {
+  const drafts = skill.drafts ?? [];
+  return (
+    drafts.find((draft) => draft.id === skill.currentDraftId) ?? drafts.at(-1)
   );
 }
 
@@ -242,6 +265,72 @@ function EvidenceRow({
   );
 }
 
+function SearchContextRow({
+  context,
+  disabled = false,
+  onRemove,
+}: {
+  context: SkillSearchContext;
+  disabled?: boolean;
+  onRemove: () => void;
+}) {
+  const duration = formatDuration(context.startAt, context.endAt);
+  const href = context.representativeFrameId
+    ? `screenpipe://frame/${context.representativeFrameId}?timestamp=${encodeURIComponent(context.representativeTimestamp)}`
+    : `screenpipe://timeline?timestamp=${encodeURIComponent(context.startAt)}`;
+  const title = context.windowName.trim() || context.query;
+
+  return (
+    <div
+      data-testid={`skill-search-context-${context.id}`}
+      className="grid gap-3 border-b border-border py-3 last:border-b-0 sm:grid-cols-[minmax(0,1fr)_auto]"
+    >
+      <div className="min-w-0">
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 font-mono text-[10px] uppercase tracking-wide text-muted-foreground">
+          <span>search context</span>
+          <span aria-hidden="true">/</span>
+          <span>{formatMoment(context.startAt)}</span>
+          {context.appName && (
+            <>
+              <span aria-hidden="true">/</span>
+              <span>{context.appName}</span>
+            </>
+          )}
+          {duration && (
+            <>
+              <span aria-hidden="true">/</span>
+              <span>{duration}</span>
+            </>
+          )}
+        </div>
+        <a
+          href={href}
+          className="mt-1 inline-flex items-center gap-1.5 text-sm font-medium text-foreground hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-foreground"
+        >
+          {title}
+          <ExternalLink className="h-3 w-3" />
+        </a>
+        {context.snippet && (
+          <p className="mt-1 max-w-2xl text-xs leading-relaxed text-muted-foreground">
+            {context.snippet}
+          </p>
+        )}
+      </div>
+      <div className="flex items-start gap-1 sm:justify-end">
+        <button
+          type="button"
+          onClick={onRemove}
+          disabled={disabled}
+          className="inline-flex h-8 items-center gap-1 border border-transparent px-2 font-mono text-[10px] uppercase tracking-wide text-muted-foreground transition-colors duration-150 hover:border-foreground hover:bg-foreground hover:text-background focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-foreground focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50"
+          aria-label={`remove ${title}`}
+        >
+          <X className="h-3 w-3" /> remove
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function buildTaskAgentChatPrefill(
   task: UnfinishedOpportunity,
   evidence: OpportunityEvidence[],
@@ -345,6 +434,7 @@ export function BrainOpportunities({
   navigation,
   onOpportunityCountChange,
   onStartAgentChat,
+  onOpenSkillDraftChat,
 }: BrainOpportunitiesProps) {
   const [snapshot, setSnapshot] = useState<ActivityOpportunitySnapshot | null>(
     null,
@@ -358,7 +448,7 @@ export function BrainOpportunities({
   const [compactTaskDetailOpen, setCompactTaskDetailOpen] = useState(false);
   const [continueExpanded, setContinueExpanded] = useState(true);
   const [showAllSuggestions, setShowAllSuggestions] = useState(false);
-  const [skillDrafts, setSkillDrafts] = useState<Record<string, SkillDraft>>(
+  const [skillDrafts, setSkillDrafts] = useState<Record<string, SkillFields>>(
     {},
   );
   const [taskDrafts, setTaskDrafts] = useState<Record<string, TaskDraft>>({});
@@ -375,10 +465,6 @@ export function BrainOpportunities({
     Record<string, Promise<ActivityOpportunitySnapshot | null>>
   >({});
   const [creatingSkillId, setCreatingSkillId] = useState<string | null>(null);
-  const [createdConfirmationId, setCreatedConfirmationId] = useState<
-    string | null
-  >(null);
-  const [previewSkillId, setPreviewSkillId] = useState<string | null>(null);
   const [startingTaskId, setStartingTaskId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
 
@@ -549,6 +635,7 @@ export function BrainOpportunities({
       current: ActivityOpportunitySnapshot,
       id: string,
       forcedExcludedIds?: string[],
+      forcedSupportingContexts?: SkillSearchContext[],
     ): UpdateActivityOpportunityRequest | null => {
       const skill = current.skills.find((item) => item.id === id);
       const draft = skillDraftsRef.current[id];
@@ -557,6 +644,9 @@ export function BrainOpportunities({
         forcedExcludedIds ?? excludedActivityIds(skill.evidence)
       ).sort();
       const storedExcluded = excludedActivityIds(skill.evidence);
+      const supportingContexts =
+        forcedSupportingContexts ?? skill.supportingContexts ?? [];
+      const storedSupportingContexts = skill.supportingContexts ?? [];
       const name = draft.name.trim();
       const description = draft.description.trim();
       const notes = draft.notes.trim();
@@ -571,10 +661,16 @@ export function BrainOpportunities({
       if (!sameStrings(excluded, storedExcluded)) {
         request.excludedActivityIds = excluded;
       }
+      if (
+        !sameSupportingContexts(supportingContexts, storedSupportingContexts)
+      ) {
+        request.supportingContexts = supportingContexts;
+      }
       return request.name !== undefined ||
         request.description !== undefined ||
         request.notes !== undefined ||
-        request.excludedActivityIds !== undefined
+        request.excludedActivityIds !== undefined ||
+        request.supportingContexts !== undefined
         ? request
         : null;
     },
@@ -659,7 +755,9 @@ export function BrainOpportunities({
     hasSkillDraftChanges(skill, skillDrafts[skill.id]),
   );
   const suggestedSkills = pendingSkills.filter(
-    (skill) => !hasSkillDraftChanges(skill, skillDrafts[skill.id]),
+    (skill) =>
+      skill.status === "pending" &&
+      !hasSkillDraftChanges(skill, skillDrafts[skill.id]),
   );
   const displayedSuggestions = showAllSuggestions
     ? suggestedSkills
@@ -676,7 +774,9 @@ export function BrainOpportunities({
   const selectedTask =
     pendingTasks.find((task) => task.id === selectedTaskId) ?? pendingTasks[0];
   const pendingSkillCount =
-    snapshot?.skills.filter((skill) => skill.status === "pending").length ?? 0;
+    snapshot?.skills.filter(
+      (skill) => skill.status === "pending" || skill.status === "drafting",
+    ).length ?? 0;
   const pendingTaskCount = pendingTasks.length;
   const hasAnyData =
     (snapshot?.skills.length ?? 0) + (snapshot?.unfinished.length ?? 0) > 0;
@@ -699,12 +799,30 @@ export function BrainOpportunities({
     else setCompactSkillDetailOpen(false);
   };
 
+  const openSkillDraftChat = async (
+    conversationId: string,
+    filePreviewPath: string,
+  ) => {
+    if (onOpenSkillDraftChat) {
+      await onOpenSkillDraftChat(conversationId, filePreviewPath);
+      return;
+    }
+    await openChatConversationInCurrentChatSurface(
+      conversationId,
+      filePreviewPath,
+    );
+  };
+
   const openSkillDetail = (id: string) => {
+    const skill = snapshotRef.current?.skills.find((item) => item.id === id);
+    const activeDraft = skill ? currentSkillDraft(skill) : undefined;
+    if (skill?.status === "drafting" && activeDraft) {
+      void openSkillDraftChat(activeDraft.conversationId, activeDraft.path);
+      return;
+    }
     setSelectedSkillId(id);
     setCompactSkillDetailOpen(true);
     setActionError(null);
-    const skill = snapshotRef.current?.skills.find((item) => item.id === id);
-    if (skill?.status === "created") setPreviewSkillId(id);
     requestAnimationFrame(() => {
       document.getElementById("skill-opportunity-back")?.focus();
     });
@@ -773,6 +891,42 @@ export function BrainOpportunities({
     );
   };
 
+  const addSkillSearchContext = async (
+    skill: SkillOpportunity,
+    context: ActivitySearchContext,
+  ) => {
+    const nextContext: SkillSearchContext = {
+      ...context,
+      id: `search-${crypto.randomUUID()}`,
+    };
+    await queueUpdate(`skill:${skill.id}`, (current) => {
+      const latest = current.skills.find((item) => item.id === skill.id);
+      if (!latest) return null;
+      return buildSkillUpdate(current, skill.id, undefined, [
+        ...(latest.supportingContexts ?? []),
+        nextContext,
+      ]);
+    });
+  };
+
+  const removeSkillSearchContext = async (
+    skill: SkillOpportunity,
+    contextId: string,
+  ) => {
+    await queueUpdate(`skill:${skill.id}`, (current) => {
+      const latest = current.skills.find((item) => item.id === skill.id);
+      if (!latest) return null;
+      return buildSkillUpdate(
+        current,
+        skill.id,
+        undefined,
+        (latest.supportingContexts ?? []).filter(
+          (context) => context.id !== contextId,
+        ),
+      );
+    });
+  };
+
   const toggleTaskEvidence = async (
     task: UnfinishedOpportunity,
     evidence: OpportunityEvidence,
@@ -821,32 +975,14 @@ export function BrainOpportunities({
         (item) => item.id === skill.id,
       );
       if (!current) throw new Error("Skill opportunity was not found");
-      const created = await commandData(
-        commands.createActivityOpportunitySkill({
+      const draft = await commandData(
+        commands.startActivityOpportunitySkillDraft({
           id: current.id,
           revision: current.revision,
         }),
       );
-      const latest = snapshotRef.current;
-      if (latest) {
-        acceptSnapshot({
-          ...latest,
-          skills: latest.skills.map((item) =>
-            item.id === skill.id
-              ? {
-                  ...item,
-                  status: "created",
-                  createdSkill: created,
-                  revision:
-                    item.status === "created"
-                      ? item.revision
-                      : item.revision + 1,
-                }
-              : item,
-          ),
-        });
-      }
-      setCreatedConfirmationId(skill.id);
+      await loadSnapshot();
+      await openSkillDraftChat(draft.conversationId, draft.path);
     } catch (error) {
       setActionError(errorMessage(error));
     } finally {
@@ -976,6 +1112,15 @@ export function BrainOpportunities({
 
   const renderSkillRow = (skill: SkillOpportunity, canReject: boolean) => {
     const draft = skillDrafts[skill.id] ?? skill;
+    const activeDraft = currentSkillDraft(skill);
+    const draftStatus =
+      activeDraft?.phase === "running"
+        ? "drafting"
+        : activeDraft?.phase === "ready"
+          ? "draft ready"
+          : activeDraft?.phase === "error"
+            ? "needs attention"
+            : null;
     return (
       <div
         key={skill.id}
@@ -988,9 +1133,16 @@ export function BrainOpportunities({
           onClick={() => openSkillDetail(skill.id)}
           className="min-w-0 flex-1 px-4 py-3.5 text-left text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-foreground"
         >
-          <h3 className="truncate text-sm font-medium lowercase leading-snug">
-            {draft.name}
-          </h3>
+          <div className="flex items-center justify-between gap-4">
+            <h3 className="truncate text-sm font-medium lowercase leading-snug">
+              {draft.name}
+            </h3>
+            {draftStatus && (
+              <span className="shrink-0 font-mono text-[9px] uppercase tracking-wide text-muted-foreground">
+                {draftStatus}
+              </span>
+            )}
+          </div>
           <p className="mt-1 line-clamp-2 max-w-2xl text-xs leading-relaxed text-muted-foreground">
             {draft.description}
           </p>
@@ -1072,7 +1224,9 @@ export function BrainOpportunities({
           >
             {label}
             {count > 0 && (
-              <span className="tabular-nums text-muted-foreground">{count}</span>
+              <span className="tabular-nums text-muted-foreground">
+                {count}
+              </span>
             )}
             {group === value && (
               <span className="absolute inset-x-0 -bottom-px h-px bg-foreground" />
@@ -1157,7 +1311,9 @@ export function BrainOpportunities({
                       {suggestedSkills.length > 3 && (
                         <button
                           type="button"
-                          onClick={() => setShowAllSuggestions((value) => !value)}
+                          onClick={() =>
+                            setShowAllSuggestions((value) => !value)
+                          }
                           className="w-full border-b border-border px-4 py-3 text-left text-xs text-muted-foreground transition-colors hover:bg-muted/40 hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-foreground"
                         >
                           {showAllSuggestions
@@ -1192,17 +1348,12 @@ export function BrainOpportunities({
                   description: selectedSkill.description,
                   notes: selectedSkill.notes,
                 };
-                const includedOccurrenceCount =
-                  supportingOccurrenceCount(selectedSkill);
                 const creating = creatingSkillId === selectedSkill.id;
                 const created = selectedSkill.status === "created";
-                const showPreview =
-                  previewSkillId === selectedSkill.id ||
-                  (created && createdConfirmationId !== selectedSkill.id);
+                const showPreview = created;
                 const canCreate =
                   draft.name.trim().length > 0 &&
-                  draft.description.trim().length > 0 &&
-                  includedOccurrenceCount >= 2;
+                  draft.description.trim().length > 0;
 
                 if (showPreview) {
                   if (!selectedSkill.createdSkill) {
@@ -1313,6 +1464,20 @@ export function BrainOpportunities({
                             hide
                           </span>
                         </summary>
+                        <div className="flex justify-end border-t border-border py-1.5">
+                          <ActivityContextPicker
+                            disabled={
+                              creating ||
+                              created ||
+                              pendingMutationKeys.has(
+                                `skill:${selectedSkill.id}`,
+                              )
+                            }
+                            onSelect={(context) =>
+                              addSkillSearchContext(selectedSkill, context)
+                            }
+                          />
+                        </div>
                         {selectedSkill.evidence.map((evidence) => (
                           <EvidenceRow
                             key={evidence.activityId}
@@ -1329,6 +1494,27 @@ export function BrainOpportunities({
                             }
                           />
                         ))}
+                        {(selectedSkill.supportingContexts ?? []).map(
+                          (context) => (
+                            <SearchContextRow
+                              key={context.id}
+                              context={context}
+                              disabled={
+                                creating ||
+                                created ||
+                                pendingMutationKeys.has(
+                                  `skill:${selectedSkill.id}`,
+                                )
+                              }
+                              onRemove={() =>
+                                void removeSkillSearchContext(
+                                  selectedSkill,
+                                  context.id,
+                                )
+                              }
+                            />
+                          ),
+                        )}
                       </details>
 
                       <details className="group mt-1">
@@ -1364,44 +1550,19 @@ export function BrainOpportunities({
                       ) : (
                         <span />
                       )}
-                      {created && createdConfirmationId === selectedSkill.id ? (
-                        <div
-                          data-testid="skill-created-state"
-                          className="flex items-center gap-3"
-                        >
-                          <span
-                            role="status"
-                            aria-live="polite"
-                            className="text-sm"
-                          >
-                            skill created
-                          </span>
-                          <Button
-                            size="sm"
-                            onClick={() => {
-                              setPreviewSkillId(selectedSkill.id);
-                              setCreatedConfirmationId(null);
-                            }}
-                          >
-                            open skill
-                            <ArrowRight className="ml-2 h-3.5 w-3.5" />
-                          </Button>
-                        </div>
-                      ) : (
-                        <Button
-                          data-testid="create-skill-draft"
-                          size="sm"
-                          disabled={!canCreate || creating || created}
-                          onClick={() => void createSkill(selectedSkill)}
-                        >
-                          <span aria-live="polite">
-                            {creating ? "creating…" : "create skill"}
-                          </span>
-                          {!creating && (
-                            <ArrowRight className="ml-2 h-3.5 w-3.5" />
-                          )}
-                        </Button>
-                      )}
+                      <Button
+                        data-testid="create-skill-draft"
+                        size="sm"
+                        disabled={!canCreate || creating || created}
+                        onClick={() => void createSkill(selectedSkill)}
+                      >
+                        <span aria-live="polite">
+                          {creating ? "starting…" : "create skill"}
+                        </span>
+                        {!creating && (
+                          <ArrowRight className="ml-2 h-3.5 w-3.5" />
+                        )}
+                      </Button>
                     </div>
                   </>
                 );

@@ -13,6 +13,30 @@ import type {
 import { mockLocalApiResponse, createMockHealth } from "./browser-engine-mock";
 import { createBrowserIpcMock } from "./browser-tauri-mock";
 
+type BrowserSkillDraft = {
+  id: string;
+  conversationId: string;
+  path: string;
+  phase: "running" | "ready" | "error";
+  skillMd: string;
+  startedAt: string;
+  updatedAt: string;
+  completedAt?: string | null;
+};
+
+type BrowserOpportunitySnapshot = Omit<
+  ActivityOpportunitySnapshot,
+  "skills"
+> & {
+  skills: Array<
+    Omit<ActivityOpportunitySnapshot["skills"][number], "status"> & {
+      status: "pending" | "drafting" | "dismissed" | "created";
+      drafts: BrowserSkillDraft[];
+      currentDraftId?: string | null;
+    }
+  >;
+};
+
 function commandError(run: () => unknown): unknown {
   try {
     run();
@@ -219,7 +243,7 @@ describe("browser development runtime", () => {
 
     const ready = readyInvoke(
       "get_activity_opportunities",
-    ) as ActivityOpportunitySnapshot;
+    ) as BrowserOpportunitySnapshot;
     expect(ready).toMatchObject({
       analysisState: "ready",
       analysisError: null,
@@ -230,6 +254,31 @@ describe("browser development runtime", () => {
       activityId: "browser-dev-mrr-mon",
       apps: ["Stripe", "PostHog"],
       excluded: false,
+    });
+    expect(ready.skills[0]).toMatchObject({
+      id: "check-mrr",
+      status: "drafting",
+      currentDraftId: "browser-ready-mrr-draft",
+      drafts: [
+        expect.objectContaining({
+          id: "browser-ready-mrr-draft",
+          phase: "ready",
+          conversationId: "skill-draft-browser-ready-mrr-draft",
+          path: expect.stringMatching(
+            /skill-drafts\/check-mrr\/browser-ready-mrr-draft\/SKILL\.md$/,
+          ),
+        }),
+      ],
+    });
+    expect(ready.skills.some((skill) => skill.status === "pending")).toBe(true);
+    expect(
+      readyInvoke("read_viewer_file", {
+        path: ready.skills[0].drafts[0].path,
+      }),
+    ).toMatchObject({
+      kind: "text",
+      name: "SKILL.md",
+      text: expect.stringContaining("Compare current MRR"),
     });
 
     expect(emptyInvoke("get_activity_opportunities")).toMatchObject({
@@ -255,7 +304,9 @@ describe("browser development runtime", () => {
     const initial = invoke(
       "get_activity_opportunities",
     ) as ActivityOpportunitySnapshot;
-    const skill = initial.skills[0];
+    const skill = initial.skills.find(
+      (candidate) => candidate.id === "review-pull-request",
+    )!;
     const excludedActivityId = skill.evidence[0].activityId;
 
     const dismissed = invoke("update_activity_opportunity", {
@@ -269,16 +320,19 @@ describe("browser development runtime", () => {
         dismissed: true,
       },
     }) as ActivityOpportunitySnapshot;
-    expect(dismissed.skills[0]).toMatchObject({
+    expect(
+      dismissed.skills.find((candidate) => candidate.id === skill.id),
+    ).toMatchObject({
       revision: 2,
       status: "dismissed",
       name: "focused feedback fix",
       notes: "preserve the customer wording",
     });
     expect(
-      dismissed.skills[0].evidence.find(
-        (source) => source.activityId === excludedActivityId,
-      )?.excluded,
+      dismissed.skills
+        .find((candidate) => candidate.id === skill.id)!
+        .evidence.find((source) => source.activityId === excludedActivityId)
+        ?.excluded,
     ).toBe(true);
 
     expect(
@@ -302,7 +356,9 @@ describe("browser development runtime", () => {
         dismissed: false,
       },
     }) as ActivityOpportunitySnapshot;
-    expect(restored.skills[0]).toMatchObject({
+    expect(
+      restored.skills.find((candidate) => candidate.id === skill.id),
+    ).toMatchObject({
       revision: 3,
       status: "pending",
     });
@@ -322,7 +378,9 @@ describe("browser development runtime", () => {
     const afterRejectedUpdate = invoke(
       "get_activity_opportunities",
     ) as ActivityOpportunitySnapshot;
-    expect(afterRejectedUpdate.skills[0]).toMatchObject({
+    expect(
+      afterRejectedUpdate.skills.find((candidate) => candidate.id === skill.id),
+    ).toMatchObject({
       revision: 3,
       name: "focused feedback fix",
     });
@@ -337,7 +395,9 @@ describe("browser development runtime", () => {
     const initial = invoke(
       "get_activity_opportunities",
     ) as ActivityOpportunitySnapshot;
-    const skill = initial.skills[0];
+    const skill = initial.skills.find(
+      (candidate) => candidate.id === "review-pull-request",
+    )!;
     const excluded = skill.evidence[0].activityId;
     const included = skill.evidence[1].activityId;
     const updated = invoke("update_activity_opportunity", {
@@ -348,7 +408,9 @@ describe("browser development runtime", () => {
         excludedActivityIds: [excluded],
       },
     }) as ActivityOpportunitySnapshot;
-    const revision = updated.skills[0].revision;
+    const revision = updated.skills.find(
+      (candidate) => candidate.id === skill.id,
+    )!.revision;
 
     expect(
       commandError(() =>
@@ -361,16 +423,16 @@ describe("browser development runtime", () => {
     const created = invoke("create_activity_opportunity_skill", {
       request: { id: skill.id, revision },
     }) as CreatedSkill;
-    expect(created.path).toMatch(
-      /\/check-mrr-across-stripe-and-posthog\/SKILL\.md$/,
-    );
+    expect(created.path).toMatch(/\/review-a-pull-request\/SKILL\.md$/);
     expect(created.skillMd).toContain(`\`${included}\``);
     expect(created.skillMd).not.toContain(`\`${excluded}\``);
 
     const saved = invoke(
       "get_activity_opportunities",
     ) as ActivityOpportunitySnapshot;
-    expect(saved.skills[0]).toMatchObject({
+    expect(
+      saved.skills.find((candidate) => candidate.id === skill.id),
+    ).toMatchObject({
       revision: revision + 1,
       status: "created",
       createdSkill: created,
@@ -378,6 +440,170 @@ describe("browser development runtime", () => {
     expect(
       invoke("create_activity_opportunity_skill", {
         request: { id: skill.id, revision: skill.revision },
+      }),
+    ).toEqual(created);
+  });
+
+  it("moves a skill draft from running to ready, saves it, and installs only on request", async () => {
+    const invoke = createBrowserIpcMock({
+      mode: "mock",
+      scenario: "ready",
+      apiPort: 3030,
+    });
+    const initial = invoke(
+      "get_activity_opportunities",
+    ) as BrowserOpportunitySnapshot;
+    const skill = initial.skills.find(
+      (candidate) => candidate.id === "meeting-follow-ups",
+    )!;
+    const startRequest = {
+      id: skill.id,
+      revision: skill.revision,
+      changeRequest: "Keep the final checklist concise.",
+    };
+
+    const running = invoke("start_activity_opportunity_skill_draft", {
+      request: startRequest,
+    }) as BrowserSkillDraft;
+    expect(running).toMatchObject({
+      phase: "running",
+      skillMd: "",
+      conversationId: `skill-draft-${running.id}`,
+    });
+    expect(
+      invoke("start_activity_opportunity_skill_draft", {
+        request: { ...startRequest, revision: 0 },
+      }),
+    ).toEqual(running);
+
+    const whileRunning = invoke(
+      "get_activity_opportunities",
+    ) as BrowserOpportunitySnapshot;
+    const runningSkill = whileRunning.skills.find(
+      (candidate) => candidate.id === skill.id,
+    )!;
+    expect(runningSkill).toMatchObject({
+      status: "drafting",
+      revision: skill.revision + 1,
+      currentDraftId: running.id,
+    });
+    expect(runningSkill.createdSkill).toBeUndefined();
+    expect(
+      runningSkill.drafts.find((draft) => draft.id === running.id),
+    ).toMatchObject({ phase: "running", skillMd: "" });
+
+    await Promise.resolve();
+
+    const readySnapshot = invoke(
+      "get_activity_opportunities",
+    ) as BrowserOpportunitySnapshot;
+    const readySkill = readySnapshot.skills.find(
+      (candidate) => candidate.id === skill.id,
+    )!;
+    const readyDraft = readySkill.drafts.find(
+      (draft) => draft.id === running.id,
+    )!;
+    expect(readySkill).toMatchObject({
+      status: "drafting",
+      revision: skill.revision + 2,
+    });
+    expect(readySkill.createdSkill).toBeUndefined();
+    expect(readyDraft).toMatchObject({
+      phase: "ready",
+      completedAt: expect.any(String),
+    });
+    expect(readyDraft.skillMd).toContain(
+      "Requested adjustment: Keep the final checklist concise.",
+    );
+    const chatBytes = invoke("plugin:fs|read_text_file", {
+      path: `/Users/screenpipe/.screenpipe/chats/${running.conversationId}.json`,
+    }) as Uint8Array;
+    const draftChat = JSON.parse(new TextDecoder().decode(chatBytes)) as {
+      messages: Array<{ role: string; content: string }>;
+    };
+    expect(
+      draftChat.messages.find((message) => message.role === "assistant")
+        ?.content,
+    ).toBe(readyDraft.skillMd);
+    expect(invoke("read_viewer_file", { path: readyDraft.path })).toMatchObject(
+      { kind: "text", text: readyDraft.skillMd },
+    );
+
+    const editedSkillMd = `---
+name: "meeting follow-ups"
+description: "Turn meeting decisions into a concise, owned follow-up list."
+---
+
+# Meeting follow-ups
+
+List each decision, owner, and next action. Keep open questions explicit.
+`;
+    const savedDraft = invoke("save_activity_opportunity_skill_draft", {
+      request: {
+        id: skill.id,
+        draftId: readyDraft.id,
+        skillMd: editedSkillMd,
+      },
+    }) as BrowserSkillDraft;
+    expect(savedDraft.skillMd).toContain('name: "meeting follow-ups"');
+    expect(invoke("read_viewer_file", { path: savedDraft.path })).toMatchObject(
+      { kind: "text", text: savedDraft.skillMd },
+    );
+
+    const savedSnapshot = invoke(
+      "get_activity_opportunities",
+    ) as BrowserOpportunitySnapshot;
+    const savedSkill = savedSnapshot.skills.find(
+      (candidate) => candidate.id === skill.id,
+    )!;
+    expect(savedSkill).toMatchObject({
+      status: "drafting",
+      revision: skill.revision + 3,
+    });
+    expect(savedSkill.createdSkill).toBeUndefined();
+    expect(
+      commandError(() =>
+        invoke("install_activity_opportunity_skill_draft", {
+          request: {
+            id: skill.id,
+            revision: readySkill.revision,
+            draftId: savedDraft.id,
+          },
+        }),
+      ),
+    ).toBe("Opportunity changed; reload it before installing the skill");
+
+    const created = invoke("install_activity_opportunity_skill_draft", {
+      request: {
+        id: skill.id,
+        revision: savedSkill.revision,
+        draftId: savedDraft.id,
+      },
+    }) as CreatedSkill;
+    expect(created).toMatchObject({
+      path: expect.stringMatching(/\/meeting-follow-ups\/SKILL\.md$/),
+      skillMd: savedDraft.skillMd,
+    });
+    const installedSnapshot = invoke(
+      "get_activity_opportunities",
+    ) as BrowserOpportunitySnapshot;
+    expect(
+      installedSnapshot.skills.find((candidate) => candidate.id === skill.id),
+    ).toMatchObject({
+      status: "created",
+      revision: savedSkill.revision + 1,
+      name: "meeting follow-ups",
+      description:
+        "Turn meeting decisions into a concise, owned follow-up list.",
+      createdSkill: created,
+    });
+    expect(
+      invoke("install_activity_opportunity_skill_draft", {
+        request: {
+          id: skill.id,
+          revision: savedSkill.revision,
+          draftId: savedDraft.id,
+        },
       }),
     ).toEqual(created);
   });
@@ -439,13 +665,17 @@ describe("browser development runtime", () => {
     const invoke = createBrowserIpcMock({ mode: "mock", apiPort: 3030 });
 
     expect(invoke("pi_list_extension_packages")).toEqual([]);
-    expect(invoke("pi_install_extension_package", { source: "npm:@demo/tool" })).toEqual([
+    expect(
+      invoke("pi_install_extension_package", { source: "npm:@demo/tool" }),
+    ).toEqual([
       expect.objectContaining({ source: "npm:@demo/tool", installed: true }),
     ]);
     expect(invoke("pi_list_extension_packages")).toEqual([
       expect.objectContaining({ source: "npm:@demo/tool", installed: true }),
     ]);
-    expect(invoke("pi_remove_extension_package", { source: "npm:@demo/tool" })).toEqual([]);
+    expect(
+      invoke("pi_remove_extension_package", { source: "npm:@demo/tool" }),
+    ).toEqual([]);
   });
 
   it("returns useful empty engine responses", async () => {
@@ -458,6 +688,11 @@ describe("browser development runtime", () => {
       new URL("http://localhost:3030/search?q=test"),
       undefined,
       "empty",
+    );
+    const keywordSearch = mockLocalApiResponse(
+      new URL("http://localhost:3030/search/keyword?query=stripe+mrr"),
+      undefined,
+      "ready",
     );
     const memories = mockLocalApiResponse(
       new URL("http://localhost:3030/memories?limit=1"),
@@ -481,6 +716,17 @@ describe("browser development runtime", () => {
       data: [],
       pagination: { total: 0 },
     });
+    expect(await keywordSearch.json()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          representative: expect.objectContaining({
+            app_name: "Stripe",
+            text: expect.stringContaining("stripe mrr"),
+          }),
+          frame_ids: expect.any(Array),
+        }),
+      ]),
+    );
     expect(await memories.json()).toMatchObject({
       data: [],
       pagination: { total: 0 },

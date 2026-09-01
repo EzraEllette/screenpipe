@@ -1613,6 +1613,7 @@ export function BrowserSidebar({
               previewPath ? (
                 <FilePreviewSidebar
                   path={previewPath}
+                  conversationId={conversationId}
                   onReplacePath={onReplaceFilePreviewPath}
                 />
               ) : null

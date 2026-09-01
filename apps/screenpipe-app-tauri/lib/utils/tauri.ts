@@ -932,6 +932,14 @@ async initSync(password: string) : Promise<Result<boolean, string>> {
     else return { status: "error", error: e  as any };
 }
 },
+async installActivityOpportunitySkillDraft(request: InstallActivityOpportunitySkillDraftRequest) : Promise<Result<CreatedSkill, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("install_activity_opportunity_skill_draft", { request }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async installBrainViewTemplateKit(request: InstallBrainViewTemplateKitRequest) : Promise<Result<BrainViewDefinition, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("install_brain_view_template_kit", { request }) };
@@ -2325,6 +2333,14 @@ async rollbackToVersion(version: string) : Promise<Result<null, string>> {
     else return { status: "error", error: e  as any };
 }
 },
+async saveActivityOpportunitySkillDraft(request: SaveActivityOpportunitySkillDraftRequest) : Promise<Result<SkillDraft, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("save_activity_opportunity_skill_draft", { request }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async saveBrainView(request: SaveBrainViewRequest) : Promise<Result<BrainViewDefinition, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("save_brain_view", { request }) };
@@ -2775,6 +2791,14 @@ async snoozeShortcutReminderForHour() : Promise<Result<null, string>> {
 async spawnScreenpipe(overrideArgs: string[] | null) : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("spawn_screenpipe", { overrideArgs }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async startActivityOpportunitySkillDraft(request: StartActivityOpportunitySkillDraftRequest) : Promise<Result<SkillDraft, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("start_activity_opportunity_skill_draft", { request }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -3309,6 +3333,7 @@ export type ImportedSkill = { name: string; description: string;
  * Absolute path inside `<data_dir>/skills/`.
  */
 path: string }
+export type InstallActivityOpportunitySkillDraftRequest = { id: string; revision: number; draftId: string }
 export type InstallBrainViewTemplateKitRequest = { kitId: string; targetViewId: string; expectedRevision: number | null }
 export type JobEvent = { kind: "started"; jobId: string; label: string; message: string | null } | { kind: "progress"; jobId: string; label: string; progress: number; message: string | null } | { kind: "completed"; jobId: string; label: string; outputPath: string | null; message: string | null } | { kind: "failed"; jobId: string; label: string; error: string }
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key in string]: JsonValue }
@@ -3597,6 +3622,7 @@ export type RemoteSyncConfig = { host: string; port: number; user: string; key_p
  * Result of a sync operation.
  */
 export type RemoteSyncResult = { ok: boolean; files_transferred: number; bytes_transferred: number; error: string | null }
+export type SaveActivityOpportunitySkillDraftRequest = { id: string; draftId: string; skillMd: string }
 export type SaveBrainViewCanvasRequest = { viewId: string; expectedRevision: number | null; mode: BrainViewDisplayMode; viewport: BrainViewCanvasViewport; blocks: BrainViewCanvasBlock[]; notes: BrainViewCanvasNote[]; arrows: BrainViewCanvasArrow[]; strokes: BrainViewCanvasStroke[] }
 export type SaveBrainViewRequest = { id: string; title: string; expectedRevision: number | null; timeRange: BrainViewTimeRange; periodPolicy: BrainViewPeriodPolicy; slots: BrainViewSlotInput[] }
 /**
@@ -4307,9 +4333,14 @@ headless?: boolean;
 headlessRecordOnly?: boolean }
 export type ShowRewindWindow = "Main" | { Home: { page: string | null } } | { Search: { query: string | null } } | "Onboarding" | "Chat" | "PermissionRecovery"
 export type SkillBlueprint = { trigger: string; steps: string[]; verification: string }
+export type SkillDraft = { id: string; conversationId: string; path: string; phase: SkillDraftPhase; skillMd?: string; error?: string | null; startedAt: string; updatedAt: string; completedAt?: string | null }
+export type SkillDraftPhase = "running" | "ready" | "error"
 export type SkillOccurrence = { activityIds: string[] }
-export type SkillOpportunity = { id: string; revision: number; status: SkillOpportunityStatus; name: string; description: string; notes: string; blueprint: SkillBlueprint; occurrences?: SkillOccurrence[]; evidence: OpportunityEvidence[]; createdSkill?: CreatedSkill | null; edited?: boolean }
-export type SkillOpportunityStatus = "pending" | "dismissed" | "created"
+export type SkillOpportunity = { id: string; revision: number; status: SkillOpportunityStatus; name: string; description: string; notes: string; blueprint: SkillBlueprint; occurrences?: SkillOccurrence[]; evidence: OpportunityEvidence[]; supportingContexts?: SkillSearchContext[]; createdSkill?: CreatedSkill | null; drafts?: SkillDraft[]; currentDraftId?: string | null; edited?: boolean }
+export type SkillOpportunityStatus = "pending" | "drafting" | "dismissed" | "created"
+export type SkillSearchContext = { id: string; source: SkillSearchContextSource; query: string; startAt: string; endAt: string; frameIds: number[]; representativeFrameId: number; representativeTimestamp: string; appName: string; windowName: string; snippet: string; url: string }
+export type SkillSearchContextSource = "keyword-search"
+export type StartActivityOpportunitySkillDraftRequest = { id: string; revision: number; changeRequest?: string | null }
 export type StartExportRecordingResponse = { jobId: string }
 export type Suggestion = { text: string;
 /**
@@ -4334,7 +4365,7 @@ export type SyncDeviceInfo = { id: string; deviceId: string; deviceName: string 
 export type SyncStatusResponse = { enabled: boolean; isSyncing: boolean; lastSync: string | null; lastError: string | null; storageUsed: number | null; storageLimit: number | null; deviceCount: number | null; deviceLimit: number | null; syncTier: string | null; machineId: string }
 export type UnfinishedOpportunity = { id: string; revision: number; status: UnfinishedOpportunityStatus; title: string; description: string; goal: string; leftOff: string; lastSeenAt: string; agentSteps: string[]; notes: string; evidence: OpportunityEvidence[]; conversationId?: string | null }
 export type UnfinishedOpportunityStatus = "pending" | "dismissed" | "handed_off"
-export type UpdateActivityOpportunityRequest = { kind: OpportunityKind; id: string; revision: number; name?: string | null; title?: string | null; description?: string | null; goal?: string | null; notes?: string | null; trigger?: string | null; steps?: string[] | null; verification?: string | null; leftOff?: string | null; agentSteps?: string[] | null; excludedActivityIds?: string[] | null;
+export type UpdateActivityOpportunityRequest = { kind: OpportunityKind; id: string; revision: number; name?: string | null; title?: string | null; description?: string | null; goal?: string | null; notes?: string | null; trigger?: string | null; steps?: string[] | null; verification?: string | null; leftOff?: string | null; agentSteps?: string[] | null; excludedActivityIds?: string[] | null; supportingContexts?: SkillSearchContext[] | null;
 /**
  * `true` dismisses and `false` undoes a dismissal.
  */

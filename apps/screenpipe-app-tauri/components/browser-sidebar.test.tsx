@@ -90,7 +90,17 @@ vi.mock("@/lib/api", () => ({
 }));
 
 vi.mock("@/components/file-preview-sidebar", () => ({
-  FilePreviewSidebar: () => null,
+  FilePreviewSidebar: ({
+    path,
+    conversationId,
+  }: {
+    path: string;
+    conversationId: string | null;
+  }) => (
+    <div data-testid="mock-file-preview">
+      {conversationId}:{path}
+    </div>
+  ),
 }));
 
 vi.mock("@/components/right-panel-tab-strip", () => ({
@@ -159,6 +169,23 @@ describe("BrowserSidebar session access", () => {
     cleanup();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+  });
+
+  it("gives a file preview the active conversation", () => {
+    render(
+      <BrowserSidebar
+        conversationId="skill-draft-chat"
+        filePreview={{
+          paths: ["/drafts/SKILL.md"],
+          activePath: "/drafts/SKILL.md",
+          panelOpen: true,
+        }}
+      />,
+    );
+
+    expect(screen.getByTestId("mock-file-preview")).toHaveTextContent(
+      "skill-draft-chat:/drafts/SKILL.md",
+    );
   });
 
   it("shows a session prompt emitted immediately after a replacement navigation", async () => {

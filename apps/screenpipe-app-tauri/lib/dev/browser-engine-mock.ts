@@ -178,6 +178,57 @@ function mockAppFrames(appName: string, limit: number, offset: number) {
   );
 }
 
+function mockKeywordGroups(query: string) {
+  const now = Date.now() - 15 * 60_000;
+  const result = (
+    frameId: number,
+    minutesAgo: number,
+    appName: string,
+    windowName: string,
+    text: string,
+    url: string,
+  ) => {
+    const end = new Date(now - minutesAgo * 60_000);
+    const start = new Date(end.getTime() - 4 * 60_000);
+    return {
+      representative: {
+        frame_id: frameId,
+        timestamp: new Date(start.getTime() + 2 * 60_000).toISOString(),
+        text_positions: [],
+        app_name: appName,
+        window_name: windowName,
+        confidence: 0.98,
+        text: `${query} — ${text}`,
+        url,
+        text_source: "accessibility",
+      },
+      group_size: 3,
+      start_time: start.toISOString(),
+      end_time: end.toISOString(),
+      frame_ids: [frameId - 1, frameId, frameId + 1],
+    };
+  };
+
+  return [
+    result(
+      94_201,
+      8,
+      "Stripe",
+      "Revenue overview",
+      "Monthly recurring revenue, recent subscriptions, and comparison period.",
+      "https://dashboard.stripe.com/overview",
+    ),
+    result(
+      94_301,
+      42,
+      "PostHog",
+      "Revenue trends",
+      "Revenue trend and subscription movement for the matching period.",
+      "https://app.posthog.com/revenue",
+    ),
+  ];
+}
+
 export function mockLocalApiResponse(
   url: URL,
   init: RequestInit | undefined,
@@ -345,6 +396,12 @@ export function mockLocalApiResponse(
         label: value.replace("https://github.com/", ""),
       })),
     });
+  }
+  if (url.pathname === "/search/keyword") {
+    if (scenario === "empty") return Response.json([]);
+    return Response.json(
+      mockKeywordGroups(url.searchParams.get("query") ?? "activity"),
+    );
   }
   if (url.pathname === "/search") {
     const appName = url.searchParams.get("app_name");

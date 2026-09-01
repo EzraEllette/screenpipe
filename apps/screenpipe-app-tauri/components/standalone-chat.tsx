@@ -127,6 +127,7 @@ import {
 import { AGENT_TOPICS, type AgentEventEnvelope } from "@/lib/events/types";
 import { listenTyped, TAURI_EVENTS } from "@/lib/events/tauri-events";
 import { localFetch } from "@/lib/api";
+import { presentSkillDraftChatMessages } from "@/components/skills/skill-draft-chat-presentation";
 
 // Session ID is per-conversation — set on mount (new conv) and updated on load/new.
 // Stored as a ref so event listeners always see the current value without stale closures.
@@ -692,6 +693,8 @@ export function StandaloneChat({
   const [conversationId, setConversationId] = useState<string | null>(
     initialSessionIdRef.current,
   );
+  const isActivityOpportunitySkillDraft =
+    conversationId?.startsWith("skill-draft-") ?? false;
   const isTemporarySideConversation = useChatStore((state) =>
     conversationId
       ? isEphemeralSideConversation(state.sessions[conversationId])
@@ -760,6 +763,13 @@ export function StandaloneChat({
       : null;
   });
   const messages = (storeBackedMessages ?? localMessages) as Message[];
+  const presentedMessages = useMemo(
+    () =>
+      isActivityOpportunitySkillDraft && !isLoading && !isStreaming
+        ? presentSkillDraftChatMessages(messages)
+        : messages,
+    [isActivityOpportunitySkillDraft, isLoading, isStreaming, messages],
+  );
 
   const {
     consumePendingAttachments,
@@ -1840,10 +1850,10 @@ export function StandaloneChat({
     currentSessionKind === "pipe-run" || currentSessionKind === "pipe-watch";
   const citationPlan = React.useMemo(
     () =>
-      computeChatCitationPlan(messages, {
+      computeChatCitationPlan(presentedMessages, {
         forceAggregate: isPipeSessionChat,
       }),
-    [isPipeSessionChat, messages],
+    [isPipeSessionChat, presentedMessages],
   );
 
   const {
@@ -1851,7 +1861,7 @@ export function StandaloneChat({
     imageViewerProps,
     scheduleDialogProps,
   } = useChatMessageActions({
-    messages,
+    messages: presentedMessages,
     setMessages,
     isLoading,
     isStreaming,
@@ -2294,7 +2304,7 @@ export function StandaloneChat({
         messagesEndRef={messagesEndRef}
         onMessagesScroll={handleMessagesScroll}
         onChatContextMenu={handleChatContextMenu}
-        messages={messages}
+        messages={presentedMessages}
         isPreparingPrefill={isPreparingPrefill}
         pendingSend={pendingSend}
         activePipeExecution={activePipeExecution}
@@ -2385,6 +2395,7 @@ export function StandaloneChat({
         }}
         messageListProps={{
           ...messageListProps,
+          readOnly: isActivityOpportunitySkillDraft,
           onAddSelectedTextToChat: addSelectedTextToChat,
           onAskSelectedTextInSideChat:
             isTemporarySideConversation || !activePreset || activePreset.provider === "acp"
@@ -2393,6 +2404,7 @@ export function StandaloneChat({
         }}
       />
 
+      {!isActivityOpportunitySkillDraft ? (
       <ChatComposer
         jumpToLatest={{
           hasMessages: messages.length > 0,
@@ -2540,6 +2552,7 @@ export function StandaloneChat({
         }}
         onStop={handleStop}
       />
+      ) : null}
       </div> {/* End of chat column */}
 
       {splitChatId && splitChatId !== conversationId ? (

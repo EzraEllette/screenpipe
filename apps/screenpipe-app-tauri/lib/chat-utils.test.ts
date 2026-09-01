@@ -79,12 +79,16 @@ describe("chat-utils", () => {
   it("opens an existing conversation in the already-mounted Home chat surface", async () => {
     getCurrentWindowMock.mockReturnValue({ label: "home" });
 
-    await openChatConversationInCurrentChatSurface("chat-123");
+    await openChatConversationInCurrentChatSurface(
+      "chat-123",
+      "/tmp/skill-drafts/draft-1/SKILL.md",
+    );
 
     expect(useChatStore.getState().currentId).toBe("chat-123");
     expect(emitMock).toHaveBeenCalledWith("chat-load-conversation", {
       conversationId: "chat-123",
       targetWindow: "home",
+      filePreviewPath: "/tmp/skill-drafts/draft-1/SKILL.md",
     });
     expect(showWindowMock).not.toHaveBeenCalled();
   });

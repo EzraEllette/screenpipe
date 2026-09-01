@@ -259,3 +259,29 @@ describe("ChatMessageList turn status ownership", () => {
     expect(screen.queryByTestId("chat-turn-scan-glyph")).not.toBeInTheDocument();
   });
 });
+
+describe("ChatMessageList read-only presentation", () => {
+  it("keeps transcript copyable without exposing chat mutation actions", () => {
+    const assistantMessage: Message = {
+      id: "assistant-message",
+      role: "assistant",
+      content: "draft ready",
+      timestamp: Date.now(),
+    };
+
+    render(
+      <ChatMessageList
+        {...messageListProps({
+          messages: [userMessage, assistantMessage],
+          readOnly: true,
+          onAddSelectedTextToChat: vi.fn(),
+        })}
+      />,
+    );
+
+    expect(screen.getAllByTitle("Copy message")).toHaveLength(2);
+    expect(screen.queryByTitle("Edit")).not.toBeInTheDocument();
+    expect(screen.queryByTitle("Retry")).not.toBeInTheDocument();
+    expect(screen.queryByTitle("More options")).not.toBeInTheDocument();
+  });
+});

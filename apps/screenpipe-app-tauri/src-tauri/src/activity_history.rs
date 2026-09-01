@@ -514,15 +514,14 @@ fn settings_restrict_activity_history(settings: &SettingsStore, is_enterprise_bu
     !is_enterprise_build && settings.is_free_or_unattributed_user()
 }
 
-fn provider_config(
-    settings: &SettingsStore,
+fn selected_preset<'a>(
+    settings: &'a SettingsStore,
     selected_preset_key: Option<&str>,
-    task_system_prompt: &str,
-) -> Result<(PiProviderConfig, Option<String>), String> {
+) -> Result<&'a crate::store::AIPreset, String> {
     let selected_id = selected_preset_key
         .and_then(|key| settings.extra.get(key))
         .and_then(Value::as_str);
-    let preset = settings
+    settings
         .ai_presets
         .iter()
         .find(|preset| selected_id == Some(preset.id.as_str()))
@@ -533,7 +532,15 @@ fn provider_config(
                 .find(|preset| preset.default_preset)
         })
         .or_else(|| settings.ai_presets.first())
-        .ok_or_else(|| "No compatible AI preset is configured".to_string())?;
+        .ok_or_else(|| "No compatible AI preset is configured".to_string())
+}
+
+fn provider_config(
+    settings: &SettingsStore,
+    selected_preset_key: Option<&str>,
+    task_system_prompt: &str,
+) -> Result<(PiProviderConfig, Option<String>), String> {
+    let preset = selected_preset(settings, selected_preset_key)?;
     let is_acp = matches!(&preset.provider, AIProviderType::Acp);
     // A coding agent is defined by its adapter, not by a model id, and several
     // adapters advertise no model at all until their own account resolves one.
@@ -601,6 +608,41 @@ fn provider_config(
         },
         token,
     ))
+}
+
+pub(crate) struct PreparedSkillDraftRun {
+    pub(crate) config: PiProviderConfig,
+    pub(crate) token: Option<String>,
+    is_agent: bool,
+}
+
+fn skill_draft_provider_config(
+    settings: &SettingsStore,
+    task_system_prompt: &str,
+) -> Result<PreparedSkillDraftRun, String> {
+    let (mut config, token) =
+        provider_config(settings, Some("activitiesAiPresetId"), task_system_prompt)?;
+    let is_agent = config.backend.is_some();
+    config.allowed_tools = Some(Vec::new());
+    config.unattended = false;
+    Ok(PreparedSkillDraftRun {
+        config,
+        token,
+        is_agent,
+    })
+}
+
+/// Resolve the same preset configured for Activity generation, but constrain
+/// this user-visible drafting chat to a tool-free, attended run.
+pub(crate) fn prepare_skill_draft_run(
+    app: &AppHandle,
+    task_system_prompt: &str,
+) -> Result<PreparedSkillDraftRun, String> {
+    let settings = SettingsStore::get(app)?.ok_or("Settings are not available")?;
+    // Unlike headless Activity generation, this is a normal visible chat. It
+    // has no tools to approve, and any adapter sign-in problem must remain a
+    // user-visible error instead of being auto-decided in the background.
+    skill_draft_provider_config(&settings, task_system_prompt)
 }
 
 fn final_assistant_text(event: &Value) -> Option<String> {
@@ -1041,6 +1083,68 @@ fn agent_failure(is_agent: bool, error: String) -> String {
     }
 }
 
+fn skill_draft_initial_chat_event(display_message: &str) -> Value {
+    json!({
+        "type": "message_start",
+        "message": {
+            "role": "user",
+            "content": display_message,
+        },
+    })
+}
+
+fn skill_draft_start_failure_events(error: &str) -> Vec<Value> {
+    let detail = error
+        .strip_prefix(AGENT_ERROR_PREFIX)
+        .unwrap_or(error)
+        .trim();
+    let detail = detail.chars().take(500).collect::<String>();
+    let message = if detail.is_empty() {
+        "I couldn't start this skill draft. Try again.".to_string()
+    } else {
+        format!("I couldn't start this skill draft: {detail}")
+    };
+    vec![
+        json!({
+            "type": "message_start",
+            "message": { "role": "assistant", "content": [] },
+        }),
+        json!({
+            "type": "message_update",
+            "assistantMessageEvent": {
+                "type": "text_delta",
+                "delta": message,
+            },
+        }),
+        json!({ "type": "agent_end", "willRetry": false }),
+    ]
+}
+
+/// Seed the optimistic transcript through the same event router that owns all
+/// later Pi output and disk persistence. The runtime's echoed user turn adopts
+/// this exact user/assistant pair instead of duplicating it.
+pub(crate) fn seed_visible_skill_draft_chat(
+    app: &AppHandle,
+    session_id: &str,
+    display_message: &str,
+) -> Result<(), String> {
+    pi::emit_visible_agent_event(
+        app,
+        session_id,
+        skill_draft_initial_chat_event(display_message),
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn emit_skill_draft_start_failure(app: &AppHandle, session_id: &str, error: &str) {
+    for event in skill_draft_start_failure_events(error) {
+        if let Err(emit_error) = pi::emit_visible_agent_event(app, session_id, event) {
+            warn!(%emit_error, %session_id, "activity history: could not persist skill draft startup failure through chat router");
+            break;
+        }
+    }
+}
+
 pub(crate) async fn run_background_pi(
     app: &AppHandle,
     session_prefix: &str,
@@ -1109,9 +1213,7 @@ pub(crate) async fn run_background_pi(
                     )
                     .await?;
                 }
-                ActivityRunEvent::Fail(error) => {
-                    return Err(agent_failure(is_agent, error))
-                }
+                ActivityRunEvent::Fail(error) => return Err(agent_failure(is_agent, error)),
                 ActivityRunEvent::Ignore => {}
             }
         }
@@ -1128,6 +1230,105 @@ pub(crate) async fn run_background_pi(
         manager.stop().await;
     }
     result?
+}
+
+/// Run the first turn of a normal, user-visible skill-drafting chat. The
+/// stable session id is supplied by Activity Opportunities and is deliberately
+/// not prefixed as an internal title session, so the standard chat event
+/// router can stream and persist it. The prompt itself is isolated from both
+/// prior conversation history and foreground connection context.
+pub(crate) async fn run_skill_draft_pi(
+    app: &AppHandle,
+    session_id: &str,
+    prepared: PreparedSkillDraftRun,
+    prompt: String,
+    display_preview: String,
+) -> Result<String, String> {
+    let project_dir = screenpipe_core::paths::default_screenpipe_data_dir()
+        .join("pi-skill-drafts")
+        .to_string_lossy()
+        .to_string();
+    let state = app.state::<PiState>();
+    let mut events = pi::subscribe_internal_agent_events();
+    let started = match pi::pi_start_inner(
+        app.clone(),
+        state.inner(),
+        session_id,
+        project_dir,
+        prepared.token,
+        Some(prepared.config),
+        None,
+    )
+    .await
+    {
+        Ok(started) => started,
+        Err(error) => {
+            let error = agent_failure(prepared.is_agent, error);
+            emit_skill_draft_start_failure(app, session_id, &error);
+            return Err(error);
+        }
+    };
+    if !started.running {
+        let error = "AI did not start".to_string();
+        emit_skill_draft_start_failure(app, session_id, &error);
+        return Err(error);
+    }
+    if let Err(error) =
+        pi::pi_prompt_isolated_inner(state.inner(), session_id, prompt, display_preview).await
+    {
+        let mut pool = state.0.lock().await;
+        if let Some(manager) = pool.sessions.get_mut(session_id) {
+            manager.stop().await;
+        }
+        let error = agent_failure(prepared.is_agent, error);
+        emit_skill_draft_start_failure(app, session_id, &error);
+        return Err(error);
+    }
+
+    let wait_for_result = async {
+        let mut empty_completion_retries = 0;
+        loop {
+            let envelope = match events.recv().await {
+                Ok(envelope) => envelope,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(error) => return Err(error.to_string()),
+            };
+            if envelope.session_id != session_id {
+                continue;
+            }
+            match classify_activity_run_event(&envelope.event, empty_completion_retries) {
+                ActivityRunEvent::Complete(text) => return Ok(text),
+                ActivityRunEvent::RetryEmptyCompletion => {
+                    empty_completion_retries += 1;
+                    pi::pi_prompt_isolated_inner(
+                        state.inner(),
+                        session_id,
+                        "Your previous turn ended without a final response. Return only the complete requested SKILL.md now, with no code fence or commentary."
+                            .to_string(),
+                        "Finish the skill draft".to_string(),
+                    )
+                    .await?;
+                }
+                ActivityRunEvent::Fail(error) => {
+                    return Err(agent_failure(prepared.is_agent, error));
+                }
+                ActivityRunEvent::Ignore => {}
+            }
+        }
+    };
+    match tokio::time::timeout(std::time::Duration::from_secs(15 * 60), wait_for_result).await {
+        // This is a normal visible chat, so a successful first draft keeps
+        // the foreground session warm for the user's next message. The normal
+        // chat router releases it when it is idle and backgrounded.
+        Ok(result) => result,
+        Err(_) => {
+            let mut pool = state.0.lock().await;
+            if let Some(manager) = pool.sessions.get_mut(session_id) {
+                manager.stop().await;
+            }
+            Err("Skill drafting timed out".to_string())
+        }
+    }
 }
 
 pub(crate) async fn run_pi(
@@ -2177,7 +2378,10 @@ mod tests {
         );
     }
 
-    fn settings_with_presets(selected: &str, presets: Vec<crate::store::AIPreset>) -> SettingsStore {
+    fn settings_with_presets(
+        selected: &str,
+        presets: Vec<crate::store::AIPreset>,
+    ) -> SettingsStore {
         let mut settings = SettingsStore::default();
         settings.ai_presets = presets;
         settings
@@ -2262,6 +2466,50 @@ mod tests {
             config.acp_agent.map(|agent| agent.id).unwrap_or_default(),
             "cursor"
         );
+    }
+
+    #[test]
+    fn skill_drafting_uses_the_activity_preset_without_tools_or_unattended_mode() {
+        let settings = settings_with_presets("cursor", vec![agent_preset("cursor", "cursor", "")]);
+
+        let prepared = skill_draft_provider_config(&settings, "draft one skill")
+            .expect("skill draft preset is usable");
+
+        assert!(matches!(prepared.config.backend, Some(PiBackend::Acp)));
+        assert_eq!(
+            prepared
+                .config
+                .acp_agent
+                .as_ref()
+                .map(|agent| agent.id.as_str()),
+            Some("cursor")
+        );
+        assert_eq!(prepared.config.allowed_tools, Some(Vec::new()));
+        assert!(!prepared.config.unattended);
+        assert!(prepared
+            .config
+            .system_prompt
+            .as_deref()
+            .is_some_and(|prompt| prompt.contains("draft one skill")));
+    }
+
+    #[test]
+    fn failure_before_the_first_runtime_event_still_completes_a_visible_chat_turn() {
+        let mut events = vec![skill_draft_initial_chat_event("Create this skill")];
+        events.extend(skill_draft_start_failure_events(
+            "activity_agent_error:Adapter is not signed in",
+        ));
+
+        assert_eq!(events[0]["type"], "message_start");
+        assert_eq!(events[0]["message"]["role"], "user");
+        assert_eq!(events[0]["message"]["content"], "Create this skill");
+        assert_eq!(events[1]["message"]["role"], "assistant");
+        assert_eq!(
+            events[2]["assistantMessageEvent"]["delta"],
+            "I couldn't start this skill draft: Adapter is not signed in"
+        );
+        assert_eq!(events.last().unwrap()["type"], "agent_end");
+        assert_eq!(events.last().unwrap()["willRetry"], false);
     }
 
     #[test]

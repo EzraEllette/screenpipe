@@ -114,6 +114,7 @@ export interface ChatMessageListProps {
   onAddSelectedTextToChat?: (text: string) => void;
   onAskSelectedTextInSideChat?: (text: string) => void | Promise<void>;
   suppressSourceFooters?: boolean;
+  readOnly?: boolean;
 }
 
 export function ChatMessageList({
@@ -158,6 +159,7 @@ export function ChatMessageList({
   onAddSelectedTextToChat,
   onAskSelectedTextInSideChat,
   suppressSourceFooters = false,
+  readOnly = false,
 }: ChatMessageListProps) {
   // Null unless an ACP agent is installing/starting. Ticks only while it is.
   const acpBoot = useAcpBootLabel();
@@ -230,7 +232,7 @@ export function ChatMessageList({
 
   return (
     <>
-      {onAddSelectedTextToChat ? (
+      {!readOnly && onAddSelectedTextToChat ? (
         <SelectedTextActions
           onAddToChat={onAddSelectedTextToChat}
           onAskInSideChat={onAskSelectedTextInSideChat}
@@ -263,7 +265,11 @@ export function ChatMessageList({
               !expandedSteerWorkIds.has(item.hideIntentLabelWhenCollapsedBy);
             const intentLabel = shouldSuppressIntentLabel ? null : getMessageIntentLabel(message);
             const isSteerUserMessage = message.role === "user" && message.intent === "steer";
-            const canEditMessage = message.role === "user" && !isSteerUserMessage && !isLoading;
+            const canEditMessage =
+              !readOnly &&
+              message.role === "user" &&
+              !isSteerUserMessage &&
+              !isLoading;
             const canShowMessageActions = !item.showActionsWhenExpandedBy ||
               expandedSteerWorkIds.has(item.showActionsWhenExpandedBy);
             const hasActiveSteerChild = steerChildActiveParentIds.has(message.id);
@@ -468,7 +474,9 @@ export function ChatMessageList({
                               : false
                           }
                           onImageClick={onOpenImageViewer}
-                          onRetry={(prompt) => sendMessage(prompt)}
+                          onRetry={
+                            readOnly ? undefined : (prompt) => sendMessage(prompt)
+                          }
                           onOpenViewerPath={openFilePreview}
                           onOpenRichResult={onOpenRichResult}
                           connectionItems={connectionItems}
@@ -477,9 +485,12 @@ export function ChatMessageList({
                           onContinueConnectionAction={onContinueConnectionAction}
                           onDismissConnectionAction={onDismissConnectionAction}
                           onAnswerAgentAction={onAnswerAgentAction}
-                          onAskUserReply={onAskUserReply}
-                          onSendPrompt={(prompt, displayLabel) =>
-                            sendMessage(prompt, displayLabel)
+                          onAskUserReply={readOnly ? undefined : onAskUserReply}
+                          onSendPrompt={
+                            readOnly
+                              ? undefined
+                              : (prompt, displayLabel) =>
+                                  sendMessage(prompt, displayLabel)
                           }
                         />
                       )}
@@ -544,7 +555,7 @@ export function ChatMessageList({
                               <Pencil className="h-3 w-3" />
                             </button>
                           )}
-                          {message.role === "assistant" && !hasFollowingSteeredAssistant && (
+                          {!readOnly && message.role === "assistant" && !hasFollowingSteeredAssistant && (
                             <ChatResponseFeedback
                               message={message}
                               telemetryContext={chatTelemetryContextForResponse(
@@ -553,7 +564,7 @@ export function ChatMessageList({
                               )}
                             />
                           )}
-                          {message.role === "assistant" && !isLoading && !hasFollowingSteeredAssistant && (
+                          {!readOnly && message.role === "assistant" && !isLoading && !hasFollowingSteeredAssistant && (
                             <button
                               onClick={() => onRetryAssistantMessage(message.id)}
                               className="p-1 rounded-md hover:bg-muted text-muted-foreground hover:text-foreground"
@@ -562,7 +573,7 @@ export function ChatMessageList({
                               <RefreshCw className="h-3 w-3" />
                             </button>
                           )}
-                          {message.role === "assistant" && !hasFollowingSteeredAssistant && (
+                          {!readOnly && message.role === "assistant" && !hasFollowingSteeredAssistant && (
                             <Popover
                               open={openMessageMenuId === message.id}
                               onOpenChange={(open) => onMessageMenuOpenChange(message.id, open)}
