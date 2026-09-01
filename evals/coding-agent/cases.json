@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "suite": "screenpipe-app-coding-agent-regressions",
-  "dataset_version": "2026-08-31.1",
+  "dataset_version": "2026-09-01.1",
   "suite_type": "regression",
   "owner": "screenpipe engineering",
   "policy": {
@@ -833,6 +833,42 @@
           { "source_path": "apps/screenpipe-app-tauri/components/__tests__/pipe-ndjson-to-chat.test.ts" }
         ],
         "command": "cd apps/screenpipe-app-tauri && bun x vitest run --config vitest.config.ts components/__tests__/pipe-ndjson-to-chat.test.ts"
+      }
+    },
+    {
+      "id": "app-log-share-redaction-false-positive",
+      "name": "Preserve accessibility telemetry while redacting shared logs",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "08feb4df5db8c6d95f58f5f1fe02930a450885c3"
+      },
+      "base_ref": "3828e565d41de1df99a24c26e69da0121f8c71c1",
+      "oracle_ref": "08feb4df5db8c6d95f58f5f1fe02930a450885c3",
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/components/share-logs-button.tsx",
+        "apps/screenpipe-app-tauri/lib/utils/redact-pii.ts"
+      ],
+      "gate": "advisory",
+      "trigger_paths": [
+        "apps/screenpipe-app-tauri/components/share-logs-button.tsx",
+        "apps/screenpipe-app-tauri/lib/utils/redact-pii.ts",
+        "crates/screenpipe-core/src/pii_removal.rs"
+      ],
+      "tags": ["regression", "escaped-failure", "privacy", "log-sharing", "redaction", "accessibility", "false-positive", "data-integrity"],
+      "prompt": "A shared support bundle includes recent chat context after removing personal information, but its phone-number detector also replaces bare accessibility coordinates and numeric telemetry. Preserve structured bounds, frame and monitor identifiers, hashes, process identifiers, pixel dimensions, and other unformatted numeric values in the uploaded bundle. Continue to remove formatted phone numbers, email addresses, government identifiers, payment-card numbers, bearer tokens, API credentials, IP addresses, and home-directory usernames. Do not solve the problem by disabling redaction or omitting the chat context.",
+      "agent_timeout_seconds": 900,
+      "grader_dependency_links": [
+        { "source_path": "apps/screenpipe-app-tauri/node_modules", "destination_path": "apps/screenpipe-app-tauri/node_modules" }
+      ],
+      "grader": {
+        "timeout_seconds": 420,
+        "fixtures": [
+          {
+            "local_path": "graders/app-log-share-redaction.test.tsx",
+            "destination_path": "apps/screenpipe-app-tauri/components/__tests__/app-log-share-redaction.eval.test.tsx"
+          }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && bun x vitest run --config vitest.config.ts components/__tests__/app-log-share-redaction.eval.test.tsx"
       }
     }
   ]
