@@ -71,6 +71,7 @@ pub struct SkillOccurrence {
 #[serde(rename_all = "kebab-case")]
 pub enum SkillSearchContextSource {
     KeywordSearch,
+    ActivityHistory,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Type, PartialEq, Eq)]
@@ -88,6 +89,9 @@ pub struct SkillSearchContext {
     pub window_name: String,
     pub snippet: String,
     pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[specta(optional)]
+    pub activity: Option<ActivityHistoryEntry>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Type, PartialEq, Eq)]
@@ -945,6 +949,45 @@ fn validate_supporting_contexts(contexts: &[SkillSearchContext]) -> Result<(), S
             return Err(
                 "supporting context frameIds cannot contain more than 1000 items".to_string(),
             );
+        }
+        if matches!(
+            &context.source,
+            SkillSearchContextSource::ActivityHistory
+        ) && context.activity.is_none()
+        {
+            return Err("activity-history context must include its activity snapshot".to_string());
+        }
+        if let Some(activity) = &context.activity {
+            validate_required("supporting activity id", &activity.id)?;
+            validate_required("supporting activity title", &activity.title)?;
+            let payload_size = serde_json::to_vec(activity)
+                .map_err(|_| "supporting activity could not be encoded".to_string())?
+                .len();
+            if payload_size > 64 * 1024 || activity.evidence.len() > 20 {
+                return Err("supporting activity is too large".to_string());
+            }
+            let activity_start = chrono::DateTime::parse_from_rfc3339(&activity.start_at)
+                .map_err(|_| "supporting activity startAt must be ISO-8601".to_string())?;
+            let activity_end = chrono::DateTime::parse_from_rfc3339(&activity.end_at)
+                .map_err(|_| "supporting activity endAt must be ISO-8601".to_string())?;
+            if activity_start > activity_end
+                || activity.start_at != context.start_at
+                || activity.end_at != context.end_at
+                || activity.title != context.window_name
+                || activity.summary != context.snippet
+            {
+                return Err("supporting activity does not match its context".to_string());
+            }
+            if !matches!(activity.kind.as_str(), "work" | "meeting") {
+                return Err("supporting activity kind is invalid".to_string());
+            }
+            for evidence in &activity.evidence {
+                if !matches!(evidence.kind.as_str(), "screen" | "audio" | "meeting")
+                    || chrono::DateTime::parse_from_rfc3339(&evidence.at).is_err()
+                {
+                    return Err("supporting activity evidence is invalid".to_string());
+                }
+            }
         }
     }
     Ok(())
@@ -2721,6 +2764,7 @@ mod tests {
             window_name: "Overview".to_string(),
             snippet: "Monthly recurring revenue".to_string(),
             url: "https://dashboard.stripe.com/dashboard".to_string(),
+            activity: None,
         }
     }
 
@@ -2788,6 +2832,29 @@ mod tests {
         let mut reversed = search_context("reversed");
         reversed.start_at = "2026-08-30T18:00:00Z".to_string();
         assert!(validate_supporting_contexts(&[reversed]).is_err());
+    }
+
+    #[test]
+    fn activity_history_context_source_round_trips() {
+        let mut context = search_context("activity-1");
+        context.source = SkillSearchContextSource::ActivityHistory;
+        context.activity = Some(ActivityHistoryEntry {
+            id: "check-mrr".to_string(),
+            kind: "work".to_string(),
+            start_at: context.start_at.clone(),
+            end_at: context.end_at.clone(),
+            title: context.window_name.clone(),
+            summary: context.snippet.clone(),
+            ..Default::default()
+        });
+
+        let encoded = serde_json::to_value(&context).unwrap();
+        assert_eq!(encoded["source"], "activity-history");
+        assert_eq!(
+            serde_json::from_value::<SkillSearchContext>(encoded).unwrap(),
+            context
+        );
+        validate_supporting_contexts(&[context]).unwrap();
     }
 
     #[test]
