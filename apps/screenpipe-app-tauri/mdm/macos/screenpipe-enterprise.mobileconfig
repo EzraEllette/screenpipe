@@ -110,7 +110,7 @@
     </dict>
   </array>
   <key>PayloadDescription</key>
-  <string>Approves Screenpipe Enterprise accessibility and background services. Screen Recording and Microphone still require user consent.</string>
+  <string>Approves Screenpipe Enterprise accessibility and background services. Screen Recording, Input Monitoring, and Microphone still require user consent.</string>
   <key>PayloadDisplayName</key>
   <string>Screenpipe Enterprise</string>
   <key>PayloadIdentifier</key>

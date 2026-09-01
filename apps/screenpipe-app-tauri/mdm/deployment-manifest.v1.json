@@ -30,6 +30,7 @@
     "permissions": {
       "accessibility": "managed_allow",
       "screenRecording": "standard_user_may_approve",
+      "inputMonitoring": "user_consent_required",
       "microphone": "user_consent_required"
     },
     "macos27": {

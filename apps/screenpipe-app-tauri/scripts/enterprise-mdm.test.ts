@@ -27,6 +27,9 @@ describe("enterprise MDM dashboard contract", () => {
   test("selects only the opt-in persistent packages", () => {
     expect(manifest.schemaVersion).toBe(1);
     expect(manifest.macos.artifactSuffix).toBe("-persistent.pkg");
+    expect(manifest.macos.permissions.inputMonitoring).toBe(
+      "user_consent_required",
+    );
     expect(manifest.macos.configurationProfileMaximumVersion).toBe("26.x");
     expect(manifest.macos.macos27.status).toBe(
       "requires_intune_app_settings_privacy_support",
@@ -59,6 +62,7 @@ describe("enterprise MDM dashboard contract", () => {
     expect(profile).toContain("screenpi.pe.enterprise.persistence-supervisor");
     expect(profile).toContain("AllowStandardUserToSetSystemService");
     expect(profile).not.toContain("<key>Microphone</key>");
+    expect(profile).not.toContain("<key>ListenEvent</key>");
   });
 
   test("Windows detection is versioned and requires the supervisor", () => {

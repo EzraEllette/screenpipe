@@ -16,10 +16,11 @@ Intune, Jamf Pro, Kandji, Mosyle, and other Apple MDM services.
 
 The profile approves Accessibility, managed background services, and
 MDM-managed update detection. Apple does not allow a PPPC profile to silently
-grant Screen Recording or Microphone access. Screen Recording is configured so
-a standard user can approve it; Microphone remains a one-time user consent.
-The stable bundle identifier, Team ID, and designated requirement preserve the
-approval across in-place Screenpipe updates.
+grant Screen Recording, Input Monitoring, or Microphone access. Screen Recording
+is configured so a standard user can approve it; Input Monitoring and Microphone
+remain one-time user consents. The stable bundle identifier, Team ID, and
+designated requirement preserve the approvals across in-place Screenpipe
+updates.
 
 This profile is the production path for macOS 13 through 26. Apple removes the
 PPPC Accessibility grant in macOS 27 in favor of declarative App Settings
