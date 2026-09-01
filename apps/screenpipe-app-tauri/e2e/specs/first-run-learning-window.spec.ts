@@ -391,7 +391,7 @@ const learningState = (over: Record<string, unknown> = {}) => ({
 
     const composerAvailable = (await browser.execute(() => {
       const composer = document.querySelector<HTMLTextAreaElement>(
-        'textarea[placeholder^="Ask about your screen"]',
+        '[data-firstrun-target="composer"] textarea',
       );
       return Boolean(composer && !composer.disabled);
     })) as boolean;
