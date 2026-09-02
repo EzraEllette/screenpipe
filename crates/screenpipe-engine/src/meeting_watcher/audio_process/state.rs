@@ -57,6 +57,31 @@ pub(crate) enum AudioProcessStateAction {
         meeting_id: i64,
         suppressed_session: Option<SuppressedSession>,
     },
+    /// The live meeting's app moved to a different call: end the current row
+    /// (`end_reason = room_changed`) and start a fresh one for the session the
+    /// detector is now seeing, in the same tick, so no audio lands in the
+    /// wrong meeting and the merge window cannot glue the two back together.
+    /// Emitted by `room_change::detect_room_change`, never by
+    /// `advance_audio_process_state`.
+    RoomChanged {
+        ended_meeting_id: i64,
+        /// The session the ended meeting was keyed to, suppressed so a stale
+        /// frame of the old room cannot restart the row just closed.
+        ended_session: SuppressedSession,
+        /// Original episode start, retained so a failed DB close can restore
+        /// the old state and retry the boundary without rewriting history.
+        ended_first_seen_at: Instant,
+        ended_is_browser: bool,
+        /// Monotonic instant of the boundary: the old row ends and the new one
+        /// starts here (mic release, or first sighting of the new room).
+        changed_at: Instant,
+        platform: String,
+        session_key: ProcessKey,
+        meeting_url: Option<String>,
+        is_browser: bool,
+        pid: Option<i32>,
+        bundle_id: Option<String>,
+    },
 }
 
 /// A low-volume diagnostic emitted only when an active meeting crosses the

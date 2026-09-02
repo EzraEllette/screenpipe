@@ -532,6 +532,7 @@ const E2E_COMMANDS: &[&str] = &[
     "shortcut_reminder_visible",
     "open_auto_meeting",
     "simulate_calendar_meeting_match",
+    "simulate_back_to_back_meeting_rooms",
     "active_meeting_id",
     "native_meeting_overlay_state",
     "native_timeline_search_state",

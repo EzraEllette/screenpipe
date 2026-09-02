@@ -157,7 +157,11 @@ fn normalized_url(raw: &str) -> Option<Url> {
 /// Stable provider + room identity for URLs that can safely be compared.
 /// Provider-specific parsing keeps true room keys while dropping auth and
 /// tracking parameters.
-fn meeting_url_identity(raw: &str) -> Option<String> {
+///
+/// Also the identity the audio-process detector compares across polls to
+/// notice the browser moved from one conference room to another (see
+/// `audio_process::room_change`).
+pub(crate) fn meeting_url_identity(raw: &str) -> Option<String> {
     let parsed = normalized_url(raw)?;
     let host = parsed
         .host_str()?
@@ -238,7 +242,7 @@ fn exact_url_time_rank(
     }
 }
 
-fn stable_event_key(event: &CalendarEventSignal) -> String {
+pub(crate) fn stable_event_key(event: &CalendarEventSignal) -> String {
     if event.id.is_empty() {
         format!(
             "{}|{}|{}",
@@ -509,4 +513,119 @@ pub(crate) async fn insert_new_meeting(
             -1
         }
     }
+}
+
+// ── Meeting-boundary helpers ─────────────────────────────────────────────
+//
+// The audio-process detector consults these while a meeting is LIVE (not just
+// at start) to tell a back-to-back transition apart from a hiccup in the
+// current call. They are pure over the published calendar snapshot so the
+// state machine stays deterministic and unit-testable.
+
+/// Conference-room identities of the events a user could plausibly be
+/// joining right now: in progress, or starting within the exact-URL join
+/// lead. `exclude_key` drops the event the live meeting is already bound to,
+/// so "the room the browser now shows belongs to a DIFFERENT scheduled event"
+/// can be answered with a set lookup.
+pub(crate) fn calendar_room_identities_now(
+    events: &[CalendarEventSignal],
+    now: DateTime<Utc>,
+    exclude_key: Option<&str>,
+) -> std::collections::HashSet<String> {
+    events
+        .iter()
+        .filter(|event| !event.is_all_day)
+        .filter(|event| exclude_key.is_none_or(|key| stable_event_key(event) != key))
+        .filter_map(|event| {
+            let start = DateTime::parse_from_rfc3339(&event.start)
+                .ok()?
+                .with_timezone(&Utc);
+            let end = DateTime::parse_from_rfc3339(&event.end)
+                .ok()?
+                .with_timezone(&Utc);
+            let joinable = start <= now + CALENDAR_EXACT_URL_JOIN_LEAD && end >= now;
+            if !joinable {
+                return None;
+            }
+            event.meeting_url.as_deref().and_then(meeting_url_identity)
+        })
+        .collect()
+}
+
+/// Whether the event bound to a meeting has already ended. `None` when the
+/// event is not in the current calendar snapshot (or has no parseable end),
+/// which callers treat as "unknown — do not split on calendar evidence".
+pub(crate) fn calendar_event_ended(
+    events: &[CalendarEventSignal],
+    key: &str,
+    now: DateTime<Utc>,
+) -> Option<bool> {
+    let event = events.iter().find(|event| stable_event_key(event) == key)?;
+    let end = DateTime::parse_from_rfc3339(&event.end)
+        .ok()?
+        .with_timezone(&Utc);
+    Some(end < now)
+}
+
+/// Lower-case URL scheme prefix (`meeting_url_identity`'s `<provider>:`)
+/// that a platform's own conference links carry. Platforms whose links we
+/// cannot identify (Slack, Discord, WhatsApp, …) return `None`.
+fn platform_identity_provider(platform: &str) -> Option<&'static str> {
+    let normalized = platform.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "zoom" => Some("zoom"),
+        "google meet" => Some("google-meet"),
+        "microsoft teams" | "teams" => Some("teams"),
+        "webex" => Some("webex"),
+        _ => None,
+    }
+}
+
+/// True when a calendar event's conference identity could describe a call in
+/// `platform`. Events with no conference URL are compatible with anything;
+/// an event whose link points at another provider is not this call.
+pub(crate) fn calendar_event_matches_platform(event: &CalendarEventSignal, platform: &str) -> bool {
+    let Some(identity) = event.meeting_url.as_deref().and_then(meeting_url_identity) else {
+        return true;
+    };
+    match platform_identity_provider(platform) {
+        Some(provider) => identity
+            .split_once(':')
+            .is_some_and(|(prefix, _)| prefix == provider),
+        None => false,
+    }
+}
+
+/// The calendar has rolled from the event a live meeting is bound to into a
+/// different event: the bound event has ended AND a time-only match now
+/// selects another event that could plausibly be a call in `platform`.
+///
+/// This is the only boundary signal available for native apps (Zoom, Teams)
+/// whose sessions carry no room URL: two back-to-back calls in the same app
+/// look identical at the process level, and the calendar is what tells them
+/// apart. Deliberately conservative — an event still in progress (overlaps),
+/// an event missing from the snapshot, or a next event whose link belongs to
+/// another provider all answer `false`.
+pub(crate) fn calendar_boundary_crossed(
+    events: &[CalendarEventSignal],
+    now: DateTime<Utc>,
+    bound_key: Option<&str>,
+    platform: &str,
+) -> bool {
+    let Some(bound) = bound_key.filter(|key| !key.is_empty()) else {
+        return false;
+    };
+    if calendar_event_ended(events, bound, now) != Some(true) {
+        return false;
+    }
+    let Some(next) = find_overlapping_calendar_event(events, now) else {
+        return false;
+    };
+    if next.key == bound {
+        return false;
+    }
+    events
+        .iter()
+        .find(|event| stable_event_key(event) == next.key)
+        .is_some_and(|event| calendar_event_matches_platform(event, platform))
 }

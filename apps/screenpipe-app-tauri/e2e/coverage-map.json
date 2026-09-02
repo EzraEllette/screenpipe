@@ -2024,6 +2024,27 @@
       "notes": "Runs the production calendar matcher and DB write with the reported back-to-back boundary shape: an outgoing URL-less event overlaps a target event starting in 40 seconds whose normalized Meet room exactly matches the detector URL. Verifies the persisted title and attendees, then proves the visible Meetings row uses the target rather than the outgoing event."
     },
     {
+      "spec": "meeting-back-to-back-rooms.spec.ts",
+      "platforms": [
+        "windows",
+        "macos",
+        "linux"
+      ],
+      "layers": [
+        "real-ui-e2e",
+        "local-api",
+        "tauri-command"
+      ],
+      "features": [
+        "meeting-detection",
+        "meeting-calendar-association"
+      ],
+      "criticality": "high",
+      "confidence": "strong",
+      "ux": "real-user-flow",
+      "notes": "Replays a back-to-back boundary through the production room-change rule and lifecycle: a Google Meet meeting bound to calendar event A, then the same browser audio session re-acquiring the mic in a different Meet room whose URL matches event B. Proves the ordinary transition alone would have revived meeting A, that A is closed with end_reason room_changed exactly where B starts, that B carries event B's title and attendees, that the 120s merge window cannot reopen A, and that the Meetings view shows two rows."
+    },
+    {
       "spec": "meeting-note-bottom-click.spec.ts",
       "platforms": [
         "windows",

@@ -19,7 +19,7 @@
 mod tests {
     use screenpipe_db::{
         DatabaseManager, MEETING_END_REASON_AUTO_END, MEETING_END_REASON_EXPLICIT_STOP,
-        MEETING_END_REASON_SHUTDOWN,
+        MEETING_END_REASON_ROOM_CHANGED, MEETING_END_REASON_SHUTDOWN,
     };
 
     async fn setup_test_db() -> DatabaseManager {
@@ -260,5 +260,84 @@ mod tests {
             read_end_reason(&db, id).await.as_deref(),
             Some(MEETING_END_REASON_AUTO_END)
         );
+    }
+
+    /// Regression: the detector closes a row with `room_changed` when the same
+    /// app visibly moved to the next call (back-to-back Meet rooms in one
+    /// browser). That row is the previous meeting by construction, so the merge
+    /// window must never hand it back — even though it ended most recently.
+    #[tokio::test]
+    async fn room_changed_meeting_is_not_a_merge_candidate() {
+        let db = setup_test_db().await;
+        let ended_at = (chrono::Utc::now() - chrono::Duration::seconds(10))
+            .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+            .to_string();
+
+        let natural = db
+            .insert_meeting("Google Meet", "audio_process", None, None)
+            .await
+            .unwrap();
+        db.end_meeting(natural, &ended_at, None).await.unwrap();
+
+        let changed = db
+            .insert_meeting("Google Meet", "audio_process", None, None)
+            .await
+            .unwrap();
+        db.end_meeting(changed, &ended_at, Some(MEETING_END_REASON_ROOM_CHANGED))
+            .await
+            .unwrap();
+        assert_eq!(
+            read_end_reason(&db, changed).await.as_deref(),
+            Some(MEETING_END_REASON_ROOM_CHANGED)
+        );
+        assert_eq!(
+            db.meeting_end_reason(changed).await.unwrap().as_deref(),
+            Some(MEETING_END_REASON_ROOM_CHANGED)
+        );
+
+        let candidate = db
+            .find_recent_meeting_for_app("Google Meet", 120)
+            .await
+            .unwrap();
+        assert_eq!(
+            candidate.map(|m| m.id),
+            Some(natural),
+            "the room_changed row is skipped; the older natural end is still eligible"
+        );
+    }
+
+    #[tokio::test]
+    async fn meeting_calendar_event_id_reads_the_bound_event() {
+        let db = setup_test_db().await;
+        let bound = db
+            .insert_meeting_with_calendar(
+                "Zoom",
+                "audio_process",
+                Some("Sync"),
+                None,
+                Some("cal-1"),
+            )
+            .await
+            .unwrap();
+        // Only one open meeting at a time: close the first before inserting a second.
+        db.end_meeting(bound, &now_string().await, None)
+            .await
+            .unwrap();
+        // An empty provider id is stored verbatim but means "no binding".
+        let unbound = db
+            .insert_meeting_with_calendar("Zoom", "audio_process", None, None, Some(""))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            db.meeting_calendar_event_id(bound)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("cal-1")
+        );
+        assert_eq!(db.meeting_calendar_event_id(unbound).await.unwrap(), None);
+        assert_eq!(db.meeting_calendar_event_id(999_999).await.unwrap(), None);
+        assert_eq!(db.meeting_end_reason(999_999).await.unwrap(), None);
     }
 }

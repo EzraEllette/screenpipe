@@ -12,6 +12,9 @@ use oasgen::{oasgen, OaSchema};
 use screenpipe_db::DatabaseManager;
 use screenpipe_db::{MeetingRecord, MeetingTranscriptSegment, MEETING_END_REASON_EXPLICIT_STOP};
 
+use crate::meeting_watcher::audio_process::{
+    MeetingRoomChangeResponse, RoomChangeChoice, ROOM_CHANGE_RESPONSE_EVENT,
+};
 use crate::meeting_watcher::shared::telemetry::{
     capture_detection_decision, capture_detection_feedback,
 };
@@ -114,6 +117,23 @@ pub struct StopMeetingRequest {
     /// behavior.
     #[serde(default = "default_append_typed_text")]
     pub append_typed_text: bool,
+}
+
+#[derive(OaSchema, Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolveRoomChangeRequest {
+    pub meeting_id: i64,
+    pub token: String,
+    /// `switch` starts a new note; `keep` keeps the current recording intact.
+    pub decision: String,
+}
+
+fn parse_room_change_choice(raw: &str) -> Option<RoomChangeChoice> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "switch" => Some(RoomChangeChoice::Switch),
+        "keep" => Some(RoomChangeChoice::Keep),
+        _ => None,
+    }
 }
 
 fn default_append_typed_text() -> bool {
@@ -1212,6 +1232,45 @@ pub(crate) async fn stop_meeting_handler(
     Ok(JsonResponse(meeting))
 }
 
+/// Resolve the short confirmation shown when a browser appears to have moved
+/// to a different meeting room while retaining the same audio session.
+#[oasgen]
+pub(crate) async fn resolve_room_change_handler(
+    State(state): State<Arc<AppState>>,
+    axum::Json(request): axum::Json<ResolveRoomChangeRequest>,
+) -> Result<JsonResponse<Value>, (StatusCode, JsonResponse<Value>)> {
+    let decision = parse_room_change_choice(&request.decision).ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            JsonResponse(json!({"error": "decision must be 'switch' or 'keep'"})),
+        )
+    })?;
+    let status = resolve_meeting_status(&state).await?;
+    if status.active_meeting_id != Some(request.meeting_id) {
+        return Err((
+            StatusCode::CONFLICT,
+            JsonResponse(json!({"error": "the prompted meeting is no longer active"})),
+        ));
+    }
+
+    screenpipe_events::send_event(
+        ROOM_CHANGE_RESPONSE_EVENT,
+        MeetingRoomChangeResponse {
+            meeting_id: request.meeting_id,
+            token: request.token,
+            decision,
+        },
+    )
+    .map_err(|error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            JsonResponse(json!({"error": error.to_string()})),
+        )
+    })?;
+
+    Ok(JsonResponse(json!({"accepted": true})))
+}
+
 /// Export request: pass `meeting_id` to export a meeting (its window is resolved
 /// from the DB), or `start`/`end` for an arbitrary wall-clock range (`end` defaults
 /// to now). `start`/`end` accept ISO 8601, relative (`"2h ago"`, `"now"`), or
@@ -1358,6 +1417,19 @@ pub(crate) async fn export_handler(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn room_change_choice_is_strict_but_case_insensitive() {
+        assert_eq!(
+            parse_room_change_choice("switch"),
+            Some(RoomChangeChoice::Switch)
+        );
+        assert_eq!(
+            parse_room_change_choice(" KEEP "),
+            Some(RoomChangeChoice::Keep)
+        );
+        assert_eq!(parse_room_change_choice("later"), None);
+    }
 
     async fn claim_test_db() -> (tempfile::TempDir, DatabaseManager) {
         let dir = tempfile::tempdir().unwrap();

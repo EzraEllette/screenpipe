@@ -58,6 +58,37 @@ struct MeetingPrewarmEvent {
     seconds_until_start: i64,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MeetingRoomChangeOffer {
+    meeting_id: i64,
+    platform: String,
+    token: String,
+}
+
+fn room_change_offer_actions(offer: &MeetingRoomChangeOffer) -> Vec<serde_json::Value> {
+    let action = |id: &str, label: &str, decision: &str, primary: bool| {
+        json!({
+            "id": id,
+            "action": id,
+            "label": label,
+            "type": "api",
+            "url": "/meetings/room-change",
+            "method": "POST",
+            "body": {
+                "meetingId": offer.meeting_id,
+                "token": offer.token,
+                "decision": decision,
+            },
+            "primary": primary,
+        })
+    };
+    vec![
+        action("keep-meeting-note", "keep together", "keep", false),
+        action("start-new-meeting-note", "start new note", "switch", true),
+    ]
+}
+
 /// Stable key shared with the events crate's prewarm dedup: title (trimmed,
 /// lowercased) + start time. Used here to suppress the later audio/UI-driven
 /// `meeting_started` toast for the same calendar event.
@@ -163,6 +194,36 @@ pub fn start(app: AppHandle) {
         "meeting_streaming_status_changed",
         "meeting-streaming-status-changed",
     );
+
+    let room_change_app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let mut sub = screenpipe_events::subscribe_to_event::<MeetingRoomChangeOffer>(
+            "meeting_room_change_offer",
+        );
+        while let Some(event) = sub.next().await {
+            if !meeting_notifications_enabled(&room_change_app) {
+                debug!("meeting room change: prompt skipped by preference");
+                continue;
+            }
+            let offer = event.data;
+            let platform = offer.platform.trim();
+            let platform = if platform.is_empty() {
+                "browser meeting"
+            } else {
+                platform
+            };
+            client::send_typed_with_actions_and_priority(
+                "new meeting detected",
+                format!(
+                    "{platform} may have switched rooms. Keep one recording or start a new note?"
+                ),
+                "meeting",
+                Some(30_000),
+                room_change_offer_actions(&offer),
+                NotificationPriority::High,
+            );
+        }
+    });
 
     let calendar_events = Arc::new(RwLock::new(Vec::<CalendarEventSignal>::new()));
     // Flips to true on first publication from `start_calendar_events_publisher`,
@@ -664,6 +725,23 @@ fn extract_meeting_url(text: Option<&str>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn room_change_prompt_actions_are_bound_to_the_offer() {
+        let actions = room_change_offer_actions(&MeetingRoomChangeOffer {
+            meeting_id: 42,
+            platform: "Google Meet".to_string(),
+            token: "prompt-token".to_string(),
+        });
+
+        assert_eq!(actions.len(), 2);
+        assert_eq!(actions[0]["body"]["decision"], "keep");
+        assert_eq!(actions[1]["body"]["decision"], "switch");
+        assert_eq!(actions[1]["body"]["meetingId"], 42);
+        assert_eq!(actions[1]["body"]["token"], "prompt-token");
+        assert_eq!(actions[1]["url"], "/meetings/room-change");
+        assert_eq!(actions[1]["primary"], true);
+    }
 
     #[test]
     fn finds_current_meeting_title() {

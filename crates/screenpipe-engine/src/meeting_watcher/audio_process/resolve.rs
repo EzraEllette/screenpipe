@@ -230,22 +230,32 @@ pub(crate) async fn db_find_browser_evidence(
     // `frames.timestamp` is RFC3339 (`...T...+00:00`). Comparing it to
     // SQLite's `datetime()` string (`... ...`) is lexical and pulls in stale
     // same-day frames.
-    let rows: Vec<(String, String, Option<String>)> = sqlx::query_as(
-        "SELECT DISTINCT app_name, window_name, browser_url FROM frames \
+    //
+    // Newest page first: the 10s window routinely holds two different meeting
+    // rooms right after the user leaves one call and joins the next, and the
+    // first matching row is the URL the candidate carries. Returning rows in
+    // arbitrary order let a stale frame of the OLD room outrank the room the
+    // browser is showing now, which hid the room change from the detector.
+    let rows: Vec<(String, String, Option<String>, String)> = sqlx::query_as(
+        "SELECT app_name, window_name, browser_url, MAX(timestamp) AS newest FROM frames \
          WHERE timestamp > strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now', '-10 seconds') \
-         AND app_name IS NOT NULL AND window_name IS NOT NULL",
+         AND app_name IS NOT NULL AND window_name IS NOT NULL \
+         GROUP BY app_name, window_name, browser_url \
+         ORDER BY newest DESC",
     )
     .fetch_all(&db.pool)
     .await?;
 
     Ok(rows
         .into_iter()
-        .filter(|(app_name, _, _)| is_browser_app(app_name))
-        .map(|(app_name, window_name, browser_url)| BrowserPageEvidence {
-            browser_app: Some(app_name),
-            url: browser_url,
-            title: Some(window_name),
-        })
+        .filter(|(app_name, _, _, _)| is_browser_app(app_name))
+        .map(
+            |(app_name, window_name, browser_url, _)| BrowserPageEvidence {
+                browser_app: Some(app_name),
+                url: browser_url,
+                title: Some(window_name),
+            },
+        )
         .collect())
 }
 

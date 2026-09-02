@@ -141,6 +141,37 @@ impl DatabaseManager {
             .await
     }
 
+    /// The calendar event this meeting is bound to, if any. The detector reads
+    /// this at a suspected meeting boundary to tell "same scheduled event,
+    /// mic hiccup" apart from "the calendar rolled into the next event".
+    pub async fn meeting_calendar_event_id(
+        &self,
+        meeting_id: i64,
+    ) -> Result<Option<String>, SqlxError> {
+        let key = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT calendar_event_id FROM meetings WHERE id = ?1",
+        )
+        .bind(meeting_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .flatten()
+        .filter(|key| !key.is_empty());
+        Ok(key)
+    }
+
+    /// How the meeting was finalized: one of the `MEETING_END_REASON_*`
+    /// constants, or `None` for an open row / legacy natural end.
+    pub async fn meeting_end_reason(&self, meeting_id: i64) -> Result<Option<String>, SqlxError> {
+        let reason = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT end_reason FROM meetings WHERE id = ?1",
+        )
+        .bind(meeting_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .flatten();
+        Ok(reason)
+    }
+
     /// Claim `calendar_event_id` for `meeting_id`. Atomic, and idempotent for
     /// the owner: returns true when this meeting owns the event afterwards,
     /// whether this call did the claiming or a previous one did.
@@ -1645,7 +1676,8 @@ impl DatabaseManager {
     }
 
     /// Find the most recent ended meeting in `app` whose `meeting_end` is
-    /// within `within_secs` and that did NOT end via explicit user stop.
+    /// within `within_secs` and that did NOT end via explicit user stop or a
+    /// detected room change.
     ///
     /// The `end_reason != 'explicit_stop'` filter is the load-bearing piece
     /// of the meeting-merge fix: when a user clicks stop in the meeting note
@@ -1655,6 +1687,10 @@ impl DatabaseManager {
     /// "DUPLICATE: X" sync notifications. The detector loop also tracks
     /// `last_explicit_stop_id` in memory as defense-in-depth, but this SQL
     /// filter is the durable guarantee that survives restarts.
+    ///
+    /// `room_changed` rows are excluded for the same reason: the detector
+    /// closed that row precisely because the user moved to the next call, so
+    /// re-attaching the next call to it would recreate the merge it prevented.
     pub async fn find_recent_meeting_for_app(
         &self,
         app: &str,
@@ -1670,13 +1706,14 @@ impl DatabaseManager {
              WHERE meeting_app = ?1 \
                AND meeting_end IS NOT NULL \
                AND meeting_end >= ?2 \
-               AND (end_reason IS NULL OR end_reason != ?3) \
+               AND (end_reason IS NULL OR end_reason NOT IN (?3, ?4)) \
              ORDER BY meeting_end DESC \
              LIMIT 1",
         )
         .bind(app)
         .bind(&cutoff)
         .bind(MEETING_END_REASON_EXPLICIT_STOP)
+        .bind(MEETING_END_REASON_ROOM_CHANGED)
         .fetch_optional(&self.pool)
         .await?;
         Ok(meeting)

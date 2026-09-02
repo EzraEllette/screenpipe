@@ -66,6 +66,12 @@ pub const MEETING_END_REASON_EXPLICIT_STOP: &str = "explicit_stop";
 pub const MEETING_END_REASON_AUTO_END: &str = "auto_end";
 /// App shutdown closed an active meeting row. Eligible for auto-merge on next launch.
 pub const MEETING_END_REASON_SHUTDOWN: &str = "shutdown";
+/// The detector saw the same app move to a different conference room (or the
+/// calendar roll into the next scheduled event while the mic was re-acquired)
+/// and closed this row so the next call gets its own. Auto-merge MUST NOT
+/// reopen these: the boundary was chosen deliberately, and reopening would
+/// glue two back-to-back meetings into one again.
+pub const MEETING_END_REASON_ROOM_CHANGED: &str = "room_changed";
 
 fn normalize_timestamp_for_range_query(timestamp: &str) -> String {
     DateTime::parse_from_rfc3339(timestamp)

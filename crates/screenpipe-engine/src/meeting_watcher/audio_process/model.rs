@@ -268,3 +268,14 @@ pub(crate) struct SuppressedSession {
     pub(crate) platform: Option<String>,
     pub(crate) meeting_url: Option<String>,
 }
+
+/// The most recently ended meeting and the conference room it was in, kept in
+/// the detection loop so the 120s auto-merge window can refuse to reopen a
+/// row when the next session is visibly a different room.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct EndedRoom {
+    pub(crate) meeting_id: i64,
+    /// `meeting_url_identity` of the ended meeting's URL; `None` for native
+    /// apps and browser sessions whose URL never resolved to a room.
+    pub(crate) identity: Option<String>,
+}

@@ -4,6 +4,38 @@
 //! Event signals (calendar, stop, auto-end) consumed by the audio-process loop.
 
 use super::*;
+use serde::{Deserialize, Serialize};
+
+pub(crate) const ROOM_CHANGE_RESPONSE_EVENT: &str = "meeting_room_change_response";
+
+/// User decision for an ambiguous same-browser room change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RoomChangeChoice {
+    Switch,
+    Keep,
+}
+
+/// Emitted after a different browser room remains visible long enough to ask
+/// the user, but before the conservative automatic split threshold.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MeetingRoomChangeOffer {
+    pub meeting_id: i64,
+    pub platform: String,
+    pub token: String,
+}
+
+/// Returned by the local API action embedded in the desktop notification.
+/// The random token binds the response to the currently pending room change;
+/// stale clicks from an older prompt are harmless.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MeetingRoomChangeResponse {
+    pub meeting_id: i64,
+    pub token: String,
+    pub decision: RoomChangeChoice,
+}
 
 // These signals and the calendar matcher are shared with the ui_scan watcher.
 // They used to be duplicated here, and the two copies drifting is how a single

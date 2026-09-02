@@ -10,9 +10,9 @@ and layer declared in the manifest, weighted by confidence and criticality.
 
 - Manifest: `e2e/coverage-map.json`
 - Specs directory: `e2e/specs`
-- Mapped specs: 139
-- Declared test blocks: 399
-- Weighted coverage points: 320.1
+- Mapped specs: 140
+- Declared test blocks: 401
+- Weighted coverage points: 322.1
 
 Confidence weights: strong=1.0, partial=0.7, conditional=0.4, smoke=0.3.
 Criticality weights: high=1.0, medium=0.7, low=0.4.
@@ -23,9 +23,9 @@ can execute more runtime cases than this number shows.
 
 | Platform | Specs | Declared tests | Weighted points | Layers | Features | Critical score |
 | --- | --- | --- | --- | --- | --- | --- |
-| windows | 106 | 338 | 281.1 | 15 | 121 | 85% |
-| macos | 135 | 361 | 289.9 | 17 | 131 | 88% |
-| linux | 94 | 296 | 250.5 | 14 | 118 | 80% |
+| windows | 107 | 340 | 283.1 | 15 | 122 | 85% |
+| macos | 136 | 363 | 291.9 | 17 | 132 | 88% |
+| linux | 95 | 298 | 252.5 | 14 | 119 | 80% |
 
 ## Runtime Results
 
@@ -43,16 +43,16 @@ pass/fail/skip counts.
 | capture-ocr | 2 specs / 16 tests / 6.4 pts | 9 specs / 13 tests / 5.8 pts | 1 specs / 3 tests / 1.2 pts |
 | chat-ai | 37 specs / 87 tests / 71.3 pts | 51 specs / 116 tests / 90.8 pts | 35 specs / 86 tests / 70.8 pts |
 | entitlement | - | 1 specs / 1 tests / 1.0 pts | - |
-| local-api | 28 specs / 117 tests / 98.0 pts | 38 specs / 113 tests / 96.5 pts | 23 specs / 85 tests / 76.2 pts |
+| local-api | 29 specs / 119 tests / 100.0 pts | 39 specs / 115 tests / 98.5 pts | 24 specs / 87 tests / 78.2 pts |
 | notifications | 4 specs / 26 tests / 17.3 pts | 3 specs / 5 tests / 3.4 pts | 2 specs / 4 tests / 3.1 pts |
 | onboarding | 9 specs / 38 tests / 33.8 pts | 11 specs / 42 tests / 37.2 pts | 9 specs / 38 tests / 33.8 pts |
 | os-integration | 7 specs / 32 tests / 26.9 pts | 15 specs / 30 tests / 18.4 pts | 2 specs / 15 tests / 10.8 pts |
 | performance | 3 specs / 45 tests / 45.0 pts | 5 specs / 36 tests / 31.8 pts | 2 specs / 30 tests / 30.0 pts |
 | pipes | 6 specs / 20 tests / 20.0 pts | 8 specs / 26 tests / 26.0 pts | 6 specs / 20 tests / 20.0 pts |
-| real-ui-e2e | 79 specs / 236 tests / 199.9 pts | 96 specs / 253 tests / 213.9 pts | 73 specs / 212 tests / 185.9 pts |
+| real-ui-e2e | 80 specs / 238 tests / 201.9 pts | 97 specs / 255 tests / 215.9 pts | 74 specs / 214 tests / 187.9 pts |
 | settings | 15 specs / 42 tests / 39.0 pts | 17 specs / 36 tests / 31.7 pts | 14 specs / 33 tests / 30.0 pts |
 | storage-privacy | 10 specs / 44 tests / 35.3 pts | 10 specs / 29 tests / 28.1 pts | 7 specs / 22 tests / 21.1 pts |
-| tauri-command | 22 specs / 60 tests / 46.9 pts | 34 specs / 82 tests / 64.3 pts | 21 specs / 61 tests / 47.8 pts |
+| tauri-command | 23 specs / 62 tests / 48.9 pts | 35 specs / 84 tests / 66.3 pts | 22 specs / 63 tests / 49.8 pts |
 | window-lifecycle | 22 specs / 71 tests / 59.5 pts | 23 specs / 54 tests / 39.9 pts | 16 specs / 44 tests / 34.4 pts |
 
 ## Critical Feature Matrix
@@ -187,6 +187,7 @@ pass/fail/skip counts.
 | main-window-close-reopen.spec.ts | windows, macos, linux | window-lifecycle, tauri-command | window-lifecycle, main-window | medium | partial | command | 1 | Main close/reopen without handle leaks. |
 | main-window.spec.ts | windows, macos, linux | window-lifecycle, tauri-command | window-lifecycle, main-window | medium | partial | command | 2 | Main window show/hide dedupe. |
 | meeting-apps-picker.spec.ts | windows, macos, linux | settings, real-ui-e2e | settings-recording, meeting-detector-ignored-apps | medium | strong | real-user-flow | 3 | Per-app meeting-detection ignore picker: open, toggle, count badge, persistence across reopen (#3882 / #3847). |
+| meeting-back-to-back-rooms.spec.ts | windows, macos, linux | real-ui-e2e, local-api, tauri-command | meeting-detection, meeting-calendar-association | high | strong | real-user-flow | 2 | Replays a back-to-back boundary through the production room-change rule and lifecycle: a Google Meet meeting bound to calendar event A, then the same browser audio session re-acquiring the mic in a different Meet room whose URL matches event B. Proves the ordinary transition alone would have revived meeting A, that A is closed with end_reason room_changed exactly where B starts, that B carries event B's title and attendees, that the 120s merge window cannot reopen A, and that the Meetings view shows two rows. |
 | meeting-calendar-url-match.spec.ts | windows, macos, linux | real-ui-e2e, local-api, tauri-command | meeting-calendar-association | high | strong | real-user-flow | 1 | Runs the production calendar matcher and DB write with the reported back-to-back boundary shape: an outgoing URL-less event overlaps a target event starting in 40 seconds whose normalized Meet room exactly matches the detector URL. Verifies the persisted title and attendees, then proves the visible Meetings row uses the target rather than the outgoing event. |
 | meeting-chat-panel.spec.ts | macos | real-ui-e2e, local-api | meeting-notes | high | strong | real-user-flow | 3 | Seeds a settled meeting and walks the chat rail disclosure ladder in the real app: rest shows one line plus one chip and no send button, focus peeks open with suggestions, typing hides the chip and reveals send, Escape collapses while keeping the draft, status precedence names why the composer is disabled, and a 720x620 window produces no horizontal overflow. Captures a screenshot per state. |
 | meeting-note-bottom-click.spec.ts | windows, macos, linux | real-ui-e2e, local-api | meeting-notes | high | strong | real-user-flow | 3 | Seeds and opens a long meeting note, checks editor shell click focus behavior, then clicks the bottom editor line. |

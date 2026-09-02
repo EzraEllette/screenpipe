@@ -319,6 +319,46 @@ async fn simulate_calendar_meeting_match(
     .await
 }
 
+/// E2E helper: replay a back-to-back meeting boundary through the production
+/// detector rules and lifecycle (see
+/// `screenpipe_engine::meeting_watcher::e2e_simulate_back_to_back_rooms`).
+///
+/// The harness supplies two conference-room URLs and a calendar snapshot; the
+/// engine decides whether the second room ends the first meeting and starts a
+/// new one. Private-data-free by construction.
+#[command]
+async fn simulate_back_to_back_meeting_rooms(
+    state: State<'_, RecordingState>,
+    first_room_url: String,
+    second_room_url: String,
+    events: serde_json::Value,
+    now: String,
+    first_started_secs_ago: u64,
+) -> Result<serde_json::Value, String> {
+    let now = chrono::DateTime::parse_from_rfc3339(&now)
+        .map_err(|error| error.to_string())?
+        .with_timezone(&chrono::Utc);
+    let events_json = serde_json::to_string(&events).map_err(|error| error.to_string())?;
+    let db = {
+        let server_guard = state.server.lock().await;
+        server_guard
+            .as_ref()
+            .ok_or_else(|| "server not running".to_string())?
+            .db
+            .clone()
+    };
+    let outcome = screenpipe_engine::meeting_watcher::e2e_simulate_back_to_back_rooms(
+        &db,
+        &first_room_url,
+        &second_room_url,
+        &events_json,
+        now,
+        first_started_secs_ago,
+    )
+    .await?;
+    serde_json::to_value(outcome).map_err(|error| error.to_string())
+}
+
 /// E2E helper: report the currently open meeting, if any.
 ///
 /// Mirrors the "is a meeting still in progress?" question the streaming
@@ -898,6 +938,7 @@ pub(super) fn plugin() -> TauriPlugin<Wry> {
             shortcut_reminder_visible,
             open_auto_meeting,
             simulate_calendar_meeting_match,
+            simulate_back_to_back_meeting_rooms,
             active_meeting_id,
             native_meeting_overlay_state,
             native_timeline_search_state,
