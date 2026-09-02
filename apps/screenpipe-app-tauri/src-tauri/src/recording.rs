@@ -329,6 +329,13 @@ pub struct RecordingState {
     pub capture: Arc<Mutex<Option<CaptureSession>>>,
     /// True while a server start is in progress (prevents race between main.rs boot and frontend)
     pub is_starting: Arc<AtomicBool>,
+    /// Coalesces start requests that arrive while a teardown owns the lifecycle
+    /// lock. Unlike a duplicate startup, teardown will not satisfy the new
+    /// capture intent, so one start must run after teardown releases the lock.
+    pub deferred_spawn_pending: Arc<AtomicBool>,
+    /// Latest desired state for the queued lifecycle handoff. A later explicit
+    /// stop clears it so an already-queued task cannot resurrect the server.
+    pub deferred_spawn_requested: Arc<AtomicBool>,
     /// True while the caller holding `capture` is building a capture session.
     /// Duplicate app-wide start requests wait on that mutex, then observe the
     /// installed session instead of starting another one.
@@ -361,6 +368,52 @@ pub struct RecordingState {
     /// Restart-storm guard for DB-wedge auto-recovery. Shared across server
     /// restarts so a DB that stays broken after N restarts stops retrying.
     pub db_wedge_breaker: DbWedgeBreaker,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum LifecycleCollisionAction {
+    InFlightStartOwnsIntent,
+    DeferUntilTeardownCompletes,
+    DeferredStartAlreadyQueued,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum DeferredSpawnAction {
+    Start,
+    Cancelled,
+    DatabaseQuarantined,
+}
+
+fn lifecycle_collision_action(
+    is_starting: bool,
+    deferred_spawn_pending: &AtomicBool,
+) -> LifecycleCollisionAction {
+    if is_starting {
+        return LifecycleCollisionAction::InFlightStartOwnsIntent;
+    }
+
+    match deferred_spawn_pending.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst) {
+        Ok(false) => LifecycleCollisionAction::DeferUntilTeardownCompletes,
+        Err(true) => LifecycleCollisionAction::DeferredStartAlreadyQueued,
+        Ok(true) | Err(false) => unreachable!("compare_exchange returned an impossible state"),
+    }
+}
+
+fn deferred_spawn_action(requested: bool, database_quarantined: bool) -> DeferredSpawnAction {
+    if !requested {
+        DeferredSpawnAction::Cancelled
+    } else if database_quarantined {
+        DeferredSpawnAction::DatabaseQuarantined
+    } else {
+        DeferredSpawnAction::Start
+    }
+}
+
+fn database_is_quarantined(app: &tauri::AppHandle) -> Result<bool, String> {
+    let config = build_config(app)?;
+    Ok(screenpipe_db::sqlite_quarantine_exists(
+        &config.data_dir.join("db.sqlite"),
+    ))
 }
 
 /// Install a fully constructed capture session before activating any monitor
@@ -853,6 +906,7 @@ pub async fn stop_screenpipe(
     // Deliberate stop → clear the intent so the health watchdog leaves the
     // server down instead of auto-respawning it.
     state.set_capture_intent(false);
+    state.deferred_spawn_requested.store(false, Ordering::SeqCst);
 
     let _lifecycle_guard = state.server_lifecycle.lock().await;
     stop_screenpipe_inner(&state).await
@@ -954,12 +1008,19 @@ pub async fn spawn_screenpipe(
     // for Timeline, but it must not publish capture intent or restart capture.
     let store = SettingsStore::get(&app).ok().flatten().unwrap_or_default();
     require_server_access(&app, &store)?;
+    if database_is_quarantined(&app)? {
+        return Err(
+            "database remains quarantined after a SQLite hard fault; recover it before starting screenpipe"
+                .to_string(),
+        );
+    }
     let capture_allowed = recording_access_allowed(&app, &store);
 
     // Normal starts publish capture intent before touching lifecycle state.
     // The paywall deliberately leaves it OFF, so the same server startup path
     // cannot accidentally create a CaptureSession.
     state.set_capture_intent(capture_allowed);
+    state.deferred_spawn_requested.store(true, Ordering::SeqCst);
 
     // Do not wait for the lifecycle lock. It is held across a full stop/start,
     // so when the app is already bringing the server up — the ordinary case
@@ -969,17 +1030,62 @@ pub async fn spawn_screenpipe(
     // observed giving up: one closed the app at the timeout, one stayed 11
     // minutes and never completed setup.
     //
-    // A held lock means a startup or teardown is already running, and capture
-    // intent is set above, so the desired end state is already being reached.
-    // Report success and let the caller's health poll observe the engine come
-    // up — which is what already rescues most of these users, just without the
-    // dead wait first. If that in-flight startup fails, capture intent keeps
-    // the health watchdog retrying and the caller's own health timeout still
-    // surfaces it, so a real failure is not swallowed here.
+    // A duplicate startup already owns the new intent, so keep that path
+    // non-blocking. A teardown is different: it cannot satisfy a start request
+    // that arrived after teardown began, and a never-connected server has no
+    // watchdog history to trigger a retry. Queue one coalesced start behind the
+    // teardown while returning immediately to preserve onboarding responsiveness.
     let Ok(_lifecycle_guard) = state.server_lifecycle.try_lock() else {
-        info!("spawn_screenpipe: startup already in progress, not queueing behind it");
+        match lifecycle_collision_action(
+            state.is_starting.load(Ordering::SeqCst),
+            &state.deferred_spawn_pending,
+        ) {
+            LifecycleCollisionAction::InFlightStartOwnsIntent => {
+                state.deferred_spawn_requested.store(false, Ordering::SeqCst);
+                info!("spawn_screenpipe: startup already in progress, not queueing behind it");
+            }
+            LifecycleCollisionAction::DeferredStartAlreadyQueued => {
+                info!("spawn_screenpipe: teardown in progress, deferred start already queued");
+            }
+            LifecycleCollisionAction::DeferUntilTeardownCompletes => {
+                info!("spawn_screenpipe: teardown in progress, deferring start until it completes");
+                let app_for_deferred_start = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    let state = app_for_deferred_start.state::<RecordingState>();
+                    let lifecycle = state.server_lifecycle.clone();
+                    let _lifecycle_guard = lifecycle.lock().await;
+                    state.deferred_spawn_pending.store(false, Ordering::SeqCst);
+                    let requested = state.deferred_spawn_requested.swap(false, Ordering::SeqCst);
+                    let database_quarantined = match database_is_quarantined(&app_for_deferred_start)
+                    {
+                        Ok(quarantined) => quarantined,
+                        Err(error) => {
+                            warn!("spawn_screenpipe: deferred start cancelled because the database path could not be resolved: {error}");
+                            return;
+                        }
+                    };
+                    let result = match deferred_spawn_action(requested, database_quarantined) {
+                        DeferredSpawnAction::Start => {
+                            spawn_screenpipe_inner(&state, app_for_deferred_start.clone()).await
+                        }
+                        DeferredSpawnAction::Cancelled => {
+                            info!("spawn_screenpipe: deferred start cancelled by a later stop");
+                            return;
+                        }
+                        DeferredSpawnAction::DatabaseQuarantined => {
+                            warn!("spawn_screenpipe: deferred start cancelled because the database is quarantined");
+                            return;
+                        }
+                    };
+                    if let Err(error) = result {
+                        warn!("spawn_screenpipe: deferred start after teardown failed: {error}");
+                    }
+                });
+            }
+        }
         return Ok(());
     };
+    state.deferred_spawn_requested.store(false, Ordering::SeqCst);
     spawn_screenpipe_inner(&state, app).await
 }
 
@@ -1607,6 +1713,48 @@ async fn start_capture_internal(
 
 #[cfg(test)]
 mod spawn_lifecycle_lock_tests {
+    use super::{
+        deferred_spawn_action, lifecycle_collision_action, DeferredSpawnAction,
+        LifecycleCollisionAction,
+    };
+    use std::sync::atomic::AtomicBool;
+
+    #[test]
+    fn start_colliding_with_teardown_is_deferred_but_duplicate_start_is_not() {
+        let pending = AtomicBool::new(false);
+        assert_eq!(
+            lifecycle_collision_action(false, &pending),
+            LifecycleCollisionAction::DeferUntilTeardownCompletes,
+            "a start request that collides with teardown must run after teardown releases the lifecycle",
+        );
+        assert_eq!(
+            lifecycle_collision_action(true, &AtomicBool::new(false)),
+            LifecycleCollisionAction::InFlightStartOwnsIntent,
+            "a duplicate start must remain non-blocking while startup owns the lifecycle",
+        );
+        assert_eq!(
+            lifecycle_collision_action(false, &pending),
+            LifecycleCollisionAction::DeferredStartAlreadyQueued,
+            "repeated start requests during one teardown must coalesce",
+        );
+    }
+
+    #[test]
+    fn deferred_start_honors_later_stop_and_database_quarantine() {
+        assert_eq!(
+            deferred_spawn_action(false, false),
+            DeferredSpawnAction::Cancelled,
+        );
+        assert_eq!(
+            deferred_spawn_action(true, true),
+            DeferredSpawnAction::DatabaseQuarantined,
+        );
+        assert_eq!(
+            deferred_spawn_action(true, false),
+            DeferredSpawnAction::Start,
+        );
+    }
+
     /// `spawn_screenpipe` must not await `server_lifecycle`.
     ///
     /// That lock is held across a full stop/start, so awaiting it parks the
@@ -1641,6 +1789,10 @@ mod spawn_lifecycle_lock_tests {
             body.contains(non_blocking),
             "expected a non-blocking try_lock so an in-progress startup is \
              reported rather than queued behind"
+        );
+        assert!(
+            body.contains("database_is_quarantined(&app)?"),
+            "every spawn path must reject a durably quarantined database before touching lifecycle state",
         );
     }
 }

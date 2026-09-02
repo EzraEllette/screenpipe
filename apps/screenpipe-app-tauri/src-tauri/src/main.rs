@@ -941,6 +941,8 @@ async fn main() {
         server: Arc::new(tokio::sync::Mutex::new(None)),
         capture: Arc::new(tokio::sync::Mutex::new(None)),
         is_starting: Arc::new(AtomicBool::new(false)),
+        deferred_spawn_pending: Arc::new(AtomicBool::new(false)),
+        deferred_spawn_requested: Arc::new(AtomicBool::new(false)),
         is_starting_capture: Arc::new(AtomicBool::new(false)),
         last_spawn_epoch: Arc::new(AtomicU64::new(0)),
         wants_recording: Arc::new(AtomicBool::new(false)),
