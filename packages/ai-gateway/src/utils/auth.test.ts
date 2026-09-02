@@ -495,6 +495,32 @@ describe('validateAuth — verified identities only', () => {
 		});
 	});
 
+	it('uses the server-verified enterprise identity instead of the consumer billing tier', async () => {
+		verifyTokenMock.mockImplementation(async () => ({ sub: 'user_enterprise' }) as any);
+		globalThis.fetch = mock(async () => new Response(JSON.stringify({
+			success: true,
+			user: {
+				clerk_id: 'user_enterprise',
+				cloud_subscribed: true,
+				app_entitled: true,
+				subscription_plan: 'pro',
+				billing_plan: 'pro',
+				is_enterprise_user: true,
+				entitlement: { active: true, plan: 'pro', features: { app: true } },
+			},
+		}), { status: 200 })) as typeof fetch;
+
+		expect(await validateAuth(requestFor('eyJ.enterprise.clerk'), env)).toEqual({
+			isValid: true,
+			tier: 'subscribed',
+			accountPlan: 'enterprise',
+			deviceId: 'user_enterprise',
+			userId: 'user_enterprise',
+			clerkUserId: 'user_enterprise',
+			clerkUserIdVerified: true,
+		});
+	});
+
   it('uses canonical Max and Ultra billing plans with desktop-compatible access labels', async () => {
     for (const [plan, accountPlan, usageTier] of [
       ['pro_max', 'business_max', 'business_max'],

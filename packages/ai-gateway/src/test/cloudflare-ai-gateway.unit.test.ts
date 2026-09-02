@@ -50,7 +50,7 @@ describe('Cloudflare hosted-chat metadata', () => {
 	});
 
 	it('preserves Max and Ultra allowance tiers while collapsing catalog-equivalent plans', async () => {
-		for (const accountPlan of ['business', 'team', 'enterprise'] as const) {
+		for (const accountPlan of ['business', 'team'] as const) {
 			const context = await buildHostedChatGatewayContext(auth({ accountPlan }), 'gpt-5.6-sol', 'background');
 			expect(context).toMatchObject({ plan: 'business', lane: 'frontier', workload: 'background' });
 		}
@@ -58,6 +58,8 @@ describe('Cloudflare hosted-chat metadata', () => {
 			const context = await buildHostedChatGatewayContext(auth({ accountPlan }), 'auto', 'background');
 			expect(context).toMatchObject({ plan: accountPlan, lane: 'auto', workload: 'background' });
 		}
+		const enterprise = await buildHostedChatGatewayContext(auth({ accountPlan: 'enterprise' }), 'auto', 'background');
+		expect(enterprise).toMatchObject({ plan: 'business_ultra', lane: 'auto', workload: 'background' });
 		const trial = await buildHostedChatGatewayContext(auth({ accountPlan: 'basic', hostedAiTrial: true }), 'auto', 'interactive');
 		expect(trial).toMatchObject({ plan: 'basic', trial: true });
 		const internal = await buildHostedChatGatewayContext(auth({ service: true, userId: undefined }), 'auto', 'background');

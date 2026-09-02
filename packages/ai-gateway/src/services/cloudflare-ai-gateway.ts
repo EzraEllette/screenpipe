@@ -81,6 +81,7 @@ export function isHostedChatGatewayEnabled(env: Pick<Env, 'HOSTED_CHAT_GATEWAY_M
 
 function collapsePlan(auth: AuthResult): HostedChatPlan {
 	if (auth.service === true) return 'internal';
+	if (auth.accountPlan === 'enterprise') return 'business_ultra';
 	if (auth.accountPlan === 'business_max' || auth.accountPlan === 'business_ultra') {
 		return auth.accountPlan;
 	}
