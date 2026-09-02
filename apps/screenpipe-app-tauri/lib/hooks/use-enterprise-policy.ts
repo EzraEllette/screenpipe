@@ -1161,8 +1161,19 @@ export function useEnterprisePolicyRuntime() {
       // employee to sign in with their screenpipe account. Device policy was
       // already applied by fetchPolicy; only authentication is refused.
       if (credential.type === "license_key" && result.policy.requireAccountLogin) {
-        await setNativeRecordingAuthorized(false);
         setPolicy(result.policy);
+        // A saved account is the next credential in this same startup check.
+        // Keep the existing process-local grant while that viable credential is
+        // still being verified; revoking here stops capture between two successful
+        // checks and races the account grant against the in-flight teardown. The
+        // account attempt below still revokes on an explicit denial, and a key-only
+        // device still fails closed immediately.
+        if (accountTokenRef.current) {
+          setAuthenticationState("checking");
+          setAuthenticationError(null);
+          return { authenticated: false, retryable: false };
+        }
+        await setNativeRecordingAuthorized(false);
         setAuthenticationState("account");
         setAuthenticationError(ACCOUNT_LOGIN_REQUIRED_ERROR);
         return { authenticated: false, retryable: false };

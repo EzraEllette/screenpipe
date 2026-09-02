@@ -815,6 +815,59 @@ describe("enterprise policy runtime manual activation", () => {
     );
   });
 
+  it("preserves recording while handing an account-required key off to a saved account", async () => {
+    mocks.commands.getEnterpriseLicenseKey.mockResolvedValue(KEY);
+    Object.assign(mocks.settings, { user: { token: "account-token" } });
+
+    let releaseAccountPolicy!: () => void;
+    const accountPolicyPending = new Promise<void>((resolve) => {
+      releaseAccountPolicy = resolve;
+    });
+    mocks.tauriFetch.mockImplementation(async (
+      url: string,
+      init?: { headers?: Record<string, string> },
+    ) => {
+      if (url.includes("/api/enterprise/policy")) {
+        if (init?.headers?.Authorization === "Bearer account-token") {
+          await accountPolicyPending;
+        }
+        return policyResponse({ requireAccountLogin: true });
+      }
+      if (url.includes("/api/enterprise/heartbeat")) return heartbeatResponse();
+      throw new Error(`unexpected fetch ${url}`);
+    });
+
+    const { result } = await renderEnterprisePolicy();
+
+    await waitFor(() =>
+      expect(mocks.tauriFetch).toHaveBeenCalledWith(
+        expect.stringContaining("/api/enterprise/policy"),
+        expect.objectContaining({
+          headers: expect.objectContaining({ Authorization: "Bearer account-token" }),
+        }),
+      ),
+    );
+    expect(result.current.authenticationState).toBe("checking");
+    expect(mocks.commands.setEnterpriseRecordingAuthorized).not.toHaveBeenCalledWith(
+      false,
+      null,
+      null,
+    );
+
+    releaseAccountPolicy();
+    await waitFor(() => expect(result.current.isEnterpriseAuthenticated).toBe(true));
+    expect(mocks.commands.setEnterpriseRecordingAuthorized).toHaveBeenCalledWith(
+      true,
+      "account",
+      "account-token",
+    );
+    expect(mocks.commands.setEnterpriseRecordingAuthorized).not.toHaveBeenCalledWith(
+      false,
+      null,
+      null,
+    );
+  });
+
   it("recovers a rotated saved key through the signed-in account", async () => {
     mocks.commands.getEnterpriseLicenseKey.mockResolvedValue(KEY);
     Object.assign(mocks.settings, { user: { token: "account-token" } });
