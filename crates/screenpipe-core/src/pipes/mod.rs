@@ -2181,6 +2181,23 @@ fn classify_pipe_process_result(
     }
 
     if process_success {
+        if !stdout_has_verified_pipe_result(filtered_stdout) {
+            let missing_output = "pipe process exited successfully without a verified result";
+            let classified_stderr = if stderr.trim().is_empty() {
+                missing_output.to_string()
+            } else {
+                format!("{}\n{}", stderr.trim_end(), missing_output)
+            };
+            return ClassifiedPipeProcessResult {
+                status: "failed",
+                success: false,
+                stderr: classified_stderr,
+                error_type: Some("missing_output".to_string()),
+                error_message: Some(
+                    "automation finished without producing a verifiable result".to_string(),
+                ),
+            };
+        }
         return ClassifiedPipeProcessResult {
             status: "completed",
             success: true,
@@ -2226,6 +2243,46 @@ fn is_post_completion_continue_error(stderr: &str, stdout: &str) -> bool {
     }
 
     stdout_has_successful_agent_end_before_retry(stdout)
+}
+
+fn stdout_has_verified_pipe_result(stdout: &str) -> bool {
+    let mut saw_agent_protocol_event = false;
+
+    for line in stdout.lines() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with('{') || !trimmed.ends_with('}') {
+            continue;
+        }
+
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+            continue;
+        };
+        let event_type = value.get("type").and_then(|v| v.as_str());
+        if matches!(
+            event_type,
+            Some(
+                "agent_start"
+                    | "agent_end"
+                    | "message_start"
+                    | "message_end"
+                    | "tool_execution_start"
+                    | "tool_execution_end"
+                    | "compaction_start"
+                    | "compaction_end"
+            )
+        ) {
+            saw_agent_protocol_event = true;
+        }
+
+        if event_type == Some("agent_end") && agent_end_has_successful_assistant_text(&value) {
+            return true;
+        }
+    }
+
+    // Legacy command pipes may emit ordinary text instead of agent NDJSON.
+    // Preserve that contract while requiring an explicit successful agent end
+    // whenever the output is from Pi/ACP.
+    !saw_agent_protocol_event && !stdout.trim().is_empty()
 }
 
 fn stdout_has_successful_agent_end_before_retry(stdout: &str) -> bool {
@@ -10594,6 +10651,46 @@ Run the scheduled task.
         assert!(!classified.success);
         assert_eq!(classified.error_type.as_deref(), Some("provider_protocol"));
         assert!(classified.stderr.contains("provider_protocol_error"));
+    }
+
+    #[test]
+    fn successful_exit_without_output_is_not_completed() {
+        let classified = classify_pipe_process_result(true, false, "", "");
+
+        assert_eq!(classified.status, "failed");
+        assert!(!classified.success);
+        assert_eq!(classified.error_type.as_deref(), Some("missing_output"));
+        assert!(classified.stderr.contains("without a verified result"));
+    }
+
+    #[test]
+    fn agent_protocol_requires_a_successful_final_result() {
+        let stdout = [
+            r#"{"type":"agent_start"}"#,
+            r#"{"type":"agent_end","messages":[{"role":"assistant","content":[],"stopReason":"stop"}]}"#,
+        ]
+        .join("\n");
+        let classified = classify_pipe_process_result(true, false, "", &stdout);
+
+        assert_eq!(classified.status, "failed");
+        assert_eq!(classified.error_type.as_deref(), Some("missing_output"));
+    }
+
+    #[test]
+    fn successful_agent_result_can_be_completed() {
+        let stdout = r#"{"type":"agent_end","messages":[{"role":"assistant","content":[{"type":"text","text":"activity updated"}],"stopReason":"stop"}]}"#;
+        let classified = classify_pipe_process_result(true, false, "", stdout);
+
+        assert_eq!(classified.status, "completed");
+        assert!(classified.success);
+    }
+
+    #[test]
+    fn legacy_text_output_can_still_be_completed() {
+        let classified = classify_pipe_process_result(true, false, "", "output saved");
+
+        assert_eq!(classified.status, "completed");
+        assert!(classified.success);
     }
 
     fn successful_agent_then_compaction_retry_stdout() -> String {
