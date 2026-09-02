@@ -14,7 +14,9 @@ const GITHUB_CLIENT_ID: &str = "Ov23li9IT9uV0S9ql2ne";
 static OAUTH: OAuthConfig = OAuthConfig {
     auth_url: "https://github.com/login/oauth/authorize",
     client_id: GITHUB_CLIENT_ID,
-    extra_auth_params: &[("scope", "repo")],
+    // `repo` grants repository access, while `read:org` makes private
+    // organization memberships visible so `/user/repos` can include them.
+    extra_auth_params: &[("scope", "repo read:org")],
     redirect_uri_override: None,
 };
 
@@ -92,5 +94,15 @@ impl Integration for GithubIssues {
 
         let login = resp["login"].as_str().unwrap_or("unknown");
         Ok(format!("connected as {}", login))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::OAUTH;
+
+    #[test]
+    fn oauth_requests_organization_membership_visibility() {
+        assert_eq!(OAUTH.extra_auth_params, &[("scope", "repo read:org")]);
     }
 }
