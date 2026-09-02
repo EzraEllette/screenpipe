@@ -625,10 +625,20 @@ export function normalizeAppUser(rawUser: any, token: string): AppUser {
     rawUser?.app_entitled === undefined &&
     rawUser?.subscription_plan === undefined &&
     rawUser?.entitlement === undefined;
+  const entitlementSource = rawEntitlement?.source?.trim().toLowerCase();
+  const expiredConsumerDenial =
+    rawUser?.cloud_subscribed === false &&
+    rawUser?.app_entitled === undefined &&
+    rawEntitlement?.active === false &&
+    rawEntitlement.features?.app === false &&
+    rawEntitlement.features?.cloud === false &&
+    !hasFutureGrace(rawEntitlement) &&
+    (entitlementSource === "manual" || entitlementSource === "subscription");
   // Explicit server denial is stronger than a stale users.plan label left by a
   // canceled or refunded account.
   const explicitlyFree =
     legacyVerifiedFree ||
+    expiredConsumerDenial ||
     (rawUser?.app_entitled === false && !cloudSubscribed);
   // The server computes `subscription_plan` per request and can omit it while
   // still returning a full entitlement. The cloud_subscribed/app_entitled

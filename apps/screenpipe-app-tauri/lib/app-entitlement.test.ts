@@ -800,6 +800,61 @@ describe("isAuthenticatedFreeUser", () => {
     expect(isAuthenticatedFreeUser(normalized)).toBe(true);
     expect(hasVerifiedPaidPlan(normalized)).toBe(false);
   });
+
+  it.each(["manual", "subscription"])(
+    "falls back to recording-capable free policy when an expired %s entitlement refresh omits app_entitled",
+    (source) => {
+      const normalized = normalizeAppUser(
+        {
+          id: "user_expired_consumer",
+          subscription_plan: "standard",
+          cloud_subscribed: false,
+          entitlement: {
+            active: false,
+            plan: "standard",
+            source,
+            status: "expired",
+            expires_at: "2026-06-04T12:00:00.000Z",
+            grace_until: null,
+            features: { app: false, cloud: false },
+          },
+        },
+        "token",
+      );
+
+      expect(getLocalPlanPolicy(normalized)).toBe("verified-free");
+      expect(normalized.subscription_plan).toBe("none");
+      expect(normalized.entitlement).toMatchObject({
+        active: false,
+        plan: "none",
+        source: "none",
+        features: { app: false, cloud: false },
+      });
+    },
+  );
+
+  it.each(["enterprise", "lifetime", "dev"])(
+    "keeps an inactive %s entitlement fail-closed when app_entitled is omitted",
+    (source) => {
+      const normalized = normalizeAppUser(
+        {
+          id: "user_restricted",
+          subscription_plan: "standard",
+          cloud_subscribed: false,
+          entitlement: {
+            active: false,
+            plan: "standard",
+            source,
+            grace_until: null,
+            features: { app: false, cloud: false },
+          },
+        },
+        "token",
+      );
+
+      expect(getLocalPlanPolicy(normalized)).toBe("unknown");
+    },
+  );
 });
 
 describe("isSignedInCloudSubscriber", () => {
