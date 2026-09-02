@@ -181,6 +181,7 @@ interface ScreenpipeUserData {
   app_entitled?: boolean;
   subscription_plan?: string | null;
   billing_plan?: string | null;
+  is_enterprise_user?: boolean;
   hosted_ai_trial?: boolean;
   entitlement?: {
     active?: boolean;
@@ -324,11 +325,15 @@ function resolveAccountPlan(user: ScreenpipeUserData): AccountPlan {
     accountPlan = billingPlan;
   }
 
-  return user.app_entitled === true &&
-    user.entitlement?.active === true &&
-    user.entitlement?.features?.app === true
-    ? accountPlan
-    : 'unknown';
+  if (
+    user.app_entitled !== true ||
+    user.entitlement?.active !== true ||
+    user.entitlement?.features?.app !== true
+  ) {
+    return 'unknown';
+  }
+
+  return user.is_enterprise_user === true ? 'enterprise' : accountPlan;
 }
 
 async function validateScreenpipeToken(token: string): Promise<ScreenpipeTokenResult> {
