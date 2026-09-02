@@ -3416,7 +3416,8 @@ currentStep?: string | null; firstRunSummaryPhase?: string; firstRunSummaryStart
  */
 trialActivationFreshInstall?: boolean }
 export type OpportunityAnalysisState = "running" | "ready" | "error"
-export type OpportunityEvidence = { activityId: string; startAt: string; endAt: string; title: string; summary: string; apps: string[]; frameIds: number[]; meetingIds: number[]; excluded?: boolean }
+export type OpportunityEvidence = { activityId: string; startAt: string; endAt: string; title: string; summary: string; apps: string[]; frameIds: number[]; meetingIds: number[]; frameReferences?: OpportunityFrameReference[]; excluded?: boolean }
+export type OpportunityFrameReference = { frameId: number; timestamp: string; appName: string; windowName: string; browserUrl?: string | null }
 export type OpportunityKind = "skill" | "unfinished"
 /**
  * Snapshot of a pending update, exposed to the frontend via

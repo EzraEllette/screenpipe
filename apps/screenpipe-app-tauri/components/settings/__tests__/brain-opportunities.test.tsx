@@ -153,11 +153,14 @@ function evidence(
   title: string,
   app: string,
   startAt: string,
+  durationMinutes = 30,
 ) {
   return {
     activityId,
     startAt,
-    endAt: new Date(new Date(startAt).getTime() + 30 * 60_000).toISOString(),
+    endAt: new Date(
+      new Date(startAt).getTime() + durationMinutes * 60_000,
+    ).toISOString(),
     title,
     summary: `Source-backed evidence for ${title}.`,
     apps: [app],
@@ -601,6 +604,174 @@ describe("BrainOpportunities", () => {
       "skill-opportunity-meeting-followups",
     ]);
     expect(screen.queryByText(/repeats/)).toBeNull();
+  });
+
+  it("can prioritize two long episodes over more frequent short work", async () => {
+    const source = (
+      activityId: string,
+      startAt: string,
+      durationMinutes: number,
+    ) =>
+      evidence(
+        activityId,
+        `Source ${activityId}`,
+        "Cursor",
+        startAt,
+        durationMinutes,
+      );
+    const [threeShortEpisodes, twoLongEpisodes, twoModerateEpisodes] =
+      backendSnapshot.skills;
+    threeShortEpisodes.evidence = [
+      source("activity-101", "2026-08-15T09:00:00Z", 5),
+      source("activity-102", "2026-08-16T09:00:00Z", 5),
+      source("activity-105", "2026-08-17T09:00:00Z", 5),
+    ];
+    threeShortEpisodes.occurrences = [
+      { activityIds: ["activity-101"] },
+      { activityIds: ["activity-102"] },
+      { activityIds: ["activity-105"] },
+    ];
+    twoLongEpisodes.evidence = [
+      source("activity-103", "2026-08-15T10:00:00Z", 90),
+      source("activity-106", "2026-08-16T10:00:00Z", 90),
+    ];
+    twoLongEpisodes.occurrences = [
+      { activityIds: ["activity-103"] },
+      { activityIds: ["activity-106"] },
+    ];
+    twoModerateEpisodes.evidence = [
+      source("activity-104", "2026-08-15T12:00:00Z", 30),
+      source("activity-109", "2026-08-16T12:00:00Z", 30),
+    ];
+    twoModerateEpisodes.occurrences = [
+      { activityIds: ["activity-104"] },
+      { activityIds: ["activity-109"] },
+    ];
+    backendSnapshot.skills = [
+      threeShortEpisodes,
+      twoModerateEpisodes,
+      twoLongEpisodes,
+    ];
+
+    render(<BrainOpportunities />);
+
+    const panel = await screen.findByTestId("skill-opportunities-panel");
+    await screen.findByTestId("skill-opportunity-review-brief");
+    const rowIds = Array.from(
+      panel.querySelectorAll<HTMLElement>(
+        "[data-testid^='skill-opportunity-']",
+      ),
+      (row) => row.dataset.testid,
+    );
+    expect(rowIds).toEqual([
+      "skill-opportunity-review-brief",
+      "skill-opportunity-feedback-to-fix",
+      "skill-opportunity-meeting-followups",
+    ]);
+  });
+
+  it("keeps stable ties when grouped or excluded rows add no verified time", async () => {
+    const [baseline, grouped] = backendSnapshot.skills;
+    baseline.evidence = [
+      evidence(
+        "activity-101",
+        "Baseline one",
+        "Cursor",
+        "2026-08-15T09:00:00Z",
+      ),
+      evidence(
+        "activity-102",
+        "Baseline two",
+        "Cursor",
+        "2026-08-16T09:00:00Z",
+      ),
+    ];
+    baseline.occurrences = [
+      { activityIds: ["activity-101"] },
+      { activityIds: ["activity-102"] },
+    ];
+    grouped.evidence = [
+      evidence(
+        "activity-103",
+        "Grouped one",
+        "Cursor",
+        "2026-08-15T10:00:00Z",
+      ),
+      evidence(
+        "activity-106",
+        "Overlapping one",
+        "Cursor",
+        "2026-08-15T10:00:00Z",
+      ),
+      evidence(
+        "activity-107",
+        "Grouped two",
+        "Cursor",
+        "2026-08-16T10:00:00Z",
+      ),
+      evidence(
+        "activity-108",
+        "Overlapping two",
+        "Cursor",
+        "2026-08-16T10:00:00Z",
+      ),
+      evidence(
+        "activity-112",
+        "One long outlier",
+        "Cursor",
+        "2026-08-15T11:00:00Z",
+        240,
+      ),
+      {
+        ...evidence(
+          "activity-110",
+          "Excluded long one",
+          "Cursor",
+          "2026-08-15T10:30:00Z",
+          240,
+        ),
+        excluded: true,
+      },
+      {
+        ...evidence(
+          "activity-111",
+          "Excluded long two",
+          "Cursor",
+          "2026-08-16T10:30:00Z",
+          240,
+        ),
+        excluded: true,
+      },
+    ];
+    grouped.occurrences = [
+      {
+        activityIds: [
+          "activity-103",
+          "activity-106",
+          "activity-110",
+          "activity-112",
+        ],
+      },
+      {
+        activityIds: ["activity-107", "activity-108", "activity-111"],
+      },
+    ];
+    backendSnapshot.skills = [baseline, grouped];
+
+    render(<BrainOpportunities />);
+
+    const panel = await screen.findByTestId("skill-opportunities-panel");
+    await screen.findByTestId("skill-opportunity-feedback-to-fix");
+    const rowIds = Array.from(
+      panel.querySelectorAll<HTMLElement>(
+        "[data-testid^='skill-opportunity-']",
+      ),
+      (row) => row.dataset.testid,
+    );
+    expect(rowIds).toEqual([
+      "skill-opportunity-feedback-to-fix",
+      "skill-opportunity-review-brief",
+    ]);
   });
 
   it("persists review changes and opens the exact background draft chat", async () => {

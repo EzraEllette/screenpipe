@@ -96,18 +96,86 @@ function excludedActivityIds(evidence: OpportunityEvidence[]): string[] {
 }
 
 function supportingOccurrenceCount(skill: SkillOpportunity): number {
+  return supportingOccurrences(skill).length;
+}
+
+function supportingOccurrences(skill: SkillOpportunity): string[][] {
   const includedActivityIds = new Set(
     skill.evidence
       .filter((item) => !item.excluded)
       .map((item) => item.activityId),
   );
   const occurrences = skill.occurrences ?? [];
-  if (!occurrences.length) return includedActivityIds.size;
-  return occurrences.filter((occurrence) =>
-    occurrence.activityIds.some((activityId) =>
-      includedActivityIds.has(activityId),
-    ),
-  ).length;
+  if (!occurrences.length) {
+    return Array.from(includedActivityIds, (activityId) => [activityId]);
+  }
+  return occurrences
+    .map((occurrence) =>
+      occurrence.activityIds.filter((activityId) =>
+        includedActivityIds.has(activityId),
+      ),
+    )
+    .filter((activityIds) => activityIds.length > 0);
+}
+
+const MAX_VERIFIED_EPISODE_DURATION_MS = 4 * 60 * 60_000;
+const TIME_EQUIVALENT_OCCURRENCE_MS = 60 * 60_000;
+
+function verifiedEpisodeDurationMs(
+  skill: SkillOpportunity,
+  activityIds: string[],
+): number {
+  const activityIdSet = new Set(activityIds);
+  const intervals = skill.evidence
+    .filter(
+      (item) => !item.excluded && activityIdSet.has(item.activityId),
+    )
+    .map((item) => [
+      new Date(item.startAt).getTime(),
+      new Date(item.endAt).getTime(),
+    ] as const)
+    .filter(
+      ([startAt, endAt]) =>
+        Number.isFinite(startAt) && Number.isFinite(endAt) && endAt > startAt,
+    )
+    .sort(([leftStart], [rightStart]) => leftStart - rightStart);
+
+  let durationMs = 0;
+  let intervalStart = 0;
+  let intervalEnd = 0;
+  for (const [startAt, endAt] of intervals) {
+    if (!intervalEnd || startAt > intervalEnd) {
+      durationMs += intervalEnd - intervalStart;
+      intervalStart = startAt;
+      intervalEnd = endAt;
+      continue;
+    }
+    intervalEnd = Math.max(intervalEnd, endAt);
+  }
+  durationMs += intervalEnd - intervalStart;
+
+  return Math.min(durationMs, MAX_VERIFIED_EPISODE_DURATION_MS);
+}
+
+function robustEpisodeDurationMs(skill: SkillOpportunity): number {
+  const durations = supportingOccurrences(skill)
+    .map((activityIds) => verifiedEpisodeDurationMs(skill, activityIds))
+    .sort((left, right) => left - right);
+  if (!durations.length) return 0;
+
+  // The lower median requires at least half of the verified episodes to be
+  // long, so one bad timestamp cannot promote a suggestion.
+  return durations[Math.floor((durations.length - 1) / 2)];
+}
+
+function skillOpportunityPriority(skill: SkillOpportunity): number {
+  // Repetition is the base rank. A consistently verified hour of work is
+  // worth one additional rank point, so only meaningfully longer work can
+  // overtake a more frequent suggestion.
+  return (
+    supportingOccurrenceCount(skill) +
+    robustEpisodeDurationMs(skill) / TIME_EQUIVALENT_OCCURRENCE_MS
+  );
 }
 
 function visibleSkills(skills: SkillOpportunity[]): SkillOpportunity[] {
@@ -118,8 +186,8 @@ function visibleSkills(skills: SkillOpportunity[]): SkillOpportunity[] {
     .map((skill, index) => ({ skill, index }))
     .sort((left, right) => {
       return (
-        supportingOccurrenceCount(right.skill) -
-          supportingOccurrenceCount(left.skill) || left.index - right.index
+        skillOpportunityPriority(right.skill) -
+          skillOpportunityPriority(left.skill) || left.index - right.index
       );
     })
     .map(({ skill }) => skill);

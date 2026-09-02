@@ -29,7 +29,7 @@ function opportunityEvidenceHref(evidence: OpportunityEvidence): string {
     });
     return `/home?${params.toString()}`;
   }
-  const frameId = evidence.frameIds[0];
+  const frameId = evidence.frameReferences?.[0]?.frameId ?? evidence.frameIds[0];
   if (frameId) {
     return `screenpipe://frame/${frameId}?timestamp=${encodeURIComponent(evidence.startAt)}`;
   }
@@ -65,14 +65,30 @@ export function activityEntryForOpportunityEvidence(
       label: source.title,
     }),
   );
-  const screenEvidence: ActivityArtifact[] = source.apps.map((app, index) => ({
-    kind: "screen",
-    at: source.startAt,
-    frame_id: source.frameIds[index] ?? source.frameIds[0] ?? null,
-    meeting_id: null,
-    app_name: app,
-    label: source.title,
-  }));
+  const screenEvidence: ActivityArtifact[] = (source.frameReferences ?? []).map(
+    (reference) => ({
+      kind: "screen",
+      at: reference.timestamp,
+      frame_id: reference.frameId,
+      meeting_id: null,
+      app_name: reference.appName,
+      browser_url: reference.browserUrl ?? null,
+      label: reference.windowName || source.title,
+    }),
+  );
+
+  if (screenEvidence.length === 0) {
+    screenEvidence.push(
+      ...source.apps.map((app, index) => ({
+        kind: "screen" as const,
+        at: source.startAt,
+        frame_id: source.frameIds[index] ?? source.frameIds[0] ?? null,
+        meeting_id: null,
+        app_name: app,
+        label: source.title,
+      })),
+    );
+  }
 
   if (screenEvidence.length === 0 && source.frameIds.length > 0) {
     screenEvidence.push({
@@ -170,9 +186,36 @@ export function ActivityOpportunitySourceArtifacts({
 }) {
   const { entry, intervals } = useMemo(() => {
     if ("activityId" in source) {
+      const entry = activityEntryForOpportunityEvidence(source);
       return {
-        entry: activityEntryForOpportunityEvidence(source),
-        intervals: [] as ActivityLedgerArtifactInterval[],
+        entry,
+        intervals: (source.frameReferences ?? []).map((reference) => {
+          const at = new Date(reference.timestamp).getTime();
+          const entryStart = new Date(source.startAt).getTime();
+          const entryEnd = new Date(source.endAt).getTime();
+          const startAt = Number.isFinite(at)
+            ? Math.max(entryStart, at - 30_000)
+            : entryStart;
+          const endAt = Number.isFinite(at)
+            ? Math.min(entryEnd, Math.max(startAt + 1_000, at + 30_000))
+            : entryEnd;
+          return {
+            start_at: new Date(startAt).toISOString(),
+            end_at: new Date(endAt).toISOString(),
+            app_name: reference.appName || null,
+            evidence: [
+              {
+                source_type: "activity-history",
+                source_id: reference.frameId,
+                occurred_at: reference.timestamp,
+                frame_id: reference.frameId,
+                app_name: reference.appName || null,
+                window_title: reference.windowName || null,
+                browser_url: reference.browserUrl ?? null,
+              },
+            ],
+          };
+        }) satisfies ActivityLedgerArtifactInterval[],
       };
     }
     return {
