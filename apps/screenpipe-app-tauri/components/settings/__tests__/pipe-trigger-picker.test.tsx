@@ -79,6 +79,9 @@ describe("PipeTriggerPicker app trigger catalog", () => {
       "calendar event starts",
       "new issue",
       "new pull request",
+      "new Linear issue",
+      "Linear issue assigned to me",
+      "Linear issue status changed",
       "new task",
     ]) {
       expect(screen.getByText(label)).toBeInTheDocument();
@@ -160,6 +163,50 @@ describe("PipeTriggerPicker app trigger catalog", () => {
         instance: undefined,
         filter: { repository: "screenpipe/screenpipe" },
       }],
+    });
+  });
+
+  it("stores a team-scoped Linear status-change trigger", async () => {
+    fetchMock.mockImplementation(async (url, init) => {
+      if (String(url) === "/connections/linear/proxy/graphql") {
+        const after = JSON.parse(String(init?.body)).variables.after;
+        return response({
+          data: {
+            teams: {
+              nodes: after
+                ? [{ id: "team-product", name: "Product", key: "PROD" }]
+                : [{ id: "team-eng", name: "Engineering", key: "ENG" }],
+              pageInfo: after
+                ? { hasNextPage: false, endCursor: null }
+                : { hasNextPage: true, endCursor: "page-2" },
+            },
+          },
+        });
+      }
+      return response({});
+    });
+    const { applyOptimistic } = renderPicker([
+      { id: "linear", name: "Linear", icon: "linear", connected: true },
+    ]);
+
+    chooseOption(/^Linear issue status changed/i);
+    fireEvent.click(await screen.findByRole("button", { name: /Product PROD/i }));
+    clickDetailAdd();
+
+    expect(applyOptimistic).toHaveBeenCalledWith({
+      sources: [{
+        app: "linear",
+        kind: "issue_status_changed",
+        filter: { team_id: "team-product", team_name: "Product" },
+      }],
+    });
+    const requests = fetchMock.mock.calls.filter(([url]) => String(url) === "/connections/linear/proxy/graphql");
+    expect(requests).toHaveLength(2);
+    const request = requests[0];
+    expect(request?.[1]?.method).toBe("POST");
+    expect(JSON.parse(String(request?.[1]?.body))).toMatchObject({
+      query: expect.stringContaining("teams(first: 100, after: $after)"),
+      variables: { after: null },
     });
   });
 });

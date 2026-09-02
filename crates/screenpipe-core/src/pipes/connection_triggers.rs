@@ -11,7 +11,7 @@
 //!
 //! Three ingestion classes, one cursor model:
 //! - **file** (Obsidian): scan a vault folder for new/changed `.md` files.
-//! - **api poll** (Slack, Notion, email, Calendar, GitHub, Todoist): page the local connection proxy
+//! - **api poll** (Slack, Notion, email, Calendar, GitHub, Linear, Todoist): page the local connection proxy
 //!   (`/connections/<id>/...`, which injects auth server-side) and diff the
 //!   response against an opaque, source-specific cursor token.
 //!
@@ -80,6 +80,7 @@ const SUPPORTED_APPS: &[&str] = &[
     "google-calendar",
     "outlook-email",
     "github",
+    "linear",
     "todoist",
 ];
 
@@ -220,6 +221,13 @@ fn token_cmp(app: &str, a: &str, b: &str) -> Ordering {
             (Err(_), Ok(_)) => Ordering::Less,
             (Err(_), Err(_)) => a.cmp(b),
         }
+    } else if app == "linear" {
+        match (linear_token_parts(a), linear_token_parts(b)) {
+            (Some((at, ai)), Some((bt, bi))) => at.cmp(&bt).then_with(|| ai.cmp(bi)),
+            (Some(_), None) => Ordering::Greater,
+            (None, Some(_)) => Ordering::Less,
+            (None, None) => a.cmp(b),
+        }
     } else {
         let pa = a.parse::<f64>().unwrap_or(f64::MIN);
         let pb = b.parse::<f64>().unwrap_or(f64::MIN);
@@ -246,6 +254,7 @@ fn now_token(app: &str) -> String {
         "google-calendar" | "outlook-email" | "github" | "todoist" => {
             system_time_ms(SystemTime::now()).unwrap_or(0).to_string()
         }
+        "linear" => format!("{}:", chrono::Utc::now().timestamp_micros()),
         _ => String::new(),
     }
 }
@@ -302,6 +311,7 @@ fn default_kind(app: &str) -> &str {
         "imap" | "outlook-email" => "message",
         "google-calendar" => "event_started",
         "github" => "issue",
+        "linear" => "issue_created",
         "todoist" => "task",
         _ => "item",
     }
@@ -330,6 +340,37 @@ fn rfc3339_millis(value: &str) -> Option<String> {
     chrono::DateTime::parse_from_rfc3339(value)
         .ok()
         .map(|dt| dt.timestamp_millis().to_string())
+}
+
+fn rfc3339_micros(value: &str) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|dt| dt.timestamp_micros())
+}
+
+fn linear_token(timestamp: &str, event_id: &str) -> Option<String> {
+    Some(format!("{}:{}", rfc3339_micros(timestamp)?, event_id))
+}
+
+fn linear_token_parts(value: &str) -> Option<(i64, &str)> {
+    let (timestamp, event_id) = value.split_once(':')?;
+    Some((timestamp.parse().ok()?, event_id))
+}
+
+fn linear_cursor_rfc3339(value: &str) -> Option<String> {
+    let raw = value
+        .split_once(':')
+        .map(|(timestamp, _)| timestamp)
+        .unwrap_or(value);
+    let parsed = raw.parse::<i64>().ok()?;
+    // Accept millisecond cursors if an older development build wrote one.
+    let micros = if parsed.abs() < 10_000_000_000_000 {
+        parsed.checked_mul(1_000)?
+    } else {
+        parsed
+    };
+    chrono::DateTime::<chrono::Utc>::from_timestamp_micros(micros)
+        .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Micros, true))
 }
 
 fn millis_as_rfc3339(value: &str) -> Option<String> {
@@ -370,6 +411,7 @@ async fn fetch_items(
         "google-calendar" => fetch_google_calendar(ctx, src, since).await,
         "outlook-email" => fetch_outlook_email(ctx, src).await,
         "github" => fetch_github(ctx, src, since).await,
+        "linear" => fetch_linear(ctx, src, since).await,
         "todoist" => fetch_todoist(ctx, since).await,
         _ => None,
     }
@@ -679,6 +721,132 @@ async fn fetch_github(
 
     all.sort_by(|a, b| token_cmp("github", &a.ts, &b.ts));
     all.dedup_by(|a, b| a.id == b.id);
+    Some(all)
+}
+
+const LINEAR_CREATED_QUERY: &str = r#"
+query PipeLinearCreatedIssues($teamId: ID!, $since: DateTimeOrDuration!, $after: String) {
+  issues(
+    first: 100
+    after: $after
+    orderBy: createdAt
+    filter: { team: { id: { eq: $teamId } }, createdAt: { gte: $since } }
+  ) {
+    nodes { id identifier title url createdAt }
+    pageInfo { hasNextPage endCursor }
+  }
+}
+"#;
+
+const LINEAR_ACTIVITY_QUERY: &str = r#"
+query PipeLinearIssueActivity($teamId: ID!, $since: DateTimeOrDuration!, $after: String) {
+  viewer { id }
+  issues(
+    first: 100
+    after: $after
+    orderBy: updatedAt
+    filter: { team: { id: { eq: $teamId } }, updatedAt: { gte: $since } }
+  ) {
+    nodes {
+      id
+      identifier
+      title
+      url
+      history(last: 50) {
+        nodes {
+          id
+          createdAt
+          fromAssigneeId
+          toAssigneeId
+          toAssignee { id name }
+          fromStateId
+          toStateId
+          fromState { id name }
+          toState { id name }
+        }
+      }
+    }
+    pageInfo { hasNextPage endCursor }
+  }
+}
+"#;
+
+async fn fetch_linear(
+    ctx: &SourceCtx<'_>,
+    src: &SourceTrigger,
+    since: &str,
+) -> Option<Vec<DetectedItem>> {
+    let team_id = src
+        .filter
+        .get("team_id")
+        .map(String::as_str)
+        .filter(|id| !id.is_empty())?;
+    let kind = effective_kind(src);
+    if !matches!(
+        kind,
+        "issue_created" | "issue_assigned" | "issue_status_changed"
+    ) {
+        return None;
+    }
+
+    let since_at = linear_cursor_rfc3339(since)
+        .unwrap_or_else(|| (chrono::Utc::now() - chrono::Duration::days(30)).to_rfc3339());
+    let query = if kind == "issue_created" {
+        LINEAR_CREATED_QUERY
+    } else {
+        LINEAR_ACTIVITY_QUERY
+    };
+    let url = format!("{}/connections/linear/proxy/graphql", ctx.api_base);
+    let mut after: Option<String> = None;
+    let mut all = Vec::new();
+
+    for _ in 0..MAX_PAGES {
+        let value = ctx
+            .post_json(
+                &url,
+                serde_json::json!({
+                    "query": query,
+                    "variables": {
+                        "teamId": team_id,
+                        "since": since_at,
+                        "after": after,
+                    }
+                }),
+            )
+            .await?;
+        if value
+            .get("errors")
+            .and_then(Value::as_array)
+            .is_some_and(|errors| !errors.is_empty())
+        {
+            debug!("connection trigger: Linear GraphQL returned errors");
+            return None;
+        }
+        value.pointer("/data/issues/nodes")?.as_array()?;
+        all.extend(parse_linear_issues(&value, kind));
+
+        let page_info = value.pointer("/data/issues/pageInfo");
+        let has_next = page_info
+            .and_then(|info| info.get("hasNextPage"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        after = page_info
+            .and_then(|info| info.get("endCursor"))
+            .and_then(Value::as_str)
+            .filter(|cursor| !cursor.is_empty())
+            .map(String::from);
+        // Initialization only proves the connection and establishes a "now"
+        // watermark; it must never walk or replay the existing issue history.
+        if since.is_empty() || !has_next || after.is_none() {
+            break;
+        }
+    }
+
+    all.sort_by(|a, b| token_cmp("linear", &a.ts, &b.ts));
+    all.dedup_by(|a, b| a.id == b.id);
+    if !since.is_empty() {
+        all.retain(|item| token_gt("linear", &item.ts, since));
+    }
     Some(all)
 }
 
@@ -996,6 +1164,137 @@ pub fn parse_todoist_tasks(value: &Value) -> Vec<DetectedItem> {
         })
         .collect();
     out.sort_by(|a, b| token_cmp("todoist", &a.ts, &b.ts));
+    out
+}
+
+pub fn parse_linear_issues(value: &Value, kind: &str) -> Vec<DetectedItem> {
+    if !matches!(
+        kind,
+        "issue_created" | "issue_assigned" | "issue_status_changed"
+    ) {
+        return Vec::new();
+    }
+    let issues = value
+        .pointer("/data/issues/nodes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten();
+    let viewer_id = value.pointer("/data/viewer/id").and_then(Value::as_str);
+    let mut out = Vec::new();
+
+    for issue in issues {
+        let issue_id = match issue.get("id").and_then(Value::as_str) {
+            Some(id) => id,
+            None => continue,
+        };
+        let identifier = issue
+            .get("identifier")
+            .and_then(Value::as_str)
+            .unwrap_or("issue");
+        let issue_title = issue
+            .get("title")
+            .and_then(Value::as_str)
+            .filter(|title| !title.trim().is_empty())
+            .unwrap_or("issue");
+        let title = first_line(&format!("{identifier} · {issue_title}"), 120);
+        let url = issue.get("url").and_then(Value::as_str).unwrap_or("");
+
+        if kind == "issue_created" {
+            let Some(created_at) = issue.get("createdAt").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(token) = linear_token(created_at, issue_id) else {
+                continue;
+            };
+            out.push(DetectedItem {
+                id: issue_id.to_string(),
+                title,
+                preview: url.to_string(),
+                ts: token,
+            });
+            continue;
+        }
+
+        let histories = issue
+            .pointer("/history/nodes")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten();
+        for history in histories {
+            let Some(history_id) = history.get("id").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(created_at) = history.get("createdAt").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(token) = linear_token(created_at, history_id) else {
+                continue;
+            };
+
+            if kind == "issue_assigned" {
+                let to_assignee = history
+                    .get("toAssigneeId")
+                    .and_then(Value::as_str)
+                    .or_else(|| history.pointer("/toAssignee/id").and_then(Value::as_str));
+                if to_assignee.is_none() || to_assignee != viewer_id {
+                    continue;
+                }
+                let from_assignee = history.get("fromAssigneeId").and_then(Value::as_str);
+                if from_assignee == to_assignee {
+                    continue;
+                }
+                let assignee = history
+                    .pointer("/toAssignee/name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("you");
+                let preview = if url.is_empty() {
+                    format!("assigned to {assignee}")
+                } else {
+                    format!("assigned to {assignee} · {url}")
+                };
+                out.push(DetectedItem {
+                    id: history_id.to_string(),
+                    title: title.clone(),
+                    preview,
+                    ts: token,
+                });
+                continue;
+            }
+
+            let from_state_id = history
+                .get("fromStateId")
+                .and_then(Value::as_str)
+                .or_else(|| history.pointer("/fromState/id").and_then(Value::as_str));
+            let to_state_id = history
+                .get("toStateId")
+                .and_then(Value::as_str)
+                .or_else(|| history.pointer("/toState/id").and_then(Value::as_str));
+            if from_state_id.is_none() || to_state_id.is_none() || from_state_id == to_state_id {
+                continue;
+            }
+            let from_state = history
+                .pointer("/fromState/name")
+                .and_then(Value::as_str)
+                .unwrap_or("previous status");
+            let to_state = history
+                .pointer("/toState/name")
+                .and_then(Value::as_str)
+                .unwrap_or("new status");
+            let preview = if url.is_empty() {
+                format!("{from_state} → {to_state}")
+            } else {
+                format!("{from_state} → {to_state} · {url}")
+            };
+            out.push(DetectedItem {
+                id: history_id.to_string(),
+                title: title.clone(),
+                preview,
+                ts: token,
+            });
+        }
+    }
+
+    out.sort_by(|a, b| token_cmp("linear", &a.ts, &b.ts));
     out
 }
 
@@ -1605,6 +1904,146 @@ mod tests {
     }
 
     #[test]
+    fn parse_linear_created_issues_uses_stable_composite_cursors() {
+        let payload = serde_json::json!({
+            "data": {
+                "issues": {
+                    "nodes": [
+                        {
+                            "id": "issue-b",
+                            "identifier": "ENG-2",
+                            "title": "Second",
+                            "url": "https://linear.app/acme/issue/ENG-2",
+                            "createdAt": "2026-09-02T17:00:00.123456Z"
+                        },
+                        {
+                            "id": "issue-a",
+                            "identifier": "ENG-1",
+                            "title": "First",
+                            "createdAt": "2026-09-02T17:00:00.123456Z"
+                        }
+                    ]
+                }
+            }
+        });
+        let issues = parse_linear_issues(&payload, "issue_created");
+        assert_eq!(
+            issues
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            ["issue-a", "issue-b"]
+        );
+        assert_eq!(issues[0].title, "ENG-1 · First");
+        assert_eq!(issues[1].preview, "https://linear.app/acme/issue/ENG-2");
+        assert!(token_gt("linear", &issues[1].ts, &issues[0].ts));
+    }
+
+    #[test]
+    fn parse_linear_assignment_only_fires_for_a_real_assignment_to_viewer() {
+        let payload = serde_json::json!({
+            "data": {
+                "viewer": { "id": "me" },
+                "issues": {
+                    "nodes": [{
+                        "id": "issue-1",
+                        "identifier": "ENG-1",
+                        "title": "Fix capture",
+                        "url": "https://linear.app/acme/issue/ENG-1",
+                        "history": { "nodes": [
+                            {
+                                "id": "assigned-me",
+                                "createdAt": "2026-09-02T17:00:01Z",
+                                "fromAssigneeId": null,
+                                "toAssigneeId": "me",
+                                "toAssignee": { "id": "me", "name": "Louis" }
+                            },
+                            {
+                                "id": "assigned-other",
+                                "createdAt": "2026-09-02T17:00:02Z",
+                                "fromAssigneeId": "me",
+                                "toAssigneeId": "other",
+                                "toAssignee": { "id": "other", "name": "Ezra" }
+                            },
+                            {
+                                "id": "unchanged",
+                                "createdAt": "2026-09-02T17:00:03Z",
+                                "fromAssigneeId": "me",
+                                "toAssigneeId": "me",
+                                "toAssignee": { "id": "me", "name": "Louis" }
+                            }
+                        ] }
+                    }]
+                }
+            }
+        });
+        let assignments = parse_linear_issues(&payload, "issue_assigned");
+        assert_eq!(assignments.len(), 1);
+        assert_eq!(assignments[0].id, "assigned-me");
+        assert_eq!(
+            assignments[0].preview,
+            "assigned to Louis · https://linear.app/acme/issue/ENG-1"
+        );
+    }
+
+    #[test]
+    fn parse_linear_status_only_fires_for_explicit_state_transitions() {
+        let payload = serde_json::json!({
+            "data": {
+                "viewer": { "id": "me" },
+                "issues": {
+                    "nodes": [{
+                        "id": "issue-1",
+                        "identifier": "ENG-1",
+                        "title": "Fix capture",
+                        "history": { "nodes": [
+                            {
+                                "id": "transition",
+                                "createdAt": "2026-09-02T17:00:01Z",
+                                "fromStateId": "todo",
+                                "toStateId": "started",
+                                "fromState": { "id": "todo", "name": "Todo" },
+                                "toState": { "id": "started", "name": "In Progress" }
+                            },
+                            {
+                                "id": "initial-state",
+                                "createdAt": "2026-09-02T17:00:02Z",
+                                "fromStateId": null,
+                                "toStateId": "todo",
+                                "toState": { "id": "todo", "name": "Todo" }
+                            },
+                            {
+                                "id": "unrelated-edit",
+                                "createdAt": "2026-09-02T17:00:03Z",
+                                "fromStateId": null,
+                                "toStateId": null
+                            }
+                        ] }
+                    }]
+                }
+            }
+        });
+        let transitions = parse_linear_issues(&payload, "issue_status_changed");
+        assert_eq!(transitions.len(), 1);
+        assert_eq!(transitions[0].id, "transition");
+        assert_eq!(transitions[0].preview, "Todo → In Progress");
+    }
+
+    #[test]
+    fn linear_cursor_supports_microseconds_and_legacy_milliseconds() {
+        let micros = linear_token("2026-09-02T17:00:00.123456Z", "event").unwrap();
+        assert_eq!(micros, "1788368400123456:event");
+        assert_eq!(
+            linear_cursor_rfc3339(&micros).as_deref(),
+            Some("2026-09-02T17:00:00.123456Z")
+        );
+        assert_eq!(
+            linear_cursor_rfc3339("1788368400123:legacy").as_deref(),
+            Some("2026-09-02T17:00:00.123000Z")
+        );
+    }
+
+    #[test]
     fn github_repository_rejects_proxy_path_injection() {
         let mut valid = source("github", "issue");
         valid
@@ -1795,6 +2234,108 @@ mod tests {
             .unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].title, "Follow up");
+    }
+
+    #[tokio::test]
+    async fn linear_fetch_scopes_status_history_to_the_selected_team() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/connections/linear/proxy/graphql"))
+            .and(header("authorization", "Bearer local-key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "viewer": { "id": "me" },
+                    "issues": {
+                        "nodes": [{
+                            "id": "issue-1",
+                            "identifier": "ENG-1",
+                            "title": "Fix capture",
+                            "history": { "nodes": [
+                                {
+                                    "id": "history-a",
+                                    "createdAt": "2026-09-02T17:00:00Z",
+                                    "fromStateId": "todo",
+                                    "toStateId": "started",
+                                    "fromState": { "id": "todo", "name": "Todo" },
+                                    "toState": { "id": "started", "name": "In Progress" }
+                                },
+                                {
+                                    "id": "history-b",
+                                    "createdAt": "2026-09-02T17:00:00Z",
+                                    "fromStateId": "started",
+                                    "toStateId": "done",
+                                    "fromState": { "id": "started", "name": "In Progress" },
+                                    "toState": { "id": "done", "name": "Done" }
+                                }
+                            ] }
+                        }],
+                        "pageInfo": { "hasNextPage": false, "endCursor": null }
+                    }
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let ctx = SourceCtx {
+            http: &client,
+            api_base: &server.uri(),
+            api_key: Some("local-key"),
+        };
+        let mut src = source("linear", "issue_status_changed");
+        src.filter.insert("team_id".into(), "team-eng".into());
+        let since = linear_token("2026-09-02T17:00:00Z", "history-a").unwrap();
+        let items = fetch_items(&ctx, &src, &since).await.unwrap();
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            ["history-b"]
+        );
+
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
+        assert_eq!(
+            body.pointer("/variables/teamId").and_then(Value::as_str),
+            Some("team-eng")
+        );
+        assert_eq!(
+            body.pointer("/variables/since").and_then(Value::as_str),
+            Some("2026-09-02T17:00:00.000000Z")
+        );
+        let query = body.get("query").and_then(Value::as_str).unwrap();
+        assert!(query.contains("history(last: 50)"));
+        assert!(query.contains("updatedAt: { gte: $since }"));
+    }
+
+    #[tokio::test]
+    async fn linear_graphql_errors_do_not_advance_the_trigger() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/connections/linear/proxy/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "errors": [{ "message": "rate limited" }]
+            })))
+            .mount(&server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let ctx = SourceCtx {
+            http: &client,
+            api_base: &server.uri(),
+            api_key: None,
+        };
+        let mut src = source("linear", "issue_created");
+        src.filter.insert("team_id".into(), "team-eng".into());
+        assert!(fetch_items(&ctx, &src, "").await.is_none());
     }
 
     #[test]

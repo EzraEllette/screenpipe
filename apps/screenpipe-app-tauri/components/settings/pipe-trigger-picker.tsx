@@ -60,6 +60,7 @@ type SourceApp =
   | "google-calendar"
   | "outlook-email"
   | "github"
+  | "linear"
   | "todoist";
 
 type OptionId =
@@ -75,6 +76,9 @@ type OptionId =
   | "notion"
   | "github_issue"
   | "github_pull_request"
+  | "linear_issue_created"
+  | "linear_issue_assigned"
+  | "linear_issue_status_changed"
   | "todoist_task"
   | "obsidian"
   | "pipe";
@@ -104,11 +108,14 @@ const OPTIONS: Option[] = [
   { id: "notion", group: "notion", label: "page created or edited", sub: "workspace or a database", app: "notion" },
   { id: "github_issue", group: "github", label: "new issue", sub: "in a repository you pick", app: "github", kind: "issue" },
   { id: "github_pull_request", group: "github", label: "new pull request", sub: "in a repository you pick", app: "github", kind: "pull_request" },
+  { id: "linear_issue_created", group: "linear", label: "new Linear issue", sub: "in a team you pick", app: "linear", kind: "issue_created" },
+  { id: "linear_issue_assigned", group: "linear", label: "Linear issue assigned to me", sub: "in a team you pick", app: "linear", kind: "issue_assigned" },
+  { id: "linear_issue_status_changed", group: "linear", label: "Linear issue status changed", sub: "in a team you pick", app: "linear", kind: "issue_status_changed" },
   { id: "todoist_task", group: "todoist", label: "new task", sub: "added to Todoist", app: "todoist", kind: "task" },
   { id: "obsidian", group: "obsidian", label: "new note", sub: "in a vault folder", app: "obsidian" },
   { id: "pipe", group: "pipes", label: "after a scheduled task finishes", sub: "chain off another scheduled task" },
 ];
-const GROUP_ORDER = ["recurring", "meetings", "email", "calendar", "slack", "notion", "github", "todoist", "obsidian", "pipes"];
+const GROUP_ORDER = ["recurring", "meetings", "email", "calendar", "slack", "notion", "github", "linear", "todoist", "obsidian", "pipes"];
 
 function optionIcon(o: Option) {
   if (o.app) return <IntegrationIcon icon={o.icon || o.app} className="w-4 h-4 flex items-center justify-center" fallbackClassName="h-4 w-4 text-muted-foreground" />;
@@ -134,6 +141,14 @@ function sourceLabel(s: TriggerSource): string {
   if (s.app === "google-calendar") return `google calendar${acct} · event starts`;
   if (s.app === "outlook-email") return `outlook${acct} · ${s.kind === "sent_message" ? "email sent" : "new email"}`;
   if (s.app === "github") return `github${acct} · new ${s.kind === "pull_request" ? "pull request" : "issue"} in ${s.filter?.repository || "repository"}`;
+  if (s.app === "linear") {
+    const action = s.kind === "issue_assigned"
+      ? "issue assigned to me"
+      : s.kind === "issue_status_changed"
+        ? "issue status changed"
+        : "new issue";
+    return `linear · ${action} in ${s.filter?.team_name || "team"}`;
+  }
   if (s.app === "todoist") return "todoist · new task";
   return `${s.app} · ${s.kind || "new item"}`;
 }
@@ -398,6 +413,9 @@ function detailTitle(id: OptionId): string {
     case "notion": return "Notion page created or edited";
     case "github_issue": return "new GitHub issue in…";
     case "github_pull_request": return "new GitHub pull request in…";
+    case "linear_issue_created": return "new Linear issue in…";
+    case "linear_issue_assigned": return "Linear issue assigned to me in…";
+    case "linear_issue_status_changed": return "Linear issue status changed in…";
     case "todoist_task": return "new Todoist task";
     case "obsidian": return "new Obsidian note in…";
     case "pipe": return "after a scheduled task finishes";
@@ -441,6 +459,7 @@ function PipeDetail({ pipes, onAdd }: { pipes: { name: string }[]; onAdd: (name:
 interface SlackChannel { id: string; name: string; is_private?: boolean }
 interface NotionDb { id: string; name: string }
 interface GithubRepo { id: number; full_name: string; private?: boolean }
+interface LinearTeam { id: string; name: string; key?: string }
 
 /** Accounts for an app: [] = single/default, else one per connected workspace. */
 function accountsFor(conns: AvailableConnection[], app: string): { value: string; label: string }[] {
@@ -546,6 +565,7 @@ function SourceDetail({
         />
       )}
       {app === "github" && <GithubPicker key={`${inst ?? ""}:${kind}`} instance={inst} kind={kind || "issue"} onAdd={onAdd} />}
+      {app === "linear" && <LinearPicker kind={kind || "issue_created"} onAdd={onAdd} />}
       {app === "todoist" && (
         <SimpleSourceDetail
           text="Runs when a new active task is added to Todoist."
@@ -564,6 +584,7 @@ const APP_META: Record<string, { name: string; blurb: string; examples: string[]
   "google-calendar": { name: "Google Calendar", blurb: "Connect Google Calendar with read-only access to run tasks when timed events start.", examples: ["customer call", "focus block"] },
   "outlook-email": { name: "Outlook", blurb: "Connect Outlook to watch your Inbox or Sent Items.", examples: ["Inbox", "Sent Items"] },
   github: { name: "GitHub", blurb: "Connect GitHub and choose a repository to watch for issues or pull requests.", examples: ["issues", "pull requests"] },
+  linear: { name: "Linear", blurb: "Connect Linear and choose a team to watch for issue activity.", examples: ["created", "assigned", "status"] },
   todoist: { name: "Todoist", blurb: "Connect Todoist to run a task whenever a new active task is added.", examples: ["new task"] },
 };
 
@@ -843,6 +864,86 @@ function GithubPicker({ instance, kind, onAdd }: { instance?: string; kind: stri
       <PrimaryAdd
         disabled={!picked}
         onClick={() => picked && onAdd({ app: "github", kind, instance, filter: { repository: picked.full_name } })}
+      />
+    </div>
+  );
+}
+
+function LinearPicker({ kind, onAdd }: { kind: string; onAdd: (s: TriggerSource) => void }) {
+  const [teams, setTeams] = useState<LinearTeam[] | null>(null);
+  const [picked, setPicked] = useState<LinearTeam | null>(null);
+  const [q, setQ] = useState("");
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const list: LinearTeam[] = [];
+        let after: string | null = null;
+        for (let page = 0; page < 5; page += 1) {
+          const r = await localFetch("/connections/linear/proxy/graphql", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              query: "query PipeLinearTeams($after: String) { teams(first: 100, after: $after) { nodes { id name key } pageInfo { hasNextPage endCursor } } }",
+              variables: { after },
+            }),
+          });
+          const j = await r.json();
+          if (Array.isArray(j?.errors) && j.errors.length > 0) throw new Error("Linear GraphQL error");
+          if (!Array.isArray(j?.data?.teams?.nodes)) throw new Error("Invalid Linear response");
+          list.push(...j.data.teams.nodes.filter((team: LinearTeam) => team.id && team.name));
+          const pageInfo = j.data.teams.pageInfo;
+          if (!pageInfo?.hasNextPage || !pageInfo?.endCursor) break;
+          after = pageInfo.endCursor;
+        }
+        list.sort((a, b) => a.name.localeCompare(b.name));
+        setTeams(list);
+        if (!list.length) setErr("no Linear teams found for this account.");
+      } catch {
+        setTeams([]);
+        setErr("couldn't reach Linear.");
+      }
+    })();
+  }, []);
+
+  const shown = (teams ?? []).filter((team) => !q || team.name.toLowerCase().includes(q.toLowerCase()) || team.key?.toLowerCase().includes(q.toLowerCase()));
+  const description = kind === "issue_assigned"
+    ? "Runs when an issue in this team is assigned to you."
+    : kind === "issue_status_changed"
+      ? "Runs only when an issue in this team moves between workflow statuses."
+      : "Runs when a new issue is created in this team.";
+
+  return (
+    <div>
+      <p className="text-xs text-muted-foreground mb-3">{description}</p>
+      <label className={LABEL}>team</label>
+      <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="search teams…" className={`${INPUT} mt-1 mb-2`} />
+      <div className="border rounded-none max-h-[220px] overflow-y-auto">
+        {teams === null ? (
+          <div className="flex items-center gap-2 text-xs text-muted-foreground px-3 py-4"><Loader2 className="h-3.5 w-3.5 animate-spin" /> loading teams…</div>
+        ) : err ? (
+          <div className="text-xs text-muted-foreground px-3 py-3">{err}</div>
+        ) : shown.length === 0 ? (
+          <div className="text-xs text-muted-foreground px-3 py-3">no match.</div>
+        ) : (
+          shown.map((team) => (
+            <button
+              key={team.id}
+              onClick={() => setPicked(team)}
+              className={`w-full flex items-center gap-2 px-3 py-1.5 text-left text-xs transition-colors ${picked?.id === team.id ? "bg-accent" : "hover:bg-accent/60"}`}
+            >
+              <IntegrationIcon icon="linear" className="w-3.5 h-3.5 flex items-center justify-center" fallbackClassName="h-3.5 w-3.5 text-muted-foreground" />
+              <span className="flex-1 truncate">{team.name}</span>
+              {team.key && <span className="text-[10px] text-muted-foreground font-mono">{team.key}</span>}
+              {picked?.id === team.id && <Check className="h-3.5 w-3.5" />}
+            </button>
+          ))
+        )}
+      </div>
+      <PrimaryAdd
+        disabled={!picked}
+        onClick={() => picked && onAdd({ app: "linear", kind, filter: { team_id: picked.id, team_name: picked.name } })}
       />
     </div>
   );
