@@ -154,7 +154,8 @@ import {
 import { PostInstallConnectionsModal } from "@/components/post-install-connections-modal";
 import posthog from "posthog-js";
 import { MarkdownBlock } from "@/components/chat/markdown-block";
-import { Lock } from "lucide-react";
+import { useDeviceMonitor } from "@/lib/hooks/use-device-monitor";
+import { Monitor, Wifi, WifiOff, ScanSearch, Lock } from "lucide-react";
 import { requestPipeStop } from "@/lib/pipe-stop";
 
 const PIPE_EXECUTIONS_PAGE_LIMIT = 10;
@@ -1095,6 +1096,12 @@ function pipeScheduleLabel(config: PipeConfig): string {
 
 
 export function PipesSection() {
+  // Device selector: null = local machine, string = remote address
+  const [selectedDevice, setSelectedDevice] = useState<string | null>(null);
+  const { devices, discoverDevices, discovering } = useDeviceMonitor();
+  const [discoverResult, setDiscoverResult] = useState<number | null>(null);
+  const discoverResultTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   const [pipes, setPipes] = useState<PipeStatus[]>([]);
   const [pipesApiBase, setPipesApiBase] = useState<string | null>(null);
   const pipesApiBaseRef = useRef<string | null>(null);
@@ -1215,8 +1222,9 @@ export function PipesSection() {
     });
   };
 
-  const apiBase = getApiBaseUrl();
-  const composioToken = settings.user?.token;
+  const apiBase = selectedDevice ? `http://${selectedDevice}` : getApiBaseUrl();
+  const isRemote = !!selectedDevice;
+  const composioToken = isRemote ? undefined : settings.user?.token;
   currentApiBase.current = apiBase;
   const displayedPipes = pipesForApi(pipes, pipesApiBase, apiBase);
   const displayedLogs = pipesForApi(logs, logsApiBase, apiBase);
@@ -1318,10 +1326,10 @@ export function PipesSection() {
       // tab still loads lazily via /pipes/:name/executions.
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 5_000);
-      const res = await localFetch(
-        "/pipes?include_executions=true&execution_limit=1&include_execution_counts=true",
-        { signal: controller.signal },
-      ).finally(() => clearTimeout(timeout));
+      const pipesEndpoint = isRemote
+        ? `${apiBase}/pipes?include_executions=true&execution_limit=1&include_execution_counts=true`
+        : "/pipes?include_executions=true&execution_limit=1&include_execution_counts=true";
+      const res = await localFetch(pipesEndpoint, { signal: controller.signal }).finally(() => clearTimeout(timeout));
       if (!res.ok) {
         throw new Error(`scheduled tasks API returned ${res.status}`);
       }
@@ -1383,7 +1391,7 @@ export function PipesSection() {
       }
     }
     });
-  }, [apiBase]);
+  }, [apiBase, isRemote]);
 
   const fetchConnections = useCallback(async () => {
     try {
@@ -1763,12 +1771,13 @@ export function PipesSection() {
 
   // Recipient sync: install new shares (OFF by default), apply version bumps
   // (preserving each member's own on/off choice), and disable local copies
-  // whose share disappeared. Gated on configsFetched so a failed /configs fetch can never look
+  // whose share disappeared. Local machine only — never against a remote
+  // device. Gated on configsFetched so a failed /configs fetch can never look
   // like "everything was unshared". No team key needed: pipe shares are
   // plaintext rows, so members in key-limbo still receive them.
   const teamSyncRunning = useRef(false);
   useEffect(() => {
-    if (!team.team || !team.configsFetched) return;
+    if (!team.team || !team.configsFetched || isRemote) return;
     if (teamSyncRunning.current) return;
     teamSyncRunning.current = true;
     (async () => {
@@ -1838,13 +1847,14 @@ export function PipesSection() {
     team.configsFetched,
     receivedConfigs,
     pipes,
+    isRemote,
   ]);
 
   // Poll team configs so re-shares and unshares propagate while the app is
   // open (the hook otherwise only fetches on mount).
   useInterval(
     () => team.fetchConfigs(),
-    !team.team ? null : 5 * 60_000,
+    !team.team || isRemote ? null : 5 * 60_000,
   );
 
   const trackedPipesView = useRef(false);
@@ -2429,6 +2439,20 @@ export function PipesSection() {
     };
   }, [apiBase]);
 
+  const selectedDeviceInfo = selectedDevice ? devices.find((d) => d.address === selectedDevice) : null;
+  if (selectedDeviceInfo?.status === "offline") {
+    return (
+      <div className="flex flex-col items-center justify-center py-16 gap-3 text-muted-foreground">
+        <Monitor className="h-8 w-8 opacity-40" />
+        <p className="text-sm font-medium">{selectedDeviceInfo.label} is offline</p>
+        <p className="text-xs opacity-70">check that screenpipe is running on the remote device</p>
+        <Button variant="outline" size="sm" onClick={() => setSelectedDevice(null)}>
+          back to this device
+        </Button>
+      </div>
+    );
+  }
+
   const selectablePipeCount = filteredPipes.filter(
     (pipe) => parseEnterpriseManagedVersion(pipe.raw_content) === null,
   ).length;
@@ -2604,10 +2628,12 @@ export function PipesSection() {
               <AlertCircle className="h-7 w-7 mx-auto text-muted-foreground/70" />
               <div>
                 <p className="text-foreground font-medium text-base">
-                  screenpipe backend is unavailable
+                  {isRemote ? "couldn't load scheduled tasks from this device" : "screenpipe backend is unavailable"}
                 </p>
                 <p className="text-sm mt-1">
-                  your scheduled task files may still be installed, but the local API at {apiBase} did not answer.
+                  {isRemote
+                    ? `the remote API at ${apiBase} did not answer. check that screenpipe is running on that device.`
+                    : `your scheduled task files may still be installed, but the local API at ${apiBase} did not answer.`}
                 </p>
                 <p className="text-xs mt-2 font-mono text-muted-foreground/80">{loadError}</p>
               </div>
