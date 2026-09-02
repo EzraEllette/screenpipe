@@ -347,6 +347,7 @@ impl RuntimeConfig {
             env_nonempty("SCREENPIPE_ACP_SYSTEM_PROMPT")
         } else {
             Some(build_first_turn_context(
+                &agent_id,
                 load_screenpipe_agents_context(&data_dir),
                 self_improvement_context,
                 env_nonempty("SCREENPIPE_ACP_SYSTEM_PROMPT"),
@@ -402,6 +403,13 @@ Never access Screenpipe's live db.sqlite, db.sqlite-wal, or db.sqlite-shm direct
 - `live_view` reads or edits the user's saved Live Views (dashboards): action=list to find one, action=get for its definition, action=save to persist edits — only when the user asks about a dashboard.
 - screenpipe seeds on-demand task guides in `.pi/skills/*/SKILL.md` under your working directory. When tool descriptions are not enough for specialized work, read only the closest matching skill. Do not enumerate or preload unrelated skills. If the task already supplies a complete tool workflow, use that narrower contract instead of loading a general skill.
 Do not curl localhost for these; call the tools.";
+
+// Cursor's native Grep and indexed-Grep tools hard-kill their subprocess after
+// 25 seconds with no supported configuration override. Large repositories can
+// legitimately need longer, so keep Cursor off that timed path and let its
+// terminal search run until it completes or the user stops it.
+const CURSOR_SEARCH_HINT: &str = "\
+When searching project files, do not use Cursor's built-in Grep, indexed Grep, Search Files, or Codebase search tools. Use the terminal with `rg` (preferred), `git grep`, or `find` instead, and allow the command to run until it completes or the user stops it.";
 
 /// Match Codex's default maximum for project instructions. A local user can
 /// still keep detailed, on-demand workflows in `<data_dir>/skills`; this file
@@ -491,12 +499,14 @@ fn parse_self_improvement_context(payload: &Value) -> Option<String> {
 /// self-improvement context, and configured system prompt. It is
 /// delivered exactly once, on the first prompt of the ACP session.
 fn build_first_turn_context(
+    agent_id: &str,
     agents_context: Option<String>,
     self_improvement_context: Option<String>,
     user_prompt: Option<String>,
 ) -> String {
     [
         Some(SCREENPIPE_TOOLS_HINT.to_string()),
+        (agent_id == "cursor").then(|| CURSOR_SEARCH_HINT.to_string()),
         agents_context,
         self_improvement_context,
         user_prompt,
@@ -5950,7 +5960,7 @@ mod tests {
     #[test]
     fn first_turn_context_always_includes_the_tools_hint() {
         // With no user system prompt, the first-turn context is just the hint.
-        let none = build_first_turn_context(None, None, None);
+        let none = build_first_turn_context("codex-acp", None, None, None);
         assert!(none.contains("screenpipe_connect_app"));
         assert!(none.contains("save_artifact"));
         assert!(none.contains("user_profile"));
@@ -5971,6 +5981,7 @@ mod tests {
         // Durable instructions sit after the built-in tool contract, while an
         // explicit preset prompt remains last.
         let combined = build_first_turn_context(
+            "claude-acp",
             Some("# screenpipe user instructions\n\nUse the weekly-report skill.".to_string()),
             Some("# screenpipe self-improvement\n\nUser prefers short reports.".to_string()),
             Some("Be terse.".to_string()),
@@ -5980,6 +5991,17 @@ mod tests {
         assert!(combined.contains("User prefers short reports."));
         assert!(combined.find("sp_web_search") < combined.find("Use the weekly-report skill."));
         assert!(combined.trim_end().ends_with("Be terse."));
+    }
+
+    #[test]
+    fn cursor_uses_untimed_terminal_search_instead_of_native_grep() {
+        let cursor = build_first_turn_context("cursor", None, None, None);
+        assert!(cursor.contains("do not use Cursor's built-in Grep"));
+        assert!(cursor.contains("Use the terminal with `rg`"));
+        assert!(cursor.contains("until it completes or the user stops it"));
+
+        let codex = build_first_turn_context("codex-acp", None, None, None);
+        assert!(!codex.contains("do not use Cursor's built-in Grep"));
     }
 
     #[test]
