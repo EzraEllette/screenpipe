@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "suite": "screenpipe-app-coding-agent-regressions",
-  "dataset_version": "2026-09-01.1",
+  "dataset_version": "2026-09-02.1",
   "suite_type": "regression",
   "owner": "screenpipe engineering",
   "policy": {
@@ -869,6 +869,43 @@
           }
         ],
         "command": "cd apps/screenpipe-app-tauri && bun x vitest run --config vitest.config.ts components/__tests__/app-log-share-redaction.eval.test.tsx"
+      }
+    },
+    {
+      "id": "app-startup-auth-not-required",
+      "name": "Start signup-free builds without a false sign-in gate",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "27fb5d84707fc778b6d5740f54943ee25b6128b5",
+        "pull_request": "https://github.com/screenpipe/screenpipe/pull/6810"
+      },
+      "base_ref": "7ded3c132196a0ce3b347469843b4693d6765ff6",
+      "oracle_ref": "27fb5d84707fc778b6d5740f54943ee25b6128b5",
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/components/app-entitlement-gate.tsx"
+      ],
+      "gate": "advisory",
+      "trigger_paths": [
+        "apps/screenpipe-app-tauri/components/app-entitlement-gate.tsx",
+        "apps/screenpipe-app-tauri/components/providers/app-init-provider.tsx",
+        "apps/screenpipe-app-tauri/src-tauri/src/startup_auth.rs",
+        "apps/screenpipe-app-tauri/src-tauri/src/main.rs"
+      ],
+      "tags": ["regression", "escaped-failure", "auth", "startup", "signup-free", "false-gate", "recording"],
+      "prompt": "A signup-free desktop build has already resolved startup authentication as not required, but the protected app still renders a sign-in gate because no user account exists. Make an explicit no-auth-required startup reach the application without stopping the recorder. Ordinary signed-out builds must still require sign-in; authenticated, enterprise, onboarding, development-skip, entitlement, hydration, recovery, and non-primary-window behavior must remain unchanged.",
+      "agent_timeout_seconds": 900,
+      "grader_dependency_links": [
+        { "source_path": "apps/screenpipe-app-tauri/node_modules", "destination_path": "apps/screenpipe-app-tauri/node_modules" }
+      ],
+      "grader": {
+        "timeout_seconds": 420,
+        "fixtures": [
+          {
+            "source_ref": "27fb5d84707fc778b6d5740f54943ee25b6128b5",
+            "source_path": "apps/screenpipe-app-tauri/components/app-entitlement-gate.test.tsx"
+          }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && NODE_OPTIONS=--localstorage-file=.eval-localstorage bun x vitest run --config vitest.config.ts components/app-entitlement-gate.test.tsx"
       }
     }
   ]
