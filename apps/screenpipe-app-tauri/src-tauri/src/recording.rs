@@ -1384,6 +1384,7 @@ async fn spawn_screenpipe_inner(
     // topic with either a per-run or stable continued session id (see the matching
     // helper in `apps/screenpipe-app-tauri/lib/events/types.ts`).
     let app_for_pipe = app.clone();
+    let app_for_chat_destination = app.clone();
     let app_for_owned = app.clone();
     let app_for_port_conflict = app.clone();
 
@@ -1405,6 +1406,12 @@ async fn spawn_screenpipe_inner(
             pipe_agent_events.emit_line(pipe_name, exec_id, continues_chat, line);
         }),
     );
+    let chat_destination: Option<
+        screenpipe_core::agents::chat_destination::ChatDestinationDispatch,
+    > = Some(std::sync::Arc::new(move |request| {
+        let app = app_for_chat_destination.clone();
+        Box::pin(async move { crate::chat_control::run_pipe_in_existing_chat(&app, request).await })
+    }));
 
     // Oneshot for result
     let (result_tx, result_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
@@ -1433,6 +1440,7 @@ async fn spawn_screenpipe_inner(
                 let server = match ServerCore::start(
                     &recording_config,
                     on_pipe_output,
+                    chat_destination,
                     Some(owned_browser),
                     cloud_token_arc.clone(),
                     history_access.clone(),

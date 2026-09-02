@@ -24,6 +24,7 @@ import {
   isTerminalPipeExecutionStatus,
   pipeExecutionConversationId,
   pipeExecutionDeletionKey,
+  pipeExecutionUsesExistingChat,
   shouldReloadPipeExecutionHistory,
   uniquePipeExecutionConversations,
 } from "@/lib/pipe-execution-status";
@@ -72,6 +73,23 @@ describe("buildPipeExecutionHistoryPage", () => {
 });
 
 describe("continued pipe chat inventory", () => {
+  it("distinguishes user-selected chats from Pipe-owned chats", () => {
+    expect(
+      pipeExecutionUsesExistingChat({
+        id: 12,
+        pipe_name: "daily-brief",
+        conversation_id: "chat-42",
+      }),
+    ).toBe(true);
+    expect(
+      pipeExecutionUsesExistingChat({
+        id: 12,
+        pipe_name: "daily-brief",
+        conversation_id: "pipe:daily-brief:continuous",
+      }),
+    ).toBe(false);
+  });
+
   it("collapses multiple runs onto their newest stable conversation", () => {
     const executions = [
       {

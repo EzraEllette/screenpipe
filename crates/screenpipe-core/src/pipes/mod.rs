@@ -21,6 +21,9 @@ pub mod sync;
 pub(crate) mod trajectory;
 
 use crate::agents::{
+    chat_destination::{
+        ChatDestinationDispatch, ChatDestinationExecutor, CHAT_DESTINATION_EXECUTOR,
+    },
     cloud::CloudAgentConfig,
     pi::{pi_event_protocol_error, pi_package_enabled, PiExecutor},
     AgentExecutor, ExecutionHandle, SharedPid, STOP_REQUESTED_PID,
@@ -385,6 +388,12 @@ pub struct PipeConfig {
     #[serde(default, skip_serializing_if = "is_false")]
     pub history: bool,
 
+    /// Route every run into one exact existing screenpipe chat. When omitted,
+    /// `history` keeps its legacy meaning: false creates one chat per run and
+    /// true continues the Pipe's own stable chat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_in: Option<PipeRunIn>,
+
     /// When true, the pipe's agent has `SCREENPIPE_FILTER_PII=1` in its
     /// env so the BASH_ENV shim rewrites every `curl .../search` call to
     /// append `filter_pii=1` — PII is redacted server-side before the
@@ -421,6 +430,41 @@ pub struct PipeConfig {
     /// Catches any extra fields from front-matter (backwards compat).
     #[serde(default, flatten, skip_serializing_if = "HashMap::is_empty")]
     pub config: HashMap<String, serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PipeRunIn {
+    /// V1 intentionally supports only local screenpipe chats. The explicit
+    /// discriminator leaves the frontmatter forward-compatible with other
+    /// destination types without guessing from an id.
+    pub mode: PipeRunInMode,
+    pub chat_id: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PipeRunInMode {
+    ExistingChat,
+}
+
+impl PipeConfig {
+    pub fn existing_chat_id(&self) -> Result<Option<&str>> {
+        let Some(run_in) = self.run_in.as_ref() else {
+            return Ok(None);
+        };
+        let chat_id = run_in.chat_id.trim();
+        if chat_id.is_empty() || chat_id.len() > 200 {
+            return Err(anyhow!("existing chat destination has an invalid chat id"));
+        }
+        Ok(Some(chat_id))
+    }
+}
+
+fn existing_chat_executor_config(config: &PipeConfig) -> Option<serde_json::Value> {
+    config
+        .run_in
+        .as_ref()
+        .map(|destination| serde_json::json!({ "chat_id": destination.chat_id }))
 }
 
 struct CloudAgentRunSettings {
@@ -736,6 +780,7 @@ const KNOWN_CONFIG_UPDATE_KEYS: &[&str] = &[
     "connections",
     "timeout",
     "history",
+    "run_in",
     "trigger",
     "schedule_config",
 ];
@@ -888,6 +933,7 @@ fn remove_tombstone(pipes_dir: &Path, name: &str) -> Result<()> {
 
 /// File name for the local overrides registry inside the pipes directory.
 const LOCAL_OVERRIDES_FILE: &str = ".local-overrides.json";
+const LOCAL_RUN_DESTINATIONS_FILE: &str = ".local-run-destinations.json";
 
 /// Read local enabled overrides from the pipes directory.
 /// Returns an empty map on any error (missing file, corrupt JSON).
@@ -927,6 +973,41 @@ fn remove_local_override(pipes_dir: &Path, pipe_name: &str) -> Result<()> {
     let mut overrides = load_local_overrides(pipes_dir);
     if overrides.remove(pipe_name).is_some() {
         save_local_overrides(pipes_dir, &overrides)?;
+    }
+    Ok(())
+}
+
+/// Per-device chat destinations. Values are optional on purpose: an explicit
+/// null locally overrides a `run_in` block authored in synced pipe.md content.
+fn load_local_run_destinations(pipes_dir: &Path) -> HashMap<String, Option<PipeRunIn>> {
+    let path = pipes_dir.join(LOCAL_RUN_DESTINATIONS_FILE);
+    match std::fs::read_to_string(&path) {
+        Ok(content) => serde_json::from_str(&content).unwrap_or_else(|error| {
+            warn!("local run destinations file corrupt, ignoring: {}", error);
+            HashMap::new()
+        }),
+        Err(_) => HashMap::new(),
+    }
+}
+
+fn set_local_run_destination(
+    pipes_dir: &Path,
+    pipe_name: &str,
+    destination: Option<PipeRunIn>,
+) -> Result<()> {
+    let mut destinations = load_local_run_destinations(pipes_dir);
+    destinations.insert(pipe_name.to_string(), destination);
+    let path = pipes_dir.join(LOCAL_RUN_DESTINATIONS_FILE);
+    let json = serde_json::to_string_pretty(&destinations)?;
+    atomic_write(&path, &json)
+}
+
+fn remove_local_run_destination(pipes_dir: &Path, pipe_name: &str) -> Result<()> {
+    let mut destinations = load_local_run_destinations(pipes_dir);
+    if destinations.remove(pipe_name).is_some() {
+        let path = pipes_dir.join(LOCAL_RUN_DESTINATIONS_FILE);
+        let json = serde_json::to_string_pretty(&destinations)?;
+        atomic_write(&path, &json)?;
     }
     Ok(())
 }
@@ -3009,6 +3090,16 @@ impl PipeManager {
         self.on_output_line = Some(cb);
     }
 
+    /// Register the desktop-owned dispatcher for Pipes that run in an exact
+    /// existing chat. CLI/server builds omit this adapter and return a clear
+    /// "agent not available" error instead of falling back to another chat.
+    pub fn set_chat_destination_dispatch(&mut self, dispatch: ChatDestinationDispatch) {
+        self.executors.insert(
+            CHAT_DESTINATION_EXECUTOR.to_string(),
+            Arc::new(ChatDestinationExecutor::new(dispatch)),
+        );
+    }
+
     /// Add an output consumer without replacing an existing desktop or stream
     /// listener. Both callbacks receive every line in registration order.
     pub fn add_on_output_line(&mut self, cb: OnPipeOutputLine) {
@@ -3091,6 +3182,7 @@ impl PipeManager {
         paths.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
 
         let local_overrides = load_local_overrides(&self.pipes_dir);
+        let local_run_destinations = load_local_run_destinations(&self.pipes_dir);
         let mut selected = HashMap::new();
         let mut all_names = HashSet::new();
         let mut suppressed = Vec::new();
@@ -3134,6 +3226,9 @@ impl PipeManager {
             config.name = dir_name.clone();
             if let Some(&enabled) = local_overrides.get(&dir_name) {
                 config.enabled = enabled;
+            }
+            if let Some(destination) = local_run_destinations.get(&dir_name) {
+                config.run_in = destination.clone();
             }
             selected.insert(dir_name, (config, body, content));
         }
@@ -3857,7 +3952,17 @@ impl PipeManager {
             preset_prompt,
             run_agent,
             run_executor_config,
-        ) = if config.agent == "cloud-agent" {
+        ) = if let Some(chat_config) = existing_chat_executor_config(&config) {
+            (
+                "existing chat".to_string(),
+                None,
+                None,
+                None,
+                None,
+                CHAT_DESTINATION_EXECUTOR.to_string(),
+                Some(chat_config),
+            )
+        } else if config.agent == "cloud-agent" {
             let cloud = cloud_agent_run_settings(&config, &body)
                 .map_err(|error| anyhow!("pipe '{}': {error}", name))?;
             (
@@ -3980,7 +4085,11 @@ impl PipeManager {
             };
             match created {
                 Ok(id) => {
-                    if history_enabled {
+                    if let Some(conversation_id) = config.existing_chat_id().ok().flatten() {
+                        let _ = store
+                            .set_execution_conversation_id(id, conversation_id)
+                            .await;
+                    } else if history_enabled {
                         let conversation_id = pipe_conversation_id(name, id, true);
                         let _ = store
                             .set_execution_conversation_id(id, &conversation_id)
@@ -4028,7 +4137,11 @@ impl PipeManager {
             let _ = store.set_execution_running(id, None).await;
         }
         emit_pipe_start(
-            self.on_output_line.as_ref(),
+            if config.run_in.is_none() {
+                self.on_output_line.as_ref()
+            } else {
+                None
+            },
             &pipe_name,
             exec_id.unwrap_or(0),
             history_enabled,
@@ -4080,7 +4193,11 @@ impl PipeManager {
         let store_ref = self.store.clone();
         let on_complete = self.on_run_complete.clone();
         let trigger_for_cb = trigger.to_string();
-        let on_output = self.on_output_line.clone();
+        let on_output = if config.run_in.is_none() {
+            self.on_output_line.clone()
+        } else {
+            None
+        };
         let pipes_dir_for_log = self.pipes_dir.clone();
         let pipe_timeout = config.timeout.unwrap_or(DEFAULT_TIMEOUT_SECS);
         let mcp_session_access = self.mcp_session_access.clone();
@@ -4462,7 +4579,19 @@ impl PipeManager {
                 active_preset_idx,
                 run_agent,
                 run_executor_config,
-            ) = if config.agent == "cloud-agent" {
+            ) = if let Some(chat_config) = existing_chat_executor_config(&config) {
+                (
+                    "existing chat".to_string(),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    CHAT_DESTINATION_EXECUTOR.to_string(),
+                    Some(chat_config),
+                )
+            } else if config.agent == "cloud-agent" {
                 let cloud = match cloud_agent_run_settings(&config, &body) {
                     Ok(cloud) => cloud,
                     Err(error) => {
@@ -4637,7 +4766,11 @@ impl PipeManager {
                 };
                 match created {
                     Ok(id) => {
-                        if history_enabled {
+                        if let Some(conversation_id) = config.existing_chat_id().ok().flatten() {
+                            let _ = store
+                                .set_execution_conversation_id(id, conversation_id)
+                                .await;
+                        } else if history_enabled {
                             let conversation_id = pipe_conversation_id(name, id, true);
                             let _ = store
                                 .set_execution_conversation_id(id, &conversation_id)
@@ -4686,7 +4819,11 @@ impl PipeManager {
                 let _ = store.set_execution_running(id, None).await;
             }
             emit_pipe_start(
-                self.on_output_line.as_ref(),
+                if config.run_in.is_none() {
+                    self.on_output_line.as_ref()
+                } else {
+                    None
+                },
                 name,
                 exec_id.unwrap_or(0),
                 history_enabled,
@@ -4736,7 +4873,11 @@ impl PipeManager {
             let (line_tx, mut line_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
             let drain_pipe_name = name.to_string();
             let drain_exec_id = exec_id.unwrap_or(0);
-            let drain_on_output = self.on_output_line.clone();
+            let drain_on_output = if config.run_in.is_none() {
+                self.on_output_line.clone()
+            } else {
+                None
+            };
             // Tee the full agent event stream to a per-run trajectory file
             // (model-training/eval export). Best-effort: None on IO failure.
             let mut drain_trajectory = trajectory::TrajectoryWriter::create(
@@ -5142,6 +5283,10 @@ impl PipeManager {
             config.name = name.to_string(); // preserve directory name
             atomic_write(&pipe_md, raw)?;
 
+            if let Some(destination) = load_local_run_destinations(&self.pipes_dir).get(name) {
+                config.run_in = destination.clone();
+            }
+
             // Update in-memory
             let mut pipes = self.pipes.lock().await;
             if let Some(entry) = pipes.get_mut(name) {
@@ -5154,6 +5299,8 @@ impl PipeManager {
 
         let (mut config, body) = parse_frontmatter(&content)?;
         config.name = name.to_string(); // preserve directory name
+        let frontmatter_run_in = config.run_in.clone();
+        let mut local_run_destination_update: Option<Option<PipeRunIn>> = None;
 
         let mut new_body = body.clone();
         for (k, v) in &updates {
@@ -5234,6 +5381,32 @@ impl PipeManager {
                         config.history = value;
                     }
                 }
+                "run_in" => {
+                    let destination =
+                        if v.is_null() {
+                            None
+                        } else {
+                            Some(serde_json::from_value::<PipeRunIn>(v.clone()).map_err(
+                                |error| anyhow!("invalid run_in config for '{}': {}", name, error),
+                            )?)
+                        };
+                    if let Some(ref destination) = destination {
+                        let chat_id = destination.chat_id.trim();
+                        if chat_id.is_empty() || chat_id.len() > 200 {
+                            return Err(anyhow!(
+                                "invalid run_in config for '{}': invalid chat id",
+                                name
+                            ));
+                        }
+                    }
+                    local_run_destination_update = Some(destination.clone());
+                    config.run_in = destination;
+                    // An existing chat is already a continuing context. Do not
+                    // also materialize the legacy Pipe-owned chat.
+                    if config.run_in.is_some() {
+                        config.history = false;
+                    }
+                }
                 "trigger" => {
                     if v.is_null() {
                         config.trigger = None;
@@ -5268,8 +5441,18 @@ impl PipeManager {
             }
         }
 
+        // Chat ids belong to this device. Persist the source file exactly as it
+        // was authored and keep UI-selected destinations in the local registry.
+        config.run_in = frontmatter_run_in;
         let new_content = serialize_pipe(&config, &new_body)?;
         atomic_write(&pipe_md, &new_content)?;
+
+        if let Some(destination) = local_run_destination_update {
+            set_local_run_destination(&self.pipes_dir, name, destination)?;
+        }
+        if let Some(destination) = load_local_run_destinations(&self.pipes_dir).get(name) {
+            config.run_in = destination.clone();
+        }
 
         // Update in-memory
         let mut pipes = self.pipes.lock().await;
@@ -5577,6 +5760,12 @@ impl PipeManager {
         // Clean up device-local enabled override
         if let Err(e) = remove_local_override(&self.pipes_dir, name) {
             warn!("failed to remove local override for '{}': {}", name, e);
+        }
+        if let Err(e) = remove_local_run_destination(&self.pipes_dir, name) {
+            warn!(
+                "failed to remove local run destination for '{}': {}",
+                name, e
+            );
         }
 
         let mut pipes = self.pipes.lock().await;
@@ -6198,7 +6387,19 @@ impl PipeManager {
                         executor_config,
                         active_preset_id,
                         active_preset_idx,
-                    ) = if config.agent == "cloud-agent" {
+                    ) = if let Some(chat_config) = existing_chat_executor_config(config) {
+                        (
+                            "existing chat".to_string(),
+                            None,
+                            None,
+                            None,
+                            None,
+                            CHAT_DESTINATION_EXECUTOR.to_string(),
+                            Some(chat_config),
+                            None,
+                            None,
+                        )
+                    } else if config.agent == "cloud-agent" {
                         let cloud = match cloud_agent_run_settings(config, body) {
                             Ok(cloud) => cloud,
                             Err(error) => {
@@ -6462,6 +6663,9 @@ impl PipeManager {
                         combined_context.as_deref(),
                     );
                     let pipe_name = name.clone();
+                    let has_chat_destination = config.run_in.is_some();
+                    let existing_chat_id =
+                        config.existing_chat_id().ok().flatten().map(str::to_string);
                     let is_event_triggered = triggered_by_event;
                     let trigger = trigger.to_string();
                     let logs_ref = logs.clone();
@@ -6469,7 +6673,11 @@ impl PipeManager {
                     let running_exec_ids_ref = running_execution_ids.clone();
                     let pipes_dir_for_log = pipes_dir.clone();
                     let on_complete = on_run_complete.clone();
-                    let on_output = on_output_line.clone();
+                    let on_output = if has_chat_destination {
+                        None
+                    } else {
+                        on_output_line.clone()
+                    };
                     let store_ref = store.clone();
                     let token_registry_ref = token_registry.clone();
                     let mcp_session_access_ref = mcp_session_access.clone();
@@ -6504,7 +6712,9 @@ impl PipeManager {
                     let fallback_event_context = event_triggered.get(name).cloned();
                     let fallback_runner = fallback_runner.clone();
                     let fallback_registry = fallback_registry.clone();
-                    let max_fallback_attempts = if is_enterprise_managed(config) {
+                    let max_fallback_attempts = if run_agent == CHAT_DESTINATION_EXECUTOR
+                        || is_enterprise_managed(config)
+                    {
                         1
                     } else {
                         preset_ids.len().min(preset_fallback::MAX_FALLBACK_DEPTH)
@@ -6564,7 +6774,11 @@ impl PipeManager {
                                 .await
                             {
                                 Ok(id) => {
-                                    if history_enabled {
+                                    if let Some(conversation_id) = existing_chat_id.as_deref() {
+                                        let _ = store
+                                            .set_execution_conversation_id(id, conversation_id)
+                                            .await;
+                                    } else if history_enabled {
                                         let conversation_id =
                                             pipe_conversation_id(&pipe_name, id, true);
                                         let _ = store
@@ -7315,6 +7529,7 @@ pub fn parse_frontmatter(content: &str) -> Result<(PipeConfig, String)> {
     let body = rest[end + 4..].trim().to_string();
 
     let config: PipeConfig = serde_yaml::from_str(yaml_str)?;
+    config.existing_chat_id()?;
 
     Ok((config, body))
 }
@@ -7358,6 +7573,8 @@ pub fn serialize_pipe(config: &PipeConfig, body: &str) -> Result<String> {
         "connections",
         "permissions",
         "timeout",
+        "history",
+        "run_in",
         "trigger",
         "source_slug",
         "installed_version",
@@ -10832,6 +11049,55 @@ Run the scheduled task.
         );
     }
 
+    #[tokio::test]
+    async fn chat_destination_update_stays_local_and_can_be_cleared() {
+        let installed = tempfile::tempdir().unwrap();
+        let pipes_dir = installed.path().join("pipes");
+        std::fs::create_dir_all(&pipes_dir).unwrap();
+
+        let manager = PipeManager::new(pipes_dir.clone(), HashMap::new(), None, 0);
+        manager.install_builtin_pipes().unwrap();
+        manager.load_pipes().await.unwrap();
+        manager
+            .update_config(
+                "day-recap",
+                HashMap::from([(
+                    "run_in".to_string(),
+                    serde_json::json!({
+                        "mode": "existing_chat",
+                        "chat_id": "chat-on-this-device"
+                    }),
+                )]),
+            )
+            .await
+            .unwrap();
+
+        let selected = manager.get_pipe("day-recap").await.unwrap();
+        assert_eq!(
+            selected.config.existing_chat_id().unwrap(),
+            Some("chat-on-this-device")
+        );
+        assert!(!selected.config.history);
+        let synced_source = std::fs::read_to_string(pipes_dir.join("day-recap/pipe.md")).unwrap();
+        assert!(!synced_source.contains("chat-on-this-device"));
+
+        manager
+            .update_config(
+                "day-recap",
+                HashMap::from([("run_in".to_string(), serde_json::Value::Null)]),
+            )
+            .await
+            .unwrap();
+        assert!(manager
+            .get_pipe("day-recap")
+            .await
+            .unwrap()
+            .config
+            .run_in
+            .is_none());
+        assert_eq!(load_local_run_destinations(&pipes_dir)["day-recap"], None);
+    }
+
     #[test]
     fn test_parse_frontmatter_trims_preset_ids() {
         let content = "---\nschedule: every 1h\nenabled: true\npreset:\n  - \" primary \"\n  - \"   \"\n  - \"fallback  \"\n---\n\nBody";
@@ -10921,6 +11187,7 @@ Run the scheduled task.
             source_hash: None,
             subagent: false,
             history: false,
+            run_in: None,
             privacy_filter: false,
             artifacts: vec![],
             trigger: None,
@@ -11658,6 +11925,7 @@ Run the scheduled task.
             source_hash: None,
             subagent: false,
             history: false,
+            run_in: None,
             privacy_filter: false,
             artifacts: vec![],
             trigger: None,
@@ -11819,6 +12087,7 @@ Run the scheduled task.
             source_hash: None,
             subagent: false,
             history: false,
+            run_in: None,
             privacy_filter: false,
             artifacts: vec![],
             trigger: None,
@@ -11859,6 +12128,7 @@ Run the scheduled task.
             source_hash: None,
             subagent: false,
             history: false,
+            run_in: None,
             privacy_filter: false,
             artifacts: vec![],
             trigger: None,
@@ -11889,6 +12159,7 @@ Run the scheduled task.
             source_hash: None,
             subagent: false,
             history: false,
+            run_in: None,
             privacy_filter: false,
             artifacts: vec![],
             trigger: None,
@@ -11928,6 +12199,7 @@ Run the scheduled task.
             source_hash: None,
             subagent: false,
             history: false,
+            run_in: None,
             privacy_filter: false,
             artifacts: vec![],
             trigger: None,
@@ -12055,6 +12327,7 @@ Run the scheduled task.
                 source_hash: None,
                 subagent: false,
                 history: false,
+                run_in: None,
                 privacy_filter: false,
                 artifacts: vec![],
                 trigger: None,
@@ -12221,6 +12494,45 @@ Run the scheduled task.
         let content = "---\nschedule: every 1h\n---\n\nPrompt";
         let (config, _) = parse_frontmatter(content).unwrap();
         assert!(!config.history, "history should default to false");
+    }
+
+    #[test]
+    fn test_parse_frontmatter_existing_chat_destination() {
+        let content = "---\nschedule: every 4h\nrun_in:\n  mode: existing_chat\n  chat_id: chat-42\n---\n\nPrompt";
+        let (config, _) = parse_frontmatter(content).unwrap();
+        assert_eq!(config.existing_chat_id().unwrap(), Some("chat-42"));
+        assert!(existing_chat_executor_config(&config).is_some());
+    }
+
+    #[test]
+    fn test_parse_frontmatter_rejects_empty_existing_chat_id() {
+        let content =
+            "---\nschedule: every 4h\nrun_in:\n  mode: existing_chat\n  chat_id: ''\n---\n\nPrompt";
+        assert!(parse_frontmatter(content).is_err());
+    }
+
+    #[test]
+    fn local_chat_destination_can_override_and_clear_synced_config() {
+        let dir = tempfile::tempdir().unwrap();
+        set_local_run_destination(
+            dir.path(),
+            "daily-recap",
+            Some(PipeRunIn {
+                mode: PipeRunInMode::ExistingChat,
+                chat_id: "chat-on-this-device".to_string(),
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            load_local_run_destinations(dir.path())["daily-recap"]
+                .as_ref()
+                .unwrap()
+                .chat_id,
+            "chat-on-this-device"
+        );
+
+        set_local_run_destination(dir.path(), "daily-recap", None).unwrap();
+        assert_eq!(load_local_run_destinations(dir.path())["daily-recap"], None);
     }
 
     #[test]

@@ -141,7 +141,10 @@ import {
   materializePipeExecutionConversation,
   pipeConversationNeedsRefresh,
 } from "@/lib/pipe-conversation";
-import { pipeConversationDeletionKey } from "@/lib/pipe-execution-status";
+import {
+  pipeConversationDeletionKey,
+  pipeExecutionUsesExistingChat,
+} from "@/lib/pipe-execution-status";
 import { PipeStoreSubmissionDialog } from "@/components/pipe-store-submission";
 import {
   Dialog,
@@ -157,6 +160,7 @@ import { MarkdownBlock } from "@/components/chat/markdown-block";
 import { useDeviceMonitor } from "@/lib/hooks/use-device-monitor";
 import { Monitor, Wifi, WifiOff, ScanSearch, Lock } from "lucide-react";
 import { requestPipeStop } from "@/lib/pipe-stop";
+import { PipeChatDestinationPicker } from "./pipe-chat-destination-picker";
 
 const PIPE_EXECUTIONS_PAGE_LIMIT = 10;
 
@@ -488,6 +492,10 @@ interface PipeConfig {
   preset?: string | string[];
   enterprise_managed?: boolean;
   history?: boolean;
+  run_in?: {
+    mode: "existing_chat";
+    chat_id: string;
+  } | null;
   connections?: string[];
   trigger?: {
     events?: string[];
@@ -502,6 +510,13 @@ interface PipeConfig {
   };
   // serde(flatten) merges extra YAML fields into this level at runtime
   [key: string]: unknown;
+}
+
+type PipeRunDestinationMode = "per_run" | "task_chat" | "existing_chat";
+
+function pipeRunDestinationMode(config: PipeConfig): PipeRunDestinationMode {
+  if (config.run_in?.mode === "existing_chat") return "existing_chat";
+  return config.history ? "task_chat" : "per_run";
 }
 
 interface PipeConnectionOption {
@@ -1138,6 +1153,10 @@ export function PipesSection() {
     Record<string, "saving" | "saved" | "error">
   >({});
   const [historySaveErrors, setHistorySaveErrors] = useState<Record<string, string>>({});
+  const [runDestinationDrafts, setRunDestinationDrafts] = useState<
+    Record<string, PipeRunDestinationMode>
+  >({});
+  const [chatPickerOpen, setChatPickerOpen] = useState<Record<string, boolean>>({});
   const [historyResetPipe, setHistoryResetPipe] = useState<PipeStatus | null>(null);
   const [historyResetStatus, setHistoryResetStatus] = useState<
     Record<string, "clearing" | "cleared" | "error">
@@ -1503,9 +1522,21 @@ export function PipesSection() {
   const isReadOnlyPipe = (pipe: PipeStatus) =>
     isReceivedTeamPipe(pipe) || isEnterpriseManagedPipe(pipe);
 
-  const savePipeHistoryMode = async (pipe: PipeStatus, history: boolean) => {
+  const savePipeRunDestination = async (
+    pipe: PipeStatus,
+    mode: PipeRunDestinationMode,
+    chatId?: string,
+  ) => {
     const pipeName = pipe.config.name;
     const previousHistory = Boolean(pipe.config.history);
+    const previousRunIn = pipe.config.run_in ?? null;
+    if (mode === "existing_chat" && !chatId?.trim()) {
+      throw new Error("choose a chat before saving this destination");
+    }
+    const history = mode === "task_chat";
+    const run_in = mode === "existing_chat"
+      ? { mode: "existing_chat" as const, chat_id: chatId!.trim() }
+      : null;
     setHistorySaveStatus((previous) => ({ ...previous, [pipeName]: "saving" }));
     setHistorySaveErrors((previous) => {
       const next = { ...previous };
@@ -1515,7 +1546,7 @@ export function PipesSection() {
     setPipes((previous) =>
       previous.map((candidate) =>
         candidate.config.name === pipeName
-          ? { ...candidate, config: { ...candidate.config, history } }
+          ? { ...candidate, config: { ...candidate.config, history, run_in } }
           : candidate
       )
     );
@@ -1526,7 +1557,7 @@ export function PipesSection() {
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ history }),
+          body: JSON.stringify({ history, run_in }),
         },
       );
       let data: { error?: string; success?: boolean } | undefined;
@@ -1543,7 +1574,7 @@ export function PipesSection() {
 
     try {
       await savePromise;
-      void emit("pipe-config-updated", { pipeName, history }).catch(() => undefined);
+      void emit("pipe-config-updated", { pipeName, history, run_in }).catch(() => undefined);
       setHistorySaveStatus((previous) => ({ ...previous, [pipeName]: "saved" }));
       window.setTimeout(() => {
         setHistorySaveStatus((previous) => {
@@ -1560,7 +1591,11 @@ export function PipesSection() {
           candidate.config.name === pipeName
             ? {
                 ...candidate,
-                config: { ...candidate.config, history: previousHistory },
+                config: {
+                  ...candidate.config,
+                  history: previousHistory,
+                  run_in: previousRunIn,
+                },
               }
             : candidate
         )
@@ -1569,6 +1604,11 @@ export function PipesSection() {
       setHistorySaveErrors((previous) => ({ ...previous, [pipeName]: message }));
       throw error;
     } finally {
+      setRunDestinationDrafts((previous) => {
+        const next = { ...previous };
+        delete next[pipeName];
+        return next;
+      });
       if (pendingConfigSaves.current[pipeName] === savePromise) {
         delete pendingConfigSaves.current[pipeName];
       }
@@ -3604,7 +3644,15 @@ export function PipesSection() {
                                       <button className="text-muted-foreground hover:text-foreground p-0.5" title="open in chat" onClick={async () => {
                                         const recorderSid = exec.conversation_id || `pipe:${exec.pipe_name}:${exec.id}`;
                                         const existing = await loadConversationFile(recorderSid);
-                                        if (pipeConversationNeedsRefresh(existing, exec)) {
+                                        if (pipeExecutionUsesExistingChat(exec) && !existing) {
+                                          toast({
+                                            title: "chat unavailable",
+                                            description: "this run's destination was deleted or cannot be read",
+                                            variant: "destructive",
+                                          });
+                                          return;
+                                        }
+                                        if (!pipeExecutionUsesExistingChat(exec) && pipeConversationNeedsRefresh(existing, exec)) {
                                           await saveConversationFile(
                                             materializePipeExecutionConversation(exec, existing),
                                           );
@@ -3703,10 +3751,10 @@ export function PipesSection() {
                       </TabsContent>
 
                       {/* ═══ ADVANCED TAB ═══ */}
-                      <TabsContent value="advanced" className="mt-4 space-y-4">
+                      <TabsContent value="advanced" className="mt-4 flex flex-col gap-4">
                       {!enterpriseManaged && (
                         <>
-                      <section className="divide-y divide-border border border-border">
+                      <section className="order-2 divide-y divide-border border border-border">
                       <div className="px-4 py-3">
                         <p className="text-sm font-medium">runtime</p>
                         <p className="mt-0.5 text-[11px] text-muted-foreground">
@@ -3829,108 +3877,185 @@ export function PipesSection() {
                       </div>
                       </section>
 
-                      <section className="flex items-start justify-between gap-4 border border-border p-4">
-                        <div className="min-w-0">
-                          <Label
-                            htmlFor={`pipe-history-switch-${pipe.config.name}`}
-                            className="text-xs font-medium"
-                          >
-                            continue in one chat
-                          </Label>
-                          <div
-                            id={`pipe-history-description-${pipe.config.name}`}
-                            className="text-[11px] text-muted-foreground"
-                          >
-                            {pipe.config.history
-                              ? "new runs and your replies share this chat. turning this off pauses memory; it does not delete saved context."
-                              : "runs start in separate chats. any previous one-chat context stays saved and resumes if you turn this on."}
-                          </div>
-                          {historySaveStatus[pipe.config.name] === "saving" && (
-                            <div className="mt-1 flex items-center gap-1 text-[11px] text-muted-foreground" role="status">
-                              <Loader2 className="h-3 w-3 animate-spin" /> saving
-                            </div>
-                          )}
-                          {historySaveStatus[pipe.config.name] === "saved" && (
-                            <div className="mt-1 flex items-center gap-1 text-[11px] text-muted-foreground" role="status">
-                              <Check className="h-3 w-3" /> saved
-                            </div>
-                          )}
-                          {historySaveStatus[pipe.config.name] === "error" && (
-                            <div
-                              className="mt-1 text-[11px] text-destructive"
-                              role="alert"
-                              data-testid={`pipe-history-error-${pipe.config.name}`}
-                            >
-                              save failed — previous setting restored
-                              {historySaveErrors[pipe.config.name]
-                                ? `: ${historySaveErrors[pipe.config.name]}`
-                                : ""}
-                            </div>
-                          )}
-                          {(pipe.has_saved_context ||
-                            historyResetStatus[pipe.config.name]) && (
-                            <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1">
-                              {pipe.has_saved_context && (
-                                <Button
-                                  type="button"
-                                  variant="link"
-                                  size="sm"
-                                  className="h-auto p-0 text-[11px] text-muted-foreground underline-offset-2"
-                                  data-testid={`pipe-history-reset-${pipe.config.name}`}
-                                  disabled={
-                                    isRunning ||
-                                    historyResetStatus[pipe.config.name] === "clearing"
+                      {(() => {
+                        const savedMode = pipeRunDestinationMode(pipe.config);
+                        const mode = runDestinationDrafts[pipe.config.name] ?? savedMode;
+                        const destinationDisabled =
+                          isReadOnlyPipe(pipe) ||
+                          isRunning ||
+                          historySaveStatus[pipe.config.name] === "saving";
+                        return (
+                          <section className="order-1 overflow-hidden rounded-lg border border-border">
+                            <div className="grid gap-3 p-4 sm:grid-cols-[minmax(0,1fr)_16rem] sm:items-center">
+                              <div>
+                                <Label className="text-xs font-medium">runs in</Label>
+                                <p
+                                  id={`pipe-run-destination-description-${pipe.config.name}`}
+                                  className="mt-0.5 text-[11px] text-muted-foreground"
+                                >
+                                  {mode === "per_run" && "a new chat with fresh context for every run."}
+                                  {mode === "task_chat" && "this task's own chat, shared across runs and your replies."}
+                                  {mode === "existing_chat" && "the selected chat on this device, using that chat's AI settings and approval prompts."}
+                                </p>
+                              </div>
+                              <Select
+                                value={mode}
+                                disabled={destinationDisabled}
+                                onValueChange={(value: PipeRunDestinationMode) => {
+                                  setRunDestinationDrafts((previous) => ({
+                                    ...previous,
+                                    [pipe.config.name]: value,
+                                  }));
+                                  if (value === "existing_chat") {
+                                    // Let the Select portal finish closing before opening the
+                                    // chat Popover. Opening both in the same Radix event causes
+                                    // the Select's outside-click cleanup to immediately dismiss
+                                    // the picker and makes the choice appear to do nothing.
+                                    window.setTimeout(() => {
+                                      setChatPickerOpen((previous) => ({
+                                        ...previous,
+                                        [pipe.config.name]: true,
+                                      }));
+                                    }, 0);
+                                    return;
                                   }
-                                  onClick={() => setHistoryResetPipe(pipe)}
+                                  void savePipeRunDestination(pipe, value).catch(() => undefined);
+                                }}
+                              >
+                                <SelectTrigger
+                                  className="h-8 w-full rounded-md text-xs"
+                                  aria-describedby={`pipe-run-destination-description-${pipe.config.name}`}
+                                  data-testid={`pipe-run-destination-${pipe.config.name}`}
                                 >
-                                  {pipe.config.history
-                                    ? "start next run fresh"
-                                    : "clear saved one-chat context"}
-                                </Button>
+                                  <SelectValue />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  <SelectItem value="per_run">new chat each run</SelectItem>
+                                  <SelectItem value="task_chat">this task&apos;s chat</SelectItem>
+                                  <SelectItem value="existing_chat" disabled={Boolean(selectedDevice)}>
+                                    existing chat{selectedDevice ? " (choose on that device)" : ""}
+                                  </SelectItem>
+                                </SelectContent>
+                              </Select>
+                            </div>
+
+                            {mode === "existing_chat" && (
+                              <div className="grid gap-3 border-t border-border p-4 sm:grid-cols-[minmax(0,1fr)_16rem] sm:items-center">
+                                <div>
+                                  <Label className="text-xs font-medium">chat</Label>
+                                  <p className="mt-0.5 text-[11px] text-muted-foreground">
+                                    {selectedDevice
+                                      ? "open this task on that device to view or change its chat."
+                                      : "renaming or unpinning is safe. deleting this chat makes future runs fail until you choose another."}
+                                  </p>
+                                </div>
+                                {selectedDevice ? (
+                                  <Button
+                                    type="button"
+                                    variant="secondary"
+                                    disabled
+                                    className="h-8 justify-start rounded-md text-xs font-normal"
+                                  >
+                                    configured on selected device
+                                  </Button>
+                                ) : (
+                                  <PipeChatDestinationPicker
+                                    value={pipe.config.run_in?.chat_id}
+                                    disabled={destinationDisabled}
+                                    open={Boolean(chatPickerOpen[pipe.config.name])}
+                                    onOpenChange={(open) => {
+                                      setChatPickerOpen((previous) => ({
+                                        ...previous,
+                                        [pipe.config.name]: open,
+                                      }));
+                                      if (!open && savedMode !== "existing_chat") {
+                                        setRunDestinationDrafts((previous) => {
+                                          const next = { ...previous };
+                                          delete next[pipe.config.name];
+                                          return next;
+                                        });
+                                      }
+                                    }}
+                                    onSelect={(chat) => {
+                                      void savePipeRunDestination(pipe, "existing_chat", chat.id).catch(
+                                        () => undefined,
+                                      );
+                                    }}
+                                  />
+                                )}
+                              </div>
+                            )}
+
+                            <div className="border-t border-border px-4 py-2.5">
+                              {historySaveStatus[pipe.config.name] === "saving" && (
+                                <div className="flex items-center gap-1 text-[11px] text-muted-foreground" role="status">
+                                  <Loader2 className="h-3 w-3 animate-spin motion-reduce:animate-none" /> saving destination
+                                </div>
                               )}
-                              {isRunning && (
-                                <span className="text-[11px] text-muted-foreground">
-                                  available after this run
-                                </span>
+                              {historySaveStatus[pipe.config.name] === "saved" && (
+                                <div className="flex items-center gap-1 text-[11px] text-muted-foreground" role="status">
+                                  <Check className="h-3 w-3" /> destination saved on {selectedDevice ? "selected device" : "this device"}
+                                </div>
                               )}
-                              {historyResetStatus[pipe.config.name] === "cleared" && (
-                                <span
-                                  className="text-[11px] text-muted-foreground"
-                                  role="status"
-                                >
-                                  context cleared
-                                </span>
-                              )}
-                              {historyResetStatus[pipe.config.name] === "error" && (
-                                <span
+                              {historySaveStatus[pipe.config.name] === "error" && (
+                                <div
                                   className="text-[11px] text-destructive"
                                   role="alert"
+                                  data-testid={`pipe-history-error-${pipe.config.name}`}
                                 >
-                                  context was not cleared
-                                </span>
+                                  save failed — previous destination restored
+                                  {historySaveErrors[pipe.config.name]
+                                    ? `: ${historySaveErrors[pipe.config.name]}`
+                                    : ""}
+                                </div>
                               )}
+                              {mode !== "existing_chat" &&
+                                (pipe.has_saved_context || historyResetStatus[pipe.config.name]) && (
+                                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                                    {pipe.has_saved_context && (
+                                      <Button
+                                        type="button"
+                                        variant="link"
+                                        size="sm"
+                                        className="h-auto p-0 text-[11px] text-muted-foreground underline-offset-2"
+                                        data-testid={`pipe-history-reset-${pipe.config.name}`}
+                                        disabled={
+                                          isRunning ||
+                                          historyResetStatus[pipe.config.name] === "clearing"
+                                        }
+                                        onClick={() => setHistoryResetPipe(pipe)}
+                                      >
+                                        {mode === "task_chat"
+                                          ? "start next run fresh"
+                                          : "clear saved task-chat context"}
+                                      </Button>
+                                    )}
+                                    {isRunning && (
+                                      <span className="text-[11px] text-muted-foreground">available after this run</span>
+                                    )}
+                                    {historyResetStatus[pipe.config.name] === "cleared" && (
+                                      <span className="text-[11px] text-muted-foreground" role="status">context cleared</span>
+                                    )}
+                                    {historyResetStatus[pipe.config.name] === "error" && (
+                                      <span className="text-[11px] text-destructive" role="alert">context was not cleared</span>
+                                    )}
+                                  </div>
+                                )}
+                              {!pipe.has_saved_context &&
+                                !historyResetStatus[pipe.config.name] &&
+                                !historySaveStatus[pipe.config.name] && (
+                                  <p className="text-[11px] text-muted-foreground">
+                                    destination changes apply to the next run and never delete a chat.
+                                  </p>
+                                )}
                             </div>
-                          )}
-                        </div>
-                        <Switch
-                          id={`pipe-history-switch-${pipe.config.name}`}
-                          checked={!!pipe.config.history}
-                          disabled={
-                            isReadOnlyPipe(pipe) ||
-                            historySaveStatus[pipe.config.name] === "saving"
-                          }
-                          aria-label={`continue ${pipe.config.name} in one chat`}
-                          aria-describedby={`pipe-history-description-${pipe.config.name}`}
-                          data-testid={`pipe-history-switch-${pipe.config.name}`}
-                          onCheckedChange={(checked) => {
-                            void savePipeHistoryMode(pipe, checked).catch(() => undefined);
-                          }}
-                        />
-                      </section>
+                          </section>
+                        );
+                      })()}
                         </>
                       )}
 
-                      <section className="border border-border">
+                      <section className="order-3 border border-border">
                       <div className="flex items-center gap-2 border-b border-border px-4 py-3">
                         <Label className="text-sm font-medium">task definition</Label>
                         <span className="text-[11px] text-muted-foreground">task configuration</span>
@@ -4024,7 +4149,15 @@ export function PipesSection() {
                                       const conversationId =
                                         exec.conversation_id || `pipe:${exec.pipe_name}:${exec.id}`;
                                       const existing = await loadConversationFile(conversationId);
-                                      if (pipeConversationNeedsRefresh(existing, exec)) {
+                                      if (pipeExecutionUsesExistingChat(exec) && !existing) {
+                                        toast({
+                                          title: "chat unavailable",
+                                          description: "this run's destination was deleted or cannot be read",
+                                          variant: "destructive",
+                                        });
+                                        return;
+                                      }
+                                      if (!pipeExecutionUsesExistingChat(exec) && pipeConversationNeedsRefresh(existing, exec)) {
                                         await saveConversationFile(
                                           materializePipeExecutionConversation(exec, existing),
                                         );

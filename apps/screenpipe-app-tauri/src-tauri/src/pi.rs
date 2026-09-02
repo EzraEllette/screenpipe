@@ -4470,6 +4470,68 @@ pub(crate) async fn pi_queue_prompt_inner(
     Ok(queue_id)
 }
 
+/// Queue a prompt and expose a terminal receipt for backend workflows that
+/// must distinguish "accepted" from "finished". The normal composer keeps
+/// using `pi_queue_prompt_inner`, which intentionally returns immediately.
+pub(crate) async fn pi_queue_prompt_tracked_inner(
+    app: &AppHandle,
+    state: &PiState,
+    sid: &str,
+    message: String,
+    display_preview: Option<String>,
+) -> Result<
+    (
+        String,
+        oneshot::Receiver<Result<(), String>>,
+    ),
+    String,
+> {
+    let mut conversation = acquire_pi_conversation_lease(state, sid).await?;
+    let message = conversation.prepare_prompt(message);
+    let preview = display_preview.unwrap_or_else(|| message.clone());
+    let message = attach_foreground_connections_context(app, sid, message).await;
+    #[cfg(feature = "e2e")]
+    emit_e2e_pi_wire_prompt(app, sid, "queue", &message);
+    let cmd = build_prompt_command(message, None, &preview)?;
+    let (queue_id, acceptance_rx, completion_rx) = conversation
+        .queue
+        .send_prompt_tracked(
+            cmd,
+            crate::pi_command_queue::WaitMode::Prompt,
+            preview,
+            true,
+        )
+        .await?;
+
+    let state_for_watchdog = state.clone();
+    let sid_for_watchdog = sid.to_string();
+    if conversation.is_synced() {
+        drop(conversation);
+        tokio::spawn(async move {
+            if let Err(error) =
+                await_prompt_start(&state_for_watchdog, &sid_for_watchdog, acceptance_rx).await
+            {
+                warn!(
+                    "tracked Pi prompt failed before it started for session {}: {}",
+                    sid_for_watchdog, error
+                );
+            }
+        });
+    } else {
+        tokio::spawn(async move {
+            match await_prompt_start(&state_for_watchdog, &sid_for_watchdog, acceptance_rx).await {
+                Ok(()) => conversation.mark_synced(),
+                Err(error) => warn!(
+                    "tracked Pi prompt failed before it started for session {}: {}",
+                    sid_for_watchdog, error
+                ),
+            }
+        });
+    }
+
+    Ok((queue_id, completion_rx))
+}
+
 /// Steer the active Pi reply using Pi's native steering command.
 /// Unlike `pi_prompt`, this is intentionally not added to the follow-up queue:
 /// Pi interrupts the current stream and resumes with the steering instruction.
@@ -4561,11 +4623,19 @@ pub async fn pi_cancel_queued(
     prompt_id: String,
 ) -> Result<bool, String> {
     let sid = session_id.unwrap_or_else(|| "chat".to_string());
+    pi_cancel_queued_inner(state.inner(), &sid, prompt_id).await
+}
+
+pub(crate) async fn pi_cancel_queued_inner(
+    state: &PiState,
+    sid: &str,
+    prompt_id: String,
+) -> Result<bool, String> {
     let queue = {
         let pool = state.0.lock().await;
         let m = pool
             .sessions
-            .get(&sid)
+            .get(sid)
             .ok_or("session not found".to_string())?;
         m.queue_handle
             .clone()
@@ -4659,9 +4729,13 @@ pub async fn pi_abort_active(
     session_id: Option<String>,
 ) -> Result<(), String> {
     let sid = session_id.unwrap_or_else(|| "chat".to_string());
+    pi_abort_active_inner(state.inner(), &sid).await
+}
+
+pub(crate) async fn pi_abort_active_inner(state: &PiState, sid: &str) -> Result<(), String> {
     let queue = {
         let mut pool = state.0.lock().await;
-        let m = pool.sessions.get_mut(&sid).ok_or("Pi not initialized")?;
+        let m = pool.sessions.get_mut(sid).ok_or("Pi not initialized")?;
         if !m.is_running() {
             return Err("Pi is not running".to_string());
         }

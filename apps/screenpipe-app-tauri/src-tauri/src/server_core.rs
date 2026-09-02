@@ -292,6 +292,9 @@ impl ServerCore {
     pub async fn start(
         config: &RecordingConfig,
         on_pipe_output: Option<screenpipe_core::pipes::OnPipeOutputLine>,
+        chat_destination: Option<
+            screenpipe_core::agents::chat_destination::ChatDestinationDispatch,
+        >,
         owned_browser: Option<
             std::sync::Arc<screenpipe_connect::connections::browser::OwnedBrowser>,
         >,
@@ -738,6 +741,9 @@ impl ServerCore {
         ));
         if let Some(cb) = on_pipe_output {
             pipe_manager.set_on_output_line(cb);
+        }
+        if let Some(dispatch) = chat_destination {
+            pipe_manager.set_chat_destination_dispatch(dispatch);
         }
         // Give scheduled runs the same Live View target authority the foreground
         // refresh button sends, so a Pipe feeding several dashboards refreshes

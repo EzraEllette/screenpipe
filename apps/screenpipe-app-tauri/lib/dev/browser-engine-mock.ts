@@ -49,6 +49,8 @@ let mockCloudAgentConfig: MockCloudAgentConfig = {
   context_max_items: 80,
 };
 let mockPipeAgent = "cloud-agent";
+let mockPipeHistory = false;
+let mockPipeRunIn: { mode: "existing_chat"; chat_id: string } | null = null;
 
 function mockCloudProviderStatuses() {
   return (["codex", "claude", "cursor"] as const).map((provider) => ({
@@ -82,6 +84,8 @@ function mockDailyRecapPipe() {
       cloud_agent:
         mockPipeAgent === "cloud-agent" ? mockCloudAgentConfig : null,
       connections: [],
+      history: mockPipeHistory,
+      run_in: mockPipeRunIn,
     },
     last_run: null,
     last_success: null,
@@ -387,6 +391,11 @@ export function mockLocalApiResponse(
     if (typeof body.agent === "string") mockPipeAgent = body.agent;
     if (body.cloud_agent && typeof body.cloud_agent === "object") {
       mockCloudAgentConfig = body.cloud_agent as MockCloudAgentConfig;
+    }
+    if (typeof body.history === "boolean") mockPipeHistory = body.history;
+    if (body.run_in === null) mockPipeRunIn = null;
+    if (body.run_in && typeof body.run_in === "object") {
+      mockPipeRunIn = body.run_in as { mode: "existing_chat"; chat_id: string };
     }
     return Response.json({ success: true });
   }

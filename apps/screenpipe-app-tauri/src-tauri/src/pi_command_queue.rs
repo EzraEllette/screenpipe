@@ -82,6 +82,9 @@ pub struct PiCommand {
     /// Channel to notify the caller when the command has been written to stdin
     /// (for fire-and-forget prompts) or when `done` is received (for blocking commands).
     pub reply: oneshot::Sender<Result<(), String>>,
+    /// Optional second receipt for callers that must know the whole turn
+    /// finished, not merely that Pi accepted the prompt.
+    pub completion: Option<oneshot::Sender<Result<(), String>>>,
     /// Set on user-prompt commands so the queue can publish "what's pending"
     /// to subscribers. None for new_session / abort / internal commands.
     pub prompt_meta: Option<PiQueuedPrompt>,
@@ -538,6 +541,7 @@ impl PiQueueHandle {
                 payload,
                 wait_mode,
                 reply: tx,
+                completion: None,
                 prompt_meta: None,
             }))
             .await
@@ -555,6 +559,54 @@ impl PiQueueHandle {
         wait_mode: WaitMode,
         preview: String,
         force_visible_queue: bool,
+    ) -> Result<(String, oneshot::Receiver<Result<(), String>>), String> {
+        self.send_prompt_with_completion(
+            payload,
+            wait_mode,
+            preview,
+            force_visible_queue,
+            None,
+        )
+        .await
+    }
+
+    /// Enqueue a prompt and return both its acceptance receipt and its terminal
+    /// turn receipt. Scheduled chat destinations use the latter so a Pipe is
+    /// never marked successful just because its message entered the queue.
+    pub async fn send_prompt_tracked(
+        &self,
+        payload: Value,
+        wait_mode: WaitMode,
+        preview: String,
+        force_visible_queue: bool,
+    ) -> Result<
+        (
+            String,
+            oneshot::Receiver<Result<(), String>>,
+            oneshot::Receiver<Result<(), String>>,
+        ),
+        String,
+    > {
+        let (completion_tx, completion_rx) = oneshot::channel();
+        let (id, acceptance_rx) = self
+            .send_prompt_with_completion(
+                payload,
+                wait_mode,
+                preview,
+                force_visible_queue,
+                Some(completion_tx),
+            )
+            .await?;
+        Ok((id, acceptance_rx, completion_rx))
+    }
+
+    async fn send_prompt_with_completion(
+        &self,
+        payload: Value,
+        wait_mode: WaitMode,
+        preview: String,
+        force_visible_queue: bool,
+        completion: Option<oneshot::Sender<Result<(), String>>>,
     ) -> Result<(String, oneshot::Receiver<Result<(), String>>), String> {
         let id = format!("q_{}", uuid::Uuid::new_v4().simple());
         let queued_at_ms = std::time::SystemTime::now()
@@ -584,6 +636,7 @@ impl PiQueueHandle {
                 payload,
                 wait_mode,
                 reply: tx,
+                completion,
                 prompt_meta: Some(meta),
             }))
             .await
@@ -892,7 +945,7 @@ fn spawn_queue_with_prompt_start_timeouts(
             }
 
             match msg {
-                QueueMessage::Command(cmd) => {
+                QueueMessage::Command(mut cmd) => {
                     let prompt_id = cmd.prompt_meta.as_ref().map(|m| m.id.clone());
                     let is_prompt = prompt_id.is_some();
 
@@ -1115,6 +1168,11 @@ fn spawn_queue_with_prompt_start_timeouts(
                             // plain rejection (process still alive) just skips
                             // this one prompt and drains the next.
                             let wedged = matches!(&accepted, Err(error) if error == PROMPT_START_TIMEOUT_ERROR);
+                            if let Err(error) = &accepted {
+                                if let Some(completion) = cmd.completion.take() {
+                                    let _ = completion.send(Err(error.clone()));
+                                }
+                            }
                             let _ = cmd.reply.send(accepted);
                             if rejected {
                                 state.cancel_response(&req_id);
@@ -1130,11 +1188,24 @@ fn spawn_queue_with_prompt_start_timeouts(
                                 std::time::Duration::from_secs(300),
                             )
                             .await;
-                            if let PromptWait::Rejected(error) = wait {
-                                warn!(
-                                    "pi_command_queue: {} was rejected after starting: {}",
-                                    cmd_type, error
-                                );
+                            let completion = match wait {
+                                PromptWait::Idle => Ok(()),
+                                PromptWait::Terminated => {
+                                    Err(format!("Pi process died during {cmd_type}"))
+                                }
+                                PromptWait::TimedOut => Err(format!(
+                                    "AI agent did not finish {cmd_type} within its idle timeout"
+                                )),
+                                PromptWait::Rejected(error) => {
+                                    warn!(
+                                        "pi_command_queue: {} was rejected after starting: {}",
+                                        cmd_type, error
+                                    );
+                                    Err(error)
+                                }
+                            };
+                            if let Some(receipt) = cmd.completion.take() {
+                                let _ = receipt.send(completion);
                             }
                             state.cancel_response(&req_id);
                         }
@@ -1674,6 +1745,92 @@ mod tests {
 
         let result = h.await.unwrap();
         assert!(result.is_ok());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn tracked_prompt_receipt_waits_for_terminal_idle() {
+        use std::process::{Command as StdCommand, Stdio};
+
+        let mut child = StdCommand::new("cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn fake pi");
+        let stdin = Arc::new(Mutex::new(child.stdin.take().expect("fake pi stdin")));
+        let state = PiQueueState::new();
+        let (handle, join) = spawn_queue(stdin, state.clone(), 0);
+
+        let (_, acceptance, mut completion) = handle
+            .send_prompt_tracked(
+                json!({ "type": "prompt", "message": "scheduled work" }),
+                WaitMode::Prompt,
+                "scheduled work".into(),
+                true,
+            )
+            .await
+            .expect("enqueue tracked prompt");
+        let request_id = wait_for_response_id(&state).await;
+        state.mark_agent_active();
+        state.signal_response(&request_id, Ok(()));
+        assert_eq!(acceptance.await.expect("acceptance receipt"), Ok(()));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(25), &mut completion)
+                .await
+                .is_err(),
+            "terminal receipt must not resolve while the turn is active"
+        );
+
+        state.mark_agent_idle();
+        state.signal_done();
+        assert_eq!(completion.await.expect("completion receipt"), Ok(()));
+
+        state.signal_terminated();
+        drop(handle);
+        join.await.expect("queue join");
+        let _ = child.wait();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn tracked_prompt_receipt_reports_process_death() {
+        use std::process::{Command as StdCommand, Stdio};
+
+        let mut child = StdCommand::new("cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn fake pi");
+        let stdin = Arc::new(Mutex::new(child.stdin.take().expect("fake pi stdin")));
+        let state = PiQueueState::new();
+        let (handle, join) = spawn_queue(stdin, state.clone(), 0);
+
+        let (_, acceptance, completion) = handle
+            .send_prompt_tracked(
+                json!({ "type": "prompt", "message": "scheduled work" }),
+                WaitMode::Prompt,
+                "scheduled work".into(),
+                true,
+            )
+            .await
+            .expect("enqueue tracked prompt");
+        let request_id = wait_for_response_id(&state).await;
+        state.mark_agent_active();
+        state.signal_response(&request_id, Ok(()));
+        assert_eq!(acceptance.await.expect("acceptance receipt"), Ok(()));
+
+        state.signal_terminated();
+        let terminal = completion
+            .await
+            .expect("terminal receipt")
+            .expect_err("process death must fail the tracked turn");
+        assert!(terminal.contains("process died"));
+
+        drop(handle);
+        join.await.expect("queue join");
+        let _ = child.wait();
     }
 
     #[cfg(unix)]

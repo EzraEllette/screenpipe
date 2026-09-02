@@ -138,6 +138,7 @@ import {
   pipeConversationDeletionKey,
   pipeExecutionConversationId,
   pipeExecutionDeletionKey,
+  pipeExecutionUsesExistingChat,
   shouldReloadPipeExecutionHistory,
   uniquePipeExecutionConversations,
 } from "@/lib/pipe-execution-status";
@@ -974,12 +975,14 @@ export function ChatSidebar({
       const visibleExecutions = uniquePipeExecutionConversations(
         terminalExecutions,
         alreadyLoadedIds,
-      ).filter(
-        (execution) => !isPipeExecutionDeleted(
-          execution,
-          deletedPipeExecutionIdsRef.current,
-        ),
-      );
+      )
+        .filter((execution) => !pipeExecutionUsesExistingChat(execution))
+        .filter(
+          (execution) => !isPipeExecutionDeleted(
+            execution,
+            deletedPipeExecutionIdsRef.current,
+          ),
+        );
       const candidates = await Promise.all(visibleExecutions.map(async (execution) => {
         const sessionId = pipeExecutionConversationId(execution);
         executionMetadataRef.current.set(sessionId, execution);

@@ -1510,6 +1510,24 @@ pub struct ScreenpipeChat {
     pub conversation: Value,
 }
 
+/// Resolve one exact local chat by immutable id. This deliberately does not
+/// search by title or create a replacement: callers that hold a saved target
+/// must fail visibly when that file was deleted or became unreadable.
+pub fn load_screenpipe_chat(id: &str) -> Result<ScreenpipeChat, String> {
+    if id.trim().is_empty() || id.len() > 200 {
+        return Err("invalid chat id".to_string());
+    }
+    let path = screenpipe_chat_path(id)?;
+    let (summary, conversation, _) = parse_screenpipe_chat(&path)?;
+    if summary.id != id {
+        return Err("screenpipe chat id did not match its conversation file".to_string());
+    }
+    Ok(ScreenpipeChat {
+        summary,
+        conversation,
+    })
+}
+
 #[derive(Clone, Debug)]
 pub struct ScreenpipeDelivery {
     pub status: String,
@@ -1551,18 +1569,10 @@ pub async fn send<H: ScreenpipeChatHost + ?Sized>(
     }
 
     let response = if request.source == ChatSource::Screenpipe {
-        let path = screenpipe_chat_path(&request.id)?;
-        let (summary, conversation, _) = parse_screenpipe_chat(&path)?;
-        if summary.id != request.id {
-            return Err("screenpipe chat id did not match its conversation file".to_string());
-        }
+        let chat = load_screenpipe_chat(&request.id)?;
         if request.origin_session_id.as_deref() == Some(request.id.as_str()) {
             return Err("refused to send a chat to itself".to_string());
         }
-        let chat = ScreenpipeChat {
-            summary,
-            conversation,
-        };
         let delivery = host.send_to_screenpipe_chat(&request, &chat).await?;
         ChatSendResponse {
             status: delivery.status,

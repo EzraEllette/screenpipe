@@ -1929,6 +1929,7 @@ async fn main() {
                 // topic dropped — every pipe stdout line goes out on
                 // `agent_event` with a per-run or stable continued session id.
                 let app_for_pipe = app_handle.clone();
+                let app_for_chat_destination = app_handle.clone();
                 // Separate clone for the owned-browser install path — the
                 // on_pipe_output closure below captures app_for_pipe by
                 // move, so we need a distinct handle that survives into
@@ -1941,6 +1942,14 @@ async fn main() {
                         pipe_agent_events.emit_line(pipe_name, exec_id, continues_chat, line);
                     }),
                 );
+                let chat_destination: Option<
+                    screenpipe_core::agents::chat_destination::ChatDestinationDispatch,
+                > = Some(std::sync::Arc::new(move |request| {
+                    let app = app_for_chat_destination.clone();
+                    Box::pin(async move {
+                        crate::chat_control::run_pipe_in_existing_chat(&app, request).await
+                    })
+                }));
 
                 let is_starting_after_spawn_error = is_starting_clone.clone();
                 let server_thread = std::thread::Builder::new()
@@ -2080,6 +2089,7 @@ async fn main() {
                             let server = match server_core::ServerCore::start(
                                 &config,
                                 on_pipe_output,
+                                chat_destination,
                                 Some(owned_browser),
                                 cloud_token_arc.clone(),
                                 history_access.clone(),
