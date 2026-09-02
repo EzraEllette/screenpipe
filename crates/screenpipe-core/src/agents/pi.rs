@@ -63,13 +63,7 @@ pub const PI_PACKAGE: &str = "@earendil-works/pi-coding-agent@0.84.1";
 pub const PI_AI_PACKAGE: &str = "@earendil-works/pi-ai@0.84.1";
 pub const PI_NAMESPACE_DIR: &str = "@earendil-works";
 pub const SCREENPIPE_API_URL: &str = "https://api.screenpipe.com/v1";
-const PI_INSTALL_ARGS: [&str; 5] = [
-    "add",
-    "--ignore-scripts",
-    PI_PACKAGE,
-    PI_AI_PACKAGE,
-    "@anthropic-ai/sdk",
-];
+const PI_INSTALL_ARGS: [&str; 3] = ["install", "--force", "--ignore-scripts"];
 const CUSTOM_PROVIDER_USER_AGENT: &str = "screenpipe";
 const GEMINI_OPENAI_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta/openai";
 const DEFAULT_CLOUD_MAX_OUTPUT_TOKENS: u64 = 32_000;
@@ -2370,17 +2364,6 @@ impl AgentExecutor for PiExecutor {
     }
 
     async fn ensure_installed(&self) -> Result<()> {
-        if find_pi_executable().is_some() {
-            // Check if local install matches expected version; upgrade if stale
-            if !is_local_pi_version_current() {
-                info!("pi version mismatch — upgrading to {}", PI_PACKAGE);
-                // Fall through to install
-            } else {
-                debug!("pi already installed");
-                return Ok(());
-            }
-        }
-
         let bun = find_bun_executable()
             .ok_or_else(|| anyhow!("bun not found — install from https://bun.sh"))?;
 
@@ -2400,8 +2383,11 @@ impl AgentExecutor for PiExecutor {
             PI_INSTALL_ARGS.join(" "),
         );
 
-        // Seed package.json with overrides to fix lru-cache resolution on Windows
-        seed_pi_package_json(&install_dir);
+        // Keep the manifest authoritative, then rematerialize the complete tree.
+        // A prior interrupted install can leave the pinned top-level Pi package
+        // present while a transitive dependency is absent. Plain `bun install`
+        // trusts that tree, so `--force` is required to repair it generically.
+        seed_pi_package_json(&install_dir)?;
 
         let mut cmd = tokio_bun_command(&bun);
         // CREATE_NO_WINDOW only covers this Bun process. Lifecycle scripts can
@@ -3163,48 +3149,16 @@ fn apply_pi_child_path(cmd: &mut tokio::process::Command) {
     }
 }
 
-/// Check whether the locally-installed Pi version matches `PI_PACKAGE`.
-fn is_local_pi_version_current() -> bool {
-    let dir = match pi_local_install_dir() {
-        Some(d) => d,
-        None => return false,
-    };
-    let pkg_json = dir
-        .join("node_modules")
-        .join(PI_NAMESPACE_DIR)
-        .join("pi-coding-agent")
-        .join("package.json");
-    let contents = match std::fs::read_to_string(&pkg_json) {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
-    let parsed: serde_json::Value = match serde_json::from_str(&contents) {
-        Ok(v) => v,
-        Err(_) => return false,
-    };
-    let installed = match parsed.get("version").and_then(|v| v.as_str()) {
-        Some(v) => v,
-        None => return false,
-    };
-    // PI_PACKAGE is "<scope>/pi-coding-agent@<ver>" — extract version after last '@'
-    let expected = PI_PACKAGE.rsplit('@').next().unwrap_or("");
-    if installed != expected {
-        info!(
-            "local pi version {} differs from expected {}",
-            installed, expected
-        );
-        return false;
-    }
-    true
-}
-
-/// Seed the pi-agent package.json with overrides + strip legacy deps.
+/// Seed the pi-agent package.json with pinned direct deps and overrides.
 /// `hosted-git-info` requires `lru-cache@^10`, but bun on Windows can hoist
 /// an ESM-only lru-cache@7.x that breaks CJS `require()`. Also drops any
 /// stale `@mariozechner/*` keys carried over from before the upstream
 /// namespace rename (issue #3527).
-fn seed_pi_package_json(install_dir: &Path) {
+fn seed_pi_package_json(install_dir: &Path) -> Result<()> {
     let pkg_path = install_dir.join("package.json");
+    let expected_pi_version = json!(PI_PACKAGE.rsplit('@').next().unwrap_or(""));
+    let expected_pi_ai_version = json!(PI_AI_PACKAGE.rsplit('@').next().unwrap_or(""));
+    let expected_sdk = json!("^0.91.1");
     let expected_overrides = json!({
         "hosted-git-info": {
             "lru-cache": "^10.0.0"
@@ -3242,44 +3196,74 @@ fn seed_pi_package_json(install_dir: &Path) {
                     obj.insert("overrides".to_string(), expected_overrides.clone());
                     changed = true;
                 }
-                if let Some(deps_obj) = obj.get_mut("dependencies").and_then(|d| d.as_object_mut())
-                {
-                    let legacy: Vec<String> = deps_obj
-                        .keys()
-                        .filter(|k| k.starts_with("@mariozechner/"))
-                        .cloned()
-                        .collect();
-                    for k in &legacy {
-                        deps_obj.remove(k);
+                let deps = obj.entry("dependencies").or_insert_with(|| json!({}));
+                if !deps.is_object() {
+                    *deps = json!({});
+                    changed = true;
+                }
+                let deps_obj = deps
+                    .as_object_mut()
+                    .expect("dependencies was normalized to an object");
+                let legacy: Vec<String> = deps_obj
+                    .keys()
+                    .filter(|k| k.starts_with("@mariozechner/"))
+                    .cloned()
+                    .collect();
+                for k in &legacy {
+                    deps_obj.remove(k);
+                    changed = true;
+                }
+                for (name, version) in [
+                    ("@earendil-works/pi-coding-agent", &expected_pi_version),
+                    ("@earendil-works/pi-ai", &expected_pi_ai_version),
+                    ("@anthropic-ai/sdk", &expected_sdk),
+                ] {
+                    if deps_obj.get(name) != Some(version) {
+                        deps_obj.insert(name.to_string(), version.clone());
                         changed = true;
                     }
                 }
             }
             if changed {
-                if let Ok(new_contents) = serde_json::to_string_pretty(&pkg) {
-                    let _ = std::fs::write(&pkg_path, new_contents);
-                    let _ = std::fs::remove_file(install_dir.join("bun.lock"));
-                    let _ = std::fs::remove_file(install_dir.join("bun.lockb"));
-                    info!("Patched pi-agent package.json (overrides + legacy dep cleanup)");
-                }
+                let new_contents = serde_json::to_string_pretty(&pkg)
+                    .map_err(|e| anyhow!("failed to serialize Pi package.json: {}", e))?;
+                std::fs::write(&pkg_path, new_contents).map_err(|e| {
+                    anyhow!(
+                        "failed to write Pi package.json at {}: {}",
+                        pkg_path.display(),
+                        e
+                    )
+                })?;
+                let _ = std::fs::remove_file(install_dir.join("bun.lock"));
+                let _ = std::fs::remove_file(install_dir.join("bun.lockb"));
+                info!("Patched pi-agent package.json (managed deps + overrides)");
             }
-            return;
+            return Ok(());
         }
     }
     let pkg_json = json!({
+        "dependencies": {
+            "@earendil-works/pi-coding-agent": expected_pi_version,
+            "@earendil-works/pi-ai": expected_pi_ai_version,
+            "@anthropic-ai/sdk": expected_sdk,
+        },
         "overrides": {
             "hosted-git-info": {
                 "lru-cache": "^10.0.0"
             }
         }
     });
-    match std::fs::write(
-        &pkg_path,
-        serde_json::to_string_pretty(&pkg_json).unwrap_or_default(),
-    ) {
-        Ok(_) => info!("Seeded pi-agent package.json with lru-cache overrides"),
-        Err(e) => warn!("Failed to seed pi-agent package.json: {}", e),
-    }
+    let contents = serde_json::to_string_pretty(&pkg_json)
+        .map_err(|e| anyhow!("failed to serialize Pi package.json: {}", e))?;
+    std::fs::write(&pkg_path, contents).map_err(|e| {
+        anyhow!(
+            "failed to write Pi package.json at {}: {}",
+            pkg_path.display(),
+            e
+        )
+    })?;
+    info!("Seeded pi-agent package.json with managed deps + overrides");
+    Ok(())
 }
 
 /// Find the JS entrypoint for the locally-installed pi package.
@@ -4087,6 +4071,39 @@ mod tests {
     #[test]
     fn managed_pi_install_disables_dependency_lifecycle_scripts() {
         assert!(PI_INSTALL_ARGS.contains(&"--ignore-scripts"));
+    }
+
+    #[test]
+    fn managed_pi_install_rematerializes_declared_dependencies() {
+        assert_eq!(PI_INSTALL_ARGS[0], "install");
+        assert!(PI_INSTALL_ARGS.contains(&"--force"));
+    }
+
+    #[test]
+    fn seed_pi_package_json_pins_managed_runtime_dependencies() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        seed_pi_package_json(dir.path()).expect("seed managed manifest");
+
+        let contents = std::fs::read_to_string(dir.path().join("package.json"))
+            .expect("seeded package.json readable");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&contents).expect("seeded package.json parses");
+        let dependencies = parsed["dependencies"]
+            .as_object()
+            .expect("managed dependencies object");
+        assert_eq!(
+            dependencies.get("@earendil-works/pi-coding-agent"),
+            Some(&json!(PI_PACKAGE.rsplit('@').next().unwrap_or("")))
+        );
+        assert_eq!(
+            dependencies.get("@earendil-works/pi-ai"),
+            Some(&json!(PI_AI_PACKAGE.rsplit('@').next().unwrap_or("")))
+        );
+        assert_eq!(
+            dependencies.get("@anthropic-ai/sdk"),
+            Some(&json!("^0.91.1"))
+        );
     }
 
     #[test]
@@ -5589,7 +5606,7 @@ mod tests {
         .expect("write corrupt pkg");
         std::fs::write(&lock_path, b"stale-lock").expect("write stale lock");
 
-        seed_pi_package_json(dir.path());
+        seed_pi_package_json(dir.path()).expect("recover managed manifest");
 
         let contents = std::fs::read_to_string(&pkg_path).expect("re-seeded pkg readable");
         assert!(
