@@ -25,9 +25,10 @@ mod imp {
     use crate::recording::local_api_context_from_app;
     use base64::Engine;
     use ee_sync::{
-        AudioRow, EnterpriseSyncConfig, EnterpriseSyncError, FeedbackRow, FrameRow, LocalApiClient,
-        MemoryRow, ParsedRow, SnapshotRow, UiEventRow,
+        ActivityRow, AudioRow, EnterpriseSyncConfig, EnterpriseSyncError, FeedbackRow, FrameRow,
+        LocalApiClient, MemoryRow, ParsedRow, SnapshotRow, UiEventRow,
     };
+    use screenpipe_telemetry_wire::ActivityEvidenceRow;
     use serde::Deserialize;
     use sha2::{Digest, Sha256};
     use std::collections::HashMap;
@@ -329,6 +330,43 @@ mod imp {
                 .collect::<Vec<_>>();
             out.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
             Ok(out)
+        }
+
+        async fn fetch_activities_since(
+            &self,
+            since_ts: Option<&str>,
+        ) -> Result<Vec<ActivityRow>, EnterpriseSyncError> {
+            let since = since_ts
+                .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+                .map(|value| value.with_timezone(&chrono::Utc))
+                .unwrap_or_else(chrono::Utc::now);
+            let entries = crate::activity_history::entries_ending_after(&self.app, since)
+                .map_err(EnterpriseSyncError::LocalApi)?;
+            Ok(entries
+                .into_iter()
+                .map(|entry| ActivityRow {
+                    activity_id: entry.id,
+                    activity_kind: entry.kind,
+                    meeting_id: entry.meeting_id,
+                    timestamp: entry.end_at.clone(),
+                    start_at: entry.start_at,
+                    end_at: entry.end_at,
+                    title: entry.title,
+                    summary: entry.summary,
+                    evidence: entry
+                        .evidence
+                        .into_iter()
+                        .map(|evidence| ActivityEvidenceRow {
+                            kind: evidence.kind,
+                            at: evidence.at,
+                            frame_id: evidence.frame_id,
+                            meeting_id: evidence.meeting_id,
+                            app_name: evidence.app_name,
+                            label: evidence.label,
+                        })
+                        .collect(),
+                })
+                .collect())
         }
 
         async fn fetch_ui_events_since(
@@ -764,6 +802,8 @@ mod imp {
         frames: bool,
         #[serde(default)]
         parsed: bool,
+        #[serde(default)]
+        activities: bool,
         #[serde(default = "default_enabled_sync_stream")]
         audio: bool,
         #[serde(default = "default_enabled_sync_stream")]
@@ -783,6 +823,7 @@ mod imp {
             Self {
                 frames: true,
                 parsed: false,
+                activities: false,
                 audio: true,
                 ui_events: true,
                 memories: true,
@@ -824,6 +865,7 @@ mod imp {
                 self.feedback_mode(),
                 self.frame_images_mode(),
             );
+            crate::enterprise_policy::set_activity_sync_enabled(self.activities);
         }
     }
 
@@ -1809,6 +1851,7 @@ mod imp {
                 sync_streams: NativeSyncStreams {
                     frames: true,
                     parsed: true,
+                    activities: true,
                     audio: false,
                     ui_events: true,
                     memories: false,
@@ -1831,6 +1874,7 @@ mod imp {
             assert!(policy.require_account_login);
             assert!(!policy.recording_allowed);
             assert!(policy.sync_streams.parsed);
+            assert!(policy.sync_streams.activities);
             assert!(!policy.sync_streams.audio);
             assert_eq!(policy.sync_streams.feedback_mode(), "full");
             assert_eq!(policy.sync_streams.frame_images_mode(), "all");

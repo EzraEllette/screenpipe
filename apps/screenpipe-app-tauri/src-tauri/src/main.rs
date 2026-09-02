@@ -168,7 +168,7 @@ pub use server::spawn_server;
 pub use enterprise_install_metadata::get_enterprise_install_metadata;
 pub use enterprise_host_identity::get_enterprise_host_identity;
 pub use enterprise_policy::set_enterprise_policy;
-pub use enterprise_policy::set_sync_streams;
+pub use enterprise_policy::{set_activity_sync_enabled, set_sync_streams};
 pub use enterprise_recording_access::set_enterprise_recording_authorized;
 pub use permissions::do_permissions_check;
 pub use permissions::open_permission_settings;
