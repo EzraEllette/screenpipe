@@ -59,6 +59,12 @@ pub(crate) fn apply_settings(app: &AppHandle, store: &mut SettingsStore) {
     // "no-audio" keeps vision enabled while disabling only audio, which
     // lets Windows hosted runners exercise OCR without booting Whisper.
     let e2e_flags = flags();
+    if e2e_flags.iter().any(|f| f == "cloud-authenticated") {
+        let token = "e2e-fake-token-onboarding-background-ai-tools".to_string();
+        store.user.token = Some(token.clone());
+        crate::auth_token::seed_cloud_token(Some(token));
+        info!("E2E seed: synthetic cloud authentication enabled");
+    }
     if e2e_flags.iter().any(|f| f == "no-recording") {
         store.recording.disable_audio = true;
         store.recording.disable_vision = true;
