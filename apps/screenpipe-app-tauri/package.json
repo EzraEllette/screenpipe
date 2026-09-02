@@ -13,6 +13,7 @@
     "eval:daily-summary-agent": "bun scripts/eval-daily-summary-prompt.ts",
     "eval:chart-fence": "bun scripts/eval-chart-fence.ts",
     "eval:activity-episode-retrieval": "bun scripts/eval-activity-episode-retrieval.ts",
+    "eval:activity-skill-discovery": "bun scripts/eval-activity-skill-discovery.ts",
     "eval:daily-summary-prompt": "bun run eval:daily-summary-agent",
     "test:bun": "bun scripts/run-bun-tests.ts",
     "test:shortcut-overlay": "./scripts/test-shortcut-overlay.sh",
