@@ -236,7 +236,6 @@ function unifiedItemTestId(item: UnifiedItem): string {
 
 type BrainViewState = {
   typeFilter: TypeFilter;
-  opportunitiesAutoOpened: boolean;
   searchQuery: string;
   activeTags: string[];
   visibleCountByType: Record<TypeFilter, number>;
@@ -245,7 +244,6 @@ type BrainViewState = {
 
 const brainViewState: BrainViewState = {
   typeFilter: "overview",
-  opportunitiesAutoOpened: false,
   searchQuery: "",
   activeTags: [],
   visibleCountByType: {
@@ -262,9 +260,10 @@ const brainViewState: BrainViewState = {
   },
 };
 
-export function resetBrainViewStateForTests() {
-  brainViewState.typeFilter = "memories";
-  brainViewState.opportunitiesAutoOpened = false;
+export function resetBrainViewStateForTests(
+  initialTypeFilter: TypeFilter = "memories",
+) {
+  brainViewState.typeFilter = initialTypeFilter;
   brainViewState.searchQuery = "";
   brainViewState.activeTags = [];
   brainViewState.visibleCountByType.memories = RENDER_WINDOW;
@@ -449,21 +448,10 @@ export function BrainSection({
   const loadingMoreRef = useRef(false);
   const didMountRenderResetRef = useRef(false);
   const memoryDisplayCacheRef = useRef<Map<string, MemoryCardDisplay>>(new Map());
-  const suppressOpportunityAutoOpenRef = useRef(false);
 
   const [typeFilter, setTypeFilter] = useState<TypeFilter>(() => {
     const onboardingHandoff = Boolean(consumeOnboardingBrainHandoff());
-    suppressOpportunityAutoOpenRef.current = onboardingHandoff;
     let initial = onboardingHandoff ? "overview" : brainViewState.typeFilter;
-    if (
-      !onboardingHandoff &&
-      isSettingsLoaded &&
-      activitiesEnabled &&
-      !brainViewState.opportunitiesAutoOpened
-    ) {
-      initial = "opportunities";
-      brainViewState.opportunitiesAutoOpened = true;
-    }
     if (isSettingsLoaded && !activitiesEnabled && initial === "opportunities") {
       initial = "overview";
     }
@@ -711,20 +699,9 @@ export function BrainSection({
 
   useEffect(() => {
     if (!isSettingsLoaded) return;
-    if (suppressOpportunityAutoOpenRef.current) return;
-    let nextTypeFilter: TypeFilter | null = null;
-    if (!activitiesEnabled && typeFilter === "opportunities") {
-      nextTypeFilter = "overview";
-    } else if (activitiesEnabled && !brainViewState.opportunitiesAutoOpened) {
-      nextTypeFilter = "opportunities";
-    }
-    if (!nextTypeFilter) return;
-    const targetTypeFilter = nextTypeFilter;
+    if (activitiesEnabled || typeFilter !== "opportunities") return;
     const frame = window.requestAnimationFrame(() => {
-      if (targetTypeFilter === "opportunities") {
-        brainViewState.opportunitiesAutoOpened = true;
-      }
-      switchTypeFilter(targetTypeFilter);
+      switchTypeFilter("overview");
     });
     return () => window.cancelAnimationFrame(frame);
   }, [activitiesEnabled, isSettingsLoaded, switchTypeFilter, typeFilter]);
@@ -1614,16 +1591,6 @@ export function BrainSection({
       : 0;
   const isStale = staleDays >= 1;
   const brainViewOptions = [
-    ...(isSettingsLoaded && activitiesEnabled
-      ? [
-          {
-            value: "opportunities" as const,
-            label: "Opportunities",
-            count: opportunitiesTabCount,
-            Icon: Route,
-          },
-        ]
-      : []),
     {
       value: "overview" as const,
       label: "Live Views",
@@ -1642,6 +1609,16 @@ export function BrainSection({
       count: artifactsTabCount,
       Icon: FolderOpen,
     },
+    ...(isSettingsLoaded && activitiesEnabled
+      ? [
+          {
+            value: "opportunities" as const,
+            label: "Opportunities",
+            count: opportunitiesTabCount,
+            Icon: Route,
+          },
+        ]
+      : []),
   ];
   const activeBrainView =
     brainViewOptions.find(({ value }) => value === typeFilter) ??

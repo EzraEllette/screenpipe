@@ -303,21 +303,43 @@ describe("BrainSection type filter", () => {
     });
   });
 
-  it("opens the activities-gated Opportunities view on the first eligible visit", async () => {
+  it("keeps Live Views primary and exposes Opportunities as the last gated view", async () => {
+    resetBrainViewStateForTests("overview");
     const view = render(
       <BrainSection activitiesEnabled isSettingsLoaded />,
     );
 
     await waitFor(() => {
-      expect(screen.getByTestId("brain-opportunities")).toBeTruthy();
+      expect(screen.getByTestId("brain-overview-stub")).toBeTruthy();
+      expect(screen.queryByTestId("brain-opportunities")).toBeNull();
       expect(screen.getByTestId("brain-view-switcher")).toHaveAttribute(
         "aria-label",
-        "switch Brain view, current: Opportunities",
+        "switch Brain view, current: Live Views",
       );
+    });
+    expect(analyticsMocks.capture).toHaveBeenCalledWith("brain_viewed", {
+      tab: "overview",
     });
 
     openBrainViewMenu();
-    expect(screen.getByTestId("brain-filter-opportunities")).toBeTruthy();
+    expect(
+      within(screen.getByTestId("brain-view-menu"))
+        .getAllByRole("menuitem")
+        .map((item) => item.getAttribute("data-testid")),
+    ).toEqual([
+      "brain-filter-overview",
+      "brain-filter-memories",
+      "brain-filter-artifacts",
+      "brain-filter-opportunities",
+    ]);
+
+    fireEvent.click(screen.getByTestId("brain-filter-opportunities"));
+    await waitFor(() => {
+      expect(screen.getByTestId("brain-opportunities")).toBeTruthy();
+    });
+    expect(analyticsMocks.capture).toHaveBeenCalledWith("brain_tab_selected", {
+      tab: "opportunities",
+    });
 
     view.rerender(
       <BrainSection activitiesEnabled={false} isSettingsLoaded />,
