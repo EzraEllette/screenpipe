@@ -174,6 +174,7 @@ import {
 } from "./meeting-summary-stream";
 import {
   extractMeetingSummary,
+  meetingSummarySaveIsVisible,
   MEETING_QUIET_CONTROL_CLASS,
   MEETING_READING_COLUMN_CLASS,
   MEETING_RULE_ACTION_CLASS,
@@ -571,7 +572,8 @@ export function NoteView({
       visibleSummaryLifecycle.kind === "running");
   const summaryExecutionId =
     visibleSummaryLifecycle.kind === "queued" ||
-    visibleSummaryLifecycle.kind === "running"
+    visibleSummaryLifecycle.kind === "running" ||
+    visibleSummaryLifecycle.kind === "completed"
       ? visibleSummaryLifecycle.execution.id
       : null;
   const summaryExecutionIdRef = useRef<number | null>(summaryExecutionId);
@@ -717,35 +719,45 @@ export function NoteView({
             });
           }
         }
-        setSummaryLifecycle(next);
-
+        let summarySavePending = false;
         if (
           next.kind === "completed" &&
           refreshedSummaryExecutionRef.current !== next.execution.id
         ) {
-          refreshedSummaryExecutionRef.current = next.execution.id;
           const meetingResponse = await localFetch(`/meetings/${meeting.id}`);
           if (meetingResponse.ok && !cancelled) {
             const updatedMeeting =
               (await meetingResponse.json()) as MeetingRecord;
-            if (
-              summaryRevealPendingRef.current &&
-              updatedMeeting.note !== meeting.note
-            ) {
+            const saveIsVisible = meetingSummarySaveIsVisible(
+              meeting.note ?? "",
+              updatedMeeting.note ?? "",
+              summaryRevealPendingRef.current,
+            );
+            if (saveIsVisible) {
+              refreshedSummaryExecutionRef.current = next.execution.id;
               summaryRevealPendingRef.current = false;
-              setSummaryRevealKey((key) => key + 1);
+              if (updatedMeeting.note !== meeting.note) {
+                setSummaryRevealKey((key) => key + 1);
+              }
+              onSavedRef.current(updatedMeeting);
             } else {
-              summaryRevealPendingRef.current = false;
+              // Execution completion and the meeting-note write are separate
+              // observable operations. Retry the authoritative meeting read
+              // until the summary is actually there; marking this execution
+              // refreshed on the first stale read made the empty state stick.
+              summarySavePending = true;
             }
-            onSavedRef.current(updatedMeeting);
+          } else {
+            summarySavePending = true;
           }
         }
+        setSummaryLifecycle(next);
 
         // Never stop: settling to idle used to end the poll, which is how a
         // deleted Pipe or a late run stayed invisible until the note remounted.
         pollHandle = setTimeout(
           () => void poll(),
-          summaryLifecycleIsWorking(next)
+          summarySavePending || summaryLifecycleIsWorking(next)
             ? SUMMARY_ACTIVE_POLL_MS
             : SUMMARY_IDLE_POLL_MS,
         );
