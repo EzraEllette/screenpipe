@@ -204,6 +204,15 @@ export interface MeetingSummaryRecovery {
   };
 }
 
+export function meetingSummarySaveIsVisible(
+  currentNote: string,
+  refreshedNote: string,
+  awaitedNewSummary: boolean,
+): boolean {
+  if (!extractMeetingSummary(refreshedNote)) return false;
+  return !awaitedNewSummary || refreshedNote !== currentNote;
+}
+
 export function MeetingSummarySurface({
   note,
   state,
@@ -228,8 +237,15 @@ export function MeetingSummarySurface({
   activity?: React.ReactNode;
 }) {
   const savedSummary = extractMeetingSummary(note);
-  const isStreaming = state === "working" && Boolean(streamedSummary?.trim());
-  const summary = isStreaming ? streamedSummary! : savedSummary;
+  const liveSummary = streamedSummary?.trim() || null;
+  // A Pipe run completes immediately after its final message, while the
+  // meeting-note PUT from that message can still be reaching the API. Keep
+  // the draft that was already on screen through that handoff instead of
+  // briefly replacing it with an older summary (or "no summary yet").
+  const showingLiveSummary =
+    Boolean(liveSummary) && (state === "working" || state === "ready");
+  const isStreaming = state === "working" && showingLiveSummary;
+  const summary = showingLiveSummary ? liveSummary : savedSummary;
   const attention = state === "attention" ? recovery : undefined;
 
   return (

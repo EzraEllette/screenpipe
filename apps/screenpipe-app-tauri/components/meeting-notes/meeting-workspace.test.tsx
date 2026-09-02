@@ -7,6 +7,7 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import {
   extractMeetingSummary,
+  meetingSummarySaveIsVisible,
   MEETING_QUIET_CONTROL_CLASS,
   MEETING_READING_COLUMN_CLASS,
   MEETING_SHELL_CLASS,
@@ -208,6 +209,33 @@ describe("meeting workspace tabs", () => {
 });
 
 describe("meeting summary surface", () => {
+  it("waits for the completed run's summary to be visible in the saved note", () => {
+    expect(meetingSummarySaveIsVisible("notes only", "notes only", true)).toBe(
+      false,
+    );
+    expect(
+      meetingSummarySaveIsVisible(
+        "## Summary\nEarlier summary.",
+        "## Summary\nEarlier summary.",
+        true,
+      ),
+    ).toBe(false);
+    expect(
+      meetingSummarySaveIsVisible(
+        "## Summary\nEarlier summary.",
+        "## Summary\nUpdated summary.",
+        true,
+      ),
+    ).toBe(true);
+    expect(
+      meetingSummarySaveIsVisible(
+        "## Summary\nAlready saved.",
+        "## Summary\nAlready saved.",
+        false,
+      ),
+    ).toBe(true);
+  });
+
   it("uses the latest appended summary without including the user's notes", () => {
     const onGenerate = vi.fn();
     const note = [
@@ -359,7 +387,7 @@ describe("meeting summary surface", () => {
   });
 
   it("replaces the placeholder with the real summary as it streams", () => {
-    render(
+    const { rerender } = render(
       <MeetingSummarySurface
         note={"## Summary\nEarlier summary."}
         state="working"
@@ -380,6 +408,30 @@ describe("meeting summary surface", () => {
     expect(screen.queryByText("Earlier summary.")).not.toBeInTheDocument();
     expect(screen.getByRole("status")).toHaveTextContent("writing summary");
     expect(screen.getByTestId("meeting-summary-stream-cursor")).toBeVisible();
+
+    rerender(
+      <MeetingSummarySurface
+        note={"## Summary\nEarlier summary."}
+        state="ready"
+        detail="saved to this meeting note"
+        streamedSummary="The team **approved** the launch."
+        onGenerate={vi.fn()}
+        canGenerate
+      />,
+    );
+
+    expect(
+      screen.getByText(
+        (_, element) =>
+          element?.textContent === "The team approved the launch.",
+        { selector: "p" },
+      ),
+    ).toBeVisible();
+    expect(screen.queryByText("Earlier summary.")).not.toBeInTheDocument();
+    expect(screen.queryByText("no summary yet")).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId("meeting-summary-stream-cursor"),
+    ).not.toBeInTheDocument();
   });
 
   it("turns a terminal usage limit into explicit upgrade and model recovery", async () => {
