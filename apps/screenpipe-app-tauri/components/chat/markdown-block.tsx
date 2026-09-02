@@ -150,6 +150,26 @@ export function MarkdownBlock({
         p({ children }) {
           return <p className="mb-2 last:mb-0 leading-relaxed">{children}</p>;
         },
+        table({ children, node: _node, className: tableClassName, ...props }) {
+          return (
+            <div
+              className="scrollbar-minimal my-4 w-full max-w-full overflow-x-auto overscroll-x-contain rounded-md border border-border focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+              role="region"
+              aria-label="Scrollable table"
+              tabIndex={0}
+            >
+              <table
+                className={cn(
+                  "!my-0 w-full border-collapse text-sm [&_td]:min-w-36 [&_td]:px-3 [&_th]:min-w-36 [&_th]:px-3 [&_thead]:bg-muted/50 [&_tr>*:first-child]:sticky [&_tr>*:first-child]:left-0 [&_tr>*:first-child]:z-10 [&_tr>*:first-child]:border-r [&_tr>*:first-child]:border-border [&_tr>*:first-child]:bg-background [&_thead_tr>*:first-child]:z-20 [&_thead_tr>*:first-child]:bg-muted",
+                  tableClassName,
+                )}
+                {...props}
+              >
+                {children}
+              </table>
+            </div>
+          );
+        },
         details({ children, ...props }) {
           return (
             <details

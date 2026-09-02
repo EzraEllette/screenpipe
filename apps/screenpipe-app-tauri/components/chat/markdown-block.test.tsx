@@ -85,6 +85,36 @@ describe("MarkdownBlock", () => {
     );
   });
 
+  it("keeps wide tables readable in a keyboard-scrollable container", () => {
+    render(
+      <MarkdownBlock
+        text={`| Company | Contact | Stage | Owner | Last touch | Next step | Risk |
+| --- | --- | --- | --- | --- | --- | --- |
+| Acme | Sam | Trial | Louis | Today | Follow up | Low |`}
+        isUser={false}
+      />,
+    );
+
+    const table = screen.getByRole("table");
+    const scrollRegion = screen.getByRole("region", {
+      name: "Scrollable table",
+    });
+
+    expect(scrollRegion).toContainElement(table);
+    expect(scrollRegion).toHaveAttribute("tabindex", "0");
+    expect(scrollRegion).toHaveClass(
+      "scrollbar-minimal",
+      "w-full",
+      "max-w-full",
+      "overflow-x-auto",
+    );
+    expect(table).toHaveClass(
+      "[&_td]:min-w-36",
+      "[&_th]:min-w-36",
+      "[&_tr>*:first-child]:sticky",
+    );
+  });
+
   it.each([
     ["same-day", "2026-07-21T18:18:46.214586+00:00"],
     ["cross-day", "2026-07-20T23:58:04.120000+00:00"],
