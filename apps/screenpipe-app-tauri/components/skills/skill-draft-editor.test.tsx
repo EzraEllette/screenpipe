@@ -87,6 +87,11 @@ describe("SkillDraftEditor", () => {
       screen.getByRole("button", { name: "install skill" }),
     ).toBeDisabled();
     expect(screen.getByPlaceholderText("change something...")).toBeDisabled();
+    expect(
+      screen
+        .getByRole("region", { name: "skill definition" })
+        .closest("section"),
+    ).toHaveClass("ph-no-capture");
   });
 
   it("edits and installs a ready draft", () => {

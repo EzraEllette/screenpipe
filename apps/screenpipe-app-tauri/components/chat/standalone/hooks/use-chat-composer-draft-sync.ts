@@ -7,6 +7,7 @@ import type * as React from "react";
 import type { PendingDoc } from "@/components/chat/standalone/hooks/use-chat-attachments";
 import type { ExtractedDoc } from "@/lib/pi/extract-document";
 import { useChatStore } from "@/lib/stores/chat-store";
+import { normalizeChatPrefillTelemetrySource } from "@/lib/chat/response-feedback";
 
 interface UseChatComposerDraftSyncOptions {
   conversationId: string | null;
@@ -43,14 +44,18 @@ export function useChatComposerDraftSync({
   useEffect(() => {
     const previousConversationId = previousConversationIdRef.current;
     previousConversationIdRef.current = conversationId;
+    const isConnectedShare = prefillSource.startsWith("connected-share-");
+    const hasTelemetrySource = Boolean(
+      normalizeChatPrefillTelemetrySource(prefillSource),
+    );
     if (
       previousConversationId === conversationId ||
-      !prefillSource.startsWith("connected-share-")
+      (!isConnectedShare && !hasTelemetrySource)
     ) {
       return;
     }
 
-    if (previousConversationId) {
+    if (isConnectedShare && previousConversationId) {
       useChatStore.getState().actions.setComposerDraft(previousConversationId, {
         input: "",
         pastedImages: [],
@@ -58,7 +63,9 @@ export function useChatComposerDraftSync({
         pendingDocs: [],
       });
     }
-    skipDraftMirrorForConversationRef.current = conversationId;
+    if (isConnectedShare) {
+      skipDraftMirrorForConversationRef.current = conversationId;
+    }
     setPrefillContext(null);
     setPrefillFrameId(null);
     setPrefillSource("search");

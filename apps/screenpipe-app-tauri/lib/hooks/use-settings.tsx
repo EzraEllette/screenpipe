@@ -29,6 +29,11 @@ import {
 import { screenpipeWebUrl } from "@/lib/web-url";
 import type { SourceCitation } from "@/lib/source-citations";
 import type {
+	ChatEntryCard,
+	ChatEntrySource,
+	ChatPrefillTelemetrySource,
+} from "@/lib/chat/types";
+import type {
 	EnterpriseAppUpdatePolicy,
 	EnterpriseInstallMetadata,
 } from "@/lib/enterprise/app-update-policy";
@@ -180,6 +185,10 @@ export interface ChatMessage {
 	 *  blocks contributed a duration, so the work-group can still show
 	 *  "Worked for X min" even when the agent emitted no thinking. */
 	workDurationMs?: number;
+	/** Coarse, content-free origin markers used for chat lifecycle analytics. */
+	entrySource?: ChatEntrySource;
+	entryCard?: ChatEntryCard;
+	prefillSource?: ChatPrefillTelemetrySource;
 }
 
 /** What kind of session a conversation represents.

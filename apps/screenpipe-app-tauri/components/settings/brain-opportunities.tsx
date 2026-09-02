@@ -24,6 +24,11 @@ import {
   showChatWithPrefill,
   type ChatPrefillData,
 } from "@/lib/chat-utils";
+import {
+  activityOpportunityDuration,
+  activityOpportunityErrorKind,
+  captureActivityOpportunityEvent,
+} from "@/lib/analytics/activity-opportunities";
 import { useTauriEvent } from "@/lib/hooks/use-tauri-event";
 import { cn } from "@/lib/utils";
 import {
@@ -64,6 +69,40 @@ type CommandResult<T> =
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function captureOpportunityEdit(
+  request: UpdateActivityOpportunityRequest,
+  result: "completed" | "failed",
+  startedAt: number,
+  error?: unknown,
+): void {
+  if (request.kind === "skill") {
+    const changedName = request.name !== undefined;
+    const changedDescription = request.description !== undefined;
+    const changedNotes = request.notes !== undefined;
+    if (!changedName && !changedDescription && !changedNotes) return;
+    captureActivityOpportunityEvent("activity_opportunity_skill_edited", {
+      result,
+      duration_ms: activityOpportunityDuration(startedAt),
+      changed_name: changedName,
+      changed_description: changedDescription,
+      changed_notes: changedNotes,
+      ...(error ? { error_kind: activityOpportunityErrorKind(error) } : {}),
+    });
+    return;
+  }
+
+  const changedDescription = request.description !== undefined;
+  const changedGoal = request.goal !== undefined;
+  if (!changedDescription && !changedGoal) return;
+  captureActivityOpportunityEvent("activity_opportunity_unfinished_edited", {
+    result,
+    duration_ms: activityOpportunityDuration(startedAt),
+    changed_description: changedDescription,
+    changed_goal: changedGoal,
+    ...(error ? { error_kind: activityOpportunityErrorKind(error) } : {}),
+  });
 }
 
 async function commandData<T>(request: Promise<CommandResult<T>>): Promise<T> {
@@ -127,13 +166,14 @@ function verifiedEpisodeDurationMs(
 ): number {
   const activityIdSet = new Set(activityIds);
   const intervals = skill.evidence
-    .filter(
-      (item) => !item.excluded && activityIdSet.has(item.activityId),
+    .filter((item) => !item.excluded && activityIdSet.has(item.activityId))
+    .map(
+      (item) =>
+        [
+          new Date(item.startAt).getTime(),
+          new Date(item.endAt).getTime(),
+        ] as const,
     )
-    .map((item) => [
-      new Date(item.startAt).getTime(),
-      new Date(item.endAt).getTime(),
-    ] as const)
     .filter(
       ([startAt, endAt]) =>
         Number.isFinite(startAt) && Number.isFinite(endAt) && endAt > startAt,
@@ -570,6 +610,7 @@ export function BrainOpportunities({
   >(() => new Set());
   const [startingTaskId, setStartingTaskId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const viewCapturedRef = useRef(false);
 
   const acceptSnapshot = useCallback((next: ActivityOpportunitySnapshot) => {
     snapshotRef.current = next;
@@ -646,6 +687,8 @@ export function BrainOpportunities({
     ) => {
       setPendingMutationKeys((current) => new Set(current).add(key));
       const previous = mutationQueues.current[key] ?? Promise.resolve(null);
+      let capturedRequest: UpdateActivityOpportunityRequest | null = null;
+      let requestStartedAt = 0;
       const next = previous
         .catch(() => null)
         .then(async () => {
@@ -662,6 +705,8 @@ export function BrainOpportunities({
             }
             return current;
           }
+          capturedRequest = request;
+          requestStartedAt = performance.now();
           const updated = await commandData(
             commands.updateActivityOpportunity(request),
           );
@@ -714,9 +759,19 @@ export function BrainOpportunities({
           }
           acceptSnapshot(updated);
           setActionError(null);
+          captureOpportunityEdit(request, "completed", requestStartedAt);
+          capturedRequest = null;
           return updated;
         })
         .catch((error) => {
+          if (capturedRequest) {
+            captureOpportunityEdit(
+              capturedRequest,
+              "failed",
+              requestStartedAt,
+              error,
+            );
+          }
           setActionError(errorMessage(error));
           throw error;
         })
@@ -895,7 +950,35 @@ export function BrainOpportunities({
     : snapshot.analysisState;
   const analysisError = loadError ?? snapshot?.analysisError;
 
+  useEffect(() => {
+    if (viewCapturedRef.current || (!snapshot && !loadError)) return;
+    viewCapturedRef.current = true;
+    captureActivityOpportunityEvent("activity_opportunity_viewed", {
+      group: "ideas",
+      analysis_state: analysisState,
+      skill_idea_count:
+        snapshot?.skills.filter((skill) => skill.status === "pending").length ??
+        0,
+      skill_draft_count:
+        snapshot?.skills.filter((skill) => skill.status === "drafting")
+          .length ?? 0,
+      created_skill_count: createdSkills.length,
+      unfinished_count: pendingTaskCount,
+    });
+  }, [
+    analysisState,
+    createdSkills.length,
+    loadError,
+    pendingTaskCount,
+    snapshot,
+  ]);
+
   const selectGroup = (next: OpportunityGroup) => {
+    if (next !== group) {
+      captureActivityOpportunityEvent("activity_opportunity_group_selected", {
+        group: next,
+      });
+    }
     setGroup(next);
     setActionError(null);
     if (next === "unfinished") setCompactTaskDetailOpen(false);
@@ -925,36 +1008,72 @@ export function BrainOpportunities({
     });
   };
 
+  const captureSkillOpen = (
+    skill: SkillOpportunity,
+    destination: "created_skill" | "detail" | "draft_chat",
+    result: "completed" | "failed",
+    error?: unknown,
+  ) => {
+    const rankedSkills =
+      skill.status === "created" ? createdSkills : pendingSkills;
+    captureActivityOpportunityEvent("activity_opportunity_skill_opened", {
+      destination,
+      status: skill.status,
+      rank: Math.max(
+        1,
+        rankedSkills.findIndex((candidate) => candidate.id === skill.id) + 1,
+      ),
+      occurrence_count: supportingOccurrenceCount(skill),
+      evidence_count: skill.evidence.filter((item) => !item.excluded).length,
+      supporting_context_count: (skill.supportingContexts ?? []).length,
+      result,
+      ...(error ? { error_kind: activityOpportunityErrorKind(error) } : {}),
+    });
+  };
+
   const openSkillDetail = (id: string) => {
     const skill = snapshotRef.current?.skills.find((item) => item.id === id);
     const created = skill ? managedCreatedSkill(skill) : null;
     if (skill?.status === "created" && created) {
       const activeDraft = currentSkillDraft(skill);
       if (activeDraft && activeDraft.id !== created.installedDraftId) {
-        void openSkillDraftChat(
-          activeDraft.conversationId,
-          activeDraft.path,
-        ).catch((error) => setActionError(errorMessage(error)));
+        void openSkillDraftChat(activeDraft.conversationId, activeDraft.path)
+          .then(() => captureSkillOpen(skill, "draft_chat", "completed"))
+          .catch((error) => {
+            captureSkillOpen(skill, "draft_chat", "failed", error);
+            setActionError(errorMessage(error));
+          });
         return;
       }
       const installedDraft = installedSkillDraft(skill);
       if (installedDraft) {
-        void openSkillDraftChat(
-          installedDraft.conversationId,
-          created.path,
-        ).catch((error) => setActionError(errorMessage(error)));
+        void openSkillDraftChat(installedDraft.conversationId, created.path)
+          .then(() => captureSkillOpen(skill, "created_skill", "completed"))
+          .catch((error) => {
+            captureSkillOpen(skill, "created_skill", "failed", error);
+            setActionError(errorMessage(error));
+          });
       } else {
-        void openCreatedSkill(created.path).catch((error) =>
-          setActionError(errorMessage(error)),
-        );
+        void openCreatedSkill(created.path)
+          .then(() => captureSkillOpen(skill, "created_skill", "completed"))
+          .catch((error) => {
+            captureSkillOpen(skill, "created_skill", "failed", error);
+            setActionError(errorMessage(error));
+          });
       }
       return;
     }
     const activeDraft = skill ? currentSkillDraft(skill) : undefined;
     if (skill?.status === "drafting" && activeDraft) {
-      void openSkillDraftChat(activeDraft.conversationId, activeDraft.path);
+      void openSkillDraftChat(activeDraft.conversationId, activeDraft.path)
+        .then(() => captureSkillOpen(skill, "draft_chat", "completed"))
+        .catch((error) => {
+          captureSkillOpen(skill, "draft_chat", "failed", error);
+          setActionError(errorMessage(error));
+        });
       return;
     }
+    if (skill) captureSkillOpen(skill, "detail", "completed");
     setSelectedSkillId(id);
     setCompactSkillDetailOpen(true);
     setActionError(null);
@@ -973,6 +1092,19 @@ export function BrainOpportunities({
   };
 
   const openTaskDetail = (id: string) => {
+    const task = pendingTasks.find((candidate) => candidate.id === id);
+    if (task) {
+      captureActivityOpportunityEvent(
+        "activity_opportunity_unfinished_opened",
+        {
+          rank: Math.max(
+            1,
+            pendingTasks.findIndex((candidate) => candidate.id === id) + 1,
+          ),
+          evidence_count: task.evidence.filter((item) => !item.excluded).length,
+        },
+      );
+    }
     setSelectedTaskId(id);
     setCompactTaskDetailOpen(true);
     setActionError(null);
@@ -1018,63 +1150,187 @@ export function BrainOpportunities({
     skill: SkillOpportunity,
     evidence: OpportunityEvidence,
   ) => {
+    const startedAt = performance.now();
+    const action = evidence.excluded ? "included" : "excluded";
     const excluded = new Set(excludedActivityIds(skill.evidence));
     if (evidence.excluded) excluded.delete(evidence.activityId);
     else excluded.add(evidence.activityId);
-    await queueUpdate(`skill:${skill.id}`, (current) =>
-      buildSkillUpdate(current, skill.id, [...excluded]),
-    );
+    try {
+      await queueUpdate(`skill:${skill.id}`, (current) =>
+        buildSkillUpdate(current, skill.id, [...excluded]),
+      );
+      captureActivityOpportunityEvent(
+        "activity_opportunity_skill_source_changed",
+        {
+          action,
+          source_type: "discovered_activity",
+          result: "completed",
+          duration_ms: activityOpportunityDuration(startedAt),
+          evidence_count: skill.evidence.length - excluded.size,
+          supporting_context_count: (skill.supportingContexts ?? []).length,
+        },
+      );
+    } catch (error) {
+      captureActivityOpportunityEvent(
+        "activity_opportunity_skill_source_changed",
+        {
+          action,
+          source_type: "discovered_activity",
+          result: "failed",
+          duration_ms: activityOpportunityDuration(startedAt),
+          evidence_count: skill.evidence.filter((item) => !item.excluded)
+            .length,
+          supporting_context_count: (skill.supportingContexts ?? []).length,
+          error_kind: activityOpportunityErrorKind(error),
+        },
+      );
+    }
   };
 
   const addSkillSearchContext = async (
     skill: SkillOpportunity,
     context: ActivitySearchContext,
   ) => {
+    const startedAt = performance.now();
     const nextContext: SkillSearchContext = {
       ...context,
       id: `search-${crypto.randomUUID()}`,
     };
-    await queueUpdate(`skill:${skill.id}`, (current) => {
-      const latest = current.skills.find((item) => item.id === skill.id);
-      if (!latest) return null;
-      return buildSkillUpdate(current, skill.id, undefined, [
-        ...(latest.supportingContexts ?? []),
-        nextContext,
-      ]);
-    });
+    try {
+      await queueUpdate(`skill:${skill.id}`, (current) => {
+        const latest = current.skills.find((item) => item.id === skill.id);
+        if (!latest) return null;
+        return buildSkillUpdate(current, skill.id, undefined, [
+          ...(latest.supportingContexts ?? []),
+          nextContext,
+        ]);
+      });
+      captureActivityOpportunityEvent(
+        "activity_opportunity_skill_source_changed",
+        {
+          action: "added",
+          source_type: "added_activity",
+          result: "completed",
+          duration_ms: activityOpportunityDuration(startedAt),
+          evidence_count: skill.evidence.filter((item) => !item.excluded)
+            .length,
+          supporting_context_count: (skill.supportingContexts ?? []).length + 1,
+        },
+      );
+    } catch (error) {
+      captureActivityOpportunityEvent(
+        "activity_opportunity_skill_source_changed",
+        {
+          action: "added",
+          source_type: "added_activity",
+          result: "failed",
+          duration_ms: activityOpportunityDuration(startedAt),
+          evidence_count: skill.evidence.filter((item) => !item.excluded)
+            .length,
+          supporting_context_count: (skill.supportingContexts ?? []).length,
+          error_kind: activityOpportunityErrorKind(error),
+        },
+      );
+      throw error;
+    }
   };
 
   const removeSkillSearchContext = async (
     skill: SkillOpportunity,
     contextId: string,
   ) => {
-    await queueUpdate(`skill:${skill.id}`, (current) => {
-      const latest = current.skills.find((item) => item.id === skill.id);
-      if (!latest) return null;
-      return buildSkillUpdate(
-        current,
-        skill.id,
-        undefined,
-        (latest.supportingContexts ?? []).filter(
-          (context) => context.id !== contextId,
-        ),
+    const startedAt = performance.now();
+    try {
+      await queueUpdate(`skill:${skill.id}`, (current) => {
+        const latest = current.skills.find((item) => item.id === skill.id);
+        if (!latest) return null;
+        return buildSkillUpdate(
+          current,
+          skill.id,
+          undefined,
+          (latest.supportingContexts ?? []).filter(
+            (context) => context.id !== contextId,
+          ),
+        );
+      });
+      captureActivityOpportunityEvent(
+        "activity_opportunity_skill_source_changed",
+        {
+          action: "removed",
+          source_type: "added_activity",
+          result: "completed",
+          duration_ms: activityOpportunityDuration(startedAt),
+          evidence_count: skill.evidence.filter((item) => !item.excluded)
+            .length,
+          supporting_context_count: Math.max(
+            0,
+            (skill.supportingContexts ?? []).length - 1,
+          ),
+        },
       );
-    });
+    } catch (error) {
+      captureActivityOpportunityEvent(
+        "activity_opportunity_skill_source_changed",
+        {
+          action: "removed",
+          source_type: "added_activity",
+          result: "failed",
+          duration_ms: activityOpportunityDuration(startedAt),
+          evidence_count: skill.evidence.filter((item) => !item.excluded)
+            .length,
+          supporting_context_count: (skill.supportingContexts ?? []).length,
+          error_kind: activityOpportunityErrorKind(error),
+        },
+      );
+    }
   };
 
   const toggleTaskEvidence = async (
     task: UnfinishedOpportunity,
     evidence: OpportunityEvidence,
   ) => {
+    const startedAt = performance.now();
+    const action = evidence.excluded ? "included" : "excluded";
     const excluded = new Set(excludedActivityIds(task.evidence));
     if (evidence.excluded) excluded.delete(evidence.activityId);
     else excluded.add(evidence.activityId);
-    await queueUpdate(`unfinished:${task.id}`, (current) =>
-      buildTaskUpdate(current, task.id, [...excluded]),
-    );
+    try {
+      await queueUpdate(`unfinished:${task.id}`, (current) =>
+        buildTaskUpdate(current, task.id, [...excluded]),
+      );
+      captureActivityOpportunityEvent(
+        "activity_opportunity_unfinished_source_changed",
+        {
+          action,
+          source_type: "discovered_activity",
+          result: "completed",
+          duration_ms: activityOpportunityDuration(startedAt),
+          evidence_count: task.evidence.length - excluded.size,
+          supporting_context_count: 0,
+        },
+      );
+    } catch (error) {
+      captureActivityOpportunityEvent(
+        "activity_opportunity_unfinished_source_changed",
+        {
+          action,
+          source_type: "discovered_activity",
+          result: "failed",
+          duration_ms: activityOpportunityDuration(startedAt),
+          evidence_count: task.evidence.filter((item) => !item.excluded).length,
+          supporting_context_count: 0,
+          error_kind: activityOpportunityErrorKind(error),
+        },
+      );
+    }
   };
 
   const dismissSkill = async (skill: SkillOpportunity) => {
+    const startedAt = performance.now();
+    const rank = Math.max(
+      1,
+      pendingSkills.findIndex((candidate) => candidate.id === skill.id) + 1,
+    );
     setActionError(null);
     try {
       await queueUpdate(`skill:${skill.id}`, (current) =>
@@ -1094,12 +1350,28 @@ export function BrainOpportunities({
       );
       acceptSnapshot(updated);
       if (selectedSkillId === skill.id) setCompactSkillDetailOpen(false);
+      captureActivityOpportunityEvent("activity_opportunity_skill_rejected", {
+        result: "completed",
+        duration_ms: activityOpportunityDuration(startedAt),
+        rank,
+        occurrence_count: supportingOccurrenceCount(skill),
+        evidence_count: skill.evidence.filter((item) => !item.excluded).length,
+      });
     } catch (error) {
       setActionError(errorMessage(error));
+      captureActivityOpportunityEvent("activity_opportunity_skill_rejected", {
+        result: "failed",
+        duration_ms: activityOpportunityDuration(startedAt),
+        rank,
+        occurrence_count: supportingOccurrenceCount(skill),
+        evidence_count: skill.evidence.filter((item) => !item.excluded).length,
+        error_kind: activityOpportunityErrorKind(error),
+      });
     }
   };
 
   const createSkill = async (skill: SkillOpportunity) => {
+    const startedAt = performance.now();
     setCreatingSkillId(skill.id);
     setActionError(null);
     try {
@@ -1118,8 +1390,33 @@ export function BrainOpportunities({
       );
       await loadSnapshot();
       await openSkillDraftChat(draft.conversationId, draft.path);
+      captureActivityOpportunityEvent(
+        "activity_opportunity_skill_draft_requested",
+        {
+          result: "completed",
+          duration_ms: activityOpportunityDuration(startedAt),
+          occurrence_count: supportingOccurrenceCount(current),
+          evidence_count: current.evidence.filter((item) => !item.excluded)
+            .length,
+          supporting_context_count: (current.supportingContexts ?? []).length,
+          has_notes: current.notes.trim().length > 0,
+        },
+      );
     } catch (error) {
       setActionError(errorMessage(error));
+      captureActivityOpportunityEvent(
+        "activity_opportunity_skill_draft_requested",
+        {
+          result: "failed",
+          duration_ms: activityOpportunityDuration(startedAt),
+          occurrence_count: supportingOccurrenceCount(skill),
+          evidence_count: skill.evidence.filter((item) => !item.excluded)
+            .length,
+          supporting_context_count: (skill.supportingContexts ?? []).length,
+          has_notes: skill.notes.trim().length > 0,
+          error_kind: activityOpportunityErrorKind(error),
+        },
+      );
     } finally {
       setCreatingSkillId(null);
     }
@@ -1129,6 +1426,7 @@ export function BrainOpportunities({
     skill: SkillOpportunity,
     enabled: boolean,
   ) => {
+    const startedAt = performance.now();
     setUpdatingCreatedSkillIds((current) => new Set(current).add(skill.id));
     setActionError(null);
     try {
@@ -1162,8 +1460,25 @@ export function BrainOpportunities({
           ),
         });
       }
+      captureActivityOpportunityEvent(
+        "activity_opportunity_created_skill_enabled",
+        {
+          enabled: updated.enabled ?? enabled,
+          result: "completed",
+          duration_ms: activityOpportunityDuration(startedAt),
+        },
+      );
     } catch (error) {
       setActionError(errorMessage(error));
+      captureActivityOpportunityEvent(
+        "activity_opportunity_created_skill_enabled",
+        {
+          enabled,
+          result: "failed",
+          duration_ms: activityOpportunityDuration(startedAt),
+          error_kind: activityOpportunityErrorKind(error),
+        },
+      );
     } finally {
       setUpdatingCreatedSkillIds((current) => {
         const next = new Set(current);
@@ -1174,6 +1489,7 @@ export function BrainOpportunities({
   };
 
   const dismissTask = async (task: UnfinishedOpportunity) => {
+    const startedAt = performance.now();
     setActionError(null);
     try {
       await queueUpdate(`unfinished:${task.id}`, (current) =>
@@ -1193,12 +1509,31 @@ export function BrainOpportunities({
       );
       acceptSnapshot(updated);
       setCompactTaskDetailOpen(false);
+      captureActivityOpportunityEvent(
+        "activity_opportunity_unfinished_dismissed",
+        {
+          result: "completed",
+          duration_ms: activityOpportunityDuration(startedAt),
+          evidence_count: task.evidence.filter((item) => !item.excluded).length,
+        },
+      );
     } catch (error) {
       setActionError(errorMessage(error));
+      captureActivityOpportunityEvent(
+        "activity_opportunity_unfinished_dismissed",
+        {
+          result: "failed",
+          duration_ms: activityOpportunityDuration(startedAt),
+          evidence_count: task.evidence.filter((item) => !item.excluded).length,
+          error_kind: activityOpportunityErrorKind(error),
+        },
+      );
     }
   };
 
   const restoreDismissedTasks = async () => {
+    const startedAt = performance.now();
+    let restoredCount = 0;
     setActionError(null);
     try {
       for (const dismissed of dismissedTasks) {
@@ -1215,17 +1550,36 @@ export function BrainOpportunities({
           }),
         );
         acceptSnapshot(updated);
+        restoredCount += 1;
       }
       const firstRestored = snapshotRef.current?.unfinished.find(
         (task) => task.status === "pending",
       );
       setSelectedTaskId(firstRestored?.id ?? "");
+      captureActivityOpportunityEvent(
+        "activity_opportunity_unfinished_restored",
+        {
+          result: "completed",
+          duration_ms: activityOpportunityDuration(startedAt),
+          restored_count: restoredCount,
+        },
+      );
     } catch (error) {
       setActionError(errorMessage(error));
+      captureActivityOpportunityEvent(
+        "activity_opportunity_unfinished_restored",
+        {
+          result: "failed",
+          duration_ms: activityOpportunityDuration(startedAt),
+          restored_count: restoredCount,
+          error_kind: activityOpportunityErrorKind(error),
+        },
+      );
     }
   };
 
   const startAgentChat = async (task: UnfinishedOpportunity) => {
+    const startedAt = performance.now();
     setStartingTaskId(task.id);
     setActionError(null);
     let conversationId: string | null = null;
@@ -1283,11 +1637,28 @@ export function BrainOpportunities({
       } else {
         window.location.assign("/home?section=home");
       }
+      captureActivityOpportunityEvent(
+        "activity_opportunity_unfinished_handoff",
+        {
+          result: "completed",
+          duration_ms: activityOpportunityDuration(startedAt),
+          evidence_count: includedEvidence.length,
+        },
+      );
     } catch (error) {
       if (conversationId && !handoffRecorded) {
         clearStagedHomeChatPrefill(conversationId);
       }
       setActionError(errorMessage(error));
+      captureActivityOpportunityEvent(
+        "activity_opportunity_unfinished_handoff",
+        {
+          result: "failed",
+          duration_ms: activityOpportunityDuration(startedAt),
+          evidence_count: task.evidence.filter((item) => !item.excluded).length,
+          error_kind: activityOpportunityErrorKind(error),
+        },
+      );
     } finally {
       setStartingTaskId(null);
     }
@@ -1398,7 +1769,7 @@ export function BrainOpportunities({
   return (
     <section
       data-testid="brain-opportunities"
-      className="flex min-h-0 flex-1 flex-col overflow-hidden"
+      className="ph-no-capture flex min-h-0 flex-1 flex-col overflow-hidden"
     >
       <div className="mx-auto flex w-full max-w-3xl items-center gap-3">
         <div className="flex min-w-0 items-start gap-3">

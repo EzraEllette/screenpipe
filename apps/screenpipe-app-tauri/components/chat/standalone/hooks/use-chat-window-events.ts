@@ -16,7 +16,13 @@ import {
   shouldHandleChatLoadConversationForWindow,
   shouldHandleChatPrefillForWindow,
 } from "@/lib/chat-utils";
-import type { ContentBlock, Message, OptimisticSteerPayload } from "@/lib/chat/types";
+import type {
+  ChatSendOptions,
+  ContentBlock,
+  Message,
+  OptimisticSteerPayload,
+} from "@/lib/chat/types";
+import { normalizeChatPrefillTelemetrySource } from "@/lib/chat/response-feedback";
 import { normalizeImageDataUrls } from "@/lib/chat/image-content";
 import type { ChatConversation } from "@/lib/hooks/use-settings";
 import { commands, type AIPreset } from "@/lib/utils/tauri";
@@ -27,7 +33,12 @@ import {
 import { useChatPrefillEvents } from "@/components/chat/standalone/hooks/use-chat-prefill-events";
 
 type SendMessageRef = React.MutableRefObject<
-  ((msg: string, displayLabel?: string, imageDataUrls?: string[]) => Promise<void>) | undefined
+  ((
+    msg: string,
+    displayLabel?: string,
+    imageDataUrls?: string[],
+    options?: ChatSendOptions,
+  ) => Promise<void>) | undefined
 >;
 
 interface UsePipeGenerationCompletionOptions {
@@ -220,7 +231,13 @@ export function useChatPrefillListener({
             autoSendBypassRef.current = true;
             await new Promise((resolve) => setTimeout(resolve, 200));
             if (sendMessageRef.current) {
-              await sendMessageRef.current(fullMessage, visiblePrompt, prefillImages);
+              const prefillSource = normalizeChatPrefillTelemetrySource(source);
+              await sendMessageRef.current(
+                fullMessage,
+                visiblePrompt,
+                prefillImages,
+                prefillSource ? { prefillSource } : undefined,
+              );
               setInput("");
               if (inputRef.current) inputRef.current.style.height = "auto";
             }

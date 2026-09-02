@@ -17,7 +17,9 @@ use specta::Type;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::Mutex;
 use tracing::{info, warn};
@@ -385,6 +387,137 @@ pub struct HandoffActivityOpportunityRequest {
 pub struct ActivityOpportunitiesState {
     lock: Arc<Mutex<()>>,
     analysis_lock: Arc<Mutex<()>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SanitizedTelemetryFailure {
+    stage: &'static str,
+    reason: &'static str,
+}
+
+struct DiscoveryRunFailure {
+    error: String,
+    telemetry: SanitizedTelemetryFailure,
+    tool_call_count: usize,
+}
+
+struct DiscoveryRunSuccess {
+    verified: Vec<VerifiedSkill>,
+    range_history: PersistedActivityHistory,
+    tool_call_count: usize,
+}
+
+fn track_opportunity_event(app: &AppHandle, event: &'static str, properties: Value) {
+    if let Some(analytics) = app.try_state::<std::sync::Arc<crate::analytics::AnalyticsManager>>() {
+        let analytics = std::sync::Arc::clone(&analytics);
+        tauri::async_runtime::spawn(async move {
+            if let Err(error) = analytics.send_event(event, Some(properties)).await {
+                warn!(%error, event, "activity opportunity telemetry delivery failed");
+            }
+        });
+    }
+}
+
+fn elapsed_millis(elapsed: std::time::Duration) -> u64 {
+    elapsed.as_millis().min(u64::MAX as u128) as u64
+}
+
+fn discovery_run_event_properties(
+    run_id: &str,
+    elapsed: std::time::Duration,
+    outcome: &'static str,
+    tool_call_count: usize,
+    verified_suggestion_count: usize,
+    failure: Option<SanitizedTelemetryFailure>,
+) -> Value {
+    let mut properties = json!({
+        "telemetry_schema_version": 1,
+        "run_id": run_id,
+        "outcome": outcome,
+        "duration_ms": elapsed_millis(elapsed),
+        "requested_range_days": DEFAULT_DISCOVERY_DAYS,
+        "requested_range_seconds": DEFAULT_DISCOVERY_DAYS * 24 * 60 * 60,
+        "tool_call_count": tool_call_count,
+        "verified_suggestion_count": verified_suggestion_count,
+    });
+    if let (Some(object), Some(failure)) = (properties.as_object_mut(), failure) {
+        object.insert("failure_stage".into(), json!(failure.stage));
+        object.insert("reason".into(), json!(failure.reason));
+    }
+    properties
+}
+
+fn skill_draft_run_event_properties(
+    run_id: &str,
+    mode: &'static str,
+    elapsed: std::time::Duration,
+    outcome: &'static str,
+    failure: Option<SanitizedTelemetryFailure>,
+) -> Value {
+    let mut properties = json!({
+        "telemetry_schema_version": 1,
+        "run_id": run_id,
+        "mode": mode,
+        "outcome": outcome,
+        "duration_ms": elapsed_millis(elapsed),
+    });
+    if let (Some(object), Some(failure)) = (properties.as_object_mut(), failure) {
+        object.insert("failure_stage".into(), json!(failure.stage));
+        object.insert("reason".into(), json!(failure.reason));
+    }
+    properties
+}
+
+fn classify_discovery_generation_failure(error: &str) -> SanitizedTelemetryFailure {
+    let normalized = error.to_ascii_lowercase();
+    if normalized.contains("timed out") || normalized.contains("timeout") {
+        SanitizedTelemetryFailure {
+            stage: "agent",
+            reason: "timeout",
+        }
+    } else if normalized.contains("not configured")
+        || normalized.contains("unavailable")
+        || normalized.contains("not available")
+    {
+        SanitizedTelemetryFailure {
+            stage: "agent",
+            reason: "unavailable",
+        }
+    } else if normalized.contains("invalid output")
+        || normalized.contains("invalid json")
+        || normalized.contains("valid json")
+        || normalized.contains("schema")
+        || normalized.contains("remained invalid")
+        || normalized.contains("without first running")
+    {
+        SanitizedTelemetryFailure {
+            stage: "response_validation",
+            reason: "invalid_response",
+        }
+    } else {
+        SanitizedTelemetryFailure {
+            stage: "agent",
+            reason: "agent_error",
+        }
+    }
+}
+
+fn classify_skill_draft_agent_failure(error: &str) -> SanitizedTelemetryFailure {
+    let normalized = error.to_ascii_lowercase();
+    let reason = if normalized.contains("timed out") || normalized.contains("timeout") {
+        "timeout"
+    } else if normalized.contains("not configured")
+        || normalized.contains("unavailable")
+        || normalized.contains("not available")
+    {
+        "unavailable"
+    } else {
+        "agent_error"
+    };
+    SanitizedTelemetryFailure {
+        stage: "agent",
+        reason,
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1976,26 +2109,85 @@ where
 async fn analyze(app: &AppHandle, history: PersistedActivityHistory) -> Result<(), String> {
     let state = app.state::<ActivityOpportunitiesState>();
     let _analysis_guard = state.analysis_lock.lock().await;
+    let run_id = uuid::Uuid::new_v4().to_string();
+    let started_at = Instant::now();
+    track_opportunity_event(
+        app,
+        "activity_opportunity_discovery_run_started",
+        discovery_run_event_properties(&run_id, started_at.elapsed(), "started", 0, 0, None),
+    );
     {
         let _snapshot_guard = state.lock.lock().await;
-        let mut snapshot = read_snapshot(app)?;
+        let mut snapshot = match read_snapshot(app) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                track_opportunity_event(
+                    app,
+                    "activity_opportunity_discovery_run_failed",
+                    discovery_run_event_properties(
+                        &run_id,
+                        started_at.elapsed(),
+                        "failed",
+                        0,
+                        0,
+                        Some(SanitizedTelemetryFailure {
+                            stage: "persistence",
+                            reason: "snapshot_read_failed",
+                        }),
+                    ),
+                );
+                return Err(error);
+            }
+        };
         snapshot.analysis_state = OpportunityAnalysisState::Running;
         snapshot.analysis_error = None;
-        write_snapshot(app, &snapshot)?;
+        if let Err(error) = write_snapshot(app, &snapshot) {
+            track_opportunity_event(
+                app,
+                "activity_opportunity_discovery_run_failed",
+                discovery_run_event_properties(
+                    &run_id,
+                    started_at.elapsed(),
+                    "failed",
+                    0,
+                    0,
+                    Some(SanitizedTelemetryFailure {
+                        stage: "persistence",
+                        reason: "snapshot_write_failed",
+                    }),
+                ),
+            );
+            return Err(error);
+        }
         let _ = app.emit("activity-opportunities-updated", &snapshot);
     }
 
-    let result: Result<Option<(Vec<VerifiedSkill>, PersistedActivityHistory)>, String> = async {
+    let result: Result<Option<DiscoveryRunSuccess>, DiscoveryRunFailure> = async {
         let end = Utc::now();
         let range_history = discovery_range(&history, end);
         if range_history.entries.is_empty() {
             return Ok(None);
         }
         let start = end - Duration::days(DEFAULT_DISCOVERY_DAYS);
-        let (document, tool_trace) = generate_discovery_document(start, end, |prompt| {
-            activity_history::run_discovery_pi(app, prompt)
+        let observed_tool_call_count = Arc::new(AtomicUsize::new(0));
+        let count_for_run = Arc::clone(&observed_tool_call_count);
+        let generated = generate_discovery_document(start, end, |prompt| {
+            let count_for_run = Arc::clone(&count_for_run);
+            async move {
+                let result = activity_history::run_discovery_pi(app, prompt).await;
+                if let Ok(run) = &result {
+                    count_for_run.fetch_add(run.tool_trace.len(), Ordering::Relaxed);
+                }
+                result
+            }
         })
-        .await?;
+        .await;
+        let tool_call_count = observed_tool_call_count.load(Ordering::Relaxed);
+        let (document, tool_trace) = generated.map_err(|error| DiscoveryRunFailure {
+            telemetry: classify_discovery_generation_failure(&error),
+            error,
+            tool_call_count,
+        })?;
         let auditable_trace = tool_trace
             .iter()
             .map(|call| {
@@ -2016,38 +2208,161 @@ async fn analyze(app: &AppHandle, history: PersistedActivityHistory) -> Result<(
             trace = ?auditable_trace,
             "activity opportunities: discovery tool trace"
         );
-        let verified = verify_discovery_document(app, document, &range_history).await?;
-        Ok(Some((verified, range_history)))
+        let verified = verify_discovery_document(app, document, &range_history)
+            .await
+            .map_err(|error| DiscoveryRunFailure {
+                error,
+                telemetry: SanitizedTelemetryFailure {
+                    stage: "evidence_verification",
+                    reason: "verification_failed",
+                },
+                tool_call_count,
+            })?;
+        Ok(Some(DiscoveryRunSuccess {
+            verified,
+            range_history,
+            tool_call_count,
+        }))
     }
     .await;
 
     let _snapshot_guard = state.lock.lock().await;
-    let mut latest = read_snapshot(app)?;
+    let mut latest = match read_snapshot(app) {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            let tool_call_count = result
+                .as_ref()
+                .ok()
+                .and_then(Option::as_ref)
+                .map(|success| success.tool_call_count)
+                .or_else(|| result.as_ref().err().map(|failure| failure.tool_call_count))
+                .unwrap_or(0);
+            track_opportunity_event(
+                app,
+                "activity_opportunity_discovery_run_failed",
+                discovery_run_event_properties(
+                    &run_id,
+                    started_at.elapsed(),
+                    "failed",
+                    tool_call_count,
+                    0,
+                    Some(SanitizedTelemetryFailure {
+                        stage: "persistence",
+                        reason: "snapshot_read_failed",
+                    }),
+                ),
+            );
+            return Err(error);
+        }
+    };
     match result {
-        Ok(verified) => {
-            let next = if let Some((verified, range_history)) = verified {
-                reconcile(latest, verified, &range_history)
-            } else {
-                latest.analysis_state = OpportunityAnalysisState::Ready;
-                latest.generated_at = Some(Utc::now().to_rfc3339());
-                latest.analysis_error = None;
-                latest
-            };
-            write_snapshot(app, &next)?;
+        Ok(success) => {
+            let (next, outcome, tool_call_count, verified_suggestion_count) =
+                if let Some(success) = success {
+                    let verified_suggestion_count = success.verified.len();
+                    (
+                        reconcile(latest, success.verified, &success.range_history),
+                        "completed",
+                        success.tool_call_count,
+                        verified_suggestion_count,
+                    )
+                } else {
+                    latest.analysis_state = OpportunityAnalysisState::Ready;
+                    latest.generated_at = Some(Utc::now().to_rfc3339());
+                    latest.analysis_error = None;
+                    (latest, "skipped", 0, 0)
+                };
+            if let Err(error) = write_snapshot(app, &next) {
+                track_opportunity_event(
+                    app,
+                    "activity_opportunity_discovery_run_failed",
+                    discovery_run_event_properties(
+                        &run_id,
+                        started_at.elapsed(),
+                        "failed",
+                        tool_call_count,
+                        verified_suggestion_count,
+                        Some(SanitizedTelemetryFailure {
+                            stage: "persistence",
+                            reason: "snapshot_write_failed",
+                        }),
+                    ),
+                );
+                return Err(error);
+            }
             let _ = app.emit("activity-opportunities-updated", &next);
             info!(
                 skills = next.skills.len(),
                 unfinished = next.unfinished.len(),
                 "activity opportunities: analysis saved"
             );
+            if outcome == "skipped" {
+                track_opportunity_event(
+                    app,
+                    "activity_opportunity_discovery_run_skipped",
+                    discovery_run_event_properties(
+                        &run_id,
+                        started_at.elapsed(),
+                        outcome,
+                        tool_call_count,
+                        verified_suggestion_count,
+                        Some(SanitizedTelemetryFailure {
+                            stage: "eligibility",
+                            reason: "no_activity_history",
+                        }),
+                    ),
+                );
+            } else {
+                track_opportunity_event(
+                    app,
+                    "activity_opportunity_discovery_run_completed",
+                    discovery_run_event_properties(
+                        &run_id,
+                        started_at.elapsed(),
+                        outcome,
+                        tool_call_count,
+                        verified_suggestion_count,
+                        None,
+                    ),
+                );
+            }
             Ok(())
         }
-        Err(error) => {
+        Err(failure) => {
             latest.analysis_state = OpportunityAnalysisState::Error;
-            latest.analysis_error = Some(error.clone());
-            write_snapshot(app, &latest)?;
+            latest.analysis_error = Some(failure.error.clone());
+            if let Err(error) = write_snapshot(app, &latest) {
+                track_opportunity_event(
+                    app,
+                    "activity_opportunity_discovery_run_failed",
+                    discovery_run_event_properties(
+                        &run_id,
+                        started_at.elapsed(),
+                        "failed",
+                        failure.tool_call_count,
+                        0,
+                        Some(SanitizedTelemetryFailure {
+                            stage: "persistence",
+                            reason: "snapshot_write_failed",
+                        }),
+                    ),
+                );
+                return Err(error);
+            }
             let _ = app.emit("activity-opportunities-updated", &latest);
-            Err(error)
+            track_opportunity_event(
+                app,
+                "activity_opportunity_discovery_run_failed",
+                discovery_run_event_properties(
+                    &run_id,
+                    started_at.elapsed(),
+                    "failed",
+                    failure.tool_call_count,
+                    0,
+                    Some(failure.telemetry),
+                ),
+            );
+            Err(failure.error)
         }
     }
 }
@@ -2566,6 +2881,16 @@ fn current_running_draft(item: &SkillOpportunity) -> Option<&SkillDraft> {
 fn current_draft(item: &SkillOpportunity) -> Option<&SkillDraft> {
     let current = item.current_draft_id.as_deref()?;
     item.drafts.iter().find(|draft| draft.id == current)
+}
+
+fn skill_draft_run_mode(item: &SkillOpportunity, change_request: Option<&str>) -> &'static str {
+    if change_request.is_some() {
+        "revision"
+    } else if current_draft(item).is_some_and(|draft| draft.phase == SkillDraftPhase::Error) {
+        "retry"
+    } else {
+        "create"
+    }
 }
 
 fn running_draft_recovery_delay(
@@ -3182,6 +3507,9 @@ async fn finish_started_skill_draft(
     prepared: activity_history::PreparedSkillDraftRun,
     prompt: String,
     display_message: String,
+    telemetry_run_id: String,
+    telemetry_mode: &'static str,
+    telemetry_started_at: Instant,
 ) {
     let generated = activity_history::run_skill_draft_pi(
         &app,
@@ -3190,16 +3518,36 @@ async fn finish_started_skill_draft(
         prompt,
         display_message,
     )
-    .await
-    .and_then(|raw| normalize_skill_draft(&raw).map(|parsed| parsed.normalized));
-    let result = match generated {
-        Ok(skill_md) => match draft_path(&opportunity_id, &draft_id)
-            .and_then(|path| write_skill_draft(&path, &skill_md))
-        {
-            Ok(()) => Ok(skill_md),
-            Err(error) => Err(error),
+    .await;
+    let (result, run_failure) = match generated {
+        Ok(raw) => match normalize_skill_draft(&raw) {
+            Ok(parsed) => {
+                let skill_md = parsed.normalized;
+                match draft_path(&opportunity_id, &draft_id)
+                    .and_then(|path| write_skill_draft(&path, &skill_md))
+                {
+                    Ok(()) => (Ok(skill_md), None),
+                    Err(error) => (
+                        Err(error),
+                        Some(SanitizedTelemetryFailure {
+                            stage: "persistence",
+                            reason: "draft_storage_failed",
+                        }),
+                    ),
+                }
+            }
+            Err(error) => (
+                Err(error),
+                Some(SanitizedTelemetryFailure {
+                    stage: "response_validation",
+                    reason: "invalid_skill_document",
+                }),
+            ),
         },
-        Err(error) => Err(error),
+        Err(error) => {
+            let telemetry = classify_skill_draft_agent_failure(&error);
+            (Err(error), Some(telemetry))
+        }
     };
 
     let state = app.state::<ActivityOpportunitiesState>();
@@ -3218,9 +3566,48 @@ async fn finish_started_skill_draft(
     match update {
         Ok(snapshot) => {
             let _ = app.emit("activity-opportunities-updated", &snapshot);
+            if let Some(failure) = run_failure {
+                track_opportunity_event(
+                    &app,
+                    "activity_opportunity_skill_draft_run_failed",
+                    skill_draft_run_event_properties(
+                        &telemetry_run_id,
+                        telemetry_mode,
+                        telemetry_started_at.elapsed(),
+                        "failed",
+                        Some(failure),
+                    ),
+                );
+            } else {
+                track_opportunity_event(
+                    &app,
+                    "activity_opportunity_skill_draft_run_completed",
+                    skill_draft_run_event_properties(
+                        &telemetry_run_id,
+                        telemetry_mode,
+                        telemetry_started_at.elapsed(),
+                        "completed",
+                        None,
+                    ),
+                );
+            }
         }
         Err(error) => {
             warn!(%error, %opportunity_id, %draft_id, "activity opportunities: could not persist completed skill draft");
+            track_opportunity_event(
+                &app,
+                "activity_opportunity_skill_draft_run_failed",
+                skill_draft_run_event_properties(
+                    &telemetry_run_id,
+                    telemetry_mode,
+                    telemetry_started_at.elapsed(),
+                    "failed",
+                    Some(SanitizedTelemetryFailure {
+                        stage: "persistence",
+                        reason: "snapshot_update_failed",
+                    }),
+                ),
+            );
         }
     }
 }
@@ -3420,6 +3807,7 @@ pub async fn start_activity_opportunity_skill_draft(
     validate_required("name", &item.name)?;
     validate_required("description", &item.description)?;
 
+    let telemetry_mode = skill_draft_run_mode(item, change_request);
     let private_prompt = skill_draft_prompt(item, change_request);
     let prepared =
         activity_history::prepare_skill_draft_run(&app, crate::pi::SKILL_DRAFT_SYSTEM_PROMPT)?;
@@ -3459,6 +3847,19 @@ pub async fn start_activity_opportunity_skill_draft(
     {
         warn!(%error, %conversation_id, "activity opportunities: could not seed skill draft chat transcript");
     }
+    let telemetry_run_id = uuid::Uuid::new_v4().to_string();
+    let telemetry_started_at = Instant::now();
+    track_opportunity_event(
+        &app,
+        "activity_opportunity_skill_draft_run_started",
+        skill_draft_run_event_properties(
+            &telemetry_run_id,
+            telemetry_mode,
+            telemetry_started_at.elapsed(),
+            "started",
+            None,
+        ),
+    );
     drop(_guard);
 
     let app_for_run = app.clone();
@@ -3472,6 +3873,9 @@ pub async fn start_activity_opportunity_skill_draft(
             prepared,
             prompt,
             display_message,
+            telemetry_run_id,
+            telemetry_mode,
+            telemetry_started_at,
         )
         .await;
     });
@@ -3809,6 +4213,87 @@ mod tests {
     use super::*;
     use std::collections::VecDeque;
     use std::future::ready;
+
+    #[test]
+    fn opportunity_run_telemetry_is_content_free_and_classified() {
+        let private_error = "invalid JSON near PRIVATE MRR TITLE activity-123 frame-456";
+        let failure = classify_discovery_generation_failure(private_error);
+        assert_eq!(
+            failure,
+            SanitizedTelemetryFailure {
+                stage: "response_validation",
+                reason: "invalid_response",
+            }
+        );
+
+        let properties = discovery_run_event_properties(
+            "fresh-run-id",
+            std::time::Duration::from_millis(42),
+            "failed",
+            7,
+            0,
+            Some(failure),
+        );
+        let encoded = serde_json::to_string(&properties).unwrap();
+        assert!(!encoded.contains("PRIVATE MRR TITLE"));
+        assert!(!encoded.contains("activity-123"));
+        assert!(!encoded.contains("frame-456"));
+        assert_eq!(properties["requested_range_days"], DEFAULT_DISCOVERY_DAYS);
+        assert_eq!(properties["tool_call_count"], 7);
+        assert_eq!(properties["failure_stage"], "response_validation");
+        assert_eq!(properties["reason"], "invalid_response");
+
+        let keys = properties
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            keys,
+            BTreeSet::from([
+                "duration_ms",
+                "failure_stage",
+                "outcome",
+                "reason",
+                "requested_range_days",
+                "requested_range_seconds",
+                "run_id",
+                "telemetry_schema_version",
+                "tool_call_count",
+                "verified_suggestion_count",
+            ])
+        );
+    }
+
+    #[test]
+    fn skill_draft_run_telemetry_uses_only_normalized_mode_and_failure() {
+        let private_error = "Provider timed out while drafting PRIVATE SKILL CONTENT";
+        let failure = classify_skill_draft_agent_failure(private_error);
+        let properties = skill_draft_run_event_properties(
+            "fresh-run-id",
+            "retry",
+            std::time::Duration::from_secs(2),
+            "failed",
+            Some(failure),
+        );
+        let encoded = serde_json::to_string(&properties).unwrap();
+
+        assert!(!encoded.contains("PRIVATE SKILL CONTENT"));
+        assert_eq!(properties["mode"], "retry");
+        assert_eq!(properties["failure_stage"], "agent");
+        assert_eq!(properties["reason"], "timeout");
+
+        let mut item = SkillOpportunity::default();
+        assert_eq!(skill_draft_run_mode(&item, None), "create");
+        item.current_draft_id = Some("draft-1".to_string());
+        item.drafts.push(draft("draft-1", SkillDraftPhase::Error));
+        assert_eq!(skill_draft_run_mode(&item, None), "retry");
+        assert_eq!(
+            skill_draft_run_mode(&item, Some("PRIVATE CHANGE REQUEST")),
+            "revision"
+        );
+    }
 
     fn evidence(id: &str) -> OpportunityEvidence {
         OpportunityEvidence {

@@ -158,6 +158,36 @@ beforeEach(() => {
 afterEach(() => vi.clearAllMocks());
 
 describe("direct conversation hydration", () => {
+  it("preserves chat attribution when cold-loading a conversation from disk", async () => {
+    const attributedUser = {
+      ...user,
+      entrySource: "normal_chat" as const,
+      entryCard: "none" as const,
+      prefillSource: "activity-opportunity-created-skill" as const,
+    };
+    loadConversationFile.mockResolvedValueOnce(
+      conversation([attributedUser, completed]),
+    );
+    const { result } = renderHook(() => useHarness());
+
+    await act(async () => {
+      await result.current.hook.loadConversation(conversation([]) as any);
+    });
+
+    expect(result.current.messagesRef.current[0]).toMatchObject({
+      entrySource: "normal_chat",
+      entryCard: "none",
+      prefillSource: "activity-opportunity-created-skill",
+    });
+    expect(
+      (useChatStore.getState().sessions["chat-target"].messages as any[])[0],
+    ).toMatchObject({
+      entrySource: "normal_chat",
+      entryCard: "none",
+      prefillSource: "activity-opportunity-created-skill",
+    });
+  });
+
   it("adopts a completed persisted reply over an unhydrated in-memory placeholder", async () => {
     seedStore([user, placeholder]);
     loadConversationFile.mockResolvedValueOnce(conversation([user, completed]));

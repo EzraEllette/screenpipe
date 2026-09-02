@@ -29,7 +29,10 @@ import {
 } from "@/components/chat/standalone/hooks/pi-message-preparation";
 import type { ChatSendOptions, Message } from "@/lib/chat/types";
 import { normalizeComposerMentionsForModel } from "@/lib/chat-utils";
-import { chatSendTelemetryContext } from "@/lib/chat/response-feedback";
+import {
+  chatSendOptionsWithPrefillSource,
+  chatSendTelemetryContext,
+} from "@/lib/chat/response-feedback";
 import type { PiSendTransportOptions } from "@/components/chat/standalone/hooks/pi-types";
 import type { ResolvedPiProviderConfig } from "@/components/chat/standalone/hooks/use-pi-session-lifecycle";
 
@@ -265,6 +268,7 @@ export function usePiSendTransport(options: PiSendTransportOptions) {
     setPiStarting,
     setPrefillContext,
     setPrefillFrameId,
+    setPrefillSource,
     setRunningConfigFromProviderConfig,
     settings,
     stagePendingAttachments,
@@ -692,6 +696,9 @@ export function usePiSendTransport(options: PiSendTransportOptions) {
       ...(consumedAttachments ? { attachments: consumedAttachments } : {}),
       ...(sendOptions?.entrySource ? { entrySource: sendOptions.entrySource } : {}),
       ...(sendOptions?.entryCard ? { entryCard: sendOptions.entryCard } : {}),
+      ...(sendOptions?.prefillSource
+        ? { prefillSource: sendOptions.prefillSource }
+        : {}),
       timestamp: Date.now(),
     };
 
@@ -826,8 +833,9 @@ export function usePiSendTransport(options: PiSendTransportOptions) {
 
       // The context is already part of `userMessage`; retire the composer
       // banner now that the durable turn owns it.
-      if (prefillContext) {
-        if (isAttemptForeground()) setPrefillContext(null);
+      if (prefillContext !== null && isAttemptForeground()) {
+        setPrefillContext(null);
+        setPrefillSource("search");
       }
 
       for (const img of outgoingImages) {
@@ -1031,6 +1039,12 @@ export function usePiSendTransport(options: PiSendTransportOptions) {
           isStreaming: false,
         });
       }
+      posthog.capture("chat_response_error", {
+        provider: attemptPreset?.provider,
+        model: attemptPreset?.model,
+        error_type: "prompt_transport",
+        ...chatSendTelemetryContext(sendOptions, messageIndex, messages),
+      });
       if (isAttemptForeground()) forceQueueModeRef.current = false;
       finishAttempt();
     }
@@ -1087,6 +1101,10 @@ export function usePiSendTransport(options: PiSendTransportOptions) {
     const outgoingImages = imageDataUrls ?? pastedImages;
     const queuedDocs = attachedDocsRef.current;
     if (!trimmed && outgoingImages.length === 0 && queuedDocs.length === 0) return;
+    const effectiveSendOptions = chatSendOptionsWithPrefillSource(
+      sendOptions,
+      prefillSource,
+    );
 
     // Fold any attached documents into the outgoing turn. The extracted
     // text rides in `content` (what the model sees, kept for
@@ -1161,7 +1179,12 @@ export function usePiSendTransport(options: PiSendTransportOptions) {
     sendDispatchInFlightRef.current = true;
     try {
       // All providers route through Pi agent
-      return await sendPiMessage(outgoingMessage, outgoingDisplay, imageDataUrls, sendOptions);
+      return await sendPiMessage(
+        outgoingMessage,
+        outgoingDisplay,
+        imageDataUrls,
+        effectiveSendOptions,
+      );
     } catch (e) {
       restoreDocsOnError(e);
     } finally {

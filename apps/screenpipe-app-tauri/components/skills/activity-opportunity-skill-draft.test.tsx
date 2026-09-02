@@ -21,7 +21,12 @@ const mocks = vi.hoisted(() => ({
   openChatConversationInCurrentChatSurface: vi.fn(),
   getAppServerBaseUrl: vi.fn(),
   toast: vi.fn(),
+  posthogCapture: vi.fn(),
   eventHandlers: new Map<string, (event: { payload: unknown }) => void>(),
+}));
+
+vi.mock("posthog-js", () => ({
+  default: { capture: mocks.posthogCapture },
 }));
 
 vi.mock("@/lib/utils/tauri", () => ({
@@ -231,6 +236,7 @@ describe("activity opportunity skill draft", () => {
       .mockReset()
       .mockResolvedValue("http://localhost:11535");
     mocks.toast.mockReset();
+    mocks.posthogCapture.mockReset();
   });
 
   afterEach(() => {
@@ -376,6 +382,17 @@ describe("activity opportunity skill draft", () => {
     expect(screen.getByTestId("skill-draft-editor")).toHaveAttribute(
       "data-installed",
       "true",
+    );
+    expect(mocks.posthogCapture).toHaveBeenCalledWith(
+      "activity_opportunity_skill_draft_edited",
+      { phase: "ready" },
+    );
+    expect(mocks.posthogCapture).toHaveBeenCalledWith(
+      "activity_opportunity_skill_install",
+      expect.objectContaining({ result: "completed" }),
+    );
+    expect(JSON.stringify(mocks.posthogCapture.mock.calls)).not.toContain(
+      "Check the weekly change",
     );
   });
 
@@ -646,9 +663,15 @@ describe("activity opportunity skill draft", () => {
         source: "activity-opportunity-skill-test",
         useHomeChat: true,
         conversationId: expect.any(String),
-        filePreviewPath:
-          "/data/skill-drafts/opportunity-1/draft-1/SKILL.md",
+        filePreviewPath: "/data/skill-drafts/opportunity-1/draft-1/SKILL.md",
       }),
+    );
+    expect(mocks.posthogCapture).toHaveBeenCalledWith(
+      "activity_opportunity_skill_test",
+      expect.objectContaining({ result: "completed" }),
+    );
+    expect(JSON.stringify(mocks.posthogCapture.mock.calls)).not.toContain(
+      "verify today's MRR",
     );
   });
 
@@ -682,6 +705,13 @@ describe("activity opportunity skill draft", () => {
       revision: 6,
       changeRequest: "include weekly growth",
     });
+    expect(mocks.posthogCapture).toHaveBeenCalledWith(
+      "activity_opportunity_skill_revision",
+      expect.objectContaining({ source: "draft", result: "completed" }),
+    );
+    expect(JSON.stringify(mocks.posthogCapture.mock.calls)).not.toContain(
+      "include weekly growth",
+    );
   });
 
   it("retries a failed draft in a fresh chat with the latest revision", async () => {

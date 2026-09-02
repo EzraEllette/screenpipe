@@ -34,7 +34,12 @@ const mocks = vi.hoisted(() => ({
   setActivityOpportunitySkillEnabled: vi.fn(),
   handoffActivityOpportunity: vi.fn(),
   showChatWithPrefill: vi.fn(async () => null),
+  posthogCapture: vi.fn(),
   eventHandlers: new Map<string, (event: { payload: unknown }) => void>(),
+}));
+
+vi.mock("posthog-js", () => ({
+  default: { capture: mocks.posthogCapture },
 }));
 
 vi.mock("@/lib/utils/tauri", async (importOriginal) => {
@@ -543,6 +548,20 @@ describe("BrainOpportunities", () => {
       "3",
     );
     await waitFor(() => expect(onCountChange).toHaveBeenLastCalledWith(5));
+    expect(mocks.posthogCapture).toHaveBeenCalledWith(
+      "activity_opportunity_viewed",
+      {
+        group: "ideas",
+        analysis_state: "ready",
+        skill_idea_count: 3,
+        skill_draft_count: 0,
+        created_skill_count: 0,
+        unfinished_count: 2,
+      },
+    );
+    expect(screen.getByTestId("brain-opportunities")).toHaveClass(
+      "ph-no-capture",
+    );
   });
 
   it("ranks skills by occurrences instead of supporting activity rows", async () => {
@@ -691,24 +710,14 @@ describe("BrainOpportunities", () => {
       { activityIds: ["activity-102"] },
     ];
     grouped.evidence = [
-      evidence(
-        "activity-103",
-        "Grouped one",
-        "Cursor",
-        "2026-08-15T10:00:00Z",
-      ),
+      evidence("activity-103", "Grouped one", "Cursor", "2026-08-15T10:00:00Z"),
       evidence(
         "activity-106",
         "Overlapping one",
         "Cursor",
         "2026-08-15T10:00:00Z",
       ),
-      evidence(
-        "activity-107",
-        "Grouped two",
-        "Cursor",
-        "2026-08-16T10:00:00Z",
-      ),
+      evidence("activity-107", "Grouped two", "Cursor", "2026-08-16T10:00:00Z"),
       evidence(
         "activity-108",
         "Overlapping two",
@@ -827,6 +836,35 @@ describe("BrainOpportunities", () => {
     expect(screen.getByTestId("opportunities-tab-ideas")).toHaveTextContent(
       "3",
     );
+    expect(mocks.posthogCapture).toHaveBeenCalledWith(
+      "activity_opportunity_skill_opened",
+      expect.objectContaining({
+        destination: "detail",
+        status: "pending",
+        rank: 1,
+        result: "completed",
+      }),
+    );
+    expect(mocks.posthogCapture).toHaveBeenCalledWith(
+      "activity_opportunity_skill_source_changed",
+      expect.objectContaining({
+        action: "excluded",
+        source_type: "discovered_activity",
+        result: "completed",
+      }),
+    );
+    expect(mocks.posthogCapture).toHaveBeenCalledWith(
+      "activity_opportunity_skill_draft_requested",
+      expect.objectContaining({
+        result: "completed",
+        occurrence_count: 2,
+        evidence_count: 2,
+        has_notes: true,
+      }),
+    );
+    expect(JSON.stringify(mocks.posthogCapture.mock.calls)).not.toContain(
+      "Keep the final customer reply short",
+    );
   });
 
   it("requires a goal and hands the finalized brief to one fresh chat", async () => {
@@ -867,6 +905,16 @@ describe("BrainOpportunities", () => {
       conversationId: handoff.conversationId,
     });
     expect(screen.queryByTestId("opportunity-agent-progress")).toBeNull();
+    expect(mocks.posthogCapture).toHaveBeenCalledWith(
+      "activity_opportunity_unfinished_handoff",
+      expect.objectContaining({
+        result: "completed",
+        evidence_count: 1,
+      }),
+    );
+    expect(JSON.stringify(mocks.posthogCapture.mock.calls)).not.toContain(
+      "The reporter has a sent reply",
+    );
   });
 
   it("persists reversible not-unfinished feedback", async () => {
@@ -1064,10 +1112,7 @@ describe("BrainOpportunities", () => {
       within(sourceEvidence).getByRole("link", {
         name: /Open Stripe .* in Timeline/i,
       }),
-    ).toHaveAttribute(
-      "href",
-      "screenpipe://frame/7001",
-    );
+    ).toHaveAttribute("href", "screenpipe://frame/7001");
     expect(
       within(sourceEvidence).getByRole("link", {
         name: /Open PostHog .* in Timeline/i,

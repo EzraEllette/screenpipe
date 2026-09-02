@@ -182,7 +182,7 @@ export function SkillDraftEditor({
     <section
       aria-label="skill draft"
       className={cn(
-        "flex min-h-0 flex-col overflow-hidden bg-background",
+        "ph-no-capture flex min-h-0 flex-col overflow-hidden bg-background",
         className,
       )}
     >

@@ -11,6 +11,11 @@ import {
   openChatConversationInCurrentChatSurface,
   showChatWithPrefill,
 } from "@/lib/chat-utils";
+import {
+  activityOpportunityDuration,
+  activityOpportunityErrorKind,
+  captureActivityOpportunityEvent,
+} from "@/lib/analytics/activity-opportunities";
 import { useTauriEvent } from "@/lib/hooks/use-tauri-event";
 import {
   commands,
@@ -136,6 +141,8 @@ export function ActivityOpportunitySkillDraft({
   const [justInstalled, setJustInstalled] = useState(false);
   const [installing, setInstalling] = useState(false);
   const installingRef = useRef(false);
+  const editCapturedRef = useRef(false);
+  const openCapturedRef = useRef(false);
 
   markdownRef.current = markdown;
   draftPhaseRef.current = draft.phase;
@@ -257,6 +264,13 @@ export function ActivityOpportunitySkillDraft({
   const editMarkdown = useCallback(
     (nextMarkdown: string) => {
       if (installingRef.current) return;
+      if (!editCapturedRef.current && nextMarkdown !== markdownRef.current) {
+        editCapturedRef.current = true;
+        captureActivityOpportunityEvent(
+          "activity_opportunity_skill_draft_edited",
+          { phase: "ready" },
+        );
+      }
       setMarkdown(nextMarkdown);
       if (
         draft.phase === "ready" &&
@@ -271,6 +285,7 @@ export function ActivityOpportunitySkillDraft({
   const testSkill = useCallback(
     async (objective: string) => {
       if (installingRef.current) return;
+      const startedAt = performance.now();
       const testConversationId = crypto.randomUUID();
       try {
         await flushDraft();
@@ -287,7 +302,16 @@ export function ActivityOpportunitySkillDraft({
         if (!openedConversationId) {
           throw new Error("The test chat was not created");
         }
+        captureActivityOpportunityEvent("activity_opportunity_skill_test", {
+          result: "completed",
+          duration_ms: activityOpportunityDuration(startedAt),
+        });
       } catch (error) {
+        captureActivityOpportunityEvent("activity_opportunity_skill_test", {
+          result: "failed",
+          duration_ms: activityOpportunityDuration(startedAt),
+          error_kind: activityOpportunityErrorKind(error),
+        });
         toast({
           title: "skill test could not start",
           description: errorMessage(error),
@@ -300,6 +324,7 @@ export function ActivityOpportunitySkillDraft({
 
   const installSkill = useCallback(async () => {
     if (installingRef.current) return;
+    const startedAt = performance.now();
     installingRef.current = true;
     setInstalling(true);
     try {
@@ -313,8 +338,17 @@ export function ActivityOpportunitySkillDraft({
         }),
       );
       setJustInstalled(true);
+      captureActivityOpportunityEvent("activity_opportunity_skill_install", {
+        result: "completed",
+        duration_ms: activityOpportunityDuration(startedAt),
+      });
       toast({ title: "skill installed" });
     } catch (error) {
+      captureActivityOpportunityEvent("activity_opportunity_skill_install", {
+        result: "failed",
+        duration_ms: activityOpportunityDuration(startedAt),
+        error_kind: activityOpportunityErrorKind(error),
+      });
       setSaveState(
         markdownRef.current === savedMarkdownRef.current ? "saved" : "error",
       );
@@ -332,6 +366,7 @@ export function ActivityOpportunitySkillDraft({
   const requestChange = useCallback(
     async (changeRequest: string) => {
       if (installingRef.current) return;
+      const startedAt = performance.now();
       try {
         await flushDraft();
         const latest = await latestOpportunity();
@@ -346,7 +381,18 @@ export function ActivityOpportunitySkillDraft({
           nextDraft.conversationId,
           nextDraft.path,
         );
+        captureActivityOpportunityEvent("activity_opportunity_skill_revision", {
+          source: "draft",
+          result: "completed",
+          duration_ms: activityOpportunityDuration(startedAt),
+        });
       } catch (error) {
+        captureActivityOpportunityEvent("activity_opportunity_skill_revision", {
+          source: "draft",
+          result: "failed",
+          duration_ms: activityOpportunityDuration(startedAt),
+          error_kind: activityOpportunityErrorKind(error),
+        });
         toast({
           title: "skill revision could not start",
           description: errorMessage(error),
@@ -361,6 +407,7 @@ export function ActivityOpportunitySkillDraft({
     async (changeRequest?: string) => {
       const requestedChange = changeRequest?.trim();
       if (opportunity.status === "created" && !requestedChange) return;
+      const startedAt = performance.now();
       try {
         const latest = await latestOpportunity();
         const nextDraft = await commandData(
@@ -374,7 +421,24 @@ export function ActivityOpportunitySkillDraft({
           nextDraft.conversationId,
           nextDraft.path,
         );
+        captureActivityOpportunityEvent(
+          "activity_opportunity_skill_draft_retry",
+          {
+            requires_change: opportunity.status === "created",
+            result: "completed",
+            duration_ms: activityOpportunityDuration(startedAt),
+          },
+        );
       } catch (error) {
+        captureActivityOpportunityEvent(
+          "activity_opportunity_skill_draft_retry",
+          {
+            requires_change: opportunity.status === "created",
+            result: "failed",
+            duration_ms: activityOpportunityDuration(startedAt),
+            error_kind: activityOpportunityErrorKind(error),
+          },
+        );
         toast({
           title: "skill draft could not restart",
           description: errorMessage(error),
@@ -393,12 +457,30 @@ export function ActivityOpportunitySkillDraft({
   const isDraftConversation = conversationId === draft.conversationId;
   const openCurrentDraft = useCallback(async () => {
     if (!currentDraft || currentDraft.id === draft.id) return;
+    const startedAt = performance.now();
     try {
       await openChatConversationInCurrentChatSurface(
         currentDraft.conversationId,
         currentDraft.path,
       );
+      captureActivityOpportunityEvent(
+        "activity_opportunity_skill_draft_chat_opened",
+        {
+          destination: "current_draft",
+          result: "completed",
+          duration_ms: activityOpportunityDuration(startedAt),
+        },
+      );
     } catch (error) {
+      captureActivityOpportunityEvent(
+        "activity_opportunity_skill_draft_chat_opened",
+        {
+          destination: "current_draft",
+          result: "failed",
+          duration_ms: activityOpportunityDuration(startedAt),
+          error_kind: activityOpportunityErrorKind(error),
+        },
+      );
       toast({
         title: "current skill draft could not open",
         description: errorMessage(error),
@@ -407,12 +489,30 @@ export function ActivityOpportunitySkillDraft({
     }
   }, [currentDraft, draft.id]);
   const openDraftChat = useCallback(async () => {
+    const startedAt = performance.now();
     try {
       await openChatConversationInCurrentChatSurface(
         draft.conversationId,
         draft.path,
       );
+      captureActivityOpportunityEvent(
+        "activity_opportunity_skill_draft_chat_opened",
+        {
+          destination: "draft_chat",
+          result: "completed",
+          duration_ms: activityOpportunityDuration(startedAt),
+        },
+      );
     } catch (error) {
+      captureActivityOpportunityEvent(
+        "activity_opportunity_skill_draft_chat_opened",
+        {
+          destination: "draft_chat",
+          result: "failed",
+          duration_ms: activityOpportunityDuration(startedAt),
+          error_kind: activityOpportunityErrorKind(error),
+        },
+      );
       toast({
         title: "skill draft chat could not open",
         description: errorMessage(error),
@@ -430,6 +530,36 @@ export function ActivityOpportunitySkillDraft({
     draft.phase === "ready" &&
     opportunity.createdSkill?.skillMd === draft.skillMd &&
     (opportunity.drafts?.length ?? 0) <= 1;
+  const installed =
+    isCurrentDraft &&
+    (justInstalled ||
+      installedDraftId === draft.id ||
+      legacyInstalledCurrentDraft);
+
+  useEffect(() => {
+    if (openCapturedRef.current) return;
+    openCapturedRef.current = true;
+    captureActivityOpportunityEvent("activity_opportunity_skill_draft_opened", {
+      phase: draft.phase,
+        presentation: historical
+          ? "historical"
+          : detached
+            ? "detached"
+            : installed
+              ? "installed"
+              : "active",
+      evidence_count: opportunity.evidence.filter((item) => !item.excluded)
+        .length,
+      supporting_context_count: (opportunity.supportingContexts ?? []).length,
+    });
+  }, [
+    detached,
+    draft.phase,
+    historical,
+    installed,
+    opportunity.evidence,
+    opportunity.supportingContexts,
+  ]);
 
   return (
     <SkillDraftEditor
@@ -450,13 +580,8 @@ export function ActivityOpportunitySkillDraft({
       detached={detached}
       onOpenDraftChat={openDraftChat}
       sources={sources}
-      installed={
-        isCurrentDraft &&
-        (justInstalled ||
-          installedDraftId === draft.id ||
-          legacyInstalledCurrentDraft)
-      }
-      className="min-h-0 flex-1"
+      installed={installed}
+      className="ph-no-capture min-h-0 flex-1"
     />
   );
 }

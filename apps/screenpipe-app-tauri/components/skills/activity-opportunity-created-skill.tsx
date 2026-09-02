@@ -10,6 +10,11 @@ import { activityOpportunitySkillSources } from "@/components/skills/activity-op
 import { toast } from "@/components/ui/use-toast";
 import { openChatConversationInCurrentChatSurface } from "@/lib/chat-utils";
 import {
+  activityOpportunityDuration,
+  activityOpportunityErrorKind,
+  captureActivityOpportunityEvent,
+} from "@/lib/analytics/activity-opportunities";
+import {
   commands,
   type ActivityOpportunitySnapshot,
   type CreatedSkill,
@@ -78,6 +83,7 @@ export function ActivityOpportunityCreatedSkill({
   const [enabled, setEnabled] = useState(createdSkill.enabled);
   const [pending, setPending] = useState(false);
   const opportunityRevisionRef = useRef(opportunity.revision);
+  const openCapturedRef = useRef(false);
   const sources = useMemo(
     () => activityOpportunitySkillSources(opportunity),
     [opportunity],
@@ -87,6 +93,24 @@ export function ActivityOpportunityCreatedSkill({
     opportunityRevisionRef.current = opportunity.revision;
     setEnabled(createdSkill.enabled);
   }, [createdSkill.enabled, opportunity.revision]);
+
+  useEffect(() => {
+    if (openCapturedRef.current) return;
+    openCapturedRef.current = true;
+    captureActivityOpportunityEvent(
+      "activity_opportunity_created_skill_opened",
+      {
+        enabled: createdSkill.enabled,
+        evidence_count: opportunity.evidence.filter((item) => !item.excluded)
+          .length,
+        supporting_context_count: (opportunity.supportingContexts ?? []).length,
+      },
+    );
+  }, [
+    createdSkill.enabled,
+    opportunity.evidence,
+    opportunity.supportingContexts,
+  ]);
 
   const latestOpportunity = useCallback(async () => {
     const snapshot = await commandData(commands.getActivityOpportunities());
@@ -100,6 +124,7 @@ export function ActivityOpportunityCreatedSkill({
   const setSkillEnabled = useCallback(
     async (nextEnabled: boolean) => {
       if (pending) return;
+      const startedAt = performance.now();
       setPending(true);
       try {
         const latest = await latestOpportunity();
@@ -114,7 +139,24 @@ export function ActivityOpportunityCreatedSkill({
         if (opportunityRevisionRef.current === requestRevision) {
           setEnabled(updated.enabled ?? nextEnabled);
         }
+        captureActivityOpportunityEvent(
+          "activity_opportunity_created_skill_enabled",
+          {
+            enabled: updated.enabled ?? nextEnabled,
+            result: "completed",
+            duration_ms: activityOpportunityDuration(startedAt),
+          },
+        );
       } catch (error) {
+        captureActivityOpportunityEvent(
+          "activity_opportunity_created_skill_enabled",
+          {
+            enabled: nextEnabled,
+            result: "failed",
+            duration_ms: activityOpportunityDuration(startedAt),
+            error_kind: activityOpportunityErrorKind(error),
+          },
+        );
         toast({
           title: "skill status was not changed",
           description: errorMessage(error),
@@ -130,6 +172,7 @@ export function ActivityOpportunityCreatedSkill({
   const requestChange = useCallback(
     async (changeRequest: string) => {
       if (pending) return;
+      const startedAt = performance.now();
       setPending(true);
       try {
         const latest = await latestOpportunity();
@@ -144,7 +187,18 @@ export function ActivityOpportunityCreatedSkill({
           nextDraft.conversationId,
           nextDraft.path,
         );
+        captureActivityOpportunityEvent("activity_opportunity_skill_revision", {
+          source: "created_skill",
+          result: "completed",
+          duration_ms: activityOpportunityDuration(startedAt),
+        });
       } catch (error) {
+        captureActivityOpportunityEvent("activity_opportunity_skill_revision", {
+          source: "created_skill",
+          result: "failed",
+          duration_ms: activityOpportunityDuration(startedAt),
+          error_kind: activityOpportunityErrorKind(error),
+        });
         toast({
           title: "skill revision could not start",
           description: errorMessage(error),
@@ -158,9 +212,25 @@ export function ActivityOpportunityCreatedSkill({
   );
 
   const revealInstallLocation = useCallback(async () => {
+    const startedAt = performance.now();
     try {
       await commandData(commands.revealInDefaultBrowser(createdSkill.path));
+      captureActivityOpportunityEvent(
+        "activity_opportunity_created_skill_location_opened",
+        {
+          result: "completed",
+          duration_ms: activityOpportunityDuration(startedAt),
+        },
+      );
     } catch (error) {
+      captureActivityOpportunityEvent(
+        "activity_opportunity_created_skill_location_opened",
+        {
+          result: "failed",
+          duration_ms: activityOpportunityDuration(startedAt),
+          error_kind: activityOpportunityErrorKind(error),
+        },
+      );
       toast({
         title: "skill location could not be opened",
         description: errorMessage(error),
@@ -180,7 +250,7 @@ export function ActivityOpportunityCreatedSkill({
       onEnabledChange={setSkillEnabled}
       onRevealInstallLocation={revealInstallLocation}
       onRequestChange={requestChange}
-      className="min-h-0 flex-1"
+      className="ph-no-capture min-h-0 flex-1"
     />
   );
 }

@@ -283,7 +283,7 @@ export function ActivityContextPicker({
           </Button>
         )}
       </DialogTrigger>
-      <DialogContent className="max-w-3xl gap-0 overflow-hidden p-0">
+      <DialogContent className="ph-no-capture max-w-3xl gap-0 overflow-hidden p-0">
         <DialogHeader className="border-b border-border px-5 py-4 pr-12">
           <DialogTitle>add activity</DialogTitle>
           <DialogDescription>

@@ -379,6 +379,40 @@ describe("pi-event-router: browser state preservation", () => {
   });
 });
 
+describe("pi-event-router: chat attribution persistence", () => {
+  beforeEach(reset);
+
+  it("keeps coarse origin markers when a background turn completes", async () => {
+    seed("A", {
+      messages: [
+        {
+          id: "u1",
+          role: "user",
+          content: "private skill question",
+          timestamp: 1,
+          entrySource: "normal_chat",
+          entryCard: "none",
+          prefillSource: "activity-opportunity-created-skill",
+        },
+      ],
+      messageCount: 1,
+      isLoading: true,
+      isStreaming: true,
+    });
+    useChatStore.setState({ currentId: "B" });
+
+    handleTerminated({ sessionId: "A", source: "pi", exitCode: 0 });
+    await flushPendingSaves();
+
+    const saved = (saveConversationFile as any).mock.calls.at(-1)[0];
+    expect(saved.messages[0]).toMatchObject({
+      entrySource: "normal_chat",
+      entryCard: "none",
+      prefillSource: "activity-opportunity-created-skill",
+    });
+  });
+});
+
 describe("pi-event-router: background content accumulation (the parallel-chat repro)", () => {
   beforeEach(reset);
 

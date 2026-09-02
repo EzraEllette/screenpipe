@@ -129,6 +129,10 @@ export interface ChatPrefillData {
   /** Base64 image data URLs to attach to the next chat turn. */
   images?: string[];
   autoSend?: boolean;
+  /**
+   * Local context label. Only explicit values allowlisted by chat telemetry
+   * are emitted as the content-free `prefill_source` property.
+   */
   source?: string;
   /** Open the Home window chat instead of the Chat overlay. */
   useHomeChat?: boolean;

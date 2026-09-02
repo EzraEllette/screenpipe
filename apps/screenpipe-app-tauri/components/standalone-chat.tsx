@@ -1229,6 +1229,7 @@ export function StandaloneChat({
     setPiStarting,
     setPrefillContext,
     setPrefillFrameId,
+    setPrefillSource,
     setRunningConfigFromProviderConfig,
     settings: rolloutSettings,
     stagePendingAttachments,
@@ -2418,6 +2419,7 @@ export function StandaloneChat({
           onClear: () => {
             setPrefillContext(null);
             setPrefillFrameId(null);
+            setPrefillSource("search");
           },
           onClearFrame: () => setPrefillFrameId(null),
         }}

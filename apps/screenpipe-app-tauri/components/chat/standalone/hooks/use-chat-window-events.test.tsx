@@ -182,6 +182,7 @@ describe("chat prefill artifact handoff", () => {
           context: "skill context",
           prompt: "Test objective: check MRR",
           autoSend: true,
+          source: "activity-opportunity-skill-test",
           targetWindow: "home",
           conversationId: "skill-test-chat",
           filePreviewPath:
@@ -191,6 +192,12 @@ describe("chat prefill artifact handoff", () => {
     });
 
     await waitFor(() => expect(sendMessage).toHaveBeenCalledOnce());
+    expect(sendMessage).toHaveBeenCalledWith(
+      "skill context\n\nTest objective: check MRR",
+      "Test objective: check MRR",
+      [],
+      { prefillSource: "activity-opportunity-skill-test" },
+    );
     expect(openFilePreview).toHaveBeenCalledWith(
       "/data/skill-drafts/opportunity-1/draft-1/SKILL.md",
       "hidden",
@@ -198,6 +205,52 @@ describe("chat prefill artifact handoff", () => {
     );
     expect(useChatStore.getState().currentId).toBe("skill-test-chat");
     expect(useChatStore.getState().splitChatId).toBeNull();
+  });
+
+  it("does not forward an arbitrary prefill source into chat telemetry", async () => {
+    const sendMessage = vi.fn(async () => undefined);
+
+    renderHook(() =>
+      useChatPrefillListener({
+        setIsPreparingPrefill: vi.fn(),
+        setPrefillContext: vi.fn(),
+        setPrefillFrameId: vi.fn(),
+        setPrefillSource: vi.fn(),
+        setPastedImages: vi.fn(),
+        setInput: vi.fn(),
+        inputRef: { current: document.createElement("textarea") },
+        piStreamingTextRef: { current: "" },
+        piMessageIdRef: { current: null },
+        piContentBlocksRef: { current: [] },
+        optimisticSteerRef: { current: null },
+        piLastErrorRef: { current: null },
+        piSessionIdRef: { current: "new-chat" },
+        piSessionSyncedRef: { current: false },
+        autoSendBypassRef: { current: false },
+        sendMessageRef: { current: sendMessage },
+        setIsLoading: vi.fn(),
+        setIsStreaming: vi.fn(),
+        setMessages: vi.fn(),
+        setConversationId: vi.fn(),
+        openFilePreview: vi.fn(),
+      }),
+    );
+
+    await waitFor(() => expect(mocks.listeners.has("chat-prefill")).toBe(true));
+    act(() => {
+      mocks.listeners.get("chat-prefill")?.({
+        payload: {
+          context: "private context",
+          prompt: "private prompt",
+          autoSend: true,
+          source: "customer-secret-project",
+          targetWindow: "home",
+        },
+      });
+    });
+
+    await waitFor(() => expect(sendMessage).toHaveBeenCalledOnce());
+    expect(sendMessage.mock.calls[0]?.[3]).toBeUndefined();
   });
 });
 

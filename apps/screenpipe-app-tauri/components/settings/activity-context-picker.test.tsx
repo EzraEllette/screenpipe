@@ -144,6 +144,7 @@ describe("ActivityContextPicker", () => {
     render(<ActivityContextPicker onSelect={onSelect} />);
     fireEvent.click(screen.getByRole("button", { name: "add activity" }));
 
+    expect(screen.getByRole("dialog")).toHaveClass("ph-no-capture");
     await waitFor(() => expect(mocks.getActivityHistory).toHaveBeenCalled());
     const input = screen.getByRole("textbox", { name: "search activities" });
     expect(await screen.findByText("type to search activities")).toBeVisible();

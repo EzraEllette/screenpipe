@@ -149,6 +149,23 @@ describe("cross-window transcript sync", () => {
     expect(runtime.images).toEqual(["data:image/png;base64,abc"]);
   });
 
+  it("keeps coarse chat attribution while hydrating another window", () => {
+    const [runtime] = toRuntimeMessages([
+      {
+        ...user,
+        entrySource: "home_card",
+        entryCard: "day_recap",
+        prefillSource: "activity-opportunity-skill-test",
+      },
+    ]);
+
+    expect(runtime).toMatchObject({
+      entrySource: "home_card",
+      entryCard: "day_recap",
+      prefillSource: "activity-opportunity-skill-test",
+    });
+  });
+
   it("recovers the stable assistant identity for an active sibling turn", () => {
     const active = synchronizedActiveTurn(
       [

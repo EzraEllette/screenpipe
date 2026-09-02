@@ -7,6 +7,7 @@ import type {
   ChatComposerOrigin,
   ChatEntryCard,
   ChatEntrySource,
+  ChatPrefillTelemetrySource,
   ChatResponsePosition,
   ChatSendOptions,
   ChatSuggestionAuthorship,
@@ -39,6 +40,7 @@ export type ChatTelemetryContext = {
   entry_source: ChatEntrySource;
   entry_card: ChatEntryCard;
   response_position: ChatResponsePosition;
+  prefill_source?: ChatPrefillTelemetrySource;
 };
 
 /** Send-side context. Authorship only exists at send time — a response has no
@@ -61,6 +63,38 @@ const SAFE_ENTRY_CARDS = new Set<ChatEntryCard>([
   "none",
 ]);
 
+const SAFE_PREFILL_SOURCES = new Set<ChatPrefillTelemetrySource>([
+  "activity-opportunity-skill-test",
+  "activity-opportunity-created-skill",
+  "library-unfinished-work",
+]);
+
+export function normalizeChatPrefillTelemetrySource(
+  value: unknown,
+): ChatPrefillTelemetrySource | undefined {
+  return typeof value === "string" &&
+    SAFE_PREFILL_SOURCES.has(value as ChatPrefillTelemetrySource)
+    ? (value as ChatPrefillTelemetrySource)
+    : undefined;
+}
+
+/**
+ * Add a composer prefill origin to a send without trusting the generic local
+ * context label. Explicit send options win, but both inputs pass through the
+ * same static allowlist before they can be persisted or emitted.
+ */
+export function chatSendOptionsWithPrefillSource(
+  options: ChatSendOptions | undefined,
+  composerPrefillSource: unknown,
+): ChatSendOptions | undefined {
+  const { prefillSource: explicitPrefillSource, ...rest } = options ?? {};
+  const prefillSource =
+    normalizeChatPrefillTelemetrySource(explicitPrefillSource) ??
+    normalizeChatPrefillTelemetrySource(composerPrefillSource);
+  if (!options && !prefillSource) return undefined;
+  return prefillSource ? { ...rest, prefillSource } : rest;
+}
+
 export function normalizeChatEntryCard(value: unknown): ChatEntryCard {
   return typeof value === "string" && SAFE_ENTRY_CARDS.has(value as ChatEntryCard)
     ? (value as ChatEntryCard)
@@ -75,19 +109,32 @@ export function entryCardForHomeTemplate(templateName: string): ChatEntryCard {
 
 export function chatEntryContextFromMessages(messages: Message[]): Pick<
   ChatTelemetryContext,
-  "entry_source" | "entry_card"
+  "entry_source" | "entry_card" | "prefill_source"
 > {
   const firstUserMessage = messages.find(
     (message) => message.role === "user" && message.intent !== "steer",
   );
+  const prefillSource = [...messages]
+    .reverse()
+    .filter((message) => message.role === "user" && message.intent !== "steer")
+    .map((message) => normalizeChatPrefillTelemetrySource(message.prefillSource))
+    .find((source): source is ChatPrefillTelemetrySource => source !== undefined);
+  const prefillContext = prefillSource
+    ? { prefill_source: prefillSource }
+    : {};
   if (firstUserMessage?.entrySource !== "home_card") {
-    return { entry_source: "normal_chat", entry_card: "none" };
+    return {
+      entry_source: "normal_chat",
+      entry_card: "none",
+      ...prefillContext,
+    };
   }
 
   const card = normalizeChatEntryCard(firstUserMessage.entryCard);
   return {
     entry_source: "home_card",
     entry_card: card === "none" ? "unknown_home_card" : card,
+    ...prefillContext,
   };
 }
 
@@ -107,8 +154,13 @@ export function chatTelemetryContextForResponse(
   messages: Message[],
   assistantMessageId: string,
 ): ChatTelemetryContext {
+  const targetIndex = messages.findIndex(
+    (message) => message.id === assistantMessageId,
+  );
+  const messagesAtResponse =
+    targetIndex >= 0 ? messages.slice(0, targetIndex) : messages;
   return {
-    ...chatEntryContextFromMessages(messages),
+    ...chatEntryContextFromMessages(messagesAtResponse),
     response_position: chatResponsePositionFromMessages(messages, assistantMessageId),
   };
 }
@@ -154,6 +206,15 @@ export function chatSendTelemetryContext(
             : {}),
         }
       : {};
+  const explicitPrefillSource = normalizeChatPrefillTelemetrySource(
+    options?.prefillSource,
+  );
+  const inherited = chatEntryContextFromMessages(conversation);
+  const prefill_context = explicitPrefillSource
+    ? { prefill_source: explicitPrefillSource }
+    : inherited.prefill_source
+      ? { prefill_source: inherited.prefill_source }
+      : {};
 
   if (options?.entrySource === "home_card") {
     const card = normalizeChatEntryCard(options.entryCard);
@@ -163,17 +224,18 @@ export function chatSendTelemetryContext(
       response_position,
       composer_authorship,
       composer_origin,
+      ...prefill_context,
       ...suggestion_context,
     };
   }
 
   // No explicit origin on this send — inherit the thread's.
-  const inherited = chatEntryContextFromMessages(conversation);
   return {
     ...inherited,
     response_position,
     composer_authorship,
     composer_origin,
+    ...prefill_context,
     ...suggestion_context,
   };
 }

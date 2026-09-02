@@ -110,4 +110,44 @@ describe("useChatComposerDraftSync", () => {
       expect(setPrefillContext).not.toHaveBeenCalled();
     });
   });
+
+  it("clears an opportunity attribution source when the user switches chats", async () => {
+    seedSession("old-chat");
+    seedSession("new-chat");
+    useChatStore.getState().actions.setComposerDraft("old-chat", {
+      input: "change this skill",
+      pastedImages: [],
+      attachedDocs: [],
+      pendingDocs: [],
+    });
+    const setPrefillContext = vi.fn();
+    const setPrefillFrameId = vi.fn();
+    const setPrefillSource = vi.fn();
+
+    const { rerender } = renderHook(
+      ({ conversationId }) =>
+        useChatComposerDraftSync({
+          conversationId,
+          input: "change this skill",
+          pastedImages: [],
+          attachedDocs: [],
+          pendingDocs: [],
+          clearConnectionChip: vi.fn(),
+          prefillSource: "activity-opportunity-created-skill",
+          setPrefillContext,
+          setPrefillFrameId,
+          setPrefillSource,
+        }),
+      { initialProps: { conversationId: "old-chat" } },
+    );
+
+    rerender({ conversationId: "new-chat" });
+
+    await waitFor(() => expect(setPrefillSource).toHaveBeenCalledWith("search"));
+    expect(setPrefillContext).toHaveBeenCalledWith(null);
+    expect(setPrefillFrameId).toHaveBeenCalledWith(null);
+    expect(
+      useChatStore.getState().sessions["old-chat"].composerDraft,
+    ).toMatchObject({ input: "change this skill" });
+  });
 });

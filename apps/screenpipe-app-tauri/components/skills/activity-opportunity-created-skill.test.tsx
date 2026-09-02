@@ -19,6 +19,11 @@ const mocks = vi.hoisted(() => ({
   openChatConversationInCurrentChatSurface: vi.fn(),
   getAppServerBaseUrl: vi.fn(),
   toast: vi.fn(),
+  posthogCapture: vi.fn(),
+}));
+
+vi.mock("posthog-js", () => ({
+  default: { capture: mocks.posthogCapture },
 }));
 
 vi.mock("@/lib/utils/tauri", () => ({
@@ -151,6 +156,7 @@ describe("ActivityOpportunityCreatedSkill", () => {
       data: null,
     });
     mocks.toast.mockReset();
+    mocks.posthogCapture.mockReset();
   });
 
   afterEach(cleanup);
@@ -209,6 +215,23 @@ describe("ActivityOpportunityCreatedSkill", () => {
     expect(screen.getByText("disabled")).toBeVisible();
     expect(screen.getByLabelText("markdown editor")).toHaveAttribute(
       "readonly",
+    );
+    expect(
+      screen
+        .getByRole("region", { name: "skill definition" })
+        .closest("section"),
+    ).toHaveClass("ph-no-capture");
+    expect(mocks.posthogCapture).toHaveBeenCalledWith(
+      "activity_opportunity_created_skill_opened",
+      {
+        enabled: true,
+        evidence_count: 1,
+        supporting_context_count: 1,
+      },
+    );
+    expect(mocks.posthogCapture).toHaveBeenCalledWith(
+      "activity_opportunity_created_skill_enabled",
+      expect.objectContaining({ enabled: false, result: "completed" }),
     );
   });
 
@@ -297,6 +320,16 @@ describe("ActivityOpportunityCreatedSkill", () => {
       "/Users/screenpipe/.screenpipe/skill-drafts/opportunity-1/draft-revision/SKILL.md",
     );
     expect(mocks.setActivityOpportunitySkillEnabled).not.toHaveBeenCalled();
+    expect(mocks.posthogCapture).toHaveBeenCalledWith(
+      "activity_opportunity_skill_revision",
+      expect.objectContaining({
+        source: "created_skill",
+        result: "completed",
+      }),
+    );
+    expect(JSON.stringify(mocks.posthogCapture.mock.calls)).not.toContain(
+      "include weekly growth",
+    );
   });
 
   it("upgrades a legacy created snapshot by starting its first real revision chat", async () => {

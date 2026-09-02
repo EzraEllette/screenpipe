@@ -168,6 +168,7 @@ type StreamingActions = {
 type PrefillActions = {
   setPrefillContext: React.Dispatch<React.SetStateAction<string | null>>;
   setPrefillFrameId: React.Dispatch<React.SetStateAction<number | null>>;
+  setPrefillSource: React.Dispatch<React.SetStateAction<string>>;
 };
 
 export type PiSendTransportOptions = {
@@ -250,6 +251,7 @@ export type PiSendTransportOptions = {
   setPiStarting: NonNullable<PiStateActions["setPiStarting"]>;
   setPrefillContext: PrefillActions["setPrefillContext"];
   setPrefillFrameId: PrefillActions["setPrefillFrameId"];
+  setPrefillSource: PrefillActions["setPrefillSource"];
   setRunningConfigFromProviderConfig: PiStateActions["setRunningConfigFromProviderConfig"];
   settings: Settings;
   stagePendingAttachments: ComposerAttachmentActions["stagePendingAttachments"];
