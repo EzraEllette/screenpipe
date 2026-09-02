@@ -26,17 +26,35 @@ export SCREENPIPE_LOCAL_API_KEY="$(screenpipe auth token)"
 ```
 
 On first run the sidecar asks the authenticated local Screenpipe API for a
-short-lived, one-use node credential. The Screenpipe backend maps the account to
-its own isolated network namespace; tsnet then retains only its node state in
-`~/.screenpipe/tsnet`. There is no interactive login fallback, and `TS_AUTHKEY`
-and other Tailscale enrollment environment variables are explicitly ignored.
-The sidecar never enables Funnel.
+short-lived, one-use node credential. The backend creates a Tailscale API-only
+tailnet for that Screenpipe account and stores its OAuth credentials encrypted.
+Every device signed in to that Screenpipe account joins the same tailnet; no
+other account shares it. tsnet retains only its node state in
+`~/.screenpipe/tsnet`.
 
-The Screenpipe-operated coordination server must use
-[`headscale-policy.hujson`](./headscale-policy.hujson). Its `autogroup:self`
-rule is the isolation boundary: a device can reach port 3030 only on devices
-owned by the same opaque Screenpipe-account user. Do not run this service with
-Headscale's default allow-all policy.
+There is no interactive login fallback, and ambient Tailscale enrollment
+environment variables are explicitly ignored. Users never need a Tailscale
+account, client, auth key, or VPN configuration. The sidecar never enables
+Funnel.
+
+## Backend setup
+
+Create a Tailscale organization OAuth client with the `tailnets` scope. Store
+its client ID and secret only in the Screenpipe API Worker, together with two
+independent random keys:
+
+```bash
+openssl rand -base64 32 | bunx wrangler secret put MESH_NAMESPACE_SECRET
+openssl rand -base64 32 | bunx wrangler secret put MESH_CREDENTIAL_ENCRYPTION_KEY
+bunx wrangler secret put TAILSCALE_ORGANIZATION
+bunx wrangler secret put TAILSCALE_OAUTH_CLIENT_ID
+bunx wrangler secret put TAILSCALE_OAUTH_CLIENT_SECRET
+```
+
+Apply `packages/ai-gateway/migrations/0009_tailscale_mesh_tailnets.sql` before
+enabling enrollment. Tailscale currently marks API-only tailnet creation as
+alpha and requires an organization quota large enough for one tailnet per
+Screenpipe account.
 
 ## Query every online device
 

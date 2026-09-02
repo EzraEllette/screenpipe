@@ -98,9 +98,11 @@ PIPE_FRONTIER_POLICY = "reject"
 # Secrets (set via `wrangler secret put <NAME>`):
 # - VERTEX_SERVICE_ACCOUNT_JSON: GCP service account JSON for Vertex AI
 # - VERTEX_PROJECT_ID: Your GCP project ID
-# - HEADSCALE_API_KEY: admin API key for the Screenpipe-operated mesh coordinator
-# - HEADSCALE_CONTROL_URL: public URL of that coordinator
+# - TAILSCALE_ORGANIZATION: organization identifier that owns API-only tailnets
+# - TAILSCALE_OAUTH_CLIENT_ID: organization OAuth client with `tailnets` scope
+# - TAILSCALE_OAUTH_CLIENT_SECRET: secret for that organization OAuth client
 # - MESH_NAMESPACE_SECRET: stable random HMAC key for opaque account namespaces
+# - MESH_CREDENTIAL_ENCRYPTION_KEY: base64-encoded 32-byte AES key for D1 credentials
 
 # Workers AI — used by the difficulty router (ROUTER_MODE=embedding) for the
 # @cf/baai/bge-base-en-v1.5 prompt embedding. Harmless when ROUTER_MODE is off.

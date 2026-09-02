@@ -16,12 +16,17 @@ export function assertRequiredSchema(rawOutput: string): void {
 	}
 
 	const row = payload.find((result) => result.success === true)?.results?.[0];
-	if (row?.required_columns !== 11 || row?.required_indexes !== 1) {
-		throw new Error('required hosted AI settlement schema is incomplete');
+	if (
+		row?.required_columns !== 11
+		|| row?.required_indexes !== 1
+		|| row?.mesh_columns !== 6
+		|| row?.mesh_indexes !== 1
+	) {
+		throw new Error('required Worker schema is incomplete');
 	}
 }
 
 if (import.meta.main) {
 	assertRequiredSchema(await Bun.stdin.text());
-	console.log('required hosted AI settlement schema is ready');
+	console.log('required Worker schema is ready');
 }

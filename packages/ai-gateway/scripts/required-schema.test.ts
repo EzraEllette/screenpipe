@@ -7,18 +7,26 @@ import { Database } from 'bun:sqlite';
 import { readFileSync } from 'node:fs';
 import { assertRequiredSchema } from './required-schema';
 
-function output(requiredColumns: number, requiredIndexes: number, success = true): string {
+function output(
+	requiredColumns: number,
+	requiredIndexes: number,
+	meshColumns = 6,
+	meshIndexes = 1,
+	success = true,
+): string {
 	return JSON.stringify([{
 		success,
 		results: [{
 			required_columns: requiredColumns,
 			required_indexes: requiredIndexes,
+			mesh_columns: meshColumns,
+			mesh_indexes: meshIndexes,
 		}],
 	}]);
 }
 
 describe('assertRequiredSchema', () => {
-	it('accepts the complete settlement schema', () => {
+	it('accepts the complete Worker schema', () => {
 		expect(() => assertRequiredSchema(output(11, 1))).not.toThrow();
 	});
 
@@ -26,7 +34,9 @@ describe('assertRequiredSchema', () => {
 		for (const raw of [
 			output(10, 1),
 			output(11, 0),
-			output(11, 1, false),
+			output(11, 1, 5, 1),
+			output(11, 1, 6, 0),
+			output(11, 1, 6, 1, false),
 			'not-json',
 		]) {
 			expect(() => assertRequiredSchema(raw)).toThrow();
@@ -71,6 +81,27 @@ describe('required settlement migration', () => {
 				AND name = 'idx_hosted_ai_settlements_created_at'
 		`).get()).toEqual({ count: 1 });
 
+		database.close();
+	});
+});
+
+describe('required Tailscale mesh migration', () => {
+	it('is additive and idempotent', () => {
+		const database = new Database(':memory:');
+		const migration = readFileSync(
+			new URL('../migrations/0009_tailscale_mesh_tailnets.sql', import.meta.url),
+			'utf8',
+		);
+		database.exec(migration);
+		database.exec(migration);
+
+		expect(database.query(`
+			SELECT COUNT(*) AS count FROM pragma_table_info('mesh_tailnets')
+		`).get()).toEqual({ count: 6 });
+		expect(database.query(`
+			SELECT COUNT(*) AS count FROM sqlite_master
+			WHERE type = 'index' AND name = 'idx_mesh_tailnets_status'
+		`).get()).toEqual({ count: 1 });
 		database.close();
 	});
 });

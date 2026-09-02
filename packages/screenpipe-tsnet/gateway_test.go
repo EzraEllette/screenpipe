@@ -153,8 +153,7 @@ func TestEnrollDeviceUsesScreenpipeAccountAndPersistsOpaqueNetwork(t *testing.T)
 			t.Errorf("decode request: %v", err)
 		}
 		response := enrollmentResponse{
-			ControlURL: "https://mesh.screenpipe.test",
-			NetworkID:  "sp-opaque",
+			NetworkID: "tailnet-account",
 		}
 		if state.NetworkID == "" {
 			response.AuthKey = "one-use-key"
@@ -167,7 +166,7 @@ func TestEnrollDeviceUsesScreenpipeAccountAndPersistsOpaqueNetwork(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.AuthKey != "one-use-key" || first.NetworkID != "sp-opaque" {
+	if first.AuthKey != "one-use-key" || first.NetworkID != "tailnet-account" {
 		t.Fatalf("unexpected first enrollment: %+v", first)
 	}
 	if err := os.MkdirAll(filepath.Join(stateDir, first.NetworkID), 0o700); err != nil {

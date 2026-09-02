@@ -172,12 +172,15 @@ export interface Env {
 	DEEPGRAM_LIVE_TRANSCRIPTION_COST_PER_HOUR?: string;
 	RATE_LIMITER: DurableObjectNamespace;
 	CLERK_SECRET_KEY: string;
-	/** Screenpipe-owned Tailscale-compatible coordination server. */
-	HEADSCALE_CONTROL_URL?: string;
-	/** Server-side admin credential; never returned except as a scoped one-use node key. */
-	HEADSCALE_API_KEY?: string;
+	/** Tailscale organization that owns Screenpipe's API-only customer tailnets. */
+	TAILSCALE_ORGANIZATION?: string;
+	/** Organization OAuth client with the Tailscale `tailnets` scope. */
+	TAILSCALE_OAUTH_CLIENT_ID?: string;
+	TAILSCALE_OAUTH_CLIENT_SECRET?: string;
 	/** Stable HMAC secret for non-reversible Screenpipe-account mesh namespaces. */
 	MESH_NAMESPACE_SECRET?: string;
+	/** Base64-encoded 32-byte AES key for tailnet OAuth credentials stored in D1. */
+	MESH_CREDENTIAL_ENCRYPTION_KEY?: string;
 	GEMINI_API_KEY: string;
 	SUPABASE_URL: string;
 	SUPABASE_ANON_KEY: string;

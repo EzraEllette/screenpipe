@@ -14,10 +14,13 @@ if [[ "$mode" != "--remote" && "$mode" != "--local" ]]; then
 fi
 
 database="screenpipe-usage-v2"
-migration="./migrations/0008_hosted_ai_settlement_ledger.sql"
-
-echo "→ applying required hosted AI settlement migration (${mode#--})…"
-bunx wrangler d1 execute "$database" "$mode" --yes --file="$migration"
+for migration in \
+	./migrations/0008_hosted_ai_settlement_ledger.sql \
+	./migrations/0009_tailscale_mesh_tailnets.sql
+do
+	echo "→ applying required migration $(basename "$migration") (${mode#--})…"
+	bunx wrangler d1 execute "$database" "$mode" --yes --file="$migration"
+done
 
 schema_json="$(bunx wrangler d1 execute "$database" "$mode" --json --command "
 	SELECT
@@ -29,7 +32,15 @@ schema_json="$(bunx wrangler d1 execute "$database" "$mode" --json --command "
 		 )) AS required_columns,
 		(SELECT COUNT(*) FROM sqlite_master
 		 WHERE type = 'index'
-			AND name = 'idx_hosted_ai_settlements_created_at') AS required_indexes;
+			AND name = 'idx_hosted_ai_settlements_created_at') AS required_indexes,
+		(SELECT COUNT(*) FROM pragma_table_info('mesh_tailnets')
+		 WHERE name IN (
+			'account_namespace', 'status', 'tailnet_id', 'credentials_ciphertext',
+			'created_at', 'updated_at'
+		 )) AS mesh_columns,
+		(SELECT COUNT(*) FROM sqlite_master
+		 WHERE type = 'index'
+			AND name = 'idx_mesh_tailnets_status') AS mesh_indexes;
 ")"
 
 printf '%s' "$schema_json" | bun scripts/required-schema.ts

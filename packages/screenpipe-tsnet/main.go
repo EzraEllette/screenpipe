@@ -27,9 +27,8 @@ import (
 const maxEnrollmentResponseBytes = 1 << 20
 
 type enrollmentResponse struct {
-	ControlURL string `json:"control_url"`
-	NetworkID  string `json:"network_id"`
-	AuthKey    string `json:"auth_key,omitempty"`
+	NetworkID string `json:"network_id"`
+	AuthKey   string `json:"auth_key,omitempty"`
 }
 
 type networkState struct {
@@ -84,18 +83,17 @@ func run() error {
 		return fmt.Errorf("create network state directory: %w", err)
 	}
 
-	// tsnet otherwise falls back to Tailscale's TS_* environment variables and
-	// interactive login. This process is Screenpipe-account-only by design.
+	// Enrollment comes only from Screenpipe's Tailscale API integration. Ignore
+	// ambient Tailscale credentials and never fall back to interactive login.
 	_ = os.Unsetenv("TS_AUTHKEY")
 	_ = os.Unsetenv("TS_AUTH_KEY")
 	_ = os.Unsetenv("TS_CONTROL_URL")
 	_ = os.Setenv("TS_NO_LOGS_NO_SUPPORT", "true")
 
 	ts := &tsnet.Server{
-		Dir:        networkStateDir,
-		Hostname:   *nodeName,
-		ControlURL: enrollment.ControlURL,
-		AuthKey:    enrollment.AuthKey,
+		Dir:      networkStateDir,
+		Hostname: *nodeName,
+		AuthKey:  enrollment.AuthKey,
 		// Never print an interactive authentication URL. Enrollment is handled
 		// entirely by Screenpipe before tsnet starts.
 		UserLogf: func(string, ...any) {},
@@ -216,7 +214,7 @@ func enrollDevice(ctx context.Context, endpoint, apiKey, stateDir string) (enrol
 	if err := json.Unmarshal(body, &enrollment); err != nil {
 		return enrollmentResponse{}, fmt.Errorf("decode Screenpipe mesh enrollment: %w", err)
 	}
-	if enrollment.ControlURL == "" || enrollment.NetworkID == "" {
+	if enrollment.NetworkID == "" {
 		return enrollmentResponse{}, errors.New("Screenpipe mesh enrollment response is incomplete")
 	}
 	stateExists := false
