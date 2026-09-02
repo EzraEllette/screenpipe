@@ -1,0 +1,14 @@
+// screenpipe — AI that knows everything you've seen, said, or heard
+// https://screenpipe.com
+
+{
+  // Every Headscale user is an opaque Screenpipe account namespace. A device
+  // can reach only other devices owned by that same account.
+  "acls": [
+    {
+      "action": "accept",
+      "src": ["autogroup:member"],
+      "dst": ["autogroup:self:3030"]
+    }
+  ]
+}

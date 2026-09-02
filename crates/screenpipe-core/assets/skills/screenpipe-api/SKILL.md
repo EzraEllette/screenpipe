@@ -132,12 +132,39 @@ Response: `{"data": [{"type":"OCR","content":{"frame_id":...,"text":...,"app_nam
 
 ---
 
+## Online devices — `GET /v1/devices` and `POST /v1/query`
+
+Use these endpoints for live reads across every online Screenpipe device. They
+stay on the same authenticated local API base as every other call; an internal
+tsnet sidecar provides private reachability without exposing another client
+port. Enrollment is automatic through the signed-in Screenpipe account; never
+ask the user for a Tailscale account, login, auth key, or separate VPN setup.
+
+```bash
+curl -H "Authorization: Bearer $SCREENPIPE_LOCAL_API_KEY" \
+  "${SCREENPIPE_LOCAL_API_URL:-http://localhost:3030}/v1/devices"
+
+curl -X POST "${SCREENPIPE_LOCAL_API_URL:-http://localhost:3030}/v1/query" \
+  -H "Authorization: Bearer $SCREENPIPE_LOCAL_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"path":"/search?q=pricing&start_time=1d%20ago&limit=10"}'
+```
+
+`/v1/query` sends the supplied read path to the local device and every online
+`screenpipe-*` node, then returns separate per-device status and body fields.
+Offline devices are omitted; reachable failures remain explicit. Use Data Sync
+below only when history must remain available while the source device is
+offline.
+
+---
+
 ## Synced devices — `GET /data-sync/devices` and `/data-sync/search`
 
-Use these endpoints when the user says **another device**, **across devices**, or
-names a machine that is not the current one. For the current machine only, keep
-using `/search`; it is faster and has richer local filters. Prefer the MCP tools
-`synced-devices` and `search-synced-content` when they are available.
+Use these endpoints when the requested source device may be offline or the user
+explicitly asks for synced/cloud history. For live reads from currently online
+devices, use `/v1/devices` and `/v1/query` above. For the current machine only,
+keep using `/search`; it is faster and has richer local filters. Prefer the MCP
+tools `synced-devices` and `search-synced-content` when they are available.
 
 ```bash
 curl -H "Authorization: Bearer $SCREENPIPE_LOCAL_API_KEY" \

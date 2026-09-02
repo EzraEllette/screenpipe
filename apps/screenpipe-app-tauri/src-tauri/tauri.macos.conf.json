@@ -17,7 +17,8 @@
         "externalBin": [
             "bun",
             "ffmpeg",
-            "ffprobe"
+            "ffprobe",
+            "screenpipe-tsnet"
         ]
     }
 }

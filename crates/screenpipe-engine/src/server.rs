@@ -1204,6 +1204,21 @@ impl SCServer {
                 "/v1/web-search",
                 axum::routing::post(crate::routes::web_search::web_search),
             )
+            // The embedded tsnet process knows only the local API key. This
+            // bridge uses the server-held Screenpipe account token to obtain a
+            // short-lived, one-use node credential without any Tailscale UI.
+            .route(
+                "/v1/mesh/enroll",
+                axum::routing::post(crate::routes::mesh_enrollment::enroll),
+            )
+            // One public local API for multi-device reads. The tsnet sidecar's
+            // loopback coordinator is an internal transport; callers keep using
+            // this server's port and authentication.
+            .route("/v1/devices", get(crate::routes::tsnet_proxy::devices))
+            .route(
+                "/v1/query",
+                axum::routing::post(crate::routes::tsnet_proxy::query),
+            )
             // User-scoped cloud data reads. The signed-in identity determines
             // the bucket upstream; callers cannot provide an account or bucket.
             .route(

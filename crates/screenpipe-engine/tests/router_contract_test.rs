@@ -64,6 +64,7 @@ async fn full_router_exposes_openapi_and_private_axum_routes() {
     // when it was accidentally registered inside the OpenAPI route builder.
     // A malformed request may be rejected, but the route must still exist.
     let private_route = router
+        .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -75,4 +76,32 @@ async fn full_router_exposes_openapi_and_private_axum_routes() {
         .expect("request private Axum route");
     assert_ne!(private_route.status(), StatusCode::NOT_FOUND);
     assert_ne!(private_route.status(), StatusCode::METHOD_NOT_ALLOWED);
+
+    // Multi-device clients use the main Screenpipe API; the sidecar's own
+    // loopback coordinator port is not part of the public contract.
+    let devices_route = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/devices")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("request main-API tsnet devices route");
+    assert_ne!(devices_route.status(), StatusCode::NOT_FOUND);
+    assert_ne!(devices_route.status(), StatusCode::METHOD_NOT_ALLOWED);
+
+    let enrollment_route = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/mesh/enroll")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("request private mesh enrollment route");
+    assert_ne!(enrollment_route.status(), StatusCode::NOT_FOUND);
+    assert_ne!(enrollment_route.status(), StatusCode::METHOD_NOT_ALLOWED);
 }

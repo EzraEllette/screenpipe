@@ -22,7 +22,9 @@
       "appimage",
       "nsis"
     ],
-    "externalBin": [],
+    "externalBin": [
+      "screenpipe-tsnet"
+    ],
     "icon": [
       "icons/dev/32x32.png",
       "icons/dev/128x128.png",

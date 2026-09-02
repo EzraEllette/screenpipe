@@ -24,7 +24,8 @@
       "nsis"
     ],
     "externalBin": [
-      "bun"
+      "bun",
+      "screenpipe-tsnet"
     ],
     "icon": [
       "icons/beta/32x32.png",

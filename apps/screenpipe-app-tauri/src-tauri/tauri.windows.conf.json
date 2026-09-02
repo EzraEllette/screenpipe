@@ -11,7 +11,8 @@
             }
         },
         "externalBin": [
-            "bun"
+            "bun",
+            "screenpipe-tsnet"
         ],
         "targets": [
             "nsis"

@@ -172,6 +172,12 @@ export interface Env {
 	DEEPGRAM_LIVE_TRANSCRIPTION_COST_PER_HOUR?: string;
 	RATE_LIMITER: DurableObjectNamespace;
 	CLERK_SECRET_KEY: string;
+	/** Screenpipe-owned Tailscale-compatible coordination server. */
+	HEADSCALE_CONTROL_URL?: string;
+	/** Server-side admin credential; never returned except as a scoped one-use node key. */
+	HEADSCALE_API_KEY?: string;
+	/** Stable HMAC secret for non-reversible Screenpipe-account mesh namespaces. */
+	MESH_NAMESPACE_SECRET?: string;
 	GEMINI_API_KEY: string;
 	SUPABASE_URL: string;
 	SUPABASE_ANON_KEY: string;

@@ -1,16 +1,19 @@
 # Screenpipe tsnet sidecar
 
-This sidecar gives every online Screenpipe device a private tailnet endpoint
+This sidecar gives every online Screenpipe device a private device-mesh endpoint
 without binding Screenpipe itself to a LAN interface or copying captured data to
-the cloud.
+the cloud. The transport is powered by Tailscale's userspace networking, but
+identity and enrollment belong to the user's Screenpipe account. Users never
+create or sign in to a Tailscale account.
 
-It exposes two surfaces:
+It exposes two transport surfaces, but clients only use Screenpipe's main API:
 
 - `:3030` inside the embedded tailnet: a read-only proxy to that device's local
   Screenpipe API. The device's local API key is injected by the sidecar and is
   never sent to other devices.
-- `127.0.0.1:3031`: an authenticated coordinator that discovers sibling
-  `screenpipe-*` tsnet nodes and fans a GET out to all of them.
+- `127.0.0.1:3031`: an internal authenticated coordinator that discovers
+  sibling `screenpipe-*` tsnet nodes and fans a GET out to all of them. The main
+  Screenpipe API proxies it, so this port is not shared with clients.
 
 ## Run on every Screenpipe device
 
@@ -22,13 +25,18 @@ export SCREENPIPE_LOCAL_API_KEY="$(screenpipe auth token)"
 ./screenpipe-tsnet
 ```
 
-The first run prints a Tailscale login URL. Open it once for each device. The
-node identity is then retained in `~/.screenpipe/tsnet`. For unattended setup,
-pass a reusable or ephemeral Tailscale auth key in `TS_AUTHKEY`; the auth key is
-not persisted by Screenpipe.
+On first run the sidecar asks the authenticated local Screenpipe API for a
+short-lived, one-use node credential. The Screenpipe backend maps the account to
+its own isolated network namespace; tsnet then retains only its node state in
+`~/.screenpipe/tsnet`. There is no interactive login fallback, and `TS_AUTHKEY`
+and other Tailscale enrollment environment variables are explicitly ignored.
+The sidecar never enables Funnel.
 
-Use Tailscale ACLs to restrict which users or tagged nodes may reach the
-`screenpipe-*` nodes on TCP port 3030. The sidecar never enables Funnel.
+The Screenpipe-operated coordination server must use
+[`headscale-policy.hujson`](./headscale-policy.hujson). Its `autogroup:self`
+rule is the isolation boundary: a device can reach port 3030 only on devices
+owned by the same opaque Screenpipe-account user. Do not run this service with
+Headscale's default allow-all policy.
 
 ## Query every online device
 
@@ -36,16 +44,16 @@ Use Tailscale ACLs to restrict which users or tagged nodes may reach the
 export SCREENPIPE_LOCAL_API_KEY="$(screenpipe auth token)"
 
 curl -H "Authorization: Bearer $SCREENPIPE_LOCAL_API_KEY" \
-  http://127.0.0.1:3031/v1/devices
+  http://127.0.0.1:3030/v1/devices
 
-curl -X POST http://127.0.0.1:3031/v1/query \
+curl -X POST http://127.0.0.1:3030/v1/query \
   -H "Authorization: Bearer $SCREENPIPE_LOCAL_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"path":"/search?q=screenpipe&start_time=1d%20ago&limit=10"}'
 ```
 
-The response keeps each device's status and body separate. Devices that
-Tailscale reports offline are omitted. If Tailscale reports a device online but
+The response keeps each device's status and body separate. Devices that the
+mesh reports offline are omitted. If the mesh reports a device online but
 its sidecar or Screenpipe API cannot be reached, that device has an explicit
 per-device error. The sidecar does not fall back to cloud data.
 

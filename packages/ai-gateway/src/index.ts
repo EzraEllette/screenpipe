@@ -6,6 +6,7 @@ import { captureException, wrapRequestHandler } from '@sentry/cloudflare';
 import { Env, RequestBody, type AuthResult } from './types';
 import { handleOptions, createSuccessResponse, createErrorResponse, addCorsHeaders } from './utils/cors';
 import { validateAuth } from './utils/auth';
+import { enrollMeshDevice } from './services/mesh-enrollment';
 import { RateLimiter, checkRateLimit } from './utils/rate-limiter';
 import {
 	buildDailyUsageLimitError,
@@ -348,11 +349,16 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 		// models get routed to the high `freeRpm` bucket rather than the low
 		// paid-model `rpm`. Every other endpoint uses the standard tier limit.
 		const isChatCompletion = path === '/v1/chat/completions' && request.method === 'POST';
-		if (!isChatCompletion) {
+		const isMeshEnrollment = path === '/v1/mesh/enroll' && request.method === 'POST';
+		if (!isChatCompletion && !isMeshEnrollment) {
 			const rateLimit = await checkRateLimit(request, env, authResult);
 			if (!rateLimit.allowed && rateLimit.response) {
 				return rateLimit.response;
 			}
+		}
+
+		if (isMeshEnrollment) {
+			return enrollMeshDevice(authResult, env, request);
 		}
 
 		// Usage status endpoint - returns current usage without incrementing

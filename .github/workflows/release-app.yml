@@ -317,6 +317,12 @@ jobs:
         shell: bash
         run: node --version
 
+      - name: Set up Go for device mesh sidecar
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.6'
+          cache-dependency-path: packages/screenpipe-tsnet/go.sum
+
       - name: Set up Rust
         if: matrix.os_type != 'windows' && (runner.environment != 'self-hosted' || matrix.os_type != 'linux')
         uses: dtolnay/rust-toolchain@stable
@@ -686,6 +692,23 @@ jobs:
         working-directory: ${{ github.workspace }}/apps/screenpipe-app-tauri
         env:
           SCREENPIPE_RELEASE_TARGET: ${{ matrix.target }}
+
+      - name: Build Screenpipe device mesh sidecar
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${{ matrix.target }}" in
+            aarch64-apple-darwin) GOOS=darwin; GOARCH=arm64; EXT= ;;
+            x86_64-apple-darwin) GOOS=darwin; GOARCH=amd64; EXT= ;;
+            x86_64-pc-windows-msvc) GOOS=windows; GOARCH=amd64; EXT=.exe ;;
+            aarch64-pc-windows-msvc) GOOS=windows; GOARCH=arm64; EXT=.exe ;;
+            x86_64-unknown-linux-gnu) GOOS=linux; GOARCH=amd64; EXT= ;;
+            *) echo "unsupported mesh target: ${{ matrix.target }}" >&2; exit 1 ;;
+          esac
+          export GOOS GOARCH CGO_ENABLED=0
+          go build -trimpath -ldflags="-s -w" \
+            -o "../../apps/screenpipe-app-tauri/src-tauri/screenpipe-tsnet-${{ matrix.target }}${EXT}" .
+        working-directory: packages/screenpipe-tsnet
 
       # This constructs the exact mixed oasgen + Axum router that ships in the
       # desktop app. A schema/handler mismatch must fail the Release App run,

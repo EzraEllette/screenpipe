@@ -37,7 +37,18 @@ export const REQUIRED_HOSTED_AI_SECRET_BINDINGS = [
 	'SCREENPIPE_QWEN35_URL',
 ] as const;
 
-export function assertRequiredHostedAiSecretBindings(rawOutput: string): void {
+export const REQUIRED_MESH_SECRET_BINDINGS = [
+	'HEADSCALE_API_KEY',
+	'HEADSCALE_CONTROL_URL',
+	'MESH_NAMESPACE_SECRET',
+] as const;
+
+export const REQUIRED_WORKER_SECRET_BINDINGS = [
+	...REQUIRED_HOSTED_AI_SECRET_BINDINGS,
+	...REQUIRED_MESH_SECRET_BINDINGS,
+] as const;
+
+export function assertRequiredWorkerSecretBindings(rawOutput: string): void {
 	let bindings: WranglerSecretBinding[];
 	try {
 		bindings = JSON.parse(rawOutput) as WranglerSecretBinding[];
@@ -54,15 +65,15 @@ export function assertRequiredHostedAiSecretBindings(rawOutput: string): void {
 			.map((binding) => binding?.name)
 			.filter((name): name is string => typeof name === 'string' && name.length > 0),
 	);
-	const missing = REQUIRED_HOSTED_AI_SECRET_BINDINGS.filter((name) => !names.has(name));
+	const missing = REQUIRED_WORKER_SECRET_BINDINGS.filter((name) => !names.has(name));
 	if (missing.length > 0) {
-		throw new Error(`required hosted AI secret bindings are missing: ${missing.join(', ')}`);
+		throw new Error(`required Worker secret bindings are missing: ${missing.join(', ')}`);
 	}
 }
 
 if (import.meta.main) {
-	assertRequiredHostedAiSecretBindings(await Bun.stdin.text());
+	assertRequiredWorkerSecretBindings(await Bun.stdin.text());
 	console.log(
-		`required hosted AI secret bindings are present (${REQUIRED_HOSTED_AI_SECRET_BINDINGS.length})`,
+		`required Worker secret bindings are present (${REQUIRED_WORKER_SECRET_BINDINGS.length})`,
 	);
 }

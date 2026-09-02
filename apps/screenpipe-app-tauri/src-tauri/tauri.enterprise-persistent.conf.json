@@ -3,7 +3,8 @@
   "bundle": {
     "createUpdaterArtifacts": false,
     "externalBin": [
-      "bun"
+      "bun",
+      "screenpipe-tsnet"
     ],
     "resources": {
       "assets/*": "./assets/",

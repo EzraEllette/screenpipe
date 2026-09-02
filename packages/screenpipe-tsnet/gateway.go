@@ -267,7 +267,7 @@ func (g *gateway) targetForDevice(candidate device, path string) (string, *http.
 		return g.localAPI.ResolveReference(&url.URL{Path: pathOnly(path), RawQuery: queryOnly(path)}).String(), g.localClient, nil
 	}
 	if len(candidate.Addresses) == 0 {
-		return "", nil, errors.New("device has no Tailscale address")
+		return "", nil, errors.New("device has no mesh address")
 	}
 	host := net.JoinHostPort(candidate.Addresses[0], strconv.Itoa(g.tailnetPort))
 	target := (&url.URL{Scheme: "http", Host: host, Path: pathOnly(path), RawQuery: queryOnly(path)}).String()

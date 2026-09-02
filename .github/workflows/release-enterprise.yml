@@ -228,6 +228,19 @@ jobs:
         working-directory: apps/screenpipe-app-tauri
         run: bun install
 
+      - name: Set up Go for device mesh sidecar
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.6'
+          cache-dependency-path: packages/screenpipe-tsnet/go.sum
+
+      - name: Build Screenpipe device mesh sidecar
+        shell: bash
+        working-directory: packages/screenpipe-tsnet
+        run: |
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w" \
+            -o ../../apps/screenpipe-app-tauri/src-tauri/screenpipe-tsnet-x86_64-pc-windows-msvc.exe .
+
       - name: Set up MSVC
         uses: ilammy/msvc-dev-cmd@v1
 
@@ -651,6 +664,18 @@ jobs:
         working-directory: apps/screenpipe-app-tauri
         run: bun install
 
+      - name: Set up Go for device mesh sidecar
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.6'
+          cache-dependency-path: packages/screenpipe-tsnet/go.sum
+
+      - name: Build Screenpipe device mesh sidecar
+        working-directory: packages/screenpipe-tsnet
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" \
+            -o ../../apps/screenpipe-app-tauri/src-tauri/screenpipe-tsnet-x86_64-unknown-linux-gnu .
+
       - name: Run pre_build.js
         env:
           SKIP_SCREENPIPE_SETUP: true
@@ -850,6 +875,24 @@ jobs:
       - name: Install frontend dependencies
         working-directory: apps/screenpipe-app-tauri
         run: bun install
+
+      - name: Set up Go for device mesh sidecar
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.6'
+          cache-dependency-path: packages/screenpipe-tsnet/go.sum
+
+      - name: Build Screenpipe device mesh sidecar
+        shell: bash
+        working-directory: packages/screenpipe-tsnet
+        run: |
+          case "${{ matrix.target }}" in
+            aarch64-apple-darwin) GOARCH=arm64 ;;
+            x86_64-apple-darwin) GOARCH=amd64 ;;
+            *) echo "unsupported mesh target: ${{ matrix.target }}" >&2; exit 1 ;;
+          esac
+          CGO_ENABLED=0 GOOS=darwin GOARCH="$GOARCH" go build -trimpath -ldflags="-s -w" \
+            -o "../../apps/screenpipe-app-tauri/src-tauri/screenpipe-tsnet-${{ matrix.target }}" .
 
       - name: Install macOS binary dependencies
         shell: bash

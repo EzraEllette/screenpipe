@@ -6,9 +6,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -21,6 +23,18 @@ import (
 	"tailscale.com/ipn/ipnstate"
 	"tailscale.com/tsnet"
 )
+
+const maxEnrollmentResponseBytes = 1 << 20
+
+type enrollmentResponse struct {
+	ControlURL string `json:"control_url"`
+	NetworkID  string `json:"network_id"`
+	AuthKey    string `json:"auth_key,omitempty"`
+}
+
+type networkState struct {
+	NetworkID string `json:"network_id"`
+}
 
 func main() {
 	if err := run(); err != nil {
@@ -42,6 +56,7 @@ func run() error {
 		nodeName       = flag.String("hostname", "screenpipe-"+sanitizeHostname(hostname), "name of this embedded Tailscale node")
 		stateDir       = flag.String("state-dir", filepath.Join(home, ".screenpipe", "tsnet"), "persistent tsnet state directory")
 		localAPI       = flag.String("screenpipe-url", envOr("SCREENPIPE_LOCAL_API_URL", "http://127.0.0.1:3030"), "local Screenpipe API URL")
+		enrollmentURL  = flag.String("enrollment-url", "", "Screenpipe mesh enrollment URL (defaults to the local API)")
 		localListen    = flag.String("listen", "127.0.0.1:3031", "loopback coordinator address")
 		tailnetListen  = flag.String("tailnet-listen", ":3030", "tailnet-only proxy address")
 		peerPrefix     = flag.String("peer-prefix", "screenpipe-", "hostname prefix used to discover sibling sidecars")
@@ -57,12 +72,33 @@ func run() error {
 	if err := os.MkdirAll(*stateDir, 0o700); err != nil {
 		return fmt.Errorf("create state directory: %w", err)
 	}
+	if *enrollmentURL == "" {
+		*enrollmentURL = strings.TrimRight(*localAPI, "/") + "/v1/mesh/enroll"
+	}
+	enrollment, err := enrollDevice(context.Background(), *enrollmentURL, apiKey, *stateDir)
+	if err != nil {
+		return err
+	}
+	networkStateDir := filepath.Join(*stateDir, enrollment.NetworkID)
+	if err := os.MkdirAll(networkStateDir, 0o700); err != nil {
+		return fmt.Errorf("create network state directory: %w", err)
+	}
+
+	// tsnet otherwise falls back to Tailscale's TS_* environment variables and
+	// interactive login. This process is Screenpipe-account-only by design.
+	_ = os.Unsetenv("TS_AUTHKEY")
+	_ = os.Unsetenv("TS_AUTH_KEY")
+	_ = os.Unsetenv("TS_CONTROL_URL")
+	_ = os.Setenv("TS_NO_LOGS_NO_SUPPORT", "true")
 
 	ts := &tsnet.Server{
-		Dir:      *stateDir,
-		Hostname: *nodeName,
-		AuthKey:  os.Getenv("TS_AUTHKEY"),
-		UserLogf: log.Printf,
+		Dir:        networkStateDir,
+		Hostname:   *nodeName,
+		ControlURL: enrollment.ControlURL,
+		AuthKey:    enrollment.AuthKey,
+		// Never print an interactive authentication URL. Enrollment is handled
+		// entirely by Screenpipe before tsnet starts.
+		UserLogf: func(string, ...any) {},
 	}
 	if err := ts.Start(); err != nil {
 		return fmt.Errorf("start tsnet: %w", err)
@@ -137,6 +173,67 @@ func run() error {
 	_ = localServer.Shutdown(shutdownCtx)
 	_ = tailnetServer.Shutdown(shutdownCtx)
 	return nil
+}
+
+func enrollDevice(ctx context.Context, endpoint, apiKey, stateDir string) (enrollmentResponse, error) {
+	statePath := filepath.Join(stateDir, "mesh.json")
+	var current networkState
+	if data, err := os.ReadFile(statePath); err == nil {
+		_ = json.Unmarshal(data, &current)
+	}
+	if current.NetworkID != "" {
+		if _, err := os.Stat(filepath.Join(stateDir, current.NetworkID, "tailscaled.state")); err != nil {
+			current.NetworkID = ""
+		}
+	}
+	payload, err := json.Marshal(current)
+	if err != nil {
+		return enrollmentResponse{}, fmt.Errorf("encode mesh enrollment: %w", err)
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(string(payload)))
+	if err != nil {
+		return enrollmentResponse{}, fmt.Errorf("create mesh enrollment request: %w", err)
+	}
+	request.Header.Set("Authorization", "Bearer "+apiKey)
+	request.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Timeout: 30 * time.Second}
+	response, err := client.Do(request)
+	if err != nil {
+		return enrollmentResponse{}, fmt.Errorf("request Screenpipe mesh enrollment: %w", err)
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(response.Body, maxEnrollmentResponseBytes+1))
+	if err != nil {
+		return enrollmentResponse{}, fmt.Errorf("read Screenpipe mesh enrollment: %w", err)
+	}
+	if len(body) > maxEnrollmentResponseBytes {
+		return enrollmentResponse{}, errors.New("Screenpipe mesh enrollment response is too large")
+	}
+	if response.StatusCode != http.StatusOK {
+		return enrollmentResponse{}, fmt.Errorf("Screenpipe mesh enrollment returned %s", response.Status)
+	}
+	var enrollment enrollmentResponse
+	if err := json.Unmarshal(body, &enrollment); err != nil {
+		return enrollmentResponse{}, fmt.Errorf("decode Screenpipe mesh enrollment: %w", err)
+	}
+	if enrollment.ControlURL == "" || enrollment.NetworkID == "" {
+		return enrollmentResponse{}, errors.New("Screenpipe mesh enrollment response is incomplete")
+	}
+	stateExists := false
+	if _, err := os.Stat(filepath.Join(stateDir, enrollment.NetworkID, "tailscaled.state")); err == nil {
+		stateExists = true
+	}
+	if !stateExists && enrollment.AuthKey == "" {
+		return enrollmentResponse{}, errors.New("Screenpipe mesh enrollment did not provide a node credential")
+	}
+	encoded, err := json.Marshal(networkState{NetworkID: enrollment.NetworkID})
+	if err != nil {
+		return enrollmentResponse{}, fmt.Errorf("encode mesh state: %w", err)
+	}
+	if err := os.WriteFile(statePath, encoded, 0o600); err != nil {
+		return enrollmentResponse{}, fmt.Errorf("persist mesh state: %w", err)
+	}
+	return enrollment, nil
 }
 
 func devicesFromStatus(status *ipnstate.Status, peerPrefix string) []device {

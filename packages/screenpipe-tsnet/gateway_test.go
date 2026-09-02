@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -103,7 +105,7 @@ func TestCoordinatorFansQueryAcrossDevicesAndReportsFailures(t *testing.T) {
 	if !payload.Devices[1].Reachable || payload.Devices[1].Status != http.StatusOK {
 		t.Fatalf("remote result should be reachable: %+v", payload.Devices[1])
 	}
-	if payload.Devices[2].Error != "device has no Tailscale address" {
+	if payload.Devices[2].Error != "device has no mesh address" {
 		t.Fatalf("unexpected unreachable error: %+v", payload.Devices[2])
 	}
 }
@@ -134,6 +136,55 @@ func TestSanitizeHostname(t *testing.T) {
 	t.Parallel()
 	if got := sanitizeHostname("Ezra’s MacBook Pro.local"); got != "ezra-s-macbook-pro-local" {
 		t.Fatalf("sanitizeHostname() = %q", got)
+	}
+}
+
+func TestEnrollDeviceUsesScreenpipeAccountAndPersistsOpaqueNetwork(t *testing.T) {
+	t.Parallel()
+	stateDir := t.TempDir()
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		requests++
+		if got := request.Header.Get("Authorization"); got != "Bearer local-secret" {
+			t.Errorf("authorization = %q", got)
+		}
+		var state networkState
+		if err := json.NewDecoder(request.Body).Decode(&state); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		response := enrollmentResponse{
+			ControlURL: "https://mesh.screenpipe.test",
+			NetworkID:  "sp-opaque",
+		}
+		if state.NetworkID == "" {
+			response.AuthKey = "one-use-key"
+		}
+		writeJSON(writer, http.StatusOK, response)
+	}))
+	defer server.Close()
+
+	first, err := enrollDevice(context.Background(), server.URL, "local-secret", stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.AuthKey != "one-use-key" || first.NetworkID != "sp-opaque" {
+		t.Fatalf("unexpected first enrollment: %+v", first)
+	}
+	if err := os.MkdirAll(filepath.Join(stateDir, first.NetworkID), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, first.NetworkID, "tailscaled.state"), []byte("state"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	second, err := enrollDevice(context.Background(), server.URL, "local-secret", stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.AuthKey != "" {
+		t.Fatalf("restart minted another key: %+v", second)
+	}
+	if requests != 2 {
+		t.Fatalf("requests = %d, want 2", requests)
 	}
 }
 

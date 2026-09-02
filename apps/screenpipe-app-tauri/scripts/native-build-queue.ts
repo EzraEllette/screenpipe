@@ -105,6 +105,41 @@ function findExecutable(name: string): string | undefined {
   return Bun.which(name) ?? undefined;
 }
 
+function buildMeshSidecar(env: Record<string, string>): number {
+  const target = process.platform === "darwin"
+    ? (process.arch === "arm64" ? "aarch64-apple-darwin" : "x86_64-apple-darwin")
+    : process.platform === "win32"
+      ? (process.arch === "arm64" ? "aarch64-pc-windows-msvc" : "x86_64-pc-windows-msvc")
+      : process.arch === "arm64"
+        ? "aarch64-unknown-linux-gnu"
+        : "x86_64-unknown-linux-gnu";
+  const extension = process.platform === "win32" ? ".exe" : "";
+  const output = join(APP_ROOT, "src-tauri", `screenpipe-tsnet-${target}${extension}`);
+  const go = findExecutable(process.platform === "win32" ? "go.exe" : "go");
+  const mise = findExecutable(process.platform === "win32" ? "mise.exe" : "mise");
+  const args = [
+    "build", "-trimpath", "-o", output, ".",
+  ];
+  const command = go
+    ? [go, ...args]
+    : mise
+      ? [mise, "exec", "go@1.26.6", "--", "go", ...args]
+      : [];
+  if (command.length === 0) {
+    console.error("[native-build-queue] Go 1.26.6 is required to build the Screenpipe device mesh sidecar");
+    return 1;
+  }
+  console.log(`[native-build-queue] building device mesh sidecar: ${target}`);
+  const result = Bun.spawnSync(command, {
+    cwd: join(REPO_ROOT, "packages", "screenpipe-tsnet"),
+    env: { ...env, CGO_ENABLED: "0" },
+    stdin: "inherit",
+    stdout: "inherit",
+    stderr: "inherit",
+  });
+  return result.exitCode;
+}
+
 function findWindowsManifestTool(): string | undefined {
   const fromPath = Bun.which("mt.exe");
   if (fromPath) return fromPath;
@@ -339,6 +374,10 @@ async function perform(mode: BuildMode, args: string[]): Promise<number> {
   }
 
   const env = localSccacheEnvironment();
+  if (["build", "e2e", "signed", "test", "warmup"].includes(mode)) {
+    const meshExitCode = buildMeshSidecar(env);
+    if (meshExitCode !== 0) return meshExitCode;
+  }
   switch (mode) {
     case "build":
       return run(["bun", "tauri", "build", "--no-bundle", "--", "--profile", "debug-dev"], env);

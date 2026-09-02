@@ -10,6 +10,7 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
+use std::process::Stdio;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -95,6 +96,116 @@ const BIND_RETRY_DELAY: Duration = Duration::from_millis(500);
 const PORT_HOLDER_LOOKUP_TIMEOUT: Duration = Duration::from_secs(2);
 const OPENAI_COMPATIBLE_FAILURE_POLL_INTERVAL: Duration = Duration::from_secs(15);
 const OPENAI_COMPATIBLE_FAILURE_NOTIFICATION_COOLDOWN: Duration = Duration::from_secs(5 * 60);
+const MESH_ACCOUNT_POLL_INTERVAL: Duration = Duration::from_secs(2);
+const MESH_RESTART_DELAY: Duration = Duration::from_secs(30);
+
+fn bundled_mesh_sidecar() -> Option<PathBuf> {
+    let directory = std::env::current_exe().ok()?.parent()?.to_path_buf();
+    let filename = if cfg!(windows) {
+        "screenpipe-tsnet.exe"
+    } else {
+        "screenpipe-tsnet"
+    };
+    let path = directory.join(filename);
+    path.is_file().then_some(path)
+}
+
+fn start_mesh_supervisor(
+    cloud_token: Arc<arc_swap::ArcSwap<Option<String>>>,
+    local_api_key: Option<String>,
+    data_dir: PathBuf,
+    port: u16,
+) -> Option<tokio::task::JoinHandle<()>> {
+    let binary = match bundled_mesh_sidecar() {
+        Some(binary) => binary,
+        None => {
+            warn!("device mesh sidecar is not bundled; online-device queries are unavailable");
+            return None;
+        }
+    };
+    let local_api_key = match local_api_key.filter(|key| !key.is_empty()) {
+        Some(key) => key,
+        None => {
+            warn!("device mesh requires local API authentication");
+            return None;
+        }
+    };
+    let coordinator_port = port.checked_add(1).unwrap_or(3031);
+    std::env::set_var(
+        "SCREENPIPE_TSNET_SIDECAR_URL",
+        format!("http://127.0.0.1:{coordinator_port}"),
+    );
+
+    Some(tokio::spawn(async move {
+        let local_api_url = format!("http://127.0.0.1:{port}");
+        let listen = format!("127.0.0.1:{coordinator_port}");
+        loop {
+            let token_at_start = (**cloud_token.load()).clone();
+            if token_at_start.as_ref().is_none_or(|token| token.is_empty()) {
+                tokio::time::sleep(MESH_ACCOUNT_POLL_INTERVAL).await;
+                continue;
+            }
+
+            let mut command = screenpipe_core::no_window_command_async(&binary);
+            command
+                .arg("--screenpipe-url")
+                .arg(&local_api_url)
+                .arg("--listen")
+                .arg(&listen)
+                .arg("--state-dir")
+                .arg(data_dir.join("tsnet"))
+                .env("SCREENPIPE_LOCAL_API_KEY", &local_api_key)
+                .env_remove("TS_AUTHKEY")
+                .env_remove("TS_AUTH_KEY")
+                .env_remove("TS_CONTROL_URL")
+                .env("TS_NO_LOGS_NO_SUPPORT", "true")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .kill_on_drop(true);
+
+            let mut child = match command.spawn() {
+                Ok(child) => {
+                    info!("device mesh sidecar started");
+                    child
+                }
+                Err(error) => {
+                    warn!("failed to start device mesh sidecar: {}", error);
+                    tokio::time::sleep(MESH_RESTART_DELAY).await;
+                    continue;
+                }
+            };
+
+            let mut account_changed = false;
+            loop {
+                tokio::select! {
+                    result = child.wait() => {
+                        match result {
+                            Ok(status) => warn!("device mesh sidecar exited with {}", status),
+                            Err(error) => warn!("device mesh sidecar wait failed: {}", error),
+                        }
+                        break;
+                    }
+                    _ = tokio::time::sleep(MESH_ACCOUNT_POLL_INTERVAL) => {
+                        let current = (**cloud_token.load()).clone();
+                        if current != token_at_start {
+                            // A logout or account/token change invalidates the old
+                            // process immediately. The next loop either stays off
+                            // or re-enrolls through the new Screenpipe account.
+                            let _ = child.kill().await;
+                            let _ = child.wait().await;
+                            account_changed = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            if !account_changed {
+                tokio::time::sleep(MESH_RESTART_DELAY).await;
+            }
+        }
+    }))
+}
 
 fn should_notify_openai_compatible_failure(
     previous_error_count: u64,
@@ -1025,6 +1136,15 @@ impl ServerCore {
             crate::health::set_boot_error(&message);
             crate::health::set_recording_status(crate::health::RecordingStatus::Error);
         });
+
+        if let Some(mesh_supervisor) = start_mesh_supervisor(
+            cloud_token_handle,
+            config.api_auth_key.clone(),
+            local_data_dir.clone(),
+            config.port,
+        ) {
+            owned_tasks.push(mesh_supervisor);
+        }
 
         info!("Server core started successfully");
         crate::health::set_boot_phase("ready", None);
