@@ -12,7 +12,7 @@ use crate::capture_session::CaptureSession;
 use crate::config;
 use crate::permissions::{do_permissions_check, OSPermissionStatus};
 use crate::server_core::ServerCore;
-use crate::store::{LocalPlanPolicy, OnboardingStore, SettingsStore};
+use crate::store::{OnboardingStore, SettingsStore};
 use screenpipe_engine::RecordingConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -124,7 +124,6 @@ fn configured_local_api_port(app: &tauri::AppHandle) -> u16 {
 fn recording_access_policy(
     is_enterprise_build: bool,
     dev_bypass: bool,
-    has_verified_local_plan: bool,
     enterprise_authorized: bool,
     consumer_requires_enterprise_app: bool,
     trial_activation_paywall: bool,
@@ -142,20 +141,26 @@ fn recording_access_policy(
     server_access_policy(
         is_enterprise_build,
         dev_bypass,
-        has_verified_local_plan,
         enterprise_authorized,
         consumer_requires_enterprise_app,
+        authentication_status,
     )
 }
 
 fn server_access_policy(
     is_enterprise_build: bool,
     dev_bypass: bool,
-    has_verified_local_plan: bool,
     enterprise_authorized: bool,
     consumer_requires_enterprise_app: bool,
+    authentication_status: crate::startup_auth::AuthenticationStatus,
 ) -> bool {
     if dev_bypass {
+        return true;
+    }
+    if authentication_status == crate::startup_auth::AuthenticationStatus::LoggedOut {
+        return false;
+    }
+    if authentication_status == crate::startup_auth::AuthenticationStatus::NotRequired {
         return true;
     }
     if !is_enterprise_build && consumer_requires_enterprise_app {
@@ -167,16 +172,40 @@ fn server_access_policy(
         // only after policy and seat enrollment succeed for the organization.
         return enterprise_authorized;
     }
-    has_verified_local_plan
+    // The resolved startup authentication is sufficient for consumer recording
+    // while offline. Unknown plan truth still fails closed for paid features;
+    // it is not a second authentication decision for local capture.
+    true
 }
 
-pub(crate) fn server_access_allowed(store: &SettingsStore) -> bool {
+fn resolved_authentication_status(
+    app: &tauri::AppHandle,
+    store: &SettingsStore,
+) -> crate::startup_auth::AuthenticationStatus {
+    let startup_status = app
+        .try_state::<crate::startup_auth::AuthenticationStatus>()
+        .map(|status| *status)
+        .unwrap_or(crate::startup_auth::AuthenticationStatus::LoggedOut);
+    if startup_status == crate::startup_auth::AuthenticationStatus::LoggedOut
+        && if cfg!(feature = "enterprise-build") {
+            crate::enterprise_policy::recording_authorized()
+        } else {
+            store.has_cloud_authentication()
+        }
+    {
+        crate::startup_auth::AuthenticationStatus::Authenticated
+    } else {
+        startup_status
+    }
+}
+
+pub(crate) fn server_access_allowed(app: &tauri::AppHandle, store: &SettingsStore) -> bool {
     server_access_policy(
         cfg!(feature = "enterprise-build"),
         cfg!(debug_assertions),
-        store.local_plan_policy() != LocalPlanPolicy::Unknown,
         crate::enterprise_policy::recording_authorized(),
         !cfg!(debug_assertions) && store.requires_enterprise_app_for_consumer(),
+        resolved_authentication_status(app, store),
     )
 }
 
@@ -190,30 +219,14 @@ pub(crate) fn recording_access_allowed(app: &tauri::AppHandle, store: &SettingsS
             .flatten()
             .unwrap_or_default()
             .blocks_trial_activation_recording();
-    let resolved_authentication = app
-        .try_state::<crate::startup_auth::AuthenticationStatus>()
-        .map(|status| *status)
-        .unwrap_or(crate::startup_auth::AuthenticationStatus::LoggedOut);
     // The bootstrap result owns initial startup ordering. A later successful
     // sign-in may open recording without relaunching the already-initialized
     // app, so derive the current authenticated state from the same native
     // authorities used by the runtime guards.
-    let authentication_status = if resolved_authentication
-        == crate::startup_auth::AuthenticationStatus::LoggedOut
-        && if cfg!(feature = "enterprise-build") {
-            crate::enterprise_policy::recording_authorized()
-        } else {
-            store.has_cloud_authentication()
-        }
-    {
-        crate::startup_auth::AuthenticationStatus::Authenticated
-    } else {
-        resolved_authentication
-    };
+    let authentication_status = resolved_authentication_status(app, store);
     recording_access_policy(
         cfg!(feature = "enterprise-build"),
         cfg!(debug_assertions),
-        store.local_plan_policy() != LocalPlanPolicy::Unknown,
         crate::enterprise_policy::recording_authorized(),
         !cfg!(debug_assertions) && store.requires_enterprise_app_for_consumer(),
         trial_activation_paywall,
@@ -230,8 +243,8 @@ fn require_recording_access(app: &tauri::AppHandle, store: &SettingsStore) -> Re
     Err("account_required: sign in to start screenpipe recording".to_string())
 }
 
-fn require_server_access(store: &SettingsStore) -> Result<(), String> {
-    if server_access_allowed(store) {
+fn require_server_access(app: &tauri::AppHandle, store: &SettingsStore) -> Result<(), String> {
+    if server_access_allowed(app, store) {
         return Ok(());
     }
 
@@ -938,7 +951,7 @@ pub async fn spawn_screenpipe(
     // A summary-paywall install still needs the long-lived local read server
     // for Timeline, but it must not publish capture intent or restart capture.
     let store = SettingsStore::get(&app).ok().flatten().unwrap_or_default();
-    require_server_access(&store)?;
+    require_server_access(&app, &store)?;
     let capture_allowed = recording_access_allowed(&app, &store);
 
     // Normal starts publish capture intent before touching lifecycle state.
@@ -1023,7 +1036,7 @@ async fn spawn_screenpipe_inner(
     }
 
     let store = SettingsStore::get(&app).ok().flatten().unwrap_or_default();
-    if let Err(err) = require_server_access(&store) {
+    if let Err(err) = require_server_access(&app, &store) {
         state.is_starting.store(false, Ordering::SeqCst);
         state.is_starting_capture.store(false, Ordering::SeqCst);
         return Err(err);
@@ -1676,22 +1689,8 @@ mod recording_access_tests {
     use crate::startup_auth::AuthenticationStatus;
 
     #[test]
-    fn verified_free_consumer_can_record_without_a_paid_entitlement() {
+    fn cached_authenticated_consumer_can_record_offline() {
         assert!(recording_access_policy(
-            false,
-            false,
-            true,
-            false,
-            false,
-            false,
-            AuthenticationStatus::Authenticated,
-        ));
-    }
-
-    #[test]
-    fn consumer_with_unknown_plan_cannot_record() {
-        assert!(!recording_access_policy(
-            false,
             false,
             false,
             false,
@@ -1706,7 +1705,6 @@ mod recording_access_tests {
         assert!(!recording_access_policy(
             false,
             false,
-            true,
             false,
             false,
             false,
@@ -1719,7 +1717,6 @@ mod recording_access_tests {
         assert!(!recording_access_policy(
             true,
             false,
-            true,
             false,
             false,
             false,
@@ -1727,7 +1724,6 @@ mod recording_access_tests {
         ));
         assert!(recording_access_policy(
             true,
-            false,
             false,
             true,
             false,
@@ -1743,7 +1739,6 @@ mod recording_access_tests {
             false,
             true,
             true,
-            true,
             false,
             AuthenticationStatus::Authenticated,
         ));
@@ -1753,7 +1748,6 @@ mod recording_access_tests {
     fn summary_paywall_blocks_capture_even_in_debug_builds() {
         assert!(!recording_access_policy(
             false,
-            true,
             true,
             false,
             false,
@@ -1770,12 +1764,10 @@ mod recording_access_tests {
             false,
             false,
             false,
-            false,
             AuthenticationStatus::NotRequired,
         ));
         assert!(recording_access_policy(
             true,
-            false,
             false,
             false,
             false,
@@ -1786,8 +1778,20 @@ mod recording_access_tests {
 
     #[test]
     fn summary_paywall_keeps_the_local_read_server_available() {
-        assert!(server_access_policy(false, true, true, false, false));
-        assert!(server_access_policy(false, false, true, false, false));
+        assert!(server_access_policy(
+            false,
+            true,
+            false,
+            false,
+            AuthenticationStatus::Authenticated,
+        ));
+        assert!(server_access_policy(
+            false,
+            false,
+            false,
+            false,
+            AuthenticationStatus::Authenticated,
+        ));
     }
 }
 
