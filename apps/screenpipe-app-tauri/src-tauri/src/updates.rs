@@ -8,6 +8,7 @@ use crate::store::{get_store, SettingsStore};
 use crate::RecordingState;
 use anyhow::Error;
 use dark_light::Mode;
+use futures::StreamExt;
 use log::{debug, error, info, warn};
 use semver::Version;
 use serde_json;
@@ -343,6 +344,41 @@ pub async fn await_safe_restart(timeout_secs: Option<u64>) -> String {
 /// True once a surface has committed to applying a staged update; keeps a
 /// second trigger from starting a parallel teardown+relaunch.
 static UPDATE_RESTART_STARTED: AtomicBool = AtomicBool::new(false);
+
+async fn meeting_active(app: &tauri::AppHandle) -> bool {
+    let state = app.state::<RecordingState>();
+    let server = state.server.lock().await;
+    let Some(server) = server.as_ref() else {
+        return false;
+    };
+    screenpipe_engine::routes::meetings::resolve_meeting_status_from(
+        server.db.as_ref(),
+        server.manual_meeting.as_ref(),
+    )
+    .await
+    .map(|status| status.active)
+    .unwrap_or_else(|error| {
+        warn!("auto-update: could not verify meeting status: {}", error);
+        true
+    })
+}
+
+/// Require 30 meeting-free seconds before an automatic restart.
+async fn wait_for_meeting_restart_window(app: &tauri::AppHandle) {
+    let mut started = screenpipe_events::subscribe_to_event::<serde_json::Value>("meeting_started");
+    let mut ended = screenpipe_events::subscribe_to_event::<serde_json::Value>("meeting_ended");
+
+    if meeting_active(app).await {
+        ended.next().await;
+    }
+
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(30)) => return,
+            _ = started.next() => { ended.next().await; }
+        }
+    }
+}
 
 /// Banner-click restart. Mirror the auto-update path: gate, stop server, then
 /// spawn the replacement app and `_exit` the old process so C/C++ atexit
@@ -1191,6 +1227,9 @@ impl UpdatesManager {
 
             #[cfg(target_os = "windows")]
             {
+                if auto_update {
+                    wait_for_meeting_restart_window(&self.app).await;
+                }
                 // Windows: stop screenpipe before replacing the binary
                 if let Err(err) =
                     stop_screenpipe(self.app.state::<RecordingState>(), self.app.clone()).await
@@ -1463,7 +1502,7 @@ impl UpdatesManager {
                         "delay_secs": 30,
                     }),
                 );
-                tokio::time::sleep(Duration::from_secs(30)).await;
+                wait_for_meeting_restart_window(&self.app).await;
                 // Time-bounded: never let a wedged capture/audio teardown stall
                 // the relaunch (see PRE_EXIT_TEARDOWN_TIMEOUT / 2026-06-26 report).
                 match bounded_teardown(
