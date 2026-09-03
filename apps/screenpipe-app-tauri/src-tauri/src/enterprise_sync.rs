@@ -770,6 +770,8 @@ mod imp {
     }
     const HIDDEN_UI_POLICY_POLL_INTERVAL: std::time::Duration =
         std::time::Duration::from_secs(5 * 60);
+    const NATIVE_POLICY_RETRY_INTERVAL: std::time::Duration =
+        std::time::Duration::from_secs(30);
     const NATIVE_POLICY_STARTUP_DELAY: std::time::Duration = std::time::Duration::from_secs(15);
     const RECORDING_DISABLED_BY_ADMIN_CODE: &str = "recording_disabled_by_admin";
 
@@ -1017,6 +1019,16 @@ mod imp {
         Rejected,
         Unavailable(String),
         NoCredential,
+    }
+
+    fn native_policy_poll_interval(
+        result: &NativeAuthorizationResult,
+    ) -> std::time::Duration {
+        if matches!(result, NativeAuthorizationResult::Unavailable(_)) {
+            NATIVE_POLICY_RETRY_INTERVAL
+        } else {
+            HIDDEN_UI_POLICY_POLL_INTERVAL
+        }
     }
 
     async fn fetch_hidden_ui_policy(
@@ -1409,9 +1421,11 @@ mod imp {
             loop {
                 let was_hidden = crate::enterprise_policy::is_app_ui_hidden();
                 let device_id = settings_device_id(&app).unwrap_or_else(|| "unknown".to_string());
-                match resolve_native_authorization(&http, &policy_url, &heartbeat_url, &device_id)
-                    .await
-                {
+                let authorization =
+                    resolve_native_authorization(&http, &policy_url, &heartbeat_url, &device_id)
+                        .await;
+                let next_poll = native_policy_poll_interval(&authorization);
+                match authorization {
                     NativeAuthorizationResult::Authorized(policy) => {
                         let was_authorized = crate::enterprise_policy::recording_authorized();
                         crate::enterprise_policy::update_recording_authorized(true);
@@ -1495,7 +1509,7 @@ mod imp {
                     }
                 }
 
-                tokio::time::sleep(HIDDEN_UI_POLICY_POLL_INTERVAL).await;
+                tokio::time::sleep(next_poll).await;
             }
         });
     }
@@ -1766,9 +1780,10 @@ mod imp {
             choose_device_id, classify_failed_enterprise_response, credential_authorizes_policy,
             enterprise_license_hash, exact_frame_url, explicitly_rejects_authorization,
             image_uploads_allowed, locked_setting_enforces_auto_start, native_policy_startup_delay,
-            sibling_heartbeat_url, EnterprisePolicyCredentialKind, HiddenUiPolicyResponse,
-            NativePolicyFetchError, NativeSyncStreams, NATIVE_POLICY_STARTUP_DELAY,
-            RECORDING_DISABLED_BY_ADMIN_CODE,
+            native_policy_poll_interval, sibling_heartbeat_url, EnterprisePolicyCredentialKind,
+            HiddenUiPolicyResponse, NativeAuthorizationResult, NativePolicyFetchError,
+            NativeSyncStreams, HIDDEN_UI_POLICY_POLL_INTERVAL, NATIVE_POLICY_RETRY_INTERVAL,
+            NATIVE_POLICY_STARTUP_DELAY, RECORDING_DISABLED_BY_ADMIN_CODE,
         };
         use std::collections::HashMap;
 
@@ -1788,6 +1803,20 @@ mod imp {
             assert_eq!(
                 native_policy_startup_delay(false),
                 NATIVE_POLICY_STARTUP_DELAY
+            );
+        }
+
+        #[test]
+        fn unavailable_native_authorization_retries_before_the_regular_poll() {
+            assert_eq!(
+                native_policy_poll_interval(&NativeAuthorizationResult::Unavailable(
+                    "temporary control-plane failure".to_string()
+                )),
+                NATIVE_POLICY_RETRY_INTERVAL
+            );
+            assert_eq!(
+                native_policy_poll_interval(&NativeAuthorizationResult::Rejected),
+                HIDDEN_UI_POLICY_POLL_INTERVAL
             );
         }
 
