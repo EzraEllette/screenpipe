@@ -4,60 +4,50 @@
 
 "use client";
 
-import {
-  cloneElement,
-  useEffect,
-  useRef,
-  useState,
-  type FocusEvent,
-  type PointerEvent,
-  type ReactElement,
-} from "react";
+import { useRef, useState } from "react";
+import { Check, Clipboard, Loader2, X } from "lucide-react";
 import posthog from "posthog-js";
 
+import { CursorLogo } from "@/components/settings/tool-logos";
 import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@/components/ui/alert-dialog";
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
+import { toast } from "@/components/ui/use-toast";
 import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
+  handoffTargets,
+  performAgentHandoff,
+  type AgentHandoffTarget,
+} from "@/lib/first-run/agent-handoff";
 import { entryCardForHomeTemplate } from "@/lib/chat/response-feedback";
 import { type ChatEntryCard } from "@/lib/chat/types";
-import { cn } from "@/lib/utils";
-import { acpAdapterInfo } from "@/lib/utils/preset-appearance";
+import { commands } from "@/lib/utils/tauri";
 
-export type HomeCardAgentId =
-  "screenpipe" | "claude-acp" | "cursor" | "codex-acp";
+type HomeCardAgentId = "claude" | "cursor" | "codex";
+type LaunchState = "opening" | "opened" | "copied" | "unavailable";
 
-const HOME_CARD_AGENTS: readonly HomeCardAgentId[] = [
-  "screenpipe",
-  "claude-acp",
-  "cursor",
-  "codex-acp",
-];
+const SCREENPIPE_GITHUB_URL = "https://github.com/screenpipe/screenpipe";
 
-function homeCardAgentInfo(agentId: HomeCardAgentId) {
-  if (agentId === "screenpipe") {
-    return {
-      name: "Screenpipe",
-      imageSrc: "/images/screenpipe.png",
-      invertInDark: false,
-    };
-  }
-  return acpAdapterInfo(agentId);
-}
+export const HOME_CARD_AGENT_TOOLTIP = "run this in your favorite agent";
+
+const SETUP_TARGETS: Record<HomeCardAgentId, string> = {
+  claude: "claude-desktop",
+  cursor: "cursor",
+  codex: "codex",
+};
+
+const AGENT_LABELS: Record<HomeCardAgentId, string> = {
+  claude: "Claude",
+  cursor: "Cursor",
+  codex: "Codex",
+};
+
+const HOME_CARD_AGENT_TARGETS = handoffTargets().filter(
+  (target): target is AgentHandoffTarget & { id: HomeCardAgentId } =>
+    target.id === "claude" || target.id === "cursor" || target.id === "codex",
+);
 
 export interface HomeCardAgentTask {
   name: string;
@@ -66,184 +56,210 @@ export interface HomeCardAgentTask {
   previewPrompt?: string;
 }
 
+function taskForPipe(pipe: HomeCardAgentTask): string {
+  const task = (pipe.previewPrompt || pipe.description || pipe.title).trim();
+  return /[.!?]$/.test(task) ? task : `${task}.`;
+}
+
+/**
+ * Keep the external prompt short enough for desktop URL schemes. The agent's
+ * installed Screenpipe skill owns the detailed API procedure; this handoff
+ * carries the card's intent and a concrete recovery path when setup is absent.
+ */
+export function buildHomeCardAgentPrompt(
+  pipe: HomeCardAgentTask,
+  agentId: HomeCardAgentId,
+): string {
+  return `If Screenpipe is not already available in this agent, install its skills and MCP from ${SCREENPIPE_GITHUB_URL} by running:
+
+npx -y screenpipe@latest agent setup ${SETUP_TARGETS[agentId]}
+
+Restart this agent if setup asks you to. Then run this prompt:
+
+${taskForPipe(pipe)}
+
+Use Screenpipe's recorded data and only report activity you can verify.`;
+}
+
+function AgentLogo({ id }: { id: HomeCardAgentId }) {
+  const className = "h-3.5 w-3.5";
+  if (id === "claude") {
+    // eslint-disable-next-line @next/next/no-img-element
+    return <img src="/images/claude-ai.svg" alt="" className={className} />;
+  }
+  if (id === "cursor") return <CursorLogo className={className} />;
+  return (
+    // eslint-disable-next-line @next/next/no-img-element
+    <img src="/images/openai.svg" alt="" className={className} />
+  );
+}
+
+function statusLabel(state: LaunchState | null): string {
+  if (state === "opening") return "opening";
+  if (state === "opened") return "opened";
+  if (state === "copied") return "copied";
+  if (state === "unavailable") return "unavailable";
+  return "run in";
+}
+
+function resultDescription(state: LaunchState, label: string): string {
+  if (state === "opened") return `Opened in ${label}. The prompt is also copied.`;
+  if (state === "copied") return `${label} could not open. Paste the copied prompt there.`;
+  if (state === "unavailable") return `Could not open ${label} or copy the prompt.`;
+  return `Opening ${label}.`;
+}
+
 export function HomeCardAgentActions({
   pipe,
-  prompt,
-  displayLabel,
   entryCard,
-  menuOpen,
-  onMenuOpenChange,
-  onStartWithAgent,
-  onOpenAcpSetup,
-  children,
+  placement = "card",
 }: {
   pipe: HomeCardAgentTask;
-  prompt: string;
-  displayLabel: string;
   entryCard?: ChatEntryCard;
-  menuOpen: boolean;
-  onMenuOpenChange: (open: boolean) => void;
-  onStartWithAgent?: (
-    agentId: HomeCardAgentId,
-    prompt: string,
-    displayLabel: string,
-    entryCard: ChatEntryCard,
-  ) => boolean;
-  onOpenAcpSetup?: (agentId: HomeCardAgentId) => void;
-  children: ReactElement<Record<string, unknown>>;
+  placement?: "card" | "chip";
 }) {
-  const [setupAgent, setSetupAgent] = useState<HomeCardAgentId | null>(null);
-  const viewed = useRef(false);
-  const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [state, setState] = useState<LaunchState | null>(null);
+  const [activeAgent, setActiveAgent] = useState<HomeCardAgentId | null>(null);
+  const viewedAgents = useRef(new Set<HomeCardAgentId>());
+  const pending = state === "opening";
   const card = entryCard ?? entryCardForHomeTemplate(pipe.name);
 
-  const cancelClose = () => {
-    if (closeTimer.current) clearTimeout(closeTimer.current);
-    closeTimer.current = null;
-  };
-
-  const scheduleClose = () => {
-    cancelClose();
-    closeTimer.current = setTimeout(() => {
-      onMenuOpenChange(false);
-      closeTimer.current = null;
-    }, 120);
-  };
-
-  useEffect(() => () => cancelClose(), []);
-
-  const trackViewed = (trigger: "hover" | "keyboard") => {
-    if (viewed.current) return;
-    viewed.current = true;
-    posthog.capture("home_card_agent_action_viewed", { card, trigger });
-  };
-
-  const start = (agentId: HomeCardAgentId) => {
-    onMenuOpenChange(false);
-    const started =
-      onStartWithAgent?.(agentId, prompt, displayLabel, card) === true;
-    posthog.capture("home_card_agent_start_clicked", { agent: agentId, card });
-    posthog.capture("home_card_agent_start_completed", {
-      agent: agentId,
+  const trackAgentViewed = (
+    agent: HomeCardAgentId,
+    trigger: "hover" | "keyboard",
+  ) => {
+    if (viewedAgents.current.has(agent)) return;
+    viewedAgents.current.add(agent);
+    posthog.capture("home_card_agent_action_viewed", {
+      agent,
       card,
-      outcome: started ? "started" : "setup_required",
+      trigger,
     });
-    if (!started) setSetupAgent(agentId);
   };
 
-  const setupInfo = setupAgent ? acpAdapterInfo(setupAgent) : null;
-  const trigger = cloneElement(children, {
-    "data-home-card-agent": pipe.name,
-    onPointerEnter: (event: PointerEvent<HTMLElement>) => {
-      const childHandler = children.props.onPointerEnter as
-        ((event: PointerEvent<HTMLElement>) => void) | undefined;
-      childHandler?.(event);
-      cancelClose();
-      trackViewed("hover");
-      onMenuOpenChange(true);
-    },
-    onPointerLeave: (event: PointerEvent<HTMLElement>) => {
-      const childHandler = children.props.onPointerLeave as
-        ((event: PointerEvent<HTMLElement>) => void) | undefined;
-      childHandler?.(event);
-      scheduleClose();
-    },
-    onPointerDown: (event: PointerEvent<HTMLElement>) => {
-      const childHandler = children.props.onPointerDown as
-        ((event: PointerEvent<HTMLElement>) => void) | undefined;
-      childHandler?.(event);
-      event.preventDefault();
-    },
-    onFocus: (event: FocusEvent<HTMLElement>) => {
-      const childHandler = children.props.onFocus as
-        ((event: FocusEvent<HTMLElement>) => void) | undefined;
-      childHandler?.(event);
-      trackViewed("keyboard");
-    },
-  });
+  const launch = async (
+    target: AgentHandoffTarget & { id: HomeCardAgentId },
+  ) => {
+    const prompt = buildHomeCardAgentPrompt(pipe, target.id);
+    setActiveAgent(target.id);
+    setState("opening");
+    posthog.capture("home_card_agent_handoff_clicked", {
+      agent: target.id,
+      card,
+    });
+
+    const result = await performAgentHandoff(
+      target,
+      {
+        copyText: async (text) => {
+          const copied = await commands.copyTextToClipboard(text);
+          if (copied.status === "error") throw new Error(copied.error);
+        },
+        openUrl: async (url) => {
+          const { openUrl } = await import("@tauri-apps/plugin-opener");
+          await openUrl(url);
+        },
+      },
+      prompt,
+    );
+
+    const nextState = result.prefilled
+      ? "opened"
+      : result.copied
+        ? "copied"
+        : "unavailable";
+    setState(nextState);
+    const label = AGENT_LABELS[target.id];
+    toast({
+      title:
+        nextState === "opened"
+          ? `opened in ${label}`
+          : nextState === "copied"
+            ? "prompt copied"
+            : "agent handoff unavailable",
+      description: resultDescription(nextState, label),
+      ...(nextState === "unavailable" ? { variant: "destructive" as const } : {}),
+    });
+
+    posthog.capture("home_card_agent_handoff_completed", {
+      agent: target.id,
+      card,
+      outcome: nextState,
+      opened: result.launched,
+      prefilled: result.prefilled,
+      replayed: result.replayed,
+      copy_only: !result.prefilled && result.copied,
+      clipboard_copied: result.copied,
+    });
+  };
 
   return (
-    <>
-      <DropdownMenu
-        open={menuOpen}
-        onOpenChange={onMenuOpenChange}
-        modal={false}
+    <div
+      data-testid={`home-card-agent-actions-${pipe.name}`}
+      data-state={state ?? "idle"}
+      data-agent={activeAgent ?? undefined}
+      data-placement={placement}
+      role="group"
+      aria-label={`Run ${pipe.title} in another agent`}
+      className={`absolute top-1/2 z-20 flex -translate-y-1/2 items-center gap-0.5 text-foreground transition-opacity duration-150 motion-reduce:transition-none ${
+        placement === "chip" ? "left-1/2 -translate-x-1/2" : "right-3"
+      } ${
+        state
+          ? "pointer-events-auto opacity-100"
+          : "pointer-events-none opacity-0 group-hover/home-card:pointer-events-auto group-hover/home-card:opacity-100 group-focus-within/home-card:pointer-events-auto group-focus-within/home-card:opacity-100"
+      }`}
+    >
+      <span
+        data-testid={`home-card-agent-status-${pipe.name}`}
+        role="status"
+        className="sr-only"
       >
-        <DropdownMenuTrigger asChild>{trigger}</DropdownMenuTrigger>
-        <DropdownMenuContent
-          side="bottom"
-          align="center"
-          sideOffset={4}
-          avoidCollisions={false}
-          className="w-64"
-          onPointerEnter={cancelClose}
-          onPointerLeave={scheduleClose}
-          onCloseAutoFocus={(event) => event.preventDefault()}
-        >
-          <DropdownMenuLabel className="px-2 py-1.5 text-xs font-medium">
-            start with agent
-          </DropdownMenuLabel>
-          <p className="px-2 pb-2 text-[11px] leading-snug text-muted-foreground">
-            The agent runs inside Screenpipe with your recorded context.
-          </p>
-          <DropdownMenuSeparator />
-          {HOME_CARD_AGENTS.map((agentId) => {
-            const agent = homeCardAgentInfo(agentId);
-            return (
-              <DropdownMenuItem
-                key={agentId}
-                data-testid={`home-card-agent-${pipe.name}-${agentId}`}
-                onSelect={() => start(agentId)}
-                className="cursor-pointer gap-3 px-2 py-2"
-              >
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img
-                  src={agent.imageSrc}
-                  alt=""
-                  className={cn(
-                    "h-5 w-5 shrink-0 object-contain",
-                    agent.invertInDark && "dark:invert",
+        {statusLabel(state)}
+      </span>
+      <TooltipProvider delayDuration={120}>
+        {HOME_CARD_AGENT_TARGETS.map((target) => {
+          const label = AGENT_LABELS[target.id];
+          const isOpening = pending && activeAgent === target.id;
+          const isResult = !pending && state && activeAgent === target.id;
+          return (
+            <Tooltip key={target.id}>
+              <TooltipTrigger asChild>
+                <button
+                  type="button"
+                  data-testid={`home-card-agent-${pipe.name}-${target.id}`}
+                  aria-label={`Run in ${label}`}
+                  disabled={pending}
+                  onPointerEnter={() => trackAgentViewed(target.id, "hover")}
+                  onFocus={() => trackAgentViewed(target.id, "keyboard")}
+                  onClick={() => void launch(target)}
+                  className={`flex h-5 w-5 items-center justify-center rounded-full opacity-75 transition-[color,background-color,opacity,transform] duration-150 hover:z-10 hover:scale-110 hover:bg-background/10 hover:opacity-100 focus-visible:z-10 focus-visible:bg-background/10 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-background disabled:cursor-wait disabled:opacity-50 motion-reduce:transform-none motion-reduce:transition-none ${
+                    isResult ? "z-10 text-signal opacity-100" : ""
+                  }`}
+                >
+                  {isOpening ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+                  ) : isResult && state === "opened" ? (
+                    <Check className="h-3.5 w-3.5" aria-hidden />
+                  ) : isResult && state === "copied" ? (
+                    <Clipboard className="h-3.5 w-3.5" aria-hidden />
+                  ) : isResult && state === "unavailable" ? (
+                    <X className="h-3.5 w-3.5" aria-hidden />
+                  ) : (
+                    <AgentLogo id={target.id} />
                   )}
-                />
-                <span className="min-w-0 text-sm font-medium">
-                  {agent.name}
-                </span>
-              </DropdownMenuItem>
-            );
-          })}
-        </DropdownMenuContent>
-      </DropdownMenu>
-
-      <AlertDialog
-        open={setupAgent !== null}
-        onOpenChange={(nextOpen) => {
-          if (!nextOpen) setSetupAgent(null);
-        }}
-      >
-        <AlertDialogContent data-testid="home-card-acp-setup-dialog">
-          <AlertDialogHeader>
-            <AlertDialogTitle>
-              set up {setupInfo?.name ?? "this agent"}
-            </AlertDialogTitle>
-            <AlertDialogDescription>
-              Add a {setupInfo?.name ?? "coding agent"} ACP preset first.
-              Screenpipe will install or connect the agent, handle sign-in, and
-              keep the chat here.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>not now</AlertDialogCancel>
-            <AlertDialogAction
-              onClick={() => {
-                if (setupAgent) onOpenAcpSetup?.(setupAgent);
-                setSetupAgent(null);
-              }}
-            >
-              open AI presets
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
-    </>
+                </button>
+              </TooltipTrigger>
+              <TooltipContent
+                side={placement === "chip" ? "bottom" : "right"}
+                sideOffset={6}
+                className="rounded-md px-2.5 py-1.5 text-[11px] font-normal"
+              >
+                {HOME_CARD_AGENT_TOOLTIP}
+              </TooltipContent>
+            </Tooltip>
+          );
+        })}
+      </TooltipProvider>
+    </div>
   );
 }

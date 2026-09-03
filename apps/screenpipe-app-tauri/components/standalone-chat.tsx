@@ -70,7 +70,6 @@ import { ImageViewerDialog } from "@/components/chat/standalone/image-viewer-dia
 import { StandaloneChatHeader } from "@/components/chat/standalone/standalone-chat-header";
 import { ChatMainPane } from "@/components/chat/standalone/chat-main-pane";
 import { ChatComposer } from "@/components/chat/standalone/chat-composer";
-import { scheduleHomeCardAgentSend } from "@/components/chat/standalone/home-card-agent-start";
 import { appendSelectedTextToComposer } from "@/components/chat/standalone/selected-text-actions";
 import { useChatScroll } from "@/components/chat/standalone/hooks/use-chat-scroll";
 import { useChatConnections } from "@/components/chat/standalone/hooks/use-chat-connections";
@@ -2316,32 +2315,6 @@ export function StandaloneChat({
         }}
         summaryCardsProps={{
           onPreviewPrompt: setHomeCardPromptPreview,
-          onStartWithAgent: (agentId, message, displayLabel, entryCard) => {
-            const preset = availableAiPresets.find(
-              (candidate) =>
-                candidate.provider === "acp" &&
-                candidate.acpAgent?.id === agentId,
-            );
-            if (!preset) return false;
-
-            pendingContextualHomeSuggestionRef.current = null;
-            handleSetActivePreset(preset);
-            handlePiRestart(preset);
-            // The selected preset ref updates synchronously, but this render's
-            // send closure can still have canChat=false from the prior preset.
-            // Submit on the next task through the latest send ref so choosing
-            // an ACP agent always starts the chat without a second click.
-            scheduleHomeCardAgentSend(
-              sendMessageRef,
-              message,
-              displayLabel,
-              entryCard,
-            );
-            return true;
-          },
-          onOpenAcpSetup: () => {
-            void commands.showWindow({ Home: { page: "ai" } });
-          },
           onSendMessage: (message, displayLabel, entrySource, entryCard) => {
             pendingContextualHomeSuggestionRef.current = null;
             // Control cards may preview their prompt as placeholder text, but
