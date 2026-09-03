@@ -690,6 +690,65 @@ describe("enterprise policy runtime manual activation", () => {
     );
   });
 
+  it("recovers a denied saved account on a later policy poll", async () => {
+    vi.useFakeTimers();
+    Object.assign(mocks.settings, { user: { token: "account-token" } });
+    mockEnterpriseApi({ policyStatus: 401 });
+
+    const { result } = await renderEnterprisePolicy();
+    await act(async () => {});
+    expect(result.current.authenticationState).toBe("account");
+    expect(result.current.isEnterpriseAuthenticated).toBe(false);
+
+    mockEnterpriseApi({});
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+    });
+
+    expect(result.current.authenticationState).toBe("authenticated");
+    expect(result.current.isEnterpriseAuthenticated).toBe(true);
+    expect(result.current.authenticationError).toBeNull();
+    expect(mocks.commands.setEnterpriseRecordingAuthorized).toHaveBeenLastCalledWith(
+      true,
+      "account",
+      "account-token",
+    );
+  });
+
+  it("keeps polling after an authenticated account is later denied", async () => {
+    vi.useFakeTimers();
+    Object.assign(mocks.settings, { user: { token: "account-token" } });
+    mockEnterpriseApi({});
+
+    const { result } = await renderEnterprisePolicy();
+    await act(async () => {});
+    expect(result.current.authenticationState).toBe("authenticated");
+
+    mockEnterpriseApi({ policyStatus: 401 });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+    });
+    expect(result.current.authenticationState).toBe("account");
+    expect(result.current.isEnterpriseAuthenticated).toBe(false);
+    expect(mocks.commands.setEnterpriseRecordingAuthorized).toHaveBeenLastCalledWith(
+      false,
+      null,
+      null,
+    );
+
+    mockEnterpriseApi({});
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+    });
+    expect(result.current.authenticationState).toBe("authenticated");
+    expect(result.current.isEnterpriseAuthenticated).toBe(true);
+    expect(mocks.commands.setEnterpriseRecordingAuthorized).toHaveBeenLastCalledWith(
+      true,
+      "account",
+      "account-token",
+    );
+  });
+
   it("does not wait for a hanging engine restart during activation", async () => {
     vi.useFakeTimers();
     mockEnterpriseApi({ policy: { lockedSettings: { disableKeyboardCapture: "false" } } });

@@ -648,6 +648,8 @@ export function useEnterprisePolicyRuntime() {
   });
   const [authenticationState, setAuthenticationState] =
     useState<EnterpriseAuthenticationState>("checking");
+  const authenticationStateRef = useRef(authenticationState);
+  authenticationStateRef.current = authenticationState;
   const [authenticationError, setAuthenticationError] = useState<string | null>(null);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   // Refs for the polling handler: it must read the latest account token and
@@ -1085,6 +1087,17 @@ export function useEnterprisePolicyRuntime() {
           setAuthenticationState("authenticated");
           return;
         }
+        if (
+          credential.type === "account" &&
+          authenticationStateRef.current !== "authenticated"
+        ) {
+          if (!await setNativeRecordingAuthorized(true, credential)) {
+            setAuthenticationError(NATIVE_RECORDING_AUTH_ERROR);
+            return;
+          }
+          setAuthenticationError(null);
+          setAuthenticationState("authenticated");
+        }
       } else if (result.reason === "invalid_key") {
         console.warn("[enterprise] saved key is no longer valid, falling back to account auth");
         stopPolling();
@@ -1117,12 +1130,13 @@ export function useEnterprisePolicyRuntime() {
         setAuthenticationError(ROTATED_ENTERPRISE_KEY_ERROR);
       } else if (result.reason === "not_member") {
         console.warn("[enterprise] signed-in account is no longer an organization member");
-        stopPolling();
         await setNativeRecordingAuthorized(false);
         setAuthenticationState("account");
         setAuthenticationError("this account is not associated with the enterprise organization");
       }
-      // network_error: silently keep polling, use cached policy
+      // Account denials and network errors keep polling. The gate remains
+      // closed after a denial, but a later successful check can recover the
+      // same saved account without another login or app restart.
     }, POLL_INTERVAL_MS);
   }, [fetchPolicy, setNativeRecordingAuthorized, stopPolling]);
 
@@ -1223,6 +1237,7 @@ export function useEnterprisePolicyRuntime() {
       await setNativeRecordingAuthorized(false);
       setAuthenticationState("account");
       setAuthenticationError("this account is not associated with the enterprise organization");
+      startPolling(credential);
       return { authenticated: false, retryable: false };
     }
 
