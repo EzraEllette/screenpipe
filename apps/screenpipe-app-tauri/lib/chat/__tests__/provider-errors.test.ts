@@ -355,6 +355,17 @@ describe("provider error copy", () => {
     expect(msg).not.toContain("invalid_request_error");
   });
 
+  it("maps the engine protocol context-size-exceeded signature", () => {
+    const raw =
+      'Error: Engine protocol predict stream returned an error: {"code":500,"message":"Context size has been exceeded.","type":"server_error"}';
+
+    expect(
+      buildProviderErrorMessage(raw, { provider: "screenpipe-cloud", model: "auto" })
+    ).toBe(
+      "This chat is too long for the selected model. Match Settings → AI → Advanced → model context tokens to the provider's context window. Start a new chat or remove large attachments/screenshots, then retry."
+    );
+  });
+
   it("explains llama.cpp context mismatches with reported token counts", () => {
     const raw = 'Engine protocol predict request returned 400: {"error":{"code":400,"message":"request (13069 tokens) exceeds the available context size (8192 tokens), try increasing it","type":"exceed_context_size_error","n_prompt_tokens":13069,"n_ctx":8192}}';
     expect(

@@ -135,6 +135,7 @@ function isContextOverflowError(errorStr: string): boolean {
   return (
     normalized.includes("context_length_exceeded") ||
     normalized.includes("exceed_context_size_error") ||
+    normalized.includes("context size has been exceeded") ||
     normalized.includes("exceeds the available context size") ||
     normalized.includes("context window") ||
     normalized.includes("maximum context length") ||
