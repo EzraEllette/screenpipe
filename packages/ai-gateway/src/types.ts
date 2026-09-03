@@ -112,6 +112,11 @@ export interface ResponseFormat {
 	schema?: InputSchema;
 	name?: string;
 	description?: string;
+	json_schema?: {
+		schema: InputSchema;
+		name: string;
+		description?: string;
+	};
 }
 
 export interface ImageContent {

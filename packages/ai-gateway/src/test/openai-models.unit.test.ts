@@ -303,6 +303,32 @@ describe('OpenAI API accounting and routing', () => {
 		expect(params['max_tokens']).toBeUndefined();
 	});
 
+	it('accepts nested and flattened json_schema response formats', async () => {
+		const formats = [
+			{ type: 'json_schema', json_schema: { name: 'answer', schema: { type: 'object' } } },
+			{ type: 'json_schema', name: 'answer', schema: { type: 'object' } },
+		];
+		for (const response_format of formats) {
+			const provider = new OpenAIProvider('sk-test') as any;
+			let capturedParams: any;
+			provider.client.chat.completions.create = mock(async (params: any) => {
+				capturedParams = params;
+				return { choices: [{ message: { content: 'ok' } }] };
+			});
+			await provider.createCompletion({
+				model: 'gpt-5.6-sol',
+				messages: [{ role: 'user', content: 'hello' }],
+				response_format,
+			} as any);
+			expect(capturedParams.response_format.json_schema).toEqual({
+				name: 'answer',
+				description: undefined,
+				schema: { type: 'object' },
+				strict: true,
+			});
+		}
+	});
+
 	it('adds stable GPT-5.6 explicit prompt-cache fields at the last leading system block', async () => {
 		const params: any = {
 			model: 'gpt-5.6-luna',
