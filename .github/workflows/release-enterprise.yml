@@ -1094,15 +1094,22 @@ jobs:
 
       - name: Notarize and staple DMG
         env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
+          set -euo pipefail
           TARGET="${{ matrix.target }}"
           BUNDLE_DIR="apps/screenpipe-app-tauri/src-tauri/target/${TARGET}/release/bundle"
 
           for dmg in "${BUNDLE_DIR}"/dmg/*.dmg; do
             if [ -f "$dmg" ]; then
+              echo "Signing: $(basename "$dmg")"
+              codesign --force --sign "$APPLE_SIGNING_IDENTITY" --timestamp \
+                --identifier "screenpi.pe.enterprise.dmg" "$dmg"
+              codesign --verify --verbose=2 "$dmg"
+
               echo "Notarizing: $(basename "$dmg")"
               # Retry transient Apple-notary failures (same class as the .pkg
               # step below). `if xcrun ...; then` keeps `set -e` from aborting
@@ -1124,7 +1131,8 @@ jobs:
               echo "Stapling: $(basename "$dmg")"
               xcrun stapler staple "$dmg"
               xcrun stapler validate "$dmg"
-              spctl --assess --type open --context context:primary-signature --verbose "$dmg" 2>&1 || true
+              codesign --verify --verbose=2 "$dmg"
+              spctl --assess --type open --context context:primary-signature --verbose "$dmg"
               echo "$(basename "$dmg") notarized and stapled"
             fi
           done
