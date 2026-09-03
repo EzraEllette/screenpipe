@@ -266,6 +266,10 @@ fn should_prevent_window_close(label: &str) -> bool {
     label != "onboarding"
 }
 
+fn is_updater_endpoint_status_noise(text: &str) -> bool {
+    text == "update endpoint did not respond with a successful status code"
+}
+
 #[cfg(target_os = "macos")]
 fn emit_menu_close_window(app: &tauri::AppHandle) {
     let focused = app
@@ -761,7 +765,10 @@ async fn main() {
                         .collect()
                     });
 
-                    let matches_noise = |text: &str| env_patterns.iter().any(|re| re.is_match(text));
+                    let matches_noise = |text: &str| {
+                        is_updater_endpoint_status_noise(text)
+                            || env_patterns.iter().any(|re| re.is_match(text))
+                    };
                     if event.message.as_deref().map(matches_noise).unwrap_or(false) {
                         return None;
                     }
@@ -2739,6 +2746,46 @@ mod window_close_policy_tests {
         for label in ["home", "main", "main-window", "search", "chat"] {
             assert!(should_prevent_window_close(label), "label: {label}");
         }
+    }
+}
+
+#[cfg(test)]
+mod sentry_noise_tests {
+    use super::is_updater_endpoint_status_noise;
+
+    #[test]
+    fn updater_endpoint_status_error_is_filtered_from_sentry() {
+        assert!(is_updater_endpoint_status_noise(
+            "update endpoint did not respond with a successful status code"
+        ));
+    }
+
+    #[test]
+    fn updater_endpoint_status_error_with_prefix_is_reported() {
+        assert!(!is_updater_endpoint_status_noise(
+            "updater failed: update endpoint did not respond with a successful status code"
+        ));
+    }
+
+    #[test]
+    fn updater_endpoint_status_error_with_suffix_is_reported() {
+        assert!(!is_updater_endpoint_status_noise(
+            "update endpoint did not respond with a successful status code: retry exhausted"
+        ));
+    }
+
+    #[test]
+    fn compound_updater_endpoint_status_error_is_reported() {
+        assert!(!is_updater_endpoint_status_noise(
+            "database failure while handling: update endpoint did not respond with a successful status code"
+        ));
+    }
+
+    #[test]
+    fn unrelated_errors_are_not_filtered_from_sentry() {
+        assert!(!is_updater_endpoint_status_noise(
+            "failed to update all pipes: internal state unavailable"
+        ));
     }
 }
 
