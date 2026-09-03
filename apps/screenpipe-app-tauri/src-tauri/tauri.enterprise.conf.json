@@ -11,11 +11,11 @@
   "bundle": {
     "createUpdaterArtifacts": true,
     "active": true,
-    "publisher": "Negentropy Labs, Inc.",
+    "publisher": "Screenpipe Inc.",
     "category": "DeveloperTool",
     "shortDescription": "24/7 memory for your desktop",
     "longDescription": "24/7 memory for your desktop. 100% local. You own your data.",
-    "copyright": "Copyright © 2024-2026 Negentropy Labs, Inc. All rights reserved.",
+    "copyright": "",
     "targets": [
       "app",
       "dmg",
