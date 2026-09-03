@@ -44,6 +44,7 @@ export interface SkillDraftEditorProps {
   installing?: boolean;
   readOnly?: boolean;
   installed?: boolean;
+  installSummary?: string;
   historical?: boolean;
   onOpenCurrent?: () => void | Promise<void>;
   detached?: boolean;
@@ -84,6 +85,7 @@ export function SkillDraftEditor({
   installing = false,
   readOnly = false,
   installed = false,
+  installSummary,
   historical = false,
   onOpenCurrent,
   detached = false,
@@ -421,8 +423,11 @@ export function SkillDraftEditor({
         </footer>
       ) : installed ? (
         <footer className="flex h-12 shrink-0 items-center justify-between gap-3 border-t border-border bg-background px-4">
-          <span className="text-xs text-muted-foreground">
-            installed and ready to use
+          <span
+            className="min-w-0 truncate text-xs text-muted-foreground"
+            title={installSummary}
+          >
+            {installSummary ?? "installed and ready to use"}
           </span>
           <span className="flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-wide text-signal">
             <Check className="h-3.5 w-3.5" aria-hidden="true" />

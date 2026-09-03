@@ -4,6 +4,7 @@
 import type { InvokeArgs } from "@tauri-apps/api/core";
 import type {
   ActivityOpportunitySnapshot,
+  AgentSkillSyncSnapshot,
   BrainViewCanvasDocument,
   BrainViewDefinition,
   BrainViewTemplateKit,
@@ -192,19 +193,36 @@ const NOOP_COMMANDS = new Set([
 
 const BROWSER_DEV_IMPORTED_SKILLS: ImportedSkill[] = [
   {
+    key: "pdf-tools",
     name: "PDF tools",
     description: "read, create, and edit PDF documents",
     path: "/Users/screenpipe/.screenpipe/skills/pdf-tools",
+    origin: "user",
+    enabled: true,
   },
   {
+    key: "meeting-follow-up",
     name: "Meeting follow-up",
     description: "turn a meeting into decisions and next steps",
     path: "/Users/screenpipe/.screenpipe/skills/meeting-follow-up",
+    origin: "user",
+    enabled: true,
   },
   {
+    key: "customer-discovery",
     name: "Customer discovery",
     description: "prepare and synthesize customer interviews",
     path: "/Users/screenpipe/.screenpipe/skills/customer-discovery",
+    origin: "user",
+    enabled: true,
+  },
+  {
+    key: "daily-activity-brief",
+    name: "Daily activity brief",
+    description: "summarize the day from source-backed Screenpipe activity",
+    path: "/Users/screenpipe/.screenpipe/skills/daily-activity-brief",
+    origin: "agent",
+    enabled: true,
   },
 ];
 
@@ -1309,6 +1327,85 @@ export function createBrowserIpcMock(options: BrowserIpcMockOptions) {
   let importedSkills = BROWSER_DEV_IMPORTED_SKILLS.map((skill) => ({
     ...skill,
   }));
+  let agentSkillSync: AgentSkillSyncSnapshot = {
+    targets: [
+      { id: "claude", name: "Claude", detected: true, enabled: true, syncedCount: 1, issueCount: 0 },
+      { id: "codex", name: "Codex", detected: true, enabled: true, syncedCount: 1, issueCount: 0 },
+      { id: "cursor", name: "Cursor", detected: false, enabled: false, syncedCount: 0, issueCount: 0 },
+      { id: "gemini", name: "Gemini CLI", detected: false, enabled: false, syncedCount: 0, issueCount: 0 },
+      { id: "opencode", name: "OpenCode", detected: true, enabled: false, syncedCount: 0, issueCount: 0 },
+      { id: "openclaw", name: "OpenClaw", detected: false, enabled: false, syncedCount: 0, issueCount: 0 },
+      { id: "hermes", name: "Hermes", detected: false, enabled: false, syncedCount: 0, issueCount: 0 },
+    ],
+    skills: importedSkills.map((skill) => ({
+      key: skill.key,
+      automatic: skill.origin === "agent",
+      selectedTargets:
+        skill.origin === "agent" ? ["claude", "codex"] : [],
+      syncedTargets: skill.origin === "agent" ? ["claude", "codex"] : [],
+    })),
+    issues: [],
+  };
+  const sharedSkillTargets = new Map<string, Set<string>>(
+    agentSkillSync.skills
+      .filter((skill) => !skill.automatic)
+      .map(
+        (skill) =>
+          [skill.key, new Set(skill.selectedTargets)] as const,
+      ),
+  );
+  const cloneAgentSkillSync = (): AgentSkillSyncSnapshot => ({
+    targets: agentSkillSync.targets.map((target) => ({ ...target })),
+    skills: agentSkillSync.skills.map((skill) => ({
+      ...skill,
+      selectedTargets: [...skill.selectedTargets],
+      syncedTargets: [...skill.syncedTargets],
+    })),
+    issues: agentSkillSync.issues.map((issue) => ({ ...issue })),
+  });
+  const reconcileAgentSkills = () => {
+    const enabledTargets = new Set(
+      agentSkillSync.targets
+        .filter((target) => target.enabled)
+        .map((target) => target.id),
+    );
+    const availableTargets = new Set(
+      agentSkillSync.targets
+        .filter((target) => target.enabled && target.detected)
+        .map((target) => target.id),
+    );
+    agentSkillSync.skills = agentSkillSync.skills.map((skill) => {
+      const localSkill = importedSkills.find(
+        (candidate) => candidate.key === skill.key,
+      );
+      const selectedTargets = localSkill?.enabled
+        ? skill.automatic
+          ? agentSkillSync.targets
+              .filter((target) => target.enabled)
+              .map((target) => target.id)
+          : Array.from(sharedSkillTargets.get(skill.key) ?? []).filter(
+              (target) => enabledTargets.has(target),
+            )
+        : [];
+      return {
+        ...skill,
+        selectedTargets,
+        syncedTargets: selectedTargets.filter((target) =>
+          availableTargets.has(target),
+        ),
+      };
+    });
+    agentSkillSync.targets = agentSkillSync.targets.map((target) => ({
+      ...target,
+      syncedCount: agentSkillSync.skills.filter((skill) =>
+        skill.syncedTargets.includes(target.id),
+      ).length,
+      issueCount: agentSkillSync.issues.filter(
+        (issue) => issue.target === target.id,
+      ).length,
+    }));
+    return cloneAgentSkillSync();
+  };
   const providerSkills = BROWSER_DEV_PROVIDER_SKILLS.map((skill) => ({
     ...skill,
   }));
@@ -1906,6 +2003,68 @@ export function createBrowserIpcMock(options: BrowserIpcMockOptions) {
           ...task,
           availableActions: [...(task.availableActions ?? [])],
         }));
+      case "get_agent_skill_sync_state":
+        return cloneAgentSkillSync();
+      case "reconcile_agent_skill_sync":
+        return reconcileAgentSkills();
+      case "set_agent_skill_sync_target": {
+        const targetId = String(input.target ?? "");
+        const target = agentSkillSync.targets.find(
+          (candidate) => candidate.id === targetId,
+        );
+        if (!target) throw new Error("unsupported skill sync target");
+        if (input.enabled === true && !target.detected) {
+          throw new Error(`${target.name} was not detected on this device`);
+        }
+        target.enabled = input.enabled === true;
+        return reconcileAgentSkills();
+      }
+      case "set_agent_skill_sync_destination": {
+        const skillKey = String(input.skillKey ?? "");
+        const targetId = String(input.target ?? "");
+        const skill = agentSkillSync.skills.find(
+          (candidate) => candidate.key === skillKey,
+        );
+        const target = agentSkillSync.targets.find(
+          (candidate) => candidate.id === targetId,
+        );
+        if (!skill) throw new Error("skill was not found");
+        if (skill.automatic) {
+          throw new Error("generated skills use automatic target sync");
+        }
+        if (!target?.enabled) {
+          throw new Error("enable this agent before sharing individual skills");
+        }
+        const destinations =
+          sharedSkillTargets.get(skillKey) ?? new Set<string>();
+        if (input.enabled === true) destinations.add(targetId);
+        else destinations.delete(targetId);
+        sharedSkillTargets.set(skillKey, destinations);
+        return reconcileAgentSkills();
+      }
+      case "resolve_agent_skill_sync_conflict": {
+        const skillKey = String(input.skillKey ?? "");
+        const targetId = String(input.target ?? "");
+        const conflict = agentSkillSync.issues.find(
+          (issue) =>
+            issue.skillKey === skillKey &&
+            issue.target === targetId &&
+            issue.kind === "conflict",
+        );
+        if (!conflict) throw new Error("skill conflict was not found");
+        agentSkillSync.issues = agentSkillSync.issues.filter(
+          (issue) => issue !== conflict,
+        );
+        if (input.resolution === "replace_with_screenpipe") {
+          const skill = agentSkillSync.skills.find(
+            (candidate) => candidate.key === skillKey,
+          );
+          if (skill && !skill.syncedTargets.includes(targetId)) {
+            skill.syncedTargets.push(targetId);
+          }
+        }
+        return reconcileAgentSkills();
+      }
       case "list_imported_skills":
         return importedSkills.map((skill) => ({ ...skill }));
       case "fetch_skills_registry":
@@ -1917,10 +2076,14 @@ export function createBrowserIpcMock(options: BrowserIpcMockOptions) {
         );
         if (!skill) throw new Error("skill is no longer available");
         skill.imported = true;
-        const installed = {
+        const key = skill.path.split("/").at(-1) ?? skill.name.toLowerCase();
+        const installed: ImportedSkill = {
+          key,
           name: skill.name,
           description: skill.description ?? "",
-          path: `/Users/screenpipe/.screenpipe/skills/${skill.path.split("/").at(-1)}`,
+          path: `/Users/screenpipe/.screenpipe/skills/${key}`,
+          origin: "user",
+          enabled: true,
         };
         importedSkills = [
           ...importedSkills.filter(
@@ -1928,6 +2091,18 @@ export function createBrowserIpcMock(options: BrowserIpcMockOptions) {
           ),
           installed,
         ];
+        agentSkillSync.skills = [
+          ...agentSkillSync.skills.filter(
+            (candidate) => candidate.key !== installed.key,
+          ),
+          {
+            key: installed.key,
+            automatic: false,
+            selectedTargets: [],
+            syncedTargets: [],
+          },
+        ];
+        sharedSkillTargets.set(installed.key, new Set());
         return { ...installed };
       }
       case "scan_device_skills":

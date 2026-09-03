@@ -993,7 +993,7 @@ function SkillsSpotlight({
   onClick: () => void;
 }) {
   const summary =
-    count === 0 ? "No skills yet" : `${count} skill${count === 1 ? "" : "s"} imported`;
+    count === 0 ? "No skills yet" : `${count} skill${count === 1 ? "" : "s"}`;
 
   return (
     <div

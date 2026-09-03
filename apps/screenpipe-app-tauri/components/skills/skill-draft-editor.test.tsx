@@ -330,6 +330,7 @@ describe("SkillDraftEditor", () => {
         phase="ready"
         value={SKILL_MD}
         installed
+        installSummary="synced to Claude and Codex"
         onChange={vi.fn()}
         onTest={vi.fn()}
         onInstall={vi.fn()}
@@ -339,7 +340,7 @@ describe("SkillDraftEditor", () => {
     );
 
     expect(screen.getByRole("status")).toHaveAccessibleName("skill installed");
-    expect(screen.getByText("installed and ready to use")).toBeVisible();
+    expect(screen.getByText("synced to Claude and Codex")).toBeVisible();
     expect(screen.getByLabelText("skill name")).toBeDisabled();
     expect(
       screen.queryByRole("button", { name: "install skill" }),

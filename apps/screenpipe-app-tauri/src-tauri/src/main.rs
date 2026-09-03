@@ -49,6 +49,7 @@ mod focus_handoff;
 mod icons;
 use crate::analytics::start_analytics;
 mod agent_event_emitter;
+mod agent_skill_sync;
 mod audio_exclusions;
 mod auth_token;
 mod brain_views;
@@ -1697,6 +1698,7 @@ async fn main() {
                     store.recording.api_auth,
                     local_api.port,
                 );
+                agent_skill_sync::start_agent_skill_sync_watcher();
             }
 
             // Enterprise hidden-UI deployments always run headless with the

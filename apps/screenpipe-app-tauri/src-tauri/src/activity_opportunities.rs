@@ -4016,6 +4016,9 @@ pub async fn install_activity_opportunity_skill_draft(
     if let Err(error) = commit_skill_install_document(&app, &created, &source).await {
         warn!("could not clear completed skill install recovery: {error}");
     }
+    if let Err(error) = crate::agent_skill_sync::reconcile_agent_skill_sync().await {
+        warn!(%error, "could not sync installed skill to local agents");
+    }
     let _ = app.emit("activity-opportunities-updated", &snapshot);
     Ok(created)
 }
@@ -4129,6 +4132,9 @@ pub async fn set_activity_opportunity_skill_enabled(
         },
     )
     .await?;
+    if let Err(error) = crate::agent_skill_sync::reconcile_agent_skill_sync().await {
+        warn!(%error, "could not sync skill enablement to local agents");
+    }
     let _ = app.emit("activity-opportunities-updated", &snapshot);
     Ok(updated)
 }
@@ -4167,6 +4173,9 @@ pub async fn create_activity_opportunity_skill(
     saved.created_skill = Some(created.clone());
     saved.revision += 1;
     write_snapshot(&app, &snapshot)?;
+    if let Err(error) = crate::agent_skill_sync::reconcile_agent_skill_sync().await {
+        warn!(%error, "could not sync created skill to local agents");
+    }
     let _ = app.emit("activity-opportunities-updated", &snapshot);
     Ok(created)
 }

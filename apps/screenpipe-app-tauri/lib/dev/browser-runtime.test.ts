@@ -4,6 +4,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type {
   ActivityOpportunitySnapshot,
+  AgentSkillSyncSnapshot,
   BrainViewCanvasDocument,
   BrainViewDefinition,
   CreatedSkill,
@@ -111,11 +112,20 @@ describe("browser development runtime", () => {
 
     expect(invoke("list_imported_skills")).toEqual([
       expect.objectContaining({
+        key: "pdf-tools",
         name: "PDF tools",
         path: "/Users/screenpipe/.screenpipe/skills/pdf-tools",
+        origin: "user",
+        enabled: true,
       }),
       expect.objectContaining({ name: "Meeting follow-up" }),
       expect.objectContaining({ name: "Customer discovery" }),
+      expect.objectContaining({
+        key: "daily-activity-brief",
+        name: "Daily activity brief",
+        origin: "agent",
+        enabled: true,
+      }),
     ]);
     expect(invoke("scan_device_skills")).toEqual([]);
     expect(invoke("list_managed_team_skills")).toEqual([]);
@@ -143,8 +153,77 @@ describe("browser development runtime", () => {
       ]),
     );
     expect(invoke("list_imported_skills")).toEqual(
-      expect.arrayContaining([expect.objectContaining({ name: "PDF" })]),
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: "PDF",
+          origin: "user",
+          enabled: true,
+        }),
+      ]),
     );
+  });
+
+  it("keeps generated and explicitly shared skill sync state separate", () => {
+    const invoke = createBrowserIpcMock({ mode: "mock", apiPort: 3030 });
+
+    const initial = invoke(
+      "get_agent_skill_sync_state",
+    ) as AgentSkillSyncSnapshot;
+    expect(initial.targets.find((target) => target.id === "opencode")).toMatchObject({
+      detected: true,
+      enabled: false,
+      syncedCount: 0,
+    });
+    expect(
+      initial.skills.find((skill) => skill.key === "daily-activity-brief"),
+    ).toMatchObject({
+      automatic: true,
+      selectedTargets: ["claude", "codex"],
+      syncedTargets: ["claude", "codex"],
+    });
+    expect(initial.skills.find((skill) => skill.key === "pdf-tools")).toMatchObject({
+      automatic: false,
+      selectedTargets: [],
+      syncedTargets: [],
+    });
+
+    const withOpenCode = invoke("set_agent_skill_sync_target", {
+      target: "opencode",
+      enabled: true,
+    }) as AgentSkillSyncSnapshot;
+    expect(
+      withOpenCode.targets.find((target) => target.id === "opencode"),
+    ).toMatchObject({ enabled: true, syncedCount: 1 });
+    expect(
+      withOpenCode.skills.find(
+        (skill) => skill.key === "daily-activity-brief",
+      )?.syncedTargets,
+    ).toContain("opencode");
+    expect(
+      withOpenCode.skills.find((skill) => skill.key === "pdf-tools")
+        ?.selectedTargets,
+    ).toEqual([]);
+
+    const shared = invoke("set_agent_skill_sync_destination", {
+      skillKey: "pdf-tools",
+      target: "claude",
+      enabled: true,
+    }) as AgentSkillSyncSnapshot;
+    expect(shared.skills.find((skill) => skill.key === "pdf-tools")).toMatchObject({
+      automatic: false,
+      selectedTargets: ["claude"],
+      syncedTargets: ["claude"],
+    });
+
+    invoke("set_agent_skill_sync_target", { target: "claude", enabled: false });
+    const restored = invoke("set_agent_skill_sync_target", {
+      target: "claude",
+      enabled: true,
+    }) as AgentSkillSyncSnapshot;
+    expect(restored.skills.find((skill) => skill.key === "pdf-tools")).toMatchObject({
+      selectedTargets: ["claude"],
+      syncedTargets: ["claude"],
+    });
   });
 
   it("starts a stateful browser agent session and forwards its prompt", async () => {

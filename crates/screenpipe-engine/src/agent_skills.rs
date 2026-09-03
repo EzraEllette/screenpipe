@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fmt,
     path::{Path, PathBuf},
     sync::{Mutex, OnceLock},
@@ -46,6 +46,59 @@ pub(crate) struct AgentSkill {
     pub created_at: Option<String>,
     pub updated_at: Option<String>,
     pub enabled: bool,
+}
+
+/// Read-only skill metadata for native consumers that must preserve the
+/// agent-owned versus user/imported boundary enforced by this module.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LocalAgentSkill {
+    pub key: String,
+    pub name: String,
+    pub description: String,
+    pub sha256: String,
+    pub origin: String,
+    pub path: String,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalAgentSkillsForSync {
+    pub skills: Vec<LocalAgentSkill>,
+    pub pending_install_keys: BTreeSet<String>,
+}
+
+fn local_skill(skill: AgentSkill) -> LocalAgentSkill {
+    LocalAgentSkill {
+        key: skill.key,
+        name: skill.name,
+        description: skill.description,
+        sha256: skill.sha256,
+        origin: skill.origin,
+        path: skill.path,
+        enabled: skill.enabled,
+    }
+}
+
+/// List the canonical local skill store through the same provenance and
+/// tamper checks used by `/agent/skills/manage`.
+pub fn list_local_agent_skills(root: PathBuf) -> Result<Vec<LocalAgentSkill>, String> {
+    AgentSkillStore::new(root)
+        .list()
+        .map(|skills| skills.into_iter().map(local_skill).collect())
+        .map_err(|error| error.to_string())
+}
+
+/// Return only committed skill revisions plus keys whose install transaction is
+/// still pending. Consumers must preserve existing projections for pending
+/// keys without copying their current canonical bytes.
+pub fn list_local_agent_skills_for_sync(root: PathBuf) -> Result<LocalAgentSkillsForSync, String> {
+    AgentSkillStore::new(root)
+        .list_syncable()
+        .map(|snapshot| LocalAgentSkillsForSync {
+            skills: snapshot.skills.into_iter().map(local_skill).collect(),
+            pending_install_keys: snapshot.pending_install_keys,
+        })
+        .map_err(|error| error.to_string())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -160,6 +213,11 @@ pub(crate) struct AgentSkillStore {
     root: PathBuf,
 }
 
+struct SyncableAgentSkills {
+    skills: Vec<AgentSkill>,
+    pending_install_keys: BTreeSet<String>,
+}
+
 impl AgentSkillStore {
     pub(crate) fn new(root: PathBuf) -> Self {
         Self { root }
@@ -167,6 +225,25 @@ impl AgentSkillStore {
 
     pub(crate) fn list(&self) -> Result<Vec<AgentSkill>, AgentSkillError> {
         let _guard = store_lock()?;
+        self.list_unlocked()
+    }
+
+    fn list_syncable(&self) -> Result<SyncableAgentSkills, AgentSkillError> {
+        let _guard = store_lock()?;
+        let pending = read_install_recoveries(&self.root)?;
+        let pending_install_keys = pending.installs.keys().cloned().collect::<BTreeSet<_>>();
+        let skills = self
+            .list_unlocked()?
+            .into_iter()
+            .filter(|skill| !pending_install_keys.contains(&skill.key))
+            .collect();
+        Ok(SyncableAgentSkills {
+            skills,
+            pending_install_keys,
+        })
+    }
+
+    fn list_unlocked(&self) -> Result<Vec<AgentSkill>, AgentSkillError> {
         std::fs::create_dir_all(&self.root)?;
         recover_pending_patch(&self.root)?;
         // Fail closed on provenance corruption instead of returning a false
@@ -1777,6 +1854,38 @@ mod tests {
             .unwrap()
             .installs
             .is_empty());
+    }
+
+    #[test]
+    fn syncable_list_waits_for_install_commit() {
+        let (_temp, store) = store();
+        let installed = store
+            .install_create(
+                "Review",
+                "Reusable review.",
+                "# Review\n\n1. Check.",
+                "activity-opportunity:skill-1",
+            )
+            .unwrap();
+
+        let pending = store.list_syncable().unwrap();
+        assert!(pending.skills.is_empty());
+        assert_eq!(
+            pending.pending_install_keys,
+            BTreeSet::from(["review".to_string()])
+        );
+        assert_eq!(store.list().unwrap(), vec![installed.clone()]);
+
+        store
+            .commit_install(
+                &installed.key,
+                &installed.sha256,
+                "activity-opportunity:skill-1",
+            )
+            .unwrap();
+        let committed = store.list_syncable().unwrap();
+        assert_eq!(committed.skills, vec![installed]);
+        assert!(committed.pending_install_keys.is_empty());
     }
 
     #[test]

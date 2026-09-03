@@ -20,6 +20,7 @@ import { useTauriEvent } from "@/lib/hooks/use-tauri-event";
 import {
   commands,
   type ActivityOpportunitySnapshot,
+  type AgentSkillSyncSnapshot,
   type SkillDraft,
   type SkillOpportunity,
 } from "@/lib/utils/tauri";
@@ -40,6 +41,52 @@ async function commandData<T>(request: Promise<CommandResult<T>>): Promise<T> {
   const result = await request;
   if (result.status === "error") throw new Error(errorMessage(result.error));
   return result.data;
+}
+
+function formatAgentNames(names: string[]): string {
+  if (names.length <= 1) return names[0] ?? "";
+  if (names.length === 2) return `${names[0]} and ${names[1]}`;
+  if (names.length === 3) {
+    return `${names[0]}, ${names[1]}, and ${names[2]}`;
+  }
+  return `${names[0]}, ${names[1]}, and ${names.length - 2} more`;
+}
+
+function installedSkillSyncSummary(
+  snapshot: AgentSkillSyncSnapshot,
+  skillKey?: string,
+): string {
+  const screenpipeOnly = "installed in Screenpipe";
+  const skill = snapshot.skills.find((candidate) => candidate.key === skillKey);
+  if (!skill) return `${screenpipeOnly} · sync status unavailable`;
+
+  const namesByTarget = new Map(
+    snapshot.targets.map((target) => [target.id, target.name]),
+  );
+  const syncedNames = [
+    ...new Set(
+      skill.syncedTargets.map(
+        (target) => namesByTarget.get(target) ?? target,
+      ),
+    ),
+  ];
+  const issueCount = snapshot.issues.filter(
+    (issue) => issue.skillKey === skill.key,
+  ).length;
+  const installedWhere = syncedNames.length
+    ? `synced to ${formatAgentNames(syncedNames)}`
+    : screenpipeOnly;
+
+  if (issueCount) {
+    return `${installedWhere} · ${issueCount} sync issue${
+      issueCount === 1 ? "" : "s"
+    }`;
+  }
+  if (syncedNames.length) return installedWhere;
+  if (skill.selectedTargets.length === 0) {
+    return `${screenpipeOnly} · agent sync is off`;
+  }
+  return `${screenpipeOnly} · sync status unavailable`;
 }
 
 export function findActivityOpportunitySkillDraft(
@@ -139,6 +186,7 @@ export function ActivityOpportunitySkillDraft({
   >(() => Promise.resolve());
   const draftPhaseRef = useRef(draft.phase);
   const [justInstalled, setJustInstalled] = useState(false);
+  const [installSummary, setInstallSummary] = useState<string>();
   const [installing, setInstalling] = useState(false);
   const installingRef = useRef(false);
   const editCapturedRef = useRef(false);
@@ -330,7 +378,7 @@ export function ActivityOpportunitySkillDraft({
     try {
       await flushDraft();
       const latest = await latestOpportunity();
-      await commandData(
+      const installedSkill = await commandData(
         commands.installActivityOpportunitySkillDraft({
           id: opportunity.id,
           revision: latest.revision,
@@ -342,7 +390,21 @@ export function ActivityOpportunitySkillDraft({
         result: "completed",
         duration_ms: activityOpportunityDuration(startedAt),
       });
-      toast({ title: "skill installed" });
+      let nextInstallSummary =
+        "installed in Screenpipe · sync status unavailable";
+      try {
+        const syncState = await commandData<AgentSkillSyncSnapshot>(
+          commands.getAgentSkillSyncState(),
+        );
+        nextInstallSummary = installedSkillSyncSummary(
+          syncState,
+          installedSkill.key,
+        );
+      } catch {
+        // The canonical Screenpipe install succeeded. Agent sync is secondary.
+      }
+      setInstallSummary(nextInstallSummary);
+      toast({ title: "skill installed", description: nextInstallSummary });
     } catch (error) {
       captureActivityOpportunityEvent("activity_opportunity_skill_install", {
         result: "failed",
@@ -581,6 +643,7 @@ export function ActivityOpportunitySkillDraft({
       onOpenDraftChat={openDraftChat}
       sources={sources}
       installed={installed}
+      installSummary={installSummary}
       className="ph-no-capture min-h-0 flex-1"
     />
   );

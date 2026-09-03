@@ -108,7 +108,7 @@ pub async fn set_ai_tool_auto_connect_opt_out(
     .await
 }
 
-fn background_ai_tools_home() -> Option<PathBuf> {
+pub(crate) fn background_ai_tools_home() -> Option<PathBuf> {
     #[cfg(feature = "e2e")]
     {
         // E2E must never touch the developer or CI user's real agent configs.
@@ -286,10 +286,14 @@ pub struct DeviceSkill {
 /// A skill currently sitting in the screenpipe store.
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub struct ImportedSkill {
+    pub key: String,
     pub name: String,
     pub description: String,
     /// Absolute path inside `<data_dir>/skills/`.
     pub path: String,
+    /// `agent` only while the canonical provenance marker matches the content.
+    pub origin: String,
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
@@ -679,7 +683,7 @@ fn read_managed_team_skill_marker(dir: &Path) -> Option<ManagedTeamSkillMarker> 
     })
 }
 
-fn is_managed_team_skill_dir(dir: &Path) -> bool {
+pub(crate) fn is_managed_team_skill_dir(dir: &Path) -> bool {
     read_managed_team_skill_marker(dir).is_some()
 }
 
@@ -883,7 +887,7 @@ fn skills_store_dir() -> PathBuf {
 /// Normalize a display name into a filesystem-safe folder key. Mirrors the
 /// scheme the rest of the app uses for skill dirs: lowercase, non
 /// `[a-z0-9_-]` runs collapsed to `-`, trimmed.
-fn skill_key(name: &str) -> String {
+pub(crate) fn skill_key(name: &str) -> String {
     let mut out = String::with_capacity(name.len());
     let mut prev_dash = false;
     for ch in name.trim().chars() {
@@ -1014,25 +1018,18 @@ pub fn scan_device_skills() -> Result<Vec<DeviceSkill>, String> {
 #[specta::specta]
 pub fn list_imported_skills() -> Result<Vec<ImportedSkill>, String> {
     let store = skills_store_dir();
-    let mut out: Vec<ImportedSkill> = Vec::new();
-    let entries = match std::fs::read_dir(&store) {
-        Ok(e) => e,
-        Err(_) => return Ok(out), // store not created yet
-    };
-    for entry in entries.flatten() {
-        let dir = entry.path();
-        let skill_md = dir.join("SKILL.md");
-        if !dir.is_dir() || !skill_md.exists() || is_managed_team_skill_file(&skill_md) {
-            continue;
-        }
-        let folder = entry.file_name().into_string().unwrap_or_default();
-        let (fm_name, fm_desc) = parse_skill_frontmatter(&skill_md);
-        out.push(ImportedSkill {
-            name: fm_name.unwrap_or_else(|| folder.clone()),
-            description: fm_desc.unwrap_or_default(),
-            path: dir.to_string_lossy().to_string(),
-        });
-    }
+    let mut out = screenpipe_engine::list_local_agent_skills(store)?
+        .into_iter()
+        .filter(|skill| !is_managed_team_skill_dir(Path::new(&skill.path)))
+        .map(|skill| ImportedSkill {
+            key: skill.key,
+            name: skill.name,
+            description: skill.description,
+            path: skill.path,
+            origin: skill.origin,
+            enabled: skill.enabled,
+        })
+        .collect::<Vec<_>>();
     out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     Ok(out)
 }
@@ -1299,11 +1296,15 @@ pub fn import_skill(source_path: String) -> Result<ImportedSkill, String> {
     screenpipe_core::paths::copy_dir_all(&src, &dest)
         .map_err(|e| format!("failed to copy skill: {e}"))?;
 
+    crate::agent_skill_sync::reconcile_agent_skill_sync_in_background();
     info!("imported skill \"{}\" -> {}", display_name, dest.display());
     Ok(ImportedSkill {
+        key,
         name: display_name,
         description: fm_desc.unwrap_or_default(),
         path: dest.to_string_lossy().to_string(),
+        origin: "user".to_string(),
+        enabled: true,
     })
 }
 
@@ -1336,6 +1337,7 @@ pub fn remove_imported_skill(name: String) -> Result<(), String> {
     if chat_copy.exists() {
         let _ = std::fs::remove_dir_all(&chat_copy);
     }
+    crate::agent_skill_sync::reconcile_agent_skill_sync_in_background();
     info!("removed imported skill \"{}\"", key);
     Ok(())
 }
@@ -1675,6 +1677,7 @@ pub async fn install_registry_skill(
         return Err(format!("failed to install skill: {e}"));
     }
 
+    crate::agent_skill_sync::reconcile_agent_skill_sync_in_background();
     info!(
         "installed registry skill \"{}\" from {}/{} -> {}",
         display_name,
@@ -1683,9 +1686,12 @@ pub async fn install_registry_skill(
         dest.display()
     );
     Ok(ImportedSkill {
+        key,
         name: display_name,
         description: fm_desc.unwrap_or_default(),
         path: dest.to_string_lossy().to_string(),
+        origin: "user".to_string(),
+        enabled: true,
     })
 }
 

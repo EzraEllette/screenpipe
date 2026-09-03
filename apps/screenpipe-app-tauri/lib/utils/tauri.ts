@@ -545,6 +545,14 @@ async getActivityOpportunities() : Promise<Result<ActivityOpportunitySnapshot, s
     else return { status: "error", error: e  as any };
 }
 },
+async getAgentSkillSyncState() : Promise<Result<AgentSkillSyncSnapshot, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_agent_skill_sync_state") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 /**
  * Return the macOS bundle identifier of the running app
  * (e.g. `screenpi.pe`, `screenpi.pe.beta`, `screenpi.pe.dev`,
@@ -2009,6 +2017,14 @@ async readViewerFile(path: string) : Promise<Result<ViewerContent, string>> {
     else return { status: "error", error: e  as any };
 }
 },
+async reconcileAgentSkillSync() : Promise<Result<AgentSkillSyncSnapshot, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("reconcile_agent_skill_sync") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 /**
  * Redact a feedback bundle for upload.
  *
@@ -2268,6 +2284,14 @@ async resizeSearchWindow(width: number, height: number) : Promise<Result<null, s
     else return { status: "error", error: e  as any };
 }
 },
+async resolveAgentSkillSyncConflict(skillKey: string, target: string, resolution: AgentSkillSyncConflictResolution) : Promise<Result<AgentSkillSyncSnapshot, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("resolve_agent_skill_sync_conflict", { skillKey, target, resolution }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 /**
  * Restart only after the user explicitly clicks the in-app action. macOS's
  * native Screen Recording sheet includes a "Later" choice; closing that sheet
@@ -2421,6 +2445,22 @@ async searchNavigateToTimeline(timestamp: string, frameId: number | null, search
 async setActivityOpportunitySkillEnabled(request: SetActivityOpportunitySkillEnabledRequest) : Promise<Result<CreatedSkill, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("set_activity_opportunity_skill_enabled", { request }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async setAgentSkillSyncDestination(skillKey: string, target: string, enabled: boolean) : Promise<Result<AgentSkillSyncSnapshot, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_agent_skill_sync_destination", { skillKey, target, enabled }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async setAgentSkillSyncTarget(target: string, enabled: boolean) : Promise<Result<AgentSkillSyncSnapshot, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_agent_skill_sync_target", { target, enabled }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -3166,6 +3206,13 @@ export type ActivityHistoryEntry = { id: string; kind: string; meeting_id: numbe
 export type ActivityHistoryEvidence = { kind: string; at: string; frame_id: number | null; meeting_id: number | null; app_name: string | null; label: string }
 export type ActivityOpportunitySnapshot = { analysisState: OpportunityAnalysisState; generatedAt: string | null; analysisError?: string | null; skills: SkillOpportunity[]; unfinished: UnfinishedOpportunity[] }
 export type AecMode = "off" | "screenpipe" | "macos" | "windows"
+export type AgentSkillSyncConflictResolution = "replace_with_screenpipe" | "import_as_new_skill"
+export type AgentSkillSyncIssue = { target: string; targetName: string; skillKey: string; skillName: string; canonicalExists: boolean; screenpipeResolution: AgentSkillSyncScreenpipeResolution; kind: AgentSkillSyncIssueKind; message: string }
+export type AgentSkillSyncIssueKind = "conflict" | "error"
+export type AgentSkillSyncScreenpipeResolution = "replace_with_screenpipe" | "remove_agent_copy"
+export type AgentSkillSyncSkill = { key: string; automatic: boolean; selectedTargets: string[]; syncedTargets: string[] }
+export type AgentSkillSyncSnapshot = { targets: AgentSkillSyncTarget[]; skills: AgentSkillSyncSkill[]; issues: AgentSkillSyncIssue[] }
+export type AgentSkillSyncTarget = { id: string; name: string; detected: boolean; enabled: boolean; syncedCount: number; issueCount: number }
 export type Attribution = { utmSource: string | null; utmMedium: string | null; utmCampaign: string | null; utmContent: string | null; utmTerm: string | null }
 export type AudioDeviceInfo = { name: string; isDefault: boolean;
 /**
@@ -3335,11 +3382,15 @@ export type IcsCalendarEntry = { name: string; url: string; enabled: boolean }
 /**
  * A skill currently sitting in the screenpipe store.
  */
-export type ImportedSkill = { name: string; description: string;
+export type ImportedSkill = { key: string; name: string; description: string;
 /**
  * Absolute path inside `<data_dir>/skills/`.
  */
-path: string }
+path: string;
+/**
+ * `agent` only while the canonical provenance marker matches the content.
+ */
+origin: string; enabled: boolean }
 export type InstallActivityOpportunitySkillDraftRequest = { id: string; revision: number; draftId: string }
 export type InstallBrainViewTemplateKitRequest = { kitId: string; targetViewId: string; expectedRevision: number | null }
 export type JobEvent = { kind: "started"; jobId: string; label: string; message: string | null } | { kind: "progress"; jobId: string; label: string; progress: number; message: string | null } | { kind: "completed"; jobId: string; label: string; outputPath: string | null; message: string | null } | { kind: "failed"; jobId: string; label: string; error: string }

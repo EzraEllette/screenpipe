@@ -14,6 +14,7 @@ import type { ReactNode } from "react";
 
 const mocks = vi.hoisted(() => ({
   getActivityOpportunities: vi.fn(),
+  getAgentSkillSyncState: vi.fn(),
   saveActivityOpportunitySkillDraft: vi.fn(),
   installActivityOpportunitySkillDraft: vi.fn(),
   startActivityOpportunitySkillDraft: vi.fn(),
@@ -32,6 +33,7 @@ vi.mock("posthog-js", () => ({
 vi.mock("@/lib/utils/tauri", () => ({
   commands: {
     getActivityOpportunities: mocks.getActivityOpportunities,
+    getAgentSkillSyncState: mocks.getAgentSkillSyncState,
     saveActivityOpportunitySkillDraft: mocks.saveActivityOpportunitySkillDraft,
     installActivityOpportunitySkillDraft:
       mocks.installActivityOpportunitySkillDraft,
@@ -75,6 +77,7 @@ vi.mock("@/components/skills/skill-draft-editor", () => ({
     installing?: boolean;
     readOnly?: boolean;
     installed?: boolean;
+    installSummary?: string;
     historical?: boolean;
     detached?: boolean;
     onOpenCurrent?: () => void;
@@ -100,6 +103,7 @@ vi.mock("@/components/skills/skill-draft-editor", () => ({
         onChange={(event) => props.onChange(event.target.value)}
       />
       <span data-testid="save-state">{props.saveState}</span>
+      <span data-testid="install-summary">{props.installSummary}</span>
       <button
         disabled={props.installing}
         onClick={() => props.onTest("verify today's MRR")}
@@ -196,9 +200,57 @@ function snapshot(skills = [opportunity()]) {
   };
 }
 
+function agentSkillSyncResult({
+  selectedTargets = ["claude", "codex"],
+  syncedTargets = selectedTargets,
+  issueCount = 0,
+}: {
+  selectedTargets?: string[];
+  syncedTargets?: string[];
+  issueCount?: number;
+} = {}) {
+  return {
+    status: "ok",
+    data: {
+      targets: [
+        { id: "claude", name: "Claude", enabled: true },
+        { id: "codex", name: "Codex", enabled: true },
+      ],
+      skills: [{ key: "review-mrr", selectedTargets, syncedTargets }],
+      issues: Array.from({ length: issueCount }, () => ({
+        target: "claude",
+        targetName: "Claude",
+        skillKey: "review-mrr",
+      })),
+    },
+  };
+}
+
 function HookHarness({ path }: { path: string }) {
   const match = useActivityOpportunitySkillDraft(path);
   return <span data-testid="matched-draft">{match?.draft.id ?? "none"}</span>;
+}
+
+async function installCurrentDraft() {
+  render(
+    <ActivityOpportunitySkillDraft
+      conversationId="skill-draft-chat"
+      match={{
+        opportunity: opportunity() as never,
+        draft: skillDraft() as never,
+      }}
+    />,
+  );
+  fireEvent.click(screen.getByRole("button", { name: "install" }));
+  await waitFor(() =>
+    expect(mocks.toast).toHaveBeenCalledWith(
+      expect.objectContaining({ title: "skill installed" }),
+    ),
+  );
+  expect(screen.getByTestId("skill-draft-editor")).toHaveAttribute(
+    "data-installed",
+    "true",
+  );
 }
 
 describe("activity opportunity skill draft", () => {
@@ -216,8 +268,15 @@ describe("activity opportunity skill draft", () => {
       }));
     mocks.installActivityOpportunitySkillDraft.mockReset().mockResolvedValue({
       status: "ok",
-      data: { path: "/skills/review-mrr/SKILL.md", skillMd: SKILL_MD },
+      data: {
+        key: "review-mrr",
+        path: "/skills/review-mrr/SKILL.md",
+        skillMd: SKILL_MD,
+      },
     });
+    mocks.getAgentSkillSyncState
+      .mockReset()
+      .mockResolvedValue(agentSkillSyncResult());
     mocks.startActivityOpportunitySkillDraft.mockReset().mockResolvedValue({
       status: "ok",
       data: skillDraft({
@@ -383,6 +442,14 @@ describe("activity opportunity skill draft", () => {
       "data-installed",
       "true",
     );
+    expect(mocks.getAgentSkillSyncState).toHaveBeenCalledOnce();
+    expect(screen.getByTestId("install-summary")).toHaveTextContent(
+      "synced to Claude and Codex",
+    );
+    expect(mocks.toast).toHaveBeenCalledWith({
+      title: "skill installed",
+      description: "synced to Claude and Codex",
+    });
     expect(mocks.posthogCapture).toHaveBeenCalledWith(
       "activity_opportunity_skill_draft_edited",
       { phase: "ready" },
@@ -393,6 +460,46 @@ describe("activity opportunity skill draft", () => {
     );
     expect(JSON.stringify(mocks.posthogCapture.mock.calls)).not.toContain(
       "Check the weekly change",
+    );
+  });
+
+  it.each([
+    {
+      result: {
+        status: "error",
+        error: "sync settings could not be read",
+      },
+      expected: "installed in Screenpipe · sync status unavailable",
+    },
+    {
+      result: agentSkillSyncResult({
+        selectedTargets: [],
+        syncedTargets: [],
+      }),
+      expected: "installed in Screenpipe · agent sync is off",
+    },
+    {
+      result: agentSkillSyncResult({ syncedTargets: [], issueCount: 1 }),
+      expected: "installed in Screenpipe · 1 sync issue",
+    },
+  ])("reports $expected after installation", async ({ result, expected }) => {
+    mocks.getAgentSkillSyncState.mockResolvedValueOnce(result);
+    await installCurrentDraft();
+
+    expect(screen.getByTestId("install-summary")).toHaveTextContent(
+      expected,
+    );
+    expect(mocks.toast).toHaveBeenCalledWith({
+      title: "skill installed",
+      description: expected,
+    });
+    expect(mocks.posthogCapture).toHaveBeenCalledWith(
+      "activity_opportunity_skill_install",
+      expect.objectContaining({ result: "completed" }),
+    );
+    expect(mocks.posthogCapture).not.toHaveBeenCalledWith(
+      "activity_opportunity_skill_install",
+      expect.objectContaining({ result: "failed" }),
     );
   });
 
