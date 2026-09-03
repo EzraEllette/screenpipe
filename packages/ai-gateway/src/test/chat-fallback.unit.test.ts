@@ -273,8 +273,22 @@ describe('chat handler — client payload classification (SCREENPIPE-AI-PROXY-1A
 		expect(msg).toContain('at least one user or assistant message');
 	});
 
+	it('maps provider tool-array length 400s to actionable guidance', () => {
+		const messages = [
+			"400 Invalid 'tools': array too long. Expected an array with maximum length 128, but got an array with length 157 instead.",
+			"400 Invalid 'messages[14].tool_calls': array too long. Expected an array with maximum length 128, but got an array with length 261 instead.",
+		];
+
+		for (const message of messages) {
+			expect(clientPayloadMessage(400, message)).toBe(
+				'The request contains too many tools or tool calls. Reduce them and try again.',
+			);
+		}
+	});
+
 	it('leaves unrelated 400s unclassified', () => {
 		expect(clientPayloadMessage(400, 'invalid tool schema')).toBeNull();
+		expect(clientPayloadMessage(400, "Invalid 'messages[0].content': array too long.")).toBeNull();
 		expect(clientPayloadMessage(500, 'failed to decode image data')).toBeNull();
 	});
 });

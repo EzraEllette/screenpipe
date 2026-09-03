@@ -144,6 +144,10 @@ const CLIENT_PAYLOAD_PATTERNS: Array<{ re: RegExp; message: string }> = [
     re: /at least one message is required/i,
     message: 'The request must include at least one user or assistant message.',
   },
+  {
+    re: /invalid '(?:tools|messages\[\d+\]\.tool_calls)': array too long/i,
+    message: 'The request contains too many tools or tool calls. Reduce them and try again.',
+  },
 ];
 
 export function clientPayloadMessage(status: number, msg: string): string | null {
