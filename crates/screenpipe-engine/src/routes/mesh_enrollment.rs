@@ -27,9 +27,23 @@ static ENROLLMENT_CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
         .expect("mesh enrollment reqwest client")
 });
 
+const DEFAULT_ENROLLMENT_URL: &str = "https://api.screenpipe.com/v1/mesh/enroll";
+
+fn resolve_enrollment_url(runtime: Option<String>, baked: Option<&str>) -> String {
+    runtime
+        .as_deref()
+        .or(baked)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(DEFAULT_ENROLLMENT_URL)
+        .to_string()
+}
+
 fn enrollment_url() -> String {
-    std::env::var("SCREENPIPE_MESH_ENROLLMENT_URL")
-        .unwrap_or_else(|_| "https://api.screenpipe.com/v1/mesh/enroll".to_string())
+    resolve_enrollment_url(
+        std::env::var("SCREENPIPE_MESH_ENROLLMENT_URL").ok(),
+        option_env!("SCREENPIPE_MESH_ENROLLMENT_URL"),
+    )
 }
 
 pub async fn enroll(State(state): State<Arc<AppState>>, body: axum::body::Bytes) -> Response {
@@ -77,4 +91,29 @@ pub async fn enroll(State(state): State<Arc<AppState>>, body: axum::body::Bytes)
         headers.insert(axum::http::header::CONTENT_TYPE, content_type.clone());
     }
     (status, headers, Body::from_stream(response.bytes_stream())).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_override_wins_over_baked_endpoint() {
+        assert_eq!(
+            resolve_enrollment_url(
+                Some(" https://runtime.example/v1/mesh/enroll ".to_string()),
+                Some("https://baked.example/v1/mesh/enroll"),
+            ),
+            "https://runtime.example/v1/mesh/enroll"
+        );
+    }
+
+    #[test]
+    fn baked_endpoint_wins_over_production_default() {
+        assert_eq!(
+            resolve_enrollment_url(None, Some("https://staging.example/v1/mesh/enroll")),
+            "https://staging.example/v1/mesh/enroll"
+        );
+        assert_eq!(resolve_enrollment_url(None, None), DEFAULT_ENROLLMENT_URL);
+    }
 }
