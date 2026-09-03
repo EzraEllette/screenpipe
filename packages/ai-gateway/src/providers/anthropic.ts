@@ -33,12 +33,12 @@ function safeJson(value: unknown): string {
 function safeToolInput(value: unknown): Record<string, any> {
 	if (typeof value === 'string') {
 		try {
-			return JSON.parse(value);
+			value = JSON.parse(value);
 		} catch {
 			return {};
 		}
 	}
-	return (value && typeof value === 'object') ? value as Record<string, any> : {};
+	return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, any>) : {};
 }
 
 function anthropicStopReasonToOpenAI(reason: unknown): string {
