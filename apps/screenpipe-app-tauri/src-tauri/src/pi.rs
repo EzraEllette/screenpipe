@@ -4198,7 +4198,7 @@ async fn resolve_user_mcp_servers_json() -> Option<String> {
     let servers = store.list().await.ok()?;
     let mut out = Vec::new();
     for cfg in servers {
-        if !cfg.enabled || cfg.name.eq_ignore_ascii_case("screenpipe") {
+        if !cfg.enabled || screenpipe_connect::mcp_servers::is_screenpipe_mcp_config(&cfg) {
             continue;
         }
         let is_stdio = matches!(cfg.transport, McpTransport::Stdio);
