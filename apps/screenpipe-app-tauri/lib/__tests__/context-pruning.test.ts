@@ -26,8 +26,10 @@
 
 import { beforeEach, describe, expect, it } from "vitest";
 import extension, {
+  boundInlineMedia,
   boundOversizedMessages,
   clampMessageText,
+  MAX_INLINE_MEDIA_BYTES,
   maxMessageChars,
   normalizeContextOverflowError,
   resolveContextWindowTokens,
@@ -447,7 +449,7 @@ describe("clampMessageText — malformed history blocks fall back to head+tail",
 });
 
 describe("boundOversizedMessages — additional content shapes", () => {
-  it("clamps every oversized text block but never touches non-text blocks", () => {
+  it("clamps every oversized text block without changing other blocks", () => {
     const limit = maxMessageChars(WINDOW);
     const image = { type: "image", data: "x".repeat(limit + 10) };
     const messages = [
@@ -463,7 +465,7 @@ describe("boundOversizedMessages — additional content shapes", () => {
     expect(boundOversizedMessages(messages, WINDOW)).toBe(true);
     expect(messages[0].content[0].text.length).toBeLessThanOrEqual(limit);
     expect(messages[0].content[2].text.length).toBeLessThanOrEqual(limit);
-    // image block left byte-for-byte alone
+    // Per-message text clamping remains separate from aggregate media bounding.
     expect(messages[0].content[1]).toBe(image);
     expect(messages[0].content[1].data.length).toBe(limit + 10);
   });
@@ -475,6 +477,68 @@ describe("boundOversizedMessages — additional content shapes", () => {
       { role: "user" },
     ];
     expect(boundOversizedMessages(messages as any, WINDOW)).toBe(false);
+  });
+});
+
+describe("boundInlineMedia", () => {
+  it("removes oldest inline image bytes first and preserves the newest image", () => {
+    const oldest = { type: "image", mimeType: "image/jpeg", data: "a".repeat(8) };
+    const middle = {
+      type: "image_url",
+      image_url: { url: `data:image/png;base64,${"b".repeat(8)}` },
+    };
+    const newest = {
+      type: "image",
+      source: { type: "base64", media_type: "image/webp", data: "c".repeat(8) },
+    };
+    const messages = [
+      { role: "user", content: [oldest] },
+      { role: "user", content: [middle] },
+      { role: "user", content: [newest] },
+    ];
+
+    expect(boundInlineMedia(messages, middle.image_url.url.length + newest.source.data.length)).toBe(true);
+    expect(messages[0].content[0]).toEqual(expect.objectContaining({ type: "text" }));
+    expect(messages[1].content[0]).toBe(middle);
+    expect(messages[2].content[0]).toBe(newest);
+  });
+
+  it("leaves under-budget and URL-backed images unchanged", () => {
+    const inline = { type: "image", data: "abc", mimeType: "image/png" };
+    const remote = { type: "image_url", image_url: { url: "https://example.com/image.png" } };
+    const messages = [{ role: "user", content: [inline, remote] }];
+
+    expect(boundInlineMedia(messages, 3)).toBe(false);
+    expect(messages[0].content).toEqual([inline, remote]);
+  });
+
+  it("omits a single image that alone exceeds the byte budget", () => {
+    const messages = [{
+      role: "user",
+      content: [{ type: "image", data: "x".repeat(11), mimeType: "image/png" }],
+    }];
+
+    expect(boundInlineMedia(messages, 10)).toBe(true);
+    expect(messages[0].content[0].text).toContain("image omitted");
+  });
+});
+
+describe("context handler — provider request byte budget", () => {
+  it("keeps serialized image history below Anthropic's 32 MiB request ceiling", async () => {
+    const handlers = registerExtension();
+    const messages = [
+      { role: "user", content: [{ type: "image", mimeType: "image/jpeg", data: "a".repeat(9 * 1024 * 1024) }] },
+      { role: "assistant", content: [{ type: "text", text: "first image processed" }] },
+      { role: "user", content: [{ type: "image", mimeType: "image/jpeg", data: "b".repeat(9 * 1024 * 1024) }] },
+    ];
+
+    const result = await handlers.context({ type: "context", messages }, ctx200k);
+
+    expect(result).toBeDefined();
+    expect(result.messages[0].content[0].text).toContain("image omitted");
+    expect(result.messages[2].content[0].data.length).toBe(9 * 1024 * 1024);
+    expect(JSON.stringify(result.messages).length).toBeLessThan(32 * 1024 * 1024);
+    expect(result.messages[2].content[0].data.length).toBeLessThan(MAX_INLINE_MEDIA_BYTES);
   });
 });
 

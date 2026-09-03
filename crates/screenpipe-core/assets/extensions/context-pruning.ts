@@ -7,7 +7,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 /**
  * Context management extension for screenpipe pipes and chat.
  *
- * Five mechanisms that keep pi's existing compaction path effective. The
+ * Six mechanisms that keep pi's existing compaction path effective. The
  * `context` hook is pi's `transformContext` slot, which runs before every LLM
  * call and whose returned messages are what actually gets sent:
  *
@@ -41,6 +41,11 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
  * 5. `agent_settled` (proactive compaction) — Compact after a successful turn
  *    reaches 70% of the configured context window. This protects answer
  *    quality before pi's near-limit threshold or provider overflow fallback.
+ *
+ * 6. `context` (inline media bytes) — Provider request-size limits count the
+ *    base64 bytes carried by historical images separately from model context
+ *    tokens. Keep the newest images and replace older inline payloads with a
+ *    marker until the request has enough headroom for text, tools, and JSON.
  */
 
 // A single tool result above this threshold triggers the "too large" feedback.
@@ -82,6 +87,11 @@ const HISTORY_OPEN = "<conversation_history>";
 const HISTORY_CLOSE = "</conversation_history>";
 const CONTEXT_SIZE_EXCEEDED = /context size has been exceeded/i;
 const PROACTIVE_COMPACTION_PERCENT = 70;
+// Anthropic's Messages API accepts at most 32 MiB. Keep inline media to half
+// that ceiling so text, tool schemas, system prompts, and JSON framing retain
+// substantial headroom. Base64 is ASCII, so string length is its UTF-8 size.
+export const MAX_INLINE_MEDIA_BYTES = 16 * 1024 * 1024;
+const OMITTED_IMAGE_TEXT = "[earlier image omitted to keep the model request within its size limit]";
 
 /** Whether the reported context usage has reached the quality guardrail. */
 export function shouldProactivelyCompact(usage: any): boolean {
@@ -214,6 +224,67 @@ export function boundOversizedMessages(messages: any[], contextWindowTokens: num
   return modified;
 }
 
+type InlineImage = {
+  content: any[];
+  index: number;
+  bytes: number;
+};
+
+function inlineImageBytes(item: any): number {
+  if (!item || typeof item !== "object") return 0;
+
+  if (item.type === "image" && typeof item.data === "string") {
+    return item.data.length;
+  }
+  if (
+    item.type === "image" &&
+    item.source?.type === "base64" &&
+    typeof item.source.data === "string"
+  ) {
+    return item.source.data.length;
+  }
+  const url = item.type === "image_url"
+    ? (typeof item.image_url === "string" ? item.image_url : item.image_url?.url)
+    : undefined;
+  if (typeof url === "string" && /^data:image\/[^;]+;base64,/i.test(url)) {
+    return url.length;
+  }
+  return 0;
+}
+
+/**
+ * Bound inline base64 image history by actual request bytes, oldest first.
+ * Mutates only image blocks that must be omitted and leaves URL-backed images
+ * and every other non-text block intact.
+ */
+export function boundInlineMedia(
+  messages: any[],
+  maxBytes: number = MAX_INLINE_MEDIA_BYTES,
+): boolean {
+  const images: InlineImage[] = [];
+  let totalBytes = 0;
+
+  for (const message of messages) {
+    if (!Array.isArray(message?.content)) continue;
+    for (let index = 0; index < message.content.length; index++) {
+      const bytes = inlineImageBytes(message.content[index]);
+      if (bytes === 0) continue;
+      images.push({ content: message.content, index, bytes });
+      totalBytes += bytes;
+    }
+  }
+
+  if (totalBytes <= maxBytes) return false;
+
+  for (const image of images) {
+    image.content[image.index] = { type: "text", text: OMITTED_IMAGE_TEXT };
+    totalBytes -= image.bytes;
+    if (totalBytes <= maxBytes) return true;
+  }
+
+  return images.length > 0;
+}
+
 export default function (pi: ExtensionAPI) {
   let lastAssistantSucceeded = false;
   let proactiveCompactionInFlight = false;
@@ -314,7 +385,7 @@ export default function (pi: ExtensionAPI) {
     };
   });
 
-  // ── 2 + 3. Prune old tool results AND clamp oversized messages ─────
+  // ── 2 + 3 + 6. Prune tools, clamp text, bound inline media ─────────
   // Runs before each LLM call. Returning { messages } replaces what's sent.
   pi.on("context", async (event, ctx) => {
     if (!event.messages || !Array.isArray(event.messages)) return;
@@ -352,6 +423,7 @@ export default function (pi: ExtensionAPI) {
     //    built-in compaction (which can't split one message) can recover.
     const windowTokens = resolveContextWindowTokens(ctx);
     if (boundOversizedMessages(event.messages, windowTokens)) modified = true;
+    if (boundInlineMedia(event.messages)) modified = true;
 
     if (modified) {
       return { messages: event.messages };
