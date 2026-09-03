@@ -237,6 +237,17 @@ fn render_memory_line(entry: &MemoryEntry, dest: &Destination) -> String {
     } else {
         collapsed.trim().to_string()
     };
+    // ATX headings are valid inside list items too: `- # title` renders an
+    // H1 in Obsidian. Escape only an opening heading marker, after collapsing
+    // and trimming, so ordinary hashtags and the agent snapshots stay intact.
+    if dest.id == Destination::OBSIDIAN.id {
+        let hashes = bounded.bytes().take_while(|&b| b == b'#').count();
+        if (1..=6).contains(&hashes)
+            && matches!(bounded.as_bytes().get(hashes), None | Some(b' ' | b'\t'))
+        {
+            line.push('\\');
+        }
+    }
     line.push_str(&bounded);
     let mut meta_parts: Vec<String> = Vec::new();
     if !entry.source.is_empty() && entry.source != "user" {
@@ -691,6 +702,60 @@ mod tests {
         assert_eq!(Destination::OBSIDIAN.id, "obsidian-memories");
         assert_eq!(Destination::OBSIDIAN.filename, "screenpipe-memories.md");
         assert_eq!(Destination::OBSIDIAN.sidecar_filename, None);
+    }
+
+    #[test]
+    fn obsidian_meeting_heading_stays_inside_memory_bullet() {
+        let mut meeting = entry(
+            "\r\n# Planning meeting\r\n## Summary\r\nDiscussed #roadmap\r\n- [ ] Follow up",
+            0.9,
+            "2026-01-01T00:00:00Z",
+        );
+        meeting.source = "meeting-intel".to_string();
+        meeting.tags = vec!["meeting:123".to_string()];
+        let note = render_owned_note(&[meeting], &Destination::OBSIDIAN);
+        assert!(note.contains(
+            "\n- \\# Planning meeting  ## Summary  Discussed #roadmap  - [ ] Follow up _(src: meeting-intel · #meeting:123)_\n"
+        ));
+        assert!(!note.contains("\n- # "));
+    }
+
+    #[test]
+    fn obsidian_escapes_all_atx_heading_levels_including_empty_headings() {
+        for level in 1..=6 {
+            let marker = "#".repeat(level);
+            for suffix in [" title", "\ttitle", "", "\nbody"] {
+                let content = format!("  {marker}{suffix}");
+                let memory = entry(&content, 0.9, "2026-01-01T00:00:00Z");
+                let note = render_owned_note(&[memory], &Destination::OBSIDIAN);
+                assert!(note.contains(&format!("\n- \\{marker}")), "{note}");
+            }
+        }
+    }
+
+    #[test]
+    fn obsidian_preserves_non_heading_hashes_and_existing_escapes() {
+        for content in [
+            "#roadmap",
+            "C# and issue #123",
+            "####### not an ATX heading",
+            "\\# already escaped",
+            "**bold** and [link](https://example.com/#section)",
+        ] {
+            let memory = entry(content, 0.9, "2026-01-01T00:00:00Z");
+            let note = render_owned_note(&[memory], &Destination::OBSIDIAN);
+            assert!(note.contains(&format!("\n- {content}\n")), "{note}");
+        }
+    }
+
+    #[test]
+    fn obsidian_heading_escape_does_not_change_agent_digests() {
+        let memory = entry("# Meeting\n## Summary", 0.9, "2026-01-01T00:00:00Z");
+        for dest in [Destination::CLAUDE_CODE, Destination::CODEX] {
+            let digest = render_digest(std::slice::from_ref(&memory), &dest);
+            assert!(digest.contains("\n- # Meeting ## Summary _(updated: 2026-01-01)_\n"));
+            assert!(!digest.contains("\\#"));
+        }
     }
 
     #[test]
