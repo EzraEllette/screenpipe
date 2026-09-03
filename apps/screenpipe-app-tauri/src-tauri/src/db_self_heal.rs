@@ -39,8 +39,15 @@ use tracing::{info, warn};
 use crate::notifications::client;
 use crate::notifications::store::NotificationPriority;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LaunchSelfHealOutcome {
+    RecordingResumed,
+    QuarantineUnresolved,
+    QuarantineResolvedStartupFailed,
+}
+
 pub async fn finish_launch_quarantine<Failure, Report, ReportFuture>(
-    self_healed: bool,
+    outcome: LaunchSelfHealOutcome,
     on_failure: Failure,
     report: Report,
 ) where
@@ -48,7 +55,7 @@ pub async fn finish_launch_quarantine<Failure, Report, ReportFuture>(
     Report: FnOnce() -> ReportFuture,
     ReportFuture: std::future::Future<Output = ()>,
 {
-    if self_healed {
+    if outcome != LaunchSelfHealOutcome::QuarantineUnresolved {
         return;
     }
     on_failure();
@@ -230,23 +237,30 @@ where
 /// Full launch path: resolve the quarantine when it is safe to, then bring
 /// recording back through the same entry point the health watchdog uses.
 ///
-/// Returns true when recording was resumed, so the caller can skip the
-/// recovery notification it would otherwise publish.
+/// Launch observed a durable marker, then `try_resolve_quarantine` skipped.
+/// A marker that vanished in between is a resolved quarantine, not an
+/// unresolved one, so startup continues; every other skip stays fail-closed.
+fn launch_outcome_after_skip(reason: SelfHealSkip) -> Option<LaunchSelfHealOutcome> {
+    if reason == SelfHealSkip::NotQuarantined {
+        return None;
+    }
+    info!(
+        reason = reason.as_str(),
+        "db self-heal: keeping the fail-closed launch path"
+    );
+    Some(LaunchSelfHealOutcome::QuarantineUnresolved)
+}
+
+/// Distinguishes an unresolved quarantine from a post-resolution startup
+/// failure, so the caller reports only durable quarantine failures.
 pub async fn try_self_heal_at_launch(
     app: AppHandle,
     database_path: PathBuf,
     notify_user: bool,
-) -> bool {
-    match try_resolve_quarantine(&database_path).await {
-        Ok(()) => {}
-        Err(reason) => {
-            if reason != SelfHealSkip::NotQuarantined {
-                info!(
-                    reason = reason.as_str(),
-                    "db self-heal: keeping the fail-closed launch path"
-                );
-            }
-            return false;
+) -> LaunchSelfHealOutcome {
+    if let Err(reason) = try_resolve_quarantine(&database_path).await {
+        if let Some(outcome) = launch_outcome_after_skip(reason) {
+            return outcome;
         }
     }
 
@@ -262,7 +276,7 @@ pub async fn try_self_heal_at_launch(
             error = %error,
             "db self-heal: quarantine cleared but the first start failed — leaving it to the watchdog"
         );
-        return false;
+        return LaunchSelfHealOutcome::QuarantineResolvedStartupFailed;
     }
 
     if notify_user {
@@ -274,7 +288,7 @@ pub async fn try_self_heal_at_launch(
             NotificationPriority::Normal,
         );
     }
-    true
+    LaunchSelfHealOutcome::RecordingResumed
 }
 
 #[cfg(test)]
@@ -322,14 +336,35 @@ mod tests {
         }
     }
 
+    #[test]
+    fn marker_removed_before_self_heal_does_not_report_quarantine() {
+        assert_eq!(
+            launch_outcome_after_skip(SelfHealSkip::NotQuarantined),
+            None
+        );
+        for reason in [
+            SelfHealSkip::AlreadyLatchedThisProcess,
+            SelfHealSkip::UnreadableMarker,
+        ] {
+            assert_eq!(
+                launch_outcome_after_skip(reason),
+                Some(LaunchSelfHealOutcome::QuarantineUnresolved)
+            );
+        }
+    }
+
     #[tokio::test]
-    async fn launch_quarantine_reports_only_after_self_heal_fails() {
-        for (self_healed, expected_failures) in [(true, 0), (false, 1)] {
+    async fn launch_quarantine_reports_only_when_quarantine_remains() {
+        for (outcome, expected_failures) in [
+            (LaunchSelfHealOutcome::RecordingResumed, 0),
+            (LaunchSelfHealOutcome::QuarantineUnresolved, 1),
+            (LaunchSelfHealOutcome::QuarantineResolvedStartupFailed, 0),
+        ] {
             let mut boot_errors = 0;
             let mut recovery_reports = 0;
 
             finish_launch_quarantine(
-                self_healed,
+                outcome,
                 || boot_errors += 1,
                 || async { recovery_reports += 1 },
             )

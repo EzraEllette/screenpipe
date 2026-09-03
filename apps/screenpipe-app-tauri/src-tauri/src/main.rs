@@ -2329,14 +2329,14 @@ async fn main() {
                 let recovery_app = app_handle.clone();
                 let automatic_recovery = headless_startup;
                 tauri::async_runtime::spawn(async move {
-                    let self_healed = crate::db_self_heal::try_self_heal_at_launch(
+                    let self_heal_outcome = crate::db_self_heal::try_self_heal_at_launch(
                         self_heal_app,
                         self_heal_db_path,
                         !automatic_recovery,
                     )
                     .await;
                     crate::db_self_heal::finish_launch_quarantine(
-                        self_healed,
+                        self_heal_outcome,
                         || {
                             crate::health::set_boot_error(
                                 "database remains quarantined after a SQLite hard fault; run `screenpipe db recover` while screenpipe is closed",
@@ -2348,7 +2348,9 @@ async fn main() {
                         ),
                     )
                     .await;
-                    if self_healed {
+                    if self_heal_outcome
+                        != crate::db_self_heal::LaunchSelfHealOutcome::QuarantineUnresolved
+                    {
                         return;
                     }
                     if automatic_recovery {
