@@ -313,6 +313,10 @@ function buildGenericProviderErrorMessage(
     }
   }
 
+  if (/"codexerrorinfo"\s*:\s*"usagelimitexceeded"/i.test(errorStr)) {
+    return "Your Codex usage limit has been reached. Wait for it to reset, upgrade your ChatGPT plan, or switch your Screenpipe AI preset.";
+  }
+
   if (normalized.includes("codex error: the usage limit has been reached")) {
     return "The AI provider usage limit has been reached. Wait for it to reset, or switch your AI preset or provider.";
   }
