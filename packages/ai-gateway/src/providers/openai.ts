@@ -368,12 +368,13 @@ export class OpenAIProvider implements AIProvider {
 	}
 
 	private applyToolCompatibilityOptions(params: ChatCompletionCreateParams, body: RequestBody): void {
-		// GPT-5.5 and GPT-5.6 accept function tools through Chat Completions only when
-		// reasoning_effort is "none". Pi speaks the Chat Completions protocol,
-		// so preserve tool support there rather than silently cascading a Luna
-		// request to another provider. Agentic callers that need reasoning plus
-		// tools can use the Responses API directly.
-		if (/^gpt-5\.(?:5|6)(?:$|[.-])/i.test(body.model) && Array.isArray(body.tools) && body.tools.length > 0) {
+		// The whole GPT-5 family accepts function tools through Chat Completions
+		// only when reasoning_effort is "none" — including the 5.4 tier, which
+		// background pipes reach with an injected effort (applyBackgroundReasoningDefault).
+		// Pi speaks the Chat Completions protocol, so preserve tool support here
+		// rather than silently cascading the request to another provider. Agentic
+		// callers that need reasoning plus tools can use the Responses API directly.
+		if (/^gpt-5(?:$|[.-])/i.test(body.model) && Array.isArray(body.tools) && body.tools.length > 0) {
 			Object.assign(params, { reasoning_effort: 'none' });
 		}
 	}
