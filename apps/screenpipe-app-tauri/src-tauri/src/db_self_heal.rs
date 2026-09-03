@@ -39,6 +39,22 @@ use tracing::{info, warn};
 use crate::notifications::client;
 use crate::notifications::store::NotificationPriority;
 
+pub async fn finish_launch_quarantine<Failure, Report, ReportFuture>(
+    self_healed: bool,
+    on_failure: Failure,
+    report: Report,
+) where
+    Failure: FnOnce(),
+    Report: FnOnce() -> ReportFuture,
+    ReportFuture: std::future::Future<Output = ()>,
+{
+    if self_healed {
+        return;
+    }
+    on_failure();
+    report().await;
+}
+
 /// Why a launch-time quarantine was not self-healed. Recorded so the decision
 /// is auditable in logs instead of looking like the check never ran.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -303,6 +319,24 @@ mod tests {
                 seen.insert(reason.as_str()),
                 "duplicate log token for {reason:?}"
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn launch_quarantine_reports_only_after_self_heal_fails() {
+        for (self_healed, expected_failures) in [(true, 0), (false, 1)] {
+            let mut boot_errors = 0;
+            let mut recovery_reports = 0;
+
+            finish_launch_quarantine(
+                self_healed,
+                || boot_errors += 1,
+                || async { recovery_reports += 1 },
+            )
+            .await;
+
+            assert_eq!(boot_errors, expected_failures);
+            assert_eq!(recovery_reports, expected_failures);
         }
     }
 
