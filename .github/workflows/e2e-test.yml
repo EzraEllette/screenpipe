@@ -973,7 +973,9 @@ jobs:
   linux-wayland-e2e-gate:
     name: Linux Wayland E2E Tests
     needs: [changes, linux-wayland-e2e-test]
-    if: always()
+    # A superseding main push cancels the old workflow. Keep that required
+    # check skipped instead of manufacturing a failure from "cancelled".
+    if: ${{ always() && !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - name: Verify routed check
