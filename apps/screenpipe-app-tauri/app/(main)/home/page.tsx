@@ -1143,8 +1143,7 @@ function HomeContent() {
   // is exactly when the compact chrome-strip icon takes over — so the two can
   // never both render, and neither survives policy hiding the section.
   const meetingsInSidebar = visibleSidebarIds.includes("meetings");
-  const meetingsInToolbar =
-    !meetingsInSidebar && availableSidebarIds.includes("meetings");
+  const meetingsInToolbar = false;
 
   const persistSidebarLayout = (next: ReturnType<typeof normalizeSidebarNavLayout>) => {
     void updateSettings({ sidebarNavLayout: next });
