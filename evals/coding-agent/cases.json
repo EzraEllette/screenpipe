@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "suite": "screenpipe-app-coding-agent-regressions",
-  "dataset_version": "2026-09-02.1",
+  "dataset_version": "2026-09-03.1",
   "suite_type": "regression",
   "owner": "screenpipe engineering",
   "policy": {
@@ -906,6 +906,41 @@
           }
         ],
         "command": "cd apps/screenpipe-app-tauri && NODE_OPTIONS=--localstorage-file=.eval-localstorage bun x vitest run --config vitest.config.ts components/app-entitlement-gate.test.tsx"
+      }
+    },
+    {
+      "id": "app-enterprise-account-handoff-recording",
+      "name": "Keep recording authorized during enterprise account handoff",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "666dd855cd1e6539f700426990e90114d06e97d8",
+        "pull_request": "https://github.com/screenpipe/screenpipe/pull/6841"
+      },
+      "base_ref": "c6721aae2caefb59ce7d8a839c732107332bb773",
+      "oracle_ref": "666dd855cd1e6539f700426990e90114d06e97d8",
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/lib/hooks/use-enterprise-policy.ts"
+      ],
+      "gate": "advisory",
+      "trigger_paths": [
+        "apps/screenpipe-app-tauri/lib/hooks/use-enterprise-policy.ts",
+        "apps/screenpipe-app-tauri/lib/hooks/__tests__/use-enterprise-policy.test.tsx"
+      ],
+      "tags": ["regression", "escaped-failure", "enterprise", "auth", "recording", "account-handoff", "race", "fail-closed"],
+      "prompt": "An enterprise desktop has a previously verified device grant, a policy that now requires account sign-in, and a saved account credential ready to check. During startup, evaluating the device credential first revokes native recording authorization before the viable account credential finishes, stopping capture and racing the later account grant. Keep recording authorized through that account handoff, then grant account authorization when verification succeeds. Preserve immediate fail-closed behavior for key-only devices, explicit account denial, invalid or missing credentials, rotated keys, transient failures, policy changes, and ordinary non-enterprise startup.",
+      "agent_timeout_seconds": 900,
+      "grader_dependency_links": [
+        { "source_path": "apps/screenpipe-app-tauri/node_modules", "destination_path": "apps/screenpipe-app-tauri/node_modules" }
+      ],
+      "grader": {
+        "timeout_seconds": 420,
+        "fixtures": [
+          {
+            "source_ref": "666dd855cd1e6539f700426990e90114d06e97d8",
+            "source_path": "apps/screenpipe-app-tauri/lib/hooks/__tests__/use-enterprise-policy.test.tsx"
+          }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && NODE_OPTIONS=--localstorage-file=.eval-localstorage bun x vitest run --config vitest.config.ts lib/hooks/__tests__/use-enterprise-policy.test.tsx"
       }
     }
   ]
