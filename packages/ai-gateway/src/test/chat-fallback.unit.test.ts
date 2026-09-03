@@ -273,6 +273,14 @@ describe('chat handler — client payload classification (SCREENPIPE-AI-PROXY-1A
 		expect(msg).toContain('at least one user or assistant message');
 	});
 
+	it('maps output-budget exhaustion to actionable token guidance', () => {
+		const msg = clientPayloadMessage(
+			400,
+			'400 Could not finish the message because max_tokens or model output limit was reached. Please try again with higher max_tokens.',
+		);
+		expect(msg).toContain('Increase max_tokens');
+	});
+
 	it('leaves unrelated 400s unclassified', () => {
 		expect(clientPayloadMessage(400, 'invalid tool schema')).toBeNull();
 		expect(clientPayloadMessage(500, 'failed to decode image data')).toBeNull();

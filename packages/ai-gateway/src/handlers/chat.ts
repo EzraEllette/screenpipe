@@ -144,6 +144,10 @@ const CLIENT_PAYLOAD_PATTERNS: Array<{ re: RegExp; message: string }> = [
     re: /at least one message is required/i,
     message: 'The request must include at least one user or assistant message.',
   },
+  {
+    re: /could not finish the message because max_tokens or model output limit was reached/i,
+    message: 'The model reached its output limit before finishing. Increase max_tokens and try again.',
+  },
 ];
 
 export function clientPayloadMessage(status: number, msg: string): string | null {
