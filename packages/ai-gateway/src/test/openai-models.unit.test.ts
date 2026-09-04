@@ -259,6 +259,41 @@ describe('OpenAI API accounting and routing', () => {
 		expect(capturedParams!['tool_choice']).toBe('required');
 	});
 
+	it('compacts the Pi catalog to fit GLM while preserving core Screenpipe capabilities', async () => {
+		const provider = new ScreenpipeGlmProvider('glm-container-secret') as any;
+		const coreSkill = `  <skill>\n    <name>screenpipe-api</name>\n    <description>Query local history</description>\n  </skill>`;
+		const unrelatedSkill = `  <skill>\n    <name>talking-head-recut</name>\n    <description>Edit a video</description>\n  </skill>`;
+		const readTool = {
+			type: 'function',
+			function: { name: 'read', description: 'Read a file', parameters: { type: 'object', properties: {} } },
+		};
+		const subagentTool = {
+			type: 'function',
+			function: { name: 'subagent', description: 'Large orchestration schema', parameters: { type: 'object', properties: {} } },
+		};
+		let capturedParams: Record<string, any> | null = null;
+		provider.client.chat.completions.create = mock(async (params: Record<string, any>) => {
+			capturedParams = params;
+			return { choices: [{ message: { role: 'assistant', content: 'done' } }] };
+		});
+
+		await provider.createCompletion({
+			model: 'glm-5.3-flash-reap50-iq3m',
+			messages: [{
+				role: 'system',
+				content: `Keep this system policy.\n<available_skills>\n${coreSkill}\n${unrelatedSkill}\n</available_skills>`,
+			}, { role: 'user', content: 'Summarize today.' }],
+			tools: [readTool, subagentTool],
+		});
+
+		expect(capturedParams).not.toBeNull();
+		const system = capturedParams!.messages[0].content as string;
+		expect(system).toContain('Keep this system policy.');
+		expect(system).toContain('<name>screenpipe-api</name>');
+		expect(system).not.toContain('talking-head-recut');
+		expect(capturedParams!.tools).toEqual([readTool]);
+	});
+
 	it('normalizes GLM native tagged content into an executable Pi tool call', async () => {
 		const provider = new ScreenpipeGlmProvider('glm-container-secret') as any;
 		provider.client.chat.completions.create = mock(async () => ({

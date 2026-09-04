@@ -6,6 +6,13 @@ import { OpenAIProvider } from './openai';
 
 export const SCREENPIPE_GLM_MODEL = 'glm-5.3-flash-reap50-iq3m';
 const DIRECT_GLM_BASE_URL = 'https://pii.screenpipe.containers.tinfoil.dev/glm/v1';
+const GLM_CORE_SKILLS = new Set([
+	'render-html-report',
+	'screenpipe-api',
+	'screenpipe-chats',
+	'screenpipe-cli',
+	'screenpipe-team',
+]);
 
 type GlmTool = {
 	type?: string;
@@ -238,10 +245,57 @@ function normalizeGlmToolCallStream(stream: ReadableStream, tools: unknown[]): R
 	});
 }
 
-function normalizeGlmRequest(body: RequestBody): RequestBody {
+function compactGlmSkillCatalog(content: string): string {
+	return content.replace(
+		/<available_skills>([\s\S]*?)<\/available_skills>/g,
+		(fullCatalog, entries: string) => {
+			const skillBlocks = entries.match(/\s*<skill>[\s\S]*?<\/skill>/g);
+			if (!skillBlocks) return fullCatalog;
+			const retained = skillBlocks.filter((block) => {
+				const name = block.match(/<name>\s*([^<]+?)\s*<\/name>/)?.[1];
+				return name ? GLM_CORE_SKILLS.has(name) : false;
+			});
+			return `<available_skills>${retained.join('')}\n</available_skills>`;
+		},
+	);
+}
+
+function compactGlmSystemMessage(message: RequestBody['messages'][number]): RequestBody['messages'][number] {
+	if (message.role !== 'system' && message.role !== 'developer') return message;
+	if (typeof message.content === 'string') {
+		return { ...message, content: compactGlmSkillCatalog(message.content) };
+	}
+	return {
+		...message,
+		content: message.content.map((part) =>
+			part.type === 'text' && typeof part.text === 'string'
+				? { ...part, text: compactGlmSkillCatalog(part.text) }
+				: part,
+		),
+	};
+}
+
+function isSubagentTool(tool: unknown): boolean {
+	if (!tool || typeof tool !== 'object') return false;
+	const candidate = tool as { type?: unknown; function?: { name?: unknown } };
+	return candidate.type === 'function' && candidate.function?.name === 'subagent';
+}
+
+/**
+ * Pi's normal prompt advertises every installed skill and the full subagent
+ * orchestration schema. That baseline alone is about 31K tokens on Louis's
+ * real Screenpipe profile, leaving a 32K model one token for its answer.
+ *
+ * Keep the core Screenpipe skills and ordinary tools, but omit capabilities
+ * that this single-slot model cannot fit. The files remain local and richer
+ * models keep the complete catalog; this changes only what GLM sees.
+ */
+export function normalizeGlmRequest(body: RequestBody): RequestBody {
 	return {
 		...body,
 		model: SCREENPIPE_GLM_MODEL,
+		messages: body.messages.map(compactGlmSystemMessage),
+		tools: Array.isArray(body.tools) ? body.tools.filter((tool) => !isSubagentTool(tool)) : body.tools,
 	};
 }
 
