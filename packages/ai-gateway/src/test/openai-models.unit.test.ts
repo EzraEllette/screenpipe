@@ -284,6 +284,7 @@ describe('OpenAI API accounting and routing', () => {
 				content: `Keep this system policy.\n<available_skills>\n${coreSkill}\n${unrelatedSkill}\n</available_skills>`,
 			}, { role: 'user', content: 'Summarize today.' }],
 			tools: [readTool, subagentTool],
+			max_completion_tokens: 1,
 		});
 
 		expect(capturedParams).not.toBeNull();
@@ -292,6 +293,25 @@ describe('OpenAI API accounting and routing', () => {
 		expect(system).toContain('<name>screenpipe-api</name>');
 		expect(system).not.toContain('talking-head-recut');
 		expect(capturedParams!.tools).toEqual([readTool]);
+		expect(capturedParams!.max_completion_tokens).toBe(4096);
+	});
+
+	it('preserves an intentional small GLM output limit outside Pi context compaction', async () => {
+		const provider = new ScreenpipeGlmProvider('glm-container-secret') as any;
+		let capturedParams: Record<string, any> | null = null;
+		provider.client.chat.completions.create = mock(async (params: Record<string, any>) => {
+			capturedParams = params;
+			return { choices: [{ message: { role: 'assistant', content: 'ok' } }] };
+		});
+
+		await provider.createCompletion({
+			model: 'glm-5.3-flash-reap50-iq3m',
+			messages: [{ role: 'user', content: 'Reply with one token.' }],
+			max_tokens: 1,
+		});
+
+		expect(capturedParams).not.toBeNull();
+		expect(capturedParams!.max_tokens).toBe(1);
 	});
 
 	it('normalizes GLM native tagged content into an executable Pi tool call', async () => {

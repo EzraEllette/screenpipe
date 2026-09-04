@@ -13,6 +13,7 @@ const GLM_CORE_SKILLS = new Set([
 	'screenpipe-cli',
 	'screenpipe-team',
 ]);
+const GLM_COMPACTED_MIN_OUTPUT_TOKENS = 4096;
 
 type GlmTool = {
 	type?: string;
@@ -260,6 +261,18 @@ function compactGlmSkillCatalog(content: string): string {
 	);
 }
 
+function hasGlmSkillCatalog(content: string): boolean {
+	return /<available_skills>[\s\S]*?<\/available_skills>/.test(content);
+}
+
+function isGlmCatalogMessage(message: RequestBody['messages'][number]): boolean {
+	if (message.role !== 'system' && message.role !== 'developer') return false;
+	if (typeof message.content === 'string') return hasGlmSkillCatalog(message.content);
+	return message.content.some((part) =>
+		part.type === 'text' && typeof part.text === 'string' && hasGlmSkillCatalog(part.text)
+	);
+}
+
 function compactGlmSystemMessage(message: RequestBody['messages'][number]): RequestBody['messages'][number] {
 	if (message.role !== 'system' && message.role !== 'developer') return message;
 	if (typeof message.content === 'string') {
@@ -291,12 +304,33 @@ function isSubagentTool(tool: unknown): boolean {
  * models keep the complete catalog; this changes only what GLM sees.
  */
 export function normalizeGlmRequest(body: RequestBody): RequestBody {
-	return {
+	const compactsPiContext = body.messages.some(isGlmCatalogMessage)
+		|| (Array.isArray(body.tools) && body.tools.some(isSubagentTool));
+	const normalized: RequestBody = {
 		...body,
 		model: SCREENPIPE_GLM_MODEL,
 		messages: body.messages.map(compactGlmSystemMessage),
 		tools: Array.isArray(body.tools) ? body.tools.filter((tool) => !isSubagentTool(tool)) : body.tools,
 	};
+
+	// Pi clamps the output limit against its pre-gateway prompt estimate. With a
+	// large installed skill catalog that becomes one token even though the
+	// gateway removes most of that catalog before inference. Restore a useful
+	// answer budget only for requests where this GLM-specific compaction ran;
+	// ordinary API clients that intentionally request a tiny answer are unchanged.
+	if (compactsPiContext) {
+		if (normalized.max_completion_tokens !== undefined) {
+			normalized.max_completion_tokens = Math.max(
+				normalized.max_completion_tokens,
+				GLM_COMPACTED_MIN_OUTPUT_TOKENS,
+			);
+		}
+		if (normalized.max_tokens !== undefined) {
+			normalized.max_tokens = Math.max(normalized.max_tokens, GLM_COMPACTED_MIN_OUTPUT_TOKENS);
+		}
+	}
+
+	return normalized;
 }
 
 /**
