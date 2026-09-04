@@ -14,6 +14,8 @@ const GLM_CORE_SKILLS = new Set([
 	'screenpipe-team',
 ]);
 const GLM_COMPACTED_MIN_OUTPUT_TOKENS = 4096;
+const GLM_MAX_TOOL_RESULT_CHARS = 8000;
+const GLM_TOOL_RESULT_COMPACTION_MARKER = '\n...[tool result compacted for GLM 32K context; reread a narrower range if needed]...\n';
 
 type GlmTool = {
 	type?: string;
@@ -273,6 +275,19 @@ function isGlmCatalogMessage(message: RequestBody['messages'][number]): boolean 
 	);
 }
 
+function compactGlmToolResultText(content: string): string {
+	if (content.length <= GLM_MAX_TOOL_RESULT_CHARS) return content;
+	const available = GLM_MAX_TOOL_RESULT_CHARS - GLM_TOOL_RESULT_COMPACTION_MARKER.length;
+	const headChars = Math.ceil(available * 0.82);
+	const tailChars = available - headChars;
+	return `${content.slice(0, headChars)}${GLM_TOOL_RESULT_COMPACTION_MARKER}${content.slice(-tailChars)}`;
+}
+
+function compactGlmToolResultMessage(message: RequestBody['messages'][number]): RequestBody['messages'][number] {
+	if (message.role !== 'tool' || typeof message.content !== 'string') return message;
+	return { ...message, content: compactGlmToolResultText(message.content) };
+}
+
 function compactGlmSystemMessage(message: RequestBody['messages'][number]): RequestBody['messages'][number] {
 	if (message.role !== 'system' && message.role !== 'developer') return message;
 	if (typeof message.content === 'string') {
@@ -309,7 +324,9 @@ export function normalizeGlmRequest(body: RequestBody): RequestBody {
 	const normalized: RequestBody = {
 		...body,
 		model: SCREENPIPE_GLM_MODEL,
-		messages: body.messages.map(compactGlmSystemMessage),
+		messages: body.messages
+			.map(compactGlmSystemMessage)
+			.map((message) => compactsPiContext ? compactGlmToolResultMessage(message) : message),
 		tools: Array.isArray(body.tools) ? body.tools.filter((tool) => !isSubagentTool(tool)) : body.tools,
 	};
 

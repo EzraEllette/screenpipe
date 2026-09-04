@@ -314,6 +314,46 @@ describe('OpenAI API accounting and routing', () => {
 		expect(capturedParams!.max_tokens).toBe(1);
 	});
 
+	it('compacts oversized Pi tool results while retaining their beginning and end', async () => {
+		const provider = new ScreenpipeGlmProvider('glm-container-secret') as any;
+		let capturedParams: Record<string, any> | null = null;
+		provider.client.chat.completions.create = mock(async (params: Record<string, any>) => {
+			capturedParams = params;
+			return { choices: [{ message: { role: 'assistant', content: 'done' } }] };
+		});
+		const oversizedResult = `ACTIVITY SUMMARY\n${'evidence '.repeat(5000)}END OF RESULT`;
+
+		await provider.createCompletion({
+			model: 'glm-5.3-flash-reap50-iq3m',
+			messages: [{
+				role: 'system',
+				content: '<available_skills><skill><name>screenpipe-api</name></skill></available_skills>',
+			}, {
+				role: 'assistant',
+				content: '',
+				tool_calls: [{
+					id: 'call_screenpipe_activity',
+					type: 'function',
+					function: { name: 'read', arguments: '{"path":"screenpipe-api/SKILL.md"}' },
+				}],
+			}, {
+				role: 'tool',
+				tool_call_id: 'call_screenpipe_activity',
+				content: oversizedResult,
+			}],
+			max_completion_tokens: 1,
+		});
+
+		expect(capturedParams).not.toBeNull();
+		const toolMessage = capturedParams!.messages.find((message: { role?: string }) => message.role === 'tool');
+		const compacted = toolMessage.content as string;
+		expect(compacted).toHaveLength(8000);
+		expect(compacted).toStartWith('ACTIVITY SUMMARY');
+		expect(compacted).toContain('tool result compacted for GLM 32K context');
+		expect(compacted).toEndWith('END OF RESULT');
+		expect(toolMessage.tool_call_id).toBe('call_screenpipe_activity');
+	});
+
 	it('normalizes GLM native tagged content into an executable Pi tool call', async () => {
 		const provider = new ScreenpipeGlmProvider('glm-container-secret') as any;
 		provider.client.chat.completions.create = mock(async () => ({
