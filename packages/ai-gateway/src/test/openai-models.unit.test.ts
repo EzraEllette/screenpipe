@@ -6,6 +6,7 @@ import { describe, it, expect, mock } from 'bun:test';
 import { handleModelListing } from '../handlers/models';
 import { createProvider } from '../providers';
 import { OpenAIProvider, applyGpt56PromptCaching } from '../providers/openai';
+import { ScreenpipeGlmProvider } from '../providers/screenpipe-glm';
 import { getModelCost, inferProvider, isZeroCostModel } from '../services/cost-tracker';
 import { getModelWeight, isModelAllowed } from '../services/usage-tracker';
 
@@ -113,6 +114,19 @@ describe('OpenAI API model catalog', () => {
 		expect(ids).toContain('claude-fable-5');
 	});
 
+	it('advertises the exact quantized GLM model only when its container key exists', async () => {
+		const model = 'glm-5.3-flash-reap50-iq3m';
+		expect(await listedModelIds()).not.toContain(model);
+
+		const models = await listedModels({ TINFOIL_GLM_API_KEY: 'glm-container-secret' });
+		const glm = models.find(entry => entry.id === model);
+		expect(glm).toMatchObject({
+			owned_by: 'screenpipe',
+			context_window: 32768,
+			max_output_tokens: 8192,
+		});
+	});
+
 	it('publishes the full Claude 5 output budget for agent tool calls', async () => {
 		const models = await listedModels();
 		for (const id of ['claude-sonnet-5', 'claude-opus-5', 'claude-fable-5']) {
@@ -199,6 +213,18 @@ describe('OpenAI API accounting and routing', () => {
 		expect(inferProvider('gpt-5.4-mini')).toBe('openai');
 		expect(inferProvider('gpt-5.6-luna')).toBe('openai');
 		expect(inferProvider('o4-mini')).toBe('openai');
+	});
+
+	it('routes the active GLM model to the text-only Screenpipe enclave provider', () => {
+		const model = 'glm-5.3-flash-reap50-iq3m';
+		const provider = createProvider(model, env({ TINFOIL_GLM_API_KEY: 'glm-container-secret' }));
+		expect(provider).toBeInstanceOf(ScreenpipeGlmProvider);
+		expect(provider.supportsTools).toBe(false);
+		expect(provider.supportsVision).toBe(false);
+		expect(inferProvider(model)).toBe('screenpipe-tinfoil');
+		expect(isZeroCostModel(model)).toBe(true);
+		expect(isModelAllowed(model, 'logged_in')).toBe(false);
+		expect(isModelAllowed(model, 'subscribed')).toBe(true);
 	});
 
 	it('keeps Argus internal and sends the non-thinking tool-compatible template option', async () => {
