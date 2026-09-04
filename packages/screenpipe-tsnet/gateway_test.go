@@ -110,6 +110,41 @@ func TestCoordinatorFansQueryAcrossDevicesAndReportsFailures(t *testing.T) {
 	}
 }
 
+func TestDeviceListUsesConsumerShape(t *testing.T) {
+	t.Parallel()
+	gateway := testGateway(t, "http://127.0.0.1:3030", http.DefaultClient, func(context.Context) ([]device, error) {
+		return []device{{
+			Name:      "screenpipe-ezra-macbook",
+			DNSName:   "screenpipe-ezra-macbook.example.ts.net",
+			Addresses: []string{"100.64.0.1"},
+			Online:    true,
+			Local:     true,
+		}}, nil
+	})
+
+	request := httptest.NewRequest(http.MethodGet, "/v1/devices", nil)
+	request.Header.Set("Authorization", "Bearer local-secret")
+	response := httptest.NewRecorder()
+	gateway.coordinatorHandler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", response.Code, response.Body.String())
+	}
+
+	var payload struct {
+		Devices []map[string]any `json:"devices"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Devices) != 1 {
+		t.Fatalf("devices = %d, want 1", len(payload.Devices))
+	}
+	want := map[string]any{"name": "ezra-macbook", "online": true, "current": true}
+	if fmt.Sprint(payload.Devices[0]) != fmt.Sprint(want) {
+		t.Fatalf("device = %#v, want %#v", payload.Devices[0], want)
+	}
+}
+
 func TestCoordinatorRequiresTheScreenpipeKeyAndRejectsAbsoluteURLs(t *testing.T) {
 	t.Parallel()
 	gateway := testGateway(t, "http://127.0.0.1:3030", http.DefaultClient, func(context.Context) ([]device, error) {

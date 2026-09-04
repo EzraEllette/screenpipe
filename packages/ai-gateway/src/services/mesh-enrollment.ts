@@ -5,6 +5,7 @@ import type { AuthResult, Env } from '../types';
 
 const TAILSCALE_API = 'https://api.tailscale.com/api/v2';
 const AUTH_KEY_EXPIRY_SECONDS = 60 * 60;
+const DEVICE_TAG = 'tag:screenpipe-device';
 
 type MeshEnv = Pick<
 	Env,
@@ -163,6 +164,7 @@ async function oauthToken(
 	clientSecret: string,
 	scope: string,
 	fetcher: typeof fetch,
+	tags: string[] = [],
 ): Promise<string> {
 	const body = new URLSearchParams({
 		grant_type: 'client_credentials',
@@ -170,6 +172,7 @@ async function oauthToken(
 		client_secret: clientSecret,
 		scope,
 	});
+	if (tags.length > 0) body.set('tags', tags.join(' '));
 	const response = await fetcher(`${TAILSCALE_API}/oauth/token`, {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -197,6 +200,37 @@ async function tailscaleRequest<T>(
 	});
 	if (!response.ok) throw new Error(`Tailscale ${path} returned ${response.status}`);
 	return response.json() as Promise<T>;
+}
+
+async function configureTailnet(
+	credentials: TailnetCredentials,
+	fetcher: typeof fetch,
+): Promise<void> {
+	const token = await oauthToken(
+		credentials.clientId,
+		credentials.clientSecret,
+		'all',
+		fetcher,
+	);
+	const response = await fetcher(
+		`${TAILSCALE_API}/tailnet/${encodeURIComponent(credentials.tailnetId)}/acl`,
+		{
+			method: 'POST',
+			headers: {
+				Authorization: `Bearer ${token}`,
+				'Content-Type': 'application/hujson',
+			},
+			body: JSON.stringify({
+				tagOwners: { [DEVICE_TAG]: [] },
+				acls: [{
+					action: 'accept',
+					src: [DEVICE_TAG],
+					dst: [`${DEVICE_TAG}:3030`],
+				}],
+			}),
+		},
+	);
+	if (!response.ok) throw new Error(`Tailscale tailnet policy returned ${response.status}`);
 }
 
 async function provisionTailnet(
@@ -297,11 +331,13 @@ export async function enrollMeshDevice(
 			return json(200, { network_id: credentials.tailnetId });
 		}
 
+		await configureTailnet(credentials, fetcher);
 		const tailnetToken = await oauthToken(
 			credentials.clientId,
 			credentials.clientSecret,
 			'auth_keys',
 			fetcher,
+			[DEVICE_TAG],
 		);
 		const created = await tailscaleRequest<CreateAuthKeyResponse>(
 			`/tailnet/${encodeURIComponent(credentials.tailnetId)}/keys`,
@@ -315,6 +351,7 @@ export async function enrollMeshDevice(
 								reusable: false,
 								ephemeral: false,
 								preauthorized: true,
+								tags: [DEVICE_TAG],
 							},
 						},
 					},

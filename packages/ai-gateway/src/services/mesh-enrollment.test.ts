@@ -62,6 +62,7 @@ function tailscaleFetcher(requests: Array<{ url: string; init: RequestInit }>): 
 				oauthClient: { id: 'tailnet-client', secret: 'tailnet-secret' },
 			});
 		}
+		if (url.endsWith('/acl')) return Response.json({});
 		return Response.json({ key: 'tskey-auth-one-use', expires: '2026-09-02T01:00:00Z' });
 	}) as typeof fetch;
 }
@@ -91,20 +92,39 @@ describe('mesh enrollment', () => {
 			'https://api.tailscale.com/api/v2/oauth/token',
 			'https://api.tailscale.com/api/v2/organizations/screenpipe-org/tailnets',
 			'https://api.tailscale.com/api/v2/oauth/token',
+			'https://api.tailscale.com/api/v2/tailnet/tailnet-account-123/acl',
+			'https://api.tailscale.com/api/v2/oauth/token',
 			'https://api.tailscale.com/api/v2/tailnet/tailnet-account-123/keys',
 		]);
 		const organizationTokenBody = new URLSearchParams(requests[0].init.body as URLSearchParams);
 		expect(organizationTokenBody.get('grant_type')).toBe('client_credentials');
 		expect(organizationTokenBody.get('scope')).toBe('tailnets');
-		const tailnetTokenBody = new URLSearchParams(requests[2].init.body as URLSearchParams);
+		const policyTokenBody = new URLSearchParams(requests[2].init.body as URLSearchParams);
+		expect(policyTokenBody.get('scope')).toBe('all');
+		const policyBody = JSON.parse(requests[3].init.body as string);
+		expect(policyBody).toEqual({
+			tagOwners: { 'tag:screenpipe-device': [] },
+			acls: [{
+				action: 'accept',
+				src: ['tag:screenpipe-device'],
+				dst: ['tag:screenpipe-device:3030'],
+			}],
+		});
+		const tailnetTokenBody = new URLSearchParams(requests[4].init.body as URLSearchParams);
 		expect(tailnetTokenBody.get('scope')).toBe('auth_keys');
+		expect(tailnetTokenBody.get('tags')).toBe('tag:screenpipe-device');
 		const tailnetBody = JSON.parse(requests[1].init.body as string);
 		expect(tailnetBody.displayName).toMatch(/^Screenpipe-[a-f0-9]{32}$/);
-		const keyBody = JSON.parse(requests[3].init.body as string);
+		const keyBody = JSON.parse(requests[5].init.body as string);
 		expect(keyBody).toMatchObject({
 			capabilities: {
 				devices: {
-					create: { reusable: false, ephemeral: false, preauthorized: true },
+					create: {
+						reusable: false,
+						ephemeral: false,
+						preauthorized: true,
+						tags: ['tag:screenpipe-device'],
+					},
 				},
 			},
 			expirySeconds: 3600,

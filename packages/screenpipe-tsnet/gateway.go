@@ -41,6 +41,12 @@ type deviceResult struct {
 	Error       string `json:"error,omitempty"`
 }
 
+type deviceSummary struct {
+	Name    string `json:"name"`
+	Online  bool   `json:"online"`
+	Current bool   `json:"current"`
+}
+
 type queryRequest struct {
 	Path string `json:"path"`
 }
@@ -152,7 +158,15 @@ func (g *gateway) handleDevices(writer http.ResponseWriter, request *http.Reques
 		return
 	}
 	results := g.fanOut(request.Context(), devices, "/healthz")
-	writeJSON(writer, http.StatusOK, map[string]any{"devices": results})
+	summaries := make([]deviceSummary, 0, len(results))
+	for _, result := range results {
+		summaries = append(summaries, deviceSummary{
+			Name:    strings.TrimPrefix(result.Device.Name, "screenpipe-"),
+			Online:  result.Reachable && result.Status >= 200 && result.Status < 300,
+			Current: result.Device.Local,
+		})
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"devices": summaries})
 }
 
 func (g *gateway) handleQuery(writer http.ResponseWriter, request *http.Request) {

@@ -135,10 +135,9 @@ Response: `{"data": [{"type":"OCR","content":{"frame_id":...,"text":...,"app_nam
 ## Online devices — `GET /v1/devices` and `POST /v1/query`
 
 Use these endpoints for live reads across every online Screenpipe device. They
-stay on the same authenticated local API base as every other call; an internal
-tsnet sidecar provides private reachability without exposing another client
-port. Enrollment is automatic through the signed-in Screenpipe account; never
-ask the user for a Tailscale account, login, auth key, or separate VPN setup.
+stay on the same authenticated local API base as every other call. Device
+connectivity is automatic through the signed-in Screenpipe account; never ask
+the user for separate networking setup or credentials.
 
 ```bash
 curl -H "Authorization: Bearer $SCREENPIPE_LOCAL_API_KEY" \
@@ -150,11 +149,12 @@ curl -X POST "${SCREENPIPE_LOCAL_API_URL:-http://localhost:3030}/v1/query" \
   -d '{"path":"/search?q=pricing&start_time=1d%20ago&limit=10"}'
 ```
 
-`/v1/query` sends the supplied read path to the local device and every online
-`screenpipe-*` node, then returns separate per-device status and body fields.
-Offline devices are omitted; reachable failures remain explicit. Use Data Sync
-below only when history must remain available while the source device is
-offline.
+`/v1/devices` returns `{"devices":[{"name":"macbook","online":true,
+"current":true}]}`. `/v1/query` sends the supplied read path to the current
+device and every other online Screenpipe device, then returns separate
+per-device status and body fields. Offline devices are omitted; reachable
+failures remain explicit. Use Data Sync below only when history must remain
+available while the source device is offline.
 
 ---
 
