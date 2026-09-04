@@ -246,9 +246,14 @@ export class OpenAIProvider implements AIProvider {
 		this.chatTemplateKwargs = chatTemplateKwargs;
 	}
 
-	private applyProviderOptions(params: ChatCompletionCreateParams): void {
-		if (this.chatTemplateKwargs) {
-			Object.assign(params, { chat_template_kwargs: this.chatTemplateKwargs });
+	protected getChatTemplateKwargs(_body: RequestBody): Record<string, unknown> | undefined {
+		return this.chatTemplateKwargs;
+	}
+
+	private applyProviderOptions(params: ChatCompletionCreateParams, body: RequestBody): void {
+		const chatTemplateKwargs = this.getChatTemplateKwargs(body);
+		if (chatTemplateKwargs) {
+			Object.assign(params, { chat_template_kwargs: chatTemplateKwargs });
 		}
 	}
 
@@ -399,7 +404,7 @@ export class OpenAIProvider implements AIProvider {
 		this.applyGenerationOptions(params, body);
 		this.applyTokenLimit(params, body);
 		this.applyToolCompatibilityOptions(params, body);
-		this.applyProviderOptions(params);
+		this.applyProviderOptions(params, body);
 		await applyGpt56PromptCaching(params, body.gpt56HistoryCacheEligible === true);
 
 		const response = await this.createWithUnsupportedParamRetry(params, (p) =>
@@ -433,7 +438,7 @@ export class OpenAIProvider implements AIProvider {
 		this.applyGenerationOptions(params, body);
 		this.applyTokenLimit(params, body);
 		this.applyToolCompatibilityOptions(params, body);
-		this.applyProviderOptions(params);
+		this.applyProviderOptions(params, body);
 		await applyGpt56PromptCaching(params, body.gpt56HistoryCacheEligible === true);
 
 		const stream = (await this.createWithUnsupportedParamRetry(params, (p) =>
@@ -493,6 +498,24 @@ export class OpenAIProvider implements AIProvider {
 								new TextEncoder().encode(
 									`data: ${JSON.stringify({
 										choices: [{ delta: { tool_calls: toolCalls } }],
+									})}\n\n`
+								)
+							);
+						}
+						// OpenAI-compatible reasoning models (notably llama.cpp GLM)
+						// stream their work before final text. Preserve the first
+						// supported reasoning field so Pi receives thinking deltas and
+						// the UI can show liveness instead of appearing frozen. This is
+						// also the only model output when generation ends inside the
+						// reasoning budget, so dropping it produced an empty response.
+						const delta = choice?.delta as Record<string, unknown> | undefined;
+						const reasoningField = ['reasoning_content', 'reasoning', 'reasoning_text']
+							.find((field) => typeof delta?.[field] === 'string' && (delta[field] as string).length > 0);
+						if (reasoningField && delta) {
+							controller.enqueue(
+								new TextEncoder().encode(
+									`data: ${JSON.stringify({
+										choices: [{ delta: { [reasoningField]: delta[reasoningField] } }],
 									})}\n\n`
 								)
 							);

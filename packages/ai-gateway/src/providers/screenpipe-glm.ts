@@ -168,6 +168,16 @@ function normalizeGlmToolCallStream(stream: ReadableStream, tools: unknown[]): R
 					emit(raw);
 					return;
 				}
+				// Reasoning arrives before GLM's final content. It cannot be a
+				// native tool-call payload, so forward it immediately while the
+				// content-only detector remains undecided. Buffering these chunks
+				// made long-thinking requests look completely frozen in Pi.
+				const hasReasoning = ['reasoning_content', 'reasoning', 'reasoning_text']
+					.some((field) => typeof choice?.delta?.[field] === 'string' && choice.delta[field].length > 0);
+				if (hasReasoning && typeof deltaContent !== 'string') {
+					emit(raw);
+					return;
+				}
 
 				pending.push(raw);
 				if (typeof deltaContent === 'string') {
@@ -251,6 +261,18 @@ export class ScreenpipeGlmProvider extends OpenAIProvider {
 		maxRetries = 0,
 	) {
 		super(apiKey, baseURL, defaultHeaders, maxRetries);
+	}
+
+	protected getChatTemplateKwargs(body: RequestBody): Record<string, unknown> {
+		// The deployed GLM template has binary thinking, not graded effort.
+		// Pi defaults interactive chats to "medium" and its 32K Day Recap
+		// prompt already consumes most of that window. Treat medium and below
+		// as the fast/non-thinking path; high+ remains an explicit opt-in.
+		return {
+			enable_thinking: body.reasoning_effort === 'high'
+				|| body.reasoning_effort === 'xhigh'
+				|| String(body.reasoning_effort) === 'max',
+		};
 	}
 
 	async createCompletion(body: RequestBody): Promise<Response> {

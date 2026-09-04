@@ -313,7 +313,7 @@ const CURATED_MODELS: ModelEntry[] = [
     intelligence: 'high',
     cost_tier: 'low',
     recommended_for: ['chat', 'analysis'],
-    warning: 'Experimental single-slot model — requests may queue under load; no vision or tool calling',
+    warning: 'Experimental single-slot, text-only model — requests may queue under load',
     requires_env: 'TINFOIL_GLM_API_KEY',
   },
 ];
