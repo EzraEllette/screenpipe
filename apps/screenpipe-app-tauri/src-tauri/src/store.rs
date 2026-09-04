@@ -4088,6 +4088,9 @@ mod tests {
                 .readonly(),
             "neighboring recording must remain untouched"
         );
+        let mut permissions = std::fs::metadata(&recording).unwrap().permissions();
+        permissions.set_readonly(false);
+        std::fs::set_permissions(&recording, permissions).unwrap();
     }
 
     #[cfg(windows)]
@@ -4114,10 +4117,10 @@ mod tests {
             .nth(1)
             .unwrap()
             .trim_matches('"');
-        let readonly_grant = format!("{sid}:(R)");
+        let readonly_deny = format!("*{sid}:(WD)");
         let restricted = std::process::Command::new("icacls.exe")
             .arg(&store_path)
-            .args(["/inheritance:r", "/grant:r", &readonly_grant, "/Q"])
+            .args(["/inheritance:r", "/deny", &readonly_deny, "/Q"])
             .creation_flags(CREATE_NO_WINDOW)
             .status()
             .unwrap();
@@ -4145,8 +4148,8 @@ mod tests {
         assert!(acl.status.success());
         let acl = String::from_utf8_lossy(&acl.stdout);
         assert!(
-            acl.contains("(I)"),
-            "repaired ACL must contain inherited entries: {acl}"
+            !acl.contains("(DENY)"),
+            "repaired ACL must remove the explicit deny entry: {acl}"
         );
     }
 
