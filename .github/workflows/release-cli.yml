@@ -986,6 +986,12 @@ jobs:
       # every error — versions 0.3.290..0.3.295 all "succeeded" without ever
       # publishing because the npm token had expired and nobody noticed.
       - name: Publish platform packages
+        # npm prefers the job's OIDC identity when a package has trusted
+        # publishing configured, then falls back to this shared release token.
+        # Keep the fallback until every platform package has its own trusted
+        # publisher configuration on npm.
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           for pkg in screenpipe-darwin-arm64 screenpipe-darwin-x64 screenpipe-linux-x64 screenpipe-win32-x64; do
             cd packages/cli/$pkg
@@ -1045,6 +1051,8 @@ jobs:
           done
 
       - name: Publish main package
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           cd packages/cli/screenpipe
           err=$(mktemp)
