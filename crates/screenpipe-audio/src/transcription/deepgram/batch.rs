@@ -159,8 +159,9 @@ fn create_query_params(languages: Vec<Language>, vocabulary: &[VocabularyEntry])
 /// Send the Deepgram request, retrying transient transport failures (timeouts,
 /// connection resets, "error sending request" blips) up to a few times with
 /// backoff. HTTP 429 responses retry after a bounded provider-directed cooldown,
-/// and transient 5xx responses use the same bounded exponential backoff as
-/// transport failures. Other HTTP errors remain the caller's responsibility.
+/// and transient 5xx or explicitly empty successful responses use the same
+/// bounded exponential backoff as transport failures. Other HTTP errors remain
+/// the caller's responsibility.
 async fn get_deepgram_response(
     config: &DeepgramTranscriptionConfig,
     audio_data: Vec<u8>,
@@ -199,6 +200,20 @@ async fn get_deepgram_response(
                     attempt + 1,
                     MAX_ATTEMPTS,
                     status,
+                    delay
+                );
+                tokio::time::sleep(delay).await;
+            }
+            Ok(resp)
+                if resp.status().is_success()
+                    && resp.content_length() == Some(0)
+                    && attempt + 1 < MAX_ATTEMPTS =>
+            {
+                let delay = Duration::from_millis(300 * 2u64.pow(attempt));
+                debug!(
+                    "deepgram returned an empty success response (attempt {}/{}); retrying in {:?}",
+                    attempt + 1,
+                    MAX_ATTEMPTS,
                     delay
                 );
                 tokio::time::sleep(delay).await;
@@ -818,6 +833,28 @@ mod tests {
     async fn server_error_batch_request_is_retried() {
         let (endpoint, request_count) = sequential_http_server(vec![
             "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+        ])
+        .await;
+        let config = DeepgramTranscriptionConfig {
+            endpoint,
+            auth_token: "test-token".into(),
+            auth_header_prefix: "Bearer",
+        };
+
+        let response =
+            get_deepgram_response(&config, vec![1, 2, 3], "model=nova-3".into(), "audio/mpeg")
+                .await
+                .unwrap();
+
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert_eq!(*request_count.lock().await, 2);
+    }
+
+    #[tokio::test]
+    async fn empty_success_batch_response_is_retried() {
+        let (endpoint, request_count) = sequential_http_server(vec![
+            "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
         ])
         .await;
