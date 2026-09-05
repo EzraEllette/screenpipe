@@ -329,15 +329,6 @@ fn database_is_quarantined(database_path: &std::path::Path) -> Result<bool, Stri
     }
 }
 
-fn tray_start_data_dir(app: &AppHandle) -> Result<std::path::PathBuf, String> {
-    let settings = SettingsStore::get(app)
-        .map_err(|error| format!("could not read settings for recording start: {error}"))?
-        .unwrap_or_default();
-    let (data_dir, _fell_back) = crate::config::resolve_data_dir(&settings.data_dir)
-        .map_err(|error| format!("could not resolve the recording data directory: {error}"))?;
-    Ok(data_dir)
-}
-
 impl TrayRecordingAction {
     fn optimistic_status(self) -> RecordingStatus {
         match self {
@@ -376,7 +367,7 @@ async fn run_tray_recording_action(
     let state = app.state::<RecordingState>();
     match action {
         TrayRecordingAction::Start => {
-            let data_dir = tray_start_data_dir(app)?;
+            let data_dir = crate::db_recovery_notifications::effective_recovery_data_dir(app)?;
             let database_path = data_dir.join("db.sqlite");
             match tray_start_route_with(|| database_is_quarantined(&database_path))? {
                 TrayStartRoute::StartCapture => {
@@ -2318,7 +2309,7 @@ mod tests {
     }
 
     #[test]
-    fn tray_start_routes_quarantined_database_to_recovery_offer() {
+    fn tray_start_offers_quarantined_database_recovery_without_starting_repair() {
         let data_dir = tempfile::tempdir().expect("tray quarantine tempdir");
         let database_path = data_dir.path().join("db.sqlite");
         std::fs::write(&database_path, b"quarantined generation").expect("write database");
