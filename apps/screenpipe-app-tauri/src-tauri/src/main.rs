@@ -2114,8 +2114,8 @@ async fn main() {
                             // auto-restarts recording (rebuilding every pool +
                             // the shared WAL-index).
                             let db_health = server.db.write_queue_health();
-                            server.db.set_persistent_failure_hook(
-                                crate::recording::make_db_wedge_recovery_hook(
+                            server.db.set_database_restart_hook(
+                                crate::recording::make_database_restart_hook(
                                     app_for_db_wedge.clone(),
                                     db_wedge_breaker.clone(),
                                     db_health,
