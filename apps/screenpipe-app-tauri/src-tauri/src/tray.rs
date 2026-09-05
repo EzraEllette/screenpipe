@@ -300,6 +300,44 @@ enum TrayRecordingAction {
     Stop,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TrayStartRoute {
+    StartCapture,
+    OfferDatabaseRecovery,
+}
+
+fn tray_start_route_with<F>(quarantine_lookup: F) -> Result<TrayStartRoute, String>
+where
+    F: FnOnce() -> Result<bool, String>,
+{
+    if quarantine_lookup()? {
+        Ok(TrayStartRoute::OfferDatabaseRecovery)
+    } else {
+        Ok(TrayStartRoute::StartCapture)
+    }
+}
+
+fn database_is_quarantined(database_path: &std::path::Path) -> Result<bool, String> {
+    let marker_path = screenpipe_db::sqlite_quarantine_marker_path(database_path)
+        .ok_or_else(|| "the database path cannot be quarantined".to_string())?;
+    match std::fs::symlink_metadata(marker_path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(format!(
+            "could not check whether the database needs recovery: {error}"
+        )),
+    }
+}
+
+fn tray_start_data_dir(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    let settings = SettingsStore::get(app)
+        .map_err(|error| format!("could not read settings for recording start: {error}"))?
+        .unwrap_or_default();
+    let (data_dir, _fell_back) = crate::config::resolve_data_dir(&settings.data_dir)
+        .map_err(|error| format!("could not resolve the recording data directory: {error}"))?;
+    Ok(data_dir)
+}
+
 impl TrayRecordingAction {
     fn optimistic_status(self) -> RecordingStatus {
         match self {
@@ -337,7 +375,27 @@ async fn run_tray_recording_action(
     info!(?action, "handling recording action from native tray");
     let state = app.state::<RecordingState>();
     match action {
-        TrayRecordingAction::Start => crate::recording::start_capture(state, app.clone()).await?,
+        TrayRecordingAction::Start => {
+            let data_dir = tray_start_data_dir(app)?;
+            let database_path = data_dir.join("db.sqlite");
+            match tray_start_route_with(|| database_is_quarantined(&database_path))? {
+                TrayStartRoute::StartCapture => {
+                    crate::recording::start_capture(state, app.clone()).await?
+                }
+                TrayStartRoute::OfferDatabaseRecovery => {
+                    info!("native tray start routed to protected database recovery offer");
+                    if !crate::db_recovery_notifications::offer_quarantined_database_recovery(
+                        data_dir,
+                    ) {
+                        return Err(
+                            "the database recovery marker disappeared during recording start"
+                                .to_string(),
+                        );
+                    }
+                    return Ok(());
+                }
+            }
+        }
         TrayRecordingAction::Stop => crate::recording::stop_capture(state, app.clone()).await?,
     }
 
@@ -2257,6 +2315,34 @@ mod tests {
             next_tray_recording_action(true),
             TrayRecordingAction::Stop
         ));
+    }
+
+    #[test]
+    fn tray_start_routes_quarantined_database_to_recovery_offer() {
+        let data_dir = tempfile::tempdir().expect("tray quarantine tempdir");
+        let database_path = data_dir.path().join("db.sqlite");
+        std::fs::write(&database_path, b"quarantined generation").expect("write database");
+        screenpipe_db::persist_sqlite_quarantine(&database_path, Some(11), "database corrupt")
+            .expect("persist quarantine");
+
+        assert_eq!(
+            tray_start_route_with(|| database_is_quarantined(&database_path)),
+            Ok(TrayStartRoute::OfferDatabaseRecovery)
+        );
+    }
+
+    #[test]
+    fn tray_start_allows_healthy_database_and_fails_closed_on_unknown_state() {
+        let data_dir = tempfile::tempdir().expect("healthy tray tempdir");
+        let database_path = data_dir.path().join("db.sqlite");
+        assert_eq!(
+            tray_start_route_with(|| database_is_quarantined(&database_path)),
+            Ok(TrayStartRoute::StartCapture)
+        );
+        assert_eq!(
+            tray_start_route_with(|| Err("lookup failed".to_string())),
+            Err("lookup failed".to_string())
+        );
     }
 
     #[test]

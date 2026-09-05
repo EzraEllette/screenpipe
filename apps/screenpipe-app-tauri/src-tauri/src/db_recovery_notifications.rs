@@ -184,6 +184,16 @@ fn send_recovery_offer() {
     );
 }
 
+/// Re-surface the protected recovery action after an explicit user attempt to
+/// resume recording. This only offers recovery; it never starts repair work.
+pub fn offer_quarantined_database_recovery(data_dir: PathBuf) -> bool {
+    if !screenpipe_db::sqlite_quarantine_exists(data_dir.join("db.sqlite")) {
+        return false;
+    }
+    send_recovery_offer();
+    true
+}
+
 /// Offer recovery only after launch has proven the durable quarantine marker
 /// exists and has skipped every server, pool, watchdog, and capture startup.
 /// The notice persists in `/notify` and its inbox until the user acts.
@@ -194,7 +204,7 @@ pub fn notify_quarantined_database(data_dir: PathBuf) {
     {
         return;
     }
-    send_recovery_offer();
+    offer_quarantined_database_recovery(data_dir);
 }
 
 /// Start the protected recovery requested from the `/notify` action. Returns
