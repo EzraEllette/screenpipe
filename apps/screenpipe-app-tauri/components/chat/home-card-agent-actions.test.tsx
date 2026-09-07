@@ -9,7 +9,6 @@ import tauriConfig from "../../src-tauri/tauri.conf.json";
 
 import {
   buildHomeCardAgentPrompt,
-  HOME_CARD_AGENT_TOOLTIP,
   HomeCardAgentActions,
 } from "./home-card-agent-actions";
 
@@ -51,7 +50,7 @@ describe("HomeCardAgentActions", () => {
     vi.clearAllMocks();
   });
 
-  it("offers named Claude, Cursor, and Codex actions", () => {
+  it("offers named Claude, Cursor, and Codex actions and tooltips", async () => {
     render(<HomeCardAgentActions pipe={DAY_RECAP} />);
 
     expect(
@@ -68,9 +67,15 @@ describe("HomeCardAgentActions", () => {
         .getByRole("button", { name: "Run in Codex" })
         .querySelector("img"),
     ).toHaveAttribute("src", "/images/openai.svg");
-    expect(HOME_CARD_AGENT_TOOLTIP).toBe(
-      "run this in your favorite agent",
-    );
+    for (const agent of ["Claude", "Cursor", "Codex"]) {
+      const button = screen.getByRole("button", { name: `Run in ${agent}` });
+      fireEvent.focus(button);
+      expect(
+        await screen.findByRole("tooltip", { name: `Run in ${agent}` }),
+      ).toBeInTheDocument();
+      expect(button).toHaveAccessibleDescription(`Run in ${agent}`);
+      fireEvent.blur(button);
+    }
   });
 
   it("centers the action cluster over compact chips", () => {
