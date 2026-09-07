@@ -208,9 +208,9 @@ function localSccacheEnvironment(): Record<string, string> {
   const env = { ...process.env } as Record<string, string>;
   const sccache = findExecutable("sccache");
   if (!sccache) {
-    if (process.platform === "darwin") {
+    if (process.platform === "darwin" || process.platform === "win32") {
       throw new Error(
-        "[native-build-queue] machine-wide sccache is required on macOS; refusing local compilation",
+        "[native-build-queue] machine-wide sccache is required; refusing local compilation",
       );
     }
     console.warn("[native-build-queue] sccache not found; continuing without a compile cache");
@@ -290,7 +290,7 @@ function localSccacheEnvironment(): Record<string, string> {
     ) {
       const message =
         "[native-build-queue] machine-wide sccache did not start with all worktree bases";
-      if (process.platform === "darwin") {
+      if (process.platform === "darwin" || process.platform === "win32") {
         throw new Error(`${message}; refusing local compilation`);
       }
       console.warn(`${message}; compile-cache reuse may be reduced`);
@@ -515,6 +515,25 @@ function ownerSummary(owner: QueueOwner | undefined): string {
 }
 
 async function queue(mode: BuildMode, args: string[] = []): Promise<number> {
+  if (process.platform === "win32") {
+    mkdirSync(QUEUE_ROOT, { recursive: true });
+    const child = Bun.spawn([
+      "powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive",
+      "-ExecutionPolicy", "Bypass", "-File",
+      join(import.meta.dir, "native-build-lock.ps1"),
+    ], {
+      cwd: APP_ROOT,
+      env: {
+        ...process.env,
+        SCREENPIPE_NATIVE_QUEUE_REQUEST: JSON.stringify({
+          executable: process.execPath, runner: import.meta.path,
+          requestId: crypto.randomUUID(), mode, args,
+        }),
+      },
+      stdin: "inherit", stdout: "inherit", stderr: "inherit",
+    });
+    return child.exited;
+  }
   if (process.platform !== "darwin" || !existsSync("/usr/bin/lockf")) {
     console.log("[native-build-queue] system queue unavailable on this platform; running directly");
     return perform(mode, args);
@@ -554,6 +573,15 @@ async function queue(mode: BuildMode, args: string[] = []): Promise<number> {
 
 function printStatus(): void {
   mkdirSync(QUEUE_ROOT, { recursive: true });
+  if (process.platform === "win32") {
+    const result = Bun.spawnSync([
+      "powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive",
+      "-ExecutionPolicy", "Bypass", "-File",
+      join(import.meta.dir, "native-build-lock.ps1"), "-Status",
+    ], { stdout: "inherit", stderr: "inherit" });
+    if (result.exitCode !== 0) throw new Error("Windows native queue is unavailable");
+    return;
+  }
   if (process.platform !== "darwin" || !existsSync("/usr/bin/lockf")) {
     console.log("[native-build-queue] the system queue is only active on macOS");
     return;
