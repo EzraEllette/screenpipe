@@ -120,7 +120,7 @@ pub fn run_supervisor_command() -> Result<()> {
         Some("install") => install_persistence(),
         Some("prepare-upgrade") => prepare_upgrade(),
         Some("remove") => remove_persistence(),
-        Some("watch-update") => watch_update(),
+        Some("watch-update") => watch_update_resilient(),
         Some(command) => Err(format!("unknown command: {command}").into()),
         None => {
             service_dispatcher::start(SERVICE_NAME, ffi_service_main)?;
@@ -645,6 +645,27 @@ fn watch_update() -> Result<()> {
         write_transaction(&transaction_path, &transaction)?;
         run_update_installer(&staging)?;
     }
+}
+
+fn watch_update_resilient() -> Result<()> {
+    if let Err(update_error) = watch_update() {
+        let program_data = env::var_os("ProgramData").ok_or("ProgramData is unavailable")?;
+        let staging = state_dir(Path::new(&program_data)).join(UPDATE_STAGING_DIR);
+        let transaction_path = staging.join(UPDATE_TRANSACTION_FILE);
+        let transaction: AcceptedUpdateTransaction =
+            serde_json::from_slice(&fs::read(&transaction_path)?)?;
+        let runner_state = staging.join(UPDATE_RUNNER_STATE_FILE);
+        let app_path = installed_app_path()?;
+        restore_pre_update_snapshot(&app_path, &staging, &transaction)?;
+        latch_failed_update(&staging, &runner_state, &transaction.request.version)?;
+        reconcile_installed_service(&app_path)?;
+        log_event(
+            "error",
+            "update_runner_recovered",
+            &format!("trusted runner failed and restored snapshot: {update_error}"),
+        );
+    }
+    Ok(())
 }
 
 fn run_update_installer(staging: &Path) -> Result<()> {
