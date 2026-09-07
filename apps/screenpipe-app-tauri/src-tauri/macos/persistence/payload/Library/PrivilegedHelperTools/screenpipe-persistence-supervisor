@@ -328,6 +328,12 @@ if [ ! -e "\$work/started" ] && [ ! -e "\$work/settled" ]; then
   fi
 fi
 if [ ! -e "\$work/settled" ]; then
+  # If launchd restarted only this runner on the same boot, do not restore over
+  # an installer that is still applying the protected package. Match its exact
+  # command, not a PID that can be reused after reboot.
+  while /bin/ps -axo command= | /usr/bin/grep -Fx '${INSTALLER} -pkg ${UPDATE_WORK_DIR}/package.pkg -target /' >/dev/null; do
+    /bin/sleep 1
+  done
   # Restore idempotently; keep the snapshot until every file is back. If a
   # restore is itself interrupted, this launchd job repeats it on the next boot.
   /usr/bin/ditto "\$work/backup/app" "\$work/restored.app" || exit 1
