@@ -56,8 +56,8 @@ use crate::{
     APP_EXE, INSTALLED_STATE_FILE, POLICY_REFRESH_SECONDS, RECHECK_SECONDS,
     RECOVERY_SUPERVISOR_FILE, REMOVER_EXE, SERVICE_DISPLAY_NAME, SERVICE_NAME, SUPERVISOR_EXE,
     UPDATE_FAILED_VERSION_FILE, UPDATE_PACKAGE_FILE, UPDATE_REQUEST_DIR, UPDATE_REQUEST_FILE,
-    UPDATE_RUNNER_READY_FILE, UPDATE_RUNNER_STATE_FILE, UPDATE_SIGNATURE_FILE,
-    UPDATE_SNAPSHOT_DIR, UPDATE_TRANSACTION_FILE,
+    UPDATE_RUNNER_READY_FILE, UPDATE_RUNNER_STATE_FILE, UPDATE_SIGNATURE_FILE, UPDATE_SNAPSHOT_DIR,
+    UPDATE_TRANSACTION_FILE,
 };
 
 type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
@@ -506,30 +506,68 @@ fn launch_update_runner(staging: &Path) -> Result<bool> {
     let ready = staging.join(UPDATE_RUNNER_READY_FILE);
     let runner_state = staging.join(UPDATE_RUNNER_STATE_FILE);
     let recovery = recovery_supervisor_path()?;
-    if let Ok(pid) = fs::read_to_string(&runner_state)
-        .and_then(|value| value.trim().parse::<u32>().map_err(std::io::Error::other))
-    {
-        if process_identity(pid).is_some_and(|(_, path)| path_eq(&path, &recovery)) {
+    let mut claimed = false;
+    for _ in 0..3 {
+        if active_runner_pid(&runner_state, &recovery).is_some() {
             return Ok(true);
         }
+        if fs::read_to_string(&runner_state).is_ok_and(|value| value.trim() == "starting") {
+            let deadline = Instant::now() + Duration::from_secs(RUNNER_READY_WAIT_SECONDS);
+            while Instant::now() < deadline {
+                if active_runner_pid(&runner_state, &recovery).is_some() {
+                    return Ok(true);
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
+        }
+        let _ = fs::remove_file(&ready);
+        let _ = fs::remove_file(&runner_state);
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&runner_state)
+        {
+            Ok(mut claim) => {
+                claim.write_all(b"starting\n")?;
+                claim.sync_all()?;
+                claimed = true;
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    if !claimed {
+        return Err("could not claim recovery runner ownership".into());
     }
     let recovery = prepare_recovery_service()?;
-    let _ = fs::remove_file(&runner_state);
-    let _ = fs::remove_file(&ready);
-    Command::new(recovery)
+    Command::new(&recovery)
         .arg("watch-update")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()?;
     let deadline = Instant::now() + Duration::from_secs(RUNNER_READY_WAIT_SECONDS);
-    while !ready.is_file() {
+    while !ready.is_file() || active_runner_pid(&runner_state, &recovery).is_none() {
         if Instant::now() >= deadline {
+            let _ = fs::remove_file(&runner_state);
+            let _ = fs::remove_file(&ready);
             return Err("recovery runner did not establish durable maintenance".into());
         }
         thread::sleep(Duration::from_millis(100));
     }
     Ok(true)
+}
+
+fn active_runner_pid(runner_state: &Path, recovery: &Path) -> Option<u32> {
+    let pid = fs::read_to_string(runner_state)
+        .ok()?
+        .trim()
+        .parse::<u32>()
+        .ok()?;
+    process_identity(pid)
+        .is_some_and(|(_, path)| path_eq(&path, recovery))
+        .then_some(pid)
 }
 
 fn recovery_supervisor_path() -> Result<PathBuf> {
@@ -561,9 +599,12 @@ fn watch_update() -> Result<()> {
     let mut transaction: AcceptedUpdateTransaction =
         serde_json::from_slice(&fs::read(&transaction_path)?)?;
     let runner_state = staging.join(UPDATE_RUNNER_STATE_FILE);
+    if fs::read_to_string(&runner_state)?.trim() != "starting" {
+        return Err("recovery runner ownership was not claimed".into());
+    }
     let mut runner_guard = OpenOptions::new()
         .write(true)
-        .create_new(true)
+        .truncate(true)
         .open(&runner_state)?;
     writeln!(runner_guard, "{}", std::process::id())?;
     runner_guard.sync_all()?;
