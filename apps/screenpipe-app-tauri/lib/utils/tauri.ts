@@ -3363,7 +3363,11 @@ downloaded: boolean;
 /**
  * True when download failed with 401/403 — user must sign in.
  */
-auth_required: boolean }
+auth_required: boolean;
+/**
+ * True when the privileged persistence supervisor applies a complete system package.
+ */
+persistent: boolean }
 export type PersistedActivityHistory = { entries: ActivityHistoryEntry[]; coverage: ActivityHistoryCoverage[] }
 export type PiBackend = "acp"
 export type PiCheckResult = { available: boolean; path: string | null }

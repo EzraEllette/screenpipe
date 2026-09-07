@@ -196,8 +196,9 @@
       ; survived but whose supervisor file did not.
       nsExec::ExecToLog /TIMEOUT=30000 '"$SYSDIR\sc.exe" stop ScreenpipeEnterprisePersistence'
       Pop $0
-      nsExec::ExecToLog /TIMEOUT=30000 '"$SYSDIR\sc.exe" delete ScreenpipeEnterprisePersistence'
-      Pop $0
+      ; Keep the automatic service registration. If this installer is
+      ; interrupted, Windows can retry the protected staged package on reboot;
+      ; POSTINSTALL reconciles the entry to the newly installed helper.
     ${EndIf}
   !endif
 

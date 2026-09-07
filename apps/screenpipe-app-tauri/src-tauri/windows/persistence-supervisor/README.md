@@ -10,7 +10,8 @@ service runs as LocalSystem, but launches `screenpipe-app.exe --autostart` only
 in an active interactive user session discovered through Windows session
 enumeration. The physical console is preferred when it is active; virtual or
 remote active sessions remain eligible. It does not capture data, access the
-Screenpipe database, perform network requests, or update the application.
+Screenpipe database, or inspect recordings. Its only network access is the
+Enterprise policy and published-update validation described below.
 
 ## Installed state
 
@@ -32,6 +33,24 @@ minutes. An explicit `false` stops supervised relaunches while leaving the
 service alive so a later admin `true` can resume enforcement. Missing policy or
 refresh failures retain the protected package default or the last valid admin
 decision.
+
+## Automatic persistent updates
+
+When the Enterprise update policy selects Screenpipe automatic updates, the app
+stages only a request and a signed persistent installer under the active user's
+`.screenpipe\persistence-update` directory. The LocalSystem service copies the
+fixed-name files into protected ProgramData state, verifies the installer with
+the pinned Enterprise updater key, and independently rechecks the authenticated
+Enterprise update endpoint. It proceeds only when the request, signed package,
+and currently published version agree and are newer than the installed app.
+
+Before launching the installer, the service switches its automatic registration
+to a protected recovery copy. The persistent installer then stops supervision,
+replaces the app and privileged helpers, reconciles the service back to the new
+helper, and validates the relaunched app. If setup fails or is interrupted, a
+LocalSystem watchdog restarts the recovery service; the same protected fallback
+also survives a reboot. The ordinary consumer and non-persistent Enterprise
+installers and updater lifecycle do not use this path.
 
 ## Administrator removal
 

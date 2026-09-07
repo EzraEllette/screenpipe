@@ -6,7 +6,7 @@ use std::env;
 use std::error::Error;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::mem::size_of;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
@@ -46,8 +46,10 @@ use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 
 use crate::{
     is_path_within, launch_decision, log_path, marker_path, path_eq, policy_disabled_path,
-    policy_enforcement_from_exit_code, select_active_session, state_dir, LaunchDecision, APP_EXE,
-    POLICY_REFRESH_SECONDS, RECHECK_SECONDS, SERVICE_DISPLAY_NAME, SERVICE_NAME, SUPERVISOR_EXE,
+    policy_enforcement_from_exit_code, select_active_session, state_dir, LaunchDecision,
+    UpdateRequest, APP_EXE, POLICY_REFRESH_SECONDS, RECHECK_SECONDS, RECOVERY_SUPERVISOR_FILE,
+    SERVICE_DISPLAY_NAME, SERVICE_NAME, SUPERVISOR_EXE, UPDATE_PACKAGE_FILE, UPDATE_REQUEST_DIR,
+    UPDATE_REQUEST_FILE, UPDATE_SIGNATURE_FILE,
 };
 
 type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
@@ -56,6 +58,8 @@ const ERROR_SERVICE_DOES_NOT_EXIST: i32 = 1060;
 const STOP_WAIT_SECONDS: u64 = 20;
 const START_WAIT_SECONDS: u64 = 15;
 const APP_LAUNCH_WAIT_SECONDS: u64 = 20;
+const UPDATE_STAGING_DIR: &str = "update-staging";
+const ENTERPRISE_UPDATER_PUBLIC_KEY: &str = "untrusted comment: minisign public key: 22B46FD31CA9AC17\nRWQXrKkc02+0IiwFPFQnsaA4fm/4QQE9m5FYMEqGaqP3mIgTHx2/rMrg\n";
 
 define_windows_service!(ffi_service_main, service_main);
 
@@ -83,10 +87,18 @@ impl Drop for OwnedHandle {
 }
 
 pub fn run_supervisor_command() -> Result<()> {
-    match env::args().nth(1).as_deref() {
+    let args = env::args().collect::<Vec<_>>();
+    match args.get(1).map(String::as_str) {
         Some("install") => install_persistence(),
         Some("prepare-upgrade") => prepare_upgrade(),
         Some("remove") => remove_persistence(),
+        Some("watch-update") => {
+            let pid = args
+                .get(2)
+                .ok_or("watch-update requires the installer pid")?
+                .parse::<u32>()?;
+            watch_update(pid)
+        }
         Some(command) => Err(format!("unknown command: {command}").into()),
         None => {
             service_dispatcher::start(SERVICE_NAME, ffi_service_main)?;
@@ -125,6 +137,21 @@ fn run_service() -> Result<()> {
     let mut next_policy_refresh = Instant::now();
     let mut policy_refresh_in_flight = false;
     loop {
+        cleanup_inactive_recovery_copy();
+        match try_launch_persistence_update(&app_path) {
+            Ok(true) => {
+                status_handle.set_service_status(service_status(ServiceState::Stopped))?;
+                log_event(
+                    "info",
+                    "update_installer_launched",
+                    "service yielding to persistent installer",
+                );
+                return Ok(());
+            }
+            Ok(false) => {}
+            Err(error) => log_event("warn", "update_request_rejected", &error.to_string()),
+        }
+
         if !policy_refresh_in_flight && Instant::now() >= next_policy_refresh {
             policy_refresh_in_flight = true;
             next_policy_refresh = Instant::now() + Duration::from_secs(POLICY_REFRESH_SECONDS);
@@ -324,6 +351,279 @@ fn default_policy_url() -> String {
         .trim()
         .trim_end_matches('/');
     format!("{base}/api/enterprise/policy")
+}
+
+const PUBLISHED_UPDATE_POWERSHELL: &str = r#"
+$ErrorActionPreference = 'Stop'
+$headers = @{}
+$config = $null
+if (Test-Path -LiteralPath $env:SCREENPIPE_PERSISTENCE_ENTERPRISE_CONFIG) {
+  $config = Get-Content -Raw -LiteralPath $env:SCREENPIPE_PERSISTENCE_ENTERPRISE_CONFIG | ConvertFrom-Json
+  if ($config.license_key) { $headers['X-License-Key'] = [string]$config.license_key }
+}
+if (-not $headers.ContainsKey('X-License-Key')) {
+  $registry = Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\screenpipe' -ErrorAction SilentlyContinue
+  if ($registry.EnterpriseLicenseKey) { $headers['X-License-Key'] = [string]$registry.EnterpriseLicenseKey }
+}
+if ($env:SCREENPIPE_PERSISTENCE_USER_PROFILE) {
+  $userConfigPath = Join-Path $env:SCREENPIPE_PERSISTENCE_USER_PROFILE '.screenpipe\enterprise.json'
+  if (Test-Path -LiteralPath $userConfigPath) {
+    $userConfig = Get-Content -Raw -LiteralPath $userConfigPath | ConvertFrom-Json
+    if (-not $config) { $config = $userConfig }
+    if (-not $headers.ContainsKey('X-License-Key') -and $userConfig.license_key) {
+      $headers['X-License-Key'] = [string]$userConfig.license_key
+    }
+  }
+  $authPath = Join-Path $env:SCREENPIPE_PERSISTENCE_USER_PROFILE '.screenpipe\auth.json'
+  if (Test-Path -LiteralPath $authPath) {
+    $auth = Get-Content -Raw -LiteralPath $authPath | ConvertFrom-Json
+    if ($auth.token) { $headers['Authorization'] = 'Bearer ' + [string]$auth.token }
+  }
+}
+if ($headers.Count -eq 0) { exit 20 }
+$base = $env:SCREENPIPE_PERSISTENCE_WEB_BASE.TrimEnd('/')
+$policyUrl = $base + '/api/enterprise/policy'
+if ($config.ingest_url) {
+  $ingest = [Uri][string]$config.ingest_url
+  if ($ingest.Scheme -eq 'http' -or $ingest.Scheme -eq 'https') {
+    $policyUrl = $ingest.GetLeftPart([UriPartial]::Authority) + '/api/enterprise/policy'
+  }
+}
+$policy = Invoke-RestMethod -Method Get -Uri $policyUrl -Headers $headers -TimeoutSec 15
+$mode = $policy.appUpdatePolicy.mode
+if (-not $mode) { $mode = $policy.lockedSettings.app_update_policy.mode }
+$mode = ([string]$mode).ToLowerInvariant()
+$managed = $false
+$configuredManager = ([string]$config.update_manager).ToLowerInvariant()
+if (-not $configuredManager -and $userConfig) { $configuredManager = ([string]$userConfig.update_manager).ToLowerInvariant() }
+if ($configuredManager -in @('mdm', 'intune', 'jamf', 'workspace_one')) { $managed = $true }
+$registry = Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\screenpipe' -ErrorAction SilentlyContinue
+if (([string]$registry.UpdateManager).ToLowerInvariant() -in @('mdm', 'intune', 'jamf', 'workspace_one')) { $managed = $true }
+if (Test-Path -LiteralPath 'HKLM:\SOFTWARE\Microsoft\IntuneManagementExtension') { $managed = $true }
+if (Test-Path -LiteralPath 'C:\Program Files (x86)\Microsoft Intune Management Extension\Microsoft.Management.Services.IntuneWindowsAgent.exe') { $managed = $true }
+if ($mode -eq 'manual' -or $mode -eq 'mdm' -or ($mode -eq 'auto_detect' -and $managed)) { exit 24 }
+$current = (Get-Item -LiteralPath $env:SCREENPIPE_PERSISTENCE_APP).VersionInfo.ProductVersion
+if (-not $current) { exit 21 }
+$current = ([string]$current).Split('+')[0]
+$url = $base + '/api/app-update/enterprise/windows-x86_64/' + [Uri]::EscapeDataString($current)
+$response = Invoke-RestMethod -Method Get -Uri $url -Headers $headers -TimeoutSec 15
+if (-not $response.version) { exit 22 }
+$packageVersion = (Get-Item -LiteralPath $env:SCREENPIPE_PERSISTENCE_PACKAGE).VersionInfo.ProductVersion
+if (-not $packageVersion) { exit 23 }
+$packageVersion = ([string]$packageVersion).Split('+')[0]
+Write-Output $current
+Write-Output ([string]$response.version)
+Write-Output $packageVersion
+"#;
+
+fn try_launch_persistence_update(app_path: &Path) -> Result<bool> {
+    let Some(session_id) = active_interactive_session()? else {
+        return Ok(false);
+    };
+    let Some(profile) = user_profile_for_session(session_id)? else {
+        return Ok(false);
+    };
+    let program_data = env::var_os("ProgramData").ok_or("ProgramData is unavailable")?;
+    let staging = state_dir(Path::new(&program_data)).join(UPDATE_STAGING_DIR);
+    let user_request_dir = profile.join(UPDATE_REQUEST_DIR);
+    if user_request_dir.join(UPDATE_REQUEST_FILE).is_file() {
+        stage_user_update_request(&user_request_dir, &staging)?;
+    }
+    let request_path = staging.join(UPDATE_REQUEST_FILE);
+    if !request_path.is_file() {
+        return Ok(false);
+    }
+
+    let request: UpdateRequest = serde_json::from_slice(&fs::read(&request_path)?)?;
+    if request.package != UPDATE_PACKAGE_FILE || request.signature != UPDATE_SIGNATURE_FILE {
+        return Err("update request contains unexpected filenames".into());
+    }
+    verify_update_signature(
+        &staging.join(UPDATE_PACKAGE_FILE),
+        &staging.join(UPDATE_SIGNATURE_FILE),
+    )?;
+    let staged_package = staging.join(UPDATE_PACKAGE_FILE);
+    let (installed, published, packaged) =
+        published_update_versions(app_path, &profile, &staged_package)?;
+    crate::validate_update_request(&request, &installed, &published, &packaged)
+        .map_err(|error| error.to_string())?;
+
+    let recovery = prepare_recovery_service()?;
+    let installer = Command::new(staged_package)
+        .args(["/S", "/UPDATE"])
+        .spawn()?;
+    Command::new(recovery)
+        .args(["watch-update", &installer.id().to_string()])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    Ok(true)
+}
+
+fn recovery_supervisor_path() -> Result<PathBuf> {
+    let program_data = env::var_os("ProgramData").ok_or("ProgramData is unavailable")?;
+    Ok(state_dir(Path::new(&program_data)).join(RECOVERY_SUPERVISOR_FILE))
+}
+
+fn prepare_recovery_service() -> Result<PathBuf> {
+    let current = env::current_exe()?;
+    let recovery = recovery_supervisor_path()?;
+    if !path_eq(&current, &recovery) {
+        let temp = recovery.with_extension("tmp");
+        fs::copy(&current, &temp)?;
+        replace_file(&temp, &recovery)?;
+    }
+    protect_directory(
+        recovery
+            .parent()
+            .ok_or("recovery supervisor has no parent directory")?,
+    )?;
+    configure_existing_service(&recovery)?;
+    Ok(recovery)
+}
+
+fn watch_update(installer_pid: u32) -> Result<()> {
+    while process_identity(installer_pid).is_some() {
+        thread::sleep(Duration::from_secs(1));
+    }
+    if let Some(program_data) = env::var_os("ProgramData") {
+        let _ = fs::remove_dir_all(state_dir(Path::new(&program_data)).join(UPDATE_STAGING_DIR));
+    }
+    start_existing_service()?;
+    Ok(())
+}
+
+fn cleanup_inactive_recovery_copy() {
+    let Ok(current) = env::current_exe() else {
+        return;
+    };
+    let Ok(recovery) = recovery_supervisor_path() else {
+        return;
+    };
+    if !path_eq(&current, &recovery) {
+        let _ = fs::remove_file(recovery);
+    }
+}
+
+fn stage_user_update_request(source: &Path, staging: &Path) -> Result<()> {
+    let raw = fs::read(source.join(UPDATE_REQUEST_FILE))?;
+    let request: UpdateRequest = serde_json::from_slice(&raw)?;
+    if request.package != UPDATE_PACKAGE_FILE || request.signature != UPDATE_SIGNATURE_FILE {
+        return Err("update request contains unexpected filenames".into());
+    }
+    fs::create_dir_all(staging)?;
+    protect_directory(staging)?;
+    copy_replace(
+        &source.join(UPDATE_PACKAGE_FILE),
+        &staging.join(UPDATE_PACKAGE_FILE),
+    )?;
+    copy_replace(
+        &source.join(UPDATE_SIGNATURE_FILE),
+        &staging.join(UPDATE_SIGNATURE_FILE),
+    )?;
+    let staged_request = staging.join(UPDATE_REQUEST_FILE);
+    let staged_tmp = staging.join("request.json.tmp");
+    fs::write(&staged_tmp, raw)?;
+    replace_file(&staged_tmp, &staged_request)?;
+    let _ = fs::remove_file(source.join(UPDATE_REQUEST_FILE));
+    Ok(())
+}
+
+fn copy_replace(source: &Path, destination: &Path) -> Result<()> {
+    let temp = destination.with_extension("tmp");
+    fs::copy(source, &temp)?;
+    replace_file(&temp, destination)
+}
+
+fn replace_file(source: &Path, destination: &Path) -> Result<()> {
+    match fs::remove_file(destination) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    fs::rename(source, destination)?;
+    Ok(())
+}
+
+fn verify_update_signature(package: &Path, signature: &Path) -> Result<()> {
+    let public_key = minisign_verify::PublicKey::decode(ENTERPRISE_UPDATER_PUBLIC_KEY)?;
+    let signature = minisign_verify::Signature::decode(&fs::read_to_string(signature)?)?;
+    let mut verifier = public_key.verify_stream(&signature)?;
+    let mut package = fs::File::open(package)?;
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = package.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        verifier.update(&buffer[..read]);
+    }
+    verifier.finalize()?;
+    Ok(())
+}
+
+fn published_update_versions(
+    app_path: &Path,
+    profile: &Path,
+    package_path: &Path,
+) -> Result<(String, String, String)> {
+    let config = app_path
+        .parent()
+        .ok_or("installed app path has no parent directory")?
+        .join("enterprise.json");
+    let output = Command::new("powershell.exe")
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            PUBLISHED_UPDATE_POWERSHELL,
+        ])
+        .env("SCREENPIPE_PERSISTENCE_ENTERPRISE_CONFIG", config)
+        .env("SCREENPIPE_PERSISTENCE_USER_PROFILE", profile)
+        .env("SCREENPIPE_PERSISTENCE_APP", app_path)
+        .env("SCREENPIPE_PERSISTENCE_PACKAGE", package_path)
+        .env("SCREENPIPE_PERSISTENCE_WEB_BASE", web_base())
+        .stderr(Stdio::null())
+        .output()?;
+    if !output.status.success() {
+        return Err(format!(
+            "published update check exited with {:?}",
+            output.status.code()
+        )
+        .into());
+    }
+    let stdout = String::from_utf8(output.stdout)?;
+    let mut lines = stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty());
+    let installed = lines
+        .next()
+        .ok_or("published update check omitted installed version")?;
+    let published = lines
+        .next()
+        .ok_or("published update check omitted published version")?;
+    let packaged = lines
+        .next()
+        .ok_or("published update check omitted package version")?;
+    Ok((
+        installed.to_string(),
+        published.to_string(),
+        packaged.to_string(),
+    ))
+}
+
+fn web_base() -> String {
+    if let Ok(url) = env::var("SCREENPIPE_WEB_URL") {
+        if !url.trim().is_empty() {
+            return url;
+        }
+    }
+    option_env!("NEXT_PUBLIC_SCREENPIPE_WEB_URL")
+        .unwrap_or("https://screenpipe.com")
+        .to_string()
 }
 
 fn user_profile_for_session(session_id: u32) -> Result<Option<PathBuf>> {
@@ -551,6 +851,15 @@ fn install_persistence() -> Result<()> {
         app_path.as_os_str().to_string_lossy().as_bytes(),
     )?;
 
+    // The package payload and privileged helpers are now installed. Remove the
+    // durable retry request before starting the service, otherwise the freshly
+    // started supervisor could launch the same installer again.
+    let _ = fs::remove_file(
+        persistence_dir
+            .join(UPDATE_STAGING_DIR)
+            .join(UPDATE_REQUEST_FILE),
+    );
+
     let start_result = create_and_start_service(&supervisor).and_then(|_| {
         if cached_policy_enforcement() {
             wait_for_supervised_app(&app_path)
@@ -559,8 +868,20 @@ fn install_persistence() -> Result<()> {
         }
     });
     if let Err(error) = start_result {
-        let _ = fs::remove_file(marker_path(Path::new(&program_data)));
-        let _ = remove_service();
+        let recovery = recovery_supervisor_path()
+            .ok()
+            .filter(|path| path.is_file());
+        if let Some(recovery) = recovery {
+            // This was an upgrade from an already protected installation.
+            // Restore the stable service target and leave marker/policy state
+            // intact; the detached watchdog restarts it after setup exits.
+            let _ = stop_service();
+            let _ = configure_existing_service(&recovery);
+        } else {
+            // Fresh installation has no previously trusted state to restore.
+            let _ = fs::remove_file(marker_path(Path::new(&program_data)));
+            let _ = remove_service();
+        }
         return Err(error);
     }
     log_event(
@@ -576,24 +897,24 @@ fn create_and_start_service(supervisor: &Path) -> Result<()> {
         None::<&str>,
         ServiceManagerAccess::CONNECT | ServiceManagerAccess::CREATE_SERVICE,
     )?;
-    let info = ServiceInfo {
-        name: OsString::from(SERVICE_NAME),
-        display_name: OsString::from(SERVICE_DISPLAY_NAME),
-        service_type: ServiceType::OWN_PROCESS,
-        start_type: ServiceStartType::AutoStart,
-        error_control: ServiceErrorControl::Normal,
-        executable_path: supervisor.to_path_buf(),
-        launch_arguments: vec![],
-        dependencies: vec![],
-        account_name: None,
-        account_password: None,
-    };
+    let info = service_info(supervisor);
     let access = ServiceAccess::START
         | ServiceAccess::STOP
         | ServiceAccess::QUERY_STATUS
         | ServiceAccess::CHANGE_CONFIG
         | ServiceAccess::DELETE;
-    let service = manager.create_service(&info, access)?;
+    let service = match manager.open_service(SERVICE_NAME, access) {
+        Ok(service) => {
+            service.change_config(&info)?;
+            service
+        }
+        Err(windows_service::Error::Winapi(error))
+            if error.raw_os_error() == Some(ERROR_SERVICE_DOES_NOT_EXIST) =>
+        {
+            manager.create_service(&info, access)?
+        }
+        Err(error) => return Err(error.into()),
+    };
     service
         .set_description("Keeps the signed-in user's Screenpipe enterprise application running.")?;
     service.update_failure_actions(ServiceFailureActions {
@@ -616,7 +937,9 @@ fn create_and_start_service(supervisor: &Path) -> Result<()> {
         ]),
     })?;
     service.set_failure_actions_on_non_crash_failures(true)?;
-    service.start::<&str>(&[])?;
+    if service.query_status()?.current_state == ServiceState::Stopped {
+        service.start::<&str>(&[])?;
+    }
     let deadline = Instant::now() + Duration::from_secs(START_WAIT_SECONDS);
     loop {
         let status = service.query_status()?;
@@ -634,6 +957,40 @@ fn create_and_start_service(supervisor: &Path) -> Result<()> {
             return Err("timed out waiting for persistence service to start".into());
         }
         std::thread::sleep(Duration::from_millis(250));
+    }
+    Ok(())
+}
+
+fn service_info(supervisor: &Path) -> ServiceInfo {
+    ServiceInfo {
+        name: OsString::from(SERVICE_NAME),
+        display_name: OsString::from(SERVICE_DISPLAY_NAME),
+        service_type: ServiceType::OWN_PROCESS,
+        start_type: ServiceStartType::AutoStart,
+        error_control: ServiceErrorControl::Normal,
+        executable_path: supervisor.to_path_buf(),
+        launch_arguments: vec![],
+        dependencies: vec![],
+        account_name: None,
+        account_password: None,
+    }
+}
+
+fn configure_existing_service(supervisor: &Path) -> Result<()> {
+    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
+    let service = manager.open_service(SERVICE_NAME, ServiceAccess::CHANGE_CONFIG)?;
+    service.change_config(&service_info(supervisor))?;
+    Ok(())
+}
+
+fn start_existing_service() -> Result<()> {
+    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
+    let service = manager.open_service(
+        SERVICE_NAME,
+        ServiceAccess::START | ServiceAccess::QUERY_STATUS,
+    )?;
+    if service.query_status()?.current_state == ServiceState::Stopped {
+        service.start::<&str>(&[])?;
     }
     Ok(())
 }
@@ -658,8 +1015,7 @@ fn wait_for_supervised_app(app_path: &Path) -> Result<()> {
 }
 
 fn prepare_upgrade() -> Result<()> {
-    remove_marker()?;
-    remove_service()?;
+    stop_service()?;
     log_event(
         "info",
         "upgrade_prepared",
@@ -685,7 +1041,34 @@ pub fn remove_persistence() -> Result<()> {
         let state = state_dir(Path::new(&program_data));
         let _ = fs::remove_file(policy_disabled_path(Path::new(&program_data)));
         let _ = fs::remove_file(log_path(Path::new(&program_data)));
+        let _ = fs::remove_file(state.join(RECOVERY_SUPERVISOR_FILE));
+        let _ = fs::remove_dir_all(state.join(UPDATE_STAGING_DIR));
         let _ = fs::remove_dir(state);
+    }
+    Ok(())
+}
+
+fn stop_service() -> Result<()> {
+    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
+    let access = ServiceAccess::STOP | ServiceAccess::QUERY_STATUS;
+    let service = match manager.open_service(SERVICE_NAME, access) {
+        Ok(service) => service,
+        Err(windows_service::Error::Winapi(error))
+            if error.raw_os_error() == Some(ERROR_SERVICE_DOES_NOT_EXIST) =>
+        {
+            return Ok(())
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if service.query_status()?.current_state != ServiceState::Stopped {
+        let _ = service.stop();
+        let deadline = Instant::now() + Duration::from_secs(STOP_WAIT_SECONDS);
+        while service.query_status()?.current_state != ServiceState::Stopped {
+            if Instant::now() >= deadline {
+                return Err("timed out waiting for persistence service to stop".into());
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
     }
     Ok(())
 }
@@ -715,16 +1098,9 @@ fn remove_service() -> Result<()> {
         Err(error) => return Err(error.into()),
     };
 
-    if service.query_status()?.current_state != ServiceState::Stopped {
-        let _ = service.stop();
-        let deadline = Instant::now() + Duration::from_secs(STOP_WAIT_SECONDS);
-        while service.query_status()?.current_state != ServiceState::Stopped {
-            if Instant::now() >= deadline {
-                return Err("timed out waiting for persistence service to stop".into());
-            }
-            std::thread::sleep(Duration::from_millis(250));
-        }
-    }
+    drop(service);
+    stop_service()?;
+    let service = manager.open_service(SERVICE_NAME, ServiceAccess::DELETE)?;
     service.delete()?;
     Ok(())
 }
@@ -762,10 +1138,24 @@ fn validate_program_files_install(executable: &Path) -> Result<()> {
 
 fn installed_app_path() -> Result<PathBuf> {
     let executable = env::current_exe()?;
-    Ok(executable
+    let adjacent = executable
         .parent()
         .ok_or("supervisor has no installation directory")?
-        .join(APP_EXE))
+        .join(APP_EXE);
+    if adjacent.is_file() {
+        return Ok(adjacent);
+    }
+    let program_data = env::var_os("ProgramData").ok_or("ProgramData is unavailable")?;
+    let marker = fs::read_to_string(marker_path(Path::new(&program_data)))?;
+    let app = PathBuf::from(marker.trim());
+    if !app.is_file() {
+        return Err(format!("installed app is missing: {}", app.display()).into());
+    }
+    let program_files = env::var_os("ProgramFiles").ok_or("ProgramFiles is unavailable")?;
+    if !is_path_within(&app, Path::new(&program_files)) {
+        return Err("protected persistence marker points outside Program Files".into());
+    }
+    Ok(app)
 }
 
 fn log_event(level: &str, event: &str, detail: &str) {
