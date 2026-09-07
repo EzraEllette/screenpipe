@@ -275,6 +275,10 @@ run_update_supervisor
 [ ! -s "${TMP}/installer.log" ]
 /usr/bin/grep -q '^bootstrap system .*/state/update-job.plist$' "$LOG"
 [ -x "${STATE_DIR}/update-runner" ]
+if /usr/bin/grep -q 'restored.app' "${STATE_DIR}/update-runner"; then
+  echo "rollback must not require a third app-sized allocation" >&2
+  exit 1
+fi
 [ -e "${STATE_DIR}/maintenance" ]
 [ -f "${STATE_DIR}/update/package.pkg" ]
 [ ! -e "${USER_HOME}/.screenpipe/persistence-update/request.json" ]

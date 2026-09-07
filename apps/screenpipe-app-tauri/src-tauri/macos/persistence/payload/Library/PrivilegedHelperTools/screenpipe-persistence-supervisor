@@ -351,10 +351,12 @@ if [ ! -e "\$work/settled" ]; then
   done
   # Restore idempotently; keep the snapshot until every file is back. If a
   # restore is itself interrupted, this launchd job repeats it on the next boot.
-  /usr/bin/ditto "\$work/backup/app" "\$work/restored.app" || exit 1
-  "${CODESIGN}" --verify --deep --strict "\$work/restored.app" >/dev/null 2>&1 || exit 1
+  # Verify the protected snapshot in place, then reclaim the broken bundle's
+  # space before copying it back. A disk-full install failure must not require
+  # room for a third complete app just to recover.
+  "${CODESIGN}" --verify --deep --strict "\$work/backup/app" >/dev/null 2>&1 || exit 1
   /bin/rm -rf "\$app"
-  /usr/bin/ditto "\$work/restored.app" "\$app" || exit 1
+  /usr/bin/ditto "\$work/backup/app" "\$app" || exit 1
   /bin/cp "\$work/backup/supervisor" "$0" || exit 1
   /bin/cp "\$work/backup/uninstaller" "${UNINSTALLER}" || exit 1
   /bin/cp "\$work/backup/agent.plist" "${AGENT_PLIST}" || exit 1
