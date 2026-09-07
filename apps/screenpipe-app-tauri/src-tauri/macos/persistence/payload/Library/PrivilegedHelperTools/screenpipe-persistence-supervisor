@@ -145,6 +145,9 @@ recover_stale_maintenance() {
   # its snapshot just because the old installer process died or the Mac rebooted.
   if [ -f "$UPDATE_JOB_PLIST" ] && [ -f "$UPDATE_RUNNER" ]; then
     "$LAUNCHCTL" bootstrap system "$UPDATE_JOB_PLIST" >/dev/null 2>&1 || true
+    if ! "$LAUNCHCTL" print "system/${UPDATE_JOB_LABEL}" 2>/dev/null | /usr/bin/grep -q 'state = running'; then
+      "$LAUNCHCTL" kickstart "system/${UPDATE_JOB_LABEL}" >/dev/null 2>&1 || true
+    fi
     return 0
   fi
   marker_boot="$(/usr/bin/sed -n 's/^boot=//p' "$MAINTENANCE_MARKER" 2>/dev/null | /usr/bin/head -1)"
