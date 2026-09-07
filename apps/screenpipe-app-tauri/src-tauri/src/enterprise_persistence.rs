@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+#[cfg(not(feature = "persistence-updater-e2e"))]
 const ENTERPRISE_UPDATER_PUBLIC_KEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDIyQjQ2RkQzMUNBOUFDMTcKUldRWHJLa2MwMiswSWl3RlBGUW5zYUE0Zm0vNFFRRTltNUZZTUVxR2FxUDNtSWdUSHgyL3JNcmcK";
 const STAGED_METADATA: &str = "staged.json";
 const REQUEST_METADATA: &str = "request.json";
@@ -115,14 +116,22 @@ async fn download(
 }
 
 fn verify_signature(package: &[u8], signature: &[u8]) -> Result<(), String> {
+    #[cfg(feature = "persistence-updater-e2e")]
+    let encoded_public_key = option_env!("SCREENPIPE_PERSISTENCE_E2E_PUBLIC_KEY")
+        .ok_or("persistence-updater-e2e requires SCREENPIPE_PERSISTENCE_E2E_PUBLIC_KEY")?;
+    #[cfg(not(feature = "persistence-updater-e2e"))]
+    let encoded_public_key = ENTERPRISE_UPDATER_PUBLIC_KEY;
     let public_key = base64::engine::general_purpose::STANDARD
-        .decode(ENTERPRISE_UPDATER_PUBLIC_KEY)
+        .decode(encoded_public_key)
         .map_err(|error| format!("invalid embedded updater public key: {error}"))?;
     let public_key = std::str::from_utf8(&public_key)
         .map_err(|error| format!("embedded updater public key is not UTF-8: {error}"))?;
     let public_key = minisign_verify::PublicKey::decode(public_key)
         .map_err(|error| format!("invalid embedded updater public key: {error}"))?;
-    let signature = std::str::from_utf8(signature)
+    let signature = base64::engine::general_purpose::STANDARD
+        .decode(signature)
+        .map_err(|error| format!("persistent update signature is not base64: {error}"))?;
+    let signature = std::str::from_utf8(&signature)
         .map_err(|error| format!("persistent update signature is not UTF-8: {error}"))?;
     let signature = minisign_verify::Signature::decode(signature)
         .map_err(|error| format!("invalid persistent update signature: {error}"))?;

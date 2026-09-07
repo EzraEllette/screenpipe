@@ -310,6 +310,11 @@ enterprise-build = [
     "screenpipe-core/enterprise-build",
 ]
 
+# Installed persistent-updater acceptance only. Production builds never enable
+# this feature; it permits a disposable compile-time updater key in fixture
+# artifacts without weakening the shipped Enterprise trust root.
+persistence-updater-e2e = []
+
 qwen3-asr = ["screenpipe-engine/qwen3-asr"]
 parakeet = ["screenpipe-engine/parakeet"]
 # macOS only — requires Apple MLX (Metal)

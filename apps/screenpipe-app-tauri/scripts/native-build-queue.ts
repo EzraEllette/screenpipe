@@ -134,7 +134,13 @@ export function mergeConfig(base: unknown, overlay: unknown): unknown {
   return overlay;
 }
 
-function persistentEnterpriseConfig(): string {
+function cargoTargetRoot(): string {
+  return process.env.CARGO_TARGET_DIR
+    ? resolve(process.env.CARGO_TARGET_DIR)
+    : join(APP_ROOT, "src-tauri", "target");
+}
+
+function persistentEnterpriseConfig(target: string): string {
   const enterprise = JSON.parse(readFileSync(
     join(APP_ROOT, "src-tauri", "tauri.enterprise.conf.json"),
     "utf8",
@@ -143,6 +149,15 @@ function persistentEnterpriseConfig(): string {
     join(APP_ROOT, "src-tauri", "tauri.enterprise-persistent.conf.json"),
     "utf8",
   ));
+  const resources = persistence.bundle?.resources as Record<string, string> | undefined;
+  if (resources) {
+    for (const source of Object.keys(resources)) {
+      if (source.replaceAll("/", "\\").startsWith("target\\")) delete resources[source];
+    }
+    const release = join(cargoTargetRoot(), target, "release");
+    resources[join(release, "screenpipe-persistence-supervisor.exe")] = "./";
+    resources[join(release, "remove-screenpipe-persistence.exe")] = "./";
+  }
   return JSON.stringify(mergeConfig(enterprise, persistence));
 }
 
@@ -375,10 +390,26 @@ async function perform(mode: BuildMode, args: string[]): Promise<number> {
       let exitCode = await run(["bun", "scripts/pre_build.js"], env);
       if (exitCode !== 0) return exitCode;
       const target = "x86_64-pc-windows-msvc";
+      const persistenceE2e = env.SCREENPIPE_PERSISTENCE_E2E === "1";
+      if (persistenceE2e && (
+        !env.SCREENPIPE_PERSISTENCE_E2E_PUBLIC_KEY
+        || !env.SCREENPIPE_PERSISTENCE_E2E_PUBLIC_KEY_RAW
+      )) {
+        console.error(
+          "[native-build-queue] persistence E2E requires both disposable public-key forms",
+        );
+        return 2;
+      }
+      const supervisorFeatures = persistenceE2e
+        ? ["--features", "persistence-updater-e2e"]
+        : [];
+      const appFeatures = persistenceE2e
+        ? "enterprise-build,persistence-updater-e2e"
+        : "enterprise-build";
       exitCode = await run([
         "cargo", "build", "--manifest-path", "src-tauri/Cargo.toml",
         "--release", "-p", "screenpipe-persistence-supervisor", "--bins",
-        "--target", target,
+        "--target", target, ...supervisorFeatures,
       ], env);
       if (exitCode !== 0) return exitCode;
       const manifestTool = findWindowsManifestTool();
@@ -389,7 +420,7 @@ async function perform(mode: BuildMode, args: string[]): Promise<number> {
       exitCode = await run([
         manifestTool,
         "-manifest", "src-tauri/windows/persistence-supervisor/persistence.manifest",
-        `-outputresource:src-tauri/target/${target}/release/remove-screenpipe-persistence.exe;#1`,
+        `-outputresource:${join(cargoTargetRoot(), target, "release", "remove-screenpipe-persistence.exe")};#1`,
       ], env);
       if (exitCode !== 0) return exitCode;
       Object.assign(env, {
@@ -414,15 +445,16 @@ async function perform(mode: BuildMode, args: string[]): Promise<number> {
       });
       exitCode = await run([
         "bun", "tauri", "build", "--no-bundle", "--target", target,
-        "--features", "enterprise-build",
-        "--config", persistentEnterpriseConfig(),
+        "--features", appFeatures,
+        "--config", persistentEnterpriseConfig(target),
         ...args,
       ], env);
       if (exitCode !== 0) return exitCode;
       return run([
         "bun", "tauri", "bundle", "--target", target,
-        "--features", "enterprise-build", "--bundles", "nsis",
-        "--config", persistentEnterpriseConfig(),
+        "--features", appFeatures, "--bundles", "nsis",
+        "--config", persistentEnterpriseConfig(target),
+        ...args,
       ], env);
     }
     case "persistence-bundle": {
@@ -430,7 +462,7 @@ async function perform(mode: BuildMode, args: string[]): Promise<number> {
       return run([
         "bun", "tauri", "bundle", "--target", target,
         "--features", "enterprise-build", "--bundles", "nsis",
-        "--config", persistentEnterpriseConfig(),
+        "--config", persistentEnterpriseConfig(target),
         ...args,
       ], env);
     }

@@ -16,6 +16,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use base64::Engine;
 use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::Security::{
@@ -59,7 +60,18 @@ const STOP_WAIT_SECONDS: u64 = 20;
 const START_WAIT_SECONDS: u64 = 15;
 const APP_LAUNCH_WAIT_SECONDS: u64 = 20;
 const UPDATE_STAGING_DIR: &str = "update-staging";
+#[cfg(not(feature = "persistence-updater-e2e"))]
 const ENTERPRISE_UPDATER_PUBLIC_KEY: &str = "untrusted comment: minisign public key: 22B46FD31CA9AC17\nRWQXrKkc02+0IiwFPFQnsaA4fm/4QQE9m5FYMEqGaqP3mIgTHx2/rMrg\n";
+
+fn enterprise_updater_public_key() -> Result<&'static str> {
+    #[cfg(feature = "persistence-updater-e2e")]
+    return option_env!("SCREENPIPE_PERSISTENCE_E2E_PUBLIC_KEY_RAW")
+        .ok_or_else(|| {
+            "persistence-updater-e2e requires SCREENPIPE_PERSISTENCE_E2E_PUBLIC_KEY_RAW".into()
+        });
+    #[cfg(not(feature = "persistence-updater-e2e"))]
+    Ok(ENTERPRISE_UPDATER_PUBLIC_KEY)
+}
 
 define_windows_service!(ffi_service_main, service_main);
 
@@ -547,8 +559,10 @@ fn replace_file(source: &Path, destination: &Path) -> Result<()> {
 }
 
 fn verify_update_signature(package: &Path, signature: &Path) -> Result<()> {
-    let public_key = minisign_verify::PublicKey::decode(ENTERPRISE_UPDATER_PUBLIC_KEY)?;
-    let signature = minisign_verify::Signature::decode(&fs::read_to_string(signature)?)?;
+    let public_key = minisign_verify::PublicKey::decode(enterprise_updater_public_key()?)?;
+    let encoded_signature = fs::read(signature)?;
+    let signature = base64::engine::general_purpose::STANDARD.decode(encoded_signature)?;
+    let signature = minisign_verify::Signature::decode(std::str::from_utf8(&signature)?)?;
     let mut verifier = public_key.verify_stream(&signature)?;
     let mut package = fs::File::open(package)?;
     let mut buffer = [0u8; 64 * 1024];
