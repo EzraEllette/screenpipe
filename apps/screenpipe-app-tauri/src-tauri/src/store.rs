@@ -83,6 +83,13 @@ fn reset_windows_store_file_permissions(path: &Path) -> anyhow::Result<()> {
         std::fs::set_permissions(path, permissions)?;
     }
 
+    // Cloud-backed and virtual filesystems may reject `icacls /reset` even
+    // though the current process can already update the file. Do not make a
+    // Windows-specific ACL utility a startup dependency for a writable store.
+    if std::fs::OpenOptions::new().write(true).open(path).is_ok() {
+        return Ok(());
+    }
+
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let status = std::process::Command::new("icacls.exe")
         .arg(path)
@@ -111,12 +118,21 @@ fn normalize_windows_store_permissions(store_path: &Path) -> anyhow::Result<()> 
         Err(error) => return Err(error.into()),
     };
 
+    reset_windows_store_file_permissions(store_path)?;
+
     for path in [
-        store_path.to_path_buf(),
         store_path.with_extension(LAST_GOOD_SUFFIX),
         store_path.with_extension(LAST_GOOD_PREV_SUFFIX),
     ] {
-        reset_windows_store_file_permissions(&path)?;
+        if let Err(error) = reset_windows_store_file_permissions(&path) {
+            // Snapshots are recovery aids. A stale sidecar ACL must not stop
+            // an otherwise readable and writable canonical settings store.
+            tracing::warn!(
+                "failed to repair settings recovery sidecar permissions at {}: {}",
+                path.display(),
+                error
+            );
+        }
     }
 
     if let Some(bytes) = canonical {
@@ -418,7 +434,7 @@ fn restore_snapshot_over(store_path: &Path, why: &str) -> bool {
         pre_restore_note = format!("pre-restore copy at {}", pre_restore.display());
     }
 
-    if let Err(e) = durable_write(store_path, &data) {
+    if let Err(e) = retry_windows_store_io(|| durable_write(store_path, &data)) {
         tracing::error!(
             "settings recovery: failed to restore {} from {}: {}",
             store_path.display(),
@@ -748,6 +764,39 @@ fn save_store_to_disk<R: tauri::Runtime>(
     store: &tauri_plugin_store::Store<R>,
 ) -> Result<(), String> {
     retry_windows_store_io(|| store.save()).map_err(|e| e.to_string())
+}
+
+fn save_store_with_permission_repair(
+    app: &AppHandle,
+    store: &tauri_plugin_store::Store<tauri::Wry>,
+) -> Result<(), String> {
+    match save_store_to_disk(store) {
+        Ok(()) => Ok(()),
+        Err(first_error) => {
+            #[cfg(not(windows))]
+            {
+                let _ = app;
+                return Err(first_error);
+            }
+
+            #[cfg(windows)]
+            {
+                let store_path = get_base_dir(app, None)
+                    .map_err(|error| error.to_string())?
+                    .join("store.bin");
+                tracing::warn!(
+                    "settings save failed; repairing Windows store permissions and retrying: {}",
+                    first_error
+                );
+                normalize_windows_store_permissions(&store_path).map_err(|repair_error| {
+                    format!(
+                        "settings save failed ({first_error}); permission repair also failed: {repair_error}"
+                    )
+                })?;
+                save_store_to_disk(store)
+            }
+        }
+    }
 }
 
 /// Flush the process-shared store to durable, encrypted storage before a
@@ -1176,7 +1225,7 @@ impl OnboardingStore {
         let mut onboarding = Self::get(app)?.unwrap_or_default();
         update(&mut onboarding);
         store.set("onboarding", json!(onboarding));
-        save_store_to_disk(store.as_ref())?;
+        save_store_with_permission_repair(app, store.as_ref())?;
         reencrypt_store_file(app);
         Ok(())
     }
@@ -1187,7 +1236,7 @@ impl OnboardingStore {
         };
 
         store.set("onboarding", json!(self));
-        save_store_to_disk(store.as_ref())?;
+        save_store_with_permission_repair(app, store.as_ref())?;
         reencrypt_store_file(app);
         Ok(())
     }
@@ -2473,7 +2522,7 @@ impl SettingsStore {
         };
 
         store.set("settings", json!(self));
-        save_store_to_disk(store.as_ref())?;
+        save_store_with_permission_repair(app, store.as_ref())?;
         reencrypt_store_file(app);
         Ok(())
     }
