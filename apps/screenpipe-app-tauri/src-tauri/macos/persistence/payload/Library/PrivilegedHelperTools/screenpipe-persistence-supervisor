@@ -330,6 +330,7 @@ if [ ! -e "\$work/started" ] && [ ! -e "\$work/settled" ]; then
   fi
 fi
 if [ ! -e "\$work/settled" ]; then
+  status=1
   # If launchd restarted only this runner on the same boot, do not restore over
   # an installer that is still applying the protected package. Match its exact
   # command, not a PID that can be reused after reboot.
