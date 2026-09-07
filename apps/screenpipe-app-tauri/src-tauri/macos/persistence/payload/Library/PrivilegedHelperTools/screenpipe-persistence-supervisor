@@ -6,6 +6,8 @@
 set -u
 
 LABEL="screenpi.pe.enterprise.persistence"
+DAEMON_LABEL="screenpi.pe.enterprise.persistence-supervisor"
+DAEMON_PLIST="/Library/LaunchDaemons/${DAEMON_LABEL}.plist"
 AGENT_PLIST="${SCREENPIPE_PERSISTENCE_AGENT_PLIST:-/Library/LaunchAgents/${LABEL}.plist}"
 STATE_DIR="${SCREENPIPE_PERSISTENCE_STATE_DIR:-/Library/Application Support/screenpipe/persistence}"
 ENABLED_MARKER="${STATE_DIR}/enabled"
@@ -291,9 +293,14 @@ handoff_update_install() {
 
 "${INSTALLER}" -pkg "${UPDATE_WORK_DIR}/package.pkg" -target /
 status=\$?
+# A failed postinstall can leave the new helper/plist on disk without running
+# the package's normal supervisor reload. Reconcile the running job on both
+# success and failure, while maintenance still prevents app relaunch.
+"${LAUNCHCTL}" bootout "system/${DAEMON_LABEL}" >/dev/null 2>&1 || true
+"${LAUNCHCTL}" bootstrap system "${DAEMON_PLIST}" >/dev/null 2>&1 || true
 /bin/rm -f "${MAINTENANCE_MARKER}"
 /bin/rm -rf "${UPDATE_WORK_DIR}"
-"${LAUNCHCTL}" kickstart "system/screenpi.pe.enterprise.persistence-supervisor" >/dev/null 2>&1 || true
+"${LAUNCHCTL}" kickstart "system/${DAEMON_LABEL}" >/dev/null 2>&1 || true
 /bin/rm -f "${UPDATE_JOB_PLIST}" "${UPDATE_RUNNER}"
 exit \$status
 EOF

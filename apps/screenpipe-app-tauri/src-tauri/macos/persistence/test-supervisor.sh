@@ -317,6 +317,8 @@ SCREENPIPE_PERSISTENCE_TEST_INSTALL_LOG="${TMP}/installer.log" \
 SCREENPIPE_PERSISTENCE_TEST_LOG="$LOG" \
   "${STATE_DIR}/update-runner" || true
 [ ! -e "${STATE_DIR}/maintenance" ]
+/usr/bin/grep -q '^bootout system/screenpi.pe.enterprise.persistence-supervisor$' "$LOG"
+/usr/bin/grep -q '^bootstrap system /Library/LaunchDaemons/screenpi.pe.enterprise.persistence-supervisor.plist$' "$LOG"
 /usr/bin/grep -q '^kickstart system/screenpi.pe.enterprise.persistence-supervisor$' "$LOG"
 
 echo "macOS persistence supervisor tests passed"
