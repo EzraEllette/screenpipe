@@ -93,6 +93,19 @@ fn reset_windows_store_file_permissions(path: &Path) -> anyhow::Result<()> {
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let status = std::process::Command::new("icacls.exe")
         .arg(path)
+        .args(["/inheritance:e", "/Q"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .status()?;
+    if !status.success() {
+        return Err(anyhow::anyhow!(
+            "failed to enable inherited settings permissions for {}: icacls exited with {}",
+            path.display(),
+            status
+        ));
+    }
+
+    let status = std::process::Command::new("icacls.exe")
+        .arg(path)
         .args(["/reset", "/Q"])
         .creation_flags(CREATE_NO_WINDOW)
         .status()?;
