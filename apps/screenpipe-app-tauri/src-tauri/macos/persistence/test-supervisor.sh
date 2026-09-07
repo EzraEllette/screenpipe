@@ -6,9 +6,11 @@
 set -eu
 
 HERE="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"
-SUPERVISOR="${HERE}/payload/Library/PrivilegedHelperTools/screenpipe-persistence-supervisor"
+SUPERVISOR_SOURCE="${HERE}/payload/Library/PrivilegedHelperTools/screenpipe-persistence-supervisor"
 TMP="$(/usr/bin/mktemp -d)"
 trap '/bin/rm -rf "$TMP"' EXIT
+SUPERVISOR="${TMP}/supervisor"
+/bin/cp "$SUPERVISOR_SOURCE" "$SUPERVISOR"
 
 STATE_DIR="${TMP}/state"
 LOG="${TMP}/launchctl.log"
@@ -20,6 +22,9 @@ FAKE_INSTALLER="${TMP}/installer"
 APP_PATH="${TMP}/screenpipe enterprise.app"
 USER_HOME="${TMP}/home"
 /bin/mkdir -p "$STATE_DIR"
+/usr/bin/printf 'old daemon\n' > "${TMP}/daemon.plist"
+/usr/bin/printf 'old agent\n' > "${TMP}/agent.plist"
+/usr/bin/printf 'old uninstaller\n' > "${TMP}/uninstaller"
 
 /bin/cat > "$FAKE_LAUNCHCTL" <<'EOF'
 #!/bin/sh
@@ -118,6 +123,10 @@ run_supervisor() {
   SCREENPIPE_PERSISTENCE_TEST_CONSOLE_UID="$1" \
   SCREENPIPE_PERSISTENCE_TEST_POLICY_VALUE="$policy_value" \
   SCREENPIPE_PERSISTENCE_STATE_DIR="$STATE_DIR" \
+  SCREENPIPE_PERSISTENCE_DAEMON_PLIST="${TMP}/daemon.plist" \
+  SCREENPIPE_PERSISTENCE_AGENT_PLIST="${TMP}/agent.plist" \
+  SCREENPIPE_PERSISTENCE_UNINSTALLER="${TMP}/uninstaller" \
+  SCREENPIPE_PERSISTENCE_UPDATE_JOB_PLIST="${STATE_DIR}/update-job.plist" \
   SCREENPIPE_PERSISTENCE_LAUNCHCTL="$FAKE_LAUNCHCTL" \
   SCREENPIPE_PERSISTENCE_TEST_LOG="$LOG" \
   "$SUPERVISOR"
@@ -129,6 +138,10 @@ run_update_supervisor() {
   SCREENPIPE_PERSISTENCE_TEST_POLICY_VALUE=true \
   SCREENPIPE_PERSISTENCE_TEST_BOOT_ID="${SCREENPIPE_TEST_BOOT_ID:-boot-a}" \
   SCREENPIPE_PERSISTENCE_STATE_DIR="$STATE_DIR" \
+  SCREENPIPE_PERSISTENCE_DAEMON_PLIST="${TMP}/daemon.plist" \
+  SCREENPIPE_PERSISTENCE_AGENT_PLIST="${TMP}/agent.plist" \
+  SCREENPIPE_PERSISTENCE_UNINSTALLER="${TMP}/uninstaller" \
+  SCREENPIPE_PERSISTENCE_UPDATE_JOB_PLIST="${STATE_DIR}/update-job.plist" \
   SCREENPIPE_PERSISTENCE_LAUNCHCTL="$FAKE_LAUNCHCTL" \
   SCREENPIPE_PERSISTENCE_TEST_LOG="$LOG" \
   SCREENPIPE_PERSISTENCE_USER_HOME="$USER_HOME" \
@@ -318,7 +331,30 @@ SCREENPIPE_PERSISTENCE_TEST_LOG="$LOG" \
   "${STATE_DIR}/update-runner" || true
 [ ! -e "${STATE_DIR}/maintenance" ]
 /usr/bin/grep -q '^bootout system/screenpi.pe.enterprise.persistence-supervisor$' "$LOG"
-/usr/bin/grep -q '^bootstrap system /Library/LaunchDaemons/screenpi.pe.enterprise.persistence-supervisor.plist$' "$LOG"
+/usr/bin/grep -q "^bootstrap system ${TMP}/daemon.plist$" "$LOG"
 /usr/bin/grep -q '^kickstart system/screenpi.pe.enterprise.persistence-supervisor$' "$LOG"
+
+# A boot during a torn payload retains the trusted snapshot and starts the
+# independent recovery job. It must not clear maintenance and launch that app.
+make_update_request
+run_update_supervisor
+/usr/bin/touch "${STATE_DIR}/update/started"
+/bin/rm -rf "$APP_PATH"
+/usr/bin/printf 'damaged helper\n' > "${TMP}/uninstaller"
+: > "$LOG"
+SCREENPIPE_TEST_BOOT_ID=reboot-during-copy run_update_supervisor
+[ -e "${STATE_DIR}/maintenance" ]
+[ -d "${STATE_DIR}/update/backup/app" ]
+if /usr/bin/grep -Eq '^(enable|bootstrap|kickstart) gui/501/' "$LOG"; then
+  echo "torn payload recovery must retain maintenance" >&2
+  exit 1
+fi
+SCREENPIPE_PERSISTENCE_TEST_INSTALL_LOG="${TMP}/installer.log" \
+SCREENPIPE_PERSISTENCE_TEST_LOG="$LOG" \
+  "${STATE_DIR}/update-runner" || true
+[ "$(/usr/bin/plutil -extract CFBundleShortVersionString raw -o - "${APP_PATH}/Contents/Info.plist")" = "2.7.0" ]
+[ "$(/bin/cat "${TMP}/uninstaller")" = 'old uninstaller' ]
+[ ! -e "${STATE_DIR}/maintenance" ]
+[ ! -e "${STATE_DIR}/update-job.plist" ]
 
 echo "macOS persistence supervisor tests passed"

@@ -31,6 +31,7 @@ fi
 /bin/rm -f \
   "/Library/LaunchAgents/${AGENT_LABEL}.plist" \
   "/Library/LaunchDaemons/${DAEMON_LABEL}.plist" \
+  "/Library/LaunchDaemons/${UPDATE_LABEL}.plist" \
   "/Library/PrivilegedHelperTools/screenpipe-persistence-supervisor" \
   "$0"
 /bin/rm -rf "$STATE_DIR"

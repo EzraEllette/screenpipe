@@ -28,7 +28,7 @@ STATE_DIR="/Library/Application Support/screenpipe/persistence"
 # let that new supervisor accept another request while installd is still
 # finishing the first transaction. External administrator installs have no
 # runner and complete maintenance here.
-if [ ! -e "${STATE_DIR}/update-job.plist" ]; then
+if [ ! -e "/Library/LaunchDaemons/screenpi.pe.enterprise.persistence-update.plist" ]; then
   /bin/rm -f "${STATE_DIR}/maintenance"
 fi
 
