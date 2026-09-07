@@ -60,9 +60,9 @@ marker and supervisor state, and leaves the Screenpipe application and all user
 data installed. The normal persistent-package uninstaller also removes the
 service before removing application files.
 
-During a persistent upgrade, the installer first removes the marker and stops
-and deletes the service. It performs the existing Screenpipe process and locked
-file cleanup next, then recreates the marker and service only after all package
-files have been installed successfully. Installation fails and rolls the
-service and marker back if the service does not reach `Running` or does not
-produce an exact-path app process in an active user session.
+During a persistent upgrade, a protected detached runner owns maintenance while
+the existing service yields. It preserves the marker and policy cache, keeps a
+verified pre-update snapshot of the app and matching helpers, and reconciles the
+running service to one coherent installed version. Interrupted or failed setup
+is retried a bounded number of times and then restored from that snapshot;
+administrator reinstall and removal remain available.
