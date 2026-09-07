@@ -35,6 +35,7 @@ import {
 } from "@/lib/first-run/trial-activation";
 import { readOnboardingCheckoutStatus } from "@/lib/onboarding-checkout-navigation";
 import { StartupAuthenticationContext } from "@/components/app-entitlement-gate";
+import { shouldRestoreOnboardingLogin } from "@/lib/onboarding-auth-restore";
 
 type SlideKey =
   | "login"
@@ -534,9 +535,12 @@ export default function OnboardingPage() {
             // steps calls spawn_screenpipe while signed out and strands the user
             // on the engine error screen. Return consumer installs to the login
             // gate so they can re-authenticate before setup resumes.
-            !isManagedDeployment &&
-            startupAuthenticationStatus === "logged_out" &&
-            mapped !== "login"
+            shouldRestoreOnboardingLogin({
+              isManagedDeployment,
+              startupAuthenticationStatus,
+              isLoggedIn,
+              mappedSlide: mapped,
+            })
               ? "login"
               : mapped === "acquisition" && isManagedDeployment
               ? // A managed install saved mid-acquisition, from a build that
@@ -556,6 +560,7 @@ export default function OnboardingPage() {
     checkoutReturnStatus,
     isManagedDeployment,
     isManagedDeploymentResolved,
+    isLoggedIn,
     isSettingsLoaded,
     router,
     shouldShowPlanSelection,

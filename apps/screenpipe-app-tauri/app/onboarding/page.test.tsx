@@ -873,6 +873,21 @@ describe("enterprise onboarding authentication", () => {
     expect(screen.queryByText("engine")).not.toBeInTheDocument();
   });
 
+  it("restores an authenticated consumer after a logged-out startup", async () => {
+    mocks.enterprisePolicy.isManagedDeployment = false;
+    mocks.settings.user = { token: "tok" };
+    onboardingData.currentStep = "engine";
+
+    render(
+      <StartupAuthenticationContext.Provider value="logged_out">
+        <OnboardingPage />
+      </StartupAuthenticationContext.Provider>,
+    );
+
+    expect(await screen.findByText("engine")).toBeInTheDocument();
+    expect(screen.queryByText("regular sign in")).not.toBeInTheDocument();
+  });
+
   it("does not restore managed onboarding onto consumer pricing", async () => {
     onboardingData.currentStep = "plan";
 
