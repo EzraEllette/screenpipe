@@ -116,21 +116,16 @@ fn reset_windows_store_file_permissions(path: &Path) -> anyhow::Result<()> {
             status
         ));
     }
+    std::fs::OpenOptions::new().write(true).open(path)?;
     Ok(())
 }
 
 /// Repair only the settings files whose permissions may have been carried
-/// forward from an older installation. The canonical bytes are captured
-/// before any mutation and atomically republished afterward so store.bin
-/// inherits the directory's current ACL without risking settings loss.
+/// forward from an older installation. `icacls /reset` reapplies the
+/// directory's inherited ACL in place, so the canonical bytes never need to
+/// be replaced while the old ACL may still deny delete/replace access.
 #[cfg(windows)]
 fn normalize_windows_store_permissions(store_path: &Path) -> anyhow::Result<()> {
-    let canonical = match read_store_file(store_path) {
-        Ok(bytes) => Some(bytes),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => return Err(error.into()),
-    };
-
     reset_windows_store_file_permissions(store_path)?;
 
     for path in [
@@ -148,9 +143,6 @@ fn normalize_windows_store_permissions(store_path: &Path) -> anyhow::Result<()> 
         }
     }
 
-    if let Some(bytes) = canonical {
-        durable_write(store_path, &bytes)?;
-    }
     Ok(())
 }
 
