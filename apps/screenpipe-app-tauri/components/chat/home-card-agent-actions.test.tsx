@@ -6,6 +6,12 @@ import React from "react";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import tauriConfig from "../../src-tauri/tauri.conf.json";
+import productionConfig from "../../src-tauri/tauri.prod.conf.json";
+import enterpriseConfig from "../../src-tauri/tauri.enterprise.conf.json";
+import {
+  agentHandoffTargetForPrompt,
+  handoffTargets,
+} from "@/lib/first-run/agent-handoff";
 
 import {
   buildHomeCardAgentPrompt,
@@ -258,13 +264,38 @@ describe("HomeCardAgentActions", () => {
     );
   });
 
-  it("allows every agent deeplink through the cross-platform shell validator", () => {
-    const validator = new RegExp(`^${tauriConfig.plugins.shell.open}$`);
+  it.each([
+    ["development", tauriConfig],
+    ["production", productionConfig],
+    ["enterprise", enterpriseConfig],
+  ])("allows home-card deeplinks in the %s shell config", (_, config) => {
+    // Release workflows replace the base config, so each packaged config
+    // must retain the same narrow shell allowlist.
+    expect(config.plugins).toHaveProperty(
+      "shell.open",
+      tauriConfig.plugins.shell.open,
+    );
+    const validator = new RegExp(`^${config.plugins.shell.open}$`);
 
-    expect(validator.test("claude://claude.ai/new?q=test")).toBe(true);
-    expect(
-      validator.test("cursor://anysphere.cursor-deeplink/prompt?text=test"),
-    ).toBe(true);
-    expect(validator.test("codex://threads/new?prompt=test")).toBe(true);
+    for (const target of handoffTargets()) {
+      if (
+        target.id !== "claude" &&
+        target.id !== "cursor" &&
+        target.id !== "codex"
+      ) continue;
+      const prompt = buildHomeCardAgentPrompt(DAY_RECAP, target.id);
+      const { deeplink } = agentHandoffTargetForPrompt(target, prompt);
+      expect(validator.test(deeplink!)).toBe(true);
+    }
+
+    for (const url of [
+      "file:///tmp/prompt",
+      "claude://unrelated",
+      "cursor://unrelated",
+      "codex://unrelated",
+      "--help",
+    ]) {
+      expect(validator.test(url)).toBe(false);
+    }
   });
 });
