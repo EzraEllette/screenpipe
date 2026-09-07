@@ -52,11 +52,12 @@ use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 use crate::{
     accepted_update_action, is_path_within, launch_decision, log_path, marker_path, path_eq,
     policy_disabled_path, policy_enforcement_from_exit_code, select_active_session, state_dir,
-    AcceptedUpdateAction, AcceptedUpdateTransaction, LaunchDecision, UpdateRequest, APP_EXE,
-    INSTALLED_STATE_FILE, POLICY_REFRESH_SECONDS, RECHECK_SECONDS, RECOVERY_SUPERVISOR_FILE,
-    REMOVER_EXE, SERVICE_DISPLAY_NAME, SERVICE_NAME, SUPERVISOR_EXE, UPDATE_FAILED_VERSION_FILE,
-    UPDATE_PACKAGE_FILE, UPDATE_REQUEST_DIR, UPDATE_REQUEST_FILE, UPDATE_RUNNER_READY_FILE,
-    UPDATE_RUNNER_STATE_FILE, UPDATE_SIGNATURE_FILE, UPDATE_SNAPSHOT_DIR, UPDATE_TRANSACTION_FILE,
+    AcceptedUpdateAction, AcceptedUpdateTransaction, LaunchDecision, SnapshotFile, UpdateRequest,
+    APP_EXE, INSTALLED_STATE_FILE, POLICY_REFRESH_SECONDS, RECHECK_SECONDS,
+    RECOVERY_SUPERVISOR_FILE, REMOVER_EXE, SERVICE_DISPLAY_NAME, SERVICE_NAME, SUPERVISOR_EXE,
+    UPDATE_FAILED_VERSION_FILE, UPDATE_PACKAGE_FILE, UPDATE_REQUEST_DIR, UPDATE_REQUEST_FILE,
+    UPDATE_RUNNER_READY_FILE, UPDATE_RUNNER_STATE_FILE, UPDATE_SIGNATURE_FILE,
+    UPDATE_SNAPSHOT_DIR, UPDATE_TRANSACTION_FILE,
 };
 
 type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
@@ -495,6 +496,7 @@ fn try_launch_persistence_update(app_path: &Path) -> Result<bool> {
             app_sha256: snapshot.1,
             supervisor_sha256: snapshot.2,
             remover_sha256: snapshot.3,
+            snapshot_files: snapshot.4,
         },
     )?;
     launch_update_runner(&staging)
@@ -778,7 +780,7 @@ fn sha256_hex(path: &Path) -> Result<String> {
 fn create_pre_update_snapshot(
     app_path: &Path,
     staging: &Path,
-) -> Result<(String, String, String, String)> {
+) -> Result<(String, String, String, String, Vec<SnapshotFile>)> {
     let install = app_path.parent().ok_or("installed app has no parent")?;
     let supervisor = install.join(SUPERVISOR_EXE);
     let remover = install.join(REMOVER_EXE);
@@ -787,21 +789,62 @@ fn create_pre_update_snapshot(
         return Err("installed app and persistence helpers are not a coherent version".into());
     }
     let snapshot = staging.join(UPDATE_SNAPSHOT_DIR);
+    if snapshot.exists() {
+        fs::remove_dir_all(&snapshot)?;
+    }
     fs::create_dir_all(&snapshot)?;
     protect_directory(&snapshot)?;
-    for (source, name) in [
-        (app_path, APP_EXE),
-        (&supervisor, SUPERVISOR_EXE),
-        (&remover, REMOVER_EXE),
-    ] {
-        copy_replace(source, &snapshot.join(name))?;
-    }
+    let mut snapshot_files = Vec::new();
+    snapshot_installation(install, install, &snapshot, &mut snapshot_files)?;
+    snapshot_files.sort_by(|left, right| left.path.cmp(&right.path));
     Ok((
         version,
         sha256_hex(app_path)?,
         sha256_hex(&supervisor)?,
         sha256_hex(&remover)?,
+        snapshot_files,
     ))
+}
+
+fn snapshot_installation(
+    install: &Path,
+    current: &Path,
+    snapshot: &Path,
+    files: &mut Vec<SnapshotFile>,
+) -> Result<()> {
+    for entry in fs::read_dir(current)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            return Err(format!(
+                "installation snapshot contains a link: {}",
+                entry.path().display()
+            )
+            .into());
+        }
+        let relative = entry.path().strip_prefix(install)?.to_path_buf();
+        let destination = snapshot.join(&relative);
+        if file_type.is_dir() {
+            fs::create_dir_all(&destination)?;
+            snapshot_installation(install, &entry.path(), snapshot, files)?;
+        } else if file_type.is_file() {
+            if let Some(parent) = destination.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            copy_replace(&entry.path(), &destination)?;
+            files.push(SnapshotFile {
+                path: relative.to_string_lossy().replace('/', "\\"),
+                sha256: sha256_hex(&entry.path())?,
+            });
+        } else {
+            return Err(format!(
+                "installation snapshot contains an unsupported entry: {}",
+                entry.path().display()
+            )
+            .into());
+        }
+    }
+    Ok(())
 }
 
 fn coherent_installation(app_path: &Path, version: Option<&str>) -> bool {
@@ -849,6 +892,9 @@ fn restore_pre_update_snapshot(
 ) -> Result<()> {
     let install = app_path.parent().ok_or("installed app has no parent")?;
     let snapshot = staging.join(UPDATE_SNAPSHOT_DIR);
+    if transaction.snapshot_files.is_empty() {
+        return Err("pre-update snapshot manifest is empty".into());
+    }
     let files = [
         (APP_EXE, transaction.app_sha256.as_str()),
         (SUPERVISOR_EXE, transaction.supervisor_sha256.as_str()),
@@ -860,8 +906,32 @@ fn restore_pre_update_snapshot(
             return Err(format!("pre-update snapshot hash mismatch: {name}").into());
         }
     }
-    for (name, _) in files {
-        copy_replace(&snapshot.join(name), &install.join(name))?;
+    for entry in &transaction.snapshot_files {
+        let relative = Path::new(&entry.path);
+        if relative.is_absolute()
+            || relative.components().any(|part| {
+                matches!(
+                    part,
+                    std::path::Component::ParentDir
+                        | std::path::Component::RootDir
+                        | std::path::Component::Prefix(_)
+                )
+            })
+        {
+            return Err("pre-update snapshot manifest contains an unsafe path".into());
+        }
+        if sha256_hex(&snapshot.join(relative))? != entry.sha256 {
+            return Err(format!("pre-update snapshot hash mismatch: {}", entry.path).into());
+        }
+    }
+    clear_installation_directory(install)?;
+    for entry in &transaction.snapshot_files {
+        let relative = Path::new(&entry.path);
+        let destination = install.join(relative);
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        copy_replace(&snapshot.join(relative), &destination)?;
     }
     if file_version(app_path)? != transaction.snapshot_version {
         return Err("restored pre-update snapshot is not coherent".into());
@@ -869,6 +939,19 @@ fn restore_pre_update_snapshot(
     write_installed_state(app_path)?;
     if !coherent_installation(app_path, Some(&transaction.snapshot_version)) {
         return Err("restored pre-update snapshot is not coherent".into());
+    }
+    Ok(())
+}
+
+fn clear_installation_directory(install: &Path) -> Result<()> {
+    for entry in fs::read_dir(install)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() && !file_type.is_symlink() {
+            fs::remove_dir_all(entry.path())?;
+        } else {
+            fs::remove_file(entry.path())?;
+        }
     }
     Ok(())
 }

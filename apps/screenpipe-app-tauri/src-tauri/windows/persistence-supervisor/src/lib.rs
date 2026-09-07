@@ -42,6 +42,14 @@ pub struct AcceptedUpdateTransaction {
     pub app_sha256: String,
     pub supervisor_sha256: String,
     pub remover_sha256: String,
+    pub snapshot_files: Vec<SnapshotFile>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SnapshotFile {
+    pub path: String,
+    pub sha256: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -366,6 +374,7 @@ mod tests {
             app_sha256: "a".into(),
             supervisor_sha256: "b".into(),
             remover_sha256: "c".into(),
+            snapshot_files: Vec::new(),
         };
         assert_eq!(
             accepted_update_action(&transaction, Some("2.7.9"), true),

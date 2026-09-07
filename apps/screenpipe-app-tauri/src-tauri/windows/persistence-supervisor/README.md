@@ -62,7 +62,9 @@ service before removing application files.
 
 During a persistent upgrade, a protected detached runner owns maintenance while
 the existing service yields. It preserves the marker and policy cache, keeps a
-verified pre-update snapshot of the app and matching helpers, and reconciles the
-running service to one coherent installed version. Interrupted or failed setup
-is retried a bounded number of times and then restored from that snapshot;
-administrator reinstall and removal remain available.
+verified pre-update snapshot of the complete Program Files application payload,
+including matching helpers, DLLs, and resources, and reconciles the running
+service to one coherent installed version. Interrupted or failed setup is
+retried a bounded number of times and then restored from that snapshot, removing
+files introduced only by the failed version; administrator reinstall and removal
+remain available.
