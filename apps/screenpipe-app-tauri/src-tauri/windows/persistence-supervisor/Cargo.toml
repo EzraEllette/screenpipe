@@ -8,6 +8,11 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
+[features]
+# Installed acceptance fixtures may substitute a disposable updater trust root.
+# Release packaging does not enable this feature.
+persistence-updater-e2e = []
+
 [[bin]]
 name = "screenpipe-persistence-supervisor"
 path = "src/main.rs"
@@ -17,6 +22,7 @@ name = "remove-screenpipe-persistence"
 path = "src/bin/remove.rs"
 
 [dependencies]
+base64 = "0.22"
 minisign-verify = "0.2"
 semver = "1"
 serde = { version = "1", features = ["derive"] }

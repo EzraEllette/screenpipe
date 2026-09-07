@@ -121,7 +121,10 @@ fn verify_signature_with_key(package: &[u8], signature: &[u8], key: &str) -> Res
         .map_err(|error| format!("embedded updater public key is not UTF-8: {error}"))?;
     let public_key = minisign_verify::PublicKey::decode(public_key)
         .map_err(|error| format!("invalid embedded updater public key: {error}"))?;
-    let signature = std::str::from_utf8(signature)
+    let signature = base64::engine::general_purpose::STANDARD
+        .decode(signature)
+        .map_err(|error| format!("persistent update signature is not base64: {error}"))?;
+    let signature = std::str::from_utf8(&signature)
         .map_err(|error| format!("persistent update signature is not UTF-8: {error}"))?;
     // `tauri signer sign` writes a base64-encoded minisign document, just as
     // ordinary updater manifests do. Decode the transport before parsing it.
