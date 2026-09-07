@@ -1006,7 +1006,7 @@ impl UpdatesManager {
                 return Result::Ok(false);
             }
         }
-        if cfg!(debug_assertions) {
+        if cfg!(debug_assertions) && !cfg!(feature = "e2e") {
             info!("dev mode is enabled, skipping update check");
             return Result::Ok(false);
         }
@@ -1329,7 +1329,7 @@ impl UpdatesManager {
                     #[cfg(any(target_os = "macos", target_os = "windows"))]
                     let persistent_result = if persistent_package {
                         Some(
-                            crate::enterprise_persistence::stage_update(&update)
+                            crate::enterprise_persistence::stage_update(&self.app, &update)
                                 .await
                                 .map_err(|error| {
                                     tauri_plugin_updater::Error::Io(std::io::Error::other(error))
