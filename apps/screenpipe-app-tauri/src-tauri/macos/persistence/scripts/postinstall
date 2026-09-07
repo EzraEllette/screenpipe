@@ -29,7 +29,7 @@ STATE_DIR="/Library/Application Support/screenpipe/persistence"
 # finishing the first transaction. External administrator installs have no
 # runner and complete maintenance here.
 if [ ! -e "/Library/LaunchDaemons/screenpi.pe.enterprise.persistence-update.plist" ]; then
-  /bin/rm -f "${STATE_DIR}/maintenance"
+  /bin/rm -f "${STATE_DIR}/maintenance" "${STATE_DIR}/failed-update-version"
 fi
 
 /bin/launchctl bootout "system/${DAEMON_LABEL}" >/dev/null 2>&1 || true

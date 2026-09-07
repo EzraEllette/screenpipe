@@ -333,6 +333,12 @@ SCREENPIPE_PERSISTENCE_TEST_LOG="$LOG" \
 /usr/bin/grep -q '^bootout system/screenpi.pe.enterprise.persistence-supervisor$' "$LOG"
 /usr/bin/grep -q "^bootstrap system ${TMP}/daemon.plist$" "$LOG"
 /usr/bin/grep -q '^kickstart system/screenpi.pe.enterprise.persistence-supervisor$' "$LOG"
+[ "$(/bin/cat "${STATE_DIR}/failed-update-version")" = '2.7.1' ]
+make_update_request
+run_update_supervisor
+[ ! -e "${STATE_DIR}/maintenance" ]
+[ ! -e "${STATE_DIR}/update-runner" ]
+/bin/rm -f "${STATE_DIR}/failed-update-version"
 
 # A boot during a torn payload retains the trusted snapshot and starts the
 # independent recovery job. It must not clear maintenance and launch that app.

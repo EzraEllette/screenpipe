@@ -12,6 +12,7 @@ AGENT_PLIST="${SCREENPIPE_PERSISTENCE_AGENT_PLIST:-/Library/LaunchAgents/${LABEL
 STATE_DIR="${SCREENPIPE_PERSISTENCE_STATE_DIR:-/Library/Application Support/screenpipe/persistence}"
 ENABLED_MARKER="${STATE_DIR}/enabled"
 MAINTENANCE_MARKER="${STATE_DIR}/maintenance"
+FAILED_UPDATE_VERSION="${STATE_DIR}/failed-update-version"
 POLICY_DISABLED_MARKER="${STATE_DIR}/policy-disabled"
 LAST_UID_FILE="${STATE_DIR}/active-console-uid"
 LAUNCHCTL="${SCREENPIPE_PERSISTENCE_LAUNCHCTL:-/bin/launchctl}"
@@ -324,6 +325,7 @@ if [ ! -e "\$work/started" ] && [ ! -e "\$work/settled" ]; then
   version=\$(/usr/bin/plutil -extract CFBundleShortVersionString raw -o - "\$app/Contents/Info.plist" 2>/dev/null || true)
   if [ "\$status" -eq 0 ] && [ "\$version" = "${expected}" ] && \
      "${CODESIGN}" --verify --deep --strict "\$app" >/dev/null 2>&1; then
+    /bin/rm -f "${FAILED_UPDATE_VERSION}"
     /usr/bin/touch "\$work/settled"
   fi
 fi
@@ -347,6 +349,7 @@ if [ ! -e "\$work/settled" ]; then
   /usr/sbin/chown root:wheel "\$app" "$0" "${UNINSTALLER}" "${AGENT_PLIST}" "${DAEMON_PLIST}" 2>/dev/null || true
   /bin/chmod 755 "$0" "${UNINSTALLER}" || exit 1
   /bin/chmod 644 "${AGENT_PLIST}" "${DAEMON_PLIST}" || exit 1
+  /usr/bin/printf '%s\n' '${expected}' > "${FAILED_UPDATE_VERSION}"
   /usr/bin/touch "\$work/settled"
 fi
 /bin/sync
@@ -414,6 +417,14 @@ process_update_request() {
   package_name="$(/usr/bin/plutil -extract package raw -o - "${UPDATE_WORK_DIR}/request.json" 2>/dev/null || true)"
   signature_name="$(/usr/bin/plutil -extract signature raw -o - "${UPDATE_WORK_DIR}/request.json" 2>/dev/null || true)"
   expected="$(/usr/bin/plutil -extract version raw -o - "${UPDATE_WORK_DIR}/request.json" 2>/dev/null || true)"
+  # A failed immutable release must not repeatedly interrupt recording at each
+  # app poll. A newer published version or an explicit administrator reinstall
+  # can retry; ordinary user requests cannot clear this protected failure latch.
+  if [ -r "$FAILED_UPDATE_VERSION" ] && [ "$(/bin/cat "$FAILED_UPDATE_VERSION")" = "$expected" ]; then
+    clear_user_request "$request_dir"
+    /bin/rm -rf "$UPDATE_WORK_DIR"
+    return 0
+  fi
   if [ "$package_name" != "screenpipe-enterprise-persistent.pkg" ] || \
      [ "$signature_name" != "screenpipe-enterprise-persistent.pkg.sig" ] || \
      [ ! -f "${request_dir}/${package_name}" ] || [ -L "${request_dir}/${package_name}" ] || \
