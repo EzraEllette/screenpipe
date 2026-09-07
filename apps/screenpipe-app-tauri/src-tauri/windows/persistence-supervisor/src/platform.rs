@@ -17,6 +17,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
+use sha2::{Digest, Sha256};
 use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::Security::{
@@ -46,11 +47,12 @@ use windows_service::service_dispatcher;
 use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 
 use crate::{
-    is_path_within, launch_decision, log_path, marker_path, path_eq, policy_disabled_path,
-    policy_enforcement_from_exit_code, select_active_session, state_dir, LaunchDecision,
-    UpdateRequest, APP_EXE, POLICY_REFRESH_SECONDS, RECHECK_SECONDS, RECOVERY_SUPERVISOR_FILE,
-    SERVICE_DISPLAY_NAME, SERVICE_NAME, SUPERVISOR_EXE, UPDATE_PACKAGE_FILE, UPDATE_REQUEST_DIR,
-    UPDATE_REQUEST_FILE, UPDATE_SIGNATURE_FILE,
+    accepted_update_action, is_path_within, launch_decision, log_path, marker_path, path_eq,
+    policy_disabled_path, policy_enforcement_from_exit_code, select_active_session, state_dir,
+    AcceptedUpdateAction, AcceptedUpdateTransaction, LaunchDecision, UpdateRequest, APP_EXE,
+    POLICY_REFRESH_SECONDS, RECHECK_SECONDS, RECOVERY_SUPERVISOR_FILE, SERVICE_DISPLAY_NAME,
+    SERVICE_NAME, SUPERVISOR_EXE, UPDATE_PACKAGE_FILE, UPDATE_REQUEST_DIR, UPDATE_REQUEST_FILE,
+    UPDATE_RUNNER_READY_FILE, UPDATE_SIGNATURE_FILE, UPDATE_TRANSACTION_FILE,
 };
 
 type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
@@ -59,6 +61,8 @@ const ERROR_SERVICE_DOES_NOT_EXIST: i32 = 1060;
 const STOP_WAIT_SECONDS: u64 = 20;
 const START_WAIT_SECONDS: u64 = 15;
 const APP_LAUNCH_WAIT_SECONDS: u64 = 20;
+const RUNNER_READY_WAIT_SECONDS: u64 = 15;
+const INSTALLER_TIMEOUT_SECONDS: u64 = 10 * 60;
 const UPDATE_STAGING_DIR: &str = "update-staging";
 #[cfg(not(feature = "persistence-updater-e2e"))]
 const ENTERPRISE_UPDATER_PUBLIC_KEY: &str = "untrusted comment: minisign public key: 22B46FD31CA9AC17\nRWQXrKkc02+0IiwFPFQnsaA4fm/4QQE9m5FYMEqGaqP3mIgTHx2/rMrg\n";
@@ -104,13 +108,7 @@ pub fn run_supervisor_command() -> Result<()> {
         Some("install") => install_persistence(),
         Some("prepare-upgrade") => prepare_upgrade(),
         Some("remove") => remove_persistence(),
-        Some("watch-update") => {
-            let pid = args
-                .get(2)
-                .ok_or("watch-update requires the installer pid")?
-                .parse::<u32>()?;
-            watch_update(pid)
-        }
+        Some("watch-update") => watch_update(),
         Some(command) => Err(format!("unknown command: {command}").into()),
         None => {
             service_dispatcher::start(SERVICE_NAME, ffi_service_main)?;
@@ -446,6 +444,10 @@ fn try_launch_persistence_update(app_path: &Path) -> Result<bool> {
         return Ok(false);
     }
 
+    let transaction_path = staging.join(UPDATE_TRANSACTION_FILE);
+    if transaction_path.is_file() {
+        return resume_accepted_update(app_path, &staging);
+    }
     let request: UpdateRequest = serde_json::from_slice(&fs::read(&request_path)?)?;
     if request.package != UPDATE_PACKAGE_FILE || request.signature != UPDATE_SIGNATURE_FILE {
         return Err("update request contains unexpected filenames".into());
@@ -459,17 +461,62 @@ fn try_launch_persistence_update(app_path: &Path) -> Result<bool> {
         published_update_versions(app_path, &profile, &staged_package)?;
     crate::validate_update_request(&request, &installed, &published, &packaged)
         .map_err(|error| error.to_string())?;
+    write_transaction(
+        &transaction_path,
+        &AcceptedUpdateTransaction {
+            request,
+            attempts: 0,
+        },
+    )?;
+    launch_update_runner(&staging)
+}
 
+fn resume_accepted_update(app_path: &Path, staging: &Path) -> Result<bool> {
+    let transaction: AcceptedUpdateTransaction =
+        serde_json::from_slice(&fs::read(staging.join(UPDATE_TRANSACTION_FILE))?)?;
+    if transaction.request.package != UPDATE_PACKAGE_FILE
+        || transaction.request.signature != UPDATE_SIGNATURE_FILE
+    {
+        return Err("accepted transaction contains unexpected filenames".into());
+    }
+    verify_update_signature(
+        &staging.join(UPDATE_PACKAGE_FILE),
+        &staging.join(UPDATE_SIGNATURE_FILE),
+    )?;
+    let installed = file_version(app_path)?;
+    match accepted_update_action(&transaction, &installed).map_err(str::to_string)? {
+        AcceptedUpdateAction::ReconcileInstalled => {
+            reconcile_installed_service(app_path)?;
+            fs::remove_dir_all(staging)?;
+            Ok(false)
+        }
+        AcceptedUpdateAction::Exhausted => {
+            reconcile_best_service(app_path)?;
+            fs::remove_dir_all(staging)?;
+            log_event("error", "update_retry_exhausted", "maintenance cleared after bounded retries");
+            Ok(false)
+        }
+        AcceptedUpdateAction::Install => launch_update_runner(staging),
+    }
+}
+
+fn launch_update_runner(staging: &Path) -> Result<bool> {
     let recovery = prepare_recovery_service()?;
-    let installer = Command::new(staged_package)
-        .args(["/S", "/UPDATE"])
-        .spawn()?;
+    let ready = staging.join(UPDATE_RUNNER_READY_FILE);
+    let _ = fs::remove_file(&ready);
     Command::new(recovery)
-        .args(["watch-update", &installer.id().to_string()])
+        .arg("watch-update")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()?;
+    let deadline = Instant::now() + Duration::from_secs(RUNNER_READY_WAIT_SECONDS);
+    while !ready.is_file() {
+        if Instant::now() >= deadline {
+            return Err("recovery runner did not establish durable maintenance".into());
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
     Ok(true)
 }
 
@@ -495,15 +542,118 @@ fn prepare_recovery_service() -> Result<PathBuf> {
     Ok(recovery)
 }
 
-fn watch_update(installer_pid: u32) -> Result<()> {
-    while process_identity(installer_pid).is_some() {
+fn watch_update() -> Result<()> {
+    let program_data = env::var_os("ProgramData").ok_or("ProgramData is unavailable")?;
+    let staging = state_dir(Path::new(&program_data)).join(UPDATE_STAGING_DIR);
+    let transaction_path = staging.join(UPDATE_TRANSACTION_FILE);
+    let mut transaction: AcceptedUpdateTransaction =
+        serde_json::from_slice(&fs::read(&transaction_path)?)?;
+    fs::write(staging.join(UPDATE_RUNNER_READY_FILE), b"ready\n")?;
+    let deadline = Instant::now() + Duration::from_secs(STOP_WAIT_SECONDS);
+    while service_is_running()? {
+        if Instant::now() >= deadline {
+            return Err("service did not yield before installer launch".into());
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    transaction.attempts = transaction.attempts.saturating_add(1);
+    write_transaction(&transaction_path, &transaction)?;
+    let mut installer = Command::new(staging.join(UPDATE_PACKAGE_FILE))
+        .args(["/S", "/UPDATE"])
+        .spawn()?;
+    let installer_pid = installer.id();
+    let installer_path = staging.join(UPDATE_PACKAGE_FILE);
+    let deadline = Instant::now() + Duration::from_secs(INSTALLER_TIMEOUT_SECONDS);
+    loop {
+        if let Some(status) = installer.try_wait()? {
+            log_event("info", "update_installer_finished", &format!("pid={installer_pid} status={status}"));
+            break;
+        }
+        if Instant::now() >= deadline {
+            if process_identity(installer_pid)
+                .is_some_and(|(_, path)| path_eq(&path, &installer_path))
+            {
+                installer.kill()?;
+                let _ = installer.wait();
+            }
+            log_event("error", "update_installer_timeout", &format!("pid={installer_pid}"));
+            break;
+        }
         thread::sleep(Duration::from_secs(1));
     }
-    if let Some(program_data) = env::var_os("ProgramData") {
-        let _ = fs::remove_dir_all(state_dir(Path::new(&program_data)).join(UPDATE_STAGING_DIR));
+    let app_path = installed_app_path()?;
+    let installed = file_version(&app_path)?;
+    if accepted_update_action(&transaction, &installed).map_err(str::to_string)?
+        == AcceptedUpdateAction::ReconcileInstalled
+    {
+        reconcile_installed_service(&app_path)?;
+        fs::remove_dir_all(staging)?;
+    } else {
+        reconcile_best_service(&app_path)?;
     }
-    start_existing_service()?;
     Ok(())
+}
+
+fn write_transaction(path: &Path, transaction: &AcceptedUpdateTransaction) -> Result<()> {
+    let temp = path.with_extension("tmp");
+    fs::write(&temp, serde_json::to_vec(transaction)?)?;
+    replace_file(&temp, path)
+}
+
+fn file_version(path: &Path) -> Result<String> {
+    let script = "(Get-Item -LiteralPath $env:SCREENPIPE_FILE).VersionInfo.ProductVersion";
+    let output = Command::new("powershell.exe").args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script]).env("SCREENPIPE_FILE", path).output()?;
+    if !output.status.success() { return Err("failed to read installed file version".into()); }
+    Ok(String::from_utf8(output.stdout)?.trim().split('+').next().unwrap_or_default().to_string())
+}
+
+fn service_is_running() -> Result<bool> {
+    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
+    let service = manager.open_service(SERVICE_NAME, ServiceAccess::QUERY_STATUS)?;
+    Ok(service.query_status()?.current_state != ServiceState::Stopped)
+}
+
+fn reconcile_best_service(app_path: &Path) -> Result<()> {
+    let installed = app_path.parent().ok_or("installed app has no parent")?.join(SUPERVISOR_EXE);
+    if installed.is_file() { reconcile_service(&installed) } else { reconcile_service(&recovery_supervisor_path()?) }
+}
+
+fn reconcile_installed_service(app_path: &Path) -> Result<()> {
+    let installed = app_path.parent().ok_or("installed app has no parent")?.join(SUPERVISOR_EXE);
+    if !installed.is_file() { return Err("installed persistence helper is missing".into()); }
+    reconcile_service(&installed)
+}
+
+fn reconcile_service(helper: &Path) -> Result<()> {
+    stop_service()?;
+    configure_existing_service(helper)?;
+    start_existing_service()?;
+    let expected_hash = file_sha256(helper)?;
+    let deadline = Instant::now() + Duration::from_secs(START_WAIT_SECONDS);
+    loop {
+        let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
+        let service = manager.open_service(SERVICE_NAME, ServiceAccess::QUERY_STATUS)?;
+        let status = service.query_status()?;
+        if status.current_state == ServiceState::Running {
+            if let Some(pid) = status.process_id {
+                if let Some((_, running_path)) = process_identity(pid) {
+                    if path_eq(&running_path, helper) && file_sha256(&running_path)? == expected_hash {
+                        return Ok(());
+                    }
+                }
+            }
+        }
+        if Instant::now() >= deadline { return Err("running persistence service did not reconcile to installed helper".into()); }
+        thread::sleep(Duration::from_millis(250));
+    }
+}
+
+fn file_sha256(path: &Path) -> Result<[u8; 32]> {
+    let mut file = fs::File::open(path)?;
+    let mut hash = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop { let read = file.read(&mut buffer)?; if read == 0 { break; } hash.update(&buffer[..read]); }
+    Ok(hash.finalize().into())
 }
 
 fn cleanup_inactive_recovery_copy() {
