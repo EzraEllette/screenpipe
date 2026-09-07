@@ -317,10 +317,7 @@ pub(crate) fn durable_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         f.write_all(bytes)?;
         f.sync_all()?; // contents + metadata to stable storage before the rename
     }
-    if let Err(e) = retry_windows_store_io(|| std::fs::rename(&tmp, path)) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e);
-    }
+    replace_store_temp(&tmp, path)?;
     // fsync the directory so the rename itself survives a crash. Best-effort:
     // not all platforms allow opening a dir for sync (Windows), and rename is
     // already atomic there via MoveFileEx.
@@ -331,6 +328,34 @@ pub(crate) fn durable_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(not(windows))]
+fn replace_store_temp(tmp: &Path, path: &Path) -> std::io::Result<()> {
+    std::fs::rename(tmp, path)
+}
+
+#[cfg(windows)]
+fn replace_store_temp(tmp: &Path, path: &Path) -> std::io::Result<()> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let mut delay = std::time::Duration::from_millis(1);
+    let mut temporary = tempfile::TempPath::try_from_path(tmp)?;
+
+    loop {
+        match temporary.persist(path) {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                if error.error.kind() != std::io::ErrorKind::PermissionDenied
+                    || std::time::Instant::now() >= deadline
+                {
+                    return Err(error.error);
+                }
+                temporary = error.path;
+                std::thread::sleep(delay);
+                delay = (delay * 2).min(std::time::Duration::from_millis(50));
+            }
+        }
+    }
 }
 
 /// Like [`durable_write`], but skip the temp/fsync/rename if `path` already
