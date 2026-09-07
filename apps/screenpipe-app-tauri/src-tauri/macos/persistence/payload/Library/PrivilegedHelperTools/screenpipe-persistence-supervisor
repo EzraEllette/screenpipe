@@ -315,6 +315,18 @@ set -u
 work="${UPDATE_WORK_DIR}"
 app="${APP_PATH}"
 status=1
+# A login can load an agent independently of the supervisor during reboot.
+# Unload it before restoration, including an old agent without the launch fence.
+stop_update_session() {
+  console=\$(/usr/bin/stat -f '%u' /dev/console 2>/dev/null || true)
+  previous=\$(/bin/cat "${LAST_UID_FILE}" 2>/dev/null || true)
+  for session in "\$console" "\$previous"; do
+    case "\$session" in ''|*[!0-9]*) continue ;; esac
+    [ "\$session" -ge 500 ] && [ "\$session" -ne 65534 ] || continue
+    "${LAUNCHCTL}" bootout "gui/\$session/${LABEL}" >/dev/null 2>&1 || true
+  done
+}
+stop_update_session
 # The intent is durable before installer launch. A new boot never reruns an
 # unbounded failed transaction: it restores the protected pre-update snapshot.
 if [ ! -e "\$work/started" ] && [ ! -e "\$work/settled" ]; then
@@ -354,6 +366,9 @@ if [ ! -e "\$work/settled" ]; then
   /usr/bin/touch "\$work/settled"
 fi
 /bin/sync
+# Forget launchd's cached executable/EX_CONFIG state after a torn replacement,
+# and reload the agent definition belonging to the settled payload.
+stop_update_session
 # Reload the matching helper while maintenance still blocks the user agent.
 "${LAUNCHCTL}" bootout "system/${DAEMON_LABEL}" >/dev/null 2>&1 || true
 "${LAUNCHCTL}" bootstrap system "${DAEMON_PLIST}" >/dev/null 2>&1 || exit 1

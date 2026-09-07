@@ -258,6 +258,14 @@ if /usr/bin/grep -q 'bootout "system/' "${HERE}/scripts/preinstall"; then
   exit 1
 fi
 
+# launchd can load the agent at login before the root daemon runs. Its stable
+# shell entry point must wait for maintenance instead of caching a missing app.
+agent="${HERE}/payload/Library/LaunchAgents/screenpi.pe.enterprise.persistence.plist"
+[ "$(/usr/bin/plutil -extract ProgramArguments.0 raw -o - "$agent")" = /bin/sh ]
+fence="$(/usr/bin/plutil -extract ProgramArguments.2 raw -o - "$agent")"
+/usr/bin/printf '%s' "$fence" | /usr/bin/grep -Fq 'while [ -e "$state/maintenance" ]'
+/usr/bin/printf '%s' "$fence" | /usr/bin/grep -Fq '[ ! -e "$state/policy-disabled" ]'
+
 # A fully authorized request is copied into root-owned state, checked against
 # the live published manifest and package/app signing identity, then installed.
 : > "$LOG"
@@ -356,6 +364,7 @@ run_update_supervisor
 SCREENPIPE_TEST_BOOT_ID=reboot-during-copy run_update_supervisor
 [ -e "${STATE_DIR}/maintenance" ]
 [ -d "${STATE_DIR}/update/backup/app" ]
+/usr/bin/printf '501\n' > "${STATE_DIR}/active-console-uid"
 if /usr/bin/grep -Eq '^(enable|bootstrap|kickstart) gui/501/' "$LOG"; then
   echo "torn payload recovery must retain maintenance" >&2
   exit 1
@@ -367,5 +376,9 @@ SCREENPIPE_PERSISTENCE_TEST_LOG="$LOG" \
 [ "$(/bin/cat "${TMP}/uninstaller")" = 'old uninstaller' ]
 [ ! -e "${STATE_DIR}/maintenance" ]
 [ ! -e "${STATE_DIR}/update-job.plist" ]
+# Recovery unloads the stale user job before the matching daemon is reloaded.
+/usr/bin/awk '/^bootout gui\/501\/screenpi.pe.enterprise.persistence$/ { stopped=1 }
+  /^bootstrap system .*daemon.plist$/ { if (!stopped) exit 1; reloaded=1 }
+  END { if (!reloaded) exit 1 }' "$LOG"
 
 echo "macOS persistence supervisor tests passed"
