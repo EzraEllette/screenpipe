@@ -622,26 +622,32 @@ fn watch_update() -> Result<()> {
         &staging.join(UPDATE_SIGNATURE_FILE),
     )?;
     let app_path = installed_app_path()?;
-    let installed = file_version(&app_path).ok();
-    let complete = coherent_installation(&app_path, installed.as_deref());
-    match accepted_update_action(&transaction, installed.as_deref(), complete)
-        .map_err(str::to_string)?
-    {
-        AcceptedUpdateAction::ReconcileInstalled | AcceptedUpdateAction::ReconcileNewer => {
-            reconcile_installed_service(&app_path)?;
-            finish_update(&staging, &runner_state)?;
-            return Ok(());
+    loop {
+        let installed = file_version(&app_path).ok();
+        let complete = coherent_installation(&app_path, installed.as_deref());
+        match accepted_update_action(&transaction, installed.as_deref(), complete)
+            .map_err(str::to_string)?
+        {
+            AcceptedUpdateAction::ReconcileInstalled | AcceptedUpdateAction::ReconcileNewer => {
+                finish_update(&staging, &runner_state)?;
+                reconcile_installed_service(&app_path)?;
+                return Ok(());
+            }
+            AcceptedUpdateAction::RestoreSnapshot | AcceptedUpdateAction::Exhausted => {
+                restore_pre_update_snapshot(&app_path, &staging, &transaction)?;
+                latch_failed_update(&staging, &runner_state, &transaction.request.version)?;
+                reconcile_installed_service(&app_path)?;
+                return Ok(());
+            }
+            AcceptedUpdateAction::Install => {}
         }
-        AcceptedUpdateAction::RestoreSnapshot | AcceptedUpdateAction::Exhausted => {
-            restore_pre_update_snapshot(&app_path, &staging, &transaction)?;
-            reconcile_installed_service(&app_path)?;
-            latch_failed_update(&staging, &runner_state, &transaction.request.version)?;
-            return Ok(());
-        }
-        AcceptedUpdateAction::Install => {}
+        transaction.attempts = transaction.attempts.saturating_add(1);
+        write_transaction(&transaction_path, &transaction)?;
+        run_update_installer(&staging)?;
     }
-    transaction.attempts = transaction.attempts.saturating_add(1);
-    write_transaction(&transaction_path, &transaction)?;
+}
+
+fn run_update_installer(staging: &Path) -> Result<()> {
     let mut installer = Command::new(staging.join(UPDATE_PACKAGE_FILE))
         .args(["/S", "/UPDATE"])
         .spawn()?;
@@ -662,7 +668,7 @@ fn watch_update() -> Result<()> {
             {
                 terminate_process_tree(installer_pid, &observed_tree)?;
             }
-            break;
+            return Ok(());
         }
         if Instant::now() >= deadline {
             terminate_process_tree(installer_pid, &observed_tree)?;
@@ -672,32 +678,10 @@ fn watch_update() -> Result<()> {
                 "update_installer_timeout",
                 &format!("pid={installer_pid}"),
             );
-            break;
+            return Ok(());
         }
         thread::sleep(Duration::from_millis(100));
     }
-    let installed = file_version(&app_path).ok();
-    let complete = coherent_installation(&app_path, installed.as_deref());
-    match accepted_update_action(&transaction, installed.as_deref(), complete)
-        .map_err(str::to_string)?
-    {
-        AcceptedUpdateAction::ReconcileInstalled | AcceptedUpdateAction::ReconcileNewer => {
-            reconcile_installed_service(&app_path)?;
-            finish_update(&staging, &runner_state)?;
-        }
-        AcceptedUpdateAction::Install if transaction.attempts < crate::MAX_UPDATE_ATTEMPTS => {
-            reconcile_best_service(&app_path)?;
-            let _ = fs::remove_file(&runner_state);
-        }
-        AcceptedUpdateAction::Install
-        | AcceptedUpdateAction::RestoreSnapshot
-        | AcceptedUpdateAction::Exhausted => {
-            restore_pre_update_snapshot(&app_path, &staging, &transaction)?;
-            reconcile_installed_service(&app_path)?;
-            latch_failed_update(&staging, &runner_state, &transaction.request.version)?;
-        }
-    }
-    Ok(())
 }
 
 fn write_transaction(path: &Path, transaction: &AcceptedUpdateTransaction) -> Result<()> {
