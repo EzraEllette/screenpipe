@@ -469,6 +469,16 @@ pub fn auto_restore_if_wiped(store_path: &Path) -> bool {
     if store_json_has_presets(&cur) {
         return false; // current state is healthy, nothing to do
     }
+    if read_healthy_snapshot(store_path).is_none() {
+        // A valid legacy document can predate aiPresets. SettingsStore's serde
+        // defaults recover it below and init_store persists the non-empty
+        // invariant; absence of a snapshot is not itself a recovery failure.
+        tracing::warn!(
+            "settings recovery: store.bin has no aiPresets and no healthy snapshot; \
+             the settings migration will persist the default preset"
+        );
+        return false;
+    }
     restore_snapshot_over(
         store_path,
         "store.bin is degraded (parses but has no aiPresets)",
@@ -524,7 +534,7 @@ fn decrypt_store_file(path: &Path) -> DecryptOutcome {
             // user's settings instead of silently resetting them.
             let backup = path.with_extension("bin.encrypted.bak");
             let _ = std::fs::copy(path, &backup);
-            tracing::error!(
+            tracing::warn!(
                 "store.bin is encrypted but keychain access was denied — \
                  ciphertext preserved at {}. Grant keychain access and \
                  restart to use it.",
@@ -2525,6 +2535,14 @@ fn migrate_windows_timeline_to_window_mode(settings: &mut SettingsStore) -> bool
     true
 }
 
+fn backfill_default_ai_preset(settings: &mut SettingsStore) -> bool {
+    if !settings.ai_presets.is_empty() {
+        return false;
+    }
+    settings.ai_presets = SettingsStore::default().ai_presets;
+    true
+}
+
 pub fn init_store(app: &AppHandle) -> Result<SettingsStore, String> {
     println!("Initializing settings store");
 
@@ -2540,12 +2558,29 @@ pub fn init_store(app: &AppHandle) -> Result<SettingsStore, String> {
         .as_ref()
         .map(|obj| !obj.contains_key("restartNotificationsDefaultedOff"))
         .unwrap_or(false);
+    let should_persist_ai_preset_backfill = raw_obj.as_ref().is_some_and(|obj| {
+        obj.get("aiPresets")
+            .and_then(Value::as_array)
+            .is_none_or(Vec::is_empty)
+    });
 
     let is_new_store;
     let (mut store, mut should_save, can_run_settings_migrations) = match SettingsStore::get(app) {
-        Ok(Some(store)) => {
+        Ok(Some(mut store)) => {
             is_new_store = false;
-            (store, should_persist_restart_notification_migration, true)
+            if should_persist_ai_preset_backfill {
+                // At least one preset is a UI and persistence invariant. Keep
+                // every other setting from the valid document and repair only
+                // the missing/null/empty list.
+                backfill_default_ai_preset(&mut store);
+                tracing::warn!("settings migration: restored the default AI preset");
+            }
+            (
+                store,
+                should_persist_restart_notification_migration
+                    || should_persist_ai_preset_backfill,
+                true,
+            )
         }
         Ok(None) => {
             is_new_store = true;
@@ -3915,6 +3950,23 @@ mod tests {
         assert!(!store_json_has_presets(&missing));
         assert!(!store_json_has_presets(&no_settings));
         assert!(!store_json_has_presets(&invalid_json));
+    }
+
+    #[test]
+    fn valid_settings_without_presets_restore_one_default_and_preserve_other_fields() {
+        let raw = json!({
+            "autoUpdate": false,
+            "aiPresets": [],
+        });
+        let mut settings: SettingsStore = serde_json::from_value(raw).unwrap();
+
+        assert!(settings.ai_presets.is_empty());
+        let preserved_auto_update = settings.auto_update;
+        assert!(backfill_default_ai_preset(&mut settings));
+
+        assert_eq!(settings.ai_presets.len(), 1);
+        assert_eq!(settings.auto_update, preserved_auto_update);
+        assert!(!backfill_default_ai_preset(&mut settings));
     }
 
     /// Any `<name>.durable.<pid>.<seq>.tmp` still sitting in `dir`.
