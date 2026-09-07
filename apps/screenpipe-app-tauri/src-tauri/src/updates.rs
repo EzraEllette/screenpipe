@@ -358,6 +358,20 @@ pub async fn await_safe_restart(timeout_secs: Option<u64>) -> String {
 /// second trigger from starting a parallel teardown+relaunch.
 static UPDATE_RESTART_STARTED: AtomicBool = AtomicBool::new(false);
 
+fn request_persistent_update_for_restart() -> Result<(), String> {
+    let result = crate::enterprise_persistence::request_staged_update().and_then(|version| {
+        version.ok_or_else(|| {
+            "persistent update is no longer staged; check for updates again".to_string()
+        })
+    });
+    if result.is_err() {
+        // No privileged handoff occurred. A deleted/failed staging write must
+        // remain retryable, rather than permanently latching "restarting".
+        UPDATE_RESTART_STARTED.store(false, Ordering::SeqCst);
+    }
+    result.map(|_| ())
+}
+
 async fn meeting_active(app: &tauri::AppHandle) -> bool {
     let state = app.state::<RecordingState>();
     let server = state.server.lock().await;
@@ -418,19 +432,23 @@ pub async fn restart_for_update(
         format!("failed to persist settings before update restart: {err}")
     })?;
 
+    let persistent_version = if is_enterprise_build(&app)
+        && enterprise_update_route(&app) == EnterpriseUpdateRoute::PersistentPackage
+    {
+        Some(
+            crate::enterprise_persistence::staged_version().ok_or_else(|| {
+                "persistent update is no longer staged; check for updates again".to_string()
+            })?,
+        )
+    } else {
+        None
+    };
+
     // Only the first trigger applies; later ones ride the in-flight restart.
     if UPDATE_RESTART_STARTED.swap(true, Ordering::SeqCst) {
         info!("banner restart: update-restart already in progress, ignoring");
         return Ok("proceed".to_string());
     }
-
-    let persistent_version = if is_enterprise_build(&app)
-        && enterprise_update_route(&app) == EnterpriseUpdateRoute::PersistentPackage
-    {
-        crate::enterprise_persistence::staged_version()
-    } else {
-        None
-    };
 
     // Durable "we are about to apply vX" marker: the next boot compares it
     // with the running version, so a swap that silently failed to apply is
@@ -448,7 +466,7 @@ pub async fn restart_for_update(
         record_update_attempt(&app, &to_version);
     }
     if persistent_version.is_some() {
-        crate::enterprise_persistence::request_staged_update()?;
+        request_persistent_update_for_restart()?;
     }
 
     info!("banner restart: gate passed, shutting down for update");
@@ -1575,8 +1593,7 @@ impl UpdatesManager {
                 );
                 wait_for_meeting_restart_window(&self.app).await;
                 if persistent_update {
-                    crate::enterprise_persistence::request_staged_update()
-                        .map_err(std::io::Error::other)?;
+                    request_persistent_update_for_restart().map_err(std::io::Error::other)?;
                 }
                 // Time-bounded: never let a wedged capture/audio teardown stall
                 // the relaunch (see PRE_EXIT_TEARDOWN_TIMEOUT / 2026-06-26 report).
