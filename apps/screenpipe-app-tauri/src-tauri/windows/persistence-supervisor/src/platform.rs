@@ -10,6 +10,7 @@ use std::io::{Read, Write};
 use std::mem::size_of;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::fs::MetadataExt;
+use std::os::windows::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::ptr;
@@ -20,7 +21,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use base64::Engine;
 use sha2::{Digest, Sha256};
 use windows::core::{PCWSTR, PWSTR};
-use windows::Win32::Foundation::{CloseHandle, HANDLE};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT};
 use windows::Win32::Security::{
     DuplicateTokenEx, SecurityImpersonation, TokenPrimary, TOKEN_ALL_ACCESS,
 };
@@ -33,15 +34,18 @@ use windows::Win32::System::Diagnostics::ToolHelp::{
 use windows::Win32::System::Environment::{CreateEnvironmentBlock, DestroyEnvironmentBlock};
 use windows::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JobObjectBasicAccountingInformation,
-    QueryInformationJobObject, TerminateJobObject, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
+    JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
+    TerminateJobObject, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
 };
 use windows::Win32::System::RemoteDesktop::{
     ProcessIdToSessionId, WTSActive, WTSEnumerateSessionsW, WTSFreeMemory,
     WTSGetActiveConsoleSessionId, WTSQueryUserToken, WTS_CURRENT_SERVER_HANDLE, WTS_SESSION_INFOW,
 };
 use windows::Win32::System::Threading::{
-    CreateProcessAsUserW, GetCurrentProcess, OpenProcess, QueryFullProcessImageNameW,
-    CREATE_NEW_PROCESS_GROUP, CREATE_UNICODE_ENVIRONMENT, PROCESS_INFORMATION, PROCESS_NAME_WIN32,
+    CreateProcessAsUserW, CreateProcessW, GetExitCodeProcess, OpenProcess,
+    QueryFullProcessImageNameW, ResumeThread, WaitForSingleObject, CREATE_NEW_PROCESS_GROUP,
+    CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, PROCESS_INFORMATION, PROCESS_NAME_WIN32,
     PROCESS_QUERY_LIMITED_INFORMATION, STARTUPINFOW,
 };
 use windows_service::define_windows_service;
@@ -82,7 +86,6 @@ const APP_LAUNCH_WAIT_SECONDS: u64 = 20;
 const RUNNER_READY_WAIT_SECONDS: u64 = 15;
 const INSTALLER_TIMEOUT_SECONDS: u64 = 10 * 60;
 const UPDATE_STAGING_DIR: &str = "update-staging";
-const UPDATE_JOB_ENV: &str = "SCREENPIPE_UPDATE_JOB";
 const UPDATE_GUARD_PID_ENV: &str = "SCREENPIPE_UPDATE_GUARD_PID";
 #[cfg(not(feature = "persistence-updater-e2e"))]
 const ENTERPRISE_UPDATER_PUBLIC_KEY: &str = "untrusted comment: minisign public key: 22B46FD31CA9AC17\nRWQXrKkc02+0IiwFPFQnsaA4fm/4QQE9m5FYMEqGaqP3mIgTHx2/rMrg\n";
@@ -646,24 +649,7 @@ fn watch_update() -> Result<()> {
 }
 
 fn watch_update_resilient() -> Result<()> {
-    if let Err(update_error) = watch_update() {
-        let program_data = env::var_os("ProgramData").ok_or("ProgramData is unavailable")?;
-        let staging = state_dir(Path::new(&program_data)).join(UPDATE_STAGING_DIR);
-        let transaction_path = staging.join(UPDATE_TRANSACTION_FILE);
-        let transaction: AcceptedUpdateTransaction =
-            serde_json::from_slice(&fs::read(&transaction_path)?)?;
-        let runner_state = staging.join(UPDATE_RUNNER_STATE_FILE);
-        let app_path = installed_app_path()?;
-        restore_pre_update_snapshot(&app_path, &staging, &transaction)?;
-        latch_failed_update(&staging, &runner_state, &transaction.request.version)?;
-        reconcile_installed_service(&app_path)?;
-        log_event(
-            "error",
-            "update_runner_recovered",
-            &format!("trusted runner failed and restored snapshot: {update_error}"),
-        );
-    }
-    Ok(())
+    watch_update()
 }
 
 fn watch_update_guard() -> Result<()> {
@@ -680,44 +666,144 @@ fn watch_update_guard() -> Result<()> {
         format!("{}\n", std::process::id()).as_bytes(),
     )?;
     durable_write(&staging.join(UPDATE_RUNNER_READY_FILE), b"ready\n")?;
+    let lifecycle_deadline = Instant::now() + Duration::from_secs(INSTALLER_TIMEOUT_SECONDS);
     for attempt in 0..MAX_UPDATE_ATTEMPTS {
-        let job_name = format!(
-            "Global\\ScreenpipePersistenceUpdate-{}-{}",
-            std::process::id(),
-            attempt
-        );
-        let job = create_update_job(&job_name)?;
-        let status = Command::new(&recovery)
-            .arg("watch-update")
-            .env(UPDATE_JOB_ENV, &job_name)
-            .env(UPDATE_GUARD_PID_ENV, std::process::id().to_string())
-            .status()?;
+        let job = create_update_job()?;
+        let worker = launch_update_worker(&recovery, &job)?;
+        let status = match wait_for_update_worker(&worker, lifecycle_deadline) {
+            Ok(status) => {
+                drain_update_job(&job, lifecycle_deadline)?;
+                status.to_string()
+            }
+            Err(error) => {
+                stop_and_drain_update_job(&job)?;
+                format!("worker failure: {error}")
+            }
+        };
         if !transaction_path.is_file() {
             return Ok(());
         }
-        stop_update_job(&job)?;
         log_event(
             "warn",
             "update_worker_restarted",
             &format!("attempt={} status={status}", attempt + 1),
         );
+        if Instant::now() >= lifecycle_deadline {
+            break;
+        }
         thread::sleep(Duration::from_secs(1));
     }
-    let transaction: AcceptedUpdateTransaction =
-        serde_json::from_slice(&fs::read(&transaction_path)?)?;
-    let app_path = installed_app_path()?;
-    restore_pre_update_snapshot(&app_path, &staging, &transaction)?;
-    latch_failed_update(&staging, &runner_state, &transaction.request.version)?;
-    reconcile_installed_service(&app_path)
+    recover_accepted_transaction(&staging, &runner_state, "guard attempts exhausted")
 }
 
-fn create_update_job(name: &str) -> Result<OwnedHandle> {
-    let wide = OsStr::new(name)
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
-    let handle = unsafe { CreateJobObjectW(None, PCWSTR(wide.as_ptr()))? };
-    Ok(OwnedHandle::new(handle))
+fn recover_accepted_transaction(staging: &Path, runner_state: &Path, reason: &str) -> Result<()> {
+    let transaction_path = staging.join(UPDATE_TRANSACTION_FILE);
+    let mut transaction: AcceptedUpdateTransaction =
+        serde_json::from_slice(&fs::read(&transaction_path)?)?;
+    // A guard failure exhausts this accepted transaction, but must use the same
+    // coherence/version arbitration as the ordinary update loop.
+    transaction.attempts = MAX_UPDATE_ATTEMPTS;
+    let app_path = installed_app_target_path()?;
+    let installed = file_version(&app_path).ok();
+    let complete = coherent_installation(&app_path, installed.as_deref());
+    match accepted_update_action(&transaction, installed.as_deref(), complete)
+        .map_err(str::to_string)?
+    {
+        AcceptedUpdateAction::ReconcileInstalled | AcceptedUpdateAction::ReconcileNewer => {
+            finish_update(staging, runner_state)?;
+            reconcile_installed_service(&app_path)?;
+            log_event("warn", "update_guard_reconciled", reason);
+            Ok(())
+        }
+        AcceptedUpdateAction::RestoreSnapshot
+        | AcceptedUpdateAction::Exhausted
+        | AcceptedUpdateAction::Install => {
+            restore_pre_update_snapshot(&app_path, staging, &transaction)?;
+            latch_failed_update(staging, runner_state, &transaction.request.version)?;
+            reconcile_installed_service(&app_path)?;
+            log_event("error", "update_guard_recovered", reason);
+            Ok(())
+        }
+    }
+}
+
+fn create_update_job() -> Result<OwnedHandle> {
+    let handle = unsafe { CreateJobObjectW(None, PCWSTR::null())? };
+    let handle = OwnedHandle::new(handle);
+    let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    unsafe {
+        SetInformationJobObject(
+            handle.0,
+            JobObjectExtendedLimitInformation,
+            &limits as *const _ as *const _,
+            size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        )?;
+    }
+    Ok(handle)
+}
+
+fn launch_update_worker(recovery: &Path, job: &OwnedHandle) -> Result<OwnedHandle> {
+    // The unnamed job cannot be opened by an untrusted process. The suspended
+    // worker is assigned before any of its code (or an installer child) runs.
+    let old_guard = env::var_os(UPDATE_GUARD_PID_ENV);
+    env::set_var(UPDATE_GUARD_PID_ENV, std::process::id().to_string());
+    let mut application = wide(recovery.as_os_str());
+    let mut command = wide(OsStr::new(&format!(
+        "\"{}\" watch-update",
+        recovery.display()
+    )));
+    let startup = STARTUPINFOW {
+        cb: size_of::<STARTUPINFOW>() as u32,
+        ..Default::default()
+    };
+    let mut process = PROCESS_INFORMATION::default();
+    let launched = unsafe {
+        CreateProcessW(
+            PCWSTR(application.as_mut_ptr()),
+            PWSTR(command.as_mut_ptr()),
+            None,
+            None,
+            false,
+            CREATE_SUSPENDED,
+            None,
+            PCWSTR::null(),
+            &startup,
+            &mut process,
+        )
+    };
+    match old_guard {
+        Some(value) => env::set_var(UPDATE_GUARD_PID_ENV, value),
+        None => env::remove_var(UPDATE_GUARD_PID_ENV),
+    }
+    launched?;
+    let process_handle = OwnedHandle::new(process.hProcess);
+    let thread_handle = OwnedHandle::new(process.hThread);
+    if let Err(error) = unsafe { AssignProcessToJobObject(job.0, process_handle.0) } {
+        let _ = unsafe { windows::Win32::System::Threading::TerminateProcess(process_handle.0, 1) };
+        return Err(error.into());
+    }
+    if unsafe { ResumeThread(thread_handle.0) } == u32::MAX {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(process_handle)
+}
+
+fn wait_for_update_worker(
+    worker: &OwnedHandle,
+    deadline: Instant,
+) -> Result<std::process::ExitStatus> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    let millis = remaining.as_millis().min(u32::MAX as u128) as u32;
+    match unsafe { WaitForSingleObject(worker.0, millis) } {
+        WAIT_OBJECT_0 => {
+            let mut code = 0;
+            unsafe { GetExitCodeProcess(worker.0, &mut code)? };
+            Ok(std::process::ExitStatus::from_raw(code))
+        }
+        WAIT_TIMEOUT => Err("update worker exceeded the transaction deadline".into()),
+        _ => Err(std::io::Error::last_os_error().into()),
+    }
 }
 
 fn join_guard_job(runner_state: &Path) -> Result<()> {
@@ -726,26 +812,15 @@ fn join_guard_job(runner_state: &Path) -> Result<()> {
     if active_runner_pid(runner_state, &recovery) != Some(guard_pid) {
         return Err("recovery guard no longer owns maintenance".into());
     }
-    let job_name = env::var(UPDATE_JOB_ENV)?;
-    let wide = OsStr::new(&job_name)
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
-    let job = unsafe {
-        windows::Win32::System::JobObjects::OpenJobObjectW(
-            0x001f001f,
-            false,
-            PCWSTR(wide.as_ptr()),
-        )?
-    };
-    let job = OwnedHandle::new(job);
-    unsafe { AssignProcessToJobObject(job.0, GetCurrentProcess())? };
     Ok(())
 }
 
-fn stop_update_job(job: &OwnedHandle) -> Result<()> {
+fn stop_and_drain_update_job(job: &OwnedHandle) -> Result<()> {
     unsafe { TerminateJobObject(job.0, 1)? };
-    let deadline = Instant::now() + Duration::from_secs(STOP_WAIT_SECONDS);
+    drain_update_job(job, Instant::now() + Duration::from_secs(STOP_WAIT_SECONDS))
+}
+
+fn drain_update_job(job: &OwnedHandle, deadline: Instant) -> Result<()> {
     loop {
         let mut accounting = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
         unsafe {
@@ -761,7 +836,24 @@ fn stop_update_job(job: &OwnedHandle) -> Result<()> {
             return Ok(());
         }
         if Instant::now() >= deadline {
-            return Err("update installer job did not stop".into());
+            unsafe { TerminateJobObject(job.0, 1)? };
+            let stop_deadline = Instant::now() + Duration::from_secs(STOP_WAIT_SECONDS);
+            while Instant::now() < stop_deadline {
+                unsafe {
+                    QueryInformationJobObject(
+                        job.0,
+                        JobObjectBasicAccountingInformation,
+                        &mut accounting as *mut _ as *mut _,
+                        size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
+                        None,
+                    )?;
+                }
+                if accounting.ActiveProcesses == 0 {
+                    return Ok(());
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
+            return Err("update installer job did not stop after deadline".into());
         }
         thread::sleep(Duration::from_millis(100));
     }
@@ -772,33 +864,23 @@ fn run_update_installer(staging: &Path) -> Result<()> {
         .args(["/S", "/UPDATE"])
         .spawn()?;
     let installer_pid = installer.id();
-    let installer_path = staging.join(UPDATE_PACKAGE_FILE);
-    let mut observed_tree = vec![(installer_pid, installer_path.clone())];
     let deadline = Instant::now() + Duration::from_secs(INSTALLER_TIMEOUT_SECONDS);
     loop {
-        extend_process_tree(installer_pid, &mut observed_tree)?;
         if let Some(status) = installer.try_wait()? {
             log_event(
                 "info",
                 "update_installer_finished",
                 &format!("pid={installer_pid} status={status}"),
             );
-            if wait_for_processes_to_stop(&observed_tree, Duration::from_secs(STOP_WAIT_SECONDS))
-                .is_err()
-            {
-                terminate_process_tree(installer_pid, &observed_tree)?;
-            }
             return Ok(());
         }
         if Instant::now() >= deadline {
-            terminate_process_tree(installer_pid, &observed_tree)?;
-            let _ = installer.wait();
             log_event(
                 "error",
                 "update_installer_timeout",
                 &format!("pid={installer_pid}"),
             );
-            return Ok(());
+            return Err("update installer exceeded its deadline".into());
         }
         thread::sleep(Duration::from_millis(100));
     }
@@ -1069,6 +1151,11 @@ fn restore_pre_update_snapshot(
             return Err(format!("pre-update snapshot hash mismatch: {}", entry.path).into());
         }
     }
+    if installation_matches_snapshot(install, &transaction.snapshot_files)? {
+        write_installed_state(app_path)?;
+        return Ok(());
+    }
+    quiesce_installed_app(app_path)?;
     clear_installation_directory(install)?;
     for entry in &transaction.snapshot_files {
         let relative = Path::new(&entry.path);
@@ -1084,6 +1171,99 @@ fn restore_pre_update_snapshot(
     write_installed_state(app_path)?;
     if !coherent_installation(app_path, Some(&transaction.snapshot_version)) {
         return Err("restored pre-update snapshot is not coherent".into());
+    }
+    Ok(())
+}
+
+fn installation_matches_snapshot(install: &Path, manifest: &[SnapshotFile]) -> Result<bool> {
+    let mut installed_files = Vec::new();
+    collect_installed_files(install, install, &mut installed_files)?;
+    installed_files.sort_by(|left, right| left.path.cmp(&right.path));
+    let mut expected = manifest.to_vec();
+    expected.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(installed_files.len() == expected.len()
+        && installed_files
+            .iter()
+            .zip(expected.iter())
+            .all(|(actual, expected)| {
+                actual.path.eq_ignore_ascii_case(&expected.path) && actual.sha256 == expected.sha256
+            }))
+}
+
+fn collect_installed_files(
+    root: &Path,
+    directory: &Path,
+    files: &mut Vec<SnapshotFile>,
+) -> Result<()> {
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            return Err(format!(
+                "installation contains an unsupported link: {}",
+                entry.path().display()
+            )
+            .into());
+        }
+        if file_type.is_dir() {
+            collect_installed_files(root, &entry.path(), files)?;
+        } else if file_type.is_file() {
+            let relative = entry
+                .path()
+                .strip_prefix(root)?
+                .to_string_lossy()
+                .replace('/', "\\");
+            files.push(SnapshotFile {
+                path: relative,
+                sha256: sha256_hex(&entry.path())?,
+            });
+        } else {
+            return Err(format!(
+                "installation contains an unsupported entry: {}",
+                entry.path().display()
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
+fn quiesce_installed_app(app_path: &Path) -> Result<()> {
+    let snapshot = OwnedHandle::new(unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)? });
+    let mut entry = PROCESSENTRY32W {
+        dwSize: size_of::<PROCESSENTRY32W>() as u32,
+        ..Default::default()
+    };
+    let mut pids = Vec::new();
+    if unsafe { Process32FirstW(snapshot.0, &mut entry) }.is_ok() {
+        loop {
+            if process_identity(entry.th32ProcessID)
+                .is_some_and(|(_, process_path)| path_eq(&process_path, app_path))
+            {
+                pids.push(entry.th32ProcessID);
+            }
+            if unsafe { Process32NextW(snapshot.0, &mut entry) }.is_err() {
+                break;
+            }
+        }
+    }
+    for pid in &pids {
+        let status = Command::new("taskkill.exe")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()?;
+        if !status.success() && process_identity(*pid).is_some() {
+            return Err(format!("failed to stop installed app tree {pid}: {status}").into());
+        }
+    }
+    let deadline = Instant::now() + Duration::from_secs(STOP_WAIT_SECONDS);
+    while pids.iter().any(|pid| process_identity(*pid).is_some()) {
+        if Instant::now() >= deadline {
+            return Err("installed app did not stop before snapshot restore".into());
+        }
+        thread::sleep(Duration::from_millis(100));
     }
     Ok(())
 }
@@ -1369,61 +1549,6 @@ fn matching_process_sessions(app_path: &Path) -> Result<Vec<u32>> {
         }
     }
     Ok(sessions)
-}
-
-fn extend_process_tree(root_pid: u32, observed: &mut Vec<(u32, PathBuf)>) -> Result<()> {
-    let snapshot = OwnedHandle::new(unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)? });
-    let mut entry = PROCESSENTRY32W {
-        dwSize: size_of::<PROCESSENTRY32W>() as u32,
-        ..Default::default()
-    };
-    if unsafe { Process32FirstW(snapshot.0, &mut entry) }.is_err() {
-        return Ok(());
-    }
-    let mut parents = vec![root_pid];
-    loop {
-        if parents.contains(&entry.th32ParentProcessID) && !parents.contains(&entry.th32ProcessID) {
-            parents.push(entry.th32ProcessID);
-            if let Some((_, path)) = process_identity(entry.th32ProcessID) {
-                observed.push((entry.th32ProcessID, path));
-            }
-        }
-        if unsafe { Process32NextW(snapshot.0, &mut entry) }.is_err() {
-            break;
-        }
-    }
-    observed.sort_by_key(|(pid, _)| *pid);
-    observed.dedup_by_key(|(pid, _)| *pid);
-    Ok(())
-}
-
-fn wait_for_processes_to_stop(processes: &[(u32, PathBuf)], timeout: Duration) -> Result<()> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        let alive = processes.iter().any(|(pid, expected)| {
-            process_identity(*pid).is_some_and(|(_, actual)| path_eq(&actual, expected))
-        });
-        if !alive {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            return Err("installer process tree did not stop".into());
-        }
-        thread::sleep(Duration::from_millis(100));
-    }
-}
-
-fn terminate_process_tree(root_pid: u32, observed: &[(u32, PathBuf)]) -> Result<()> {
-    let status = Command::new("taskkill.exe")
-        .args(["/PID", &root_pid.to_string(), "/T", "/F"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()?;
-    if !status.success() && process_identity(root_pid).is_some() {
-        return Err(format!("taskkill failed for installer tree {root_pid}: {status}").into());
-    }
-    wait_for_processes_to_stop(observed, Duration::from_secs(STOP_WAIT_SECONDS))
 }
 
 fn process_identity(pid: u32) -> Option<(u32, PathBuf)> {
@@ -1850,18 +1975,9 @@ fn protect_readable_file(path: &Path) -> Result<()> {
 
 fn protect_path(path: &Path, grants: &[&str]) -> Result<()> {
     reject_reparse(path)?;
-    let takeown = Command::new("takeown.exe")
-        .args(["/F"])
-        .arg(path)
-        .arg("/A")
-        .status()?;
-    if !takeown.success() {
-        return Err(format!("takeown failed for {} with {takeown}", path.display()).into());
-    }
-    run_icacls(path, &["/reset"])?;
-    // Keep WRITE_DAC while /inheritance:r removes inherited ACEs. /reset above
-    // removed every hostile explicit ACE; the final /grant:r below then
-    // installs only the intended rules.
+    validate_trusted_acl_namespace(path)?;
+    // Establish explicit trusted control before removing inheritance. Unlike
+    // /reset, this never reintroduces a parent-writable DACL.
     run_icacls(
         path,
         &[
@@ -1873,9 +1989,58 @@ fn protect_path(path: &Path, grants: &[&str]) -> Result<()> {
         ],
     )?;
     run_icacls(path, &["/inheritance:r"])?;
+    run_icacls(
+        path,
+        &["/remove:g", "*S-1-1-0", "*S-1-5-11", "*S-1-5-32-545"],
+    )?;
     let mut grant_args = vec!["/grant:r"];
     grant_args.extend_from_slice(grants);
     run_icacls(path, &grant_args)
+}
+
+fn validate_trusted_acl_namespace(path: &Path) -> Result<()> {
+    const VALIDATE_ACL: &str = r#"
+$ErrorActionPreference = 'Stop'
+$acl = Get-Acl -LiteralPath $env:SCREENPIPE_ACL_PATH
+$owner = $acl.Owner
+try { $owner = ([System.Security.Principal.NTAccount]$owner).Translate([System.Security.Principal.SecurityIdentifier]).Value } catch {}
+if ($owner -notin @('S-1-5-18', 'S-1-5-32-544')) { exit 40 }
+$write = [System.Security.AccessControl.FileSystemRights]::Write -bor
+         [System.Security.AccessControl.FileSystemRights]::Modify -bor
+         [System.Security.AccessControl.FileSystemRights]::FullControl -bor
+         [System.Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+         [System.Security.AccessControl.FileSystemRights]::TakeOwnership -bor
+         [System.Security.AccessControl.FileSystemRights]::Delete
+foreach ($rule in $acl.Access) {
+  $sid = $rule.IdentityReference
+  try { $sid = $sid.Translate([System.Security.Principal.SecurityIdentifier]).Value } catch { $sid = [string]$sid }
+  $trusted = $sid -in @('S-1-5-18', 'S-1-5-32-544')
+  if (-not $trusted -and -not $rule.IsInherited) { exit 41 }
+  if (-not $trusted -and $rule.AccessControlType -eq 'Allow' -and (($rule.FileSystemRights -band $write) -ne 0)) { exit 42 }
+}
+exit 0
+"#;
+    let status = Command::new("powershell.exe")
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            VALIDATE_ACL,
+        ])
+        .env("SCREENPIPE_ACL_PATH", path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "refusing hostile or untrusted persistence namespace {} (ACL validation exit {:?}); remove it from an elevated administrator session before reinstalling",
+            path.display(), status.code()
+        ).into())
+    }
 }
 
 fn run_icacls(path: &Path, args: &[&str]) -> Result<()> {
@@ -1941,6 +2106,25 @@ fn installed_app_path() -> Result<PathBuf> {
     if !app.is_file() {
         return Err(format!("installed app is missing: {}", app.display()).into());
     }
+    let program_files = env::var_os("ProgramFiles").ok_or("ProgramFiles is unavailable")?;
+    if !is_path_within(&app, Path::new(&program_files)) {
+        return Err("protected persistence marker points outside Program Files".into());
+    }
+    Ok(app)
+}
+
+fn installed_app_target_path() -> Result<PathBuf> {
+    let executable = env::current_exe()?;
+    let adjacent = executable
+        .parent()
+        .ok_or("supervisor has no installation directory")?
+        .join(APP_EXE);
+    if adjacent.is_file() {
+        return Ok(adjacent);
+    }
+    let program_data = env::var_os("ProgramData").ok_or("ProgramData is unavailable")?;
+    let marker = fs::read_to_string(marker_path(Path::new(&program_data)))?;
+    let app = PathBuf::from(marker.trim());
     let program_files = env::var_os("ProgramFiles").ok_or("ProgramFiles is unavailable")?;
     if !is_path_within(&app, Path::new(&program_files)) {
         return Err("protected persistence marker points outside Program Files".into());

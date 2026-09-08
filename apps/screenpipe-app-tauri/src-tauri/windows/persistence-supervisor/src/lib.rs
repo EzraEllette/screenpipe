@@ -398,6 +398,14 @@ mod tests {
         );
         transaction.attempts = MAX_UPDATE_ATTEMPTS;
         assert_eq!(
+            accepted_update_action(&transaction, Some("2.8.0"), true),
+            Ok(AcceptedUpdateAction::ReconcileInstalled)
+        );
+        assert_eq!(
+            accepted_update_action(&transaction, Some("2.9.0"), true),
+            Ok(AcceptedUpdateAction::ReconcileNewer)
+        );
+        assert_eq!(
             accepted_update_action(&transaction, Some("2.7.9"), true),
             Ok(AcceptedUpdateAction::Exhausted)
         );
