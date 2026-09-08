@@ -9,6 +9,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::mem::size_of;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
+use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::ptr;
@@ -591,7 +592,7 @@ fn prepare_recovery_service() -> Result<PathBuf> {
         fs::copy(&current, &temp)?;
         replace_file(&temp, &recovery)?;
     }
-    protect_directory(
+    protect_private_directory(
         recovery
             .parent()
             .ok_or("recovery supervisor has no parent directory")?,
@@ -935,7 +936,7 @@ fn create_pre_update_snapshot(
         fs::remove_dir_all(&snapshot)?;
     }
     fs::create_dir_all(&snapshot)?;
-    protect_directory(&snapshot)?;
+    protect_private_directory(&snapshot)?;
     let mut snapshot_files = Vec::new();
     snapshot_installation(install, install, &snapshot, &mut snapshot_files)?;
     snapshot_files.sort_by(|left, right| left.path.cmp(&right.path));
@@ -1138,7 +1139,7 @@ fn stage_user_update_request(source: &Path, staging: &Path) -> Result<()> {
         return Err("update request contains unexpected filenames".into());
     }
     fs::create_dir_all(staging)?;
-    protect_directory(staging)?;
+    protect_private_directory(staging)?;
     copy_replace(
         &source.join(UPDATE_PACKAGE_FILE),
         &staging.join(UPDATE_PACKAGE_FILE),
@@ -1525,13 +1526,20 @@ fn install_persistence() -> Result<()> {
 
     let program_data = env::var_os("ProgramData").ok_or("ProgramData is unavailable")?;
     let persistence_dir = state_dir(Path::new(&program_data));
+    let state_parent = persistence_dir
+        .parent()
+        .ok_or("persistence state has no parent directory")?;
+    reject_reparse_components(state_parent, Path::new(&program_data))?;
+    fs::create_dir_all(state_parent)?;
+    protect_directory(state_parent)?;
+    reject_reparse_components(&persistence_dir, Path::new(&program_data))?;
     fs::create_dir_all(&persistence_dir)?;
     protect_directory(
         supervisor
             .parent()
             .ok_or("supervisor has no installation directory")?,
     )?;
-    protect_directory(&persistence_dir)?;
+    protect_private_directory(&persistence_dir)?;
     // An administrator-run install is always allowed to clear a previously
     // failed automatic version and repair/reinstall the current package.
     let _ = fs::remove_file(persistence_dir.join(UPDATE_FAILED_VERSION_FILE));
@@ -1539,6 +1547,7 @@ fn install_persistence() -> Result<()> {
         marker_path(Path::new(&program_data)),
         app_path.as_os_str().to_string_lossy().as_bytes(),
     )?;
+    protect_readable_file(&marker_path(Path::new(&program_data)))?;
     write_installed_state(&app_path)?;
 
     // The package payload and privileged helpers are now installed. Remove the
@@ -1808,20 +1817,59 @@ fn remove_service() -> Result<()> {
 }
 
 fn protect_directory(path: &Path) -> Result<()> {
-    let status = std::process::Command::new("icacls.exe")
-        .arg(path)
-        .args([
-            "/inheritance:r",
-            "/grant:r",
-            "*S-1-5-18:(OI)(CI)F",
-            "*S-1-5-32-544:(OI)(CI)F",
-            "*S-1-5-32-545:(OI)(CI)RX",
-        ])
-        .status()?;
-    if status.success() {
-        Ok(())
+    protect_path(path, &["*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F", "*S-1-5-32-545:(OI)(CI)RX"])
+}
+
+fn protect_private_directory(path: &Path) -> Result<()> {
+    protect_path(path, &["*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F"])
+}
+
+fn protect_readable_file(path: &Path) -> Result<()> {
+    protect_path(path, &["*S-1-5-18:F", "*S-1-5-32-544:F", "*S-1-5-32-545:R"])
+}
+
+fn protect_path(path: &Path, grants: &[&str]) -> Result<()> {
+    reject_reparse(path)?;
+    for args in [
+        vec!["/reset"],
+        vec!["/inheritance:r"],
+        vec!["/setowner", "*S-1-5-32-544"],
+    ] {
+        run_icacls(path, &args)?;
+    }
+    let mut grant_args = vec!["/grant:r"];
+    grant_args.extend_from_slice(grants);
+    run_icacls(path, &grant_args)
+}
+
+fn run_icacls(path: &Path, args: &[&str]) -> Result<()> {
+    let status = Command::new("icacls.exe").arg(path).args(args).status()?;
+    status
+        .success()
+        .then_some(())
+        .ok_or_else(|| format!("icacls failed for {} with {status}", path.display()).into())
+}
+
+fn reject_reparse_components(path: &Path, trusted_root: &Path) -> Result<()> {
+    let mut current = Some(path);
+    while let Some(component) = current {
+        if component.exists() {
+            reject_reparse(component)?;
+        }
+        if path_eq(component, trusted_root) {
+            return Ok(());
+        }
+        current = component.parent();
+    }
+    Err("persistence path is outside ProgramData".into())
+}
+
+fn reject_reparse(path: &Path) -> Result<()> {
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    if fs::symlink_metadata(path)?.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        Err(format!("persistence path contains a reparse point: {}", path.display()).into())
     } else {
-        Err(format!("icacls failed for {} with {status}", path.display()).into())
+        Ok(())
     }
 }
 
