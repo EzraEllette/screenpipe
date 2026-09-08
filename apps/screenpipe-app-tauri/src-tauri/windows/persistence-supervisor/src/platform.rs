@@ -43,7 +43,7 @@ use windows::Win32::System::RemoteDesktop::{
     WTSGetActiveConsoleSessionId, WTSQueryUserToken, WTS_CURRENT_SERVER_HANDLE, WTS_SESSION_INFOW,
 };
 use windows::Win32::System::Threading::{
-    CreateProcessAsUserW, CreateProcessW, GetExitCodeProcess, OpenProcess,
+    CreateProcessAsUserW, CreateProcessW, GetExitCodeProcess, GetProcessTimes, OpenProcess,
     QueryFullProcessImageNameW, ResumeThread, WaitForSingleObject, CREATE_NEW_PROCESS_GROUP,
     CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, PROCESS_INFORMATION, PROCESS_NAME_WIN32,
     PROCESS_QUERY_LIMITED_INFORMATION, STARTUPINFOW,
@@ -571,14 +571,28 @@ fn launch_update_runner(staging: &Path) -> Result<bool> {
 }
 
 fn active_runner_pid(runner_state: &Path, recovery: &Path) -> Option<u32> {
-    let pid = fs::read_to_string(runner_state)
-        .ok()?
-        .trim()
-        .parse::<u32>()
-        .ok()?;
-    process_identity(pid)
-        .is_some_and(|(_, path)| path_eq(&path, recovery))
-        .then_some(pid)
+    let state = fs::read_to_string(runner_state).ok()?;
+    let (pid, created) = parse_runner_identity(state.trim())?;
+    (process_identity(pid).is_some_and(|(_, path)| path_eq(&path, recovery))
+        && process_creation_time(pid).is_some_and(|actual| actual == created))
+    .then_some(pid)
+}
+
+fn parse_runner_identity(value: &str) -> Option<(u32, u64)> {
+    let (pid, created) = value.split_once(':')?;
+    Some((pid.parse().ok()?, created.parse().ok()?))
+}
+
+fn process_creation_time(pid: u32) -> Option<u64> {
+    let process = OwnedHandle::new(unsafe {
+        OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?
+    });
+    let mut created = Default::default();
+    let mut exited = Default::default();
+    let mut kernel = Default::default();
+    let mut user = Default::default();
+    unsafe { GetProcessTimes(process.0, &mut created, &mut exited, &mut kernel, &mut user) }.ok()?;
+    Some(((created.dwHighDateTime as u64) << 32) | created.dwLowDateTime as u64)
 }
 
 fn recovery_supervisor_path() -> Result<PathBuf> {
@@ -661,10 +675,10 @@ fn watch_update_guard() -> Result<()> {
     if fs::read_to_string(&runner_state)?.trim() != "starting" {
         return Err("recovery guard ownership was not claimed".into());
     }
-    durable_write(
-        &runner_state,
-        format!("{}\n", std::process::id()).as_bytes(),
-    )?;
+    let guard_pid = std::process::id();
+    let guard_created = process_creation_time(guard_pid)
+        .ok_or("recovery guard creation identity is unavailable")?;
+    durable_write(&runner_state, format!("{guard_pid}:{guard_created}\n").as_bytes())?;
     durable_write(&staging.join(UPDATE_RUNNER_READY_FILE), b"ready\n")?;
     let lifecycle_deadline = Instant::now() + Duration::from_secs(INSTALLER_TIMEOUT_SECONDS);
     for attempt in 0..MAX_UPDATE_ATTEMPTS {
@@ -2195,5 +2209,13 @@ mod tests {
         assert!(service_status(ServiceState::Stopped)
             .controls_accepted
             .is_empty());
+    }
+
+    #[test]
+    fn runner_identity_requires_pid_and_process_creation_time() {
+        assert_eq!(parse_runner_identity("123:456"), Some((123, 456)));
+        assert_eq!(parse_runner_identity("123"), None);
+        assert_eq!(parse_runner_identity("123:not-a-time"), None);
+        assert_ne!(parse_runner_identity("123:456"), Some((123, 457)));
     }
 }
