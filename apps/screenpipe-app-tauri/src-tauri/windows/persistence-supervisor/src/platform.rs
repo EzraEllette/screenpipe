@@ -53,7 +53,7 @@ use crate::{
     accepted_update_action, is_path_within, launch_decision, log_path, marker_path, path_eq,
     policy_disabled_path, policy_enforcement_from_exit_code, select_active_session, state_dir,
     AcceptedUpdateAction, AcceptedUpdateTransaction, LaunchDecision, SnapshotFile, UpdateRequest,
-    APP_EXE, INSTALLED_STATE_FILE, POLICY_REFRESH_SECONDS, RECHECK_SECONDS,
+    APP_EXE, INSTALLED_STATE_FILE, MAX_UPDATE_ATTEMPTS, POLICY_REFRESH_SECONDS, RECHECK_SECONDS,
     RECOVERY_SUPERVISOR_FILE, REMOVER_EXE, SERVICE_DISPLAY_NAME, SERVICE_NAME, SUPERVISOR_EXE,
     UPDATE_FAILED_VERSION_FILE, UPDATE_PACKAGE_FILE, UPDATE_REQUEST_DIR, UPDATE_REQUEST_FILE,
     UPDATE_RUNNER_READY_FILE, UPDATE_RUNNER_STATE_FILE, UPDATE_SIGNATURE_FILE, UPDATE_SNAPSHOT_DIR,
@@ -121,6 +121,7 @@ pub fn run_supervisor_command() -> Result<()> {
         Some("prepare-upgrade") => prepare_upgrade(),
         Some("remove") => remove_persistence(),
         Some("watch-update") => watch_update_resilient(),
+        Some("watch-update-guard") => watch_update_guard(),
         Some(command) => Err(format!("unknown command: {command}").into()),
         None => {
             service_dispatcher::start(SERVICE_NAME, ffi_service_main)?;
@@ -542,7 +543,7 @@ fn launch_update_runner(staging: &Path) -> Result<bool> {
     }
     let recovery = prepare_recovery_service()?;
     Command::new(&recovery)
-        .arg("watch-update")
+        .arg("watch-update-guard")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -666,6 +667,35 @@ fn watch_update_resilient() -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn watch_update_guard() -> Result<()> {
+    let program_data = env::var_os("ProgramData").ok_or("ProgramData is unavailable")?;
+    let staging = state_dir(Path::new(&program_data)).join(UPDATE_STAGING_DIR);
+    let transaction_path = staging.join(UPDATE_TRANSACTION_FILE);
+    let runner_state = staging.join(UPDATE_RUNNER_STATE_FILE);
+    let recovery = env::current_exe()?;
+    for attempt in 0..MAX_UPDATE_ATTEMPTS {
+        if attempt > 0 {
+            durable_write(&runner_state, b"starting\n")?;
+        }
+        let status = Command::new(&recovery).arg("watch-update").status()?;
+        if !transaction_path.is_file() {
+            return Ok(());
+        }
+        log_event(
+            "warn",
+            "update_worker_restarted",
+            &format!("attempt={} status={status}", attempt + 1),
+        );
+        thread::sleep(Duration::from_secs(1));
+    }
+    let transaction: AcceptedUpdateTransaction =
+        serde_json::from_slice(&fs::read(&transaction_path)?)?;
+    let app_path = installed_app_path()?;
+    restore_pre_update_snapshot(&app_path, &staging, &transaction)?;
+    latch_failed_update(&staging, &runner_state, &transaction.request.version)?;
+    reconcile_installed_service(&app_path)
 }
 
 fn run_update_installer(staging: &Path) -> Result<()> {
