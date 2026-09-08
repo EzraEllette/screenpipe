@@ -1,3 +1,6 @@
+// screenpipe — AI that knows everything you've seen, said, or heard
+// https://screenpipe.com
+
 /*
 ** 2022-08-27
 **
@@ -995,6 +998,8 @@ static int recoverOpenOutput(sqlite3_recover *p){
   if( sqlite3_open_v2(p->zUri, &db, flags, 0) ){
     recoverDbError(p, db);
   }
+
+  recoverExec(p, db, "PRAGMA foreign_keys = off");
 
   /* Register the sqlite_dbdata and sqlite_dbptr virtual table modules.
   ** These two are registered with the output database handle - this

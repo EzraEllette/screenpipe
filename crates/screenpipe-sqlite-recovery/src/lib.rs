@@ -278,6 +278,42 @@ mod tests {
     }
 
     #[test]
+    fn recovers_foreign_key_child_when_parent_row_is_unavailable() {
+        // Page-level recovery must salvage every readable row. The higher-level
+        // screenpipe-db verifier still rejects a candidate with unresolved
+        // foreign-key violations before it can replace the quarantined source.
+        let directory = tempfile::tempdir().expect("temporary recovery directory");
+        let source = directory.path().join("source.sqlite");
+        let destination = directory.path().join("destination.sqlite");
+        let connection = Connection::open(&source).expect("open source");
+        connection
+            .execute_batch(
+                "PRAGMA foreign_keys = OFF;\
+                 CREATE TABLE children (\
+                   id INTEGER PRIMARY KEY,\
+                   parent_id INTEGER NOT NULL REFERENCES parents(id)\
+                     DEFERRABLE INITIALLY DEFERRED\
+                 );\
+                 CREATE TABLE parents (id INTEGER PRIMARY KEY);\
+                 INSERT INTO children VALUES (1, 1);",
+            )
+            .expect("seed related rows");
+        drop(connection);
+
+        recover_database(&source, &destination).expect("recover foreign-key relationships");
+
+        let recovered = Connection::open_with_flags(&destination, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .expect("open recovered database");
+        assert_eq!(
+            recovered
+                .query_row("SELECT COUNT(*) FROM children", [], |row| row
+                    .get::<_, i64>(0))
+                .expect("count recovered children"),
+            1
+        );
+    }
+
+    #[test]
     fn salvages_rows_when_an_index_page_is_corrupt() {
         let directory = tempfile::tempdir().expect("temporary recovery directory");
         let source = directory.path().join("corrupt.sqlite");

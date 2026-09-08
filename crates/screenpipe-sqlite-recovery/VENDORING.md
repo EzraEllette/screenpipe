@@ -11,8 +11,14 @@ Source archive:
 Vendored upstream files and SHA-256 digests:
 
 - `dbdata.c`: `0a57eae22b51507c28f6c647fba00ccacd39b5aaf3393dfe9435fb04810a6e0e`
-- `sqlite3recover.c`: `bc56c1131dfdc979fd93a7e013856f4c2a98570c722c069600f6c66d2d47743f`
+- `sqlite3recover.c`: `2b93163ec8af9a3667881b1aa1835a494ff6c6d91ba898790cade67225e203fd`
 - `sqlite3recover.h`: `c088088d15af055304e931842f7c197024d46ff1b7077912ec42149e9fa4f9bb`
+
+`sqlite3recover.c` carries the required Screenpipe source header and one local
+integration patch: the file-output connection disables foreign-key enforcement
+before recovery writes, matching the SQL emitted by the extension's
+callback-output mode. The unpatched upstream digest is
+`bc56c1131dfdc979fd93a7e013856f4c2a98570c722c069600f6c66d2d47743f`.
 
 When the bundled SQLite version changes, replace these files from the matching
 official SQLite tag, update the digests above, and run the recovery tests on
