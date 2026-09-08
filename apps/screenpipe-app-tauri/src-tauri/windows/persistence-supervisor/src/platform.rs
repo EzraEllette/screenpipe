@@ -32,8 +32,8 @@ use windows::Win32::System::Diagnostics::ToolHelp::{
 };
 use windows::Win32::System::Environment::{CreateEnvironmentBlock, DestroyEnvironmentBlock};
 use windows::Win32::System::JobObjects::{
-    AssignProcessToJobObject, CreateJobObjectW, QueryInformationJobObject, TerminateJobObject,
-    JobObjectBasicAccountingInformation, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
+    AssignProcessToJobObject, CreateJobObjectW, JobObjectBasicAccountingInformation,
+    QueryInformationJobObject, TerminateJobObject, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
 };
 use windows::Win32::System::RemoteDesktop::{
     ProcessIdToSessionId, WTSActive, WTSEnumerateSessionsW, WTSFreeMemory,
@@ -41,8 +41,7 @@ use windows::Win32::System::RemoteDesktop::{
 };
 use windows::Win32::System::Threading::{
     CreateProcessAsUserW, GetCurrentProcess, OpenProcess, QueryFullProcessImageNameW,
-    CREATE_NEW_PROCESS_GROUP,
-    CREATE_UNICODE_ENVIRONMENT, PROCESS_INFORMATION, PROCESS_NAME_WIN32,
+    CREATE_NEW_PROCESS_GROUP, CREATE_UNICODE_ENVIRONMENT, PROCESS_INFORMATION, PROCESS_NAME_WIN32,
     PROCESS_QUERY_LIMITED_INFORMATION, STARTUPINFOW,
 };
 use windows_service::define_windows_service;
@@ -676,7 +675,10 @@ fn watch_update_guard() -> Result<()> {
     if fs::read_to_string(&runner_state)?.trim() != "starting" {
         return Err("recovery guard ownership was not claimed".into());
     }
-    durable_write(&runner_state, format!("{}\n", std::process::id()).as_bytes())?;
+    durable_write(
+        &runner_state,
+        format!("{}\n", std::process::id()).as_bytes(),
+    )?;
     durable_write(&staging.join(UPDATE_RUNNER_READY_FILE), b"ready\n")?;
     for attempt in 0..MAX_UPDATE_ATTEMPTS {
         let job_name = format!(
@@ -1817,11 +1819,29 @@ fn remove_service() -> Result<()> {
 }
 
 fn protect_directory(path: &Path) -> Result<()> {
-    protect_path(path, &["*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F", "*S-1-5-32-545:(OI)(CI)RX"])
+    protect_path(
+        path,
+        &[
+            "*S-1-5-18:F",
+            "*S-1-5-18:(OI)(CI)F",
+            "*S-1-5-32-544:F",
+            "*S-1-5-32-544:(OI)(CI)F",
+            "*S-1-5-32-545:RX",
+            "*S-1-5-32-545:(OI)(CI)RX",
+        ],
+    )
 }
 
 fn protect_private_directory(path: &Path) -> Result<()> {
-    protect_path(path, &["*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F"])
+    protect_path(
+        path,
+        &[
+            "*S-1-5-18:F",
+            "*S-1-5-18:(OI)(CI)F",
+            "*S-1-5-32-544:F",
+            "*S-1-5-32-544:(OI)(CI)F",
+        ],
+    )
 }
 
 fn protect_readable_file(path: &Path) -> Result<()> {
@@ -1844,7 +1864,13 @@ fn protect_path(path: &Path, grants: &[&str]) -> Result<()> {
     // installs only the intended rules.
     run_icacls(
         path,
-        &["/grant:r", "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F"],
+        &[
+            "/grant:r",
+            "*S-1-5-18:F",
+            "*S-1-5-18:(OI)(CI)F",
+            "*S-1-5-32-544:F",
+            "*S-1-5-32-544:(OI)(CI)F",
+        ],
     )?;
     run_icacls(path, &["/inheritance:r"])?;
     let mut grant_args = vec!["/grant:r"];
@@ -1877,7 +1903,11 @@ fn reject_reparse_components(path: &Path, trusted_root: &Path) -> Result<()> {
 fn reject_reparse(path: &Path) -> Result<()> {
     const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
     if fs::symlink_metadata(path)?.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-        Err(format!("persistence path contains a reparse point: {}", path.display()).into())
+        Err(format!(
+            "persistence path contains a reparse point: {}",
+            path.display()
+        )
+        .into())
     } else {
         Ok(())
     }
