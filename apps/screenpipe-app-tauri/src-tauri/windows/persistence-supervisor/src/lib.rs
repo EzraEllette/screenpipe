@@ -19,6 +19,11 @@ pub const UPDATE_SIGNATURE_FILE: &str = "screenpipe-enterprise-persistent.exe.si
 pub const RECOVERY_SUPERVISOR_FILE: &str = "recovery-supervisor.exe";
 pub const UPDATE_TRANSACTION_FILE: &str = "accepted-transaction.json";
 pub const UPDATE_RUNNER_READY_FILE: &str = "runner-ready";
+pub const UPDATE_RUNNER_ACK_FILE: &str = "runner-ready-observed";
+pub const UPDATE_RUNNER_STATE_FILE: &str = "runner.json";
+pub const UPDATE_FAILED_VERSION_FILE: &str = "failed-version";
+pub const UPDATE_SNAPSHOT_DIR: &str = "pre-update";
+pub const INSTALLED_STATE_FILE: &str = "installed-state.json";
 pub const MAX_UPDATE_ATTEMPTS: u8 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -34,25 +39,51 @@ pub struct UpdateRequest {
 pub struct AcceptedUpdateTransaction {
     pub request: UpdateRequest,
     pub attempts: u8,
+    pub snapshot_version: String,
+    pub app_sha256: String,
+    pub supervisor_sha256: String,
+    pub remover_sha256: String,
+    pub snapshot_files: Vec<SnapshotFile>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SnapshotFile {
+    pub path: String,
+    pub sha256: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AcceptedUpdateAction {
     Install,
     ReconcileInstalled,
+    ReconcileNewer,
+    RestoreSnapshot,
     Exhausted,
 }
 
 pub fn accepted_update_action(
     transaction: &AcceptedUpdateTransaction,
-    installed_version: &str,
+    installed_version: Option<&str>,
+    installation_complete: bool,
 ) -> Result<AcceptedUpdateAction, &'static str> {
-    let installed = semver::Version::parse(installed_version)
-        .map_err(|_| "installed version is not semantic versioning")?;
     let requested = semver::Version::parse(&transaction.request.version)
         .map_err(|_| "requested version is invalid")?;
-    if installed == requested {
+    let Some(installed_version) = installed_version else {
+        return Ok(AcceptedUpdateAction::RestoreSnapshot);
+    };
+    let installed = match semver::Version::parse(installed_version) {
+        Ok(version) => version,
+        Err(_) => return Ok(AcceptedUpdateAction::RestoreSnapshot),
+    };
+    if installed > requested {
+        return Ok(AcceptedUpdateAction::ReconcileNewer);
+    }
+    if installed == requested && installation_complete {
         return Ok(AcceptedUpdateAction::ReconcileInstalled);
+    }
+    if installed == requested {
+        return Ok(AcceptedUpdateAction::RestoreSnapshot);
     }
     if transaction.attempts >= MAX_UPDATE_ATTEMPTS {
         return Ok(AcceptedUpdateAction::Exhausted);
@@ -340,18 +371,43 @@ mod tests {
         let mut transaction = AcceptedUpdateTransaction {
             request,
             attempts: 0,
+            snapshot_version: "2.7.9".into(),
+            app_sha256: "a".into(),
+            supervisor_sha256: "b".into(),
+            remover_sha256: "c".into(),
+            snapshot_files: Vec::new(),
         };
         assert_eq!(
-            accepted_update_action(&transaction, "2.7.9"),
+            accepted_update_action(&transaction, Some("2.7.9"), true),
             Ok(AcceptedUpdateAction::Install)
         );
         assert_eq!(
-            accepted_update_action(&transaction, "2.8.0"),
+            accepted_update_action(&transaction, Some("2.8.0"), true),
             Ok(AcceptedUpdateAction::ReconcileInstalled)
+        );
+        assert_eq!(
+            accepted_update_action(&transaction, Some("2.9.0"), true),
+            Ok(AcceptedUpdateAction::ReconcileNewer)
+        );
+        assert_eq!(
+            accepted_update_action(&transaction, None, false),
+            Ok(AcceptedUpdateAction::RestoreSnapshot)
+        );
+        assert_eq!(
+            accepted_update_action(&transaction, Some("2.8.0"), false),
+            Ok(AcceptedUpdateAction::RestoreSnapshot)
         );
         transaction.attempts = MAX_UPDATE_ATTEMPTS;
         assert_eq!(
-            accepted_update_action(&transaction, "2.7.9"),
+            accepted_update_action(&transaction, Some("2.8.0"), true),
+            Ok(AcceptedUpdateAction::ReconcileInstalled)
+        );
+        assert_eq!(
+            accepted_update_action(&transaction, Some("2.9.0"), true),
+            Ok(AcceptedUpdateAction::ReconcileNewer)
+        );
+        assert_eq!(
+            accepted_update_action(&transaction, Some("2.7.9"), true),
             Ok(AcceptedUpdateAction::Exhausted)
         );
     }
