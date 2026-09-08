@@ -1833,7 +1833,7 @@ fn protect_path(path: &Path, grants: &[&str]) -> Result<()> {
     let takeown = Command::new("takeown.exe")
         .args(["/F"])
         .arg(path)
-        .args(["/A", "/D", "Y"])
+        .arg("/A")
         .status()?;
     if !takeown.success() {
         return Err(format!("takeown failed for {} with {takeown}", path.display()).into());
