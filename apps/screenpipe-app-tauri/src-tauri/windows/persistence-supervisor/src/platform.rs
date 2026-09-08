@@ -1830,11 +1830,15 @@ fn protect_readable_file(path: &Path) -> Result<()> {
 
 fn protect_path(path: &Path, grants: &[&str]) -> Result<()> {
     reject_reparse(path)?;
-    for args in [
-        vec!["/reset"],
-        vec!["/inheritance:r"],
-        vec!["/setowner", "*S-1-5-32-544"],
-    ] {
+    let takeown = Command::new("takeown.exe")
+        .args(["/F"])
+        .arg(path)
+        .args(["/A", "/D", "Y"])
+        .status()?;
+    if !takeown.success() {
+        return Err(format!("takeown failed for {} with {takeown}", path.display()).into());
+    }
+    for args in [vec!["/reset"], vec!["/inheritance:r"]] {
         run_icacls(path, &args)?;
     }
     let mut grant_args = vec!["/grant:r"];
