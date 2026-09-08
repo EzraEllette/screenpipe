@@ -1838,6 +1838,13 @@ fn protect_path(path: &Path, grants: &[&str]) -> Result<()> {
     if !takeown.success() {
         return Err(format!("takeown failed for {} with {takeown}", path.display()).into());
     }
+    // Keep WRITE_DAC while /reset and /inheritance:r remove every hostile
+    // explicit and inherited ACE. The final /grant:r below then installs only
+    // the intended rules.
+    run_icacls(
+        path,
+        &["/grant:r", "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F"],
+    )?;
     for args in [vec!["/reset"], vec!["/inheritance:r"]] {
         run_icacls(path, &args)?;
     }
