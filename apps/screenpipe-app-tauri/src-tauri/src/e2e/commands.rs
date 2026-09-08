@@ -249,8 +249,8 @@ async fn active_meeting_id(state: State<'_, RecordingState>) -> Result<Option<i6
 /// Returns `None` off macOS and whenever the native panel is unavailable, so a
 /// spec can tell "not this platform" apart from "card is hidden".
 #[command]
-fn native_meeting_overlay_state() -> Option<crate::native_shortcut_reminder::MeetingOverlayPanelState>
-{
+fn native_meeting_overlay_state(
+) -> Option<crate::native_shortcut_reminder::MeetingOverlayPanelState> {
     crate::native_shortcut_reminder::meeting_overlay_state()
 }
 
@@ -656,6 +656,20 @@ async fn inject_db_hard_fault(
 }
 
 #[command]
+async fn inject_db_transient_fault(
+    state: State<'_, RecordingState>,
+) -> Result<serde_json::Value, String> {
+    super::seeds::inject_db_transient_fault(state).await
+}
+
+#[command]
+async fn db_retry_write_probe(
+    state: State<'_, RecordingState>,
+) -> Result<serde_json::Value, String> {
+    super::seeds::db_retry_write_probe(state).await
+}
+
+#[command]
 fn db_hard_fault_state(state: State<'_, RecordingState>) -> Result<serde_json::Value, String> {
     super::seeds::db_hard_fault_state(state)
 }
@@ -744,6 +758,8 @@ pub(super) fn plugin() -> TauriPlugin<Wry> {
             owned_browser_visible,
             owned_browser_detach,
             inject_db_hard_fault,
+            inject_db_transient_fault,
+            db_retry_write_probe,
             db_hard_fault_state,
             seed_flags,
             capture_pi_start_error,

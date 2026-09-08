@@ -68,7 +68,7 @@ impl LocalApiContext {
 /// Build a `RecordingConfig` from the current settings store.
 fn build_config(app: &tauri::AppHandle) -> Result<RecordingConfig, String> {
     let store = SettingsStore::get(app).ok().flatten().unwrap_or_default();
-    let (data_dir, _) = config::resolve_data_dir(&store.data_dir)
+    let data_dir = config::resolve_data_dir(&store.data_dir)
         .map_err(|e| format!("failed to prepare recording data directory: {e}"))?;
     Ok(store.to_recording_config(data_dir))
 }
@@ -867,6 +867,31 @@ pub async fn spawn_screenpipe(
     spawn_screenpipe_inner(&state, app).await
 }
 
+/// Automatic retry preserves capture intent; unlike the user command it must
+/// not turn recording back on after the user stopped it.
+pub(crate) async fn retry_screenpipe(
+    state: State<'_, RecordingState>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    let Ok(_lifecycle_guard) = state.server_lifecycle.try_lock() else {
+        return Ok(());
+    };
+    if !state.capture_intended() || crate::process_exit::QUIT_REQUESTED.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+    // The watchdog owns retry timing. Do not enter the user command's
+    // cooldown path, which schedules a frontend restart request later.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let last_spawn = state.last_spawn_epoch.load(Ordering::SeqCst);
+    if last_spawn > 0 && now.saturating_sub(last_spawn) < RESTART_COOLDOWN_SECS {
+        return Ok(());
+    }
+    spawn_screenpipe_inner(&state, app).await
+}
+
 async fn spawn_screenpipe_inner(
     state: &RecordingState,
     app: tauri::AppHandle,
@@ -1163,15 +1188,20 @@ async fn spawn_screenpipe_inner(
         permissions_check.microphone
     );
 
-    let (data_dir, fell_back) = config::resolve_data_dir(&store.data_dir)
-        .map_err(|e| format!("failed to prepare recording data directory: {e}"))?;
-    if fell_back {
-        warn!(
-            "Custom data dir '{}' unavailable, using default: {}",
-            store.data_dir,
-            data_dir.display()
-        );
+    if let Ok(selected) = config::selected_recording_data_dir(&store.data_dir) {
+        crate::db_relaunch::set_active_database(&selected);
     }
+    let data_dir = match config::resolve_data_dir(&store.data_dir) {
+        Ok(resolved) => resolved,
+        Err(error) => {
+            let message = format!("Failed to initialize database: cannot access recording data directory: {error}");
+            crate::health::set_boot_error(&message);
+            state.is_starting.store(false, Ordering::SeqCst);
+            state.is_starting_capture.store(false, Ordering::SeqCst);
+            return Err(message);
+        }
+    };
+    crate::db_relaunch::set_active_database(&data_dir);
 
     // Resolve the API auth key exactly once per process via the shared
     // helper and seed the cache before `to_recording_config` reads it. The

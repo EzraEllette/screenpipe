@@ -43,7 +43,7 @@ fn preflight_existing_database_header(path: &Path) -> Result<(), SqlxError> {
     file.by_ref()
         .take(SQLITE_HEADER_BYTES as u64)
         .read_exact(&mut header)
-        .map_err(startup_not_a_database)?;
+        .map_err(SqlxError::Io)?;
     if &header[..16] != b"SQLite format 3\0" {
         return Err(startup_not_a_database("invalid SQLite header magic"));
     }
@@ -128,31 +128,23 @@ impl DatabaseManager {
         // write_queue's runtime recovery (see ensure_db_parent_dir).
         crate::write_queue::ensure_db_parent_dir(database_path, true);
 
-        // Arm a preallocated fail-closed marker before SQLite touches the
-        // database. If the filesystem later reports SQLITE_FULL, the hard-fault
-        // path can durably quarantine this generation with a metadata-only
-        // rename even when allocating a new marker would fail.
+        // Preallocate incident metadata before opening SQLite so disk-full
+        // failures can request verification with a metadata-only rename.
+        // The incident does not claim that the database is corrupt.
         let database_file = Path::new(database_path);
+        let _lifecycle = crate::recovery::database_lifecycle(database_file).await;
         screenpipe_sqlite_coordinator::prepare_sqlite_quarantine_reserve(database_file).map_err(
             |error| {
                 SqlxError::Protocol(format!(
-                    "failed to arm durable SQLite quarantine for {}: {error}",
+                    "failed to arm SQLite verification incident for {}: {error}",
                     database_file.display()
                 ))
             },
         )?;
 
-        // A hard fault is durable for a physical path. Rebuilding a manager or
-        // relaunching the app must not reopen the same potentially damaged
-        // DB/WAL/SHM generation. A malformed marker also maps to the fail-closed
-        // IOERR class in the coordinator.
-        if let Some(code) =
-            screenpipe_sqlite_coordinator::registered_sqlite_hard_fault(database_path)
-        {
-            return Err(SqlxError::Protocol(format!(
-                "SQLite database remains durably quarantined after a hard fault (code: {code}); run `screenpipe db recover` while the app is closed"
-            )));
-        }
+        // Retire the old connection generation and diagnose its committed data
+        // before admitting writes. Unavailable storage stays retryable.
+        crate::recovery::verify_database_before_reopen(database_file).await?;
 
         // Validate the fixed-size SQLite header before journal conversion,
         // checkpointing, migrations, or capture can mutate an existing file.
@@ -180,7 +172,7 @@ impl DatabaseManager {
             screenpipe_sqlite_coordinator::prepare_sqlite_quarantine_reserve(database_file)
                 .map_err(|error| {
                     SqlxError::Protocol(format!(
-                        "failed to identify fresh SQLite generation for durable quarantine: {error}"
+                        "failed to identify fresh SQLite generation for verification: {error}"
                     ))
                 })?;
         }
@@ -290,20 +282,31 @@ impl DatabaseManager {
             .await
             .map_err(|error| quarantine_startup_error(database_file, error))?;
 
+        crate::recovery::register_database_pool(database_file, &read_pool);
+
         // Write pool: dedicated to INSERT/UPDATE/DELETE via begin_immediate_with_retry().
         // Writes are serialized by write_semaphore so only 1 is active
         // at a time; extras absorb connection detach without killing the pool.
-        let write_pool = crate::write_queue::capture_pool_options()
+        let write_pool = match crate::write_queue::capture_pool_options()
             .max_connections(config.write_pool_max)
             .min_connections(1)
             .acquire_timeout(Duration::from_secs(10))
             .connect_with(connect_options.clone())
             .await
-            .map_err(|error| quarantine_startup_error(database_file, error))?;
+        {
+            Ok(pool) => pool,
+            Err(error) => {
+                // The registered reader must not pin this generation when a
+                // partial startup fails before a DatabaseManager owns cleanup.
+                read_pool.close().await;
+                return Err(quarantine_startup_error(database_file, error));
+            }
+        };
+        crate::recovery::register_database_pool(database_file, &write_pool);
 
-        // Recovery wiring: transient contention may rebuild a pool, but a typed
-        // IOERR/CORRUPT/FULL/NOTADB fault permanently closes this generation's
-        // admission and requests offline recovery through the app hook.
+        // Hard errors close this connection generation and request teardown.
+        // Fresh startup verifies the existing database before admitting a new
+        // writer; only confirmed physical damage requires separate-copy repair.
         let write_queue_health =
             crate::write_queue::WriteQueueHealth::for_database_path(database_path);
         let write_pool_rebuilder = crate::write_queue::WritePoolRebuilder::new(
@@ -1101,7 +1104,7 @@ mod shutdown_tests {
     }
 
     #[tokio::test]
-    async fn sqlite_full_is_process_lifetime_and_signals_recovery_once() {
+    async fn sqlite_full_signals_once_then_verified_storage_resumes() {
         let dir = tempfile::tempdir().expect("temp dir");
         let db_path = dir.path().join("full.sqlite");
         let database = DatabaseManager::new(
@@ -1132,24 +1135,22 @@ mod shutdown_tests {
         );
         database.close().await;
 
-        let replacement_error = match DatabaseManager::new(
+        assert!(!screenpipe_sqlite_coordinator::sqlite_quarantine_exists(&db_path));
+        let replacement = DatabaseManager::new(
             db_path.to_str().expect("utf-8 temp path"),
             DbConfig::for_tier(screenpipe_config::DeviceTier::Low),
         )
         .await
-        {
-            Ok(replacement) => {
-                replacement.close().await;
-                panic!("SQLITE_FULL path must remain quarantined in this process");
-            }
-            Err(error) => error,
-        };
-        assert!(
-            replacement_error
-                .to_string()
-                .contains("remains durably quarantined"),
-            "unexpected replacement error: {replacement_error}"
-        );
+        .expect("healthy database resumes after a disk-full observation");
+        replacement.insert_audio_chunk("/after/full", None).await.unwrap();
+        replacement.close().await;
+        assert!(writer_gate.is_closed(), "old writer admission remains retired");
+        let reopened = DatabaseManager::new(
+            db_path.to_str().unwrap(),
+            DbConfig::for_tier(screenpipe_config::DeviceTier::Low),
+        ).await.unwrap();
+        assert!(reopened.find_audio_chunk_id("/after/full").await.unwrap().is_some());
+        reopened.close().await;
     }
 
     #[tokio::test]
@@ -1184,7 +1185,7 @@ mod shutdown_tests {
             Some(26)
         );
 
-        let replacement_error = match DatabaseManager::new(
+        let _replacement_error = match DatabaseManager::new(
             db_path.to_str().expect("utf-8 temp path"),
             DbConfig::for_tier(screenpipe_config::DeviceTier::Low),
         )
@@ -1196,12 +1197,10 @@ mod shutdown_tests {
             }
             Err(error) => error,
         };
-        assert!(
-            replacement_error
-                .to_string()
-                .contains("remains durably quarantined"),
-            "unexpected replacement error: {replacement_error}"
-        );
+        let marker = screenpipe_sqlite_coordinator::read_sqlite_quarantine(&db_path)
+            .unwrap().expect("verified header damage is quarantined");
+        assert!(marker.confirmed_damage);
+        assert_eq!(std::fs::read(&db_path).unwrap(), wrong_page);
     }
 
     #[tokio::test]

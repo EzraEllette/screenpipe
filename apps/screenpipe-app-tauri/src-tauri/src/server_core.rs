@@ -330,10 +330,23 @@ impl ServerCore {
 
         // --- Database ---
         let local_data_dir = config.data_dir.clone();
+        crate::db_relaunch::set_active_database(&local_data_dir);
         let data_path = local_data_dir.join("data");
-        std::fs::create_dir_all(&data_path)
-            .map_err(|e| format!("Failed to create data dir: {}", e))?;
+        std::fs::create_dir_all(&data_path).map_err(|error| {
+            let message = format!("Failed to initialize database: cannot access data directory: {error}");
+            crate::health::set_boot_error(&message);
+            message
+        })?;
 
+        // A crash during repair may leave the committed WAL archived separately
+        // from the main file. Reconcile the swap before ordinary DB diagnosis.
+        let startup_guard = screenpipe_engine::cli::db::prepare_database_startup(&local_data_dir)
+            .await
+            .map_err(|error| {
+                let message = format!("Failed to initialize database: {error:#}");
+                crate::health::set_boot_error(&message);
+                message
+            })?;
         let db_path = format!("{}/db.sqlite", local_data_dir.to_string_lossy());
         crate::health::set_boot_phase(
             "migrating_database",
@@ -469,11 +482,16 @@ impl ServerCore {
             .openai_compatible_config(openai_compatible_config);
 
         crate::health::set_boot_phase("building_audio", Some("starting audio pipeline"));
-        let mut audio_manager = audio_manager_builder.build(db.clone()).await.map_err(|e| {
-            let msg = format!("Failed to build audio manager: {}", e);
-            crate::health::set_boot_error(&msg);
-            msg
-        })?;
+        let mut audio_manager = match audio_manager_builder.build(db.clone()).await {
+            Ok(manager) => manager,
+            Err(error) => {
+                let msg = format!("Failed to build audio manager: {error}");
+                crate::health::set_boot_error(&msg);
+                db.close().await;
+                screenpipe_secrets::close_all_secret_pools().await;
+                return Err(msg);
+            }
+        };
 
         // Wire audio → hot cache (only the timeline reads this cache, so skip
         // the per-transcript buffering when the timeline is disabled).
@@ -953,6 +971,8 @@ impl ServerCore {
                     format!("failed to bind port {}: {}", config.port, e)
                 };
                 crate::health::set_boot_error(&msg);
+                db.close().await;
+                screenpipe_secrets::close_all_secret_pools().await;
                 return Err(msg);
             }
         };
@@ -969,9 +989,15 @@ impl ServerCore {
                 let msg = format!("failed to construct local API router: {error}");
                 crate::health::set_boot_error(&msg);
                 crate::health::set_recording_status(crate::health::RecordingStatus::Error);
+                db.close().await;
+                screenpipe_secrets::close_all_secret_pools().await;
                 return Err(msg);
             }
         };
+
+        // Startup reconciliation excludes offline maintenance until the
+        // existing offline check can observe the validated, bound listener.
+        drop(startup_guard);
 
         let vision_manager_handle = server.vision_manager.clone();
 

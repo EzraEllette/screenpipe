@@ -277,6 +277,91 @@ mod tests {
     }
 
     #[test]
+    fn recovers_foreign_keys_without_requiring_parent_first_order() {
+        // Recovery walks pages, not foreign-key dependencies. Cover both
+        // cross-table references and a parent stored after its child by rowid.
+        for schema in [
+            "CREATE TABLE child (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES parent(id));\
+             CREATE TABLE grandchild (child_id INTEGER REFERENCES child(id) DEFERRABLE INITIALLY DEFERRED);\
+             CREATE TABLE parent (id INTEGER PRIMARY KEY);\
+             INSERT INTO parent VALUES (2);\
+             INSERT INTO child VALUES (1, 2);\
+             INSERT INTO grandchild VALUES (1);",
+            "CREATE TABLE child (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES parent(id));\
+             CREATE TABLE parent (id INTEGER PRIMARY KEY);\
+             INSERT INTO parent VALUES (2);\
+             INSERT INTO child VALUES (1, 2);",
+            "CREATE TABLE child (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES child(id));\
+             INSERT INTO child VALUES (2, NULL);\
+             INSERT INTO child VALUES (1, 2);",
+        ] {
+            let directory = tempfile::tempdir().expect("temporary recovery directory");
+            let source = directory.path().join("source.sqlite");
+            let destination = directory.path().join("destination.sqlite");
+            let connection = Connection::open(&source).expect("open source");
+            assert_eq!(
+                connection
+                    .query_row("PRAGMA foreign_keys", [], |row| row.get::<_, i64>(0))
+                    .expect("bundled foreign-key default"),
+                1
+            );
+            connection.execute_batch(schema).expect("seed valid references");
+            drop(connection);
+            let original = std::fs::read(&source).expect("read source bytes");
+
+            recover_database(&source, &destination).expect("recover valid foreign keys");
+
+            let recovered = Connection::open_with_flags(&destination, OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .expect("open recovered database");
+            let parent: i64 = recovered
+                .query_row("SELECT parent_id FROM child WHERE id = 1", [], |row| row.get(0))
+                .expect("child reference survives recovery");
+            assert_eq!(parent, 2);
+            let violations: i64 = recovered
+                .query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |row| row.get(0))
+                .expect("verify recovered references");
+            assert_eq!(violations, 0);
+            assert_eq!(
+                recovered
+                    .query_row("PRAGMA foreign_keys", [], |row| row.get::<_, i64>(0))
+                    .expect("new connections still enforce foreign keys"),
+                1
+            );
+            assert_eq!(std::fs::read(&source).expect("read source after recovery"), original);
+        }
+    }
+
+    #[test]
+    fn preserves_orphans_for_candidate_verification() {
+        let directory = tempfile::tempdir().expect("temporary recovery directory");
+        let source = directory.path().join("source.sqlite");
+        let destination = directory.path().join("destination.sqlite");
+        let connection = Connection::open(&source).expect("open source");
+        connection
+            .execute_batch(
+                "PRAGMA foreign_keys = OFF;\
+                 CREATE TABLE parent (id INTEGER PRIMARY KEY);\
+                 CREATE TABLE child (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES parent(id));\
+                 INSERT INTO child VALUES (1, 2);",
+            )
+            .expect("seed orphaned reference");
+        drop(connection);
+
+        recover_database(&source, &destination).expect("salvage candidate for verification");
+
+        let recovered = Connection::open_with_flags(&destination, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .expect("open recovered database");
+        let violations: i64 = recovered
+            .query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get(0)
+            })
+            .expect("verify recovered references");
+        // Salvage must not silently discard orphaned data to pass verification.
+        // Screenpipe's candidate verifier rejects this before installation.
+        assert_eq!(violations, 1);
+    }
+
+    #[test]
     fn salvages_rows_when_an_index_page_is_corrupt() {
         let directory = tempfile::tempdir().expect("temporary recovery directory");
         let source = directory.path().join("corrupt.sqlite");

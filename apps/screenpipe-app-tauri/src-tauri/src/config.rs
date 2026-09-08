@@ -6,7 +6,6 @@ use screenpipe_core::paths::{
     default_screenpipe_data_dir, ensure_spotlight_excluded, ensure_spotlight_excluded_best_effort,
 };
 use std::{fs, net::IpAddr, path::PathBuf};
-use tracing::warn;
 
 pub const SCREENPIPE_AI_GATEWAY_URL: &str =
     screenpipe_core::agents::pi::SCREENPIPE_API_URL;
@@ -114,47 +113,27 @@ pub async fn get_screenpipe_base_dir(app: tauri::AppHandle) -> Result<String, St
         .map_err(|e| e.to_string())
 }
 
-/// Resolve the recording data directory from the store's `data_dir` setting.
-///
-/// Returns `(resolved_path, fell_back)` where `fell_back` is true when the
-/// custom path was unusable and we silently fell back to default (~/.screenpipe or SCREENPIPE_DATA_DIR).
-pub fn resolve_data_dir(data_dir_setting: &str) -> anyhow::Result<(PathBuf, bool)> {
-    let default_path = default_screenpipe_data_dir();
-
-    // "default" or empty → use ~/.screenpipe
+/// Select the recording location without creating directories or substituting
+/// another database when the selected storage is temporarily unavailable.
+pub fn selected_recording_data_dir(data_dir_setting: &str) -> anyhow::Result<PathBuf> {
     if data_dir_setting.is_empty() || data_dir_setting == "default" {
-        fs::create_dir_all(default_path.join("data"))?;
-        ensure_spotlight_excluded_best_effort(&default_path);
-        return Ok((default_path, false));
+        return Ok(default_screenpipe_data_dir());
     }
-
     let path = PathBuf::from(data_dir_setting);
+    anyhow::ensure!(
+        path.is_absolute(),
+        "recording data directory must be an absolute path"
+    );
+    Ok(path)
+}
 
-    // Must be absolute
-    if !path.is_absolute() {
-        warn!(
-            "Custom data dir '{}' is not an absolute path, falling back to default",
-            data_dir_setting
-        );
-        fs::create_dir_all(default_path.join("data"))?;
-        ensure_spotlight_excluded_best_effort(&default_path);
-        return Ok((default_path, true));
-    }
-
-    // Try to create the data subdirectory
-    if let Err(e) = fs::create_dir_all(path.join("data")) {
-        warn!(
-            "Cannot create data dir at '{}': {}. Falling back to default",
-            path.display(),
-            e
-        );
-        fs::create_dir_all(default_path.join("data"))?;
-        ensure_spotlight_excluded_best_effort(&default_path);
-        return Ok((default_path, true));
-    }
-
+/// Prepare only the selected recording directory. Access failures stay errors
+/// so the database lifecycle can retry that same location when storage returns.
+pub fn resolve_data_dir(data_dir_setting: &str) -> anyhow::Result<PathBuf> {
+    let path = selected_recording_data_dir(data_dir_setting)?;
+    fs::create_dir_all(path.join("data"))?;
     ensure_spotlight_excluded_best_effort(&path);
-    Ok((path, false))
+    Ok(path)
 }
 
 /// Tauri command: validate that a path is usable as a data directory.
@@ -193,23 +172,38 @@ mod tests {
 
     #[test]
     fn test_resolve_default() {
-        let (path, fell_back) = resolve_data_dir("default").unwrap();
-        assert!(!fell_back);
-        assert!(path.ends_with(".screenpipe"));
+        let path = selected_recording_data_dir("default").unwrap();
+        assert_eq!(path, default_screenpipe_data_dir());
     }
 
     #[test]
     fn test_resolve_empty() {
-        let (path, fell_back) = resolve_data_dir("").unwrap();
-        assert!(!fell_back);
-        assert!(path.ends_with(".screenpipe"));
+        let path = selected_recording_data_dir("").unwrap();
+        assert_eq!(path, default_screenpipe_data_dir());
     }
 
     #[test]
-    fn test_resolve_relative_path_falls_back() {
-        let (path, fell_back) = resolve_data_dir("relative/path").unwrap();
-        assert!(fell_back);
-        assert!(path.ends_with(".screenpipe"));
+    fn test_resolve_relative_path_does_not_substitute_another_database() {
+        assert!(resolve_data_dir("relative/path").is_err());
+    }
+
+    #[test]
+    fn unavailable_custom_directory_retries_the_same_location() {
+        let root = tempfile::tempdir().unwrap();
+        let selected = root.path().join("recordings");
+        fs::write(&selected, b"temporary path obstruction").unwrap();
+        assert_eq!(
+            selected_recording_data_dir(selected.to_str().unwrap()).unwrap(),
+            selected
+        );
+        assert!(resolve_data_dir(selected.to_str().unwrap()).is_err());
+        fs::remove_file(&selected).unwrap();
+        assert_eq!(
+            resolve_data_dir(selected.to_str().unwrap()).unwrap(),
+            selected
+        );
+        assert!(selected.join("data").is_dir());
+        assert!(!selected.join("db.sqlite").exists());
     }
 
     #[test]
@@ -225,8 +219,7 @@ mod tests {
             assert!(!screenpipe_core::paths::is_spotlight_excluded(&tmp).unwrap());
         }
 
-        let (path, fell_back) = resolve_data_dir(tmp.to_str().unwrap()).unwrap();
-        assert!(!fell_back);
+        let path = resolve_data_dir(tmp.to_str().unwrap()).unwrap();
         assert_eq!(path, tmp);
         assert!(tmp.join("data").exists());
 

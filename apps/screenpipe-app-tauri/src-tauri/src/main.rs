@@ -1395,7 +1395,17 @@ async fn main() {
             }
 
             // Resolve data directory from user setting (custom dir or ~/.screenpipe)
-            let (data_dir, data_dir_fell_back) = config::resolve_data_dir(&store.data_dir)?;
+            let selected_data_dir = config::selected_recording_data_dir(&store.data_dir)?;
+            crate::db_relaunch::set_active_database(&selected_data_dir);
+            let data_dir = match config::resolve_data_dir(&store.data_dir) {
+                Ok(path) => path,
+                Err(error) => {
+                    let message = format!("Failed to initialize database: cannot access recording data directory: {error}");
+                    warn!("{message}; keeping the UI available while recording retries");
+                    crate::health::set_boot_error(&message);
+                    selected_data_dir
+                }
+            };
             info!("Recording data directory: {}", data_dir.display());
 
             // Pin SCREENPIPE_DATA_DIR to the *resolved* dir so every consumer of
@@ -1444,15 +1454,6 @@ async fn main() {
             // PostHog without sending the raw license key. No-op on consumer
             // builds; explicit MDM/support env vars still win when provided.
             enterprise_sync::configure_telemetry_context(&app_handle);
-
-            if data_dir_fell_back {
-                let app_handle_fb = app_handle.clone();
-                tauri::async_runtime::spawn(async move {
-                    // Small delay so the frontend window is ready to receive events
-                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                    let _ = app_handle_fb.emit("data-dir-fallback", ());
-                });
-            }
 
             // Attach non-sensitive settings to all future Sentry events
             if !telemetry_disabled {
@@ -1794,28 +1795,10 @@ async fn main() {
             //     let _ = app_handle.emit("vault-locked-on-startup", ());
             // }
 
-            let launch_db_path = data_dir.join("db.sqlite");
-            let launch_db_quarantined = screenpipe_db::sqlite_quarantine_exists(&launch_db_path);
-            if launch_db_quarantined {
-                // Preserve the cross-launch fail-closed boundary before any
-                // server, SQLite pool, watchdog, or capture thread is started.
-                crate::health::set_boot_error(
-                    "database remains quarantined after a SQLite hard fault; run `screenpipe db recover` while screenpipe is closed",
-                );
-                crate::health::set_recording_status(crate::health::RecordingStatus::Error);
-            }
-
             // Start server core + capture on a dedicated thread with its own tokio runtime
             // to avoid competing with Tauri's UI runtime.
             // Two-phase startup: ServerCore (DB + HTTP + pipes) then CaptureSession (vision + audio).
             'start_server: {
-                if launch_db_quarantined {
-                    info!(
-                        database = %launch_db_path.display(),
-                        "Skipping server and capture startup: durable SQLite quarantine is active"
-                    );
-                    break 'start_server;
-                }
                 let store_clone = store.clone();
                 let data_dir_clone = data_dir.clone();
                 if !crate::recording::recording_access_allowed(&store_clone) {
@@ -2012,6 +1995,7 @@ async fn main() {
                                 Ok(s) => s,
                                 Err(e) => {
                                     error!("Failed to start server core: {}", e);
+                                    crate::db_relaunch::note_respawn_failure(&app_for_db_wedge, &e).await;
                                     is_starting_clone.store(false, std::sync::atomic::Ordering::SeqCst);
                                     return;
                                 }
@@ -2208,37 +2192,6 @@ async fn main() {
             crate::meeting_live_notes::start(app_handle.clone());
             crate::meeting_stall_notifications::start(app_handle.clone());
             crate::db_recovery_notifications::start(app_handle.clone());
-            if launch_db_quarantined {
-                // A new process must preserve the same fail-closed state as the
-                // process that observed the hard fault — unless the fault was
-                // the transient I/O family and this generation still verifies
-                // healthy, in which case the fresh WAL index already undid the
-                // damage and parking recording until a human intervenes costs
-                // hours of capture for nothing. Verification runs off the setup
-                // thread: it reads the whole file, which is seconds on a large
-                // database, and the UI must not wait for it.
-                let self_heal_app = app_handle.clone();
-                let self_heal_db_path = launch_db_path.clone();
-                let notify_data_dir = data_dir.clone();
-                let surface_recovery = !app_ui_hidden && !headless_startup;
-                tauri::async_runtime::spawn(async move {
-                    if crate::db_self_heal::try_self_heal_at_launch(
-                        self_heal_app,
-                        self_heal_db_path,
-                    )
-                    .await
-                    {
-                        return;
-                    }
-                    crate::db_relaunch::surface_quarantined_recovery_at_launch(&launch_db_path)
-                        .await;
-                    if surface_recovery {
-                        crate::db_recovery_notifications::notify_quarantined_database(
-                            notify_data_dir,
-                        );
-                    }
-                });
-            }
             crate::disk_pressure_notifications::start(app_handle.clone());
 
             // Background ChatGPT OAuth token refresh — keeps access tokens

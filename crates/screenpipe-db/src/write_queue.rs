@@ -1141,8 +1141,20 @@ async fn drain_loop(
                 // (~ms) and idempotent; retried periodically until writes recover.
                 if reopen_every != 0 && consecutive_fatal.is_multiple_of(reopen_every) {
                     if let Some(rb) = &rebuilder {
+                        let _lifecycle = crate::recovery::database_lifecycle(std::path::Path::new(
+                            db_path.as_ref(),
+                        ))
+                        .await;
+                        if write_semaphore.is_closed() {
+                            write_pool.close().await;
+                            return;
+                        }
                         match rb.rebuild().await {
                             Ok(new_pool) => {
+                                crate::recovery::register_database_pool(
+                                    std::path::Path::new(db_path.as_ref()),
+                                    &new_pool,
+                                );
                                 let old = std::mem::replace(&mut write_pool, new_pool);
                                 old.close().await;
                                 health.note_reopen();
