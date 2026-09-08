@@ -30,6 +30,11 @@ const WINDOWS_STORE_RETRY_ATTEMPTS: usize = 101;
 fn is_retryable_windows_store_error(error: &(dyn std::error::Error + 'static)) -> bool {
     let mut source = Some(error);
     while let Some(current) = source {
+        if let Some(tauri_plugin_store::Error::Io(io_error)) =
+            current.downcast_ref::<tauri_plugin_store::Error>()
+        {
+            return matches!(io_error.raw_os_error(), Some(5 | 32 | 33));
+        }
         if let Some(io_error) = current.downcast_ref::<std::io::Error>() {
             return matches!(io_error.raw_os_error(), Some(5 | 32 | 33));
         }
