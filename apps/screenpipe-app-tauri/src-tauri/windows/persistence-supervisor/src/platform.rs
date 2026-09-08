@@ -2023,13 +2023,19 @@ foreach ($rule in $acl.Access) {
 }
 exit 0
 "#;
+    let encoded_script = base64::engine::general_purpose::STANDARD.encode(
+        VALIDATE_ACL
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>(),
+    );
     let status = Command::new("powershell.exe")
         .args([
             "-NoLogo",
             "-NoProfile",
             "-NonInteractive",
-            "-Command",
-            VALIDATE_ACL,
+            "-EncodedCommand",
+            &encoded_script,
         ])
         .env("SCREENPIPE_ACL_PATH", path)
         .stdin(Stdio::null())
