@@ -24,11 +24,12 @@ Enterprise policy and published-update validation described below.
   in the all-users Start menu.
 
 The marker is readable so the app can report persistence status. Transaction,
-policy, recovery, and snapshot state remains private to SYSTEM and
+policy, recovery, snapshot, and log state remains private to SYSTEM and
 Administrators. The installer grants full control on its protected directories
-to SYSTEM and Administrators. Standard users receive read and execute access only. The normal
-consumer and enterprise installers do not define the persistence build flag,
-install this service, or create the marker.
+to SYSTEM and Administrators. Standard users receive read and execute access
+only to installed application files. The normal consumer and enterprise
+installers do not define the persistence build flag, install this service, or
+create the marker.
 
 The service refreshes the Enterprise `enforcePersistence` policy every five
 minutes. An explicit `false` stops supervised relaunches while leaving the
@@ -66,10 +67,10 @@ During a persistent upgrade, a protected detached runner owns maintenance while
 the existing service yields. It preserves the marker and policy cache, keeps a
 verified pre-update snapshot of the complete Program Files application payload,
 including matching helpers, DLLs, and resources, and reconciles the running
-service to one coherent installed version. Interrupted or failed setup is
-arbitrates completed, newer, and exhausted transactions after the launching
-service observes the guard's ready handshake and yields, before any installer
-is launched after reboot. Setup registers and configures the replacement helper
+service to one coherent installed version. After the launching service observes
+the guard's ready acknowledgement and yields, the guard arbitrates completed,
+newer, and exhausted transactions before any installer is launched after reboot.
+Setup registers and configures the replacement helper
 without starting it while that trusted guard owns maintenance; normal fresh or
 administrator installs still start the service and wait for the supervised app.
 Failed setup is retried a bounded number of times and then restored from that snapshot, removing

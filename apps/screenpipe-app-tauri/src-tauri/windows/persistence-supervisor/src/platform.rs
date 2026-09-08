@@ -2468,13 +2468,16 @@ mod tests {
         )
         .unwrap();
         let delayed_ready = ready.clone();
+        let early_ack = ready_observed.clone();
         let writer = thread::spawn(move || {
             thread::sleep(Duration::from_millis(200));
+            assert!(!early_ack.exists(), "acknowledgement preceded readiness");
             durable_write(&delayed_ready, b"ready\n").unwrap();
         });
 
         acknowledge_runner_ready(&ready, &ready_observed, &runner_state, &recovery).unwrap();
 
+        assert!(ready.exists(), "readiness must precede acknowledgement");
         writer.join().unwrap();
         assert_eq!(fs::read_to_string(&ready_observed).unwrap(), "observed\n");
         let _ = fs::remove_dir_all(root);
