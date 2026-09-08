@@ -1724,7 +1724,19 @@ pub fn remove_persistence() -> Result<()> {
         .ok_or("removal tool has no installation directory")?;
     let supervisor = install_dir.join(SUPERVISOR_EXE);
     if supervisor != current && supervisor.exists() {
-        fs::remove_file(&supervisor)?;
+        let deadline = Instant::now() + Duration::from_secs(STOP_WAIT_SECONDS);
+        loop {
+            match fs::remove_file(&supervisor) {
+                Ok(()) => break,
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::PermissionDenied
+                        && Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(250));
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
     }
 
     if let Some(program_data) = env::var_os("ProgramData") {
