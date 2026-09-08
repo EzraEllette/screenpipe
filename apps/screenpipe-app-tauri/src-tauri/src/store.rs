@@ -16,14 +16,16 @@ use tauri_plugin_store::StoreBuilder;
 use tracing::{error, warn};
 
 #[cfg(windows)]
-const WINDOWS_STORE_RETRY_ATTEMPTS: usize = 6;
+const WINDOWS_STORE_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
 #[cfg(windows)]
-const WINDOWS_STORE_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(50);
+const WINDOWS_STORE_RETRY_ATTEMPTS: usize = 101;
 
 /// Windows scanners and sync providers can briefly open the canonical store
 /// without write/delete sharing. Retry only the Win32 errors produced by that
-/// conflict; a persistent ACL/CFA denial uses the same ACCESS_DENIED code, so
-/// it receives the same short bound and then returns the original error.
+/// conflict. Real-time antivirus can retain that handle for several seconds
+/// while scanning a changed store, so keep retrying for up to ten seconds.
+/// Persistent ACL/CFA denial uses the same ACCESS_DENIED code and still fails
+/// closed at that bound.
 #[cfg(windows)]
 fn is_retryable_windows_store_error(error: &(dyn std::error::Error + 'static)) -> bool {
     let mut source = Some(error);
@@ -329,7 +331,8 @@ fn replace_store_temp(tmp: &Path, path: &Path) -> std::io::Result<()> {
 
 #[cfg(windows)]
 fn replace_store_temp(tmp: &Path, path: &Path) -> std::io::Result<()> {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let deadline = std::time::Instant::now()
+        + WINDOWS_STORE_RETRY_DELAY * (WINDOWS_STORE_RETRY_ATTEMPTS as u32 - 1);
     let mut delay = std::time::Duration::from_millis(1);
     let mut temporary = tempfile::TempPath::try_from_path(tmp)?;
 
@@ -464,7 +467,7 @@ fn restore_snapshot_over(store_path: &Path, why: &str) -> bool {
         pre_restore_note = format!("pre-restore copy at {}", pre_restore.display());
     }
 
-    if let Err(e) = retry_windows_store_io(|| durable_write(store_path, &data)) {
+    if let Err(e) = durable_write(store_path, &data) {
         tracing::error!(
             "settings recovery: failed to restore {} from {}: {}",
             store_path.display(),
@@ -4399,7 +4402,7 @@ mod tests {
         let elapsed = started.elapsed();
 
         assert!(result.is_err(), "persistent denial must fail closed");
-        assert!(elapsed < std::time::Duration::from_secs(2));
+        assert!(elapsed < std::time::Duration::from_secs(12));
         drop(_lock);
         assert_eq!(std::fs::read(&store_path).unwrap(), canonical_before);
         assert_eq!(std::fs::read(&snapshot_path).unwrap(), snapshot_before);
@@ -4423,7 +4426,7 @@ mod tests {
         assert!(matches!(error.raw_os_error(), Some(5 | 32 | 33)));
         assert!(
             elapsed >= WINDOWS_STORE_RETRY_DELAY * (WINDOWS_STORE_RETRY_ATTEMPTS as u32 - 1)
-                && elapsed < std::time::Duration::from_secs(2),
+                && elapsed < std::time::Duration::from_secs(12),
             "retry bound was not respected: {elapsed:?}"
         );
         assert_eq!(std::fs::read(&store_path).unwrap(), b"canonical-before");
@@ -4450,7 +4453,9 @@ mod tests {
 
         let lock = open_with_restrictive_sharing(&store_path);
         let unlocker = std::thread::spawn(move || {
-            std::thread::sleep(WINDOWS_STORE_RETRY_DELAY * 2);
+            // Bitdefender held the current production user's store for longer
+            // than the old 250 ms retry window. Model a multi-second scan lock.
+            std::thread::sleep(std::time::Duration::from_secs(3));
             drop(lock);
         });
 
@@ -4492,7 +4497,7 @@ mod tests {
         );
         assert!(
             elapsed >= WINDOWS_STORE_RETRY_DELAY * (WINDOWS_STORE_RETRY_ATTEMPTS as u32 - 1)
-                && elapsed < std::time::Duration::from_secs(2),
+                && elapsed < std::time::Duration::from_secs(12),
             "retry bound was not respected: {elapsed:?}"
         );
         let saved: Value = serde_json::from_slice(&std::fs::read(&store_path).unwrap()).unwrap();
