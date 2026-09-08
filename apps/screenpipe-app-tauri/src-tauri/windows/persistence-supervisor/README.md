@@ -48,12 +48,22 @@ Enterprise update endpoint. It proceeds only when the request, signed package,
 and currently published version agree and are newer than the installed app.
 
 Before launching the installer, the service switches its automatic registration
-to a protected recovery copy. The persistent installer then stops supervision,
-replaces the app and privileged helpers, reconciles the service back to the new
-helper, and validates the relaunched app. If setup fails or is interrupted, a
-LocalSystem watchdog restarts the recovery service; the same protected fallback
-also survives a reboot. The ordinary consumer and non-persistent Enterprise
-installers and updater lifecycle do not use this path.
+to a protected recovery copy. A detached guard owns maintenance while the
+existing service acknowledges readiness and yields. Protected state retains the
+marker, policy cache, and a verified snapshot of the complete application
+payload, including matching helpers, DLLs, and resources.
+
+The guard arbitrates completed, newer, and exhausted transactions before any
+installer launch, including after reboot. During trusted maintenance, the
+installer replaces the app and helpers and registers/configures the new service
+without starting it. Only after the installer process tree has stopped does the
+guard reconcile the installed service and validate the supervised app.
+
+Failed setup is retried a bounded number of times, then restored from the
+snapshot, removing files introduced only by the failed version. A LocalSystem
+watchdog restarts recovery supervision if the guard dies; the protected recovery
+service also survives reboot. The ordinary consumer and non-persistent
+Enterprise installers and updater lifecycle do not use this path.
 
 ## Administrator removal
 
@@ -63,16 +73,6 @@ marker and supervisor state, and leaves the Screenpipe application and all user
 data installed. The normal persistent-package uninstaller also removes the
 service before removing application files.
 
-During a persistent upgrade, a protected detached runner owns maintenance while
-the existing service yields. It preserves the marker and policy cache, keeps a
-verified pre-update snapshot of the complete Program Files application payload,
-including matching helpers, DLLs, and resources, and reconciles the running
-service to one coherent installed version. After the launching service observes
-the guard's ready acknowledgement and yields, the guard arbitrates completed,
-newer, and exhausted transactions before any installer is launched after reboot.
-Setup registers and configures the replacement helper
-without starting it while that trusted guard owns maintenance; normal fresh or
-administrator installs still start the service and wait for the supervised app.
-Failed setup is retried a bounded number of times and then restored from that snapshot, removing
-files introduced only by the failed version; administrator reinstall and removal
-remain available.
+Fresh or administrator-run persistent installations outside owned maintenance
+retain their ordinary service and app startup checks. Administrator reinstall
+and removal remain available.
