@@ -7,32 +7,9 @@ $mutex = $null
 $acquired = $false
 $exitCode = 1
 try {
-  # A fixed Global\ name can be pre-created by an unprivileged local process,
-  # permanently denying native builds while that process holds it. Keep the
-  # machine-wide identity in an administrators/SYSTEM-only directory instead.
-  # Program Files also prevents an unprivileged process from planting the
-  # identity before the first queued build.
-  $identityDir = Join-Path $env:ProgramFiles 'screenpipe-native-build-queue'
-  $identityFile = Join-Path $identityDir 'mutex-id'
-  if (-not (Test-Path -LiteralPath $identityFile -PathType Leaf)) {
-    New-Item -ItemType Directory -Path $identityDir -Force | Out-Null
-    & icacls.exe $identityDir /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw 'failed to protect native build queue identity' }
-    $candidate = [Guid]::NewGuid().ToString('N')
-    $temporary = Join-Path $identityDir ("mutex-id.$PID.tmp")
-    [IO.File]::WriteAllText($temporary, $candidate, [Text.UTF8Encoding]::new($false))
-    try { Move-Item -LiteralPath $temporary -Destination $identityFile -ErrorAction Stop }
-    catch {
-      Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
-      if (-not (Test-Path -LiteralPath $identityFile -PathType Leaf)) { throw }
-    }
-  }
-  $identity = [IO.File]::ReadAllText($identityFile).Trim()
-  if ($identity -notmatch '^[0-9a-f]{32}$') { throw 'invalid native build queue identity' }
   # Kernel ownership is released even after a worker crash or reboot. All
-  # worktrees use the same protected machine-wide name, not a checkout-local
-  # lock file.
-  $mutex = [Threading.Mutex]::new($false, "Global\ScreenpipeNativeBuildQueue-$identity")
+  # worktrees use the same machine-wide name, not a checkout-local lock file.
+  $mutex = [Threading.Mutex]::new($false, 'Global\ScreenpipeNativeBuildQueue')
   try { $acquired = $mutex.WaitOne(0) }
   catch [Threading.AbandonedMutexException] { $acquired = $true }
   if ($Status) {
