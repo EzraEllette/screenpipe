@@ -65,8 +65,8 @@ use crate::{
     APP_EXE, INSTALLED_STATE_FILE, MAX_UPDATE_ATTEMPTS, POLICY_REFRESH_SECONDS, RECHECK_SECONDS,
     RECOVERY_SUPERVISOR_FILE, REMOVER_EXE, SERVICE_DISPLAY_NAME, SERVICE_NAME, SUPERVISOR_EXE,
     UPDATE_FAILED_VERSION_FILE, UPDATE_PACKAGE_FILE, UPDATE_REQUEST_DIR, UPDATE_REQUEST_FILE,
-    UPDATE_RUNNER_READY_FILE, UPDATE_RUNNER_STATE_FILE, UPDATE_SIGNATURE_FILE, UPDATE_SNAPSHOT_DIR,
-    UPDATE_TRANSACTION_FILE,
+    UPDATE_RUNNER_ACK_FILE, UPDATE_RUNNER_READY_FILE, UPDATE_RUNNER_STATE_FILE,
+    UPDATE_SIGNATURE_FILE, UPDATE_SNAPSHOT_DIR, UPDATE_TRANSACTION_FILE,
 };
 
 type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
@@ -523,23 +523,32 @@ fn try_launch_persistence_update(app_path: &Path) -> Result<bool> {
 
 fn launch_update_runner(staging: &Path) -> Result<bool> {
     let ready = staging.join(UPDATE_RUNNER_READY_FILE);
+    let ready_observed = staging.join(UPDATE_RUNNER_ACK_FILE);
     let runner_state = staging.join(UPDATE_RUNNER_STATE_FILE);
     let recovery = recovery_supervisor_path()?;
     let mut claimed = false;
     for _ in 0..3 {
         if active_runner_pid(&runner_state, &recovery).is_some() {
+            acknowledge_runner_ready(&ready, &ready_observed, &runner_state, &recovery)?;
             return Ok(true);
         }
         if fs::read_to_string(&runner_state).is_ok_and(|value| value.trim() == "starting") {
             let deadline = Instant::now() + Duration::from_secs(RUNNER_READY_WAIT_SECONDS);
             while Instant::now() < deadline {
                 if active_runner_pid(&runner_state, &recovery).is_some() {
+                    acknowledge_runner_ready(
+                        &ready,
+                        &ready_observed,
+                        &runner_state,
+                        &recovery,
+                    )?;
                     return Ok(true);
                 }
                 thread::sleep(Duration::from_millis(100));
             }
         }
         let _ = fs::remove_file(&ready);
+        let _ = fs::remove_file(&ready_observed);
         let _ = fs::remove_file(&runner_state);
         match OpenOptions::new()
             .write(true)
@@ -566,16 +575,31 @@ fn launch_update_runner(staging: &Path) -> Result<bool> {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()?;
+    if let Err(error) =
+        acknowledge_runner_ready(&ready, &ready_observed, &runner_state, &recovery)
+    {
+        let _ = fs::remove_file(&runner_state);
+        let _ = fs::remove_file(&ready);
+        let _ = fs::remove_file(&ready_observed);
+        return Err(error);
+    }
+    Ok(true)
+}
+
+fn acknowledge_runner_ready(
+    ready: &Path,
+    ready_observed: &Path,
+    runner_state: &Path,
+    recovery: &Path,
+) -> Result<()> {
     let deadline = Instant::now() + Duration::from_secs(RUNNER_READY_WAIT_SECONDS);
-    while !ready.is_file() || active_runner_pid(&runner_state, &recovery).is_none() {
+    while !ready.is_file() || active_runner_pid(runner_state, recovery).is_none() {
         if Instant::now() >= deadline {
-            let _ = fs::remove_file(&runner_state);
-            let _ = fs::remove_file(&ready);
             return Err("recovery runner did not establish durable maintenance".into());
         }
         thread::sleep(Duration::from_millis(100));
     }
-    Ok(true)
+    durable_write(ready_observed, b"observed\n")
 }
 
 fn active_runner_pid(runner_state: &Path, recovery: &Path) -> Option<u32> {
@@ -669,7 +693,25 @@ fn watch_update_guard() -> Result<()> {
     durable_write(&staging.join(UPDATE_RUNNER_READY_FILE), b"ready\n")?;
     launch_update_guard_watchdog(&recovery, guard_pid, guard_created)?;
     let lifecycle_deadline = Instant::now() + Duration::from_secs(INSTALLER_TIMEOUT_SECONDS);
+
+    // The service which launched this guard owns the other side of the ready
+    // handshake. Do not finalize protected state until it has observed ready
+    // and fully yielded; otherwise a reboot recovery can race the old service.
+    let ready_observed = staging.join(UPDATE_RUNNER_ACK_FILE);
+    let yield_deadline = Instant::now() + Duration::from_secs(RUNNER_READY_WAIT_SECONDS);
+    while !ready_observed.is_file() || service_is_running()? {
+        if Instant::now() >= yield_deadline {
+            return Err("launching service did not observe ready and yield".into());
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
     for attempt in 0..MAX_UPDATE_ATTEMPTS {
+        // Resume arbitration always precedes the next installer. In particular,
+        // exhausted, completed, and newer transactions never launch a worker.
+        if reconcile_quiescent_transaction(&staging, &runner_state)? {
+            return Ok(());
+        }
         let job = create_update_job()?;
         let worker = launch_update_worker(&recovery, &job)?;
         let status = match wait_for_update_worker(&worker, lifecycle_deadline) {
@@ -1749,10 +1791,7 @@ fn install_persistence() -> Result<()> {
 
     let program_data = env::var_os("ProgramData").ok_or("ProgramData is unavailable")?;
     let persistence_dir = state_dir(Path::new(&program_data));
-    let accepted_update_in_progress = persistence_dir
-        .join(UPDATE_STAGING_DIR)
-        .join(UPDATE_TRANSACTION_FILE)
-        .is_file();
+    let staging = persistence_dir.join(UPDATE_STAGING_DIR);
     let state_parent = persistence_dir
         .parent()
         .ok_or("persistence state has no parent directory")?;
@@ -1785,13 +1824,18 @@ fn install_persistence() -> Result<()> {
             .join(UPDATE_REQUEST_FILE),
     );
 
-    let start_result = create_and_start_service(&supervisor).and_then(|_| {
-        if cached_policy_enforcement() && !accepted_update_in_progress {
-            wait_for_supervised_app(&app_path)
-        } else {
-            Ok(())
-        }
-    });
+    let owned_maintenance = trusted_update_maintenance(&staging)?;
+    let start_result = if owned_maintenance {
+        register_service(&supervisor)
+    } else {
+        create_and_start_service(&supervisor).and_then(|_| {
+            if cached_policy_enforcement() {
+                wait_for_supervised_app(&app_path)
+            } else {
+                Ok(())
+            }
+        })
+    };
     if let Err(error) = start_result {
         let recovery = recovery_supervisor_path()
             .ok()
@@ -1818,6 +1862,37 @@ fn install_persistence() -> Result<()> {
 }
 
 fn create_and_start_service(supervisor: &Path) -> Result<()> {
+    register_service(supervisor)?;
+    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
+    let service = manager.open_service(
+        SERVICE_NAME,
+        ServiceAccess::START | ServiceAccess::QUERY_STATUS,
+    )?;
+    if service.query_status()?.current_state == ServiceState::Stopped {
+        service.start::<&str>(&[])?;
+    }
+    let deadline = Instant::now() + Duration::from_secs(START_WAIT_SECONDS);
+    loop {
+        let status = service.query_status()?;
+        if status.current_state == ServiceState::Running {
+            break;
+        }
+        if status.current_state == ServiceState::Stopped {
+            return Err(format!(
+                "persistence service stopped during startup (exit={:?})",
+                status.exit_code
+            )
+            .into());
+        }
+        if Instant::now() >= deadline {
+            return Err("timed out waiting for persistence service to start".into());
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    Ok(())
+}
+
+fn register_service(supervisor: &Path) -> Result<()> {
     let manager = ServiceManager::local_computer(
         None::<&str>,
         ServiceManagerAccess::CONNECT | ServiceManagerAccess::CREATE_SERVICE,
@@ -1862,28 +1937,29 @@ fn create_and_start_service(supervisor: &Path) -> Result<()> {
         ]),
     })?;
     service.set_failure_actions_on_non_crash_failures(true)?;
-    if service.query_status()?.current_state == ServiceState::Stopped {
-        service.start::<&str>(&[])?;
-    }
-    let deadline = Instant::now() + Duration::from_secs(START_WAIT_SECONDS);
-    loop {
-        let status = service.query_status()?;
-        if status.current_state == ServiceState::Running {
-            break;
-        }
-        if status.current_state == ServiceState::Stopped {
-            return Err(format!(
-                "persistence service stopped during startup (exit={:?})",
-                status.exit_code
-            )
-            .into());
-        }
-        if Instant::now() >= deadline {
-            return Err("timed out waiting for persistence service to start".into());
-        }
-        std::thread::sleep(Duration::from_millis(250));
-    }
     Ok(())
+}
+
+fn trusted_update_maintenance(staging: &Path) -> Result<bool> {
+    let transaction_path = staging.join(UPDATE_TRANSACTION_FILE);
+    if !transaction_path.is_file() {
+        return Ok(false);
+    }
+    let transaction: AcceptedUpdateTransaction =
+        serde_json::from_slice(&fs::read(&transaction_path)?)?;
+    if transaction.request.package != UPDATE_PACKAGE_FILE
+        || transaction.request.signature != UPDATE_SIGNATURE_FILE
+    {
+        return Err("accepted update transaction contains unexpected filenames".into());
+    }
+    let recovery = recovery_supervisor_path()?;
+    let runner_state = staging.join(UPDATE_RUNNER_STATE_FILE);
+    if !staging.join(UPDATE_RUNNER_READY_FILE).is_file()
+        || active_runner_pid(&runner_state, &recovery).is_none()
+    {
+        return Err("accepted update has no live trusted maintenance guard".into());
+    }
+    Ok(true)
 }
 
 fn service_info(supervisor: &Path) -> ServiceInfo {
@@ -2371,6 +2447,37 @@ mod tests {
         assert_eq!(parse_runner_identity("123"), None);
         assert_eq!(parse_runner_identity("123:not-a-time"), None);
         assert_ne!(parse_runner_identity("123:456"), Some((123, 457)));
+    }
+
+    #[test]
+    fn joining_live_runner_waits_for_delayed_ready_before_acknowledging() {
+        let root = env::temp_dir().join(format!(
+            "screenpipe-runner-ready-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let ready = root.join(UPDATE_RUNNER_READY_FILE);
+        let ready_observed = root.join(UPDATE_RUNNER_ACK_FILE);
+        let runner_state = root.join(UPDATE_RUNNER_STATE_FILE);
+        let recovery = env::current_exe().unwrap();
+        let created = process_creation_time(std::process::id()).unwrap();
+        durable_write(
+            &runner_state,
+            format!("{}:{created}\n", std::process::id()).as_bytes(),
+        )
+        .unwrap();
+        let delayed_ready = ready.clone();
+        let writer = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(200));
+            durable_write(&delayed_ready, b"ready\n").unwrap();
+        });
+
+        acknowledge_runner_ready(&ready, &ready_observed, &runner_state, &recovery).unwrap();
+
+        writer.join().unwrap();
+        assert_eq!(fs::read_to_string(&ready_observed).unwrap(), "observed\n");
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

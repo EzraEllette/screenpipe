@@ -19,6 +19,7 @@ pub const UPDATE_SIGNATURE_FILE: &str = "screenpipe-enterprise-persistent.exe.si
 pub const RECOVERY_SUPERVISOR_FILE: &str = "recovery-supervisor.exe";
 pub const UPDATE_TRANSACTION_FILE: &str = "accepted-transaction.json";
 pub const UPDATE_RUNNER_READY_FILE: &str = "runner-ready";
+pub const UPDATE_RUNNER_ACK_FILE: &str = "runner-ready-observed";
 pub const UPDATE_RUNNER_STATE_FILE: &str = "runner.json";
 pub const UPDATE_FAILED_VERSION_FILE: &str = "failed-version";
 pub const UPDATE_SNAPSHOT_DIR: &str = "pre-update";
