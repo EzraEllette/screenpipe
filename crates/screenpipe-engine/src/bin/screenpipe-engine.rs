@@ -1815,7 +1815,13 @@ async fn main() -> anyhow::Result<()> {
         let drm_pause = config.pause_on_drm_content;
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(10)).await;
-            audio_manager_clone.start().await.unwrap();
+            if let Err(error) = audio_manager_clone.start().await {
+                tracing::error!(
+                    "audio startup failed; vision and the local server will continue: {:?}",
+                    error
+                );
+                return;
+            }
             // If DRM content was already focused at launch, the DRM callback
             // fired before audio was ready. Stop the output device now so we
             // don't hold an SCK session while DRM is active.
