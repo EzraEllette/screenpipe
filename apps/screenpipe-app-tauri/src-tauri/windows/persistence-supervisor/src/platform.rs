@@ -2005,9 +2005,13 @@ $acl = Get-Acl -LiteralPath $env:SCREENPIPE_ACL_PATH
 $owner = $acl.Owner
 try { $owner = ([System.Security.Principal.NTAccount]$owner).Translate([System.Security.Principal.SecurityIdentifier]).Value } catch {}
 if ($owner -notin @('S-1-5-18', 'S-1-5-32-544')) { exit 40 }
-$write = [System.Security.AccessControl.FileSystemRights]::Write -bor
-         [System.Security.AccessControl.FileSystemRights]::Modify -bor
-         [System.Security.AccessControl.FileSystemRights]::FullControl -bor
+$write = [System.Security.AccessControl.FileSystemRights]::WriteData -bor
+         [System.Security.AccessControl.FileSystemRights]::CreateFiles -bor
+         [System.Security.AccessControl.FileSystemRights]::AppendData -bor
+         [System.Security.AccessControl.FileSystemRights]::CreateDirectories -bor
+         [System.Security.AccessControl.FileSystemRights]::WriteExtendedAttributes -bor
+         [System.Security.AccessControl.FileSystemRights]::WriteAttributes -bor
+         [System.Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
          [System.Security.AccessControl.FileSystemRights]::ChangePermissions -bor
          [System.Security.AccessControl.FileSystemRights]::TakeOwnership -bor
          [System.Security.AccessControl.FileSystemRights]::Delete
