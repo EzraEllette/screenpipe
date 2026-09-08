@@ -25,7 +25,7 @@ use sha2::{Digest, Sha256};
 use specta::Type;
 use tracing::{info, warn};
 
-const AI_TOOL_AUTO_CONNECT_TARGETS: [&str; 9] = [
+const AI_TOOL_AUTO_CONNECT_TARGETS: [&str; 10] = [
     "claude",
     "claude-code",
     "codex",
@@ -35,6 +35,7 @@ const AI_TOOL_AUTO_CONNECT_TARGETS: [&str; 9] = [
     "hermes",
     "runner",
     "windsurf",
+    "grokbot",
 ];
 
 /// Orders the launch reconciler and Settings opt-out writes. Disconnect sets
@@ -44,7 +45,7 @@ const AI_TOOL_AUTO_CONNECT_TARGETS: [&str; 9] = [
 static AI_TOOL_AUTO_CONNECT_LOCK: Lazy<tokio::sync::Mutex<()>> =
     Lazy::new(|| tokio::sync::Mutex::new(()));
 
-fn ai_tool_auto_connect_opt_out_dir() -> PathBuf {
+pub(crate) fn ai_tool_auto_connect_opt_out_dir() -> PathBuf {
     screenpipe_core::paths::default_screenpipe_data_dir().join("ai-tool-auto-connect-opt-outs-v1")
 }
 
@@ -56,7 +57,7 @@ fn ai_tool_auto_connect_opt_outs_in(dir: &Path) -> BTreeSet<String> {
         .collect()
 }
 
-fn set_ai_tool_auto_connect_opt_out_in(
+pub(crate) fn set_ai_tool_auto_connect_opt_out_in(
     dir: &Path,
     target: &str,
     opt_out: bool,
@@ -84,7 +85,11 @@ async fn set_ai_tool_auto_connect_opt_out_serialized_in(
     target: String,
     opt_out: bool,
 ) -> Result<(), String> {
-    let _guard = AI_TOOL_AUTO_CONNECT_LOCK.lock().await;
+    let _guard = if target == "grokbot" {
+        crate::grokbot::GROKBOT_CONNECTION_LOCK.lock().await
+    } else {
+        AI_TOOL_AUTO_CONNECT_LOCK.lock().await
+    };
     tokio::task::spawn_blocking(move || {
         set_ai_tool_auto_connect_opt_out_in(&dir, &target, opt_out)
     })
@@ -164,7 +169,11 @@ async fn wait_for_background_api_key(api_auth_enabled: bool) -> Option<String> {
 /// task. The task is non-blocking, retries naturally across
 /// permission-triggered app restarts, and is safe to run on every launch: it
 /// changes only missing or stale screenpipe-managed MCP and skill entries.
-pub fn connect_detected_ai_tools_in_background(api_auth_enabled: bool, api_port: u16) {
+pub fn connect_detected_ai_tools_in_background(
+    app: tauri::AppHandle,
+    api_auth_enabled: bool,
+    api_port: u16,
+) {
     let Some(home) = background_ai_tools_home() else {
         info!("AI tool background setup skipped: no home directory");
         return;
@@ -173,6 +182,7 @@ pub fn connect_detected_ai_tools_in_background(api_auth_enabled: bool, api_port:
         warn!("AI tool background setup skipped: bundled Bun was not found");
         return;
     };
+    crate::grokbot::start_background(app, home.clone(), bun_path.clone());
     tauri::async_runtime::spawn(async move {
         let api_key = wait_for_background_api_key(api_auth_enabled).await;
 
@@ -1692,6 +1702,34 @@ pub async fn install_registry_skill(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn grokbot_network_work_does_not_block_other_ai_tool_choices() {
+        let root = tempfile::tempdir().unwrap();
+        let grok_guard = crate::grokbot::GROKBOT_CONNECTION_LOCK.lock().await;
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            set_ai_tool_auto_connect_opt_out_serialized_in(
+                root.path().to_owned(),
+                "codex".into(),
+                true,
+            ),
+        )
+        .await
+        .expect("Grok Bot network work must not hold up other AI tools")
+        .unwrap();
+        assert!(root.path().join("codex").is_file());
+        let pending = tokio::spawn(set_ai_tool_auto_connect_opt_out_serialized_in(
+            root.path().to_owned(),
+            "grokbot".into(),
+            true,
+        ));
+        tokio::task::yield_now().await;
+        assert!(!pending.is_finished());
+        drop(grok_guard);
+        pending.await.unwrap().unwrap();
+        assert!(root.path().join("grokbot").is_file());
+    }
 
     #[test]
     fn ai_tool_auto_connect_opt_out_is_per_target_and_reversible() {
