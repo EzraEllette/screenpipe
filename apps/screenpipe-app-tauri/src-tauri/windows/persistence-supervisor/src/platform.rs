@@ -2029,7 +2029,7 @@ exit 0
             .flat_map(u16::to_le_bytes)
             .collect::<Vec<_>>(),
     );
-    let status = Command::new("powershell.exe")
+    let output = Command::new("powershell.exe")
         .args([
             "-NoLogo",
             "-NoProfile",
@@ -2040,14 +2040,14 @@ exit 0
         .env("SCREENPIPE_ACL_PATH", path)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()?;
-    if status.success() {
+        .stderr(Stdio::piped())
+        .output()?;
+    if output.status.success() {
         Ok(())
     } else {
         Err(format!(
-            "refusing hostile or untrusted persistence namespace {} (ACL validation exit {:?}); remove it from an elevated administrator session before reinstalling",
-            path.display(), status.code()
+            "refusing hostile or untrusted persistence namespace {} (ACL validation exit {:?}: {}); remove it from an elevated administrator session before reinstalling",
+            path.display(), output.status.code(), String::from_utf8_lossy(&output.stderr).trim()
         ).into())
     }
 }
