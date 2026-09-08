@@ -5,6 +5,7 @@
 import { homeDir } from "@tauri-apps/api/path";
 import { getVersion } from "@tauri-apps/api/app";
 import { commands } from "@/lib/utils/tauri";
+import { saveWithPresetReassignment } from "@/lib/ai-preset-deletion";
 import { platform } from "@tauri-apps/plugin-os";
 import { Store } from "@tauri-apps/plugin-store";
 import { emit, listen } from "@tauri-apps/api/event";
@@ -1442,8 +1443,10 @@ function createSettingsStore() {
 			) as Settings;
 			if (managedValues) newSettings.enterpriseManagedSettings = managedValues;
 			else delete newSettings.enterpriseManagedSettings;
-			await setSettingsStripped(store, newSettings);
-			await saveAndEncrypt(store);
+			await saveWithPresetReassignment(current, newSettings, async (reassigned) => {
+				await setSettingsStripped(store, reassigned);
+				await saveAndEncrypt(store);
+			});
 		});
 
 	const reset = () =>
