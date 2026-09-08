@@ -30,12 +30,17 @@ use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
 };
 use windows::Win32::System::Environment::{CreateEnvironmentBlock, DestroyEnvironmentBlock};
+use windows::Win32::System::JobObjects::{
+    AssignProcessToJobObject, CreateJobObjectW, QueryInformationJobObject, TerminateJobObject,
+    JobObjectBasicAccountingInformation, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
+};
 use windows::Win32::System::RemoteDesktop::{
     ProcessIdToSessionId, WTSActive, WTSEnumerateSessionsW, WTSFreeMemory,
     WTSGetActiveConsoleSessionId, WTSQueryUserToken, WTS_CURRENT_SERVER_HANDLE, WTS_SESSION_INFOW,
 };
 use windows::Win32::System::Threading::{
-    CreateProcessAsUserW, OpenProcess, QueryFullProcessImageNameW, CREATE_NEW_PROCESS_GROUP,
+    CreateProcessAsUserW, GetCurrentProcess, OpenProcess, QueryFullProcessImageNameW,
+    CREATE_NEW_PROCESS_GROUP,
     CREATE_UNICODE_ENVIRONMENT, PROCESS_INFORMATION, PROCESS_NAME_WIN32,
     PROCESS_QUERY_LIMITED_INFORMATION, STARTUPINFOW,
 };
@@ -77,6 +82,8 @@ const APP_LAUNCH_WAIT_SECONDS: u64 = 20;
 const RUNNER_READY_WAIT_SECONDS: u64 = 15;
 const INSTALLER_TIMEOUT_SECONDS: u64 = 10 * 60;
 const UPDATE_STAGING_DIR: &str = "update-staging";
+const UPDATE_JOB_ENV: &str = "SCREENPIPE_UPDATE_JOB";
+const UPDATE_GUARD_PID_ENV: &str = "SCREENPIPE_UPDATE_GUARD_PID";
 #[cfg(not(feature = "persistence-updater-e2e"))]
 const ENTERPRISE_UPDATER_PUBLIC_KEY: &str = "untrusted comment: minisign public key: 22B46FD31CA9AC17\nRWQXrKkc02+0IiwFPFQnsaA4fm/4QQE9m5FYMEqGaqP3mIgTHx2/rMrg\n";
 
@@ -600,17 +607,7 @@ fn watch_update() -> Result<()> {
     let mut transaction: AcceptedUpdateTransaction =
         serde_json::from_slice(&fs::read(&transaction_path)?)?;
     let runner_state = staging.join(UPDATE_RUNNER_STATE_FILE);
-    if fs::read_to_string(&runner_state)?.trim() != "starting" {
-        return Err("recovery runner ownership was not claimed".into());
-    }
-    let mut runner_guard = OpenOptions::new()
-        .write(true)
-        .truncate(true)
-        .open(&runner_state)?;
-    writeln!(runner_guard, "{}", std::process::id())?;
-    runner_guard.sync_all()?;
-    drop(runner_guard);
-    durable_write(&staging.join(UPDATE_RUNNER_READY_FILE), b"ready\n")?;
+    join_guard_job(&runner_state)?;
     let deadline = Instant::now() + Duration::from_secs(STOP_WAIT_SECONDS);
     while service_is_running()? {
         if Instant::now() >= deadline {
@@ -675,14 +672,27 @@ fn watch_update_guard() -> Result<()> {
     let transaction_path = staging.join(UPDATE_TRANSACTION_FILE);
     let runner_state = staging.join(UPDATE_RUNNER_STATE_FILE);
     let recovery = env::current_exe()?;
+    if fs::read_to_string(&runner_state)?.trim() != "starting" {
+        return Err("recovery guard ownership was not claimed".into());
+    }
+    durable_write(&runner_state, format!("{}\n", std::process::id()).as_bytes())?;
+    durable_write(&staging.join(UPDATE_RUNNER_READY_FILE), b"ready\n")?;
     for attempt in 0..MAX_UPDATE_ATTEMPTS {
-        if attempt > 0 {
-            durable_write(&runner_state, b"starting\n")?;
-        }
-        let status = Command::new(&recovery).arg("watch-update").status()?;
+        let job_name = format!(
+            "Global\\ScreenpipePersistenceUpdate-{}-{}",
+            std::process::id(),
+            attempt
+        );
+        let job = create_update_job(&job_name)?;
+        let status = Command::new(&recovery)
+            .arg("watch-update")
+            .env(UPDATE_JOB_ENV, &job_name)
+            .env(UPDATE_GUARD_PID_ENV, std::process::id().to_string())
+            .status()?;
         if !transaction_path.is_file() {
             return Ok(());
         }
+        stop_update_job(&job)?;
         log_event(
             "warn",
             "update_worker_restarted",
@@ -696,6 +706,62 @@ fn watch_update_guard() -> Result<()> {
     restore_pre_update_snapshot(&app_path, &staging, &transaction)?;
     latch_failed_update(&staging, &runner_state, &transaction.request.version)?;
     reconcile_installed_service(&app_path)
+}
+
+fn create_update_job(name: &str) -> Result<OwnedHandle> {
+    let wide = OsStr::new(name)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let handle = unsafe { CreateJobObjectW(None, PCWSTR(wide.as_ptr()))? };
+    Ok(OwnedHandle::new(handle))
+}
+
+fn join_guard_job(runner_state: &Path) -> Result<()> {
+    let guard_pid = env::var(UPDATE_GUARD_PID_ENV)?.parse::<u32>()?;
+    let recovery = env::current_exe()?;
+    if active_runner_pid(runner_state, &recovery) != Some(guard_pid) {
+        return Err("recovery guard no longer owns maintenance".into());
+    }
+    let job_name = env::var(UPDATE_JOB_ENV)?;
+    let wide = OsStr::new(&job_name)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let job = unsafe {
+        windows::Win32::System::JobObjects::OpenJobObjectW(
+            0x001f001f,
+            false,
+            PCWSTR(wide.as_ptr()),
+        )?
+    };
+    let job = OwnedHandle::new(job);
+    unsafe { AssignProcessToJobObject(job.0, GetCurrentProcess())? };
+    Ok(())
+}
+
+fn stop_update_job(job: &OwnedHandle) -> Result<()> {
+    unsafe { TerminateJobObject(job.0, 1)? };
+    let deadline = Instant::now() + Duration::from_secs(STOP_WAIT_SECONDS);
+    loop {
+        let mut accounting = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
+        unsafe {
+            QueryInformationJobObject(
+                job.0,
+                JobObjectBasicAccountingInformation,
+                &mut accounting as *mut _ as *mut _,
+                size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
+                None,
+            )?;
+        }
+        if accounting.ActiveProcesses == 0 {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err("update installer job did not stop".into());
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
 }
 
 fn run_update_installer(staging: &Path) -> Result<()> {
