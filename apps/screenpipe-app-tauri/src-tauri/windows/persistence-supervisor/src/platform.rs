@@ -132,6 +132,14 @@ pub fn run_supervisor_command() -> Result<()> {
         Some("remove") => remove_persistence(),
         Some("watch-update") => watch_update_resilient(),
         Some("watch-update-guard") => watch_update_guard(),
+        Some("watch-update-guard-watchdog") => {
+            let pid = args.get(2).ok_or("guard watchdog PID is missing")?.parse()?;
+            let created = args
+                .get(3)
+                .ok_or("guard watchdog creation time is missing")?
+                .parse()?;
+            watch_update_guard_watchdog(pid, created)
+        }
         Some(command) => Err(format!("unknown command: {command}").into()),
         None => {
             service_dispatcher::start(SERVICE_NAME, ffi_service_main)?;
@@ -621,8 +629,6 @@ fn watch_update() -> Result<()> {
     let program_data = env::var_os("ProgramData").ok_or("ProgramData is unavailable")?;
     let staging = state_dir(Path::new(&program_data)).join(UPDATE_STAGING_DIR);
     let transaction_path = staging.join(UPDATE_TRANSACTION_FILE);
-    let mut transaction: AcceptedUpdateTransaction =
-        serde_json::from_slice(&fs::read(&transaction_path)?)?;
     let runner_state = staging.join(UPDATE_RUNNER_STATE_FILE);
     join_guard_job(&runner_state)?;
     let deadline = Instant::now() + Duration::from_secs(STOP_WAIT_SECONDS);
@@ -636,30 +642,11 @@ fn watch_update() -> Result<()> {
         &staging.join(UPDATE_PACKAGE_FILE),
         &staging.join(UPDATE_SIGNATURE_FILE),
     )?;
-    let app_path = installed_app_path()?;
-    loop {
-        let installed = file_version(&app_path).ok();
-        let complete = coherent_installation(&app_path, installed.as_deref());
-        match accepted_update_action(&transaction, installed.as_deref(), complete)
-            .map_err(str::to_string)?
-        {
-            AcceptedUpdateAction::ReconcileInstalled | AcceptedUpdateAction::ReconcileNewer => {
-                finish_update(&staging, &runner_state)?;
-                reconcile_installed_service(&app_path)?;
-                return Ok(());
-            }
-            AcceptedUpdateAction::RestoreSnapshot | AcceptedUpdateAction::Exhausted => {
-                restore_pre_update_snapshot(&app_path, &staging, &transaction)?;
-                latch_failed_update(&staging, &runner_state, &transaction.request.version)?;
-                reconcile_installed_service(&app_path)?;
-                return Ok(());
-            }
-            AcceptedUpdateAction::Install => {}
-        }
-        transaction.attempts = transaction.attempts.saturating_add(1);
-        write_transaction(&transaction_path, &transaction)?;
-        run_update_installer(&staging)?;
-    }
+    let mut transaction: AcceptedUpdateTransaction =
+        serde_json::from_slice(&fs::read(&transaction_path)?)?;
+    transaction.attempts = transaction.attempts.saturating_add(1);
+    write_transaction(&transaction_path, &transaction)?;
+    run_update_installer(&staging)
 }
 
 fn watch_update_resilient() -> Result<()> {
@@ -680,6 +667,7 @@ fn watch_update_guard() -> Result<()> {
         .ok_or("recovery guard creation identity is unavailable")?;
     durable_write(&runner_state, format!("{guard_pid}:{guard_created}\n").as_bytes())?;
     durable_write(&staging.join(UPDATE_RUNNER_READY_FILE), b"ready\n")?;
+    launch_update_guard_watchdog(&recovery, guard_pid, guard_created)?;
     let lifecycle_deadline = Instant::now() + Duration::from_secs(INSTALLER_TIMEOUT_SECONDS);
     for attempt in 0..MAX_UPDATE_ATTEMPTS {
         let job = create_update_job()?;
@@ -697,6 +685,9 @@ fn watch_update_guard() -> Result<()> {
         if !transaction_path.is_file() {
             return Ok(());
         }
+        if reconcile_quiescent_transaction(&staging, &runner_state)? {
+            return Ok(());
+        }
         log_event(
             "warn",
             "update_worker_restarted",
@@ -708,6 +699,97 @@ fn watch_update_guard() -> Result<()> {
         thread::sleep(Duration::from_secs(1));
     }
     recover_accepted_transaction(&staging, &runner_state, "guard attempts exhausted")
+}
+
+fn launch_update_guard_watchdog(recovery: &Path, guard_pid: u32, guard_created: u64) -> Result<()> {
+    Command::new(recovery)
+        .args([
+            "watch-update-guard-watchdog",
+            &guard_pid.to_string(),
+            &guard_created.to_string(),
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    Ok(())
+}
+
+// This process deliberately owns no installer job handle and performs no
+// update arbitration. Its only role is to restore SCM supervision if the guard
+// dies while an accepted transaction still exists; the replacement guard then
+// drains its own job and makes the sole completion/recovery decision.
+fn watch_update_guard_watchdog(guard_pid: u32, guard_created: u64) -> Result<()> {
+    let program_data = env::var_os("ProgramData").ok_or("ProgramData is unavailable")?;
+    let staging = state_dir(Path::new(&program_data)).join(UPDATE_STAGING_DIR);
+    let transaction_path = staging.join(UPDATE_TRANSACTION_FILE);
+    let runner_state = staging.join(UPDATE_RUNNER_STATE_FILE);
+    let recovery = env::current_exe()?;
+    let expected = format!("{guard_pid}:{guard_created}");
+    let deadline = Instant::now() + Duration::from_secs(INSTALLER_TIMEOUT_SECONDS);
+    loop {
+        if !transaction_path.is_file() {
+            return Ok(());
+        }
+        let runner = fs::read_to_string(&runner_state).unwrap_or_default();
+        if runner.trim() != expected {
+            return Ok(());
+        }
+        if active_runner_pid(&runner_state, &recovery) == Some(guard_pid) {
+            if Instant::now() >= deadline {
+                return Err("guard watchdog exceeded the transaction deadline".into());
+            }
+            thread::sleep(Duration::from_millis(100));
+            continue;
+        }
+
+        if !service_is_running()? {
+            start_existing_service()?;
+        }
+        let recovery_deadline = Instant::now() + Duration::from_secs(START_WAIT_SECONDS);
+        while transaction_path.is_file() && Instant::now() < recovery_deadline {
+            if active_runner_pid(&runner_state, &recovery).is_some() {
+                return Ok(());
+            }
+            if !service_is_running()? {
+                start_existing_service()?;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        return transaction_path
+            .is_file()
+            .then_some(Err("recovery service did not replace the dead update guard".into()))
+            .unwrap_or(Ok(()));
+    }
+}
+
+// Returns true once the accepted transaction has reached a terminal state.
+// Only the guard calls this, after every process in the installer job has
+// exited, so restore/finalization and another installer can never race a live
+// launcher or extractor descendant.
+fn reconcile_quiescent_transaction(staging: &Path, runner_state: &Path) -> Result<bool> {
+    let transaction_path = staging.join(UPDATE_TRANSACTION_FILE);
+    let transaction: AcceptedUpdateTransaction =
+        serde_json::from_slice(&fs::read(&transaction_path)?)?;
+    let app_path = installed_app_target_path()?;
+    let installed = file_version(&app_path).ok();
+    let complete = coherent_installation(&app_path, installed.as_deref());
+    match accepted_update_action(&transaction, installed.as_deref(), complete)
+        .map_err(str::to_string)?
+    {
+        AcceptedUpdateAction::ReconcileInstalled | AcceptedUpdateAction::ReconcileNewer => {
+            finish_update(staging, runner_state)?;
+            reconcile_installed_service(&app_path)?;
+            Ok(true)
+        }
+        AcceptedUpdateAction::RestoreSnapshot | AcceptedUpdateAction::Exhausted => {
+            restore_pre_update_snapshot(&app_path, staging, &transaction)?;
+            latch_failed_update(staging, runner_state, &transaction.request.version)?;
+            reconcile_installed_service(&app_path)?;
+            Ok(true)
+        }
+        AcceptedUpdateAction::Install => Ok(false),
+    }
 }
 
 fn recover_accepted_transaction(staging: &Path, runner_state: &Path, reason: &str) -> Result<()> {
@@ -1667,6 +1749,10 @@ fn install_persistence() -> Result<()> {
 
     let program_data = env::var_os("ProgramData").ok_or("ProgramData is unavailable")?;
     let persistence_dir = state_dir(Path::new(&program_data));
+    let accepted_update_in_progress = persistence_dir
+        .join(UPDATE_STAGING_DIR)
+        .join(UPDATE_TRANSACTION_FILE)
+        .is_file();
     let state_parent = persistence_dir
         .parent()
         .ok_or("persistence state has no parent directory")?;
@@ -1700,7 +1786,7 @@ fn install_persistence() -> Result<()> {
     );
 
     let start_result = create_and_start_service(&supervisor).and_then(|_| {
-        if cached_policy_enforcement() {
+        if cached_policy_enforcement() && !accepted_update_in_progress {
             wait_for_supervised_app(&app_path)
         } else {
             Ok(())
@@ -2221,13 +2307,22 @@ fn log_event(level: &str, event: &str, detail: &str) {
         return;
     };
     let state = state_dir(Path::new(&program_data));
-    if fs::create_dir_all(&state).is_err() {
+    if !state.is_dir()
+        || reject_reparse_components(&state, Path::new(&program_data)).is_err()
+        || validate_trusted_acl_namespace(&state).is_err()
+    {
+        return;
+    }
+    let path = log_path(Path::new(&program_data));
+    if path.exists()
+        && (reject_reparse(&path).is_err() || validate_trusted_acl_namespace(&path).is_err())
+    {
         return;
     }
     let Ok(mut log) = OpenOptions::new()
         .create(true)
         .append(true)
-        .open(log_path(Path::new(&program_data)))
+        .open(path)
     else {
         return;
     };
@@ -2245,6 +2340,9 @@ fn log_event(level: &str, event: &str, detail: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static PROGRAM_DATA_TEST: Mutex<()> = Mutex::new(());
 
     #[test]
     fn service_status_accepts_stop_shutdown_and_session_changes() {
@@ -2273,5 +2371,23 @@ mod tests {
         assert_eq!(parse_runner_identity("123"), None);
         assert_eq!(parse_runner_identity("123:not-a-time"), None);
         assert_ne!(parse_runner_identity("123:456"), Some((123, 457)));
+    }
+
+    #[test]
+    fn logging_never_creates_a_missing_state_namespace() {
+        let _lock = PROGRAM_DATA_TEST.lock().unwrap();
+        let original = env::var_os("ProgramData");
+        let root = env::temp_dir().join(format!("screenpipe-log-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        env::set_var("ProgramData", &root);
+
+        log_event("info", "missing_namespace_test", "must remain absent");
+
+        assert!(!state_dir(&root).exists());
+        if let Some(original) = original {
+            env::set_var("ProgramData", original);
+        } else {
+            env::remove_var("ProgramData");
+        }
     }
 }
