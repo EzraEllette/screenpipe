@@ -1671,10 +1671,9 @@ fn install_persistence() -> Result<()> {
         .parent()
         .ok_or("persistence state has no parent directory")?;
     reject_reparse_components(state_parent, Path::new(&program_data))?;
-    fs::create_dir_all(state_parent)?;
-    protect_directory(state_parent)?;
+    create_protected_directory(state_parent, false)?;
     reject_reparse_components(&persistence_dir, Path::new(&program_data))?;
-    fs::create_dir_all(&persistence_dir)?;
+    create_protected_directory(&persistence_dir, true)?;
     protect_directory(
         supervisor
             .parent()
@@ -1985,6 +1984,63 @@ fn protect_private_directory(path: &Path) -> Result<()> {
 
 fn protect_readable_file(path: &Path) -> Result<()> {
     protect_path(path, &["*S-1-5-18:F", "*S-1-5-32-544:F", "*S-1-5-32-545:R"])
+}
+
+fn create_protected_directory(path: &Path, private: bool) -> Result<()> {
+    if path.exists() {
+        return if private {
+            protect_private_directory(path)
+        } else {
+            protect_directory(path)
+        };
+    }
+
+    // Directory.CreateDirectory(path, DirectorySecurity) applies the owner and
+    // DACL to the new object atomically. A standard user therefore has no
+    // interval in which to create a child or retain a WRITE_DAC handle.
+    const CREATE_WITH_ACL: &str = r#"
+$ErrorActionPreference = 'Stop'
+$security = New-Object System.Security.AccessControl.DirectorySecurity
+$security.SetSecurityDescriptorSddlForm($env:SCREENPIPE_DIRECTORY_SDDL)
+[System.IO.Directory]::CreateDirectory($env:SCREENPIPE_ACL_PATH, $security) | Out-Null
+"#;
+    let sddl = if private {
+        "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
+    } else {
+        "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;GRGX;;;BU)"
+    };
+    let encoded_script = base64::engine::general_purpose::STANDARD.encode(
+        CREATE_WITH_ACL
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>(),
+    );
+    let status = Command::new("powershell.exe")
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-EncodedCommand",
+            &encoded_script,
+        ])
+        .env("SCREENPIPE_ACL_PATH", path)
+        .env("SCREENPIPE_DIRECTORY_SDDL", sddl)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+    if !status.success() {
+        return Err(format!(
+            "failed to create protected persistence directory {}: {status}",
+            path.display()
+        )
+        .into());
+    }
+    if private {
+        protect_private_directory(path)
+    } else {
+        protect_directory(path)
+    }
 }
 
 fn protect_path(path: &Path, grants: &[&str]) -> Result<()> {
