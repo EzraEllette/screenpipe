@@ -2015,7 +2015,6 @@ foreach ($rule in $acl.Access) {
   $sid = $rule.IdentityReference
   try { $sid = $sid.Translate([System.Security.Principal.SecurityIdentifier]).Value } catch { $sid = [string]$sid }
   $trusted = $sid -in @('S-1-5-18', 'S-1-5-32-544')
-  if (-not $trusted -and -not $rule.IsInherited) { exit 41 }
   if (-not $trusted -and $rule.AccessControlType -eq 'Allow' -and (($rule.FileSystemRights -band $write) -ne 0)) { exit 42 }
 }
 exit 0
