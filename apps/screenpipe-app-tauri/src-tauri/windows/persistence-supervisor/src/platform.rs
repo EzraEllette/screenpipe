@@ -2001,7 +2001,12 @@ fn protect_path(path: &Path, grants: &[&str]) -> Result<()> {
 fn validate_trusted_acl_namespace(path: &Path) -> Result<()> {
     const VALIDATE_ACL: &str = r#"
 $ErrorActionPreference = 'Stop'
-$acl = Get-Acl -LiteralPath $env:SCREENPIPE_ACL_PATH
+$attributes = [System.IO.File]::GetAttributes($env:SCREENPIPE_ACL_PATH)
+if (($attributes -band [System.IO.FileAttributes]::Directory) -ne 0) {
+  $acl = [System.IO.Directory]::GetAccessControl($env:SCREENPIPE_ACL_PATH)
+} else {
+  $acl = [System.IO.File]::GetAccessControl($env:SCREENPIPE_ACL_PATH)
+}
 $owner = $acl.Owner
 try { $owner = ([System.Security.Principal.NTAccount]$owner).Translate([System.Security.Principal.SecurityIdentifier]).Value } catch {}
 if ($owner -notin @('S-1-5-18', 'S-1-5-32-544')) { exit 40 }
