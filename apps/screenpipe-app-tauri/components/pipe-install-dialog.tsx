@@ -14,14 +14,18 @@ import {
   AlertDialogDescription,
   AlertDialogFooter,
   AlertDialogCancel,
-  AlertDialogAction,
 } from "@/components/ui/alert-dialog";
+import { Button } from "@/components/ui/button";
 import { Loader2 } from "lucide-react";
 import { useToast } from "@/components/ui/use-toast";
 import { listen } from "@tauri-apps/api/event";
 import posthog from "posthog-js";
 import { InstallRiskSummary, getPipeInstallRisk } from "@/components/pipe-store";
 import { localFetch } from "@/lib/api";
+import {
+  publishPipeInstallCancelledReceipt,
+  publishPipeInstalledReceipt,
+} from "@/lib/pipe-install-receipt";
 import { useFeedbackStore } from "@/lib/stores/feedback-store";
 
 interface PipeInstallRequest {
@@ -50,7 +54,6 @@ export function PipeInstallDialog() {
   const [preview, setPreview] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [installing, setInstalling] = useState(false);
-  const [installRiskAcknowledged, setInstallRiskAcknowledged] = useState(false);
   const [registryDetail, setRegistryDetail] = useState<RegistryPipeDetail | null>(null);
   const [, setSection] = useQueryState("section");
   const { toast } = useToast();
@@ -62,7 +65,6 @@ export function PipeInstallDialog() {
       setRequest(event.payload);
       setPreview(null);
       setRegistryDetail(null);
-      setInstallRiskAcknowledged(false);
       setLoading(true);
 
       const url = event.payload.url;
@@ -139,17 +141,22 @@ export function PipeInstallDialog() {
       if (pipeConnections.length > 0) {
         // sessionStorage fallback for when PipesSection isn't mounted yet
         sessionStorage.setItem(`justInstalled:${data.name}`, "1");
-        // Also fire event in case PipesSection is already mounted
-        window.dispatchEvent(
-          new CustomEvent("screenpipe:pipeInstalled", {
-            detail: { pipeName: data.name, connections: pipeConnections },
-          })
-        );
       }
 
+      // Always publish an installation receipt. Connection-aware installs use
+      // it to open the existing modal; first-run recommendations also use it
+      // to reconcile an installed card and continue a promised setup handoff.
+      // Previously connection-free Pipes emitted nothing, so callers could
+      // only guess whether the install finished.
+      publishPipeInstalledReceipt({
+        pipeName: data.name,
+        connections: pipeConnections,
+      });
+
       setRequest(null);
-      // Navigate to pipes tab so user sees installed pipe + connection modal
-      setSection("pipes");
+      // Connection-aware tasks still need the existing post-install handoff.
+      // Connection-free installs stay on the surface that initiated them.
+      if (pipeConnections.length > 0) setSection("pipes");
     } catch (err: any) {
       toast({
         title: "failed to install scheduled task",
@@ -173,9 +180,10 @@ export function PipeInstallDialog() {
   };
 
   const handleCancel = () => {
+    if (!request) return;
     posthog.capture("pipe_install_cancelled", { url: request?.url });
+    publishPipeInstallCancelledReceipt({ url: request.url });
     setRequest(null);
-    setInstallRiskAcknowledged(false);
   };
 
   // Strip frontmatter for display
@@ -195,7 +203,7 @@ export function PipeInstallDialog() {
       <AlertDialog open={!!request} onOpenChange={(open) => !open && handleCancel()}>
         <AlertDialogContent className="max-w-lg max-h-[80vh] overflow-y-auto">
           <AlertDialogHeader>
-            <AlertDialogTitle className="text-sm">install scheduled task?</AlertDialogTitle>
+            <AlertDialogTitle className="text-sm">review scheduled task access</AlertDialogTitle>
             <AlertDialogDescription className="text-xs">
               {isRegistry
                 ? registryRisk === "high"
@@ -220,9 +228,6 @@ export function PipeInstallDialog() {
               author={registryDetail.author}
               authorVerified={registryDetail.author_verified}
               permissions={registryDetail.permissions as any}
-              acknowledgeId="registry-pipe-risk-ack"
-              acknowledged={installRiskAcknowledged}
-              onAcknowledgedChange={setInstallRiskAcknowledged}
             />
           ) : preview ? (
             <div className="border rounded overflow-hidden">
@@ -245,13 +250,12 @@ export function PipeInstallDialog() {
           )}
 
           <AlertDialogFooter>
-            <AlertDialogCancel className="text-xs" onClick={handleCancel}>
-              not now
-            </AlertDialogCancel>
-            <AlertDialogAction
+            <AlertDialogCancel className="text-xs">not now</AlertDialogCancel>
+            <Button
+              type="button"
               className="text-xs"
               onClick={handleInstall}
-              disabled={installing || (isRegistry && registryRisk === "high" && !installRiskAcknowledged)}
+              disabled={installing}
             >
               {installing ? (
                 <>
@@ -261,7 +265,7 @@ export function PipeInstallDialog() {
               ) : (
                 "install scheduled task"
               )}
-            </AlertDialogAction>
+            </Button>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>

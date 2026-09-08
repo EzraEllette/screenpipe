@@ -6,7 +6,8 @@
                 "headerImage": "assets/nsis-header.bmp",
                 "sidebarImage": "assets/nsis-sidebar.bmp",
                 "installerIcon": "icons/icon.ico",
-                "installerHooks": "windows/hooks.nsh"
+                "installerHooks": "windows/hooks.nsh",
+                "compression": "zlib"
             }
         },
         "externalBin": [

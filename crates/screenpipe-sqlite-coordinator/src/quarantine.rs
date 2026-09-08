@@ -563,6 +563,31 @@ pub fn archive_resolved_sqlite_quarantine(
     Ok(Some(archive_path.to_path_buf()))
 }
 
+/// Known availability checks retained for legacy incident diagnostics.
+/// Every unverified incident still needs owner teardown and independent health
+/// verification; an absent hint never means that physical repair is required.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SqliteQuarantineSelfHealPrerequisite {
+    /// Legacy short-read recovery used a fresh process to discard stale owners.
+    FreshProcess,
+    /// The volume must recover the established capture-safety headroom.
+    RecoveredDiskSpace,
+}
+
+pub fn sqlite_quarantine_self_heal_prerequisite(
+    code: i32,
+) -> Option<SqliteQuarantineSelfHealPrerequisite> {
+    match code {
+        libsqlite3_sys::SQLITE_IOERR_SHORT_READ => {
+            Some(SqliteQuarantineSelfHealPrerequisite::FreshProcess)
+        }
+        libsqlite3_sys::SQLITE_FULL => {
+            Some(SqliteQuarantineSelfHealPrerequisite::RecoveredDiskSpace)
+        }
+        _ => None,
+    }
+}
+
 /// Legacy result codes are diagnostic hints, never an alternative to verification.
 pub fn sqlite_quarantine_is_self_healable(code: i32) -> bool {
     super::is_sqlite_hard_fault_code(code)
@@ -664,6 +689,21 @@ mod tests {
         assert_eq!(marker.sqlite_code, Some(522));
         assert_eq!(marker.file_identity, Some(expected_identity));
         assert!(sqlite_quarantine_exists(&db));
+    }
+
+    #[test]
+    fn legacy_availability_hints_preserve_disk_full_headroom() {
+        assert_eq!(
+            sqlite_quarantine_self_heal_prerequisite(libsqlite3_sys::SQLITE_IOERR_SHORT_READ),
+            Some(SqliteQuarantineSelfHealPrerequisite::FreshProcess)
+        );
+        assert_eq!(
+            sqlite_quarantine_self_heal_prerequisite(libsqlite3_sys::SQLITE_FULL),
+            Some(SqliteQuarantineSelfHealPrerequisite::RecoveredDiskSpace)
+        );
+        // No known availability hint must not become a corruption diagnosis.
+        assert_eq!(sqlite_quarantine_self_heal_prerequisite(10), None);
+        assert!(sqlite_quarantine_is_self_healable(10));
     }
 
     #[test]

@@ -4,6 +4,117 @@
 
 export type BrowserDevScenario = "ready" | "empty" | "backend-error";
 
+type MockCloudAgentProvider = "codex" | "claude" | "cursor";
+
+interface MockCloudAgentConfig {
+  provider: MockCloudAgentProvider;
+  environment_id?: string;
+  branch?: string;
+  session_id?: string;
+  agent_id?: string;
+  repository?: string;
+  starting_ref?: string;
+  send_screenpipe_context: boolean;
+  context_lookback_hours: number;
+  context_max_items: number;
+}
+
+const MOCK_NOTIFICATION_ARTIFACT_PATH =
+  "/Users/screenpipe/.screenpipe/pipes/imessage-sync/output/sync-summary.md";
+
+const MOCK_NOTIFICATION_ARTIFACT = {
+  registered: true,
+  id: 4242,
+  source: "imessage-sync",
+  source_type: "pipe",
+  title: "sync-summary.md",
+  kind: "markdown",
+  path: MOCK_NOTIFICATION_ARTIFACT_PATH,
+  original_path: null,
+  size_bytes: 642,
+  preview:
+    "# iMessage Sync\n\n5 conversations stored with no errors. The checkpoint is ready for the next run.",
+  modified_at: "2026-08-26T18:01:54.359Z",
+  created_at: "2026-08-26T18:01:54.359Z",
+};
+
+// The ready fixture starts with Codex already authenticated, matching the
+// normal returning-user state where the CLI session survives app restarts.
+const mockCloudConnections = new Set<MockCloudAgentProvider>(["codex"]);
+let mockCloudAgentConfig: MockCloudAgentConfig = {
+  provider: "codex",
+  environment_id: "screenpipe/screenpipe",
+  send_screenpipe_context: false,
+  context_lookback_hours: 24,
+  context_max_items: 80,
+};
+let mockPipeAgent = "cloud-agent";
+let mockPipeHistory = false;
+let mockPipePreset: string | string[] | null = null;
+let mockPipeRunIn: { mode: "existing_chat"; chat_id: string } | null = null;
+
+function mockCloudProviderStatuses() {
+  return (["codex", "claude", "cursor"] as const).map((provider) => ({
+    provider,
+    available: true,
+    configured: mockCloudConnections.has(provider),
+    detail:
+      provider === "codex"
+        ? mockCloudConnections.has(provider)
+          ? "uses your ChatGPT account"
+          : "connect your ChatGPT account"
+        : provider === "claude"
+          ? mockCloudConnections.has(provider)
+            ? "uses your Claude account"
+            : "connect your Claude account"
+          : mockCloudConnections.has(provider)
+            ? "uses your Cursor Cloud Agents API key"
+            : "add a Cursor Cloud Agents API key",
+  }));
+}
+
+function mockDailyRecapPipe() {
+  return {
+    config: {
+      name: "daily-recap",
+      description: "Summarize the day with relevant screenpipe memory.",
+      schedule: "0 17 * * *",
+      enabled: true,
+      agent: mockPipeAgent,
+      model: "default",
+      preset: mockPipePreset,
+      cloud_agent:
+        mockPipeAgent === "cloud-agent" ? mockCloudAgentConfig : null,
+      connections: [],
+      history: mockPipeHistory,
+      run_in: mockPipeRunIn,
+    },
+    last_run: null,
+    last_success: null,
+    is_running: false,
+    is_bundled_builtin: false,
+    prompt_body:
+      "Summarize what I worked on today, the decisions I made, and the next actions.",
+    raw_content:
+      "---\nname: daily-recap\nschedule: 0 17 * * *\n---\n\nSummarize what I worked on today.",
+    last_error: null,
+    current_execution_id: null,
+    consecutive_failures: 0,
+    execution_count: 0,
+    next_run: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+    recent_executions: [],
+  };
+}
+
+function parseJsonBody(init: RequestInit | undefined): Record<string, unknown> {
+  if (typeof init?.body !== "string") return {};
+  try {
+    return JSON.parse(init.body) as Record<string, unknown>;
+  } catch {
+    return {};
+  }
+}
+
 export function createMockHealth(scenario: BrowserDevScenario = "ready") {
   const now = new Date().toISOString();
   return {
@@ -94,6 +205,21 @@ export function mockLocalApiResponse(
   if (url.pathname === "/health") {
     return Response.json(createMockHealth(scenario));
   }
+  // Sharing fixtures are synthetic but connected, so the meeting preview can
+  // exercise the same ranked app stack and review dialog as the desktop app.
+  if (url.pathname === "/connections") {
+    return Response.json({
+      data:
+        scenario === "empty"
+          ? []
+          : [
+              { id: "slack", name: "Slack", connected: true },
+              { id: "notion", name: "Notion", connected: true, mcp: true },
+              { id: "linear", name: "Linear", connected: true, mcp: true },
+              { id: "obsidian", name: "Obsidian", connected: true },
+            ],
+    });
+  }
   if (url.pathname === "/audio/device/status") return Response.json([]);
   if (url.pathname === "/vision/device/status") return Response.json([]);
   if (url.pathname === "/raw_sql") {
@@ -116,6 +242,24 @@ export function mockLocalApiResponse(
   if (url.pathname === "/activity-ledger") {
     return Response.json(mockActivityLedger(url, scenario));
   }
+  if (url.pathname === "/frames/preview-samples") {
+    const start = new Date(url.searchParams.get("start_time") ?? "");
+    const end = new Date(url.searchParams.get("end_time") ?? "");
+    const validRange =
+      Number.isFinite(start.getTime()) && Number.isFinite(end.getTime());
+    const span = validRange ? end.getTime() - start.getTime() : 0;
+    return Response.json({
+      frames:
+        scenario === "empty" || !validRange
+          ? []
+          : Array.from({ length: 6 }, (_, index) => ({
+              frame_id: 98_000 + index,
+              timestamp: new Date(
+                start.getTime() + (span * index) / 5,
+              ).toISOString(),
+            })),
+    });
+  }
   if (url.pathname === "/meetings/status") {
     return Response.json({ active: false, manualActive: false });
   }
@@ -127,10 +271,86 @@ export function mockLocalApiResponse(
   }
   if (url.pathname === "/memories") return Response.json(emptyPage);
   if (url.pathname === "/artifacts") {
-    return Response.json({ ...emptyPage, sources: [] });
+    const query = url.searchParams.get("q")?.toLowerCase() ?? "";
+    const requestedId = Number(url.searchParams.get("id") ?? 0);
+    if (query.endsWith("notification-error.md")) {
+      return Response.json(
+        { error: "mock artifact index unavailable" },
+        { status: 503 },
+      );
+    }
+
+    const artifacts =
+      scenario === "empty" ||
+      (requestedId > 0 && requestedId !== MOCK_NOTIFICATION_ARTIFACT.id) ||
+      (query &&
+        ![
+          MOCK_NOTIFICATION_ARTIFACT.title,
+          MOCK_NOTIFICATION_ARTIFACT.path,
+          MOCK_NOTIFICATION_ARTIFACT.preview,
+        ].some((value) => value.toLowerCase().includes(query)))
+        ? []
+        : [MOCK_NOTIFICATION_ARTIFACT];
+    const limit = Number(url.searchParams.get("limit") ?? 100);
+    const offset = Number(url.searchParams.get("offset") ?? 0);
+    return Response.json({
+      data: artifacts.slice(offset, offset + limit),
+      pagination: { limit, offset, total: artifacts.length },
+      sources: scenario === "empty" ? [] : ["imessage-sync"],
+    });
   }
   if (url.pathname === "/pipes/activity") {
     return Response.json({ data: [], has_more: false, next_before_id: null });
+  }
+  if (url.pathname === "/cloud-agents/status") {
+    return Response.json({ providers: mockCloudProviderStatuses() });
+  }
+  const cloudConnect = url.pathname.match(
+    /^\/cloud-agents\/(codex|claude|cursor)\/connect$/,
+  );
+  if (cloudConnect && method === "POST") {
+    const provider = cloudConnect[1];
+    if (provider === "codex" || provider === "claude") {
+      mockCloudConnections.add(provider);
+    }
+    return Response.json({ providers: mockCloudProviderStatuses() });
+  }
+  if (url.pathname === "/cloud-agents/cursor-key" && method === "PUT") {
+    mockCloudConnections.add("cursor");
+    return Response.json({ success: true });
+  }
+  if (url.pathname === "/cloud-agents/cursor-agents") {
+    return Response.json({
+      agents: mockCloudConnections.has("cursor")
+        ? [
+            {
+              id: "bc-00000000-0000-0000-0000-000000000001",
+              name: "daily memory agent",
+              status: "ACTIVE",
+              url: "https://cursor.com/agents/bc-00000000-0000-0000-0000-000000000001",
+            },
+          ]
+        : [],
+    });
+  }
+  const cloudCodebases = url.pathname.match(
+    /^\/cloud-agents\/(codex|claude|cursor)\/codebases$/,
+  );
+  if (cloudCodebases) {
+    const values =
+      cloudCodebases[1] === "claude"
+        ? []
+        : [
+            "https://github.com/screenpipe/screenpipe",
+            "https://github.com/screenpipe/docs",
+            "https://github.com/example/product-app",
+          ];
+    return Response.json({
+      codebases: values.map((value) => ({
+        value,
+        label: value.replace("https://github.com/", ""),
+      })),
+    });
   }
   if (url.pathname === "/search") {
     const appName = url.searchParams.get("app_name");
@@ -158,7 +378,40 @@ export function mockLocalApiResponse(
     }
     return Response.json(emptyPage);
   }
-  if (url.pathname === "/pipes") return Response.json(emptyPage);
+  if (url.pathname === "/pipes") {
+    return Response.json(
+      scenario === "empty"
+        ? emptyPage
+        : {
+            data: [mockDailyRecapPipe()],
+            pagination: { limit: 100, offset: 0, total: 1 },
+          },
+    );
+  }
+  if (url.pathname === "/pipes/daily-recap/config" && method === "POST") {
+    const body = parseJsonBody(init);
+    if ("preset" in body) mockPipePreset = body.preset as typeof mockPipePreset;
+    if (typeof body.agent === "string") mockPipeAgent = body.agent;
+    if (body.cloud_agent && typeof body.cloud_agent === "object") {
+      mockCloudAgentConfig = body.cloud_agent as MockCloudAgentConfig;
+    }
+    if (typeof body.history === "boolean") mockPipeHistory = body.history;
+    if (body.run_in === null) mockPipeRunIn = null;
+    if (body.run_in && typeof body.run_in === "object") {
+      mockPipeRunIn = body.run_in as { mode: "existing_chat"; chat_id: string };
+    }
+    return Response.json({ success: true });
+  }
+  if (url.pathname === "/pipes/favorites") {
+    return Response.json({ data: [] });
+  }
+  if (url.pathname === "/pipes/store/check-updates") {
+    return Response.json({ data: [] });
+  }
+  if (url.pathname.endsWith("/logs")) return Response.json([]);
+  if (url.pathname.endsWith("/executions")) {
+    return Response.json({ data: [], has_more: false });
+  }
   if (method === "DELETE") return Response.json({ success: true });
   if (method !== "GET") return Response.json({ success: true });
   return Response.json(scenario === "empty" ? emptyPage : { data: [] });
@@ -269,6 +522,13 @@ function mockActivitySummary() {
         first_seen: start.toISOString(),
         last_seen: end.toISOString(),
       },
+      {
+        name: "Obsidian",
+        frame_count: 62,
+        minutes: 3,
+        first_seen: start.toISOString(),
+        last_seen: end.toISOString(),
+      },
     ],
     windows: [
       {
@@ -280,10 +540,17 @@ function mockActivitySummary() {
       },
       {
         app_name: "Google Chrome",
-        window_name: "Sample tracker — board",
-        browser_url: "https://example.com/board/sample",
+        window_name: "Sample tracker — Linear",
+        browser_url: "https://linear.app/sample/board",
         minutes: 4,
         frame_count: 120,
+      },
+      {
+        app_name: "Google Chrome",
+        window_name: "Rollout notes — Notion",
+        browser_url: "https://notion.so/sample-rollout-notes",
+        minutes: 3,
+        frame_count: 88,
       },
       {
         app_name: "Cursor",
@@ -298,6 +565,13 @@ function mockActivitySummary() {
         browser_url: "",
         minutes: 2,
         frame_count: 44,
+      },
+      {
+        app_name: "Obsidian",
+        window_name: "sample rollout notes",
+        browser_url: "",
+        minutes: 3,
+        frame_count: 62,
       },
     ],
     edited_files: [
@@ -578,9 +852,24 @@ function installMockFetch(apiPort: number, scenario: BrowserDevScenario) {
           ? input.href
           : input.url;
     const url = new URL(value, document.baseURI);
-    return isLocalEngineUrl(url, apiPort)
-      ? Promise.resolve(mockLocalApiResponse(url, init, scenario))
-      : nativeFetch(input, init);
+    if (!isLocalEngineUrl(url, apiPort)) return nativeFetch(input, init);
+
+    // A deliberate slow lane for visual and interaction testing of the
+    // notification recovery state. It is reachable only through an explicit
+    // browser-dev request and never affects normal fixture traffic.
+    if (
+      url.pathname === "/artifacts" &&
+      url.searchParams.get("q")?.endsWith("notification-loading.md")
+    ) {
+      return new Promise((resolve) => {
+        window.setTimeout(
+          () => resolve(mockLocalApiResponse(url, init, scenario)),
+          15_000,
+        );
+      });
+    }
+
+    return Promise.resolve(mockLocalApiResponse(url, init, scenario));
   };
 }
 

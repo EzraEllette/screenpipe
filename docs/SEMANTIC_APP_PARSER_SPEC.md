@@ -107,7 +107,7 @@ Screenpipe-owned parser families and exact app overrides.
 | Family | Built-in profiles |
 |---|---|
 | Conversation | Antigravity, Antigravity IDE, ChatGPT, ChatGPT legacy, ChatGPT web, Claude, Claude macOS, ClickUp, ClickUp web, Codex, Cursor, Discord, Gemini desktop, Gemini web, Messages, Messenger, Microsoft Teams, Slack, WhatsApp, WhatsApp web, Windsurf |
-| Mail | Gmail, Mail, Microsoft Outlook, Spark Desktop, Spark Mail Classic, Superhuman |
+| Mail | Fastmail, Gmail, HEY, Mail, Microsoft Outlook, Proton Mail, Spark Desktop, Spark Mail Classic, Superhuman, Thunderbird |
 | Editor | Antigravity IDE, Cursor, VS Code, Windsurf, Xcode |
 | Document | Antigravity IDE, Claude macOS, ClickUp, ClickUp web, Microsoft Outlook, Microsoft Word, Microsoft Word web, Notes, Notion, Obsidian, Pages, TextEdit, Xcode |
 | Task | Antigravity, Asana, Asana web, ClickUp, ClickUp web, Microsoft To Do, OmniFocus, Todoist, Toggl |

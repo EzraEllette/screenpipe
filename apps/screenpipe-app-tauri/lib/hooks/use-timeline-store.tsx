@@ -5,7 +5,11 @@
 import { create } from "zustand";
 import { StreamTimeSeriesResponse } from "@/components/rewind/timeline";
 import { findNearestDateWithFrames } from "../actions/has-frames-date";
-import { saveFramesToCache, loadCachedFrames } from "./use-timeline-cache";
+import {
+	filterTimelineFramesForHistoryAccess,
+	loadCachedFrames,
+	saveFramesToCache,
+} from "./use-timeline-cache";
 import {
 	appendAuthToken,
 	ensureApiReady,
@@ -102,9 +106,11 @@ interface TimelineState {
 
 	// Deep link navigation — persists across component mounts
 	pendingNavigation: { timestamp: string; frameId?: string } | null;
+	historyAccessRestricted: boolean;
 
 	// Actions
 	setPendingNavigation: (nav: { timestamp: string; frameId?: string } | null) => void;
+	setHistoryAccessRestricted: (restricted: boolean) => void;
 	setFrames: (frames: StreamTimeSeriesResponse[]) => void;
 	setIsLoading: (isLoading: boolean) => void;
 	setError: (error: string | null) => void;
@@ -138,8 +144,24 @@ export const useTimelineStore = create<TimelineState>((set, get) => ({
 	hasCachedData: false,
 	pendingDateSwap: false,
 	pendingNavigation: null,
+	historyAccessRestricted: false,
 
 	setPendingNavigation: (nav) => set({ pendingNavigation: nav }),
+	setHistoryAccessRestricted: (restricted) => {
+		frameBuffer = filterTimelineFramesForHistoryAccess(frameBuffer, restricted);
+		set((state) => {
+			const frames = filterTimelineFramesForHistoryAccess(
+				state.frames,
+				restricted,
+			);
+			return {
+				historyAccessRestricted: restricted,
+				frames,
+				frameTimestamps: new Set(frames.map((frame) => frame.timestamp)),
+				hasCachedData: state.hasCachedData && frames.length > 0,
+			};
+		});
+	},
 	setFrames: (frames) => set({ frames }),
 	setIsLoading: (isLoading) => set({ isLoading }),
 	setError: (error) => set({ error }),
@@ -166,7 +188,7 @@ export const useTimelineStore = create<TimelineState>((set, get) => ({
 	// Load cached frames for instant display
 	loadFromCache: async () => {
 		try {
-			const cached = await loadCachedFrames();
+			const cached = await loadCachedFrames(get().historyAccessRestricted);
 			if (cached && cached.frames.length > 0) {
 				const cachedDate = new Date(cached.date);
 				const today = new Date();
@@ -234,7 +256,10 @@ export const useTimelineStore = create<TimelineState>((set, get) => ({
 	flushFrameBuffer: () => {
 		if (frameBuffer.length === 0) return;
 
-		const framesToFlush = frameBuffer;
+		const framesToFlush = filterTimelineFramesForHistoryAccess(
+			frameBuffer,
+			get().historyAccessRestricted,
+		);
 		frameBuffer = [];
 
 		set((state) => {
@@ -258,7 +283,11 @@ export const useTimelineStore = create<TimelineState>((set, get) => ({
 				if (cacheSaveTimer) clearTimeout(cacheSaveTimer);
 				cacheSaveTimer = setTimeout(() => {
 					cacheSaveTimer = null;
-					saveFramesToCache(merged.frames, state.currentDate);
+					saveFramesToCache(
+						merged.frames,
+						state.currentDate,
+						state.historyAccessRestricted,
+					);
 				}, CACHE_SAVE_DEBOUNCE_MS);
 
 				return {
@@ -299,7 +328,11 @@ export const useTimelineStore = create<TimelineState>((set, get) => ({
 			}
 			cacheSaveTimer = setTimeout(() => {
 				cacheSaveTimer = null;
-				saveFramesToCache(merged.frames, state.currentDate);
+				saveFramesToCache(
+					merged.frames,
+					state.currentDate,
+					state.historyAccessRestricted,
+				);
 			}, CACHE_SAVE_DEBOUNCE_MS);
 
 			return {

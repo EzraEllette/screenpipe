@@ -104,8 +104,22 @@ fn collect_rs(dir: &Path, out: &mut Vec<PathBuf>) {
 /// function, excludes Windows — a spawn in a `#[cfg(not(windows))]` or
 /// `#[cfg(unix)]` branch cannot flash a console on a Windows desktop, and
 /// demanding the flag there would not even compile.
+///
+/// `start` is the enclosing item's signature line. Attribute lines directly
+/// above the signature gate the whole item, so they count too: a factory
+/// declared under `#[cfg(target_os = "macos")]` does not exist on Windows
+/// (this is how `macos_add_password_command` in screenpipe-secrets tripped a
+/// false positive — its cfg sat one line above the `fn` and outside the scan).
 fn is_non_windows_branch(lines: &[&str], start: usize, line: usize) -> bool {
-    let Some(cfg) = (start..line).rev().find(|&i| lines[i].contains("#[cfg(")) else {
+    let attr_start = (0..start)
+        .rev()
+        .take_while(|&i| lines[i].trim_start().starts_with("#["))
+        .last()
+        .unwrap_or(start);
+    let Some(cfg) = (attr_start..line)
+        .rev()
+        .find(|&i| lines[i].contains("#[cfg("))
+    else {
         return false;
     };
     let cfg = lines[cfg];

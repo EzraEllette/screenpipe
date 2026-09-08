@@ -183,6 +183,40 @@ mod macos_screen_recording {
         unsafe { CGPreflightScreenCaptureAccess() }
     }
 
+    /// Read Screen Recording authorization directly from TCC, bypassing the
+    /// process-local SkyLight answer returned by `CGPreflightScreenCaptureAccess`.
+    pub fn tcc_preflight() -> Result<bool, String> {
+        type TccAccessPreflight = unsafe extern "C" fn(*const c_void) -> u32;
+
+        const TCC_FRAMEWORK: &[u8] = b"/System/Library/PrivateFrameworks/TCC.framework/TCC\0";
+        const PREFLIGHT_SYMBOL: &[u8] = b"TCCAccessPreflight\0";
+        const SCREEN_CAPTURE_SERVICE_SYMBOL: &[u8] = b"kTCCServiceScreenCapture\0";
+        const TCC_PREFLIGHT_GRANTED: u32 = 0;
+
+        unsafe {
+            let handle = libc::dlopen(
+                TCC_FRAMEWORK.as_ptr().cast(),
+                libc::RTLD_LAZY | libc::RTLD_LOCAL,
+            );
+            if handle.is_null() {
+                return Err("failed to load TCC.framework".to_string());
+            }
+
+            let preflight_symbol = libc::dlsym(handle, PREFLIGHT_SYMBOL.as_ptr().cast());
+            let service_symbol = libc::dlsym(handle, SCREEN_CAPTURE_SERVICE_SYMBOL.as_ptr().cast());
+            if preflight_symbol.is_null() || service_symbol.is_null() {
+                libc::dlclose(handle);
+                return Err("required TCC.framework symbols are unavailable".to_string());
+            }
+
+            let preflight: TccAccessPreflight = std::mem::transmute(preflight_symbol);
+            let service = *(service_symbol as *const *const c_void);
+            let result = preflight(service);
+            libc::dlclose(handle);
+            Ok(result == TCC_PREFLIGHT_GRANTED)
+        }
+    }
+
     /// True on macOS 15 (Sequoia) or later. Cached — spawns `sw_vers` once per process.
     pub fn is_sequoia_or_later() -> bool {
         use std::sync::OnceLock;
@@ -228,6 +262,27 @@ mod macos_screen_recording {
     }
 }
 
+/// Current Screen Recording authorization read directly from TCC.
+///
+/// Unlike `CGPreflightScreenCaptureAccess`, this bypasses SkyLight's
+/// process-local cache and therefore sees grants and revocations made while
+/// the process is running.
+#[cfg(target_os = "macos")]
+pub fn check_screen_recording_tcc() -> Result<PermissionStatus, String> {
+    macos_screen_recording::tcc_preflight().map(|granted| {
+        if granted {
+            PermissionStatus::Granted
+        } else {
+            PermissionStatus::Denied
+        }
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn check_screen_recording_tcc() -> Result<PermissionStatus, String> {
+    Ok(PermissionStatus::NotNeeded)
+}
+
 /// CLI: always uses `preflight() || capture_probe()` on every macOS version.
 #[cfg(target_os = "macos")]
 pub fn check_screen_recording() -> PermissionStatus {
@@ -245,10 +300,12 @@ pub fn check_screen_recording() -> PermissionStatus {
 /// and benefit from the full probe chain to avoid false-negative preflight stalls.
 #[cfg(target_os = "macos")]
 pub fn check_screen_recording_tauri() -> PermissionStatus {
+    let live = macos_screen_recording::tcc_preflight()
+        .unwrap_or_else(|_| macos_screen_recording::preflight());
     let ok = if macos_screen_recording::is_sequoia_or_later() && !cfg!(debug_assertions) {
-        macos_screen_recording::preflight()
+        live
     } else {
-        macos_screen_recording::preflight() || macos_screen_recording::capture_probe()
+        live || macos_screen_recording::capture_probe()
     };
     if ok {
         PermissionStatus::Granted

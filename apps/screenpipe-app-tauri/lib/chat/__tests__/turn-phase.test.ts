@@ -130,6 +130,48 @@ describe("turnPhaseLabel", () => {
       "analyzing · 3s",
     );
   });
+
+  it("states that an offline message is saved", () => {
+    expect(
+      turnPhaseLabel("analyzing", {
+        active: true,
+        liveness: { state: "offline" },
+      }),
+    ).toBe("offline · message saved; retrying when online");
+  });
+
+  it("shows the bounded retry attempt and countdown", () => {
+    expect(
+      turnPhaseLabel("writing", {
+        active: true,
+        streaming: true,
+        liveness: {
+          state: "retrying",
+          attempt: 2,
+          maxAttempts: 3,
+          retryInMs: 4_100,
+        },
+      }),
+    ).toBe("retrying · attempt 2/3 · in 5s");
+  });
+
+  it("shows how long the harness has been silent", () => {
+    expect(
+      turnPhaseLabel("analyzing", {
+        active: true,
+        liveness: { state: "stalled", silentForMs: 31_000 },
+      }),
+    ).toBe("still working · no update for 31s");
+  });
+
+  it("never lets stale liveness replace a terminal receipt", () => {
+    expect(
+      turnPhaseLabel("failed", {
+        active: false,
+        liveness: { state: "offline" },
+      }),
+    ).toBe("failed");
+  });
 });
 
 describe("formatTurnElapsed", () => {

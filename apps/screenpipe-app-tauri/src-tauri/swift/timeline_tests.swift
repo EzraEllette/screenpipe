@@ -1122,6 +1122,51 @@ private func testDateNavigation() {
                 tolerance: 0.01)
 
     expectEqual(TimelineDateNavigation.dayKey(today).count, 10, "day key is yyyy-MM-dd")
+
+    expect(
+        TimelineDateNavigation.isCalendarDateAllowed(
+            yesterday,
+            historyAccessRestricted: true,
+            now: today
+        ),
+        "restricted calendar allows yesterday"
+    )
+    expect(
+        TimelineDateNavigation.isCalendarDateAllowed(
+            today,
+            historyAccessRestricted: true,
+            now: today
+        ),
+        "restricted calendar allows today"
+    )
+    expect(
+        !TimelineDateNavigation.isCalendarDateAllowed(
+            twoDaysAgo,
+            historyAccessRestricted: true,
+            now: today
+        ),
+        "restricted calendar disables dates before yesterday"
+    )
+    expect(
+        TimelineDateNavigation.isCalendarDateAllowed(
+            twoDaysAgo,
+            historyAccessRestricted: false,
+            now: today
+        ),
+        "unrestricted calendar preserves older dates"
+    )
+    expect(
+        cal.isDate(
+            TimelineDateNavigation.jumpDay(
+                from: yesterday,
+                delta: -1,
+                historyAccessRestricted: true,
+                now: today
+            ),
+            inSameDayAs: yesterday
+        ),
+        "restricted previous-day navigation stops at yesterday"
+    )
 }
 
 // MARK: - Frame accessors
@@ -1173,6 +1218,26 @@ private func testHoverPreviewPlacement() {
     )
 }
 
+// MARK: - Screen-safe chrome
+
+private func testTopChromeSafeInset() {
+    expectClose(
+        TimelineTopChromeLayout.safeInset(windowMaxY: 982, visibleFrameMaxY: 982),
+        0,
+        "a window inside the visible frame keeps its existing top spacing"
+    )
+    expectClose(
+        TimelineTopChromeLayout.safeInset(windowMaxY: 1_116, visibleFrameMaxY: 1_082),
+        34,
+        "fullscreen chrome clears the menu bar and camera housing"
+    )
+    expectClose(
+        TimelineTopChromeLayout.safeInset(windowMaxY: 900, visibleFrameMaxY: 982),
+        0,
+        "a lower window never receives a negative inset"
+    )
+}
+
 // MARK: - Runner
 
 private let allTests: [(String, () -> Void)] = [
@@ -1209,6 +1274,7 @@ private let allTests: [(String, () -> Void)] = [
     ("date navigation", testDateNavigation),
     ("frame accessors", testFrameAccessors),
     ("hover preview placement", testHoverPreviewPlacement),
+    ("top chrome safe inset", testTopChromeSafeInset),
 ]
 
 @main

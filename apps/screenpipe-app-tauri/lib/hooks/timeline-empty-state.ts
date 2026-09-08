@@ -23,10 +23,42 @@
 /** Minimal shape this module needs from `useHealthCheck`. */
 export interface TimelineHealthLike {
 	frame_status?: string;
+	vision_reason?: string | null;
 }
 
 export function isScreenRecordingOff(
 	health: TimelineHealthLike | null | undefined,
 ): boolean {
 	return health?.frame_status === "disabled";
+}
+
+/**
+ * A screenshots-off state that screenpipe caused on purpose (config toggle or
+ * the battery-saver power profile), reported by the engine as `vision_reason`.
+ * Distinct from `isScreenRecordingOff` (whole vision off) and from a real stall:
+ * the timeline is empty but nothing is broken, so the user gets a plain reason
+ * and a way to turn screenshots back on rather than a permission warning.
+ */
+export interface ScreenshotsDisabledCta {
+	headline: string;
+	body: string;
+}
+
+export function screenshotsDisabledCta(
+	health: TimelineHealthLike | null | undefined,
+): ScreenshotsDisabledCta | null {
+	switch (health?.vision_reason) {
+		case "screenshots_disabled_by_config":
+			return {
+				headline: "Screenshots are turned off",
+				body: "Screenpipe is still capturing text, but screenshots are disabled in settings. Turn them back on to see your timeline.",
+			};
+		case "screenshots_disabled_by_power_profile":
+			return {
+				headline: "Battery saver paused screenshots",
+				body: "Screenpipe stopped taking screenshots to save power. Change the power mode in settings to resume them.",
+			};
+		default:
+			return null;
+	}
 }

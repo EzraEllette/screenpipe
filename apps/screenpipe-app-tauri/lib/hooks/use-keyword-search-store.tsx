@@ -138,6 +138,13 @@ function textContainsToken(text: string, token: string): boolean {
 	).test(normalizedText);
 }
 
+function metadataMatchesQuery(result: SearchMatch, query: string): boolean {
+	const tokens = queryHighlightTokens(query);
+	return [result.app_name, result.window_name, result.url].some((value) =>
+		tokens.some((token) => textContainsToken(value, token)),
+	);
+}
+
 export function visibleMatchingPositions(
 	positions: SearchMatch["text_positions"],
 	query: string,
@@ -157,27 +164,33 @@ export function visibleMatchingPositions(
 /**
  * Narrow each result's highlight to the positions that match the query.
  *
- * The API remains authoritative and continues to return accessibility matches,
- * but the desktop search UI temporarily omits them. AX labels can describe icon
- * buttons or whole containers without rendering those words in the screenshot,
- * and their element bounds are not trustworthy pixel highlights. Screenshot OCR
- * is not run here because it shares the recorder's single OCR permit. Since
- * text_source is frame-level, this is a temporary UI cutoff rather than exact
- * per-query match provenance.
+ * The desktop search UI omits accessibility-only matches. AX labels can describe
+ * icon buttons or whole containers without rendering those words in the
+ * screenshot, and their element bounds are not trustworthy pixel highlights.
+ * `text_source` is frame-level rather than query provenance, though, so an
+ * accessibility-captured frame can still match visible app, window, or URL
+ * metadata. Keep those results without an AX highlight.
+ *
+ * Screenshot OCR is not run here because it shares the recorder's single OCR
+ * permit. Exact AX-only attribution still belongs in the API contract.
  */
 export function narrowSearchMatchHighlights(
 	results: SearchMatch[],
 	query: string,
 ): SearchMatch[] {
-	return results
-		.filter((result) => result.text_source !== "accessibility")
-		.map((result) => {
-			const matchingPositions = visibleMatchingPositions(
-				result.text_positions,
-				query,
-			);
-			return { ...result, text_positions: matchingPositions };
-		});
+	return results.flatMap((result) => {
+		const matchingPositions = visibleMatchingPositions(
+			result.text_positions,
+			query,
+		);
+		if (
+			result.text_source === "accessibility" &&
+			!metadataMatchesQuery(result, query)
+		) {
+			return [];
+		}
+		return [{ ...result, text_positions: matchingPositions }];
+	});
 }
 
 export const useKeywordSearchStore = create<KeywordSearchState>((set, get) => ({

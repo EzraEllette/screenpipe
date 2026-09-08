@@ -278,6 +278,10 @@ done
 # qwen3-asr links OpenBLAS on Linux. linuxdeploy can miss it when the library is
 # pulled in through the build-time BLAS shim, so bundle the SONAME explicitly.
 bundle_named_lib "libopenblas.so.0"
+# The app binary itself can retain a direct libgfortran dependency even when
+# the selected OpenBLAS build does not expose it transitively. A minimal Ubuntu
+# desktop does not install this runtime by default, so make it explicit too.
+bundle_named_lib "libgfortran.so.5"
 
 # Generic Wayland capture connects to the desktop portal's PipeWire remote.
 # linuxdeploy can miss this dependency because the capture path is lazy, but

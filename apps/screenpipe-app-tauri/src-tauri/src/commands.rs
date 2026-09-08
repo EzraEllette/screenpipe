@@ -10,8 +10,12 @@ mod native_actions;
 pub(crate) mod overlay_anchor;
 
 use crate::{
+    analytics::{AnalyticsManager, Attribution},
     native_notification, native_shortcut_reminder,
-    store::{OnboardingStore, SettingsStore},
+    store::{
+        OnboardingStore, SettingsStore, TRIAL_ACTIVATION_PAYWALL_STEP,
+        TRIAL_ACTIVATION_SUMMARY_STEP, TRIAL_ACTIVATION_UNLOCKED_STEP,
+    },
     updates::is_enterprise_build,
     window::{RewindWindowId, ShowRewindWindow},
 };
@@ -20,7 +24,6 @@ use crate::window::GatedPanelPlacement;
 use crate::window::GatedWindowPlacement;
 use sha2::{Digest, Sha256};
 use tauri::{Emitter, Manager};
-#[cfg(not(target_os = "macos"))]
 use tauri_plugin_opener::OpenerExt;
 use tracing::{debug, error, info, warn};
 
@@ -61,7 +64,8 @@ fn log_webview_build_failure(label: &str, url_hint: &str, err: &(impl std::fmt::
 mod tests {
     use super::{
         enterprise_license_key_sha256, fallback_local_api_config, is_login_callback_scheme,
-        merge_enterprise_file_configs, persist_enterprise_device_config,
+        merge_enterprise_file_configs, normalize_enterprise_config_value,
+        persist_enterprise_device_config,
         persist_recovered_enterprise_device_config, read_enterprise_config_from_path,
         notification_belongs_to_overlay, recovery_anchor_license_key, save_enterprise_team_config,
         scan_chat_entries_by_mtime, shortcut_overlay_hidden_by_choice,
@@ -307,6 +311,19 @@ mod tests {
     }
 
     #[test]
+    fn registry_enterprise_key_ignores_blank_values() {
+        assert_eq!(
+            normalize_enterprise_config_value(Some("  ENT-REGISTRY-KEY  ".to_string())),
+            Some("ENT-REGISTRY-KEY".to_string())
+        );
+        assert_eq!(
+            normalize_enterprise_config_value(Some("   ".to_string())),
+            None
+        );
+        assert_eq!(normalize_enterprise_config_value(None), None);
+    }
+
+    #[test]
     fn chat_entries_missing_dir_is_empty() {
         // First run (no chats dir yet) must be a clean empty list, not an error.
         let res =
@@ -383,6 +400,17 @@ pub fn is_enterprise_build_cmd(app_handle: tauri::AppHandle) -> bool {
     is_enterprise_build(&app_handle)
 }
 
+/// Whether the running local API currently enforces the rolling history window.
+/// This is the authoritative app-wide value shared by every webview and backend
+/// route, so detached windows do not depend on duplicating account hydration.
+#[tauri::command]
+#[specta::specta]
+pub fn is_history_access_restricted(
+    state: tauri::State<'_, crate::recording::RecordingState>,
+) -> bool {
+    state.history_access.is_restricted()
+}
+
 /// Whether an automated environment has force-disabled telemetry
 /// (`SCREENPIPE_DISABLE_TELEMETRY` / `GITHUB_ACTIONS` / `CI`).
 ///
@@ -397,6 +425,18 @@ pub fn is_enterprise_build_cmd(app_handle: tauri::AppHandle) -> bool {
 #[specta::specta]
 pub fn is_telemetry_disabled_by_env() -> bool {
     screenpipe_engine::analytics::telemetry_disabled_by_env()
+}
+
+/// Return the website UTM attribution already resolved at app startup.
+///
+/// This is read-only and never triggers another network request. Analytics can
+/// be disabled before the manager is installed, so absence is a normal result.
+#[tauri::command]
+#[specta::specta]
+pub async fn get_onboarding_attribution(app_handle: tauri::AppHandle) -> Option<Attribution> {
+    let analytics = app_handle.try_state::<std::sync::Arc<AnalyticsManager>>()?;
+    let analytics = std::sync::Arc::clone(&analytics);
+    analytics.attribution_snapshot().await
 }
 
 /// Return the macOS bundle identifier of the running app
@@ -498,6 +538,14 @@ pub fn get_app_server_config() -> serde_json::Value {
 #[specta::specta]
 pub fn start_database_recovery(app_handle: tauri::AppHandle) -> Result<(), String> {
     crate::db_recovery_notifications::start_quarantined_database_recovery(app_handle)
+}
+
+/// Restart the app after an explicit user action so an exact short-read
+/// quarantine can be verified in a fresh process before recording resumes.
+#[tauri::command]
+#[specta::specta]
+pub fn restart_database_verification(app_handle: tauri::AppHandle) -> Result<(), String> {
+    crate::db_recovery_notifications::restart_quarantined_database_verification(app_handle)
 }
 
 /// Pure JSON shape used by the cold-spawn fallback. Extracted so the contract
@@ -691,6 +739,13 @@ fn recovery_anchor_license_key<'a>(
     bundled_license_key.unwrap_or(rejected_license_key)
 }
 
+#[cfg(any(test, target_os = "windows"))]
+fn normalize_enterprise_config_value(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
 /// Preserve bundled/MDM precedence except for a recovery record tied to the
 /// exact bundled key it replaces. A later MDM key automatically wins because
 /// its fingerprint no longer matches.
@@ -719,10 +774,57 @@ fn merge_enterprise_file_configs(
     bundled
 }
 
+#[cfg(target_os = "windows")]
+fn read_enterprise_config_from_windows_registry() -> Option<EnterpriseFileConfig> {
+    use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_32KEY, KEY_WOW64_64KEY};
+    use winreg::RegKey;
+
+    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+    // Intune runs 64-bit PowerShell by default, but older deployment scripts
+    // may have written through a 32-bit host. Prefer the documented 64-bit view
+    // and fall back to the 32-bit view so upgrades do not strand those fleets.
+    for view in [KEY_WOW64_64KEY, KEY_WOW64_32KEY] {
+        let Ok(key) = hklm.open_subkey_with_flags("SOFTWARE\\screenpipe", KEY_READ | view) else {
+            continue;
+        };
+        let license_key = normalize_enterprise_config_value(
+            key.get_value::<String, _>("EnterpriseLicenseKey").ok(),
+        );
+        if license_key.is_some() {
+            info!(
+                "enterprise: license key loaded from HKLM\\SOFTWARE\\screenpipe ({})",
+                if view == KEY_WOW64_64KEY {
+                    "64-bit view"
+                } else {
+                    "32-bit view"
+                }
+            );
+            return Some(EnterpriseFileConfig {
+                license_key,
+                ..EnterpriseFileConfig::default()
+            });
+        }
+    }
+    None
+}
+
+#[cfg(not(target_os = "windows"))]
+fn read_enterprise_config_from_windows_registry() -> Option<EnterpriseFileConfig> {
+    None
+}
+
+/// Read an administrator-deployed config. An executable-adjacent file is the
+/// explicit cross-platform contract and therefore wins as a complete config;
+/// the Windows registry is the documented Intune fallback when no such file is
+/// bundled.
+fn read_enterprise_config_from_deployment() -> Option<EnterpriseFileConfig> {
+    read_enterprise_config_from_exe_dir().or_else(read_enterprise_config_from_windows_registry)
+}
+
 /// Read enterprise device config. Bundled/MDM config is authoritative unless
-/// the user file carries a validated recovery for that exact bundled key.
+/// the user file carries a validated recovery for that exact deployed key.
 pub fn get_enterprise_file_config() -> EnterpriseFileConfig {
-    let bundled = read_enterprise_config_from_exe_dir();
+    let bundled = read_enterprise_config_from_deployment();
     let user_path = screenpipe_core::paths::default_screenpipe_data_dir().join("enterprise.json");
     let user = if user_path.exists() {
         info!(
@@ -734,13 +836,14 @@ pub fn get_enterprise_file_config() -> EnterpriseFileConfig {
         None
     };
     if bundled.is_none() && user.is_none() {
-        info!("enterprise: no enterprise.json found in any location");
+        info!("enterprise: no deployed or user enterprise config found");
     }
     merge_enterprise_file_configs(bundled, user)
 }
 
-/// Read the enterprise license key from `enterprise.json`.
-/// Returns None if no file is found or is invalid.
+/// Read the enterprise license key from deployment config (`enterprise.json`
+/// or the documented Windows registry value) and the user recovery config.
+/// Returns None if no valid key is found.
 #[tauri::command]
 #[specta::specta]
 pub fn get_enterprise_license_key() -> Option<String> {
@@ -896,7 +999,8 @@ pub fn persist_recovered_enterprise_device_config(
     // A user recovery overlays the executable-adjacent file. Keep every
     // subsequent rotation tied to that immutable source key so recovery B can
     // replace recovery A without making the overlay disappear on restart.
-    let bundled_license_key = read_enterprise_config_from_exe_dir().and_then(|cfg| cfg.license_key);
+    let bundled_license_key =
+        read_enterprise_config_from_deployment().and_then(|cfg| cfg.license_key);
     let recovery_anchor =
         recovery_anchor_license_key(bundled_license_key.as_deref(), replaced_license_key);
     persist_enterprise_device_config_inner(Some(license_key), ingest_url, Some(recovery_anchor))
@@ -907,7 +1011,7 @@ pub fn persist_recovered_enterprise_device_config(
 #[tauri::command]
 #[specta::specta]
 pub fn save_enterprise_license_key(license_key: String) -> Result<(), String> {
-    let bundled_key = read_enterprise_config_from_exe_dir().and_then(|cfg| cfg.license_key);
+    let bundled_key = read_enterprise_config_from_deployment().and_then(|cfg| cfg.license_key);
     match bundled_key
         .as_deref()
         .filter(|key| *key != license_key.as_str())
@@ -1074,6 +1178,14 @@ pub async fn set_cloud_token(
         .as_ref()
         .map(|settings| settings.restricts_paid_local_features())
         .unwrap_or(true);
+    if let Some(settings) = settings.as_ref() {
+        crate::recording::refresh_history_access_policy(&state.history_access, settings);
+    } else {
+        // Missing/corrupt settings are unattributed on consumer builds.
+        state
+            .history_access
+            .set_last_24_hours(!cfg!(feature = "enterprise-build"));
+    }
     let pipe_manager = {
         let server = state.server.lock().await;
         server.as_ref().map(|core| core.pipe_manager.clone())
@@ -1724,6 +1836,11 @@ fn login_url_with_intent(
         }
         if let Some(scheme) = return_scheme {
             query.append_pair("return_scheme", scheme);
+            // The website only honors a non-consumer scheme when the caller
+            // advertises this contract. That keeps deploy order safe: older
+            // Enterprise builds requested their scheme but dropped it during
+            // warm-instance forwarding on Windows and Linux.
+            query.append_pair("callback_version", crate::deep_link::AUTH_CALLBACK_VERSION);
         }
     }
     Ok(url.to_string())
@@ -1750,6 +1867,10 @@ mod login_url_intent_tests {
             pairs.get("return_scheme").map(|value| value.as_ref()),
             Some("screenpipe")
         );
+        assert_eq!(
+            pairs.get("callback_version").map(|value| value.as_ref()),
+            Some("1")
+        );
     }
 
     #[test]
@@ -1766,24 +1887,27 @@ mod login_url_intent_tests {
             pairs.get("return_scheme").map(|value| value.as_ref()),
             Some("screenpipe-enterprise")
         );
+        assert_eq!(
+            pairs.get("callback_version").map(|value| value.as_ref()),
+            Some("1")
+        );
     }
 }
 
 /// The custom URL scheme this build registers for deep links. The enterprise
 /// build uses a distinct scheme so it does not collide with the consumer app's
 /// `screenpipe://` on machines that have both installed (see #3890). Login
-/// URLs pass a `return_scheme` query param so the website can redirect back
-/// to the right build; until the website supports the param it is ignored and
-/// redirects stay on `screenpipe://`, matching the consumer path.
+/// URLs pass an allowlisted `return_scheme` plus a versioned callback contract
+/// so the website can redirect back to the right build without making rollout
+/// order unsafe for older Enterprise clients.
 pub fn deep_link_scheme() -> &'static str {
-    if cfg!(feature = "enterprise-build") {
-        "screenpipe-enterprise"
-    } else {
-        "screenpipe"
-    }
+    crate::deep_link::scheme()
 }
 
 fn is_login_callback_scheme(scheme: &str) -> bool {
+    // Keep accepting the old consumer callback inside the embedded WebView for
+    // fallback compatibility during rollout. OS-level routing remains strict
+    // and is handled by deep_link::is_for_current_build.
     scheme == deep_link_scheme() || scheme == "screenpipe"
 }
 
@@ -1804,12 +1928,11 @@ fn reset_existing_login_window<R: tauri::Runtime>(
 }
 
 /// Open the screenpipe.com login page.
-/// macOS: ASWebAuthenticationSession (system-managed sheet, forwards callback).
-/// Windows/Linux: in-app WebView that intercepts the screenpipe:// redirect.
+/// Normal login opens the user's default browser and returns through the
+/// versioned app-specific deep-link callback.
 ///
-/// `fresh_session` is used by "use different account": macOS asks
-/// ASWebAuthenticationSession for an ephemeral browser session instead of
-/// reusing Safari cookies, and Windows/Linux use a throwaway webview profile.
+/// `fresh_session` is used by "use different account": macOS uses an ephemeral
+/// ASWebAuthenticationSession and Windows/Linux use a throwaway webview profile.
 #[tauri::command]
 #[specta::specta]
 /// Returns the device code when this call started the browser device-code flow,
@@ -1829,13 +1952,41 @@ pub async fn open_login_window(
     let fresh_session = fresh_session.unwrap_or(false);
     #[cfg(target_os = "macos")]
     {
+        let callback_scheme = deep_link_scheme();
+        let login_url = login_url_with_intent(auth_mode, Some(callback_scheme))?;
+
+        // Normal sign-in belongs in the user's preferred browser. It already
+        // has their password manager, passkeys and Google/GitHub sessions, and
+        // it is also where a prior screenpipe.com acquisition cookie is most
+        // likely to live. The website returns the token through the versioned,
+        // build-specific scheme handled by the existing cold/warm deep-link
+        // paths.
+        //
+        // "Use different account" deliberately stays in an ephemeral Apple
+        // auth session so it cannot silently reuse the browser's current user.
+        if !fresh_session {
+            match app_handle
+                .opener()
+                .open_url(login_url.as_str(), None::<&str>)
+            {
+                Ok(()) => {
+                    info!("opened system browser for login");
+                    return Ok(String::new());
+                }
+                Err(e) => {
+                    // Keep the previous, reliable native auth path when macOS
+                    // cannot launch a default browser.
+                    warn!("could not open system browser, falling back to auth session: {e}");
+                }
+            }
+        }
+
         // ASWebAuthenticationSession intercepts the redirect itself (no OS
-        // scheme routing), so the consumer `screenpipe` scheme cannot collide
-        // with another installed build here (#3890) and stays correct until
-        // the website honours `return_scheme`.
+        // scheme routing). It remains the isolated-account path and the
+        // launch-failure fallback.
         let callback_url = match crate::auth_session::start_session(
-            login_url_with_intent(auth_mode, None)?,
-            "screenpipe".to_string(),
+            login_url,
+            callback_scheme.to_string(),
             fresh_session,
         )
         .await
@@ -2635,6 +2786,8 @@ pub async fn complete_onboarding(app_handle: tauri::AppHandle) -> Result<(), Str
 
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
     close_window(app_handle.clone(), ShowRewindWindow::Onboarding).await?;
+    crate::first_run_summary::arm(&app_handle)?;
+    let _ = refresh_tray_menu(app_handle.clone()).await;
 
     // Hidden UI applies to the main app, but incomplete onboarding remains
     // visible long enough to finish permissions. Once onboarding completes,
@@ -2682,9 +2835,36 @@ pub async fn reset_onboarding(app_handle: tauri::AppHandle) -> Result<(), String
 #[tauri::command]
 #[specta::specta]
 pub async fn set_onboarding_step(app_handle: tauri::AppHandle, step: String) -> Result<(), String> {
+    let previous_step = OnboardingStore::get(&app_handle)
+        .ok()
+        .flatten()
+        .and_then(|onboarding| onboarding.current_step);
     OnboardingStore::update(&app_handle, |onboarding| {
-        onboarding.current_step = Some(step);
+        onboarding.current_step = Some(step.clone());
+        if step == TRIAL_ACTIVATION_SUMMARY_STEP
+            && crate::store::trial_activation_dev_force_enabled()
+        {
+            onboarding.trial_activation_fresh_install = true;
+        }
     })?;
+    let _ = refresh_tray_menu(app_handle.clone()).await;
+
+    if !crate::should_skip_onboarding() && step == TRIAL_ACTIVATION_PAYWALL_STEP {
+        let state = app_handle.state::<crate::recording::RecordingState>();
+        crate::recording::stop_capture(state, app_handle.clone()).await?;
+        let _ = app_handle.emit("trial-activation-state", "paywall");
+    } else if step == TRIAL_ACTIVATION_UNLOCKED_STEP
+        && previous_step.as_deref() == Some(TRIAL_ACTIVATION_PAYWALL_STEP)
+    {
+        let _ = app_handle.emit("trial-activation-state", "trial-unlocked");
+        let recording_app = app_handle.clone();
+        tauri::async_runtime::spawn(async move {
+            let state = recording_app.state::<crate::recording::RecordingState>();
+            if let Err(error) = crate::spawn_screenpipe(state, recording_app.clone(), None).await {
+                warn!("failed to restart capture after trial activation: {error}");
+            }
+        });
+    }
     Ok(())
 }
 
@@ -3143,6 +3323,17 @@ pub(crate) async fn show_shortcut_reminder_impl(
 
     info!("show_shortcut_reminder called");
 
+    let trial_locked = !crate::should_skip_onboarding()
+        && OnboardingStore::get(&app_handle)
+            .ok()
+            .flatten()
+            .unwrap_or_default()
+            .blocks_trial_activation_app();
+    if trial_locked {
+        info!("trial activation: suppressed shortcut reminder overlay");
+        return Ok(());
+    }
+
     // The screenpipe shortcut only opens the timeline/rewind overlay, so the
     // reminder is pointless when the timeline is disabled. Suppress it here so
     // every caller (startup, settings toggles, shortcut edits) is covered.
@@ -3466,10 +3657,11 @@ pub async fn hide_shortcut_reminder(app_handle: tauri::AppHandle) -> Result<(), 
     Ok(())
 }
 
-/// Current recording-health overlay state: "normal" | "failure" | "fixing" |
-/// "recovered", optionally suffixed "|<detail>" (a concise failure reason or
-/// boot-phase label while fixing). The shortcut-reminder webview pulls this on
-/// mount, then stays current via the "recording-health-state" event.
+/// Current recording-health overlay state: "normal" | "failure" |
+/// "recovering" | "fixing" | "recovered", optionally suffixed "|<detail>" (a
+/// concise failure reason or boot-phase label while fixing). The
+/// shortcut-reminder webview pulls this on mount, then stays current via the
+/// "recording-health-state" event.
 #[tauri::command]
 #[specta::specta]
 pub async fn get_recording_health_state() -> String {
@@ -3696,23 +3888,18 @@ pub async fn show_notification_panel(
     app_handle: tauri::AppHandle,
     payload: String,
 ) -> Result<(), String> {
-    deliver_notification_panel(app_handle, payload, true)
+    deliver_notification_panel(app_handle, payload)
         .await
         .map(|_| ())
 }
 
 /// Render an alert, returning what actually happened to it.
 ///
-/// `apply_repeat_gate` exists because the repeat gate is check-and-record, so
-/// running it twice for one alert makes the second call collide with the
-/// record the first call just wrote. `/notify` already gates before it
-/// persists, so it passes `false` and stays the single recorder for that path;
-/// the direct callers (capture-stall, audio device/health) come straight here
-/// and pass `true`.
+/// This is the single check-and-record owner for repeat suppression. `/notify`
+/// only peeks before persisting, while direct callers come straight here.
 pub(crate) async fn deliver_notification_panel(
     app_handle: tauri::AppHandle,
     payload: String,
-    apply_repeat_gate: bool,
 ) -> Result<NotificationDelivery, String> {
     use tauri::{Emitter, WebviewWindowBuilder};
 
@@ -3747,14 +3934,12 @@ pub(crate) async fn deliver_notification_panel(
         crate::notifications::gate::title_from_payload(&payload).unwrap_or_default();
     let notification_body =
         crate::notifications::gate::body_from_payload(&payload).unwrap_or_default();
-    if apply_repeat_gate
-        && crate::notifications::gate::repeat_suppressed_now(
-            notification_type.as_deref(),
-            notification_pipe.as_deref(),
-            &notification_title,
-            &notification_body,
-        )
-    {
+    if crate::notifications::gate::repeat_suppressed_now(
+        notification_type.as_deref(),
+        notification_pipe.as_deref(),
+        &notification_title,
+        &notification_body,
+    ) {
         info!(
             "show_notification_panel: suppressed (repeat within cooldown, type={:?})",
             notification_type
@@ -4469,16 +4654,12 @@ pub async fn open_note_path(path: String) -> Result<(), String> {
     }
     #[cfg(target_os = "windows")]
     {
-        use std::os::windows::process::CommandExt;
-        use std::process::Command;
         let obsidian_uri = format!("obsidian://open?path={}", urlencoding::encode(&path));
-        let mut a = Command::new("cmd");
-        a.args(["/C", "start", "", &obsidian_uri]);
-        a.creation_flags(0x08000000); // CREATE_NO_WINDOW
-        let mut b = Command::new("cmd");
-        b.args(["/C", "start", "", &path]);
-        b.creation_flags(0x08000000); // CREATE_NO_WINDOW
-        if a.spawn().is_ok() || b.spawn().is_ok() {
+        if open_windows_shell_target(obsidian_uri).is_ok() {
+            return Ok(());
+        }
+
+        if open_windows_shell_target(path.clone()).is_ok() {
             Ok(())
         } else {
             Err(format!("failed to open note path: {}", path))
@@ -4500,23 +4681,43 @@ pub async fn open_note_path(path: String) -> Result<(), String> {
 pub fn open_windows_shell_target(target: String) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
-        use std::os::windows::process::CommandExt;
-        use std::process::Command;
+        use windows::core::PCWSTR;
+        use windows::Win32::UI::Shell::ShellExecuteW;
+        use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
-        let mut cmd = Command::new("cmd");
-        cmd.args(["/C", "start", "", &target])
-            .creation_flags(0x08000000); // CREATE_NO_WINDOW
+        let target = target.trim().to_string();
+        if target.is_empty() {
+            return Err("failed to open Windows shell target: target is empty".to_string());
+        }
 
-        match cmd.status() {
-            Ok(status) if status.success() => Ok(()),
-            Ok(status) => Err(format!(
-                "failed to open Windows shell target {}: {}",
-                target, status
-            )),
-            Err(e) => Err(format!(
-                "failed to open Windows shell target {}: {}",
-                target, e
-            )),
+        let operation = "open"
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect::<Vec<u16>>();
+        let target_wide = target
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect::<Vec<u16>>();
+
+        let result = unsafe {
+            ShellExecuteW(
+                None,
+                PCWSTR(operation.as_ptr()),
+                PCWSTR(target_wide.as_ptr()),
+                PCWSTR::null(),
+                PCWSTR::null(),
+                SW_SHOWNORMAL,
+            )
+        };
+
+        let result_code = result.0 as isize;
+        if result_code > 32 {
+            Ok(())
+        } else {
+            Err(format!(
+                "failed to open Windows shell target {}: ShellExecuteW returned {}",
+                target, result_code
+            ))
         }
     }
 
@@ -4717,6 +4918,16 @@ fn dir_size(path: &std::path::Path) -> u64 {
 #[specta::specta]
 pub fn set_autostart(app_handle: tauri::AppHandle, enabled: bool) -> Result<(), String> {
     use tauri_plugin_autostart::ManagerExt as AutostartManagerExt;
+
+    #[cfg(all(feature = "enterprise-build", target_os = "windows"))]
+    if crate::enterprise_persistence::installed() {
+        // The protected service owns startup for this package. Keep the
+        // user-writable Run entry absent even if an old setting is toggled.
+        return app_handle
+            .autolaunch()
+            .disable()
+            .map_err(|error| error.to_string());
+    }
 
     #[cfg(all(feature = "enterprise-build", target_os = "macos"))]
     crate::enterprise_autostart::set_macos_employee_autostart(&app_handle, enabled)?;

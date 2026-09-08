@@ -5,6 +5,7 @@
 import { describe, it, expect, beforeAll } from "vitest";
 import { spawn, execFileSync } from "child_process";
 import * as fs from "fs";
+import { createServer } from "http";
 import * as path from "path";
 import * as os from "os";
 
@@ -44,7 +45,11 @@ function ensureBuilt(): void {
     ...inputs.filter((f) => fs.existsSync(f)).map((f) => fs.statSync(f).mtimeMs),
   );
   if (builtAt > newestInput) return;
-  execFileSync("npx", ["tsc"], { cwd: PKG_ROOT, stdio: "inherit", timeout: 120000 });
+  execFileSync("bun", ["run", "build"], {
+    cwd: PKG_ROOT,
+    stdio: "inherit",
+    timeout: 120000,
+  });
 }
 
 /**
@@ -133,7 +138,7 @@ function initializeHandshake(
   });
 }
 
-function listToolsHandshake(): Promise<any[]> {
+function listToolsHandshake(env: Record<string, string> = {}): Promise<any[]> {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [CLI], {
       env: {
@@ -142,6 +147,7 @@ function listToolsHandshake(): Promise<any[]> {
         SCREENPIPE_DISABLE_TELEMETRY: "1",
         SCREENPIPE_LOCAL_API_KEY: "sp-smoke-test-key",
         SCREENPIPE_API_URL: "http://127.0.0.1:59999",
+        ...env,
       },
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -205,7 +211,158 @@ function listToolsHandshake(): Promise<any[]> {
   });
 }
 
-describe("stdio startup handshake", () => {
+type ApiRequest = {
+  method: string;
+  url: string;
+  authorization?: string;
+  client?: string;
+};
+
+async function searchContentThroughMcp(): Promise<{
+  requests: ApiRequest[];
+  toolResponse: any;
+}> {
+  const requests: ApiRequest[] = [];
+  const api = createServer((request, response) => {
+    requests.push({
+      method: request.method || "",
+      url: request.url || "",
+      authorization: request.headers.authorization,
+      client: request.headers["x-screenpipe-client"] as string | undefined,
+    });
+
+    response.setHeader("content-type", "application/json");
+    if (request.url?.startsWith("/search?")) {
+      response.end(
+        JSON.stringify({
+          data: [
+            {
+              type: "OCR",
+              content: {
+                app_name: "Codex",
+                window_name: "DB boundary E2E",
+                timestamp: "2026-08-28T12:00:00-07:00",
+                text: "mcp-api-boundary-e2e",
+                text_source: "accessibility",
+              },
+            },
+          ],
+          pagination: { total: 1, offset: 0 },
+        }),
+      );
+    } else {
+      response.end(JSON.stringify({ ok: true }));
+    }
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    api.once("error", reject);
+    api.listen(0, "127.0.0.1", () => resolve());
+  });
+  const address = api.address();
+  if (!address || typeof address === "string") {
+    api.close();
+    throw new Error("test API did not bind a TCP port");
+  }
+
+  const testHome = fs.mkdtempSync(path.join(os.tmpdir(), "screenpipe-mcp-db-boundary-"));
+  fs.mkdirSync(path.join(testHome, ".screenpipe"));
+  fs.writeFileSync(path.join(testHome, ".screenpipe", "db.sqlite"), "must-not-be-opened");
+
+  try {
+    const toolResponse = await new Promise<any>((resolve, reject) => {
+      const child = spawn(process.execPath, [CLI], {
+        env: {
+          HOME: testHome,
+          PATH: "",
+          SCREENPIPE_DISABLE_TELEMETRY: "1",
+          SCREENPIPE_LOCAL_API_KEY: "sp-boundary-e2e-key",
+          SCREENPIPE_API_URL: `http://127.0.0.1:${address.port}`,
+        },
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+      let stdout = "";
+      let stderr = "";
+      let settled = false;
+
+      const finish = (error?: Error, result?: any) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        child.kill("SIGKILL");
+        if (error) reject(error);
+        else resolve(result);
+      };
+      const timer = setTimeout(
+        () => finish(new Error(`MCP tool call timed out; stderr=${stderr.slice(-500)}`)),
+        INIT_DEADLINE_MS,
+      );
+
+      child.stderr.on("data", (chunk) => {
+        stderr += chunk.toString();
+      });
+      child.stdout.on("data", (chunk) => {
+        stdout += chunk.toString();
+        let newline: number;
+        while ((newline = stdout.indexOf("\n")) >= 0) {
+          const line = stdout.slice(0, newline).trim();
+          stdout = stdout.slice(newline + 1);
+          if (!line) continue;
+          let message: any;
+          try {
+            message = JSON.parse(line);
+          } catch {
+            continue;
+          }
+          if (message.id === 1 && message.result) {
+            child.stdin.write(
+              `${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })}\n`,
+            );
+            child.stdin.write(
+              `${JSON.stringify({
+                jsonrpc: "2.0",
+                id: 2,
+                method: "tools/call",
+                params: {
+                  name: "search-content",
+                  arguments: { q: "boundary", start_time: "1h ago", limit: 1 },
+                },
+              })}\n`,
+            );
+          } else if (message.id === 2) {
+            finish(undefined, message);
+          }
+        }
+      });
+      child.on("error", (error) => finish(error));
+      child.on("exit", (code) => {
+        if (!settled) finish(new Error(`MCP exited ${code}; stderr=${stderr.slice(-500)}`));
+      });
+      child.stdin.write(
+        `${JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "initialize",
+          params: {
+            protocolVersion: "2024-11-05",
+            capabilities: {},
+            clientInfo: { name: "codex-boundary-e2e", version: "0.0.0" },
+          },
+        })}\n`,
+      );
+    });
+
+    return { requests, toolResponse };
+  } finally {
+    await new Promise<void>((resolve) => api.close(() => resolve()));
+    fs.rmSync(testHome, { recursive: true, force: true });
+  }
+}
+
+// Keep Vitest's wrapper beyond the helper's own deadline so a cold CI runner
+// reports the actionable initialize-timeout error instead of masking it with
+// Vitest's shorter 5-second default.
+describe("stdio startup handshake", { timeout: INIT_DEADLINE_MS + 2_000 }, () => {
   beforeAll(() => {
     ensureBuilt();
   }, 130000);
@@ -252,6 +409,22 @@ describe("stdio startup handshake", () => {
     expect(properties?.parsed_context_limit?.maximum).toBe(20);
   });
 
+  it("exposes team-frame only to enterprise-token MCP sessions", async () => {
+    const [personalTools, teamTools] = await Promise.all([
+      listToolsHandshake(),
+      listToolsHandshake({
+        SCREENPIPE_ENTERPRISE_TOKEN: "sk_ent_smoke_test",
+        SCREENPIPE_TEAM_API_URL: "http://127.0.0.1:59998/api/enterprise/v1",
+      }),
+    ]);
+
+    expect(personalTools.some((tool) => tool.name === "team-frame")).toBe(false);
+    const frame = teamTools.find((tool) => tool.name === "team-frame");
+    expect(frame?.annotations?.readOnlyHint).toBe(true);
+    expect(frame?.inputSchema?.required).toEqual(["device_id", "frame_id"]);
+    expect(frame?.inputSchema?.properties?.frame_id?.minimum).toBe(1);
+  }, INIT_DEADLINE_MS * 2);
+
   it("advertises local-calendar literals for every normalized time field", async () => {
     const tools = await listToolsHandshake();
     const fieldsByTool = new Map<string, string[]>([
@@ -283,5 +456,19 @@ describe("stdio startup handshake", () => {
     const { ms, response } = await initializeHandshake({}, /* stripPath */ true);
     expect(response.result?.serverInfo?.name).toBe("screenpipe");
     expect(ms).toBeLessThan(INIT_DEADLINE_MS);
+  });
+
+  it("routes recording reads through the authenticated API end to end", async () => {
+    const { requests, toolResponse } = await searchContentThroughMcp();
+    const searchRequest = requests.find((request) => request.url.startsWith("/search?"));
+
+    expect(toolResponse.error).toBeUndefined();
+    expect(toolResponse.result?.isError).not.toBe(true);
+    expect(toolResponse.result?.content?.[0]?.text).toContain("mcp-api-boundary-e2e");
+    expect(searchRequest).toMatchObject({
+      method: "GET",
+      authorization: "Bearer sp-boundary-e2e-key",
+      client: "mcp",
+    });
   });
 });

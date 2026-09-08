@@ -262,7 +262,7 @@ describe("meeting summary lifecycle", () => {
       status: "failed",
       error_type: "daily_limit",
     });
-    expect(copy).toContain("usage limit is reached");
+    expect(copy).toContain("AI usage limit");
     expect(copy).toContain("Your meeting and transcript are safe");
   });
 });
@@ -281,6 +281,7 @@ describe("meetingSummaryFailure", () => {
   it("tells the user rate limits are transient and retryable", () => {
     const failure = meetingSummaryFailure(failed("rate_limited"));
     expect(failure.kind).toBe("rate_limit");
+    expect(failure.title).toBe("AI is temporarily rate-limited");
     expect(failure.retryable).toBe(true);
     expect(failure.copy).toContain("rate-limited");
     expect(failure.upgrade).toBeNull();
@@ -294,8 +295,10 @@ describe("meetingSummaryFailure", () => {
     ]) {
       const failure = meetingSummaryFailure(failed(errorType));
       expect(failure.retryable).toBe(false);
+      expect(failure.title).toBe("AI usage limit reached");
       expect(failure.copy).toContain("usage limit");
       expect(failure.copy).toContain("Your meeting and transcript are safe");
+      expect(failure.changeModelRecommended).toBe(true);
     }
   });
 
@@ -323,11 +326,53 @@ describe("meetingSummaryFailure", () => {
     expect(failure.upgrade).toBeNull();
   });
 
+  /// Engine finalizer verdicts: a meeting with no captured speech is a fact,
+  /// not a failure the user must fix.
+  it("presents nothing_to_summarize as a calm terminal outcome", () => {
+    const failure = meetingSummaryFailure(
+      failed(
+        "nothing_to_summarize",
+        "no speech was captured for this meeting, so there is no summary",
+      ),
+    );
+    expect(failure.kind).toBe("nothing_to_summarize");
+    expect(failure.title).toBe("Nothing to summarize");
+    expect(failure.retryable).toBe(false);
+    expect(failure.changeModelRecommended).toBe(false);
+    expect(failure.upgrade).toBeNull();
+  });
+
+  it("offers a retry when a run finished without saving its summary", () => {
+    const failure = meetingSummaryFailure(
+      failed(
+        "summary_not_saved",
+        "the summary run finished without saving a summary onto the meeting",
+      ),
+    );
+    expect(failure.kind).toBe("summary_not_saved");
+    expect(failure.title).toBe("Summary didn't save");
+    expect(failure.retryable).toBe(true);
+    expect(failure.copy).toContain("transcript is safe");
+  });
+
   it("suggests switching models when the plan gates the model", () => {
     const failure = meetingSummaryFailure(failed("model_not_allowed"));
     expect(failure.kind).toBe("model_not_allowed");
+    expect(failure.title).toBe("Summary model not included");
     expect(failure.retryable).toBe(false);
     expect(failure.copy.toLowerCase()).toContain("model");
+  });
+
+  it("explains an AI provider authentication failure", () => {
+    const failure = meetingSummaryFailure(
+      failed("auth_failed", "authentication failed — check API key"),
+    );
+    expect(failure.kind).toBe("auth_failed");
+    expect(failure.title).toBe("AI provider needs attention");
+    expect(failure.retryable).toBe(false);
+    expect(failure.copy).toContain("AI provider");
+    expect(failure.copy).toContain("API key");
+    expect(failure.copy).toContain("meeting and transcript are safe");
   });
 
   it("classifies from the error message when error_type is missing", () => {
@@ -340,6 +385,7 @@ describe("meetingSummaryFailure", () => {
   it("keeps the reassuring generic copy for unknown failures", () => {
     const failure = meetingSummaryFailure(failed("network", "socket hang up"));
     expect(failure.retryable).toBe(true);
+    expect(failure.changeModelRecommended).toBe(false);
     expect(failure.copy).toBe(
       "Your meeting and transcript are safe. Retry when you're ready.",
     );

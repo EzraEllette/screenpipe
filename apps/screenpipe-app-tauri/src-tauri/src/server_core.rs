@@ -56,6 +56,7 @@ pub struct ServerCore {
     /// Local API auth key — exposed to the frontend via Tauri command so
     /// localFetch can inject it synchronously (no async store race).
     pub local_api_key: Option<String>,
+    pub history_access: screenpipe_engine::history_access::HistoryAccessPolicy,
     /// Shutdown signal for the redaction reconciliation workers. Fired
     /// from `shutdown()` so the workers exit before the tokio runtime
     /// tears down — otherwise their in-flight sqlx queries (which use
@@ -291,6 +292,9 @@ impl ServerCore {
     pub async fn start(
         config: &RecordingConfig,
         on_pipe_output: Option<screenpipe_core::pipes::OnPipeOutputLine>,
+        chat_destination: Option<
+            screenpipe_core::agents::chat_destination::ChatDestinationDispatch,
+        >,
         owned_browser: Option<
             std::sync::Arc<screenpipe_connect::connections::browser::OwnedBrowser>,
         >,
@@ -301,6 +305,7 @@ impl ServerCore {
         // replaced with this Arc so all three observers (cloud_proxy.rs,
         // PiExecutor, the Tauri command writer) share one storage cell.
         cloud_token_handle: std::sync::Arc<arc_swap::ArcSwap<Option<String>>>,
+        history_access: screenpipe_engine::history_access::HistoryAccessPolicy,
     ) -> Result<Self, String> {
         info!("Starting server core on port {}", config.port);
         crate::health::set_boot_phase("starting", Some("starting server"));
@@ -581,6 +586,7 @@ impl ServerCore {
         // restart — paying users who signed in after the sidecar started got
         // anonymous-tier 403s on every Sonnet/Opus pipe.
         server.cloud_token = cloud_token_handle.clone();
+        server.history_access = history_access.clone();
         // Seed the shared cell from persisted settings, but ONLY when empty
         // — if `set_cloud_token` has already pushed a fresher value (e.g. the
         // user signed in between sidecar boots), don't clobber it with the
@@ -692,6 +698,7 @@ impl ServerCore {
         // so a fresh sign-in or sign-out takes effect on the very next pipe
         // run without restarting the engine.
         let cloud_token_handle = server.cloud_token.clone();
+        let acp_gateway_url = ai_gateway_url.clone();
         let pi_executor = Arc::new(
             screenpipe_core::agents::pi::PiExecutor::with_shared_user_token(
                 cloud_token_handle.clone(),
@@ -704,6 +711,25 @@ impl ServerCore {
             Arc<dyn screenpipe_core::agents::AgentExecutor>,
         > = std::collections::HashMap::new();
         agent_executors.insert("pi".to_string(), pi_executor.clone());
+        agent_executors.insert(
+            "acp".to_string(),
+            Arc::new(
+                screenpipe_core::agents::acp::AcpExecutor::with_shared_user_token(
+                    cloud_token_handle.clone(),
+                    acp_gateway_url,
+                    config.port,
+                    config.api_auth_key.clone(),
+                ),
+            ),
+        );
+        let cloud_agent_executor = Arc::new(
+            screenpipe_core::agents::cloud::CloudAgentExecutor::new(
+                config.port,
+                config.api_auth_key.clone(),
+            )
+            .with_secret_store(server.secret_store.clone()),
+        );
+        agent_executors.insert("cloud-agent".to_string(), cloud_agent_executor);
 
         let pipe_store: Option<Arc<dyn screenpipe_core::pipes::PipeStore>> = Some(Arc::new(
             screenpipe_engine::pipe_store::SqlitePipeStore::new(db.clone()),
@@ -734,6 +760,9 @@ impl ServerCore {
         if let Some(cb) = on_pipe_output {
             pipe_manager.set_on_output_line(cb);
         }
+        if let Some(dispatch) = chat_destination {
+            pipe_manager.set_chat_destination_dispatch(dispatch);
+        }
         // Give scheduled runs the same Live View target authority the foreground
         // refresh button sends, so a Pipe feeding several dashboards refreshes
         // all of them instead of leaving the ones it skipped stale until a
@@ -752,18 +781,6 @@ impl ServerCore {
         // Inject local API key so pipe subprocesses can authenticate to localhost
         if config.api_auth {
             pipe_manager.set_local_api_key(config.api_auth_key.clone());
-        }
-        {
-            let secret_store_for_check = server.secret_store.clone();
-            let screenpipe_dir_for_check = config.data_dir.clone();
-            pipe_manager.set_connection_check(Arc::new(move |required| {
-                let ss = secret_store_for_check.clone();
-                let dir = screenpipe_dir_for_check.clone();
-                Box::pin(async move {
-                    screenpipe_connect::missing_pipe_connections(ss.as_deref(), &dir, &required)
-                        .await
-                })
-            }));
         }
         pipe_manager.install_builtin_pipes().ok();
         if let Err(e) = pipe_manager.load_pipes().await {
@@ -1285,10 +1302,11 @@ impl ServerCore {
                     let pipeline = pipeline.with_pseudonyms(pseudonymizer);
                     let pipeline_arc = Arc::new(pipeline) as Arc<dyn Redactor>;
                     let cfg = WorkerConfig {
-                        // Local inference is CPU-bound. Keep bursts short so
-                        // the adaptive whole-process 30% controller can react
-                        // quickly; cloud/enclave batching remains at 16.
-                        batch_size: 4,
+                        // Keep 16 as the throughput ceiling. The worker starts
+                        // each table at four rows and adapts toward a 250 ms
+                        // work slice, while the whole-process governor still
+                        // enforces the sustained 30% CPU budget.
+                        batch_size: 16,
                         tables: ALL_TARGET_TABLES.to_vec(),
                         ..Default::default()
                     };
@@ -1389,6 +1407,7 @@ impl ServerCore {
             data_path,
             port: config.port,
             local_api_key: config.api_auth_key.clone(),
+            history_access,
             redact_shutdown,
             oauth_refresher: oauth_refresher_handle,
             external_memory_sync: external_memory_sync_handle,

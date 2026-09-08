@@ -116,4 +116,20 @@ describe("pipe store error state", () => {
     expect(storeAttempts).toBe(2);
     expect(mocks.invalidatePrefix).toHaveBeenCalledWith("pipes/store");
   });
+
+  it("keeps Automations scoped to scheduled tasks", async () => {
+    mocks.localFetch.mockImplementation(async (url: string) => {
+      if (url === "/pipes") {
+        return jsonResponse([{ config: { name: "installed" } }]);
+      }
+      throw new Error(`unexpected request: ${url}`);
+    });
+
+    render(<PipeStoreView />);
+
+    expect(screen.getByTestId("tab-my-pipes")).toBeTruthy();
+    expect(screen.getByTestId("tab-discover")).toBeTruthy();
+    expect(screen.queryByTestId("tab-connections")).toBeNull();
+    expect(screen.queryByTestId("provider-skill-catalog")).toBeNull();
+  });
 });

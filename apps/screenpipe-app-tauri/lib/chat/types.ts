@@ -59,6 +59,9 @@ export type ChatAttachment = {
 export interface ToolCall {
   id: string;
   toolName: string;
+  /** ACP adapter id that produced this call. Used only for a safe provider
+   *  fallback when the adapter never supplies a meaningful tool title. */
+  agentId?: string;
   /** ACP tool-call kind (read/edit/execute/fetch/search/think/…) when the agent
    *  provides one; drives a sensible activity label for native ACP tools. */
   kind?: string;
@@ -91,7 +94,13 @@ export type AgentActionOption = {
 };
 
 export type ContentBlock =
-  | { type: "text"; text: string }
+  | {
+      type: "text";
+      text: string;
+      /** Interim progress stays visible around tool calls; final prose remains
+       * the settled answer. Older transcripts omit this and are inferred. */
+      phase?: "commentary" | "final_answer";
+    }
   | { type: "tool"; toolCall: ToolCall }
   | { type: "thinking"; text: string; isThinking: boolean; durationMs?: number }
   // ACP agent plan. Replaced in place on every update — ACP resends the whole
@@ -135,6 +144,8 @@ export interface Message {
   id: string;
   role: "user" | "assistant";
   content: string;
+  /** Local history source for messages copied from another agent client. */
+  importedFrom?: "claude-code" | "codex";
   displayContent?: string;
   intent?: "steer";
   turnIntentId?: string;

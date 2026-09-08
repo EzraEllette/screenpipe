@@ -19,9 +19,20 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuLabel,
+  DropdownMenuPortal,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
   DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { ConnectedShareAppIcon } from "@/components/connected-share-app-icon";
+import type {
+  ConnectedShareDestination,
+  ConnectedShareSuggestion,
+} from "@/lib/connected-share";
 import { cn } from "@/lib/utils";
 import { MEETING_RULE_ACTION_CLASS } from "./meeting-workspace";
 
@@ -100,16 +111,39 @@ const ACTION_ICON: Record<
   resend: Send,
 };
 
-/** One entry in the single overflow menu. */
-export type MeetingMenuItem = {
+type MeetingMenuItemBase = {
   key: string;
   label: string;
   icon: React.ComponentType<{ className?: string }>;
-  onSelect: () => void;
   disabled?: boolean;
   /** Renders above a separator, at the bottom. Only `delete` uses this. */
   destructive?: boolean;
 };
+
+export type MeetingMenuSubmenuOption = {
+  key: string;
+  label: string;
+  detail?: string;
+  onSelect: () => void;
+  disabled?: boolean;
+};
+
+/** One action or nested choice in the single overflow menu. */
+export type MeetingMenuItem = MeetingMenuItemBase &
+  (
+    | {
+        onSelect: () => void;
+        submenu?: never;
+      }
+    | {
+        onSelect?: never;
+        submenu: {
+          selectedKey: string | null;
+          selectedLabel: string;
+          options: MeetingMenuSubmenuOption[];
+        };
+      }
+  );
 
 /**
  * A labelled section of the overflow menu.
@@ -130,8 +164,10 @@ export function MeetingShareMenu({
   resendLabel,
   busy = false,
   copiedAction = null,
+  suggestedDestinations = [],
   moreGroups = [],
   onMenuOpenChange,
+  onDestinationSelect,
   onShare,
 }: {
   /** A summary is saved and finished streaming — a partial one is never shareable. */
@@ -155,6 +191,8 @@ export function MeetingShareMenu({
   busy?: boolean;
   /** Which action last landed on the clipboard, for the transient check. */
   copiedAction?: MeetingShareAction | null;
+  /** Connected apps, locally ranked by evidence from this meeting. */
+  suggestedDestinations?: ConnectedShareSuggestion[];
   /**
    * Meeting-level actions (summarize, resume, retranscribe, export, delete)
    * folded into this control's menu. They used to own a second `⋯` dropdown
@@ -163,6 +201,8 @@ export function MeetingShareMenu({
   moreGroups?: MeetingMenuGroup[];
   /** Fires when the overflow opens, so "went looking" is measurable. */
   onMenuOpenChange?: (open: boolean) => void;
+  /** Opens review with an explicit connected app already selected. */
+  onDestinationSelect?: (destination: ConnectedShareDestination) => void;
   onShare: (action: MeetingShareAction) => void;
 }) {
   const primary: MeetingShareAction = canShareSummary ? "summary" : "meeting";
@@ -180,7 +220,7 @@ export function MeetingShareMenu({
   const confirmed = copiedAction === primary;
   const PrimaryIcon = confirmed ? Check : ACTION_ICON[primary];
 
-  const toItems = (actions: MeetingShareAction[]) =>
+  const toItems = (actions: MeetingShareAction[]): MeetingMenuItem[] =>
     actions.map((action) => ({
       key: action,
       label: ACTION_LABEL[action],
@@ -207,9 +247,7 @@ export function MeetingShareMenu({
     {
       label: "send",
       items: toItems(sendGroupActions).map((item) =>
-        item.key === "send"
-          ? { ...item, label: "send somewhere else…" }
-          : item,
+        item.key === "send" ? { ...item, label: "send somewhere else…" } : item,
       ),
     },
     ...moreGroups,
@@ -241,26 +279,60 @@ export function MeetingShareMenu({
         {confirmed && <span className="hidden sm:inline">copied</span>}
       </button>
 
-      {/* Visible, but icon-only like copy beside it.
-          Sharing was invisible behind the caret, which is worth fixing — but on
-          the equivalent Live View surface only 2 of 2,566 people who opened a
-          dashboard in 30 days ever opened the send dialog, so a labelled button
-          would spend the rule's scarcest slot on unproven demand. The glyph is
-          the macOS share sheet rather than a paper plane: this opens a
-          destination chooser, it does not submit a message. */}
-      {canSend && !oneTap && (
-        <button
-          type="button"
-          onClick={() => onShare("send")}
-          disabled={busy}
-          data-testid="meeting-send-button"
-          aria-label={sendLabel ?? ACTION_LABEL.send}
-          title="review this meeting, then send it to a connected app"
-          className={cn(RULE_ACTION_CLASS, "px-4")}
-        >
-          <Share className="h-3.5 w-3.5" />
-        </button>
-      )}
+      {/* Connected destinations become one compact visual region. At rest the
+          icons overlap; pointer or keyboard intent fans them out. A click, not
+          hover, opens review already aimed at that app. The ranking comes from
+          local meeting evidence but never skips review or grants permission. */}
+      {canSend &&
+        !oneTap &&
+        suggestedDestinations.length > 0 &&
+        onDestinationSelect && (
+          <div
+            className="group flex h-11 shrink-0 items-center border-l border-border px-2"
+            data-testid="meeting-share-destinations"
+            aria-label="connected apps suggested for this meeting"
+          >
+            {suggestedDestinations.slice(0, 4).map((suggestion, index) => (
+              <button
+                key={suggestion.destination}
+                type="button"
+                disabled={busy}
+                data-testid={`meeting-send-${suggestion.app}`}
+                aria-label={`review and send to ${suggestion.name}`}
+                title={`${suggestion.name}${suggestion.observed ? " · used during this meeting" : ""}`}
+                onClick={() => onDestinationSelect(suggestion.destination)}
+                style={{ zIndex: suggestedDestinations.length - index }}
+                className={cn(
+                  "relative flex h-7 w-7 shrink-0 items-center justify-center rounded-sm border border-border bg-background transition-[margin,transform,background-color] duration-150 hover:z-20 hover:-translate-y-0.5 hover:bg-muted focus-visible:z-20 focus-visible:-translate-y-0.5 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-foreground motion-reduce:transform-none motion-reduce:transition-none",
+                  index > 0 && "-ml-3 group-hover:ml-1 group-focus-within:ml-1",
+                )}
+              >
+                <ConnectedShareAppIcon app={suggestion.app} />
+                {suggestion.observed && (
+                  <span className="sr-only">used during this meeting</span>
+                )}
+              </button>
+            ))}
+          </div>
+        )}
+
+      {/* Keep the generic chooser while connections are loading, unavailable,
+          or not represented by a supported destination icon. */}
+      {canSend &&
+        !oneTap &&
+        (!onDestinationSelect || suggestedDestinations.length === 0) && (
+          <button
+            type="button"
+            onClick={() => onShare("send")}
+            disabled={busy}
+            data-testid="meeting-send-button"
+            aria-label={sendLabel ?? ACTION_LABEL.send}
+            title="review this meeting, then send it to a connected app"
+            className={cn(RULE_ACTION_CLASS, "px-4")}
+          >
+            <Share className="h-3.5 w-3.5" />
+          </button>
+        )}
 
       {/* Once the destination is known there is nothing left to choose, so the
           slot stops being a chooser and becomes the send itself. It carries a
@@ -312,20 +384,70 @@ export function MeetingShareMenu({
                 <DropdownMenuLabel className="font-mono text-[10px] uppercase tracking-[0.12em] text-muted-foreground">
                   {group.label}
                 </DropdownMenuLabel>
-                {ordinary.map((item) => (
-                  <DropdownMenuItem
-                    key={item.key}
-                    onSelect={item.onSelect}
-                    disabled={item.disabled}
-                    className="text-xs"
-                  >
-                    <item.icon className="mr-2 h-3.5 w-3.5" />
-                    {item.label}
-                    {copiedAction === item.key && (
-                      <Check className="ml-auto h-3.5 w-3.5" />
-                    )}
-                  </DropdownMenuItem>
-                ))}
+                {ordinary.map((item) =>
+                  item.submenu ? (
+                    <DropdownMenuSub key={item.key}>
+                      <DropdownMenuSubTrigger
+                        disabled={item.disabled}
+                        className="text-xs [&>svg:last-child]:ml-1"
+                      >
+                        <item.icon className="mr-2 h-3.5 w-3.5" />
+                        <span>{item.label}</span>
+                        <span
+                          className="ml-auto max-w-20 truncate text-[10px] text-muted-foreground"
+                          title={item.submenu.selectedLabel}
+                        >
+                          {item.submenu.selectedLabel}
+                        </span>
+                      </DropdownMenuSubTrigger>
+                      <DropdownMenuPortal>
+                        <DropdownMenuSubContent className="w-72">
+                          <DropdownMenuRadioGroup
+                            value={item.submenu.selectedKey ?? ""}
+                          >
+                            {item.submenu.options.map((option) => (
+                              <DropdownMenuRadioItem
+                                key={option.key}
+                                value={option.key}
+                                onSelect={option.onSelect}
+                                disabled={option.disabled}
+                                className="gap-2 text-xs"
+                              >
+                                <span
+                                  className="min-w-0 flex-1 truncate"
+                                  title={option.label}
+                                >
+                                  {option.label}
+                                </span>
+                                {option.detail && (
+                                  <span
+                                    className="max-w-28 truncate text-[10px] text-muted-foreground"
+                                    title={option.detail}
+                                  >
+                                    {option.detail}
+                                  </span>
+                                )}
+                              </DropdownMenuRadioItem>
+                            ))}
+                          </DropdownMenuRadioGroup>
+                        </DropdownMenuSubContent>
+                      </DropdownMenuPortal>
+                    </DropdownMenuSub>
+                  ) : (
+                    <DropdownMenuItem
+                      key={item.key}
+                      onSelect={item.onSelect}
+                      disabled={item.disabled}
+                      className="text-xs"
+                    >
+                      <item.icon className="mr-2 h-3.5 w-3.5" />
+                      {item.label}
+                      {copiedAction === item.key && (
+                        <Check className="ml-auto h-3.5 w-3.5" />
+                      )}
+                    </DropdownMenuItem>
+                  ),
+                )}
                 {destructive.length > 0 && <DropdownMenuSeparator />}
                 {destructive.map((item) => (
                   <DropdownMenuItem

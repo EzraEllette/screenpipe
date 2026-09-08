@@ -4,12 +4,17 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Check, Copy, Download, Loader2, RefreshCw } from "lucide-react";
+import { Download, Loader2, LogIn, RefreshCw } from "lucide-react";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { commands } from "@/lib/utils/tauri";
 import { acpAdapterInfo } from "@/lib/utils/preset-appearance";
 import { dedupedModes, useAcpSessionConfig } from "@/lib/stores/acp-session-config";
+import { useTauriEvent } from "@/lib/hooks/use-tauri-event";
+import {
+  AcpSetupProgress,
+  type AcpSetupPhase,
+} from "@/components/settings/acp-setup-progress";
 import { cn } from "@/lib/utils";
 
 export interface AcpPresetDefaultsChange {
@@ -33,6 +38,13 @@ const probesInFlight = new Set<string>();
  *  an explicit "retry" clears this so the agent is checked again. */
 const probeVerdicts = new Map<string, string>();
 
+export const ACP_PRESET_SETUP_PROGRESS_EVENT = "acp_preset_setup_progress";
+
+interface AcpPresetSetupProgressPayload {
+  agentId?: string;
+  phase?: string;
+}
+
 /** The no-override choice, named after what the agent will actually use. */
 const defaultChoiceLabel = (name?: string) =>
   name ? `default (${name})` : "agent default";
@@ -49,6 +61,7 @@ export function AcpPresetDefaults({
   onChange,
   compact = false,
   onConnectedChange,
+  installedInEditor = false,
 }: {
   agent: AcpPresetAgent;
   config: Record<string, string> | undefined;
@@ -59,6 +72,9 @@ export function AcpPresetDefaults({
    *  signed in. The parent uses it to hold back advanced settings that are
    *  noise until the agent actually works. */
   onConnectedChange?: (connected: boolean) => void;
+  /** A binary installer just completed in this editor. Keep Install as the
+   *  completed first step while the shared probe starts and connects it. */
+  installedInEditor?: boolean;
 }) {
   const agentId = agent.id;
   const advertised = useAcpSessionConfig((state) => state.byAgent[agentId]);
@@ -66,7 +82,8 @@ export function AcpPresetDefaults({
   const [probing, setProbing] = useState(false);
   const [probeError, setProbeError] = useState<string | null>(null);
   const [probeNonce, setProbeNonce] = useState(0);
-  const [copied, setCopied] = useState(false);
+  const [signInPending, setSignInPending] = useState(false);
+  const [signInError, setSignInError] = useState<string | null>(null);
   // Whether this agent still has to be downloaded. Asked BEFORE probing, not
   // during: starting a background download because someone clicked an agent in
   // a list is a surprise, and "Installing Codex…" appearing unbidden reads like
@@ -75,6 +92,9 @@ export function AcpPresetDefaults({
   // Set once the user explicitly asks for the download. Until then an
   // uninstalled agent shows an install button instead of installing itself.
   const [installApproved, setInstallApproved] = useState(false);
+  const [setupPhase, setSetupPhase] = useState<AcpSetupPhase | null>(null);
+  const [setupIncludesInstall, setSetupIncludesInstall] =
+    useState(installedInEditor);
   // Holds the retry button's "checking…" spinner for a minimum window. The
   // re-probe is event-driven and often near-instant, so without this the
   // spinner would flash imperceptibly and retry would feel dead.
@@ -85,6 +105,25 @@ export function AcpPresetDefaults({
   // re-showing the same thing. Mirrors AcpSignInDialog's destructive line.
   const [retryFailed, setRetryFailed] = useState(false);
   const wasRetryRef = useRef(false);
+
+  useTauriEvent<AcpPresetSetupProgressPayload>(
+    ACP_PRESET_SETUP_PROGRESS_EVENT,
+    (event) => {
+      const payload = event.payload;
+      if (payload.agentId !== agentId) return;
+      if (payload.phase === "downloading") {
+        setSetupIncludesInstall(true);
+        setSetupPhase("downloading");
+      } else if (
+        payload.phase === "starting" ||
+        payload.phase === "connecting" ||
+        payload.phase === "ready"
+      ) {
+        setSetupPhase(payload.phase);
+      }
+    },
+    [agentId],
+  );
   const beginRetry = () => {
     probeVerdicts.delete(agentId);
     wasRetryRef.current = true;
@@ -93,6 +132,19 @@ export function AcpPresetDefaults({
     setProbeNonce((nonce) => nonce + 1);
     if (retryTimerRef.current != null) window.clearTimeout(retryTimerRef.current);
     retryTimerRef.current = window.setTimeout(() => setRetryPending(false), 900);
+  };
+  const beginExternalLogin = async () => {
+    setSignInPending(true);
+    setSignInError(null);
+    try {
+      const result = await commands.piAcpExternalLogin(agentId);
+      if (result.status === "error") throw new Error(result.error);
+      setSignInPending(false);
+      beginRetry();
+    } catch (error) {
+      setSignInPending(false);
+      setSignInError(error instanceof Error ? error.message : String(error));
+    }
   };
   useEffect(
     () => () => {
@@ -111,11 +163,15 @@ export function AcpPresetDefaults({
     setProbeError(null);
     setDownloadPending(null);
     setInstallApproved(false);
+    setSetupPhase(null);
+    setSetupIncludesInstall(installedInEditor);
     setRetryPending(false);
     setRetryFailed(false);
+    setSignInPending(false);
+    setSignInError(null);
     wasRetryRef.current = false;
     if (retryTimerRef.current != null) window.clearTimeout(retryTimerRef.current);
-  }, [agentId]);
+  }, [agentId, installedInEditor]);
 
   // Resolve "does this need downloading?" first, so the probe effect below can
   // hold off rather than discovering it mid-install.
@@ -151,6 +207,8 @@ export function AcpPresetDefaults({
       return;
     }
     probesInFlight.add(agentId);
+    setSetupIncludesInstall(Boolean(downloadPending || installedInEditor));
+    setSetupPhase(downloadPending ? "downloading" : "starting");
     setProbing(true);
     let cancelled = false;
     void (async () => {
@@ -198,7 +256,15 @@ export function AcpPresetDefaults({
     };
     // Probing keys off the adapter identity, not the callback identities.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [agentId, advertised, probeable, probeNonce, downloadPending, installApproved]);
+  }, [
+    agentId,
+    advertised,
+    probeable,
+    probeNonce,
+    downloadPending,
+    installApproved,
+    installedInEditor,
+  ]);
 
   // "Connected" is the agent having answered with its choices. Anything else
   // (needs install, needs sign-in, probe failed) is not connected.
@@ -248,9 +314,9 @@ export function AcpPresetDefaults({
       );
     // Retry keeps its "checking…" spinner up for a visible beat (retryPending)
     // even when the re-probe returns instantly, so it never feels dead.
-    const busy = probing || retryPending;
-    // First probe (no card yet): show a loading line, or a pulsing install
-    // label for a not-yet-cached npx agent (Zed's pattern: no spinner, no %).
+    const busy = probing || retryPending || signInPending;
+    // First probe (no card yet): show the shared lifecycle card. It advances
+    // only on real runtime boundaries and never guesses a download percentage.
     // Needs downloading and nobody asked for it yet: offer the download as an
     // action instead of starting it. Clicking an agent in a list is a choice
     // about which agent, not consent to fetch a package.
@@ -268,26 +334,40 @@ export function AcpPresetDefaults({
             Screenpipe can download it for you. It runs on this computer as its
             own program, and signs in with its own account.
           </p>
-          <Button type="button" size="sm" onClick={() => setInstallApproved(true)}>
+          <Button
+            type="button"
+            size="sm"
+            onClick={() => {
+              setSetupIncludesInstall(true);
+              setSetupPhase("downloading");
+              setInstallApproved(true);
+            }}
+          >
             <Download className="mr-1.5 h-3.5 w-3.5" /> Install {name}
           </Button>
         </div>
       );
     }
-    if (busy && !authErr) {
-      if (downloadPending) {
-        const name = acpAdapterInfo(agentId).name;
-        return (
-          <p className={cn(hintClass, "animate-pulse")}>
-            {compact ? `installing ${name}…` : `Installing ${name}…`}
-          </p>
-        );
-      }
+    if (downloadPending === null && !probeError) {
       return (
-        <p className={cn(hintClass, "flex items-center gap-1.5")}>
-          <Loader2 className="h-3 w-3 animate-spin" />
-          {compact ? "loading model and mode choices…" : "Loading model and mode choices from the agent…"}
-        </p>
+        <AcpSetupProgress
+          agentName={acpAdapterInfo(agentId).name}
+          phase="checking"
+          includesInstall={setupIncludesInstall}
+          installKind={installedInEditor ? "install" : "download"}
+          compact={compact}
+        />
+      );
+    }
+    if (busy && !authErr) {
+      return (
+        <AcpSetupProgress
+          agentName={acpAdapterInfo(agentId).name}
+          phase={setupPhase ?? (downloadPending ? "downloading" : "starting")}
+          includesInstall={setupIncludesInstall}
+          installKind={installedInEditor ? "install" : "download"}
+          compact={compact}
+        />
       );
     }
     if (authErr) {
@@ -304,13 +384,13 @@ export function AcpPresetDefaults({
             <p className={cn("font-medium", compact ? "text-xs" : "text-sm")}>Sign in to {info.name}</p>
             <p className={cn("text-muted-foreground", compact ? "text-[11px]" : "text-xs")}>
               {signInCommand
-                ? `Run this in a terminal. It opens ${info.name}'s own login, which stores the credential itself.`
+                ? `${info.name} opens its secure login in your browser and keeps the credential.`
                 : `${info.name} signs in when you open a chat with this preset: it runs its own login and stores the credential itself. Screenpipe never sees or stores an API key for it.`}
             </p>
           </div>
           {/* A retry that still failed: say so plainly, kept visible, like the
               chat sign-in dialog does, so the user knows to redo the step. */}
-          {retryFailed && (
+          {(retryFailed || signInError) && (
             <div
               role="alert"
               data-testid="acp-preset-signin-error"
@@ -319,46 +399,32 @@ export function AcpPresetDefaults({
                 compact ? "text-[11px]" : "text-xs",
               )}
             >
-              {signInCommand
-                ? "Still not signed in. Run the command above, then check again."
+              {signInError
+                ? `Couldn't open ${info.name}'s login: ${signInError}`
+                : signInCommand
+                ? `Still not signed in to ${info.name}. Try signing in again.`
                 : `Still not signed in. ${info.name} signs in from a chat, not from here.`}
             </div>
           )}
-          {signInCommand && (
-            <div className="relative">
-              <pre className={cn("overflow-x-auto rounded-md bg-muted py-2 pl-3 pr-10 font-mono text-foreground", compact ? "text-[11px]" : "text-xs")}>
+          {signInCommand && signInError && (
+            <div>
+              <p className={cn("mb-1 text-muted-foreground", compact ? "text-[10px]" : "text-xs")}>
+                You can still run this manually:
+              </p>
+              <pre className={cn("overflow-x-auto rounded-md bg-muted px-3 py-2 font-mono text-foreground", compact ? "text-[11px]" : "text-xs")}>
                 <code>{signInCommand}</code>
               </pre>
-              <button
-                type="button"
-                aria-label={copied ? "Copied" : "Copy command"}
-                title={copied ? "Copied" : "Copy"}
-                onClick={async () => {
-                  try {
-                    await commands.copyTextToClipboard(signInCommand);
-                    setCopied(true);
-                    window.setTimeout(() => setCopied(false), 1500);
-                  } catch {
-                    /* clipboard best-effort */
-                  }
-                }}
-                className="absolute right-1.5 top-1/2 inline-flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-background hover:text-foreground"
-              >
-                {copied ? <Check className="h-3.5 w-3.5" aria-hidden /> : <Copy className="h-3.5 w-3.5" aria-hidden />}
-              </button>
             </div>
           )}
-          {/* This button re-checks; it cannot perform the sign-in itself, so it
-              must not be labelled as if it could. "I've signed in" invited a
-              click before signing in, which then looked broken. Agents whose
-              login is in-protocol have nothing to run here at all, so they get
-              no button and an honest sentence instead. */}
+          {/* External-login agents open their own browser flow directly.
+              In-protocol agents still sign in from chat, where their methods
+              are available on the live ACP connection. */}
           {signInCommand ? (
-            <Button type="button" size="sm" disabled={busy} onClick={beginRetry}>
-              {busy ? (
-                <><Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> Checking…</>
+            <Button type="button" size="sm" disabled={busy} onClick={() => void beginExternalLogin()}>
+              {signInPending || retryPending || probing ? (
+                <><Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> {signInPending ? "Signing in…" : "Connecting…"}</>
               ) : (
-                <><RefreshCw className="mr-1.5 h-3.5 w-3.5" /> Check again</>
+                <><LogIn className="mr-1.5 h-3.5 w-3.5" /> Sign in with {info.name}</>
               )}
             </Button>
           ) : (

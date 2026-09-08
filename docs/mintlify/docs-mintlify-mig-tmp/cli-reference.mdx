@@ -84,14 +84,12 @@ curl "http://localhost:3030/search?limit=5"
 | POST | `/tags/{type}/{id}` | add tags |
 | DELETE | `/tags/{type}/{id}` | remove tags |
 
-### retention, archive & deletion
+### retention & deletion
 
 | method | endpoint | description |
 | --- | --- | --- |
 | GET | `/retention/status` | get retention status |
 | POST | `/retention/configure` | configure retention policy |
-| GET | `/archive/status` | get archive status |
-| POST | `/archive/run` | run archive now |
 | POST | `/data/delete-range` | permanently delete data in a time range |
 
 ## search example

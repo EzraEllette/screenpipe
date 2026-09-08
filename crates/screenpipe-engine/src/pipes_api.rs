@@ -11,7 +11,8 @@ use axum::http::StatusCode;
 use axum::Json;
 use screenpipe_connect::{connections, mcp_servers};
 use screenpipe_core::pipes::{
-    describe_schedule_config, next_occurrences, PipeManager, ScheduleConfig,
+    describe_schedule_config, install_bundled_pipe as install_bundled_pipe_asset, next_occurrences,
+    PipeManager, ScheduleConfig,
 };
 use screenpipe_secrets::SecretStore;
 use serde::Deserialize;
@@ -300,36 +301,6 @@ pub async fn run_pipe_now(
             .map(format_run_context)
     };
 
-    // Validate required connections are configured before running the pipe
-    let required_connections = mgr
-        .get_pipe(&id)
-        .await
-        .map(|pipe_status| pipe_status.config.connections)
-        .unwrap_or_default();
-    if !required_connections.is_empty() {
-        let screenpipe_dir = mgr
-            .pipes_dir()
-            .parent()
-            .unwrap_or(mgr.pipes_dir())
-            .to_path_buf();
-        let ss = secret_store.as_ref().map(|e| e.0.as_ref());
-        let missing = screenpipe_connect::missing_pipe_connections(
-            ss,
-            &screenpipe_dir,
-            &required_connections,
-        )
-        .await;
-        if !missing.is_empty() {
-            return Json(json!({
-                "error": format!(
-                    "pipe '{}' requires unconfigured connections: {} — set them up from the Connections page in the desktop app",
-                    id,
-                    missing.join(", ")
-                )
-            }));
-        }
-    }
-
     // Refresh connections context so the pipe system prompt includes currently
     // connected integrations (Google Calendar, Google Docs, MCP servers, etc.).
     let screenpipe_dir = mgr
@@ -530,6 +501,25 @@ pub async fn preview_schedule(Json(cfg): Json<ScheduleConfig>) -> (StatusCode, J
     )
 }
 
+/// POST /pipes/bundled/:id/install — restore a trusted Pipe shipped with the app.
+pub async fn install_bundled_pipe(
+    State(pm): State<SharedPipeManager>,
+    Path(id): Path<String>,
+) -> Json<Value> {
+    let mgr = pm.lock().await;
+    let installed = match install_bundled_pipe_asset(mgr.pipes_dir(), &id) {
+        Ok(installed) => installed,
+        Err(error) => return Json(json!({ "error": error.to_string() })),
+    };
+    if let Err(error) = mgr.load_pipes().await {
+        return Json(json!({
+            "error": format!("bundled Pipe was copied but could not be loaded: {error}")
+        }));
+    }
+
+    Json(json!({ "success": true, "name": id, "installed": installed }))
+}
+
 /// POST /pipes/install — install a pipe from URL or local path.
 pub async fn install_pipe(
     State(pm): State<SharedPipeManager>,
@@ -638,6 +628,29 @@ mod tests {
         assert_eq!(run_trigger_type(Some(&onboarding)), "onboarding");
         assert_eq!(run_trigger_type(Some(&untrusted)), "manual");
         assert_eq!(run_trigger_type(None), "manual");
+    }
+
+    #[tokio::test]
+    async fn installs_a_trusted_bundled_pipe_without_the_remote_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = PipeManager::new(dir.path().join("pipes"), HashMap::new(), None, 3030);
+        let state = Arc::new(Mutex::new(manager));
+
+        let Json(body) = install_bundled_pipe(
+            State(state.clone()),
+            Path("speaker-reconciliation".to_string()),
+        )
+        .await;
+
+        assert_eq!(body["success"], true);
+        assert_eq!(body["name"], "speaker-reconciliation");
+        assert_eq!(body["installed"], true);
+        assert!(state
+            .lock()
+            .await
+            .get_pipe("speaker-reconciliation")
+            .await
+            .is_some());
     }
 
     #[test]
@@ -803,6 +816,7 @@ mod tests {
             _pipe_system_prompt: Option<&str>,
             _mcp_server_allowlist: Option<&[String]>,
             _session_owner: Option<&str>,
+            _executor_config: Option<&serde_json::Value>,
         ) -> anyhow::Result<AgentOutput> {
             self.run_impl(shared_pid).await
         }

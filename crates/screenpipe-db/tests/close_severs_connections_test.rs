@@ -124,6 +124,9 @@ async fn verified_reopen_waits_for_checked_out_connections_before_new_writes() {
 
     let retry_path = db_path.clone();
     let mut reopening = tokio::spawn(async move {
+        // The owner must finish shutdown and release its manager lease before
+        // admitting another manager; borrowed connections delay that boundary.
+        db.close().await;
         DatabaseManager::new(&retry_path, DbConfig::for_tier(DeviceTier::Low)).await
     });
     assert!(
@@ -146,7 +149,6 @@ async fn verified_reopen_waits_for_checked_out_connections_before_new_writes() {
         .await
         .unwrap();
     resumed.close().await;
-    db.close().await;
     assert!(
         old_gate.is_closed(),
         "the retired lane cannot be resurrected"

@@ -378,8 +378,9 @@ pub(crate) async fn delete_memory_handler(
     Ok(JsonResponse(json!({"ok": true})))
 }
 
-/// Trigger an immediate sync of `memories` out to every enabled
-/// external destination (Claude Code's CLAUDE.md, Codex's AGENTS.md).
+/// Trigger an immediate sync to every enabled external destination. Agent
+/// startup files receive static MCP recall guidance; human exports receive the
+/// memory digest.
 ///
 /// The background scheduler in `external_memory_sync` runs this every
 /// 5 minutes; this handler exists so the app's "sync now" button and
@@ -443,7 +444,7 @@ pub(crate) async fn list_memory_tags_handler(
 /// a stable id, which in practice never happens — the helper falls
 /// back to a fresh UUID v4 it persists. So this function effectively
 /// always returns `Some`.
-fn enrich_source_context_with_device(ctx: Option<Value>) -> Option<Value> {
+pub(crate) fn enrich_source_context_with_device(ctx: Option<Value>) -> Option<Value> {
     let machine_id = screenpipe_core::sync::get_or_create_machine_id();
     let enriched = match ctx {
         None | Some(Value::Null) => json!({"_device": machine_id}),

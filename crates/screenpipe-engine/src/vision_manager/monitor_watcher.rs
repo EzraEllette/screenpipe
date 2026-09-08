@@ -412,7 +412,7 @@ fn restart_cooldown_elapsed(
 }
 
 #[cfg(target_os = "macos")]
-async fn wait_for_stopped_vision_retry(
+async fn wait_for_monitor_retry(
     unlock: &tokio::sync::Notify,
     screen_locked: bool,
     unlocked_backstop: Duration,
@@ -811,12 +811,25 @@ pub async fn start_monitor_watcher(
             }
 
             // ── Normal monitor polling ──────────────────────────────────────
+            // A display reconfiguration while locked still invalidates the
+            // topology cache, but SCK cannot provide useful fresh topology in
+            // that state. Keep the cache dirty and wait for the exact unlock
+            // transition instead of turning the reconfiguration notification
+            // (or 60s backstop) into a replayd retry loop.
+            #[cfg(target_os = "macos")]
+            if crate::sleep_monitor::screen_is_locked() {
+                let unlock = crate::sleep_monitor::screen_unlock_notify();
+                let _ = wait_for_monitor_retry(unlock, true, Duration::from_secs(5)).await;
+                info!("screen unlocked — refreshing monitor topology");
+                continue;
+            }
+
             // If stopped (e.g. no monitors after undock/wake), retry start().
             if vision_manager.status().await != VisionManagerStatus::Running {
                 #[cfg(target_os = "macos")]
                 {
                     let unlock = crate::sleep_monitor::screen_unlock_notify();
-                    if wait_for_stopped_vision_retry(
+                    if wait_for_monitor_retry(
                         unlock,
                         crate::sleep_monitor::screen_is_locked(),
                         Duration::from_secs(5),
@@ -1095,6 +1108,38 @@ pub async fn start_monitor_watcher(
                 }
             }
 
+            // A bounded SCK failure can start a monitor on the privacy-safe
+            // CoreGraphics fallback. Once a fresh enumeration returns an SCK
+            // handle, display IDs alone cannot reveal that the active task is
+            // still holding the fallback generation. Upgrade it immediately;
+            // otherwise excluded-window capture keeps failing closed forever.
+            #[cfg(target_os = "macos")]
+            for monitor in &current_monitors {
+                if monitor.uses_sck_backend()
+                    && vision_manager.active_monitor_uses_sck(monitor.id()) == Some(false)
+                {
+                    info!(
+                        "ScreenCaptureKit recovered for monitor {}; replacing temporary CoreGraphics fallback",
+                        monitor.id()
+                    );
+                    if let Err(e) = vision_manager.stop_monitor(monitor.id()).await {
+                        warn!(
+                            "failed to stop CoreGraphics fallback for monitor {}: {:?}",
+                            monitor.id(),
+                            e
+                        );
+                        continue;
+                    }
+                    if let Err(e) = vision_manager.start_monitor_handle(monitor.clone()).await {
+                        warn!(
+                            "failed to upgrade monitor {} back to ScreenCaptureKit: {:?}",
+                            monitor.id(),
+                            e
+                        );
+                    }
+                }
+            }
+
             // Get currently recording monitors
             let active_ids: HashSet<u32> =
                 vision_manager.active_monitors().await.into_iter().collect();
@@ -1254,9 +1299,9 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[tokio::test]
-    async fn locked_vision_retry_waits_for_the_unlock_event() {
+    async fn locked_monitor_retry_waits_for_the_unlock_event() {
         let unlock = tokio::sync::Notify::new();
-        let wait = wait_for_stopped_vision_retry(&unlock, true, Duration::from_millis(1));
+        let wait = wait_for_monitor_retry(&unlock, true, Duration::from_millis(1));
         tokio::pin!(wait);
 
         assert!(

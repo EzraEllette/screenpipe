@@ -154,6 +154,7 @@ export interface ConnectionSuggestionTile {
 
 const CONNECTION_SEARCH_ALIASES_BY_ID: Record<string, readonly string[]> = {
   gmail: ["google", "google mail", "email", "mail"],
+  claude: ["anthropic", "claude desktop", "claude code"],
 };
 
 export function connectionMatchesSearch(
@@ -172,29 +173,29 @@ export function connectionMatchesSearch(
 }
 
 export const CONNECTION_HARDCODED_DESCRIPTIONS: Record<string, string> = {
-  "claude": "Search your screen & audio from Claude Desktop via MCP",
-  "cursor": "Give Cursor AI access to your screen history via MCP",
-  "codex": "Give Codex access to your screen & audio via MCP",
-  "grok": "Give Grok CLI access to your screen & audio via MCP",
-  "claude-code": "Add screen memory to the Claude Code CLI",
-  "warp": "Search screen history from Warp terminal via MCP",
+  "claude": "Let Claude search your screen and audio history",
+  "cursor": "Let Cursor search your screen and audio history",
+  "codex": "Let Codex search your screen and audio history",
+  "grok": "Let Grok search your screen and audio history",
+  "claude-code": "Use your screen history in Claude Code",
+  "warp": "Search your screen and audio history from Warp",
   "chatgpt": "Search your screen history from ChatGPT",
-  "browser-url": "Capture visited URLs from your browser in real time",
-  "voice-memos": "Sync Apple Voice Memos for AI-powered search",
-  "apple-calendar": "Search Apple Calendar events with AI",
-  "google-calendar": "Search Google Calendar events with AI",
+  "browser-url": "Include the pages you visit in your screen history",
+  "voice-memos": "Search your Apple Voice Memos",
+  "apple-calendar": "Search your Apple Calendar events",
+  "google-calendar": "Search your Google Calendar events",
   "google-docs": "Read and search your Google Docs",
-  gmail: "Read your Gmail inbox (via composio.dev managed auth)",
-  "google-drive": "Search and read your Google Drive files (via composio.dev managed auth)",
-  "google-sheets": "Read, create, and edit Google Sheets (via composio.dev managed auth)",
+  gmail: "Read your Gmail inbox",
+  "google-drive": "Search and read your Google Drive files",
+  "google-sheets": "Read, create, and edit Google Sheets",
   "outlook-email": "Read and send your Outlook email",
-  "ics-calendar": "Subscribe to any ICS calendar feed",
-  "remote-agent": "Run a 24/7 agent (OpenClaw, Hermes, Claude, Codex) on your VPS, wired to screenpipe",
+  "ics-calendar": "Add a calendar using its subscription link",
+  "remote-agent": "Keep an AI agent running on another computer",
   "whatsapp": "Search your WhatsApp conversations",
-  "anythingllm": "Give AnythingLLM access to your screen",
-  "ollama": "Connect local Ollama models to screenpipe",
-  "lmstudio": "Connect LM Studio models to screenpipe",
-  "msty": "Connect Msty models to screenpipe",
+  "anythingllm": "Let AnythingLLM search your screen history",
+  "ollama": "Use your Ollama models with screenpipe",
+  "lmstudio": "Use your LM Studio models with screenpipe",
+  "msty": "Use your Msty models with screenpipe",
   "obsidian": "Sync screen memory to your Obsidian vault",
   "notion": "Search Notion pages with your screen context",
   "linear": "Search Linear issues from your screen context",
@@ -202,9 +203,9 @@ export const CONNECTION_HARDCODED_DESCRIPTIONS: Record<string, string> = {
   "krisp": "Search Krisp meeting transcripts and notes",
   "plaud": "Search Plaud recordings and transcripts",
   "excalidraw": "Search and edit your Excalidraw+ whiteboards",
-  "custom-mcp": "Connect any MCP-compatible server",
-  "skills": "Import Claude Code skills for AI automations",
-  "pi-extensions": "Manage portable agent extensions and native Pi packages",
+  "custom-mcp": "Connect another tool or data source",
+  "skills": "Add reusable instructions and workflows to your AI",
+  "pi-extensions": "Add web browsing and more to your AI",
 };
 
 // High-activation defaults fill the suggested row when there are not enough
@@ -225,7 +226,7 @@ export const FEATURED_CONNECTION_IDS = [
   "obsidian",
   "notion",
   "github",
-  "claude-code",
+  "claude",
   "linear",
 ];
 
@@ -250,9 +251,8 @@ export const DEVICE_CONNECTION_ORDER = [
   "whatsapp",
   "granola",
   // Desktop AI clients & local runtimes.
-  "claude-code",
-  "codex",
   "claude",
+  "codex",
   "cursor",
   "grok",
   "chatgpt",

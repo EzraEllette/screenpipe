@@ -214,7 +214,7 @@ export function GoogleCalendarCard({ onConnected, onDisconnected }: { onConnecte
       <CardContent className="p-0">
         <div className="flex items-start p-4 gap-4">
           <div className="flex-shrink-0">
-            <img src="/google-calendar-icon.svg" alt="Google Calendar" className="w-10 h-10 rounded-xl" />
+            <img src="/google-calendar-icon.svg" alt="Google Calendar" className="w-10 h-10 rounded-lg" />
           </div>
 
           <div className="flex-1 min-w-0">

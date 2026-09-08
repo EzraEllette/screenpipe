@@ -4,14 +4,13 @@
 
 "use client";
 
-// "AI tools" block — 4th sibling to MCP servers / Agent extensions / Skills in
-// Settings > Connections. One place to see every AI tool detected on this
-// machine, connect them all in one click, connect/remove a single tool, or
-// disconnect everything (two-step confirm). Connect always leads; disconnect
-// never headlines. First-run setup runs in native Rust; this card remains the
-// visible repair, explicit connect, and explicit removal surface.
+// "AI apps" keeps detected apps ready to connect in one click. Protocol and
+// config details stay out of the default surface while per-app removal and the
+// two-step disconnect-all remain available.
+// First-run setup runs in native Rust; this card remains the visible repair,
+// explicit connect, and explicit removal surface.
 
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Bot, Check, Loader2, Plus, RotateCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import posthog from "posthog-js";
@@ -21,14 +20,15 @@ import { platform } from "@tauri-apps/plugin-os";
 import {
   CONNECT_ALL_TOOL_NAMES,
   type ConnectAllToolId,
-  SKILLS_TARGET,
-  connectAiTool,
-  disconnectAiTool,
+  connectAiToolTargets,
+  disconnectAiToolTargets,
   detectAiTools,
   friendlyToolError,
   type FriendlyToolError,
+  isClaudeCodeMcpInstalled,
   isOpenclawMcpInstalled,
   isHermesMcpInstalled,
+  isGeminiMcpInstalled,
   isRunnerMcpInstalled,
   isWindsurfMcpInstalled,
 } from "@/lib/ai-tools-mcp";
@@ -41,18 +41,63 @@ import {
 
 const DISPLAY_NAMES: Record<ConnectAllToolId, string> = {
   ...CONNECT_ALL_TOOL_NAMES,
-  claude: "Claude Desktop",
+  claude: "Claude",
+  "claude-code": "Claude Code",
 };
+
+type ToolRow = {
+  id: ConnectAllToolId;
+  targets: ConnectAllToolId[];
+};
+
+// Claude Desktop and Claude Code have separate MCP config files, but they are
+// one product in the UI and share ~/.claude/skills. Keep both native targets
+// behind one row so status, bulk counts, and removal cannot disagree.
+function groupDetectedTools(tools: ConnectAllToolId[]): ToolRow[] {
+  const rows: ToolRow[] = [];
+  const claudeTargets = tools.filter((id) => id === "claude" || id === "claude-code");
+  let addedClaude = false;
+
+  for (const id of tools) {
+    if (id === "claude" || id === "claude-code") {
+      if (!addedClaude) {
+        rows.push({ id: "claude", targets: claudeTargets });
+        addedClaude = true;
+      }
+      continue;
+    }
+    rows.push({ id, targets: [id] });
+  }
+  return rows;
+}
+
+function isRowConnected(
+  row: ToolRow,
+  connected: Partial<Record<ConnectAllToolId, boolean>>
+): boolean {
+  return row.targets.every((id) => connected[id]);
+}
+
+function hasRowConnection(
+  row: ToolRow,
+  connected: Partial<Record<ConnectAllToolId, boolean>>
+): boolean {
+  return row.targets.some((id) => connected[id]);
+}
 
 // Connected = MCP entry AND both skills where supported — same rule as tiles.
 async function isToolConnected(id: ConnectAllToolId): Promise<boolean> {
   switch (id) {
     case "claude":
       return !!(await getInstalledMcpVersion()) && (await areExternalAgentSkillsInstalled("claude"));
+    case "claude-code":
+      return (await isClaudeCodeMcpInstalled()) && (await areExternalAgentSkillsInstalled("claude"));
     case "codex":
       return (await isCodexMcpInstalled()) && (await areExternalAgentSkillsInstalled("codex"));
     case "cursor":
       return (await isCursorMcpInstalled()) && (await areExternalAgentSkillsInstalled("cursor"));
+    case "gemini":
+      return (await isGeminiMcpInstalled()) && (await areExternalAgentSkillsInstalled("gemini"));
     case "openclaw":
       return (await isOpenclawMcpInstalled()) && (await areExternalAgentSkillsInstalled("openclaw"));
     case "hermes":
@@ -71,11 +116,14 @@ function ToolIcon({ id }: { id: ConnectAllToolId }) {
   const img = "h-5 w-5";
   switch (id) {
     case "claude":
+    case "claude-code":
       return <img src="/images/claude-ai.svg" alt="" className={img} />;
     case "codex":
       return <img src="/images/codex.svg" alt="" className={`${img} rounded dark:invert`} />;
     case "cursor":
       return <CursorLogo className={img} />;
+    case "gemini":
+      return <img src="/images/gemini.svg" alt="" className={img} />;
     case "openclaw":
       return <img src="/images/openclaw.png" alt="" className={`${img} rounded`} />;
     case "hermes":
@@ -118,58 +166,76 @@ export function AiToolsCard({ onChanged }: { onChanged?: () => void }) {
     };
   }, [refresh]);
 
-  const connectedCount = detected.filter((id) => connected[id]).length;
-  const allConnected = detected.length > 0 && connectedCount === detected.length;
-  const noneConnected = connectedCount === 0;
+  const rows = useMemo(() => groupDetectedTools(detected), [detected]);
+  const connectedCount = rows.filter((row) => isRowConnected(row, connected)).length;
+  const allConnected = rows.length > 0 && connectedCount === rows.length;
+  const hasAnyConnection = rows.some((row) => hasRowConnection(row, connected));
+  const noneConnected = !hasAnyConnection;
 
   const connectTool = useCallback(
-    async (id: ConnectAllToolId) => {
-      setBusy((prev) => ({ ...prev, [id]: "connecting" }));
-      setErrors((prev) => ({ ...prev, [id]: undefined }));
-      try {
-        await connectAiTool(id);
+    async (row: ToolRow) => {
+      setBusy((prev) => ({ ...prev, [row.id]: "connecting" }));
+      setErrors((prev) => ({ ...prev, [row.id]: undefined }));
+      const { succeeded, failed } = await connectAiToolTargets(row.targets);
+      for (const id of succeeded) {
         setConnected((prev) => ({ ...prev, [id]: true }));
         posthog.capture("settings_ai_tool_connected", { tool: id });
-      } catch (e) {
-        console.warn(`[ai-tools] ${id} connect failed:`, e);
-        setErrors((prev) => ({ ...prev, [id]: friendlyToolError(e) }));
-      } finally {
-        setBusy((prev) => ({ ...prev, [id]: undefined }));
       }
+      for (const { id, error } of failed) {
+        console.warn(`[ai-tools] ${id} connect failed:`, error);
+      }
+      if (failed.length > 0) {
+        const first = friendlyToolError(failed[0].error);
+        const suffix = failed.length > 1 ? ` (+${failed.length - 1} more)` : "";
+        setErrors((prev) => ({
+          ...prev,
+          [row.id]: { ...first, message: `${first.message}${suffix}` },
+        }));
+      }
+      setBusy((prev) => ({ ...prev, [row.id]: undefined }));
     },
     []
   );
 
-  const removeTool = useCallback(async (id: ConnectAllToolId) => {
-    setBusy((prev) => ({ ...prev, [id]: "removing" }));
-    setErrors((prev) => ({ ...prev, [id]: undefined }));
-    try {
-      await disconnectAiTool(id);
+  const removeTool = useCallback(async (row: ToolRow) => {
+    setBusy((prev) => ({ ...prev, [row.id]: "removing" }));
+    setErrors((prev) => ({ ...prev, [row.id]: undefined }));
+    const { succeeded, failed } = await disconnectAiToolTargets(row.targets);
+    for (const id of succeeded) {
       setConnected((prev) => ({ ...prev, [id]: false }));
       posthog.capture("settings_ai_tool_removed", { tool: id });
-    } catch (e) {
-      console.warn(`[ai-tools] ${id} remove failed:`, e);
-      setErrors((prev) => ({ ...prev, [id]: friendlyToolError(e) }));
-    } finally {
-      setBusy((prev) => ({ ...prev, [id]: undefined }));
     }
+    for (const { id, error } of failed) {
+      console.warn(`[ai-tools] ${id} remove failed:`, error);
+    }
+    if (failed.length > 0) {
+      const first = friendlyToolError(failed[0].error);
+      const suffix = failed.length > 1 ? ` (+${failed.length - 1} more)` : "";
+      setErrors((prev) => ({
+        ...prev,
+        [row.id]: { ...first, message: `${first.message}${suffix}` },
+      }));
+    }
+    setBusy((prev) => ({ ...prev, [row.id]: undefined }));
   }, []);
 
   const handleConnectAll = useCallback(async () => {
     setExpanded(true);
     setBulkRunning(true);
     try {
-      const targets = detected.filter((id) => !connected[id]);
-      posthog.capture("settings_ai_tools_connect_all_clicked", { tools: targets });
-      for (const id of targets) {
-        await connectTool(id);
+      const targets = rows.filter((row) => !isRowConnected(row, connected));
+      posthog.capture("settings_ai_tools_connect_all_clicked", {
+        tools: targets.map((row) => row.id),
+      });
+      for (const row of targets) {
+        await connectTool(row);
       }
       await refresh();
       onChanged?.();
     } finally {
       setBulkRunning(false);
     }
-  }, [detected, connected, connectTool, refresh, onChanged]);
+  }, [rows, connected, connectTool, refresh, onChanged]);
 
   const handleDisconnectAll = useCallback(async () => {
     // Two-step inline confirm for a destructive bulk action; auto-reverts.
@@ -182,17 +248,19 @@ export function AiToolsCard({ onChanged }: { onChanged?: () => void }) {
     setConfirmingDisconnect(false);
     setBulkRunning(true);
     try {
-      const targets = detected.filter((id) => connected[id]);
-      posthog.capture("settings_ai_tools_disconnect_all_clicked", { tools: targets });
-      for (const id of targets) {
-        await removeTool(id);
+      const targets = rows.filter((row) => hasRowConnection(row, connected));
+      posthog.capture("settings_ai_tools_disconnect_all_clicked", {
+        tools: targets.map((row) => row.id),
+      });
+      for (const row of targets) {
+        await removeTool(row);
       }
       await refresh();
       onChanged?.();
     } finally {
       setBulkRunning(false);
     }
-  }, [confirmingDisconnect, detected, connected, removeTool, refresh, onChanged]);
+  }, [confirmingDisconnect, rows, connected, removeTool, refresh, onChanged]);
 
   // Reveal the offending config next to the error so the fix is one click
   // away. macOS `open -R` selects the file in Finder (the shell "open" command
@@ -209,13 +277,13 @@ export function AiToolsCard({ onChanged }: { onChanged?: () => void }) {
   if (detected.length === 0) return null;
 
   const summary = noneConnected
-    ? `${detected.length} tool${detected.length === 1 ? "" : "s"} found on this Mac — add screenpipe to ${detected.length === 1 ? "it" : "all of them"} in one click`
+    ? `${rows.length} found. Connect ${rows.length === 1 ? "it" : "them"} in one click.`
     : allConnected
-    ? `All ${detected.length} tools connected`
-    : `${connectedCount} of ${detected.length} connected`;
+    ? `All ${rows.length} connected`
+    : `${connectedCount} of ${rows.length} connected`;
 
   return (
-    <div className={`rounded-xl border bg-card p-3 transition-colors ${expanded ? "border-foreground bg-accent" : "border-border"}`}>
+    <div className={`rounded-lg border bg-card p-3 transition-colors ${expanded ? "border-foreground bg-accent" : "border-border"}`}>
       <div className="flex items-center gap-3">
         <button
           type="button"
@@ -227,7 +295,7 @@ export function AiToolsCard({ onChanged }: { onChanged?: () => void }) {
           </div>
           <div className="min-w-0">
             <div className="flex items-center gap-2">
-              <h3 className="text-sm font-medium text-foreground">AI tools</h3>
+              <h3 className="text-sm font-medium text-foreground">AI apps</h3>
               {connectedCount > 0 && <span className="h-2 w-2 rounded-full bg-foreground" />}
             </div>
             <p className="text-xs text-muted-foreground">{summary}</p>
@@ -267,13 +335,13 @@ export function AiToolsCard({ onChanged }: { onChanged?: () => void }) {
       {expanded && (
         <div className="mt-3 border-t border-border">
           <p className="text-xs text-muted-foreground pt-3 pb-1">
-            screenpipe adds its MCP server{" "}
-            <span className="text-muted-foreground/70">+ skills</span> to each tool&apos;s own
-            config — remove any time.
+            Connected apps can search your screen and audio history. Remove access any time.
           </p>
           <div>
-            {detected.map((id) => {
-              const isOn = !!connected[id];
+            {rows.map((row) => {
+              const { id } = row;
+              const isOn = isRowConnected(row, connected);
+              const isPartial = !isOn && hasRowConnection(row, connected);
               const toolBusy = busy[id];
               const err = errors[id];
               return (
@@ -284,7 +352,7 @@ export function AiToolsCard({ onChanged }: { onChanged?: () => void }) {
                   <div className="min-w-0 flex-1">
                     <span className="text-[13px] text-foreground">{DISPLAY_NAMES[id]}</span>
                     <span className="ml-2 text-xs text-muted-foreground">
-                      {SKILLS_TARGET[id] ? "MCP + skills" : "MCP"}
+                      screen and audio history
                     </span>
                     {err && (
                       <p className="text-[11px] mt-1 flex items-center gap-1.5 flex-wrap">
@@ -322,7 +390,7 @@ export function AiToolsCard({ onChanged }: { onChanged?: () => void }) {
                       </span>
                       <button
                         type="button"
-                        onClick={() => removeTool(id)}
+                        onClick={() => removeTool(row)}
                         disabled={bulkRunning}
                         className="text-xs text-muted-foreground/60 hover:text-foreground transition-colors disabled:opacity-50"
                       >
@@ -330,18 +398,37 @@ export function AiToolsCard({ onChanged }: { onChanged?: () => void }) {
                       </button>
                     </>
                   ) : (
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="outline"
-                      onClick={() => connectTool(id)}
-                      disabled={bulkRunning}
-                      aria-label={`${err ? "Retry" : "Connect"} ${DISPLAY_NAMES[id]}`}
-                      title={`${err ? "Retry" : "Connect"} ${DISPLAY_NAMES[id]}`}
-                      className="h-7 w-7 p-0 shrink-0"
-                    >
-                      {err ? <RotateCw className="h-3.5 w-3.5" /> : <Plus className="h-3.5 w-3.5" />}
-                    </Button>
+                    <>
+                      {isPartial && (
+                        <span className="text-xs text-muted-foreground">Needs repair</span>
+                      )}
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        onClick={() => connectTool(row)}
+                        disabled={bulkRunning}
+                        aria-label={`${err || isPartial ? "Retry" : "Connect"} ${DISPLAY_NAMES[id]}`}
+                        title={`${err || isPartial ? "Retry" : "Connect"} ${DISPLAY_NAMES[id]}`}
+                        className="h-7 w-7 p-0 shrink-0"
+                      >
+                        {err || isPartial ? (
+                          <RotateCw className="h-3.5 w-3.5" />
+                        ) : (
+                          <Plus className="h-3.5 w-3.5" />
+                        )}
+                      </Button>
+                      {isPartial && (
+                        <button
+                          type="button"
+                          onClick={() => removeTool(row)}
+                          disabled={bulkRunning}
+                          className="text-xs text-muted-foreground/60 hover:text-foreground transition-colors disabled:opacity-50"
+                        >
+                          Remove
+                        </button>
+                      )}
+                    </>
                   )}
                 </div>
               );
@@ -350,10 +437,10 @@ export function AiToolsCard({ onChanged }: { onChanged?: () => void }) {
           {/* Bulk-action placement rule: one bulk action per place. When
               nothing is connected the header's "+ Connect all" is the only
               bulk control — no footer duplicate. */}
-          {connectedCount > 0 && (
+          {hasAnyConnection && (
             <div className="flex items-center justify-between pt-2.5">
               <span className="text-[11px] text-muted-foreground/70">
-                {connectedCount} of {detected.length} connected
+                {connectedCount} of {rows.length} connected
               </span>
               <span className="flex items-center gap-2">
                 <button

@@ -11,7 +11,11 @@ import type { BrainViewSlot } from "@/lib/utils/tauri";
 
 const NOW = Date.parse("2026-08-07T12:00:00Z");
 
-function slot(id: string, updatedAt: string | null, bound = true): BrainViewSlot {
+function slot(
+  id: string,
+  updatedAt: string | null,
+  bound = true,
+): BrainViewSlot {
   return {
     id,
     title: id,
@@ -46,7 +50,9 @@ describe("summarizeLiveViewFreshness", () => {
 
     expect(summary.filled).toBe(2);
     expect(summary.waiting).toBe(0);
-    expect(summary.label).toBe("Updated 30m ago · oldest 17h ago");
+    expect(summary.label).toBe(
+      "Sources checked 30m ago · oldest check 17h ago",
+    );
   });
 
   it("counts blocks that have never published a value", () => {
@@ -57,19 +63,16 @@ describe("summarizeLiveViewFreshness", () => {
 
     expect(summary.bound).toBe(2);
     expect(summary.waiting).toBe(1);
-    expect(summary.label).toBe("Updated 30m ago · 1 waiting");
+    expect(summary.label).toBe("Sources checked 30m ago · 1 waiting");
   });
 
   it("collapses to a single age when every block refreshed together", () => {
     const summary = summarizeLiveViewFreshness(
-      [
-        slot("a", "2026-08-07T11:30:10Z"),
-        slot("b", "2026-08-07T11:30:40Z"),
-      ],
+      [slot("a", "2026-08-07T11:30:10Z"), slot("b", "2026-08-07T11:30:40Z")],
       NOW,
     );
 
-    expect(summary.label).toBe("Updated 29m ago");
+    expect(summary.label).toBe("Sources checked 29m ago");
   });
 
   it("says so before any block has data", () => {
@@ -79,10 +82,7 @@ describe("summarizeLiveViewFreshness", () => {
   });
 
   it("stays silent on a dashboard with no connected blocks", () => {
-    const summary = summarizeLiveViewFreshness(
-      [slot("a", null, false)],
-      NOW,
-    );
+    const summary = summarizeLiveViewFreshness([slot("a", null, false)], NOW);
     expect(summary.bound).toBe(0);
     expect(summary.label).toBeNull();
   });
@@ -91,6 +91,37 @@ describe("summarizeLiveViewFreshness", () => {
     const summary = summarizeLiveViewFreshness([slot("a", "not-a-date")], NOW);
     expect(summary.filled).toBe(0);
     expect(summary.label).toBe("Waiting for first data from 1 block");
+  });
+
+  it("separates the data date from the time a source checked it", () => {
+    const evidenceSlot = slot("timeline", "2026-08-07T11:57:00Z");
+    evidenceSlot.value!.evidence = [
+      {
+        eventId: 1,
+        frameId: null,
+        transcriptionId: null,
+        ts: "2026-08-03T15:00:00Z",
+        deviceId: null,
+      },
+    ];
+
+    const summary = summarizeLiveViewFreshness([evidenceSlot], NOW, "today");
+
+    expect(summary.label).toContain("Data through Aug 3");
+    expect(summary.label).toContain("Sources checked 3m ago");
+    expect(summary.dataOutsideRange).toBe(true);
+  });
+
+  it("uses timeline payload timestamps when evidence references are absent", () => {
+    const timelineSlot = slot("timeline", "2026-08-07T11:57:00Z");
+    timelineSlot.value!.payload = {
+      items: [{ timestamp: "2026-08-07T10:00:00Z", title: "Work" }],
+    };
+
+    const summary = summarizeLiveViewFreshness([timelineSlot], NOW, "today");
+
+    expect(summary.dataThroughMs).toBe(Date.parse("2026-08-07T10:00:00Z"));
+    expect(summary.dataOutsideRange).toBe(false);
   });
 });
 

@@ -16,30 +16,50 @@
 
 import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
-import { AcpPresetDefaults } from "./acp-preset-defaults";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  ACP_PRESET_SETUP_PROGRESS_EVENT,
+  AcpPresetDefaults,
+} from "./acp-preset-defaults";
 import { useAcpSessionConfig } from "@/lib/stores/acp-session-config";
 
 const probeAgent = vi.fn();
 const downloadPending = vi.fn();
+const externalLogin = vi.fn();
+const { progressHandlers } = vi.hoisted(() => ({
+  progressHandlers: new Map<string, (event: { payload: unknown }) => void>(),
+}));
 
 vi.mock("@/lib/utils/tauri", () => ({
   commands: {
     piAcpProbeAgent: (...args: unknown[]) => probeAgent(...args),
     piAcpAgentDownloadPending: (...args: unknown[]) => downloadPending(...args),
-    copyTextToClipboard: () => Promise.resolve(),
+    piAcpExternalLogin: (...args: unknown[]) => externalLogin(...args),
   },
+}));
+
+vi.mock("@/lib/hooks/use-tauri-event", () => ({
+  useTauriEvent: (
+    event: string,
+    handler: (event: { payload: unknown }) => void,
+  ) => progressHandlers.set(event, handler),
 }));
 
 beforeEach(() => {
   probeAgent.mockReset();
   downloadPending.mockReset();
+  externalLogin.mockReset();
+  progressHandlers.clear();
   useAcpSessionConfig.setState({ sessions: {}, byAgent: {} });
 });
 
 afterEach(cleanup);
 
-const renderCard = (agentId: string, onConnectedChange?: (c: boolean) => void) =>
+const renderCard = (
+  agentId: string,
+  onConnectedChange?: (c: boolean) => void,
+  installedInEditor = false,
+) =>
   render(
     <AcpPresetDefaults
       agent={{ id: agentId }}
@@ -47,6 +67,7 @@ const renderCard = (agentId: string, onConnectedChange?: (c: boolean) => void) =
       modeId={null}
       onChange={() => {}}
       onConnectedChange={onConnectedChange}
+      installedInEditor={installedInEditor}
     />,
   );
 
@@ -66,19 +87,100 @@ describe("an agent that needs downloading", () => {
 
   it("only downloads once the user asks", async () => {
     downloadPending.mockResolvedValue(true);
-    probeAgent.mockResolvedValue({ status: "ok", data: "{}" });
+    let finishProbe: ((result: { status: "error"; error: string }) => void) | undefined;
+    probeAgent.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finishProbe = resolve;
+        }),
+    );
 
-    renderCard("codex-acp");
-    (await screen.findByRole("button", { name: /install codex/i })).click();
+    renderCard("pi-acp");
+    fireEvent.click(await screen.findByRole("button", { name: /install pi/i }));
 
     await waitFor(() => expect(probeAgent).toHaveBeenCalled());
+    await act(async () =>
+      finishProbe?.({ status: "error", error: "test probe complete" }),
+    );
+    await screen.findByText(/could not load choices/i);
+  });
+
+  it("advances through download, start, connect, and ready from runtime events", async () => {
+    downloadPending.mockResolvedValue(true);
+    let finishProbe: ((result: { status: "error"; error: string }) => void) | undefined;
+    probeAgent.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finishProbe = resolve;
+        }),
+    );
+
+    renderCard("claude-acp");
+    fireEvent.click(await screen.findByRole("button", { name: /install claude code/i }));
+
+    const progress = await screen.findByTestId("acp-setup-progress");
+    expect(progress).toHaveTextContent("Downloading Claude Code");
+    expect(progress).toHaveTextContent("step 1 of 3");
+
+    const emitPhase = (phase: string) =>
+      act(() =>
+        progressHandlers.get(ACP_PRESET_SETUP_PROGRESS_EVENT)?.({
+          payload: { agentId: "claude-acp", phase },
+        }),
+      );
+
+    emitPhase("starting");
+    expect(progress).toHaveTextContent("Starting Claude Code");
+    expect(progress).toHaveTextContent("step 2 of 3");
+
+    emitPhase("connecting");
+    expect(progress).toHaveTextContent("Connecting Claude Code");
+    expect(progress).toHaveTextContent("step 3 of 3");
+
+    emitPhase("ready");
+    expect(progress).toHaveTextContent("Claude Code is ready");
+
+    await act(async () =>
+      finishProbe?.({ status: "error", error: "authentication required" }),
+    );
+  });
+
+  it("continues a binary install at start instead of resetting its progress", async () => {
+    downloadPending.mockResolvedValue(false);
+    let finishProbe: ((result: { status: "error"; error: string }) => void) | undefined;
+    probeAgent.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finishProbe = resolve;
+        }),
+    );
+
+    renderCard("kimi", undefined, true);
+
+    await waitFor(() => expect(probeAgent).toHaveBeenCalled());
+    await screen.findByText("Starting Kimi CLI");
+    const progress = screen.getByTestId("acp-setup-progress");
+    expect(progress).toHaveTextContent("Install");
+    expect(progress).toHaveTextContent("step 2 of 3");
+
+    act(() =>
+      progressHandlers.get(ACP_PRESET_SETUP_PROGRESS_EVENT)?.({
+        payload: { agentId: "kimi", phase: "connecting" },
+      }),
+    );
+    expect(progress).toHaveTextContent("Connecting Kimi CLI");
+    expect(progress).toHaveTextContent("step 3 of 3");
+
+    await act(async () =>
+      finishProbe?.({ status: "error", error: "test probe complete" }),
+    );
   });
 
   it("stays out of the way for an agent already installed", async () => {
     downloadPending.mockResolvedValue(false);
     probeAgent.mockResolvedValue({ status: "ok", data: "{}" });
 
-    renderCard("claude-acp");
+    renderCard("github-copilot-cli");
 
     await waitFor(() => expect(probeAgent).toHaveBeenCalled());
     expect(screen.queryByTestId("acp-preset-install")).not.toBeInTheDocument();
@@ -114,17 +216,21 @@ describe("an agent that needs signing in", () => {
     expect(card).toHaveTextContent(/never sees or stores an API key/i);
   });
 
-  it("keeps a runnable command as the instruction when there is one", async () => {
+  it("runs Cursor's browser login directly and rechecks automatically", async () => {
     probeAgent.mockResolvedValue({
       status: "error",
-      error: "not logged in: run `opencode auth login` first",
+      error: "Cursor needs a one-time sign in: run `cursor-agent login` first",
     });
+    externalLogin.mockResolvedValue({ status: "ok", data: null });
 
-    renderCard("opencode");
+    renderCard("cursor");
 
     const card = await screen.findByTestId("acp-preset-signin");
-    expect(card).toHaveTextContent("opencode auth login");
-    expect(screen.getByRole("button", { name: /check again/i })).toBeInTheDocument();
+    expect(card).not.toHaveTextContent("cursor-agent login");
+    fireEvent.click(screen.getByRole("button", { name: /sign in with cursor/i }));
+
+    await waitFor(() => expect(externalLogin).toHaveBeenCalledWith("cursor"));
+    await waitFor(() => expect(probeAgent).toHaveBeenCalledTimes(2));
   });
 
   it("reports not-connected so the parent can hold back advanced settings", async () => {

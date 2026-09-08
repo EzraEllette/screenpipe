@@ -225,6 +225,27 @@ pub struct McpServerConfig {
     pub created_at: i64,
 }
 
+/// Screenpipe's own MCP server is already injected into the in-app agent.
+/// Registering it again as a user MCP connection creates a recursive duplicate
+/// that can stall tool discovery, especially when a scheduled Windows run
+/// launches the package through an unavailable shell runtime.
+pub fn is_screenpipe_mcp_config(cfg: &McpServerConfig) -> bool {
+    let normalized_name = cfg
+        .name
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect::<String>();
+    if matches!(normalized_name.as_str(), "screenpipe" | "screenpipemcp") {
+        return true;
+    }
+
+    cfg.command
+        .iter()
+        .chain(cfg.args.iter().flatten())
+        .any(|part| part.to_ascii_lowercase().contains("screenpipe-mcp"))
+}
+
 fn default_true() -> bool {
     true
 }
@@ -257,7 +278,7 @@ pub async fn is_mcp_connection_configured(screenpipe_dir: &Path, conn_id: &str) 
     };
     file.servers
         .iter()
-        .any(|server| server.id == server_id && server.enabled)
+        .any(|server| server.id == server_id && server.enabled && !is_screenpipe_mcp_config(server))
 }
 
 pub async fn configured_mcp_connection_ids(screenpipe_dir: &Path) -> Result<HashSet<String>> {
@@ -265,7 +286,7 @@ pub async fn configured_mcp_connection_ids(screenpipe_dir: &Path) -> Result<Hash
     Ok(file
         .servers
         .iter()
-        .filter(|server| server.enabled)
+        .filter(|server| server.enabled && !is_screenpipe_mcp_config(server))
         .map(|server| format!("{}{}", MCP_CONNECTION_PREFIX, server.id))
         .collect())
 }
@@ -1001,6 +1022,7 @@ impl McpServerStore {
             .get(id)
             .await?
             .ok_or_else(|| anyhow!("unknown MCP server: {}", id))?;
+        reject_screenpipe_mcp_config(&cfg)?;
         match cfg.transport {
             McpTransport::Http => {
                 let headers = self.auth_headers_for(&cfg).await?;
@@ -1048,6 +1070,7 @@ impl McpServerStore {
             .get(id)
             .await?
             .ok_or_else(|| anyhow!("unknown MCP server: {}", id))?;
+        reject_screenpipe_mcp_config(&cfg)?;
         if !cfg.enabled {
             return Err(anyhow!("MCP server '{}' is disabled", cfg.name));
         }
@@ -1253,6 +1276,7 @@ fn validate_url(url: &str) -> Result<()> {
 }
 
 fn validate_config(cfg: &McpServerConfig) -> Result<()> {
+    reject_screenpipe_mcp_config(cfg)?;
     match cfg.transport {
         McpTransport::Http => {
             validate_url(&cfg.url)?;
@@ -1274,6 +1298,15 @@ fn validate_config(cfg: &McpServerConfig) -> Result<()> {
             }
         }
     }
+}
+
+fn reject_screenpipe_mcp_config(cfg: &McpServerConfig) -> Result<()> {
+    if is_screenpipe_mcp_config(cfg) {
+        return Err(anyhow!(
+            "Screenpipe MCP is already built into Screenpipe; connect it only from an external MCP client"
+        ));
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -2040,7 +2073,7 @@ pub async fn render_context_for_ids(
     let enabled: Vec<_> = file
         .servers
         .iter()
-        .filter(|s| s.enabled)
+        .filter(|s| s.enabled && !is_screenpipe_mcp_config(s))
         .filter(|s| {
             allowed_ids
                 .map(|ids| ids.iter().any(|id| id == &s.id))
@@ -2180,6 +2213,51 @@ mod tests {
         cfg.url = "not a url".to_string();
         let err = store.upsert(cfg, None).await.unwrap_err();
         assert!(err.to_string().contains("invalid URL"));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn rejects_screenpipe_mcp_registered_inside_screenpipe() {
+        let dir = temp_dir();
+        let store = McpServerStore::new(dir.clone(), None);
+
+        let mut cfg = sample_config("screenpipe-mcp");
+        cfg.name = "Screenpipe MCP".to_string();
+        cfg.url.clear();
+        cfg.transport = McpTransport::Stdio;
+        cfg.command = Some("bun".to_string());
+        cfg.args = Some(vec!["x".to_string(), "screenpipe-mcp@latest".to_string()]);
+
+        let err = store.upsert(cfg, None).await.unwrap_err();
+        assert!(err.to_string().contains("already built into Screenpipe"));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn legacy_screenpipe_mcp_is_not_exposed_to_in_app_agents() {
+        let dir = temp_dir();
+        let mut recursive = sample_config("recursive");
+        recursive.name = "screenpipe".to_string();
+        let normal = sample_config("normal");
+        save_file(
+            &dir,
+            &McpServersFile {
+                servers: vec![recursive, normal],
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(!is_mcp_connection_configured(&dir, "mcp:recursive").await);
+        let configured = configured_mcp_connection_ids(&dir).await.unwrap();
+        assert!(!configured.contains("mcp:recursive"));
+        assert!(configured.contains("mcp:normal"));
+
+        let ctx = render_context(&dir, 3030).await;
+        assert!(!ctx.contains("mcp:recursive"));
+        assert!(ctx.contains("mcp:normal"));
 
         let _ = std::fs::remove_dir_all(dir);
     }

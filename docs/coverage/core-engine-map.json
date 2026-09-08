@@ -210,6 +210,7 @@
         "src/recording_config.rs",
         "src/schedule_monitor.rs",
         "src/sleep_monitor.rs",
+        "src/health_identity.rs",
         "src/logging.rs",
         "src/power/profile.rs",
         "src/power/manager.rs",
@@ -237,7 +238,7 @@
       "criticality": "high",
       "confidence": "strong",
       "kind": "mixed",
-      "notes": "Fast logic coverage for the config bridge, tray health debounce, sleep/power policies, and queue backpressure."
+      "notes": "Fast logic coverage for the config bridge, health-endpoint identity, tray health debounce, sleep/power policies, and queue backpressure."
     },
     {
       "id": "engine-capture-timeline",
@@ -297,8 +298,14 @@
       "crate": "screenpipe-engine",
       "files": [
         "src/activity_ledger.rs",
+        "src/agent_profile.rs",
+        "src/agent_skills.rs",
         "src/auth_key.rs",
+        "src/history_access.rs",
         "src/local_chat.rs",
+        "src/meeting_summary/extract.rs",
+        "src/meeting_summary/finalizer.rs",
+        "src/meeting_summary/notes.rs",
         "src/pipe_stream.rs",
         "src/routes/activity_summary.rs",
         "src/routes/activity_ledger.rs",
@@ -443,9 +450,11 @@
         "src/cli/profile.rs",
         "src/cli/search.rs",
         "src/cli/service.rs",
+        "src/cli/status.rs",
         "src/cli/store_file.rs",
         "src/cli/team.rs",
         "src/cli/team_pipes.rs",
+        "src/cli/team_skills.rs",
         "src/cli/view.rs",
         "src/cloud_search.rs",
         "src/connections_api.rs",
@@ -493,6 +502,7 @@
       "crate": "screenpipe-engine",
       "files": [
         "src/meeting_watcher/mod.rs",
+        "src/meeting_watcher/shared/events.rs",
         "src/meeting_watcher/shared/telemetry.rs",
         "src/meeting_watcher/audio_process/resolve.rs",
         "src/meeting_watcher/audio_process/state.rs",
@@ -653,6 +663,7 @@
         "src/db/feedback.rs",
         "src/db/maintenance.rs",
         "src/db/setup.rs",
+        "src/db/source_identity.rs",
         "src/db/tests.rs",
         "src/db/truncation_tests.rs",
         "src/types.rs",
@@ -1266,10 +1277,12 @@
     },
     {
       "id": "a11y-macos-tree",
-      "label": "macOS accessibility tree units and real app probes",
+      "label": "macOS accessibility units, click-attribution eval, and real app probes",
       "crate": "screenpipe-a11y",
       "files": [
         "src/incognito/macos.rs",
+        "src/platform/macos_click_attribution_e2e.rs",
+        "src/platform/macos_click_attribution_eval.rs",
         "src/platform/macos.rs",
         "src/tree/macos.rs",
         "src/tree/macos_lines.rs",
@@ -1293,7 +1306,7 @@
       "criticality": "high",
       "confidence": "conditional",
       "kind": "mixed",
-      "notes": "macOS AX unit coverage plus real TextEdit/Finder/Obsidian probes. Obsidian tests are ignored by default because they require a local app install and AX permission."
+      "notes": "macOS AX unit coverage, a scored 100-case click-attribution policy eval, and real TextEdit/Finder/Obsidian probes. Click attribution and Obsidian live tests are ignored by default when they require a logged-in desktop, app install, or AX permission."
     },
     {
       "id": "a11y-windows-tree",

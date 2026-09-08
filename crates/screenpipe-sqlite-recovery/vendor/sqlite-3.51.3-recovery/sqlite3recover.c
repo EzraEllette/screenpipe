@@ -1000,11 +1000,7 @@ static int recoverOpenOutput(sqlite3_recover *p){
     recoverDbError(p, db);
   }
 
-  /* Page recovery does not restore rows in foreign-key dependency order.
-  ** libsqlite3-sys enables foreign keys by default, so disable enforcement
-  ** on this output handle before any transaction starts. The caller must
-  ** verify the completed candidate's foreign keys before installing it. */
-  recoverExec(p, db, "PRAGMA foreign_keys = OFF");
+  recoverExec(p, db, "PRAGMA foreign_keys = off");
 
   /* Register the sqlite_dbdata and sqlite_dbptr virtual table modules.
   ** These two are registered with the output database handle - this

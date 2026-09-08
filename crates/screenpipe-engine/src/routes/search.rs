@@ -68,6 +68,7 @@ use tokio::{
 use tracing::{debug, error, warn};
 
 use crate::analytics;
+use crate::history_access::HistoryAccessPolicy;
 use crate::server::AppState;
 use crate::video_utils::extract_frame;
 
@@ -967,6 +968,60 @@ fn try_acquire_search_permit(semaphore: Arc<Semaphore>) -> Option<OwnedSemaphore
     semaphore.try_acquire_owned().ok()
 }
 
+/// Apply the live account history policy to a search range.
+///
+/// Returns `true` when the requested range ends wholly before the accessible
+/// boundary. Callers can then return an empty result without touching the DB.
+fn apply_search_history_access(
+    policy: &HistoryAccessPolicy,
+    start_time: &mut Option<DateTime<Utc>>,
+    end_time: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> bool {
+    let Some(cutoff) = policy.cutoff(now) else {
+        return false;
+    };
+
+    *start_time = Some(start_time.map_or(cutoff, |start| start.max(cutoff)));
+    end_time.is_some_and(|end| end < cutoff)
+}
+
+fn apply_search_query_history_access(
+    policy: &HistoryAccessPolicy,
+    query: &mut SearchQuery,
+    now: DateTime<Utc>,
+) -> bool {
+    let wholly_before_cutoff =
+        apply_search_history_access(policy, &mut query.start_time, query.end_time, now);
+    if policy.is_restricted() {
+        // `related_tags` currently aggregates across all retained data and has
+        // no time-bound form. Omit it rather than leak older tag associations.
+        query.include_related = false;
+    }
+    wholly_before_cutoff
+}
+
+fn empty_search_response(
+    query: &SearchQuery,
+    format: OutputFormat,
+    fields: &Option<Vec<String>>,
+) -> Response<Body> {
+    render_search(
+        format,
+        fields,
+        &SearchResponse {
+            data: Vec::new(),
+            pagination: PaginationInfo {
+                limit: query.pagination.limit,
+                offset: query.pagination.offset,
+                total: 0,
+            },
+            cloud: None,
+            related: None,
+        },
+    )
+}
+
 // Update the search function
 #[oasgen]
 pub(crate) async fn search(
@@ -987,6 +1042,7 @@ pub(crate) async fn search(
         .as_ref()
         .map(|permissions| permissions.has_data_restrictions())
         .unwrap_or(false);
+    let history_restricted = state.history_access.is_restricted();
 
     // Server-authoritative permission validation and privacy filter: if the request comes from a
     // pipe whose manifest declares `privacy_filter: true`, force PII
@@ -1004,6 +1060,31 @@ pub(crate) async fn search(
             query.filter_pii = true;
         }
     }
+
+    let parsed_search = query.content_type == SearchContentType::Parsed;
+    if !parsed_search && (query.frame_id.is_some() || query.actor_id.is_some()) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            JsonResponse(json!({
+                "error": "frame_id and actor_id require content_type=parsed",
+            })),
+        ));
+    }
+    if parsed_search && query.tags.as_ref().is_some_and(|tags| !tags.is_empty()) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            JsonResponse(json!({
+                "error": "tags are not supported for content_type=parsed",
+            })),
+        ));
+    }
+
+    let wholly_before_history_cutoff =
+        apply_search_query_history_access(&state.history_access, &mut query, Utc::now());
+    if wholly_before_history_cutoff {
+        return Ok(empty_search_response(&query, format, &fields));
+    }
+
     debug!(
         "received search request: query='{}', content_type={:?}, limit={}, offset={}, start_time={:?}, end_time={:?}, app_name={:?}, window_name={:?}, min_length={:?}, max_length={:?}, speaker_ids={:?}, frame_name={:?}, browser_url={:?}, focused={:?}",
         query.q.as_deref().unwrap_or(""),
@@ -1024,7 +1105,7 @@ pub(crate) async fn search(
 
     // Check cache first (only for queries without frame extraction)
     let cache_key = compute_search_cache_key(&query);
-    if !query.include_frames && cacheable_render && !pipe_data_restricted {
+    if !history_restricted && !query.include_frames && cacheable_render && !pipe_data_restricted {
         if let Some(cached) = state.search_cache.get(&cache_key).await {
             debug!("search cache hit for key {}", cache_key);
             capture_direct_api_search_value(&api_client, cached.result_count);
@@ -1047,23 +1128,6 @@ pub(crate) async fn search(
     let query_str = query.q.as_deref().unwrap_or("");
 
     let tags = query.tags.as_deref().unwrap_or(&[]);
-    let parsed_search = query.content_type == SearchContentType::Parsed;
-    if !parsed_search && (query.frame_id.is_some() || query.actor_id.is_some()) {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            JsonResponse(json!({
-                "error": "frame_id and actor_id require content_type=parsed",
-            })),
-        ));
-    }
-    if parsed_search && !tags.is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            JsonResponse(json!({
-                "error": "tags are not supported for content_type=parsed",
-            })),
-        ));
-    }
 
     enum SearchPage {
         Standard(Vec<SearchResult>),
@@ -1450,7 +1514,7 @@ pub(crate) async fn search(
     // Cache the result (only for queries without frame extraction). Cache hits
     // serve the pre-serialized JSON bytes directly for the common response
     // shape, avoiding repeated deep clones of text-heavy search payloads.
-    if !query.include_frames && cacheable_render && !pipe_data_restricted {
+    if !history_restricted && !query.include_frames && cacheable_render && !pipe_data_restricted {
         if let Some(cache_entry) = build_search_cache_entry(&response) {
             let rendered = render_cached_search(&cache_entry);
             state
@@ -1466,9 +1530,18 @@ pub(crate) async fn search(
 
 #[oasgen]
 pub(crate) async fn keyword_search_handler(
-    Query(query): Query<KeywordSearchRequest>,
+    Query(mut query): Query<KeywordSearchRequest>,
     State(state): State<Arc<AppState>>,
 ) -> Result<JsonResponse<Value>, (StatusCode, JsonResponse<Value>)> {
+    if apply_search_history_access(
+        &state.history_access,
+        &mut query.start_time,
+        query.end_time,
+        Utc::now(),
+    ) {
+        return Ok(JsonResponse(json!([])));
+    }
+
     if query.group {
         let groups = state
             .db
@@ -1671,6 +1744,89 @@ mod tests {
             format: None,
             fields: None,
         }
+    }
+
+    fn fixed_now() -> DateTime<Utc> {
+        "2026-08-24T20:00:00Z".parse().unwrap()
+    }
+
+    #[test]
+    fn restricted_search_clamps_missing_and_old_starts() {
+        let policy = HistoryAccessPolicy::last_24_hours();
+        let cutoff = fixed_now() - chrono::Duration::hours(24);
+
+        let mut missing = None;
+        assert!(!apply_search_history_access(
+            &policy,
+            &mut missing,
+            None,
+            fixed_now(),
+        ));
+        assert_eq!(missing, Some(cutoff));
+
+        let mut old = Some(fixed_now() - chrono::Duration::days(30));
+        assert!(!apply_search_history_access(
+            &policy,
+            &mut old,
+            None,
+            fixed_now(),
+        ));
+        assert_eq!(old, Some(cutoff));
+    }
+
+    #[test]
+    fn restricted_search_preserves_recent_start_and_marks_wholly_old_ranges_empty() {
+        let policy = HistoryAccessPolicy::last_24_hours();
+        let recent = fixed_now() - chrono::Duration::hours(2);
+        let mut start = Some(recent);
+        assert!(!apply_search_history_access(
+            &policy,
+            &mut start,
+            Some(fixed_now()),
+            fixed_now(),
+        ));
+        assert_eq!(start, Some(recent));
+
+        let mut old_start = Some(fixed_now() - chrono::Duration::days(7));
+        assert!(apply_search_history_access(
+            &policy,
+            &mut old_start,
+            Some(fixed_now() - chrono::Duration::days(2)),
+            fixed_now(),
+        ));
+    }
+
+    #[test]
+    fn unrestricted_search_preserves_range_and_related_tags() {
+        let policy = HistoryAccessPolicy::unrestricted();
+        let old = fixed_now() - chrono::Duration::days(30);
+        let mut query = search_query(SearchContentType::All, None);
+        query.start_time = Some(old);
+        query.end_time = Some(fixed_now() - chrono::Duration::days(29));
+        query.include_related = true;
+
+        assert!(!apply_search_query_history_access(
+            &policy,
+            &mut query,
+            fixed_now(),
+        ));
+        assert_eq!(query.start_time, Some(old));
+        assert!(query.include_related);
+    }
+
+    #[test]
+    fn restricted_search_suppresses_all_time_related_tag_expansion() {
+        let policy = HistoryAccessPolicy::last_24_hours();
+        let mut query = search_query(SearchContentType::All, None);
+        query.tags = Some(vec!["project:atlas".to_string()]);
+        query.include_related = true;
+
+        assert!(!apply_search_query_history_access(
+            &policy,
+            &mut query,
+            fixed_now(),
+        ));
+        assert!(!query.include_related);
     }
 
     #[derive(Debug)]

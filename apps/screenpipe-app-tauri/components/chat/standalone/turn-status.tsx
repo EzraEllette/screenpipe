@@ -64,6 +64,7 @@ function ScanGlyph({ live, phase }: { live: boolean; phase: TurnPhase }) {
   return (
     <span
       aria-hidden="true"
+      data-testid="chat-turn-scan-glyph"
       className="grid shrink-0"
       style={{
         gridTemplateColumns: `repeat(${COLS}, 3px)`,
@@ -75,8 +76,10 @@ function ScanGlyph({ live, phase }: { live: boolean; phase: TurnPhase }) {
         <span
           key={i}
           className={cn(
-            "block transition-colors duration-150",
-            on ? "bg-phosphor-strong" : "bg-border/40",
+            "block",
+            on
+              ? "bg-phosphor ring-1 ring-inset ring-phosphor-ink/60"
+              : "bg-trace/45",
           )}
           style={{ width: 3, height: 3 }}
         />
@@ -134,6 +137,9 @@ export function TurnStatus({
   const phase = resolveTurnPhase(signals, previous);
   const terminal = isTerminalPhase(phase);
   const live = !terminal && phase !== "idle";
+  const livenessState = live ? signals.liveness?.state ?? null : null;
+  const visiblyActive =
+    live && livenessState !== "offline" && livenessState !== "stalled";
 
   if (phase !== "idle") {
     if (traceRef.current.startedAt == null) traceRef.current.startedAt = Date.now();
@@ -167,6 +173,7 @@ export function TurnStatus({
     <div
       data-testid="chat-turn-status"
       data-phase={phase}
+      data-liveness={livenessState ?? undefined}
       role="status"
       aria-live="polite"
       className={cn("w-fit max-w-full self-start", className)}
@@ -183,8 +190,8 @@ export function TurnStatus({
           "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-offset-1",
         )}
       >
-        {live ? (
-          <ScanGlyph live={live} phase={phase} />
+        {visiblyActive ? (
+          <ScanGlyph live={visiblyActive} phase={phase} />
         ) : (
           <span
             aria-hidden="true"
@@ -207,8 +214,8 @@ export function TurnStatus({
           <ChevronRight
             aria-hidden="true"
             className={cn(
-              "h-3 w-3 shrink-0 text-muted-foreground/50 transition-transform duration-150",
-              "group-hover:text-muted-foreground",
+              "h-3 w-3 shrink-0 text-muted-foreground transition-colors duration-150",
+              "group-hover:text-foreground",
               expanded && "rotate-90",
             )}
           />
@@ -233,14 +240,18 @@ export function TurnStatus({
                   className={cn(
                     "absolute -left-[calc(0.75rem+2px)] block h-[5px] w-[5px]",
                     node.state === "current"
-                      ? "bg-phosphor-strong"
+                      ? "bg-phosphor"
                       : node.state === "ended"
                         ? "bg-foreground/50"
                         : "bg-trace",
                   )}
                 />
                 <span className="font-mono text-[10px] tracking-wide text-muted-foreground">
-                  {turnPhaseLabel(node.phase, signals)}
+                  {turnPhaseLabel(node.phase, {
+                    ...signals,
+                    liveness:
+                      node.state === "current" ? signals.liveness : null,
+                  })}
                 </span>
                 {suffix && (
                   <span className="font-mono text-[10px] tabular-nums text-muted-foreground/60">

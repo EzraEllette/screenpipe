@@ -148,7 +148,7 @@ export function GoogleDocsCard() {
       <CardContent className="p-0">
         <div className="flex items-start p-4 gap-4">
           <div className="flex-shrink-0">
-            <img src="/images/google-docs.svg" alt="Google Docs" className="w-10 h-10 rounded-xl" />
+            <img src="/images/google-docs.svg" alt="Google Docs" className="w-10 h-10 rounded-lg" />
           </div>
 
           <div className="flex-1 min-w-0">

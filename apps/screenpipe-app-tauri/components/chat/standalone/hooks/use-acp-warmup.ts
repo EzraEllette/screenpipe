@@ -66,15 +66,19 @@ export function useAcpWarmup({
   const provider = activePreset?.provider;
   const presetId = activePreset?.id;
   const agentId = activePreset?.acpAgent?.id;
-  const running = Boolean(piInfo?.running);
+  const sessionId = piSessionIdRef.current;
+  const runningForSessionRef = useRef(false);
+  runningForSessionRef.current = Boolean(
+    piInfo?.running && (!piInfo.sessionId || piInfo.sessionId === sessionId),
+  );
 
   useEffect(() => {
     if (!enabled) return;
     if (provider !== "acp" || !presetId || !agentId) return;
     // Already up, or the send path is mid-start — either way, leave it alone.
-    if (running || piStartInFlightRef.current) return;
+    if (runningForSessionRef.current || piStartInFlightRef.current) return;
 
-    const key = `${presetId}:${agentId}`;
+    const key = `${sessionId}:${presetId}:${agentId}`;
     if (attemptedRef.current === key) return;
     attemptedRef.current = key;
 
@@ -89,9 +93,9 @@ export function useAcpWarmup({
       try {
         const providerConfig = buildProviderConfig(preset);
         if (!providerConfig) return;
-        const dir = await piProjectDirForSession(piSessionIdRef.current);
+        const dir = await piProjectDirForSession(sessionId);
         const result = await commands.piStart(
-          piSessionIdRef.current,
+          sessionId,
           dir,
           userToken ?? null,
           providerConfig,
@@ -100,7 +104,7 @@ export function useAcpWarmup({
         if (result.status === "ok" && result.data.running) {
           setPiInfo(result.data);
           setRunningConfigFromProviderConfig(providerConfig);
-          syncThinkingLevelAfterStart(piSessionIdRef.current);
+          syncThinkingLevelAfterStart(sessionId);
         }
         // A non-running result is not reported here. It is usually the
         // auth case, which has already surfaced its own card.
@@ -121,9 +125,12 @@ export function useAcpWarmup({
       piStartInFlightRef.current = false;
       setPiStarting(false);
     };
-    // `activePreset` identity churns; the id/provider/agent triple is what
-    // actually decides whether a different agent needs warming.
-  }, [enabled, provider, presetId, agentId, running]);
+    // `activePreset` identity churns; the session/id/provider/agent tuple is
+    // what actually decides whether a different runtime needs warming. Do not
+    // depend on `piInfo.running`: the process becomes alive before ACP finishes
+    // its handshake, and treating that poll result as effect cleanup releases
+    // the start guard while the original `piStart` call is still pending.
+  }, [enabled, provider, presetId, agentId, sessionId]);
 
   // Selecting a different agent makes a previous failure irrelevant.
   useEffect(() => {

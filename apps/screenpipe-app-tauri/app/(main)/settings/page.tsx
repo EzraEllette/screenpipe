@@ -21,6 +21,7 @@ import {
   ChevronLeft,
   SlidersHorizontal,
   KeyRound,
+  ListChecks,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import * as PopoverPrimitive from "@radix-ui/react-popover";
@@ -51,9 +52,11 @@ import { StorageSection, searchIndex as storageSearchIndex } from "@/components/
 import { NotificationsSettings, searchIndex as notificationsSearchIndex } from "@/components/settings/notifications-settings";
 import { UsageSection, searchIndex as usageSearchIndex } from "@/components/settings/usage-section";
 import { SpeakersSection, searchIndex as speakersSearchIndex } from "@/components/settings/speakers-section";
+import { ActivitiesSettings, searchIndex as activitiesSearchIndex } from "@/components/settings/activities-settings";
 import { searchIndex as powerSearchIndex } from "@/components/settings/battery-saver-section";
 import { ReferralCard } from "@/components/settings/referral-card";
 import { SettingsSearchInput, SettingsSearchPopover, searchSettingsNav, scrollToSettingsField, type IndexedSettingsField, type SettingsField } from "@/components/settings/settings-search";
+import { ExperimentalShortcutGuide } from "@/components/shortcut-guide";
 
 // Settings search index for the inline ReferralSection defined further down in
 // this file. Lives here because the section itself lives here; same co-location
@@ -79,6 +82,7 @@ const ALL_SETTINGS_FIELDS: IndexedSettingsField[] = [
   ...generalSearchIndex.map((f) => ({ ...f, section: "general" })),
   ...aiSearchIndex.map((f) => ({ ...f, section: "ai" })),
   ...aiSettingsSearchIndex.map((f) => ({ ...f, section: "ai-settings" })),
+  ...activitiesSearchIndex.map((f) => ({ ...f, section: "activities" })),
   ...audioSearchIndex.map((f) => ({ ...f, section: "audio" })),
   ...screenSearchIndex.map((f) => ({ ...f, section: "recording" })),
   ...powerSearchIndex.map((f) => ({ ...f, section: "recording" })),
@@ -200,6 +204,7 @@ function SettingsContent() {
     {
       label: "AI",
       items: [
+        { id: "activities" as const, label: "Activities", icon: <ListChecks className="h-4 w-4" /> },
         { id: "ai-settings" as const, label: "AI features", icon: <SlidersHorizontal className="h-4 w-4" /> },
         { id: "ai" as const, label: "Models & keys", icon: <Brain className="h-4 w-4" /> },
         { id: "usage" as const, label: "AI credits", icon: <BarChart3 className="h-4 w-4" /> },
@@ -344,6 +349,7 @@ function SettingsContent() {
       case "display":       return <DisplaySection />;
       case "ai":            return <AIPresets />;
       case "ai-settings":   return <AISettings />;
+      case "activities":    return <ActivitiesSettings />;
       case "account":       return <AccountSection />;
       case "recording":     return <RecordingSettings section="screen" />;
       case "audio":         return <RecordingSettings section="audio" />;
@@ -369,9 +375,6 @@ function SettingsContent() {
         }
       `}</style>
 
-      {/* Drag region */}
-      <div className="absolute top-0 left-0 right-0 h-8 z-10" data-tauri-drag-region />
-
       {/* Left sidebar */}
       <AppSidebar className="pl-4">
         {/* Back to app */}
@@ -389,7 +392,15 @@ function SettingsContent() {
               if (chatId) {
                 localStorage.setItem("pending-chat-conversation", chatId);
               }
-              router.push(section ? `/home?section=${section}` : "/home");
+              // Settings is pushed from the Home shell. Consume that entry so
+              // the next native back gesture continues through the user's UI
+              // history instead of bouncing straight back into Settings.
+              if (fromSection) {
+                router.back();
+              } else {
+                // Direct settings deep links have no known in-app predecessor.
+                router.replace(section ? `/home?section=${section}` : "/home");
+              }
             }}
             className={cn(
               "flex items-center space-x-1.5 text-sm transition-colors w-full",
@@ -507,12 +518,15 @@ function SettingsContent() {
 
 export default function SettingsPage() {
   return (
-    <Suspense fallback={
-      <div className="flex-1 min-w-0 h-full bg-background flex items-center justify-center">
-        <div className="text-muted-foreground text-sm">Loading...</div>
-      </div>
-    }>
-      <SettingsContent />
-    </Suspense>
+    <>
+      <ExperimentalShortcutGuide />
+      <Suspense fallback={
+        <div className="flex-1 min-w-0 h-full bg-background flex items-center justify-center">
+          <div className="text-muted-foreground text-sm">Loading...</div>
+        </div>
+      }>
+        <SettingsContent />
+      </Suspense>
+    </>
   );
 }

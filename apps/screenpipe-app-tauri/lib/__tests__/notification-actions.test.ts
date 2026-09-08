@@ -13,8 +13,16 @@ vi.mock("@tauri-apps/api/event", () => ({
   emit: vi.fn(async () => undefined),
 }));
 
+const tauriCommandMocks = vi.hoisted(() => ({
+  openViewerWindow: vi.fn(async () => ({ status: "ok" as const, data: null })),
+  showWindowActivated: vi.fn(async () => ({
+    status: "ok" as const,
+    data: null,
+  })),
+}));
+
 vi.mock("@/lib/utils/tauri", () => ({
-  commands: {},
+  commands: tauriCommandMocks,
 }));
 
 vi.mock("@/lib/api", () => ({
@@ -151,5 +159,28 @@ describe("notification deeplink routing", () => {
       "deep-link-received",
       "screenpipe://timeline",
     );
+  });
+
+  it("sends file link actions to the Brain artifact detail", async () => {
+    tauriCommandMocks.openViewerWindow.mockClear();
+    tauriCommandMocks.showWindowActivated.mockClear();
+    const { emit } = await import("@tauri-apps/api/event");
+    vi.mocked(emit).mockClear();
+
+    const actionPromise = executeNotificationAction({
+      type: "link",
+      url: "file:///Users/louis/.screenpipe/pipes/time-breakdown/output/2026-08-25.md",
+    });
+    await vi.runAllTimersAsync();
+    await actionPromise;
+
+    expect(tauriCommandMocks.openViewerWindow).not.toHaveBeenCalled();
+    expect(tauriCommandMocks.showWindowActivated).toHaveBeenCalledWith({
+      Home: { page: "brain" },
+    });
+    expect(emit).toHaveBeenCalledWith("open-brain-artifact", {
+      path: "/Users/louis/.screenpipe/pipes/time-breakdown/output/2026-08-25.md",
+      source: "notification",
+    });
   });
 });

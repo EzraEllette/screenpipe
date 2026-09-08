@@ -34,6 +34,8 @@
 //! section in `AGENTS.md` before touching those.
 
 pub mod activity_ledger;
+pub(crate) mod agent_profile;
+pub(crate) mod agent_skills;
 pub mod analytics;
 pub mod archive;
 mod atomic_file;
@@ -58,13 +60,16 @@ pub mod focus_tracker;
 pub mod frame_linker;
 pub mod frame_linker_actor;
 pub mod hd_recorder;
+pub mod health_identity;
 pub mod high_fps_controller;
+pub mod history_access;
 pub mod hot_frame_cache;
 pub mod live_views;
 pub mod local_chat;
 pub mod logging;
 pub mod mcp_servers_api;
 pub mod meeting_export;
+pub mod meeting_summary;
 pub mod meeting_watcher;
 mod oauth_result_page;
 pub mod permission_monitor;

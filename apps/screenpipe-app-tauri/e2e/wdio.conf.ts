@@ -35,6 +35,7 @@ const allSpecs = [resolve(__dirname, 'specs', '**', '*.spec.ts')];
 const windowsCiSpecs = [
   'brain-overview.spec.ts',
   'acp-backend.spec.ts',
+  'history-swipe-navigation.spec.ts',
   'search/search-bugs-4645.spec.ts',
   'settings-sections.spec.ts',
   'windows-system-integration.spec.ts',

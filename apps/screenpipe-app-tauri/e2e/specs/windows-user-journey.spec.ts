@@ -50,7 +50,15 @@ async function appServerRequest(
   )) as { ok: boolean; status: number; text: string };
 }
 
-async function postNotification(id: string, title: string, body: string): Promise<void> {
+type NotificationPriority = "high" | "normal" | "low";
+
+async function postNotification(
+  id: string,
+  title: string,
+  body: string,
+  priority: NotificationPriority = "normal",
+  autoDismissMs = 2_000,
+): Promise<void> {
   const response = await appServerRequest("/notify", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -59,8 +67,8 @@ async function postNotification(id: string, title: string, body: string): Promis
       title,
       body,
       type: "pipe",
-      priority: "high",
-      autoDismissMs: 2_000,
+      priority,
+      autoDismissMs,
     }),
   });
 
@@ -798,6 +806,57 @@ describe("Windows user journey", function () {
     } finally {
       if ((await browser.getWindowHandles()).includes("home")) {
         await browser.switchToWindow("home").catch(() => {});
+      }
+    }
+  });
+
+  it("shows every notification priority in the top-right panel", async function () {
+    if (!isWindows) this.skip();
+
+    await openHomeWindow();
+    const notificationIds: string[] = [];
+
+    try {
+      for (const priority of ["high", "normal", "low"] as const) {
+        const notificationId = `windows-e2e-panel-${priority}-${Date.now()}`;
+        const notificationTitle = `${priority} priority panel notification`;
+        notificationIds.push(notificationId);
+
+        await postNotification(
+          notificationId,
+          notificationTitle,
+          `The ${priority} priority notification reached the top-right panel.`,
+          priority,
+          0,
+        );
+
+        await waitForWindowHandle("notification-panel", t(20_000));
+        await browser.switchToWindow("notification-panel");
+        await browser.waitUntil(
+          async () => (await $("body").getText()).includes(notificationTitle),
+          {
+            timeout: t(20_000),
+            interval: 250,
+            timeoutMsg: `${priority} priority notification never reached the panel`,
+          },
+        );
+
+        const screenshot = await saveScreenshot(
+          `windows-user-journey-notification-panel-${priority}`,
+        );
+        expect(existsSync(screenshot)).toBe(true);
+
+        await browser.switchToWindow("home");
+      }
+    } finally {
+      if ((await browser.getWindowHandles()).includes("home")) {
+        await browser.switchToWindow("home").catch(() => {});
+        await invokeOrThrow("hide_notification_panel").catch(() => {});
+        for (const id of notificationIds) {
+          await appServerRequest(`/notifications/${encodeURIComponent(id)}`, {
+            method: "DELETE",
+          }).catch(() => {});
+        }
       }
     }
   });

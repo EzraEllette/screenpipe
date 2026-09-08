@@ -463,6 +463,8 @@ describe("the spec itself stays strict — a relaxation fails HERE", () => {
       "SearchResult.next_cursor",
       "RecordList.next_cursor",
       "RollupList.next_cursor",
+      // Skill listings are metadata-only; package appears only for view=full.
+      "TeamSkillSummary.package",
     ]);
     const gaps: string[] = [];
     for (const [name, schema] of Object.entries<any>(doc.components.schemas)) {

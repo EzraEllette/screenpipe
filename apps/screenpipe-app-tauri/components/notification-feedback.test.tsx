@@ -23,6 +23,33 @@ const notification = {
 };
 
 describe("NotificationFeedback", () => {
+  it("reveals compact rating choices through parent hover or focus", () => {
+    const parentClick = vi.fn();
+    render(
+      <div className="group/notif" onClick={parentClick}>
+        <NotificationFeedback notification={notification} />
+      </div>,
+    );
+
+    expect(
+      screen.getByRole("group", { name: "notification feedback options" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("useful?")).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "useful notification" }),
+    ).toHaveStyle({ width: "20px", height: "20px" });
+    expect(screen.getByTestId("notification-feedback")).toHaveClass(
+      "grid-rows-[0fr]",
+      "group-hover/notif:grid-rows-[1fr]",
+      "group-focus-within/notif:grid-rows-[1fr]",
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "not useful notification" }),
+    );
+    expect(parentClick).not.toHaveBeenCalled();
+  });
+
   it("expands a small correction input and saves down feedback on send", async () => {
     capture.mockClear();
     const submitFeedback = vi.fn().mockResolvedValue(undefined);
@@ -33,7 +60,9 @@ describe("NotificationFeedback", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "not useful notification" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "not useful notification" }),
+    );
     const input = screen.getByRole("textbox", { name: "what should improve" });
     fireEvent.change(input, { target: { value: "  include project names  " } });
     fireEvent.click(screen.getByRole("button", { name: "send feedback" }));
@@ -45,7 +74,14 @@ describe("NotificationFeedback", () => {
         "include project names",
       );
     });
-    expect(await screen.findByText("saved for the next run")).toBeInTheDocument();
+    expect(await screen.findByText("feedback sent")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("group", { name: "notification feedback options" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "send feedback" }),
+    ).not.toBeInTheDocument();
     expect(capture).toHaveBeenCalledWith(
       "notification_feedback_submitted",
       expect.objectContaining({
@@ -69,11 +105,21 @@ describe("NotificationFeedback", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "useful notification" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "useful notification" }),
+    );
 
     await waitFor(() => {
-      expect(submitFeedback).toHaveBeenCalledWith(notification, "up", undefined);
+      expect(submitFeedback).toHaveBeenCalledWith(
+        notification,
+        "up",
+        undefined,
+      );
     });
+    expect(await screen.findByText("feedback sent")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("group", { name: "notification feedback options" }),
+    ).not.toBeInTheDocument();
     expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
     expect(capture).toHaveBeenCalledWith(
       "notification_feedback_submitted",
@@ -101,6 +147,8 @@ describe("NotificationFeedback", () => {
       />,
     );
 
-    expect(screen.queryByTestId("notification-feedback")).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId("notification-feedback"),
+    ).not.toBeInTheDocument();
   });
 });

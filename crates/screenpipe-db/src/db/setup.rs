@@ -133,6 +133,16 @@ impl DatabaseManager {
         // The incident does not claim that the database is corrupt.
         let database_file = Path::new(database_path);
         let _lifecycle = crate::recovery::database_lifecycle(database_file).await;
+        let is_in_memory =
+            database_path.contains(":memory:") || database_path.contains("mode=memory");
+        let manager_lease = if is_in_memory {
+            None
+        } else {
+            Some(
+                screenpipe_sqlite_coordinator::acquire_sqlite_manager_lease(database_file)
+                    .map_err(SqlxError::Protocol)?,
+            )
+        };
         screenpipe_sqlite_coordinator::prepare_sqlite_quarantine_reserve(database_file).map_err(
             |error| {
                 SqlxError::Protocol(format!(
@@ -159,16 +169,32 @@ impl DatabaseManager {
             }
         }
 
-        // Create the database if it doesn't exist
-        if !sqlx::Sqlite::database_exists(&connection_string)
-            .await
-            .map_err(|error| quarantine_startup_error(database_file, error))?
-        {
-            sqlx::Sqlite::create_database(&connection_string)
-                .await
-                .map_err(|error| quarantine_startup_error(database_file, error))?;
+        // Do not use `Sqlite::database_exists` or `Sqlite::create_database`
+        // here. Those helpers open the file through SQLite's default VFS. If a
+        // second DatabaseManager starts while the recorder is live, that
+        // default-VFS handle issues real POSIX unlocks against the same inode,
+        // silently releasing unix-excl's process-wide lock. Existing
+        // unix-excl handles still believe `bProcessLock` is set and never
+        // reacquire it, so an external sqlite3 process can then attach to the
+        // live WAL and invalidate the mapped WAL index (observed code 522).
+        // A filesystem create has no SQLite locking side effects; every actual
+        // SQLite open below therefore enters through the configured VFS.
+        let created_database = if is_in_memory {
+            false
+        } else {
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(database_file)
+            {
+                Ok(_) => true,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => false,
+                Err(error) => return Err(SqlxError::Io(error)),
+            }
+        };
+        if created_database {
             // The pre-open reserve had no file identity because this was a new
-            // path. Refresh it now that SQLite created the physical generation.
+            // path. Refresh it now that the physical generation exists.
             screenpipe_sqlite_coordinator::prepare_sqlite_quarantine_reserve(database_file)
                 .map_err(|error| {
                     SqlxError::Protocol(format!(
@@ -190,8 +216,6 @@ impl DatabaseManager {
         // cache_size + mmap_size are tier-configurable and applied here; the
         // WAL-safety pragmas that MUST be identical on every connection over this
         // file come from the single source of truth `WAL_SAFETY_PRAGMAS`.
-        let is_in_memory =
-            database_path.contains(":memory:") || database_path.contains("mode=memory");
         let mut connect_options: SqliteConnectOptions = connection_string
             .parse::<SqliteConnectOptions>()?
             .busy_timeout(Duration::from_secs(5))
@@ -330,6 +354,7 @@ impl DatabaseManager {
             },
         );
         let db_manager = DatabaseManager {
+            upload_source_id: tokio::sync::OnceCell::new(),
             pool: read_pool,
             write_pool,
             write_semaphore,
@@ -337,6 +362,7 @@ impl DatabaseManager {
             write_queue,
             write_queue_health,
             persistent_failure_hook,
+            manager_lease,
             close_token,
         };
 
@@ -427,6 +453,9 @@ impl DatabaseManager {
         // pinning the poisoned WAL-index while DB-wedge recovery was trying to
         // rebuild it.
         tokio::join!(self.write_pool.close(), self.pool.close());
+        if let Some(lease) = self.manager_lease.as_ref() {
+            lease.release();
+        }
     }
 
     async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
@@ -871,16 +900,21 @@ impl DatabaseManager {
         self.write_queue_health.clone()
     }
 
-    /// Set the hook fired when writes fail persistently (a process-wide WAL-index
-    /// desync that only a full engine restart can clear). The app wires this to a
-    /// recording restart. Safe to call after construction and to overwrite.
-    pub fn set_persistent_failure_hook(&self, hook: crate::write_queue::PersistentFailureHook) {
+    /// Set the hook fired when this database generation needs every live pool
+    /// rebuilt. The app wires this to a recording restart. Safe to call after
+    /// construction and to overwrite.
+    pub fn set_database_restart_hook(&self, hook: crate::write_queue::DatabaseRestartHook) {
         self.persistent_failure_hook.set_hook(hook);
         if self.write_queue_health.is_hard_faulted() {
             if let Some(hook) = self.persistent_failure_hook.take_hard_fault_hook() {
-                hook();
+                hook(crate::write_queue::DatabaseRestartReason::SqliteHardFault);
             }
         }
+    }
+
+    /// Compatibility wrapper for callers using the former write-wedge name.
+    pub fn set_persistent_failure_hook(&self, hook: crate::write_queue::PersistentFailureHook) {
+        self.set_database_restart_hook(Arc::new(move |_| hook()));
     }
 
     /// Route a hard SQLite error observed outside the coalescing queue (for
@@ -1080,6 +1114,72 @@ mod shutdown_tests {
         database.close().await;
     }
 
+    #[cfg(target_os = "macos")]
+    fn assert_foreign_sqlite_is_locked(db_path: &Path) {
+        let output = std::process::Command::new("/usr/bin/sqlite3")
+            .arg(db_path)
+            .arg(".schema foreign_process_probe")
+            .output()
+            .expect("run the macOS sqlite3 client");
+        assert!(
+            !output.status.success(),
+            "a foreign SQLite process bypassed unix-excl: stdout={}, stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("database is locked"),
+            "unexpected foreign-process failure: {}",
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn duplicate_manager_cannot_drop_unix_excl_process_lock() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let db_path = dir.path().join("foreign-process.sqlite");
+        let database = DatabaseManager::new(
+            db_path.to_str().expect("utf-8 temp path"),
+            DbConfig::for_tier(screenpipe_config::DeviceTier::Low),
+        )
+        .await
+        .expect("database init");
+
+        database
+            .execute_raw_sql_write("CREATE TABLE foreign_process_probe (value INTEGER NOT NULL)")
+            .await
+            .expect("create probe table");
+
+        assert_foreign_sqlite_is_locked(&db_path);
+
+        let duplicate_error = DatabaseManager::new(
+            db_path.to_str().expect("utf-8 temp path"),
+            DbConfig::for_tier(screenpipe_config::DeviceTier::Low),
+        )
+        .await
+        .err()
+        .expect("second in-process manager must be rejected");
+        assert!(
+            duplicate_error
+                .to_string()
+                .contains("already owns a live DatabaseManager"),
+            "unexpected duplicate-manager error: {duplicate_error}"
+        );
+        assert_foreign_sqlite_is_locked(&db_path);
+
+        database.close().await;
+
+        let replacement = DatabaseManager::new(
+            db_path.to_str().expect("utf-8 temp path"),
+            DbConfig::for_tier(screenpipe_config::DeviceTier::Low),
+        )
+        .await
+        .expect("closed manager releases its ownership lease");
+        assert_foreign_sqlite_is_locked(&db_path);
+        replacement.close().await;
+    }
+
     #[test]
     fn early_startup_hard_fault_closes_the_process_writer_gate() {
         let dir = tempfile::tempdir().expect("temp dir");
@@ -1123,7 +1223,7 @@ mod shutdown_tests {
         assert!(database.report_sqlite_error(&full));
         assert!(database.report_sqlite_error(&full));
         assert_eq!(hook_calls.load(Ordering::SeqCst), 0);
-        database.set_persistent_failure_hook(Arc::new(move || {
+        database.set_database_restart_hook(Arc::new(move |_| {
             hook_counter.fetch_add(1, Ordering::SeqCst);
         }));
         assert!(database.write_queue_health().is_hard_faulted());
@@ -1135,21 +1235,35 @@ mod shutdown_tests {
         );
         database.close().await;
 
-        assert!(!screenpipe_sqlite_coordinator::sqlite_quarantine_exists(&db_path));
+        assert!(!screenpipe_sqlite_coordinator::sqlite_quarantine_exists(
+            &db_path
+        ));
         let replacement = DatabaseManager::new(
             db_path.to_str().expect("utf-8 temp path"),
             DbConfig::for_tier(screenpipe_config::DeviceTier::Low),
         )
         .await
         .expect("healthy database resumes after a disk-full observation");
-        replacement.insert_audio_chunk("/after/full", None).await.unwrap();
+        replacement
+            .insert_audio_chunk("/after/full", None)
+            .await
+            .unwrap();
         replacement.close().await;
-        assert!(writer_gate.is_closed(), "old writer admission remains retired");
+        assert!(
+            writer_gate.is_closed(),
+            "old writer admission remains retired"
+        );
         let reopened = DatabaseManager::new(
             db_path.to_str().unwrap(),
             DbConfig::for_tier(screenpipe_config::DeviceTier::Low),
-        ).await.unwrap();
-        assert!(reopened.find_audio_chunk_id("/after/full").await.unwrap().is_some());
+        )
+        .await
+        .unwrap();
+        assert!(reopened
+            .find_audio_chunk_id("/after/full")
+            .await
+            .unwrap()
+            .is_some());
         reopened.close().await;
     }
 
@@ -1198,7 +1312,8 @@ mod shutdown_tests {
             Err(error) => error,
         };
         let marker = screenpipe_sqlite_coordinator::read_sqlite_quarantine(&db_path)
-            .unwrap().expect("verified header damage is quarantined");
+            .unwrap()
+            .expect("verified header damage is quarantined");
         assert!(marker.confirmed_damage);
         assert_eq!(std::fs::read(&db_path).unwrap(), wrong_page);
     }

@@ -50,6 +50,28 @@ impl DatabaseManager {
         attendees: Option<&str>,
         calendar_event_id: Option<&str>,
     ) -> Result<i64, SqlxError> {
+        self.insert_meeting_with_calendar_at(
+            meeting_app,
+            detection_source,
+            title,
+            attendees,
+            calendar_event_id,
+            chrono::Utc::now(),
+        )
+        .await
+    }
+
+    /// Insert a meeting with an explicit start timestamp in the same immediate
+    /// transaction that creates the row.
+    pub async fn insert_meeting_with_calendar_at(
+        &self,
+        meeting_app: &str,
+        detection_source: &str,
+        title: Option<&str>,
+        attendees: Option<&str>,
+        calendar_event_id: Option<&str>,
+        meeting_start: chrono::DateTime<chrono::Utc>,
+    ) -> Result<i64, SqlxError> {
         match self
             .try_insert_meeting(
                 meeting_app,
@@ -57,14 +79,22 @@ impl DatabaseManager {
                 title,
                 attendees,
                 calendar_event_id,
+                meeting_start,
             )
             .await
         {
             Err(e) if calendar_event_id.is_some() && is_calendar_event_conflict(&e) => {
                 // Lost the race to another meeting between the pre-check and
                 // this insert. The event belongs to whoever claimed it first.
-                self.try_insert_meeting(meeting_app, detection_source, None, None, None)
-                    .await
+                self.try_insert_meeting(
+                    meeting_app,
+                    detection_source,
+                    None,
+                    None,
+                    None,
+                    meeting_start,
+                )
+                .await
             }
             other => other,
         }
@@ -77,15 +107,14 @@ impl DatabaseManager {
         title: Option<&str>,
         attendees: Option<&str>,
         calendar_event_id: Option<&str>,
+        meeting_start: chrono::DateTime<chrono::Utc>,
     ) -> Result<i64, SqlxError> {
         let mut tx = self.begin_immediate_with_retry().await?;
-        let now = chrono::Utc::now()
-            .format("%Y-%m-%dT%H:%M:%S%.3fZ")
-            .to_string();
+        let meeting_start = meeting_start.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
         let id = sqlx::query(
             "INSERT INTO meetings (meeting_start, meeting_app, detection_source, title, attendees, calendar_event_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         )
-        .bind(&now)
+        .bind(&meeting_start)
         .bind(meeting_app)
         .bind(detection_source)
         .bind(title)
@@ -110,6 +139,37 @@ impl DatabaseManager {
             .bind(calendar_event_id)
             .fetch_optional(&self.pool)
             .await
+    }
+
+    /// The calendar event this meeting is bound to, if any. The detector reads
+    /// this at a suspected meeting boundary to tell "same scheduled event,
+    /// mic hiccup" apart from "the calendar rolled into the next event".
+    pub async fn meeting_calendar_event_id(
+        &self,
+        meeting_id: i64,
+    ) -> Result<Option<String>, SqlxError> {
+        let key = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT calendar_event_id FROM meetings WHERE id = ?1",
+        )
+        .bind(meeting_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .flatten()
+        .filter(|key| !key.is_empty());
+        Ok(key)
+    }
+
+    /// How the meeting was finalized: one of the `MEETING_END_REASON_*`
+    /// constants, or `None` for an open row / legacy natural end.
+    pub async fn meeting_end_reason(&self, meeting_id: i64) -> Result<Option<String>, SqlxError> {
+        let reason = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT end_reason FROM meetings WHERE id = ?1",
+        )
+        .bind(meeting_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .flatten();
+        Ok(reason)
     }
 
     /// Claim `calendar_event_id` for `meeting_id`. Atomic, and idempotent for
@@ -677,6 +737,37 @@ impl DatabaseManager {
         transcript: &str,
         captured_at: DateTime<Utc>,
     ) -> Result<i64, SqlxError> {
+        self.insert_meeting_transcript_segment_with_identity(
+            meeting_id,
+            provider,
+            model,
+            item_id,
+            device_name,
+            device_type,
+            "legacy",
+            None,
+            speaker_name,
+            transcript,
+            captured_at,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn insert_meeting_transcript_segment_with_identity(
+        &self,
+        meeting_id: i64,
+        provider: &str,
+        model: Option<&str>,
+        item_id: &str,
+        device_name: &str,
+        device_type: &str,
+        stream_id: &str,
+        session_speaker_id: Option<&str>,
+        speaker_name: Option<&str>,
+        transcript: &str,
+        captured_at: DateTime<Utc>,
+    ) -> Result<i64, SqlxError> {
         let trimmed = transcript.trim();
         if trimmed.is_empty() {
             return Ok(0);
@@ -685,8 +776,8 @@ impl DatabaseManager {
         let mut tx = self.begin_immediate_with_retry().await?;
         let result = sqlx::query(
             "INSERT OR IGNORE INTO meeting_transcript_segments \
-             (meeting_id, provider, model, item_id, device_name, device_type, speaker_name, transcript, captured_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+             (meeting_id, provider, model, item_id, device_name, device_type, stream_id, session_speaker_id, speaker_name, transcript, captured_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         )
         .bind(meeting_id)
         .bind(provider)
@@ -694,6 +785,8 @@ impl DatabaseManager {
         .bind(item_id)
         .bind(device_name)
         .bind(device_type)
+        .bind(stream_id)
+        .bind(session_speaker_id)
         .bind(speaker_name)
         .bind(trimmed)
         .bind(captured_at.to_rfc3339())
@@ -1153,6 +1246,22 @@ impl DatabaseManager {
         Ok(())
     }
 
+    /// Fast existence signal for "did anything get transcribed live": counts
+    /// only `meeting_transcript_segments` rows, not the audio_transcriptions
+    /// window join that [`Self::list_meeting_transcript_segments`] performs.
+    pub async fn count_meeting_transcript_segments(
+        &self,
+        meeting_id: i64,
+    ) -> Result<i64, SqlxError> {
+        let (count,): (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM meeting_transcript_segments WHERE meeting_id = ?1",
+        )
+        .bind(meeting_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(count)
+    }
+
     pub async fn list_meeting_transcript_segments(
         &self,
         meeting_id: i64,
@@ -1184,15 +1293,12 @@ impl DatabaseManager {
                     NULL AS audio_chunk_id,
                     NULL AS audio_file_path,
                     mts.speaker_id AS speaker_id,
-                    -- Prefer the resolved global speaker's name; output rows fall
-                    -- back to the free-text Deepgram label until backfilled / if
-                    -- the speaker is unnamed (NULLIF treats '' as "no name yet").
-                    -- Input (mic) rows get NULL instead of the raw label so the
-                    -- client can render "me" until the user assigns someone.
-                    CASE
-                        WHEN mts.device_type = 'input' THEN NULLIF(s.name, '')
-                        ELSE COALESCE(NULLIF(s.name, ''), mts.speaker_name)
-                    END AS speaker_name,
+                    mts.session_speaker_id AS session_speaker_id,
+                    -- Prefer the resolved global speaker's name, then preserve
+                    -- Deepgram's stream-local label until voice backfill gives it
+                    -- a durable identity. A mic is a capture source, not proof
+                    -- that every voice on it belongs to the local user.
+                    COALESCE(NULLIF(s.name, ''), mts.speaker_name) AS speaker_name,
                     mts.transcript,
                     mts.captured_at,
                     mts.created_at
@@ -1217,6 +1323,7 @@ impl DatabaseManager {
                     at.audio_chunk_id AS audio_chunk_id,
                     ac.file_path AS audio_file_path,
                     at.speaker_id AS speaker_id,
+                    NULL AS session_speaker_id,
                     s.name AS speaker_name,
                     at.transcription AS transcript,
                     at.timestamp AS captured_at,
@@ -1569,7 +1676,8 @@ impl DatabaseManager {
     }
 
     /// Find the most recent ended meeting in `app` whose `meeting_end` is
-    /// within `within_secs` and that did NOT end via explicit user stop.
+    /// within `within_secs` and that did NOT end via explicit user stop or a
+    /// detected room change.
     ///
     /// The `end_reason != 'explicit_stop'` filter is the load-bearing piece
     /// of the meeting-merge fix: when a user clicks stop in the meeting note
@@ -1579,6 +1687,10 @@ impl DatabaseManager {
     /// "DUPLICATE: X" sync notifications. The detector loop also tracks
     /// `last_explicit_stop_id` in memory as defense-in-depth, but this SQL
     /// filter is the durable guarantee that survives restarts.
+    ///
+    /// `room_changed` rows are excluded for the same reason: the detector
+    /// closed that row precisely because the user moved to the next call, so
+    /// re-attaching the next call to it would recreate the merge it prevented.
     pub async fn find_recent_meeting_for_app(
         &self,
         app: &str,
@@ -1594,13 +1706,14 @@ impl DatabaseManager {
              WHERE meeting_app = ?1 \
                AND meeting_end IS NOT NULL \
                AND meeting_end >= ?2 \
-               AND (end_reason IS NULL OR end_reason != ?3) \
+               AND (end_reason IS NULL OR end_reason NOT IN (?3, ?4)) \
              ORDER BY meeting_end DESC \
              LIMIT 1",
         )
         .bind(app)
         .bind(&cutoff)
         .bind(MEETING_END_REASON_EXPLICIT_STOP)
+        .bind(MEETING_END_REASON_ROOM_CHANGED)
         .fetch_optional(&self.pool)
         .await?;
         Ok(meeting)

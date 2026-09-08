@@ -9,10 +9,149 @@ use serde_json::{json, Value};
 use specta::Type;
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use tauri::AppHandle;
 use tauri_plugin_store::StoreBuilder;
 use tracing::{error, warn};
+
+#[cfg(windows)]
+const WINDOWS_STORE_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
+#[cfg(windows)]
+const WINDOWS_STORE_RETRY_ATTEMPTS: usize = 101;
+
+/// Windows scanners and sync providers can briefly open the canonical store
+/// without write/delete sharing. Retry only the Win32 errors produced by that
+/// conflict. Real-time antivirus can retain that handle for several seconds
+/// while scanning a changed store, so keep retrying for up to ten seconds.
+/// Persistent ACL/CFA denial uses the same ACCESS_DENIED code and still fails
+/// closed at that bound.
+#[cfg(windows)]
+fn is_retryable_windows_store_error(error: &(dyn std::error::Error + 'static)) -> bool {
+    let mut source = Some(error);
+    while let Some(current) = source {
+        if let Some(tauri_plugin_store::Error::Io(io_error)) =
+            current.downcast_ref::<tauri_plugin_store::Error>()
+        {
+            return matches!(io_error.raw_os_error(), Some(5 | 32 | 33));
+        }
+        if let Some(io_error) = current.downcast_ref::<std::io::Error>() {
+            return matches!(io_error.raw_os_error(), Some(5 | 32 | 33));
+        }
+        source = current.source();
+    }
+    false
+}
+
+fn retry_windows_store_io<T, E>(mut operation: impl FnMut() -> Result<T, E>) -> Result<T, E>
+where
+    E: std::error::Error + 'static,
+{
+    #[cfg(not(windows))]
+    {
+        operation()
+    }
+
+    #[cfg(windows)]
+    {
+        let first_error = match operation() {
+            Ok(value) => return Ok(value),
+            Err(error) if is_retryable_windows_store_error(&error) => error,
+            Err(error) => return Err(error),
+        };
+
+        for _ in 1..WINDOWS_STORE_RETRY_ATTEMPTS {
+            std::thread::sleep(WINDOWS_STORE_RETRY_DELAY);
+            match operation() {
+                Ok(value) => return Ok(value),
+                Err(error) if is_retryable_windows_store_error(&error) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Err(first_error)
+    }
+}
+
+fn read_store_file(path: &Path) -> std::io::Result<Vec<u8>> {
+    retry_windows_store_io(|| std::fs::read(path))
+}
+
+#[cfg(windows)]
+fn reset_windows_store_file_permissions(path: &Path) -> anyhow::Result<()> {
+    use std::os::windows::process::CommandExt;
+
+    let mut permissions = match std::fs::metadata(path) {
+        Ok(metadata) => metadata.permissions(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    if permissions.readonly() {
+        permissions.set_readonly(false);
+        std::fs::set_permissions(path, permissions)?;
+    }
+
+    // Cloud-backed and virtual filesystems may reject `icacls /reset` even
+    // though the current process can already update the file. Do not make a
+    // Windows-specific ACL utility a startup dependency for a writable store.
+    if std::fs::OpenOptions::new().write(true).open(path).is_ok() {
+        return Ok(());
+    }
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let status = std::process::Command::new("icacls.exe")
+        .arg(path)
+        .args(["/inheritance:e", "/Q"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .status()?;
+    if !status.success() {
+        return Err(anyhow::anyhow!(
+            "failed to enable inherited settings permissions for {}: icacls exited with {}",
+            path.display(),
+            status
+        ));
+    }
+
+    let status = std::process::Command::new("icacls.exe")
+        .arg(path)
+        .args(["/reset", "/Q"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .status()?;
+    if !status.success() {
+        return Err(anyhow::anyhow!(
+            "failed to reset settings permissions for {}: icacls exited with {}",
+            path.display(),
+            status
+        ));
+    }
+    std::fs::OpenOptions::new().write(true).open(path)?;
+    Ok(())
+}
+
+/// Repair only the settings files whose permissions may have been carried
+/// forward from an older installation. `icacls /reset` reapplies the
+/// directory's inherited ACL in place, so the canonical bytes never need to
+/// be replaced while the old ACL may still deny delete/replace access.
+#[cfg(windows)]
+fn normalize_windows_store_permissions(store_path: &Path) -> anyhow::Result<()> {
+    reset_windows_store_file_permissions(store_path)?;
+
+    for path in [
+        store_path.with_extension(LAST_GOOD_SUFFIX),
+        store_path.with_extension(LAST_GOOD_PREV_SUFFIX),
+    ] {
+        if let Err(error) = reset_windows_store_file_permissions(&path) {
+            // Snapshots are recovery aids. A stale sidecar ACL must not stop
+            // an otherwise readable and writable canonical settings store.
+            tracing::warn!(
+                "failed to repair settings recovery sidecar permissions at {}: {}",
+                path.display(),
+                error
+            );
+        }
+    }
+
+    Ok(())
+}
 
 /// Process-lifetime cache for the resolved API auth key.
 ///
@@ -135,7 +274,6 @@ fn store_json_has_presets(data: &[u8]) -> bool {
 /// crash can never destroy both the live file and its backup at once.
 pub(crate) fn durable_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
-    use std::sync::atomic::{AtomicU64, Ordering};
 
     // The temp name must be unique per call. It used to be a fixed
     // `<path>.durable.tmp`, which two concurrent writers to the same target
@@ -178,10 +316,7 @@ pub(crate) fn durable_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         f.write_all(bytes)?;
         f.sync_all()?; // contents + metadata to stable storage before the rename
     }
-    if let Err(e) = std::fs::rename(&tmp, path) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e);
-    }
+    replace_store_temp(&tmp, path)?;
     // fsync the directory so the rename itself survives a crash. Best-effort:
     // not all platforms allow opening a dir for sync (Windows), and rename is
     // already atomic there via MoveFileEx.
@@ -194,6 +329,61 @@ pub(crate) fn durable_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     Ok(())
 }
 
+#[cfg(not(windows))]
+fn replace_store_temp(tmp: &Path, path: &Path) -> std::io::Result<()> {
+    std::fs::rename(tmp, path)
+}
+
+#[cfg(windows)]
+fn replace_store_temp(tmp: &Path, path: &Path) -> std::io::Result<()> {
+    let deadline = std::time::Instant::now()
+        + WINDOWS_STORE_RETRY_DELAY * (WINDOWS_STORE_RETRY_ATTEMPTS as u32 - 1);
+    let mut delay = std::time::Duration::from_millis(1);
+    let mut temporary = tempfile::TempPath::try_from_path(tmp)?;
+
+    loop {
+        match temporary.persist(path) {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                if error.error.kind() != std::io::ErrorKind::PermissionDenied
+                    || std::time::Instant::now() >= deadline
+                {
+                    return Err(error.error);
+                }
+                temporary = error.path;
+                std::thread::sleep(delay);
+                delay = (delay * 2).min(std::time::Duration::from_millis(50));
+            }
+        }
+    }
+}
+
+/// Like [`durable_write`], but skip the temp/fsync/rename if `path` already
+/// holds exactly `bytes`. Identical re-encrypt IPC used to fsync a 262KB
+/// store.bin onto itself on the AppKit main thread (~100% of a core).
+///
+/// Production `reencrypt_store_at` uses more specific skip logic (ciphertext
+/// header / last-good equality) so this helper is test-facing.
+#[cfg(test)]
+pub(crate) fn durable_write_if_changed(path: &Path, bytes: &[u8]) -> std::io::Result<bool> {
+    match read_store_file(path) {
+        Ok(existing) if existing.as_slice() == bytes => return Ok(false),
+        _ => {}
+    }
+    durable_write(path, bytes)?;
+    Ok(true)
+}
+
+fn store_encryption_opted_in(store_path: &Path) -> bool {
+    std::env::var("SCREENPIPE_ENCRYPT_STORE")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+        || store_path
+            .parent()
+            .map(|p| p.join(".encrypt-store").exists())
+            .unwrap_or(false)
+}
+
 /// L1 — copy `store.bin` → `store.bin.last-good` if the current file parses
 /// and has aiPresets. Skipped silently otherwise so we never freeze a wiped
 /// state as the recovery source. Called after every successful save.
@@ -202,7 +392,7 @@ pub(crate) fn durable_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 /// a post-wipe state that re-seeded default presets (and therefore looks
 /// healthy) can't destroy the only copy of the user's real settings.
 pub fn snapshot_last_good(store_path: &Path) {
-    let data = match std::fs::read(store_path) {
+    let data = match read_store_file(store_path) {
         Ok(d) => d,
         Err(_) => return,
     };
@@ -210,8 +400,13 @@ pub fn snapshot_last_good(store_path: &Path) {
         return;
     }
     let last_good = store_path.with_extension(LAST_GOOD_SUFFIX);
-    if let Ok(existing) = std::fs::read(&last_good) {
-        if existing != data && store_json_has_presets(&existing) {
+    if let Ok(existing) = read_store_file(&last_good) {
+        if existing == data {
+            // Already snapshotted this exact document. Rewriting it used to
+            // fsync ~262KB on every settings IPC even when nothing changed.
+            return;
+        }
+        if store_json_has_presets(&existing) {
             let prev = store_path.with_extension(LAST_GOOD_PREV_SUFFIX);
             if let Err(e) = durable_write(&prev, &existing) {
                 tracing::warn!(
@@ -236,7 +431,7 @@ pub fn snapshot_last_good(store_path: &Path) {
 fn read_healthy_snapshot(store_path: &Path) -> Option<(std::path::PathBuf, Vec<u8>)> {
     for suffix in [LAST_GOOD_SUFFIX, LAST_GOOD_PREV_SUFFIX] {
         let p = store_path.with_extension(suffix);
-        if let Ok(data) = std::fs::read(&p) {
+        if let Ok(data) = read_store_file(&p) {
             if store_json_has_presets(&data) {
                 return Some((p, data));
             }
@@ -265,7 +460,7 @@ fn restore_snapshot_over(store_path: &Path, why: &str) -> bool {
     let pre_restore = store_path.with_extension(format!("bin.pre-restore-{}", ts));
     let mut pre_restore_note = String::from("no pre-restore copy (store.bin was absent)");
     if store_path.exists() {
-        if let Err(e) = std::fs::copy(store_path, &pre_restore) {
+        if let Err(e) = retry_windows_store_io(|| std::fs::copy(store_path, &pre_restore)) {
             tracing::warn!(
                 "settings recovery: failed to back up {} to {}: {} — aborting restore",
                 store_path.display(),
@@ -307,7 +502,7 @@ pub fn auto_restore_if_wiped(store_path: &Path) -> bool {
     // Only act on plain-JSON files. Encrypted files are handled by the
     // decrypt path (L2b); we don't want to restore over a blob that the
     // keychain key could still open.
-    let cur = match std::fs::read(store_path) {
+    let cur = match read_store_file(store_path) {
         Ok(d) => d,
         // Missing entirely (user/cleaner delete, chkdsk quarantining a torn
         // file to found.000 after an unclean shutdown) is the worst wipe.
@@ -327,6 +522,16 @@ pub fn auto_restore_if_wiped(store_path: &Path) -> bool {
     }
     if store_json_has_presets(&cur) {
         return false; // current state is healthy, nothing to do
+    }
+    if read_healthy_snapshot(store_path).is_none() {
+        // A valid legacy document can predate aiPresets. SettingsStore's serde
+        // defaults recover it below and init_store persists the non-empty
+        // invariant; absence of a snapshot is not itself a recovery failure.
+        tracing::warn!(
+            "settings recovery: store.bin has no aiPresets and no healthy snapshot; \
+             the settings migration will persist the default preset"
+        );
+        return false;
     }
     restore_snapshot_over(
         store_path,
@@ -352,7 +557,7 @@ enum DecryptOutcome {
 /// Decrypt store.bin in place if it's encrypted and keychain key is available.
 /// No-op if the file is already plain JSON or keychain is unavailable.
 fn decrypt_store_file(path: &Path) -> DecryptOutcome {
-    let data = match std::fs::read(path) {
+    let data = match read_store_file(path) {
         Ok(d) => d,
         Err(_) => return DecryptOutcome::PlainOrMissing,
     };
@@ -383,7 +588,7 @@ fn decrypt_store_file(path: &Path) -> DecryptOutcome {
             // user's settings instead of silently resetting them.
             let backup = path.with_extension("bin.encrypted.bak");
             let _ = std::fs::copy(path, &backup);
-            tracing::error!(
+            tracing::warn!(
                 "store.bin is encrypted but keychain access was denied — \
                  ciphertext preserved at {}. Grant keychain access and \
                  restart to use it.",
@@ -442,23 +647,15 @@ fn decrypt_store_file(path: &Path) -> DecryptOutcome {
 ///
 /// To opt in: create ~/.screenpipe/.encrypt-store or set SCREENPIPE_ENCRYPT_STORE=1.
 fn encrypt_store_file(path: &Path) {
-    // Check opt-in flag
-    let opted_in = std::env::var("SCREENPIPE_ENCRYPT_STORE")
-        .map(|v| v == "1")
-        .unwrap_or(false)
-        || path
-            .parent()
-            .map(|p| p.join(".encrypt-store").exists())
-            .unwrap_or(false);
-    if !opted_in {
+    if !store_encryption_opted_in(path) {
         return;
     }
 
-    let data = match std::fs::read(path) {
+    let data = match read_store_file(path) {
         Ok(d) => d,
         Err(_) => return,
     };
-    if data.len() >= 8 && &data[..8] == STORE_MAGIC {
+    if is_encrypted_bytes(&data) {
         return; // already encrypted
     }
     // Use read-only get_key() instead of get_or_create_key() to avoid triggering
@@ -501,71 +698,153 @@ fn encrypt_store_file(path: &Path) {
     }
 }
 
+/// Re-encrypt / durably flush store.bin after the Tauri store plugin writes
+/// plain JSON. Disk-only so tests can exercise it without an AppHandle.
+///
+/// Fast paths (the 2026-08-26 main-thread CPU spike):
+/// - already ciphertext → return without fsync
+/// - plaintext identical to last-good → skip JSON parse + snapshot fsync
+/// - encryption succeeded → ciphertext fsync is the durable store.bin;
+///   last-good holds the plaintext recovery snapshot
+/// - encryption opted in but keychain cannot encrypt → still fsync plaintext
+pub(crate) fn reencrypt_store_at(store_path: &Path) {
+    let Some(base_dir) = store_path.parent() else {
+        return;
+    };
+    let flag_path = base_dir.join(".encrypt-store");
+
+    let bytes = match read_store_file(store_path) {
+        Ok(b) if !b.is_empty() => b,
+        _ => return,
+    };
+
+    // Second IPC after saveAndEncrypt used to fsync 262KB of SPSTORE1 bytes
+    // onto themselves on the AppKit main thread. Snapshot is a no-op
+    // (ciphertext has no aiPresets). Encrypt is a no-op. Leave the opt-in
+    // flag alone — encryptStore cannot be parsed from ciphertext.
+    if is_encrypted_bytes(&bytes) {
+        return;
+    }
+
+    let last_good = store_path.with_extension(LAST_GOOD_SUFFIX);
+    let last_good_bytes = read_store_file(&last_good).ok();
+    if last_good_bytes.as_deref() == Some(bytes.as_slice()) {
+        // Identical to the durable snapshot. The encryptStore flag was synced
+        // on the save that produced last-good; skip JSON parse + snapshot.
+        // If encryption is on, the plugin just replaced ciphertext with this
+        // same plaintext and we still need to wrap it. Do not fsync plaintext
+        // here: last-good already holds the durable recovery copy.
+        if store_encryption_opted_in(store_path) {
+            encrypt_store_file(store_path);
+        }
+        return;
+    }
+
+    let encrypt_enabled = serde_json::from_slice::<Value>(&bytes)
+        .ok()
+        .and_then(|json| {
+            json.get("settings")
+                .and_then(|s| s.get("encryptStore"))
+                .and_then(|v| v.as_bool())
+        });
+
+    if let Some(encrypt_enabled) = encrypt_enabled {
+        if encrypt_enabled && !flag_path.exists() {
+            let _ = std::fs::write(&flag_path, b"");
+        } else if !encrypt_enabled && flag_path.exists() {
+            let _ = std::fs::remove_file(&flag_path);
+        }
+    }
+
+    // Snapshot plaintext first so last-good exists before we rewrite store.bin.
+    // Then encrypt (durable ciphertext). The plugin save is a non-atomic
+    // unflushed write — if encryption did not replace store.bin, fsync the
+    // plaintext. Skipping that flush when `.encrypt-store` is set but
+    // keychain cannot encrypt was a settings-loss window on power loss.
+    snapshot_last_good(store_path);
+    encrypt_store_file(store_path);
+    durable_flush_if_still_plaintext(store_path, &bytes);
+}
+
+/// Plugin `save()` is `fs::write` with no fsync. After a real change, either
+/// ciphertext (encrypt path) or this plaintext flush is the durable store.bin.
+fn durable_flush_if_still_plaintext(store_path: &Path, plaintext: &[u8]) {
+    match read_store_file(store_path) {
+        Ok(now) if is_encrypted_bytes(&now) => {}
+        Ok(now) => {
+            if let Err(e) = durable_write(store_path, &now) {
+                tracing::warn!("durable flush of store.bin failed: {}", e);
+            }
+        }
+        Err(_) => {
+            if let Err(e) = durable_write(store_path, plaintext) {
+                tracing::warn!("durable flush of store.bin failed: {}", e);
+            }
+        }
+    }
+}
+
 /// Re-encrypt store.bin on disk. Called after the Tauri store plugin writes plain JSON.
 /// Also syncs the .encrypt-store flag file from the encryptStore setting.
 pub fn reencrypt_store_file(app: &AppHandle) {
     if let Ok(base_dir) = get_base_dir(app, None) {
-        // Sync the flag file from the store's encryptStore setting
-        let flag_path = base_dir.join(".encrypt-store");
-        let store_path = base_dir.join("store.bin");
-
-        // Read the setting from the store JSON on disk. If the file is missing,
-        // encrypted, or temporarily unparsable, leave the flag unchanged; defaulting
-        // to "on" here silently opts users into repeated re-encryption churn.
-        let encrypt_enabled = std::fs::read(&store_path)
-            .ok()
-            .and_then(|data| serde_json::from_slice::<serde_json::Value>(&data).ok())
-            .and_then(|json| {
-                json.get("settings")
-                    .and_then(|s| s.get("encryptStore"))
-                    .and_then(|v| v.as_bool())
-            });
-
-        if let Some(encrypt_enabled) = encrypt_enabled {
-            if encrypt_enabled && !flag_path.exists() {
-                let _ = std::fs::write(&flag_path, b"");
-            } else if !encrypt_enabled && flag_path.exists() {
-                let _ = std::fs::remove_file(&flag_path);
-            }
-        }
-
-        // Durably flush the plugin's non-atomic write of store.bin before we
-        // snapshot or encrypt it. tauri-plugin-store saves via fs::write
-        // (O_TRUNC, no fsync), leaving a window where a power loss truncates
-        // the file to zero/partial; rewriting it atomically + fsync closes that
-        // window so the on-disk store is always a complete document. Guarded on
-        // non-empty so a transient empty read never clobbers a good file.
-        if let Ok(bytes) = std::fs::read(&store_path) {
-            if !bytes.is_empty() {
-                if let Err(e) = durable_write(&store_path, &bytes) {
-                    tracing::warn!("durable flush of store.bin failed: {}", e);
-                }
-            }
-        }
-
-        // L1 — snapshot the current state to .last-good IFF it's healthy
-        // (parses + has aiPresets). Runs BEFORE encryption so the snapshot
-        // is plain JSON and recoverable even if keychain access is lost on
-        // the next update. No-op for degraded states so we never freeze
-        // bad data as the recovery source.
-        snapshot_last_good(&store_path);
-
-        encrypt_store_file(&store_path);
+        reencrypt_store_at(&base_dir.join("store.bin"));
     }
 }
 
 /// Tauri command: re-encrypt store.bin after frontend saves.
+///
+/// Runs on a blocking worker. The previous sync command ran `fsync` of a
+/// ~262KB store on the AppKit main thread and stalled every other IPC
+/// (sampled 2026-08-26: 186% screenpipe-app + 93% Web Content).
 #[tauri::command]
 #[specta::specta]
-pub fn reencrypt_store(app: AppHandle) -> Result<(), String> {
-    reencrypt_store_file(&app);
+pub async fn reencrypt_store(app: AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        reencrypt_store_file(&app);
+    })
+    .await
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 
 fn save_store_to_disk<R: tauri::Runtime>(
     store: &tauri_plugin_store::Store<R>,
 ) -> Result<(), String> {
-    store.save().map_err(|e| e.to_string())
+    retry_windows_store_io(|| store.save()).map_err(|e| e.to_string())
+}
+
+fn save_store_with_permission_repair(
+    app: &AppHandle,
+    store: &tauri_plugin_store::Store<tauri::Wry>,
+) -> Result<(), String> {
+    match save_store_to_disk(store) {
+        Ok(()) => Ok(()),
+        Err(first_error) => {
+            #[cfg(not(windows))]
+            {
+                let _ = app;
+                return Err(first_error);
+            }
+
+            #[cfg(windows)]
+            {
+                let store_path = get_base_dir(app, None)
+                    .map_err(|error| error.to_string())?
+                    .join("store.bin");
+                tracing::warn!(
+                    "settings save failed; repairing Windows store permissions and retrying: {}",
+                    first_error
+                );
+                normalize_windows_store_permissions(&store_path).map_err(|repair_error| {
+                    format!(
+                        "settings save failed ({first_error}); permission repair also failed: {repair_error}"
+                    )
+                })?;
+                save_store_to_disk(store)
+            }
+        }
+    }
 }
 
 /// Flush the process-shared store to durable, encrypted storage before a
@@ -601,6 +880,28 @@ fn build_store_at<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     store_path: std::path::PathBuf,
 ) -> anyhow::Result<Arc<tauri_plugin_store::Store<R>>> {
+    #[cfg(windows)]
+    normalize_windows_store_permissions(&store_path).map_err(|error| {
+        anyhow::anyhow!(
+            "failed to repair settings store permissions at {}: {}",
+            store_path.display(),
+            error
+        )
+    })?;
+
+    // A Windows sharing lock can make the plugin's load look like a successful
+    // empty store because tauri-plugin-store swallows read errors. Do not let a
+    // persistently unreadable canonical file reach that wipe-primed state.
+    if store_path.exists() {
+        read_store_file(&store_path).map_err(|error| {
+            anyhow::anyhow!(
+                "settings store is not readable at {}: {}",
+                store_path.display(),
+                error
+            )
+        })?;
+    }
+
     // Decrypt store.bin before the plugin reads it (no-op if plain JSON or keychain unavailable)
     if store_path.exists() && decrypt_store_file(&store_path) == DecryptOutcome::Locked {
         // L2b — the encrypted blob is unreadable (key denied/missing or
@@ -636,7 +937,7 @@ fn build_store_at<R: tauri::Runtime>(
     // L5 precondition — note whether the disk file holds a parseable
     // `settings` key right before the plugin reads it. Compared against the
     // loaded store after build to detect silently-swallowed load failures.
-    let disk_has_settings = std::fs::read(&store_path)
+    let disk_has_settings = read_store_file(&store_path)
         .ok()
         .and_then(|d| serde_json::from_slice::<Value>(&d).ok())
         .map(|v| v.get("settings").is_some())
@@ -845,6 +1146,28 @@ pub struct OnboardingStore {
     /// Used to resume after app restart (e.g., after granting permissions)
     #[serde(rename = "currentStep", default)]
     pub current_step: Option<String>,
+    #[serde(
+        rename = "firstRunSummaryPhase",
+        default = "default_first_run_summary_phase"
+    )]
+    pub first_run_summary_phase: String,
+    #[serde(rename = "firstRunSummaryStartedAt", default)]
+    pub first_run_summary_started_at: Option<String>,
+    #[serde(rename = "firstRunSummaryChatId", default)]
+    pub first_run_summary_chat_id: Option<String>,
+    #[serde(rename = "firstRunSummaryNotificationSentAt", default)]
+    pub first_run_summary_notification_sent_at: Option<String>,
+    #[serde(rename = "firstRunSummaryNotificationId", default)]
+    pub first_run_summary_notification_id: Option<String>,
+    #[serde(rename = "firstRunSummaryError", default)]
+    pub first_run_summary_error: Option<String>,
+    #[serde(rename = "firstRunSummaryTelemetryVersion", default)]
+    pub first_run_summary_telemetry_version: u8,
+    /// Written only when this app version creates the install's first
+    /// onboarding record. Existing records deserialize to false, and reset
+    /// clears it, so onboarding replay can never enter the experiment.
+    #[serde(rename = "trialActivationFreshInstall", default)]
+    pub trial_activation_fresh_install: bool,
 }
 
 impl Default for OnboardingStore {
@@ -853,19 +1176,81 @@ impl Default for OnboardingStore {
             is_completed: false,
             completed_at: None,
             current_step: None,
+            first_run_summary_phase: "idle".to_string(),
+            first_run_summary_started_at: None,
+            first_run_summary_chat_id: None,
+            first_run_summary_notification_sent_at: None,
+            first_run_summary_notification_id: None,
+            first_run_summary_error: None,
+            first_run_summary_telemetry_version: 0,
+            trial_activation_fresh_install: false,
         }
     }
 }
 
+fn default_first_run_summary_phase() -> String {
+    "idle".to_string()
+}
+
+pub const TRIAL_ACTIVATION_SUMMARY_STEP: &str = "trial-activation-v1-summary";
+pub const TRIAL_ACTIVATION_PAYWALL_STEP: &str = "trial-activation-v1-paywall";
+pub const TRIAL_ACTIVATION_UNLOCKED_STEP: &str = "trial-activation-v1-unlocked";
+// Set false in a later release to migrate every persisted treatment install
+// out of the gate, including offline users who cannot receive the PostHog
+// force-unlock flag.
+pub const TRIAL_ACTIVATION_ROLLOUT_ENABLED: bool = true;
+
+pub fn trial_activation_dev_force_enabled() -> bool {
+    cfg!(debug_assertions) && option_env!("SCREENPIPE_TRIAL_ACTIVATION_DEV") == Some("1")
+}
+
 impl OnboardingStore {
+    fn new_install() -> Self {
+        Self {
+            trial_activation_fresh_install: true,
+            ..Self::default()
+        }
+    }
+
+    /// The summary-first trial treatment keeps product surfaces behind the
+    /// first valid summary and the card-backed trial. Settings and connection
+    /// setup are explicitly exempted by the window/router callers.
+    pub fn blocks_trial_activation_app(&self) -> bool {
+        self.trial_activation_fresh_install
+            && self.is_completed
+            && matches!(
+                self.current_step.as_deref(),
+                Some(TRIAL_ACTIVATION_SUMMARY_STEP | TRIAL_ACTIVATION_PAYWALL_STEP)
+            )
+    }
+
+    /// Capture is required while the first result is being built. It stops
+    /// only after that result has actually rendered and the durable paywall
+    /// sentinel is written.
+    pub fn blocks_trial_activation_recording(&self) -> bool {
+        self.trial_activation_fresh_install
+            && self.is_completed
+            && self.current_step.as_deref() == Some(TRIAL_ACTIVATION_PAYWALL_STEP)
+    }
+
+    fn apply_trial_activation_rollout(&mut self, enabled: bool) -> bool {
+        if enabled
+            || (!self.blocks_trial_activation_app()
+                && !self.blocks_trial_activation_recording())
+        {
+            return false;
+        }
+        self.current_step = Some(TRIAL_ACTIVATION_UNLOCKED_STEP.to_string());
+        true
+    }
+
     pub fn get(app: &AppHandle) -> Result<Option<Self>, String> {
         let store = get_store(app, None).map_err(|e| e.to_string())?;
 
-        match store.is_empty() {
-            true => Ok(None),
-            false => {
-                let onboarding =
-                    serde_json::from_value(store.get("onboarding").unwrap_or(Value::Null));
+        match store.get("onboarding") {
+            None => Ok(None),
+            Some(value) => {
+                let onboarding = serde_json::from_value(value);
                 match onboarding {
                     Ok(onboarding) => Ok(onboarding),
                     Err(e) => {
@@ -888,7 +1273,7 @@ impl OnboardingStore {
         let mut onboarding = Self::get(app)?.unwrap_or_default();
         update(&mut onboarding);
         store.set("onboarding", json!(onboarding));
-        store.save().map_err(|e| e.to_string())?;
+        save_store_with_permission_repair(app, store.as_ref())?;
         reencrypt_store_file(app);
         Ok(())
     }
@@ -899,7 +1284,7 @@ impl OnboardingStore {
         };
 
         store.set("onboarding", json!(self));
-        store.save().map_err(|e| e.to_string())?;
+        save_store_with_permission_repair(app, store.as_ref())?;
         reencrypt_store_file(app);
         Ok(())
     }
@@ -913,7 +1298,51 @@ impl OnboardingStore {
         self.is_completed = false;
         self.completed_at = None;
         self.current_step = None;
+        self.trial_activation_fresh_install = false;
+        self.first_run_summary_phase = "idle".to_string();
+        self.first_run_summary_started_at = None;
+        self.first_run_summary_chat_id = None;
+        self.first_run_summary_notification_sent_at = None;
+        self.first_run_summary_notification_id = None;
+        self.first_run_summary_error = None;
+        self.first_run_summary_telemetry_version = 0;
     }
+}
+
+const TRIAL_ACTIVATION_INSTALL_MARKER: &str = "trialActivationFreshInstallV1";
+
+fn initialize_trial_activation_install_marker(
+    settings: &mut SettingsStore,
+    is_new_store: bool,
+    can_run_migrations: bool,
+) -> bool {
+    if !can_run_migrations || settings.extra.contains_key(TRIAL_ACTIVATION_INSTALL_MARKER) {
+        return false;
+    }
+    settings.extra.insert(
+        TRIAL_ACTIVATION_INSTALL_MARKER.to_string(),
+        Value::Bool(is_new_store),
+    );
+    true
+}
+
+fn take_trial_activation_fresh_install_marker(app: &AppHandle) -> bool {
+    let Some(mut settings) = SettingsStore::get(app).ok().flatten() else {
+        return false;
+    };
+    if settings
+        .extra
+        .get(TRIAL_ACTIVATION_INSTALL_MARKER)
+        .and_then(Value::as_bool)
+        != Some(true)
+    {
+        return false;
+    }
+    settings.extra.insert(
+        TRIAL_ACTIVATION_INSTALL_MARKER.to_string(),
+        Value::Bool(false),
+    );
+    settings.save(app).is_ok()
 }
 
 fn deserialize_null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
@@ -1008,6 +1437,10 @@ pub struct SettingsStore {
     /// When disabled, users must click "update now" in the tray menu.
     #[serde(rename = "autoUpdate", default = "default_true")]
     pub auto_update: bool,
+    /// Consumer updater channel selected on this device. Older stores omit it
+    /// and therefore remain on the stable channel.
+    #[serde(rename = "updateChannel", default = "default_update_channel")]
+    pub update_channel: String,
     /// Auto-update store-installed pipes that haven't been locally modified.
     #[serde(rename = "autoUpdatePipes", default = "default_true")]
     pub auto_update_pipes: bool,
@@ -1103,6 +1536,10 @@ fn default_true() -> bool {
     true
 }
 
+fn default_update_channel() -> String {
+    "stable".to_string()
+}
+
 fn default_overlay_size() -> String {
     "small".to_string()
 }
@@ -1166,6 +1603,13 @@ pub struct AcpAgentPresetConfig {
     /// Default session mode id, applied after every session/new.
     #[serde(default)]
     pub mode_id: Option<String>,
+    /// Screenpipe-owned ACP permission response policy (`ask` or `allow-all`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_mode: Option<String>,
+    /// Send this agent's model calls through Screenpipe Cloud. `None` keeps
+    /// presets saved before this choice on the agent's own provider account.
+    #[serde(default)]
+    pub use_screenpipe_cloud: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Type, Clone)]
@@ -1316,7 +1760,11 @@ fn entitlement_is_lifetime(entitlement: &serde_json::Value) -> bool {
 fn is_verified_paid_plan_id(plan: &str) -> bool {
     matches!(
         plan.trim().to_ascii_lowercase().as_str(),
-        "standard"
+        "basic"
+            | "standard"
+            | "business"
+            | "business_max"
+            | "business_ultra"
             | "pro"
             | "pro_max"
             | "pro_ultra"
@@ -1492,7 +1940,6 @@ Rules:
                     "smartRecording": null,
                     "filterMusic": null,
                     "prioritizeInputLatency": null,
-                    "sidebarCustomization": null,
                     "aecMode": null,
                 }),
             ),
@@ -1510,7 +1957,7 @@ Rules:
                             "forceDisabled": false,
                         },
                         "smartRecording": {
-                            "defaultEnabled": false,
+                            "defaultEnabled": screenpipe_config::default_experimental_meeting_piggyback(),
                             "forceDisabled": false,
                         },
                         "filterMusic": {
@@ -1518,13 +1965,6 @@ Rules:
                             "forceDisabled": false,
                         },
                         "prioritizeInputLatency": {
-                            "defaultEnabled": false,
-                            "forceDisabled": false,
-                        },
-                        // UI-only rollout gate: no engine setting to clamp, so
-                        // its force-off is applied by the frontend registry
-                        // rather than the recording-settings pass below.
-                        "sidebarCustomization": {
                             "defaultEnabled": false,
                             "forceDisabled": false,
                         },
@@ -1606,6 +2046,7 @@ Rules:
             allow_hiding_shortcut_overlay: false,
             device_id: uuid::Uuid::new_v4().to_string(),
             auto_update: true,
+            update_channel: default_update_channel(),
             auto_update_pipes: true,
             enhanced_ai: false,
             remote_log_collection_enabled: false,
@@ -1771,7 +2212,7 @@ impl SettingsStore {
                 // Persist sanitized fields back to store so the migration only warns once
                 if sanitized != raw {
                     store.set("settings", sanitized.clone());
-                    let _ = store.save();
+                    let _ = save_store_to_disk(store.as_ref());
                     reencrypt_store_file(app);
                 }
                 let settings = serde_json::from_value(sanitized);
@@ -1799,8 +2240,17 @@ impl SettingsStore {
             .or_else(|| cached_token.filter(|token| !token.is_empty()))
     }
 
+    pub(crate) fn has_cloud_authentication(&self) -> bool {
+        self.resolved_cloud_auth_token(crate::auth_token::cached_cloud_token())
+            .is_some()
+    }
+
     pub fn to_recording_settings(&self) -> screenpipe_config::RecordingSettings {
         let mut settings = self.recording.clone();
+        // Automatic meeting capture also applies before the frontend mounts,
+        // including old stores with the former opt-in saved as false.
+        settings.experimental_meeting_piggyback =
+            screenpipe_config::default_experimental_meeting_piggyback();
         // Override user_id with the Clerk JWT token from the auth user object.
         // This token is used as the Bearer credential for screenpipe cloud
         // (transcription proxy, Pi agent, etc.), not as a database ID.
@@ -2011,8 +2461,13 @@ impl SettingsStore {
         }
     }
 
-    pub(crate) fn restricts_paid_local_features(&self) -> bool {
+    /// True for verified Free or missing/conflicting/unverified plan truth.
+    pub(crate) fn is_free_or_unattributed_user(&self) -> bool {
         self.local_plan_policy() != LocalPlanPolicy::VerifiedPaid
+    }
+
+    pub(crate) fn restricts_paid_local_features(&self) -> bool {
+        self.is_free_or_unattributed_user()
     }
 
     pub(crate) fn has_account_identity(&self) -> bool {
@@ -2115,7 +2570,26 @@ impl SettingsStore {
         };
 
         store.set("settings", json!(self));
-        store.save().map_err(|e| e.to_string())?;
+        save_store_with_permission_repair(app, store.as_ref())?;
+        reencrypt_store_file(app);
+        Ok(())
+    }
+
+    /// Update only identity, preserving the latest settings and rejecting a
+    /// concurrent identity change. The server association and cursor must already
+    /// be durable before the enterprise uploader calls this.
+    pub fn migrate_device_id(app: &AppHandle, legacy: &str, stable: &str) -> Result<(), String> {
+        let store = get_store(app, None).map_err(|e| e.to_string())?;
+        let mut settings = store.get("settings").ok_or("settings unavailable")?;
+        let current = settings["deviceId"]
+            .as_str()
+            .ok_or("device identity unavailable")?;
+        if current != legacy && current != stable {
+            return Err("device identity changed during migration".into());
+        }
+        settings["deviceId"] = json!(stable);
+        store.set("settings", settings);
+        save_store_to_disk(store.as_ref())?;
         reencrypt_store_file(app);
         Ok(())
     }
@@ -2167,6 +2641,14 @@ fn migrate_windows_timeline_to_window_mode(settings: &mut SettingsStore) -> bool
     true
 }
 
+fn backfill_default_ai_preset(settings: &mut SettingsStore) -> bool {
+    if !settings.ai_presets.is_empty() {
+        return false;
+    }
+    settings.ai_presets = SettingsStore::default().ai_presets;
+    true
+}
+
 pub fn init_store(app: &AppHandle) -> Result<SettingsStore, String> {
     println!("Initializing settings store");
 
@@ -2182,16 +2664,35 @@ pub fn init_store(app: &AppHandle) -> Result<SettingsStore, String> {
         .as_ref()
         .map(|obj| !obj.contains_key("restartNotificationsDefaultedOff"))
         .unwrap_or(false);
+    let should_persist_ai_preset_backfill = raw_obj.as_ref().is_some_and(|obj| {
+        obj.get("aiPresets")
+            .and_then(Value::as_array)
+            .is_none_or(Vec::is_empty)
+    });
 
     let is_new_store;
     let (mut store, mut should_save, can_run_settings_migrations) = match SettingsStore::get(app) {
-        Ok(Some(store)) => {
+        Ok(Some(mut store)) => {
             is_new_store = false;
-            (store, should_persist_restart_notification_migration, true)
+            if should_persist_ai_preset_backfill {
+                // At least one preset is a UI and persistence invariant. Keep
+                // every other setting from the valid document and repair only
+                // the missing/null/empty list.
+                backfill_default_ai_preset(&mut store);
+                tracing::warn!("settings migration: restored the default AI preset");
+            }
+            (
+                store,
+                should_persist_restart_notification_migration
+                    || should_persist_ai_preset_backfill,
+                true,
+            )
         }
         Ok(None) => {
             is_new_store = true;
-            (SettingsStore::default(), true, true) // New store, save defaults
+            let mut settings = SettingsStore::default();
+            settings.device_id = crate::enterprise::host_identity::new_install_device_id()?;
+            (settings, true, true)
         }
         Err(e) => {
             is_new_store = false;
@@ -2249,6 +2750,18 @@ pub fn init_store(app: &AppHandle) -> Result<SettingsStore, String> {
             }
         }
     };
+
+    // Installation provenance is decided exactly once, where we still know
+    // whether this app created the settings store. Existing stores migrate to
+    // false; new stores receive a one-shot marker consumed by onboarding.
+    // Account plan, database timing, and onboarding replay cannot create it.
+    if initialize_trial_activation_install_marker(
+        &mut store,
+        is_new_store,
+        can_run_settings_migrations,
+    ) {
+        should_save = true;
+    }
 
     // Tier detection. Two cases:
     // - New install: detect tier AND apply tier defaults (video_quality, power_mode, etc.)
@@ -2370,14 +2883,28 @@ pub fn init_onboarding_store(app: &AppHandle) -> Result<OnboardingStore, String>
     println!("Initializing onboarding store");
 
     let (onboarding, should_save) = match OnboardingStore::get(app) {
-        Ok(Some(onboarding)) => (onboarding, false),
-        Ok(None) => (OnboardingStore::default(), true),
+        Ok(Some(mut onboarding)) => {
+            let should_save =
+                onboarding.apply_trial_activation_rollout(TRIAL_ACTIVATION_ROLLOUT_ENABLED);
+            (onboarding, should_save)
+        }
+        Ok(None) => {
+            let onboarding = if take_trial_activation_fresh_install_marker(app) {
+                OnboardingStore::new_install()
+            } else {
+                tracing::info!(
+                    "missing onboarding record with existing app data — trial activation disabled"
+                );
+                OnboardingStore::default()
+            };
+            (onboarding, true)
+        }
         Err(e) => {
             // Defaults mean "onboarding not completed", so an unreadable store
-            // silently replays setup for someone who already finished it — and
-            // setup now ends at a mandatory card ask. Still not saved, so the
-            // original file survives for recovery, but this is a user-visible
-            // reset rather than a routine miss and must be reported as one.
+            // silently replays setup for someone who already finished it. The
+            // fail-closed fresh-install marker prevents that recovery path from
+            // entering trial activation. The original file still survives for
+            // recovery, but this is a user-visible reset and must be reported.
             tracing::error!(
                 "failed to deserialize onboarding store, falling back to defaults \
                  (file preserved) — setup will replay for this install: {}",
@@ -2429,7 +2956,7 @@ impl CloudSyncSettingsStore {
     pub fn save(&self, app: &AppHandle) -> Result<(), String> {
         let store = get_store(app, None).map_err(|e| e.to_string())?;
         store.set("cloud_sync", json!(self));
-        store.save().map_err(|e| e.to_string())?;
+        save_store_to_disk(store.as_ref())?;
         reencrypt_store_file(app);
         Ok(())
     }
@@ -2464,7 +2991,7 @@ impl CloudArchiveSettingsStore {
     pub fn save(&self, app: &AppHandle) -> Result<(), String> {
         let store = get_store(app, None).map_err(|e| e.to_string())?;
         store.set("cloud_archive", json!(self));
-        store.save().map_err(|e| e.to_string())?;
+        save_store_to_disk(store.as_ref())?;
         reencrypt_store_file(app);
         Ok(())
     }
@@ -2500,7 +3027,7 @@ impl IcsCalendarSettingsStore {
     pub fn save(&self, app: &AppHandle) -> Result<(), String> {
         let store = get_store(app, None).map_err(|e| e.to_string())?;
         store.set("ics_calendars", json!(self));
-        store.save().map_err(|e| e.to_string())?;
+        save_store_to_disk(store.as_ref())?;
         reencrypt_store_file(app);
         Ok(())
     }
@@ -2636,8 +3163,119 @@ mod tests {
     const FALLBACK_ENGINE: &str = "whisper-large-v3-turbo-quantized";
 
     #[test]
+    fn trial_activation_blocks_product_but_not_capture_until_paywall() {
+        let mut onboarding = OnboardingStore::new_install();
+        onboarding.complete();
+
+        // Existing installs may retain any historical onboarding step. Only
+        // the versioned treatment sentinels can enroll them into this gate.
+        for legacy_step in ["engine", "timeline", "acquisition", "summary", "paywall"] {
+            onboarding.current_step = Some(legacy_step.to_string());
+            assert!(!onboarding.blocks_trial_activation_app());
+            assert!(!onboarding.blocks_trial_activation_recording());
+        }
+
+        onboarding.current_step = Some(TRIAL_ACTIVATION_SUMMARY_STEP.to_string());
+
+        assert!(onboarding.blocks_trial_activation_app());
+        assert!(!onboarding.blocks_trial_activation_recording());
+
+        onboarding.current_step = Some(TRIAL_ACTIVATION_PAYWALL_STEP.to_string());
+        assert!(onboarding.blocks_trial_activation_app());
+        assert!(onboarding.blocks_trial_activation_recording());
+
+        onboarding.current_step = Some(TRIAL_ACTIVATION_UNLOCKED_STEP.to_string());
+        assert!(!onboarding.blocks_trial_activation_app());
+        assert!(!onboarding.blocks_trial_activation_recording());
+    }
+
+    #[test]
+    fn upgraded_and_reset_installs_never_become_trial_activation_eligible() {
+        let mut upgraded: OnboardingStore = serde_json::from_value(json!({
+            "isCompleted": true,
+            "completedAt": "2026-08-01T00:00:00Z",
+            "currentStep": TRIAL_ACTIVATION_PAYWALL_STEP
+        }))
+        .unwrap();
+
+        assert!(!upgraded.trial_activation_fresh_install);
+        assert!(!upgraded.blocks_trial_activation_app());
+        assert!(!upgraded.blocks_trial_activation_recording());
+
+        upgraded.reset();
+        assert!(!upgraded.trial_activation_fresh_install);
+
+        let mut fresh = OnboardingStore::new_install();
+        fresh.reset();
+        assert!(!fresh.trial_activation_fresh_install);
+    }
+
+    #[test]
+    fn trial_activation_install_marker_is_true_only_for_a_new_settings_store() {
+        let mut fresh = SettingsStore::default();
+        assert!(initialize_trial_activation_install_marker(
+            &mut fresh, true, true
+        ));
+        assert_eq!(
+            fresh
+                .extra
+                .get(TRIAL_ACTIVATION_INSTALL_MARKER)
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+
+        let mut upgraded = SettingsStore::default();
+        assert!(initialize_trial_activation_install_marker(
+            &mut upgraded,
+            false,
+            true
+        ));
+        assert_eq!(
+            upgraded
+                .extra
+                .get(TRIAL_ACTIVATION_INSTALL_MARKER)
+                .and_then(Value::as_bool),
+            Some(false)
+        );
+        assert!(!initialize_trial_activation_install_marker(
+            &mut upgraded,
+            true,
+            true
+        ));
+    }
+
+    #[test]
+    fn disabling_trial_activation_rollout_durably_unlocks_enrolled_installs() {
+        for step in [TRIAL_ACTIVATION_SUMMARY_STEP, TRIAL_ACTIVATION_PAYWALL_STEP] {
+            let mut onboarding = OnboardingStore::new_install();
+            onboarding.complete();
+            onboarding.current_step = Some(step.to_string());
+
+            assert!(onboarding.apply_trial_activation_rollout(false));
+            assert_eq!(
+                onboarding.current_step.as_deref(),
+                Some(TRIAL_ACTIVATION_UNLOCKED_STEP)
+            );
+            assert!(!onboarding.blocks_trial_activation_app());
+            assert!(!onboarding.blocks_trial_activation_recording());
+            assert!(!onboarding.apply_trial_activation_rollout(false));
+        }
+    }
+
+    #[test]
     fn auto_update_defaults_to_enabled() {
         assert!(SettingsStore::default().auto_update);
+    }
+
+    #[test]
+    fn update_channel_defaults_to_stable_for_old_stores() {
+        assert_eq!(SettingsStore::default().update_channel, "stable");
+
+        let missing: SettingsStore = serde_json::from_value(json!({
+            "aiPresets": []
+        }))
+        .unwrap();
+        assert_eq!(missing.update_channel, "stable");
     }
 
     #[test]
@@ -2964,6 +3602,41 @@ mod tests {
         );
     }
 
+    /// Regression for DM/KE/KF: the auth-token migration intentionally scrubs
+    /// a JWT-shaped legacy `settings.userId` to JSON null. That compatibility
+    /// value must not make the entire persisted settings object unreadable and
+    /// turn an otherwise verified account into the recording gate's Unknown
+    /// state.
+    #[test]
+    fn scrubbed_legacy_user_id_keeps_verified_recording_access() {
+        let mut persisted = SettingsStore::default();
+        persisted.user.id = Some("user_free".to_string());
+        persisted.user.subscription_plan = Some("none".to_string());
+        persisted.user.entitlement = Some(json!({
+            "active": true,
+            "plan": "none",
+            "source": "free",
+            "checked_at": chrono::Utc::now().to_rfc3339(),
+            "features": { "app": true, "cloud": false }
+        }));
+        persisted.recording.audio_transcription_engine = "parakeet".to_string();
+
+        let mut settings_json = serde_json::to_value(&persisted).unwrap();
+        settings_json["userId"] = Value::Null;
+
+        let recovered: SettingsStore = serde_json::from_value(settings_json.clone())
+            .expect("a store with only the proven legacy userId null must deserialize");
+        assert_eq!(recovered.recording.user_id, "");
+        assert_eq!(recovered.recording.audio_transcription_engine, "parakeet");
+        assert_eq!(recovered.local_plan_policy(), LocalPlanPolicy::VerifiedFree);
+
+        settings_json["userId"] = json!({ "unexpected": true });
+        assert!(
+            serde_json::from_value::<SettingsStore>(settings_json).is_err(),
+            "malformed non-null userId must remain an error"
+        );
+    }
+
     /// Regression for the Windows 2.6.20+ onboarding outage: a torn `store.bin`
     /// must be recovered, not converted into a permanent recording lockout.
     ///
@@ -3071,6 +3744,7 @@ mod tests {
         }));
 
         assert_eq!(store.local_plan_policy(), LocalPlanPolicy::VerifiedFree);
+        assert!(store.is_free_or_unattributed_user());
         let config = store.to_recording_config(std::path::PathBuf::from("/tmp/screenpipe"));
         assert_eq!(config.max_non_template_pipes, Some(2));
     }
@@ -3098,6 +3772,7 @@ mod tests {
             "features": { "app": true }
         }));
         assert_eq!(lifetime.local_plan_policy(), LocalPlanPolicy::VerifiedPaid);
+        assert!(!lifetime.is_free_or_unattributed_user());
         let config = lifetime.to_recording_config(std::path::PathBuf::from("/tmp/screenpipe"));
         assert_eq!(config.max_non_template_pipes, None);
     }
@@ -3117,6 +3792,7 @@ mod tests {
         }));
 
         assert_eq!(store.local_plan_policy(), LocalPlanPolicy::Unknown);
+        assert!(store.is_free_or_unattributed_user());
         assert!(store.restricts_paid_local_features());
         let config = store.to_recording_config(std::path::PathBuf::from("/tmp/screenpipe"));
         assert_eq!(config.max_non_template_pipes, Some(2));
@@ -3146,6 +3822,33 @@ mod tests {
         }));
 
         assert_eq!(store.local_plan_policy(), LocalPlanPolicy::Unknown);
+    }
+
+    #[test]
+    fn recognized_paid_plan_names_are_unrestricted() {
+        for plan in [
+            "basic",
+            "standard",
+            "business",
+            "pro",
+            "team",
+            "enterprise",
+            "lifetime",
+        ] {
+            let mut store = SettingsStore::default();
+            store.user.id = Some("known_paid_user".to_string());
+            store.user.subscription_plan = Some(plan.to_string());
+            store.user.app_entitled = Some(true);
+            store.user.entitlement = Some(json!({
+                "active": true,
+                "plan": plan,
+                "source": if plan == "lifetime" { "lifetime" } else { "subscription" },
+                "checked_at": chrono::Utc::now().to_rfc3339(),
+                "features": { "app": true }
+            }));
+
+            assert!(!store.is_free_or_unattributed_user(), "plan={plan}");
+        }
     }
 
     #[test]
@@ -3357,6 +4060,23 @@ mod tests {
         assert!(!store_json_has_presets(&invalid_json));
     }
 
+    #[test]
+    fn valid_settings_without_presets_restore_one_default_and_preserve_other_fields() {
+        let raw = json!({
+            "autoUpdate": false,
+            "aiPresets": [],
+        });
+        let mut settings: SettingsStore = serde_json::from_value(raw).unwrap();
+
+        assert!(settings.ai_presets.is_empty());
+        let preserved_auto_update = settings.auto_update;
+        assert!(backfill_default_ai_preset(&mut settings));
+
+        assert_eq!(settings.ai_presets.len(), 1);
+        assert_eq!(settings.auto_update, preserved_auto_update);
+        assert!(!backfill_default_ai_preset(&mut settings));
+    }
+
     /// Any `<name>.durable.<pid>.<seq>.tmp` still sitting in `dir`.
     fn lingering_durable_temps(dir: &std::path::Path) -> Vec<String> {
         std::fs::read_dir(dir)
@@ -3470,6 +4190,324 @@ mod tests {
             b"new",
             "shorter new content must fully replace the old file"
         );
+    }
+
+    #[cfg(windows)]
+    fn open_with_share_mode(path: &Path, share_mode: u32) -> std::fs::File {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(share_mode)
+            .open(path)
+            .unwrap()
+    }
+
+    #[cfg(windows)]
+    fn open_with_restrictive_sharing(path: &Path) -> std::fs::File {
+        open_with_share_mode(path, 1) // FILE_SHARE_READ: deny writes and replacement.
+    }
+
+    #[cfg(windows)]
+    fn set_readonly(path: &Path) {
+        let mut permissions = std::fs::metadata(path).unwrap().permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(path, permissions).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_store_permission_repair_is_narrow_and_preserves_canonical_bytes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_path = tmp.path().join("store.bin");
+        let last_good = tmp.path().join("store.bin.last-good");
+        let last_good_prev = tmp.path().join("store.bin.last-good.prev");
+        let recording = tmp.path().join("recording.mp4");
+        let canonical = b"canonical settings bytes";
+
+        for (path, bytes) in [
+            (&store_path, canonical.as_slice()),
+            (&last_good, b"last good".as_slice()),
+            (&last_good_prev, b"previous last good".as_slice()),
+            (&recording, b"recording".as_slice()),
+        ] {
+            std::fs::write(path, bytes).unwrap();
+            set_readonly(path);
+        }
+
+        normalize_windows_store_permissions(&store_path).unwrap();
+
+        assert_eq!(std::fs::read(&store_path).unwrap(), canonical);
+        for path in [&store_path, &last_good, &last_good_prev] {
+            assert!(
+                !std::fs::metadata(path).unwrap().permissions().readonly(),
+                "{} must lose its read-only attribute",
+                path.display()
+            );
+        }
+        assert!(
+            std::fs::metadata(&recording)
+                .unwrap()
+                .permissions()
+                .readonly(),
+            "neighboring recording must remain untouched"
+        );
+        let mut permissions = std::fs::metadata(&recording).unwrap().permissions();
+        permissions.set_readonly(false);
+        std::fs::set_permissions(&recording, permissions).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_store_permission_repair_resets_explicit_readonly_acl() {
+        use std::os::windows::process::CommandExt;
+
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let tmp = tempfile::tempdir().unwrap();
+        let store_path = tmp.path().join("store.bin");
+        let canonical = b"canonical settings bytes";
+        std::fs::write(&store_path, canonical).unwrap();
+
+        let identity = std::process::Command::new("whoami.exe")
+            .args(["/user", "/fo", "csv", "/nh"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .unwrap();
+        assert!(identity.status.success());
+        let identity = String::from_utf8(identity.stdout).unwrap();
+        let sid = identity
+            .trim()
+            .split("\",\"")
+            .nth(1)
+            .unwrap()
+            .trim_matches('"');
+        let readonly_deny = format!("*{sid}:(WD)");
+        let restricted = std::process::Command::new("icacls.exe")
+            .arg(&store_path)
+            .args(["/inheritance:r", "/deny", &readonly_deny, "/Q"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .status()
+            .unwrap();
+        assert!(restricted.success());
+        assert!(
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&store_path)
+                .is_err(),
+            "explicit read-only ACL must prevent writes before repair"
+        );
+
+        normalize_windows_store_permissions(&store_path).unwrap();
+
+        assert_eq!(std::fs::read(&store_path).unwrap(), canonical);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&store_path)
+            .expect("repaired store must be writable");
+        let acl = std::process::Command::new("icacls.exe")
+            .arg(&store_path)
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .unwrap();
+        assert!(acl.status.success());
+        let acl = String::from_utf8_lossy(&acl.stdout);
+        assert!(
+            !acl.contains("(DENY)"),
+            "repaired ACL must remove the explicit deny entry: {acl}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_restrictive_sharing_identifies_open_and_replace_failure_stages() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_path = tmp.path().join("store.bin");
+        let replacement_path = tmp.path().join("replacement.tmp");
+        std::fs::write(&store_path, b"canonical-before").unwrap();
+        std::fs::write(&replacement_path, b"replacement").unwrap();
+        let _lock = open_with_restrictive_sharing(&store_path);
+
+        let open_error = std::fs::write(&store_path, b"must-not-land").unwrap_err();
+        let replace_error = std::fs::rename(&replacement_path, &store_path).unwrap_err();
+
+        eprintln!(
+            "restrictive sharing: fs::write open/truncate raw_os_error={:?}; atomic rename raw_os_error={:?}",
+            open_error.raw_os_error(),
+            replace_error.raw_os_error()
+        );
+        assert!(matches!(open_error.raw_os_error(), Some(5 | 32 | 33)));
+        assert!(matches!(replace_error.raw_os_error(), Some(5 | 32 | 33)));
+        assert_eq!(std::fs::read(&store_path).unwrap(), b"canonical-before");
+        assert_eq!(std::fs::read(&replacement_path).unwrap(), b"replacement");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn durable_write_retries_transient_windows_replacement_lock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_path = tmp.path().join("store.bin");
+        std::fs::write(&store_path, b"canonical-before").unwrap();
+
+        let lock = open_with_restrictive_sharing(&store_path);
+        let unlocker = std::thread::spawn(move || {
+            std::thread::sleep(WINDOWS_STORE_RETRY_DELAY * 2);
+            drop(lock);
+        });
+
+        durable_write(&store_path, b"canonical-after").unwrap();
+        unlocker.join().unwrap();
+        assert_eq!(std::fs::read(&store_path).unwrap(), b"canonical-after");
+        assert!(lingering_durable_temps(tmp.path()).is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn startup_recovery_retries_transient_windows_read_lock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_path = write_store(tmp.path(), &json!({"settings": {"aiPresets": []}}));
+        write_last_good(
+            tmp.path(),
+            &json!({"settings": {"aiPresets": presets_n(2)}}),
+        );
+        let lock = open_with_share_mode(&store_path, 0);
+        let unlocker = std::thread::spawn(move || {
+            std::thread::sleep(WINDOWS_STORE_RETRY_DELAY * 2);
+            drop(lock);
+        });
+
+        assert!(auto_restore_if_wiped(&store_path));
+        unlocker.join().unwrap();
+        assert!(store_json_has_presets(&std::fs::read(&store_path).unwrap()));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn startup_persistent_windows_read_denial_fails_closed() {
+        use tauri_plugin_store::StoreExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store_path = write_store(
+            tmp.path(),
+            &json!({"settings": {"aiPresets": presets_n(2)}}),
+        );
+        let snapshot_path = write_last_good(
+            tmp.path(),
+            &json!({"settings": {"aiPresets": presets_n(3)}}),
+        );
+        let canonical_before = std::fs::read(&store_path).unwrap();
+        let snapshot_before = std::fs::read(&snapshot_path).unwrap();
+        let app = tauri::test::mock_builder()
+            .plugin(tauri_plugin_store::Builder::default().build())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let _lock = open_with_share_mode(&store_path, 0);
+
+        let started = std::time::Instant::now();
+        let result = build_store_at(app.handle(), store_path.clone());
+        let elapsed = started.elapsed();
+
+        assert!(result.is_err(), "persistent denial must fail closed");
+        assert!(elapsed < std::time::Duration::from_secs(12));
+        drop(_lock);
+        assert_eq!(std::fs::read(&store_path).unwrap(), canonical_before);
+        assert_eq!(std::fs::read(&snapshot_path).unwrap(), snapshot_before);
+        assert!(app.get_store(&store_path).is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn durable_write_bounds_persistent_windows_denial_and_preserves_recovery_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_path = tmp.path().join("store.bin");
+        let snapshot_path = store_path.with_extension(LAST_GOOD_SUFFIX);
+        std::fs::write(&store_path, b"canonical-before").unwrap();
+        std::fs::write(&snapshot_path, b"snapshot-before").unwrap();
+        let _lock = open_with_restrictive_sharing(&store_path);
+
+        let started = std::time::Instant::now();
+        let error = durable_write(&store_path, b"must-not-land").unwrap_err();
+        let elapsed = started.elapsed();
+
+        assert!(matches!(error.raw_os_error(), Some(5 | 32 | 33)));
+        assert!(
+            elapsed >= WINDOWS_STORE_RETRY_DELAY * (WINDOWS_STORE_RETRY_ATTEMPTS as u32 - 1)
+                && elapsed < std::time::Duration::from_secs(12),
+            "retry bound was not respected: {elapsed:?}"
+        );
+        assert_eq!(std::fs::read(&store_path).unwrap(), b"canonical-before");
+        assert_eq!(std::fs::read(&snapshot_path).unwrap(), b"snapshot-before");
+        assert!(lingering_durable_temps(tmp.path()).is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn plugin_save_retries_transient_windows_open_lock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_path = tmp.path().join("store.bin");
+        let app = tauri::test::mock_builder()
+            .plugin(tauri_plugin_store::Builder::default().build())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let store = StoreBuilder::new(app.handle(), store_path.clone())
+            .disable_auto_save()
+            .build()
+            .unwrap();
+        store.set("value", json!("before"));
+        save_store_to_disk(store.as_ref()).unwrap();
+        store.set("value", json!("after"));
+
+        let lock = open_with_restrictive_sharing(&store_path);
+        let unlocker = std::thread::spawn(move || {
+            // Bitdefender held the current production user's store for longer
+            // than the old 250 ms retry window. Model a multi-second scan lock.
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            drop(lock);
+        });
+
+        save_store_to_disk(store.as_ref()).unwrap();
+        unlocker.join().unwrap();
+        let saved: Value = serde_json::from_slice(&std::fs::read(&store_path).unwrap()).unwrap();
+        assert_eq!(saved.get("value"), Some(&json!("after")));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn plugin_save_bounds_persistent_windows_denial_without_touching_snapshot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_path = tmp.path().join("store.bin");
+        let snapshot_path = store_path.with_extension(LAST_GOOD_SUFFIX);
+        let app = tauri::test::mock_builder()
+            .plugin(tauri_plugin_store::Builder::default().build())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let store = StoreBuilder::new(app.handle(), store_path.clone())
+            .disable_auto_save()
+            .build()
+            .unwrap();
+        store.set("value", json!("canonical-before"));
+        save_store_to_disk(store.as_ref()).unwrap();
+        std::fs::write(&snapshot_path, b"snapshot-before").unwrap();
+        store.set("value", json!("must-not-land"));
+        let _lock = open_with_restrictive_sharing(&store_path);
+
+        let started = std::time::Instant::now();
+        let error = save_store_to_disk(store.as_ref()).unwrap_err();
+        let elapsed = started.elapsed();
+
+        assert!(
+            error.contains("os error 5")
+                || error.contains("os error 32")
+                || error.contains("os error 33"),
+            "unexpected persistent-denial error: {error}"
+        );
+        assert!(
+            elapsed >= WINDOWS_STORE_RETRY_DELAY * (WINDOWS_STORE_RETRY_ATTEMPTS as u32 - 1)
+                && elapsed < std::time::Duration::from_secs(12),
+            "retry bound was not respected: {elapsed:?}"
+        );
+        let saved: Value = serde_json::from_slice(&std::fs::read(&store_path).unwrap()).unwrap();
+        assert_eq!(saved.get("value"), Some(&json!("canonical-before")));
+        assert_eq!(std::fs::read(&snapshot_path).unwrap(), b"snapshot-before");
     }
 
     #[test]
@@ -4078,6 +5116,26 @@ mod tests {
         assert_eq!(preset["acpAgent"]["id"].as_str(), Some("codex-acp"));
     }
 
+    #[test]
+    fn acp_cloud_billing_route_survives_preset_persistence() {
+        let preset: AIPreset = serde_json::from_value(json!({
+            "id": "claude code",
+            "provider": "acp",
+            "model": "claude-acp",
+            "acpAgent": {
+                "id": "claude-acp",
+                "useScreenpipeCloud": true
+            }
+        }))
+        .expect("ACP preset should deserialize");
+
+        let persisted = serde_json::to_value(preset).expect("ACP preset should serialize");
+        assert_eq!(
+            persisted["acpAgent"]["useScreenpipeCloud"].as_bool(),
+            Some(true)
+        );
+    }
+
     /// The exact shape an ACP-unaware build leaves behind: provider rewritten
     /// to "custom", no URL, agent id still sitting in `model`. Without the
     /// repair the desktop asks the cloud gateway for a model named "codex-acp"
@@ -4163,6 +5221,17 @@ mod tests {
         assert_eq!(settings.user.token, None);
         assert_eq!(settings.embedded_llm.enabled, false);
         assert_eq!(settings.ai_presets.len(), 0);
+    }
+
+    #[test]
+    fn smart_recording_is_automatic_for_legacy_stores_before_frontend_startup() {
+        let mut store = SettingsStore::default();
+        store.recording.experimental_meeting_piggyback = false;
+        store.extra.insert(
+            "remoteControlPreferences".into(),
+            json!({"smartRecording": false}),
+        );
+        assert!(store.to_recording_settings().experimental_meeting_piggyback);
     }
 
     #[test]
@@ -4252,6 +5321,291 @@ mod tests {
                 .and_then(|policy| policy.pointer("/boolean/coreAudioSystemAudio/defaultEnabled"))
                 .and_then(Value::as_bool),
             Some(true),
+        );
+    }
+
+    fn mtime(path: &std::path::Path) -> std::time::SystemTime {
+        std::fs::metadata(path).unwrap().modified().unwrap()
+    }
+
+    fn production_sized_store(pad_bytes: usize) -> Value {
+        json!({
+            "settings": {
+                "aiPresets": presets_n(8),
+                "encryptStore": false,
+                "padding": "x".repeat(pad_bytes),
+            }
+        })
+    }
+
+    #[test]
+    fn durable_write_if_changed_skips_identical_bytes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("store.bin");
+        let payload = serde_json::to_vec(&production_sized_store(262_144)).unwrap();
+        durable_write(&p, &payload).unwrap();
+        let before = mtime(&p);
+
+        let changed = durable_write_if_changed(&p, &payload).unwrap();
+        assert!(!changed, "identical bytes must not fsync");
+        assert_eq!(mtime(&p), before, "mtime must not move on a skip");
+
+        let mut next = payload.clone();
+        next.push(b'!');
+        let changed = durable_write_if_changed(&p, &next).unwrap();
+        assert!(changed);
+        assert_eq!(std::fs::read(&p).unwrap(), next);
+        assert!(mtime(&p) >= before);
+    }
+
+    #[test]
+    fn snapshot_last_good_skips_identical_fsync() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_path = write_store(
+            tmp.path(),
+            &json!({"settings": {"aiPresets": presets_n(2)}}),
+        );
+        snapshot_last_good(&store_path);
+        let last_good = store_path.with_extension(LAST_GOOD_SUFFIX);
+        let before = mtime(&last_good);
+        snapshot_last_good(&store_path);
+        assert_eq!(
+            mtime(&last_good),
+            before,
+            "identical last-good must not fsync"
+        );
+        assert!(
+            !store_path.with_extension(LAST_GOOD_PREV_SUFFIX).exists(),
+            "identical snapshot must not churn .prev"
+        );
+    }
+
+    #[test]
+    fn reencrypt_already_encrypted_is_a_no_op_fsync() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_path = tmp.path().join("store.bin");
+        let mut blob = STORE_MAGIC.to_vec();
+        blob.extend(vec![0xAA; 262_144]);
+        std::fs::write(&store_path, &blob).unwrap();
+        let before = mtime(&store_path);
+
+        reencrypt_store_at(&store_path);
+
+        assert_eq!(std::fs::read(&store_path).unwrap(), blob);
+        assert_eq!(
+            mtime(&store_path),
+            before,
+            "ciphertext must not be rewritten onto itself"
+        );
+    }
+
+    #[test]
+    fn reencrypt_plaintext_without_encryption_fsyncs_at_most_snapshot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let contents = production_sized_store(262_144);
+        let store_path = write_store(tmp.path(), &contents);
+
+        reencrypt_store_at(&store_path);
+        let last_good = store_path.with_extension(LAST_GOOD_SUFFIX);
+        assert!(last_good.exists(), "first pass must snapshot");
+        let store_m = mtime(&store_path);
+        let snap_m = mtime(&last_good);
+
+        reencrypt_store_at(&store_path);
+        assert_eq!(
+            mtime(&store_path),
+            store_m,
+            "second identical plaintext pass must not rewrite store.bin"
+        );
+        assert_eq!(
+            mtime(&last_good),
+            snap_m,
+            "second identical plaintext pass must not rewrite last-good"
+        );
+        assert!(store_json_has_presets(&std::fs::read(&store_path).unwrap()));
+    }
+
+    #[test]
+    fn reencrypt_creates_encrypt_flag_and_still_snapshots() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_path = write_store(
+            tmp.path(),
+            &json!({
+                "settings": {
+                    "aiPresets": presets_n(2),
+                    "encryptStore": true,
+                }
+            }),
+        );
+
+        reencrypt_store_at(&store_path);
+
+        assert!(
+            tmp.path().join(".encrypt-store").exists(),
+            "encryptStore: true must create the opt-in flag"
+        );
+        let last_good = store_path.with_extension(LAST_GOOD_SUFFIX);
+        assert!(last_good.exists(), "first save still snapshots plaintext");
+        assert!(store_json_has_presets(&std::fs::read(&last_good).unwrap()));
+
+        let snap_m = mtime(&last_good);
+        reencrypt_store_at(&store_path);
+        assert_eq!(
+            mtime(&last_good),
+            snap_m,
+            "unchanged encrypt-on save must not rewrite last-good"
+        );
+    }
+
+    #[test]
+    fn reencrypt_encryption_opted_in_still_flushes_if_keychain_cannot_encrypt() {
+        let tmp = tempfile::tempdir().unwrap();
+        let contents = json!({
+            "settings": {
+                "aiPresets": presets_n(2),
+                "encryptStore": true,
+                "padding": "x".repeat(4096),
+            }
+        });
+        let store_path = write_store(tmp.path(), &contents);
+        std::fs::write(tmp.path().join(".encrypt-store"), b"").unwrap();
+
+        reencrypt_store_at(&store_path);
+
+        let last_good = store_path.with_extension(LAST_GOOD_SUFFIX);
+        assert!(last_good.exists(), "last-good is the plaintext recovery copy");
+        assert!(store_json_has_presets(&std::fs::read(&last_good).unwrap()));
+
+        let now = std::fs::read(&store_path).unwrap();
+        if is_encrypted_bytes(&now) {
+            return; // keychain encrypted; ciphertext is the durable store.bin
+        }
+        assert!(
+            store_json_has_presets(&now),
+            "without a key, store.bin must stay readable plaintext"
+        );
+
+        // Second identical pass must not fsync again (the CPU bug).
+        let store_m = mtime(&store_path);
+        let snap_m = mtime(&last_good);
+        reencrypt_store_at(&store_path);
+        assert_eq!(mtime(&store_path), store_m);
+        assert_eq!(mtime(&last_good), snap_m);
+    }
+
+    fn percentile(sorted: &[u128], p: f64) -> u128 {
+        if sorted.is_empty() {
+            return 0;
+        }
+        let idx = ((sorted.len() as f64 - 1.0) * p).round() as usize;
+        sorted[idx.min(sorted.len() - 1)]
+    }
+
+    /// Deep benchmark of the path sampled on 2026-08-26: 200 IPC-style
+    /// reencrypts of a 262KB store. The old code fsynced on every call
+    /// (~1–3ms each on APFS, 200–600ms total, on the UI thread). The new
+    /// already-encrypted / identical-plaintext paths must stay well under
+    /// 50ms total with zero fsyncs after warmup.
+    #[test]
+    fn reencrypt_hot_path_benchmark() {
+        let tmp = tempfile::tempdir().unwrap();
+        let contents = production_sized_store(262_144);
+        let store_path = write_store(tmp.path(), &contents);
+        let payload = std::fs::read(&store_path).unwrap();
+        eprintln!(
+            "reencrypt_hot_path_benchmark: payload {} bytes",
+            payload.len()
+        );
+
+        // --- baseline: old behavior (unconditional durable_write) ---
+        let baseline_iters = 40;
+        let mut baseline_ns = Vec::with_capacity(baseline_iters);
+        for _ in 0..baseline_iters {
+            let t0 = std::time::Instant::now();
+            durable_write(&store_path, &payload).unwrap();
+            baseline_ns.push(t0.elapsed().as_nanos());
+        }
+        let baseline_syncs = baseline_iters as u64;
+        baseline_ns.sort_unstable();
+        let baseline_total_ms: f64 =
+            baseline_ns.iter().sum::<u128>() as f64 / 1_000_000.0;
+        let baseline_p50 = percentile(&baseline_ns, 0.50) as f64 / 1_000.0;
+        let baseline_p99 = percentile(&baseline_ns, 0.99) as f64 / 1_000.0;
+
+        // Restore the pretty JSON file after the baseline stomped it with
+        // compact-equivalent bytes (same content).
+        write_store(tmp.path(), &contents);
+
+        // --- warmup new path (snapshot once) ---
+        reencrypt_store_at(&store_path);
+        let store_m = mtime(&store_path);
+        let snap_m = mtime(&store_path.with_extension(LAST_GOOD_SUFFIX));
+
+        let hot_iters = 200;
+        let mut hot_ns = Vec::with_capacity(hot_iters);
+        for _ in 0..hot_iters {
+            let t0 = std::time::Instant::now();
+            reencrypt_store_at(&store_path);
+            hot_ns.push(t0.elapsed().as_nanos());
+        }
+        hot_ns.sort_unstable();
+        let hot_total_ms: f64 = hot_ns.iter().sum::<u128>() as f64 / 1_000_000.0;
+        let hot_p50 = percentile(&hot_ns, 0.50) as f64 / 1_000.0;
+        let hot_p99 = percentile(&hot_ns, 0.99) as f64 / 1_000.0;
+        assert_eq!(
+            mtime(&store_path),
+            store_m,
+            "identical-plaintext loop must not rewrite store.bin"
+        );
+        assert_eq!(
+            mtime(&store_path.with_extension(LAST_GOOD_SUFFIX)),
+            snap_m,
+            "identical-plaintext loop must not rewrite last-good"
+        );
+
+        // --- ciphertext IPC retry storm (the sampled case) ---
+        let mut blob = STORE_MAGIC.to_vec();
+        blob.extend(vec![0xAB; 262_144]);
+        std::fs::write(&store_path, &blob).unwrap();
+        let enc_m = mtime(&store_path);
+        let mut enc_ns = Vec::with_capacity(hot_iters);
+        for _ in 0..hot_iters {
+            let t0 = std::time::Instant::now();
+            reencrypt_store_at(&store_path);
+            enc_ns.push(t0.elapsed().as_nanos());
+        }
+        enc_ns.sort_unstable();
+        let enc_total_ms: f64 = enc_ns.iter().sum::<u128>() as f64 / 1_000_000.0;
+        let enc_p50 = percentile(&enc_ns, 0.50) as f64 / 1_000.0;
+        let enc_p99 = percentile(&enc_ns, 0.99) as f64 / 1_000.0;
+        assert_eq!(mtime(&store_path), enc_m, "ciphertext loop must not rewrite");
+
+        eprintln!(
+            "\n=== store reencrypt CPU benchmark ===\n\
+             payload: {} bytes\n\
+             OLD unconditional durable_write x{baseline_iters}: total {baseline_total_ms:.2}ms, p50 {baseline_p50:.1}µs, p99 {baseline_p99:.1}µs, fsyncs {baseline_syncs}\n\
+             NEW identical-plaintext reencrypt x{hot_iters}: total {hot_total_ms:.2}ms, p50 {hot_p50:.1}µs, p99 {hot_p99:.1}µs, fsyncs 0\n\
+             NEW already-encrypted IPC retry x{hot_iters}: total {enc_total_ms:.2}ms, p50 {enc_p50:.1}µs, p99 {enc_p99:.1}µs, fsyncs 0\n",
+            payload.len(),
+        );
+
+        assert_eq!(baseline_syncs, baseline_iters as u64);
+        // Loaded-machine budget: 200 cached reads of 262KB must stay far below
+        // the old 200-fsync cost. The sampled bug was the ciphertext IPC retry
+        // storm, so that loop is the strict one.
+        assert!(
+            hot_total_ms < 150.0,
+            "identical-plaintext 200x should be <150ms, got {hot_total_ms:.2}ms"
+        );
+        assert!(
+            enc_total_ms < 50.0,
+            "already-encrypted 200x should be <50ms, got {enc_total_ms:.2}ms"
+        );
+        let old_per = baseline_total_ms / baseline_iters as f64;
+        let enc_per = enc_total_ms / hot_iters as f64;
+        assert!(
+            enc_per * 5.0 < old_per || enc_per < 0.05,
+            "ciphertext IPC retry must be ≥5x cheaper than unconditional fsync (old {old_per:.3}ms/call, new {enc_per:.3}ms/call)"
         );
     }
 }

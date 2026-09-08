@@ -1,0 +1,83 @@
+[
+  {
+    "id": "pi-acp",
+    "name": "Pi",
+    "imageSrc": "/images/pi.svg",
+    "presetName": "pi",
+    "description": "Use Pi for this connection.",
+    "launch": { "kind": "npx", "package": "pi-acp@0.0.32", "args": [] }
+  },
+  {
+    "id": "codex-acp",
+    "name": "Codex",
+    "imageSrc": "/images/codex.svg",
+    "presetName": "codex",
+    "description": "Use Codex for this connection.",
+    "launch": { "kind": "npx", "package": "@agentclientprotocol/codex-acp@1.1.7", "args": [] }
+  },
+  {
+    "id": "claude-acp",
+    "name": "Claude Code",
+    "imageSrc": "/images/claude-ai.svg",
+    "presetName": "claude code",
+    "description": "Use Claude Code for this connection.",
+    "launch": {
+      "kind": "npx",
+      "package": "@agentclientprotocol/claude-agent-acp@0.66.0",
+      "args": ["--hide-claude-auth"]
+    },
+    "cloudRouting": {
+      "baseUrlEnv": "ANTHROPIC_BASE_URL",
+      "tokenEnv": "ANTHROPIC_AUTH_TOKEN",
+      "pathPrefix": "/anthropic",
+      "clearEnv": ["ANTHROPIC_API_KEY"]
+    }
+  },
+  {
+    "id": "opencode",
+    "name": "OpenCode",
+    "imageSrc": "/images/opencode.svg",
+    "invertInDark": true,
+    "presetName": "opencode",
+    "description": "Use your installed OpenCode agent.",
+    "launch": { "kind": "binary", "command": "opencode", "args": ["acp"] },
+    "login": { "args": ["auth", "login"] },
+    "installUrl": "https://opencode.ai",
+    "disabled": true
+  },
+  {
+    "id": "cursor",
+    "name": "Cursor",
+    "imageSrc": "/images/cursor.png",
+    "presetName": "cursor",
+    "description": "Use Cursor for this connection.",
+    "launch": { "kind": "binary", "command": "cursor-agent", "args": ["acp"] },
+    "login": { "args": ["login"] },
+    "installUrl": "https://cursor.com/cli",
+    "installer": { "kind": "shellScript", "url": "https://cursor.com/install" },
+    "httpMcp": true,
+    "flag": "acp_agent_cursor"
+  },
+  {
+    "id": "github-copilot-cli",
+    "name": "GitHub Copilot",
+    "imageSrc": "/images/acp/github-copilot-cli.svg",
+    "invertInDark": true,
+    "presetName": "github copilot",
+    "description": "Use GitHub Copilot for this connection.",
+    "launch": { "kind": "npx", "package": "@github/copilot@1.0.74", "args": ["--acp"] },
+    "httpMcp": true,
+    "flag": "acp_agent_github_copilot"
+  },
+  {
+    "id": "kimi",
+    "name": "Kimi CLI",
+    "imageSrc": "/images/acp/kimi.svg",
+    "presetName": "kimi",
+    "description": "Use Moonshot's Kimi CLI agent installed on this computer.",
+    "launch": { "kind": "binary", "command": "kimi", "args": ["acp"] },
+    "login": { "args": ["login"] },
+    "installUrl": "https://www.kimi.com/code",
+    "disabled": true
+  }
+]

@@ -6,7 +6,7 @@
  *  catalog, provider/adapter icons, and auto-generated preset names, used by
  *  both the settings preset editor and the quick ai-provider dialog. */
 
-import acpAgentCatalog from "@/lib/acp/agents.json";
+import acpAgentCatalog from "../../../../crates/screenpipe-core/assets/acp/agents.json";
 
 export interface AcpAdapterInfo {
   id: string;
@@ -34,7 +34,8 @@ export interface AcpAdapterInfo {
 }
 
 // The whole agent catalog — name, icon, copy, and launch — lives in one static
-// file (lib/acp/agents.json). Edit that to add or change an agent; both the
+// core catalog (crates/screenpipe-core/assets/acp/agents.json). Edit that to
+// add or change an agent; both the
 // picker (here) and the Rust runtime read it. `launch` is ignored here.
 const CATALOG_ACP_ADAPTERS: readonly AcpAdapterInfo[] = (
   acpAgentCatalog as Array<{
@@ -62,10 +63,10 @@ const CATALOG_ACP_ADAPTERS: readonly AcpAdapterInfo[] = (
 
 const CUSTOM_ACP_ADAPTER: AcpAdapterInfo = {
   id: "custom",
-  name: "Another ACP agent",
+  name: "Agent command",
   imageSrc: "/images/custom.png",
   presetName: "acp agent",
-  description: "Connect any ACP-compatible command installed on this computer.",
+  description: "Connect a compatible agent using its command.",
   // Running an arbitrary local command as the agent is the widest surface we
   // offer, so it is rolled out on its own flag rather than to everyone.
   flag: "acp_agent_custom",
@@ -81,6 +82,35 @@ export const ACP_ADAPTERS: readonly AcpAdapterInfo[] = [
 // ACP_ADAPTERS above stays complete so existing presets still resolve.
 export const SELECTABLE_ACP_ADAPTERS: readonly AcpAdapterInfo[] =
   ACP_ADAPTERS.filter((adapter) => !adapter.disabled);
+
+/** Shared order for the direct AI choices shown in both preset editors. */
+export const PRIMARY_ACP_ADAPTER_ORDER = [
+  "codex-acp",
+  "claude-acp",
+  "cursor",
+  "github-copilot-cli",
+  "pi-acp",
+] as const;
+
+/** Keep the normal agent choices consistent across Settings and Rewind. */
+export function primaryAcpAdapterChoices(
+  adapters: readonly AcpAdapterInfo[],
+): AcpAdapterInfo[] {
+  return adapters
+    .filter((adapter) => adapter.id !== "custom")
+    .sort((a, b) => {
+      const aIndex = PRIMARY_ACP_ADAPTER_ORDER.indexOf(
+        a.id as (typeof PRIMARY_ACP_ADAPTER_ORDER)[number],
+      );
+      const bIndex = PRIMARY_ACP_ADAPTER_ORDER.indexOf(
+        b.id as (typeof PRIMARY_ACP_ADAPTER_ORDER)[number],
+      );
+      return (
+        (aIndex < 0 ? PRIMARY_ACP_ADAPTER_ORDER.length : aIndex) -
+        (bIndex < 0 ? PRIMARY_ACP_ADAPTER_ORDER.length : bIndex)
+      );
+    });
+}
 
 /** Every per-agent flag in the catalog, for surfaces that need "all on"
  *  (e2e builds) without hardcoding the individual keys. */

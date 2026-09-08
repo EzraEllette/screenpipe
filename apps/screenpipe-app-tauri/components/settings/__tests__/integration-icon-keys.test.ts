@@ -7,6 +7,7 @@ import {
   INTEGRATION_ICON_KEYS,
   TRY_IN_CHAT_PROMPTS,
   getOAuthFallbackMessage,
+  getOAuthPanelCopy,
   isMcpOAuthProviderTileConnected,
 } from "../connections-section";
 import { connectionNameToId } from "../../../lib/utils/connection-chip";
@@ -59,5 +60,21 @@ describe("getOAuthFallbackMessage", () => {
   it("shows the Zendesk pending-flow hint only for Zendesk", () => {
     expect(getOAuthFallbackMessage("zendesk", "pending")).toContain("No such client");
     expect(getOAuthFallbackMessage("slack", "pending")).toBeNull();
+  });
+});
+
+describe("getOAuthPanelCopy", () => {
+  it("frames Slack multi-connect as workspaces", () => {
+    expect(getOAuthPanelCopy("slack", "Slack")).toEqual({
+      description: "Connect a Slack workspace. Add each workspace where Screenpipe should act on your behalf.",
+      addAnotherLabel: "add another workspace",
+    });
+  });
+
+  it("keeps account language for other OAuth providers", () => {
+    expect(getOAuthPanelCopy("github", "GitHub")).toEqual({
+      description: "Connect your GitHub account. AI can act on your behalf once connected.",
+      addAnotherLabel: "add another account",
+    });
   });
 });

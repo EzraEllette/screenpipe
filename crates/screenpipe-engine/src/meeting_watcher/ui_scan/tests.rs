@@ -531,6 +531,7 @@ fn test_calendar_event_keep_alive() {
         start: rfc(start),
         end: rfc(end),
         attendees: vec![],
+        meeting_url: None,
         is_all_day: all_day,
     };
 

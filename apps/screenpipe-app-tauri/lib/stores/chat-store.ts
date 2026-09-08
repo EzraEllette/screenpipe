@@ -5,7 +5,7 @@
 /**
  * Global chat store — keyed by Pi session id.
  *
- * This is the foundation for multi-tab chat with background streaming. It
+ * This is the foundation for parallel chat sessions with background streaming. It
  * lives outside the React tree so chat state survives component unmounts
  * (the chat dies when you navigate to Timeline; the bun + Pi subprocess in
  * Tauri does not — events keep flowing and need somewhere to land).
@@ -24,6 +24,7 @@ import { create } from "zustand";
 import type { ConversationKind, PipeContext } from "@/lib/hooks/use-settings";
 import type { ConversationMeta } from "@/lib/chat-storage";
 import type { ChatTitleSource } from "@/lib/utils/chat-title";
+import { isEphemeralSideConversationNamespaceId } from "@/lib/chat/ephemeral-side-conversation";
 import {
   CONVERSATION_DEDUP_WINDOW_MS,
   conversationDedupIdentity,
@@ -62,6 +63,14 @@ export interface SessionDraft {
   attachedDocs: StoredAttachedDoc[];
   pendingDocs: StoredPendingDoc[];
 }
+
+export interface SessionCodingWorkspace {
+  repoName: string;
+  branch: string;
+  worktreePath: string;
+}
+
+export type SplitChatPosition = "left" | "right";
 
 export interface SessionRecord {
   /** Pi `session_id` — also the uuid used by `commands.piStart`. */
@@ -112,6 +121,16 @@ export interface SessionRecord {
   pinned: boolean;
   /** Archived conversation hidden from recents. */
   hidden?: boolean;
+  /** In-memory-only conversation. Ephemeral conversations are never written
+   *  to chat history, restored after restart, or offered by recent-chat UI. */
+  ephemeral?: boolean;
+  /** True when this ephemeral session is the temporary side conversation for
+   *  another chat. Kept separate from `ephemeral` so future temporary-chat
+   *  surfaces do not accidentally inherit side-pane behavior. */
+  sideConversation?: boolean;
+  /** Durable source conversation kept visible beside this side conversation.
+   *  In-memory only; used to preserve and clean up the two-pane relationship. */
+  sideConversationParentId?: string;
   /** ms since epoch of the most recent time this chat was actively viewed
    *  in the current app session. Ephemeral UI signal for recent-switching;
    *  never persisted to disk and does not affect the sidebar order. */
@@ -131,6 +150,10 @@ export interface SessionRecord {
    *  the model selection when switching between chats. Persisted to disk
    *  so the selection survives app restart. */
   presetId?: string;
+  /** Compact, in-memory identity for a conversation-owned worktree. The
+   *  backend remains authoritative; this lets inactive tabs keep showing
+   *  which chats are isolated after the user switches away. */
+  codingWorkspace?: SessionCodingWorkspace;
 
   // ── Live session content (Phase 3) ─────────────────────────────────
   // The chat panel reads these instead of holding its own per-render
@@ -183,11 +206,29 @@ export interface SessionRecord {
   pipeContext?: PipeContext;
   /** Optional user-assigned sidebar group label (lowercase, trimmed). */
   sidebarGroup?: string;
+  /** Local agent source when this conversation was imported into screenpipe. */
+  importedFrom?: ConversationMeta["importedFrom"];
 }
 
 interface ChatStoreState {
   /** All known sessions, keyed by id. Includes both alive and on-disk-only. */
   sessions: Record<string, SessionRecord>;
+  /** Session-lifetime tombstones for ephemeral side conversations. A closed
+   *  side chat is removed from `sessions`, but a stale autosave callback may
+   *  still fire afterward. Keeping the id here makes that callback a no-op
+   *  without retaining its transcript in memory. Reset naturally on restart. */
+  ephemeralSideConversationIds: Record<string, true>;
+  /** Small, in-memory working set rendered as chat tabs. The sidebar remains
+   *  the durable index of every conversation; closing a tab only removes its
+   *  id from this list and never archives, deletes, or stops the session. */
+  openChatIds: string[];
+  /** Optional second conversation rendered beside the active composer.
+   *  Selecting it promotes it to the primary pane and keeps the previous
+   *  primary visible here, so only one component owns global agent events. */
+  splitChatId: string | null;
+  /** Physical side for the secondary transcript. Selection-created side chats
+   *  keep the source on the left and give the fresh composer the right pane. */
+  splitChatPosition: SplitChatPosition;
   /** True once the initial `~/.screenpipe/chats` scan has finished. */
   diskHydrated: boolean;
   /** Currently FOCUSED session — i.e. the chat the user is actively
@@ -214,13 +255,27 @@ interface ChatStoreActions {
   /** Remove a session from the store (does not stop the Pi process or
    *  delete from disk — caller does that). */
   drop: (id: string) => void;
-  /** Mark a session as currently in front. Implicitly clears its unread
-   *  flag — viewing the chat counts as reading it. */
+  /** Mark a session as the current navigation target and give the event router
+   *  foreground ownership. `panelSessionId` separately tracks the rendered
+   *  React commit. Implicitly clears unread because the switch was requested. */
   setCurrent: (id: string | null) => void;
   /** Mirror of the panel's piSessionIdRef.current. Survives section
    *  switches; used to re-highlight the sidebar row when the user
    *  navigates back to home. */
   setPanelSession: (id: string | null) => void;
+  /** Add a conversation to the visible tab working set. */
+  openChat: (id: string) => void;
+  /** Remove a tab without mutating or stopping its conversation. */
+  closeChat: (id: string) => void;
+  /** Keep only the named tab in the working set. */
+  closeOtherChats: (id: string) => void;
+  /** Close every tab after the named tab. */
+  closeChatsToRight: (id: string) => void;
+  /** Show a second live transcript, or close the split with null. */
+  setSplitChat: (
+    id: string | null,
+    position?: SplitChatPosition,
+  ) => void;
   /** Toggle the pinned state. */
   togglePinned: (id: string) => void;
 
@@ -243,7 +298,7 @@ interface ChatStoreActions {
   patchMessage: (
     id: string,
     messageId: string,
-    patcher: (m: StoredMessage) => StoredMessage
+    patcher: (m: StoredMessage) => StoredMessage,
   ) => void;
   /** Replace the streaming-state triplet (text / message id / blocks).
    *  Pass undefined for any field you don't want to overwrite. */
@@ -255,7 +310,7 @@ interface ChatStoreActions {
       contentBlocks: StoredContentBlock[];
       isLoading: boolean;
       isStreaming: boolean;
-    }>
+    }>,
   ) => void;
   /** Atomic "begin a new turn" — clears streamingText / contentBlocks /
    *  streamingMessageId and flips isLoading + isStreaming to true. The
@@ -287,7 +342,7 @@ interface ChatStoreActions {
       contentBlocks: StoredContentBlock[];
       isStreaming: boolean;
       isLoading: boolean;
-    }
+    },
   ) => void;
   /** Write (or clear) the composer draft for a session. Pass
    *  `undefined` to drop the draft entirely (e.g. on successful send). */
@@ -297,11 +352,43 @@ interface ChatStoreActions {
 export type ChatStore = ChatStoreState & { actions: ChatStoreActions };
 type ChatSessionsState = Pick<ChatStoreState, "sessions">;
 
+export function isEphemeralSideConversation(
+  session: Pick<SessionRecord, "ephemeral" | "sideConversation"> | undefined,
+): boolean {
+  return session?.ephemeral === true && session.sideConversation === true;
+}
+
+export function isEphemeralSideConversationId(
+  state: Pick<ChatStoreState, "sessions" | "ephemeralSideConversationIds">,
+  id: string,
+): boolean {
+  return (
+    isEphemeralSideConversationNamespaceId(id) ||
+    state.ephemeralSideConversationIds[id] === true ||
+    isEphemeralSideConversation(state.sessions[id])
+  );
+}
+
 export function isSessionForeground(
   state: Pick<ChatStoreState, "currentId" | "panelSessionId">,
   id: string,
 ): boolean {
   return state.currentId === id || state.panelSessionId === id;
+}
+
+/** Conversation the user can actually see in the Home chat panel.
+ *
+ * `currentId` changes at navigation intent time so the event router can hand
+ * foreground ownership to the incoming session. React commits the rendered
+ * panel a moment later and `panelSessionId` follows that commit. Keeping the
+ * sidebar highlight on the panel id during that gap prevents a selected row
+ * from disagreeing with the title and transcript on screen. A null currentId
+ * means Home is covered by another section, so no row should look selected. */
+export function selectDisplayedChatId(
+  state: Pick<ChatStoreState, "currentId" | "panelSessionId">,
+): string | null {
+  if (state.currentId === null) return null;
+  return state.panelSessionId ?? state.currentId;
 }
 
 /** Payload of the backend `chat-session-activity` event — a lightweight
@@ -317,15 +404,20 @@ export interface ChatSessionActivityPayload {
   unreadHint?: boolean;
 }
 
-/** Merge a `chat-session-activity` event into the sidebar store.
+/** Patch a canonical session with a `chat-session-activity` event.
  *
- * Extracted verbatim from the home page's listener so the upsert-vs-patch,
- * staleness (`existing.updatedAt > updatedAt`), title/preview/status merge,
- * and unread-hint branches are unit-testable in isolation. `now` is injected
- * so the `lastContentAt` write is deterministic under test.
+ * Activity is a lightweight, status-only mirror and cannot prove a
+ * conversation exists. Unknown ids are therefore ignored until disk hydration
+ * or `chat-conversation-saved` supplies canonical content. This prevents a
+ * stale or foreign process pulse from creating an empty "untitled" sidebar
+ * row. `now` is injected so the `lastContentAt` write is deterministic under
+ * test.
  */
 export function applyChatSessionActivity(
-  store: Pick<ChatStore, "sessions" | "currentId" | "panelSessionId" | "actions">,
+  store: Pick<
+    ChatStore,
+    "sessions" | "currentId" | "panelSessionId" | "actions"
+  >,
   payload: ChatSessionActivityPayload | undefined,
   now: number = Date.now(),
 ): void {
@@ -333,46 +425,32 @@ export function applyChatSessionActivity(
     payload ?? ({} as Partial<ChatSessionActivityPayload>);
   if (!id || !updatedAt) return;
   const existing = store.sessions[id];
-  if (!existing) {
-    store.actions.upsert({
-      id,
-      title: title?.trim() || "untitled",
-      preview: preview ?? "",
-      status: status ?? "idle",
-      lastError,
-      messageCount: 0,
-      createdAt: updatedAt,
-      updatedAt,
-      pinned: false,
-      hidden: false,
-      unread: false,
-    });
-  } else {
-    if (existing.updatedAt > updatedAt) return;
-    const nextTitle = title?.trim() || existing.title;
-    const nextPreview = preview ?? existing.preview;
-    const nextStatus = status ?? existing.status;
-    const nextLastError =
-      lastError !== undefined
-        ? lastError || undefined
-        : nextStatus === "error"
-          ? existing.lastError
-          : undefined;
-    if (
-      existing.title === nextTitle &&
-      existing.preview === nextPreview &&
-      existing.status === nextStatus &&
-      existing.lastError === nextLastError &&
-      existing.updatedAt === updatedAt
-    ) return;
-    store.actions.patch(id, {
-      title: nextTitle,
-      preview: nextPreview,
-      status: nextStatus,
-      lastError: nextLastError,
-      updatedAt,
-    });
-  }
+  if (!existing) return;
+  if (existing.updatedAt > updatedAt) return;
+  const nextTitle = title?.trim() || existing.title;
+  const nextPreview = preview ?? existing.preview;
+  const nextStatus = status ?? existing.status;
+  const nextLastError =
+    lastError !== undefined
+      ? lastError || undefined
+      : nextStatus === "error"
+        ? existing.lastError
+        : undefined;
+  if (
+    existing.title === nextTitle &&
+    existing.preview === nextPreview &&
+    existing.status === nextStatus &&
+    existing.lastError === nextLastError &&
+    existing.updatedAt === updatedAt
+  )
+    return;
+  store.actions.patch(id, {
+    title: nextTitle,
+    preview: nextPreview,
+    status: nextStatus,
+    lastError: nextLastError,
+    updatedAt,
+  });
   if (unreadHint && !isSessionForeground(store, id)) {
     store.actions.patch(id, { lastContentAt: now });
   }
@@ -406,6 +484,10 @@ export function getPersistedViewedAt(
 
 export const useChatStore = create<ChatStore>((set) => ({
   sessions: {},
+  ephemeralSideConversationIds: {},
+  openChatIds: [],
+  splitChatId: null,
+  splitChatPosition: "right",
   diskHydrated: false,
   currentId: null,
   panelSessionId: null,
@@ -418,6 +500,10 @@ export const useChatStore = create<ChatStore>((set) => ({
         // persisted truth.
         const next: Record<string, SessionRecord> = { ...s.sessions };
         for (const r of records) {
+          // A stale save racing a just-closed side chat must not resurrect it.
+          // The reserved id also rejects leaked files after a renderer or app
+          // restart, when the in-memory tombstone is intentionally gone.
+          if (isEphemeralSideConversationId(s, r.id)) continue;
           const existing = next[r.id];
           if (!existing) {
             next[r.id] = r;
@@ -431,16 +517,21 @@ export const useChatStore = create<ChatStore>((set) => ({
             messageCount: r.messageCount,
             pinned: existing.pinned || r.pinned,
             hidden: existing.hidden ?? r.hidden ?? false,
+            // Disk decides emptiness. A router row lazy-created before
+            // hydration is born `draft: true` (it has no proof of content
+            // yet); once the file says otherwise, the flag must not keep a
+            // real conversation out of RECENTS.
+            draft: r.messageCount > 0 ? undefined : (r.draft ?? existing.draft),
             // updatedAt: take the larger so memory doesn't get clobbered
             updatedAt: Math.max(existing.updatedAt, r.updatedAt),
-            lastUserMessageAt: Math.max(
-              existing.lastUserMessageAt ?? 0,
-              r.lastUserMessageAt ?? 0,
-            ) || undefined,
-            lastContentAt: Math.max(
-              existing.lastContentAt ?? 0,
-              r.lastContentAt ?? 0,
-            ) || undefined,
+            lastUserMessageAt:
+              Math.max(
+                existing.lastUserMessageAt ?? 0,
+                r.lastUserMessageAt ?? 0,
+              ) || undefined,
+            lastContentAt:
+              Math.max(existing.lastContentAt ?? 0, r.lastContentAt ?? 0) ||
+              undefined,
             // lastViewedAt: 0 is the "never viewed" sentinel, so it must NOT
             // be collapsed to undefined — that would force restoreUnread onto
             // its fallback instead of computing the real (unread) state.
@@ -454,6 +545,7 @@ export const useChatStore = create<ChatStore>((set) => ({
             sidebarGroup: existing.sidebarGroup ?? r.sidebarGroup,
             dedupKey: existing.dedupKey ?? r.dedupKey,
             branchedFrom: existing.branchedFrom ?? r.branchedFrom,
+            importedFrom: existing.importedFrom ?? r.importedFrom,
           };
           merged.unread = restoreUnread(existing, merged);
           next[r.id] = merged;
@@ -475,7 +567,17 @@ export const useChatStore = create<ChatStore>((set) => ({
           : record;
         // Recompute unread from timestamps so it stays consistent.
         merged.unread = isUnread(merged);
-        return { sessions: { ...s.sessions, [record.id]: merged } };
+        return {
+          sessions: { ...s.sessions, [record.id]: merged },
+          ...(isEphemeralSideConversation(merged)
+            ? {
+                ephemeralSideConversationIds: {
+                  ...s.ephemeralSideConversationIds,
+                  [record.id]: true as const,
+                },
+              }
+            : {}),
+        };
       }),
 
     patch: (id, partial) =>
@@ -494,11 +596,15 @@ export const useChatStore = create<ChatStore>((set) => ({
 
     drop: (id) =>
       set((s) => {
-        if (!(id in s.sessions)) return {};
+        if (!(id in s.sessions) && !s.openChatIds.includes(id)) return {};
         const next = { ...s.sessions };
         delete next[id];
         return {
           sessions: next,
+          openChatIds: s.openChatIds.filter((openId) => openId !== id),
+          splitChatId: s.splitChatId === id ? null : s.splitChatId,
+          splitChatPosition:
+            s.splitChatId === id ? "right" : s.splitChatPosition,
           currentId: s.currentId === id ? null : s.currentId,
         };
       }),
@@ -506,23 +612,120 @@ export const useChatStore = create<ChatStore>((set) => ({
     setCurrent: (id) =>
       set((s) => {
         const viewedAt = Date.now();
+        const openChatIds =
+          id && !s.openChatIds.includes(id)
+            ? [...s.openChatIds, id]
+            : s.openChatIds;
         // Viewing a session counts as reading it — lastViewedAt >= any
         // lastContentAt means isUnread() returns false. Same atomic update
         // so the row's unread state can't transiently flicker.
         if (id && s.sessions[id]) {
           return {
             currentId: id,
-            panelSessionId: id,
+            openChatIds,
             sessions: {
               ...s.sessions,
-              [id]: { ...s.sessions[id], unread: false, lastViewedAt: viewedAt },
+              [id]: {
+                ...s.sessions[id],
+                unread: false,
+                lastViewedAt: viewedAt,
+              },
             },
           };
         }
-        return { currentId: id };
+        return { currentId: id, openChatIds };
       }),
 
-    setPanelSession: (id) => set({ panelSessionId: id }),
+    setPanelSession: (id) =>
+      set((s) => {
+        if (!id) return { panelSessionId: id };
+
+        // The panel creates one empty session on mount so first-send events have
+        // an owner immediately. If another chat wins navigation before that
+        // placeholder is used, keeping both ids in the tab set paints a second
+        // unexplained "untitled" tab. Prune only disposable, inactive blanks
+        // after the visual panel switch commits. Real chats, active turns, and
+        // blanks with composer text or attachments remain untouched.
+        const disposableIds = s.openChatIds.filter((openId) => {
+          if (openId === id) return false;
+          const session = s.sessions[openId];
+          return Boolean(
+            session &&
+            !session.composerDraft &&
+            isReusableBlankChatSession(session),
+          );
+        });
+        if (disposableIds.length === 0) return { panelSessionId: id };
+
+        const disposable = new Set(disposableIds);
+        const sessions = { ...s.sessions };
+        disposableIds.forEach((disposableId) => delete sessions[disposableId]);
+        return {
+          panelSessionId: id,
+          sessions,
+          openChatIds: s.openChatIds.filter(
+            (openId) => !disposable.has(openId),
+          ),
+          splitChatId:
+            s.splitChatId && disposable.has(s.splitChatId)
+              ? null
+              : s.splitChatId,
+          splitChatPosition:
+            s.splitChatId && disposable.has(s.splitChatId)
+              ? "right"
+              : s.splitChatPosition,
+        };
+      }),
+
+    openChat: (id) =>
+      set((s) =>
+        s.openChatIds.includes(id)
+          ? {}
+          : { openChatIds: [...s.openChatIds, id] },
+      ),
+
+    closeChat: (id) =>
+      set((s) => ({
+        openChatIds: s.openChatIds.filter((openId) => openId !== id),
+        splitChatId: s.splitChatId === id ? null : s.splitChatId,
+        splitChatPosition:
+          s.splitChatId === id ? "right" : s.splitChatPosition,
+      })),
+
+    closeOtherChats: (id) =>
+      set((s) => ({
+        openChatIds: s.openChatIds.includes(id) ? [id] : s.openChatIds,
+        splitChatId: null,
+        splitChatPosition: "right",
+      })),
+
+    closeChatsToRight: (id) =>
+      set((s) => {
+        const index = s.openChatIds.indexOf(id);
+        if (index === -1) return {};
+        const openChatIds = s.openChatIds.slice(0, index + 1);
+        return {
+          openChatIds,
+          splitChatId:
+            s.splitChatId && !openChatIds.includes(s.splitChatId)
+              ? null
+              : s.splitChatId,
+          splitChatPosition:
+            s.splitChatId && !openChatIds.includes(s.splitChatId)
+              ? "right"
+              : s.splitChatPosition,
+        };
+      }),
+
+    setSplitChat: (id, position = "right") =>
+      set((s) => ({
+        splitChatId: id,
+        splitChatPosition: id ? position : "right",
+        openChatIds:
+          id && !s.openChatIds.includes(id)
+            ? [...s.openChatIds, id]
+            : s.openChatIds,
+      })),
 
     togglePinned: (id) =>
       set((s) => {
@@ -694,7 +897,9 @@ export const useChatStore = create<ChatStore>((set) => ({
         const existingMsgs = (existing.messages as unknown[]) ?? [];
         const incomingMsgs = snapshot.messages ?? [];
         const messages =
-          incomingMsgs.length >= existingMsgs.length ? incomingMsgs : existingMsgs;
+          incomingMsgs.length >= existingMsgs.length
+            ? incomingMsgs
+            : existingMsgs;
         // Guard: never let a stale React closure re-enable streaming that
         // endTurn() already cleared. endTurn writes synchronously into
         // Zustand, but setIsStreaming/setIsLoading are async React state
@@ -773,7 +978,11 @@ export function sessionRecordFromMeta(m: ConversationMeta): SessionRecord {
     createdAt: m.createdAt,
     updatedAt: m.updatedAt,
     pinned: m.pinned,
+    hidden: m.hidden,
     unread: false,
+    // Empty persisted chat files are abandoned drafts, not durable history.
+    // Mark them here so a restart cannot resurrect stray "untitled" rows.
+    ...(m.messageCount === 0 && m.kind === "chat" ? { draft: true } : {}),
     lastUserMessageAt: m.lastUserMessageAt,
     lastContentAt: m.lastContentAt,
     lastViewedAt: m.lastViewedAt,
@@ -783,6 +992,7 @@ export function sessionRecordFromMeta(m: ConversationMeta): SessionRecord {
     dedupKey: m.dedupKey,
     branchedFrom: m.branchedFrom,
     presetId: m.presetId,
+    importedFrom: m.importedFrom,
   };
   if (typeof m.lastViewedAt === "number") {
     record.unread = isUnread(record);
@@ -805,30 +1015,74 @@ export function sessionRecordFromMeta(m: ConversationMeta): SessionRecord {
  *     SessionRecord doc), so a naive `messages.length === 0` check would
  *     treat every real conversation on disk as "empty" and make "+ new
  *     chat" hop through the sidebar instead of opening a fresh one (#4719).
+ *   - no loading/streaming turn — send preflight is mirrored here before its
+ *     first await, so New chat never reuses the session whose send is pending.
  *   - no loaded `user` message — belt-and-suspenders for a foreground
  *     draft that already has an unsent user turn before its count updates.
  *
  * Returns `{ id, isNew }` so callers can decide whether to upsert.
  */
+export function isReusableBlankChatSession(s: SessionRecord): boolean {
+  if (isEphemeralSideConversation(s)) return false;
+  if (!s.draft) return false;
+  // A live draft owns an in-memory message buffer. Hydrated zero-message files
+  // are marked draft to keep them out of Recents, but intentionally carry no
+  // buffer so New chat does not jump back into an abandoned persisted row.
+  if (!Array.isArray(s.messages)) return false;
+  if (s.kind && s.kind !== "chat") return false;
+  if (s.isLoading || s.isStreaming) return false;
+  if (s.messageCount > 0) return false;
+  const msgs = (s.messages as Array<{ role?: string }> | undefined) ?? [];
+  return !msgs.some((m) => m?.role === "user");
+}
+
+/** Ensure a panel-owned session id has a real, sidebar-hidden draft record.
+ *
+ * The standalone panel mints its initial id before any conversation has been
+ * saved. Keeping that id only in `currentId` leaves activity listeners unable
+ * to distinguish the real blank panel from an unrelated status-only pulse.
+ * This idempotent seed makes the ownership explicit without persisting an
+ * empty conversation to disk.
+ */
+export function ensureBlankChatSession(
+  store: Pick<ChatStore, "sessions" | "actions">,
+  id: string,
+  now: number = Date.now(),
+): SessionRecord {
+  const existing = store.sessions[id];
+  if (existing) return existing;
+
+  const draft: SessionRecord = {
+    id,
+    title: "untitled",
+    preview: "",
+    status: "idle",
+    messageCount: 0,
+    createdAt: now,
+    updatedAt: now,
+    pinned: false,
+    unread: false,
+    draft: true,
+    messages: [],
+  };
+  store.actions.upsert(draft);
+  return draft;
+}
+
 export function getOrCreateEmptyChatId(): { id: string; isNew: boolean } {
   const state = useChatStore.getState();
-  const isReusableBlankChat = (s: SessionRecord) => {
-    if (s.kind && s.kind !== "chat") return false;
-    if (s.messageCount > 0) return false;
-    const msgs = (s.messages as Array<{ role?: string }> | undefined) ?? [];
-    return !msgs.some((m) => m?.role === "user");
-  };
 
   // Prefer the chat the user is already on.
   const panelId = state.panelSessionId;
   if (panelId) {
     const panel = state.sessions[panelId];
-    if (panel && isReusableBlankChat(panel)) return { id: panelId, isNew: false };
+    if (panel && isReusableBlankChatSession(panel))
+      return { id: panelId, isNew: false };
   }
 
   // Otherwise any other blank chat, newest first by createdAt.
   const empties = Object.values(state.sessions)
-    .filter(isReusableBlankChat)
+    .filter(isReusableBlankChatSession)
     .sort((a, b) => b.createdAt - a.createdAt);
   if (empties.length > 0) return { id: empties[0].id, isNew: false };
 
@@ -938,13 +1192,17 @@ function sessionIsBetterDuplicate(a: SessionRecord, b: SessionRecord): boolean {
   const bReply = messagesHaveCompletedReply(b.messages);
   if (aReply !== bReply) return aReply;
   if (a.messageCount !== b.messageCount) return a.messageCount > b.messageCount;
-  return (a.lastUserMessageAt ?? a.updatedAt) > (b.lastUserMessageAt ?? b.updatedAt);
+  return (
+    (a.lastUserMessageAt ?? a.updatedAt) > (b.lastUserMessageAt ?? b.updatedAt)
+  );
 }
 
 /** Collapse store sessions that are the same conversation persisted under two
  *  ids (cross-window save race). Order-preserving; keeps the more complete
  *  copy. Pure — unit-testable in isolation. */
-export function dedupeSessionRecords(records: SessionRecord[]): SessionRecord[] {
+export function dedupeSessionRecords(
+  records: SessionRecord[],
+): SessionRecord[] {
   const kept: SessionRecord[] = [];
   const indicesByKey = new Map<string, number[]>();
   for (const rec of records) {
@@ -972,7 +1230,8 @@ export function dedupeSessionRecords(records: SessionRecord[]): SessionRecord[] 
       }
     }
     if (mergeIndex >= 0) {
-      if (sessionIsBetterDuplicate(rec, kept[mergeIndex])) kept[mergeIndex] = rec;
+      if (sessionIsBetterDuplicate(rec, kept[mergeIndex]))
+        kept[mergeIndex] = rec;
       continue;
     }
     kept.push(rec);
@@ -983,23 +1242,100 @@ export function dedupeSessionRecords(records: SessionRecord[]): SessionRecord[] 
   return kept;
 }
 
-export function selectOrderedSessions(state: ChatSessionsState): SessionRecord[] {
-  const all = dedupeSessionRecords(Object.values(state.sessions));
+/**
+ * True when a chat row has nothing a user could open: no messages in memory,
+ * none persisted, and no user turn ever sent.
+ *
+ * The `draft` boolean is bookkeeping — every creator of a blank session has to
+ * remember to set it, and any path that forgets (the event router's
+ * lazy-create did, for prewarmed / auto-restarted Pi processes) leaks an empty
+ * "untitled" row into RECENTS. This predicate is the derived backstop: the
+ * sidebar renders a chat only when a chat exists. Pipe rows are exempt — a
+ * finished run is history even with an empty in-memory message array.
+ */
+export function isEmptyChatShell(s: SessionRecord): boolean {
+  if (s.kind === "pipe-run" || s.kind === "pipe-watch") return false;
+  if (s.messageCount > 0) return false;
+  if ((s.messages?.length ?? 0) > 0) return false;
+  return !s.lastUserMessageAt;
+}
+
+export function selectOrderedSessions(
+  state: ChatSessionsState,
+): SessionRecord[] {
+  const all = dedupeSessionRecords(Object.values(state.sessions)).filter(
+    (session) => !isEphemeralSideConversation(session),
+  );
   const pinned = all.filter((s) => s.pinned).sort(compareForSidebar);
   const recents = all.filter((s) => !s.pinned).sort(compareForSidebar);
   return [...pinned, ...recents];
 }
 
-export function selectRecentSwitcherSessions(state: ChatSessionsState): SessionRecord[] {
+export function selectRecentSwitcherSessions(
+  state: ChatSessionsState,
+): SessionRecord[] {
   const ordered = selectOrderedSessions(state);
   const isEligibleSwitcherSession = (session: SessionRecord) =>
     !session.hidden &&
     !session.draft &&
+    !isEmptyChatShell(session) &&
     session.kind !== "pipe-watch" &&
     session.kind !== "pipe-run";
   return ordered
-    .filter((session) => isEligibleSwitcherSession(session) && session.lastViewedAt)
+    .filter(
+      (session) => isEligibleSwitcherSession(session) && session.lastViewedAt,
+    )
     .sort((a, b) => (b.lastViewedAt ?? 0) - (a.lastViewedAt ?? 0));
+}
+
+/** Visible chat-tab strip order, including empty or worktree-backed tabs. */
+export function selectVisibleOpenChatTabs(state: {
+  sessions: Record<string, SessionRecord>;
+  openChatIds: string[];
+}): SessionRecord[] {
+  return state.openChatIds
+    .map((id) => state.sessions[id])
+    .filter((session): session is SessionRecord =>
+      Boolean(session && !session.hidden),
+    );
+}
+
+/** Next tab after close/archive: the neighbor to the right, else left. */
+export function fallbackOpenChatId(
+  state: {
+    sessions: Record<string, SessionRecord>;
+    openChatIds: string[];
+  },
+  closingId: string,
+): string | null {
+  const isKeep = (id: string) => {
+    if (id === closingId) return false;
+    const session = state.sessions[id];
+    return Boolean(session && !session.hidden);
+  };
+  const index = state.openChatIds.indexOf(closingId);
+  if (index >= 0) {
+    for (let i = index + 1; i < state.openChatIds.length; i++) {
+      if (isKeep(state.openChatIds[i])) return state.openChatIds[i];
+    }
+    for (let i = index - 1; i >= 0; i--) {
+      if (isKeep(state.openChatIds[i])) return state.openChatIds[i];
+    }
+  }
+  return state.openChatIds.find(isKeep) ?? null;
+}
+
+export function nextOpenChatTabId(
+  tabIds: string[],
+  currentId: string | null,
+  direction: 1 | -1,
+): string | null {
+  if (tabIds.length < 2) return null;
+  const currentIndex = currentId ? tabIds.indexOf(currentId) : -1;
+  if (currentIndex < 0) {
+    return direction === 1 ? tabIds[0] : tabIds[tabIds.length - 1];
+  }
+  return tabIds[(currentIndex + direction + tabIds.length) % tabIds.length];
 }
 
 /**

@@ -22,7 +22,7 @@ impl ObsidianParser {
         Self {
             manifest: ParserManifest {
                 id: "app.obsidian.active_note".into(),
-                parser_version: "1".into(),
+                parser_version: "2".into(),
                 schema_version: 1,
                 scope: ParserScope::App,
                 platforms: vec![Platform::Macos, Platform::Windows, Platform::Linux],
@@ -70,6 +70,12 @@ impl SemanticParser for ObsidianParser {
         let source = find_below_or_all(tree, search_root, |tree, node| {
             role_is(tree, node, &["AXTextArea", "Edit"]) && has_class(tree, node, "cm-content")
         });
+        let source_lines = find_below_or_all(tree, search_root, |tree, node| {
+            has_class(tree, node, "markdown-source-view")
+                && tree
+                    .descendants(node)
+                    .any(|descendant| has_class(tree, descendant, "cm-line"))
+        });
         let preview = find_below_or_all(tree, search_root, |tree, node| {
             has_class(tree, node, "markdown-preview-view")
                 || has_class(tree, node, "markdown-rendered")
@@ -80,6 +86,11 @@ impl SemanticParser for ObsidianParser {
                 return Ok(ParseOutcome::NotHandled);
             };
             (node, body.to_owned(), "codemirror_source")
+        } else if let Some(node) = source_lines {
+            let Some(body) = collect_codemirror_lines(tree, node) else {
+                return Ok(ParseOutcome::NotHandled);
+            };
+            (node, body, "codemirror_lines")
         } else if let Some(node) = preview {
             let Some(body) = collect_text(tree, node) else {
                 return Ok(ParseOutcome::NotHandled);
@@ -106,6 +117,52 @@ impl SemanticParser for ObsidianParser {
         document.source_nodes.push(body_node);
         Ok(ParseOutcome::Handled(vec![document]))
     }
+}
+
+fn collect_codemirror_lines(tree: &SemanticTree, root: NodeId) -> Option<String> {
+    let mut lines = Vec::<String>::new();
+    for line_node in tree
+        .descendants(root)
+        .filter(|node| has_class(tree, *node, "cm-line"))
+        .take(2_000)
+    {
+        let mut fragments = Vec::<&str>::new();
+        for node in tree.descendants(line_node) {
+            if !is_text_role(tree.role(node)) || inside_control(tree, node, line_node) {
+                continue;
+            }
+            let Some(content) = node_content(tree, node) else {
+                continue;
+            };
+            let content = content.trim_matches(|character: char| {
+                character.is_whitespace() || matches!(character, '\u{200b}' | '\u{feff}')
+            });
+            if content.is_empty()
+                || fragments
+                    .last()
+                    .is_some_and(|previous| *previous == content)
+            {
+                continue;
+            }
+            fragments.push(content);
+        }
+        let line = fragments.join(" ");
+        if line.is_empty() {
+            if !lines.is_empty() && lines.last().is_some_and(|previous| !previous.is_empty()) {
+                lines.push(String::new());
+            }
+        } else {
+            lines.push(line);
+        }
+    }
+    while lines.last().is_some_and(String::is_empty) {
+        lines.pop();
+    }
+    if lines.is_empty() {
+        return None;
+    }
+    let body = lines.join("\n");
+    Some(truncate_str(&body, MAX_BODY_BYTES).to_owned())
 }
 
 fn historical_text_area(tree: &SemanticTree) -> Option<(NodeId, &str)> {

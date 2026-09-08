@@ -5,7 +5,7 @@
 
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { emit, listen } from "@tauri-apps/api/event";
-import { Archive, CheckSquare, FolderOpen, Loader2, MessageSquare, MoreVertical, Pin, Plus, Search, Timer, Trash2, Undo2, X } from "lucide-react";
+import { Archive, CheckSquare, Download, FolderOpen, Loader2, MessageSquare, MoreVertical, Pin, Plus, Search, Timer, Trash2, Undo2, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { usePlatform } from "@/lib/hooks/use-platform";
 import { isInjectedTitle } from "@/lib/chat-utils";
@@ -41,6 +41,8 @@ import {
 } from "@/lib/chat-storage";
 import { useChatStore } from "@/lib/stores/chat-store";
 import { pipeConversationDeletionKey } from "@/lib/pipe-execution-status";
+import { ImportChatsDialog } from "@/components/chat/import-chats-dialog";
+import { showChatArchiveUndoToast } from "@/components/chat/archive-undo-toast";
 import {
   listMoveTargetGroups,
   validateSidebarGroupName,
@@ -51,7 +53,7 @@ type HistoryTab = "chats" | "pipes" | "archived" | "all";
 const HISTORY_PAGE_SIZE = 30;
 const TABS: ReadonlyArray<{ value: HistoryTab; label: string }> = [
   { value: "chats", label: "Chats" },
-  { value: "pipes", label: "Scheduled" },
+  { value: "pipes", label: "Automations" },
   { value: "archived", label: "Archived" },
   { value: "all", label: "All" },
 ];
@@ -77,6 +79,7 @@ export function ChatHistoryView({
   const migratedRef = React.useRef(false);
   const [showBulkBar, setShowBulkBar] = useState(false);
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
+  const [importDialogOpen, setImportDialogOpen] = useState(false);
   const [bulkPending, setBulkPending] = useState<null | "archiving" | "restoring" | "deleting">(null);
   const [rowPendingIds, setRowPendingIds] = useState<Set<string>>(() => new Set());
   const searchInputRef = React.useRef<HTMLInputElement | null>(null);
@@ -594,6 +597,7 @@ export function ChatHistoryView({
                     disabled={rowPending}
                     onSelect={(e) => {
                       void (async () => {
+                        const wasPinned = conv.pinned ?? false;
                         await updateConversationFlags(conv.id, { hidden: true, pinned: false });
                         patchSidebarSession(conv.id, { hidden: true, pinned: false }, conv);
                         try {
@@ -602,6 +606,28 @@ export function ChatHistoryView({
                           // ignore
                         }
                         void load();
+                        showChatArchiveUndoToast({
+                          onUndo: async () => {
+                            await updateConversationFlags(conv.id, {
+                              hidden: false,
+                              pinned: wasPinned,
+                            });
+                            patchSidebarSession(
+                              conv.id,
+                              { hidden: false, pinned: wasPinned },
+                              conv,
+                            );
+                            try {
+                              await emit("chat-visibility-changed", {
+                                id: conv.id,
+                                hidden: false,
+                              });
+                            } catch {
+                              // ignore
+                            }
+                            void load();
+                          },
+                        });
                       })();
                     }}
                   >
@@ -770,6 +796,11 @@ export function ChatHistoryView({
                                     ? ids.filter((id) => !visibleById.get(id)?.hidden)
                                     : ids;
                                 if (idsToArchive.length === 0) return;
+                                const archivedStates = idsToArchive.map((id) => ({
+                                  id,
+                                  meta: visibleById.get(id),
+                                  pinned: visibleById.get(id)?.pinned ?? false,
+                                }));
                                 setBulkPending("archiving");
                                 const result = await bulkSetHidden(idsToArchive, true);
                                 setBulkPending(null);
@@ -782,6 +813,34 @@ export function ChatHistoryView({
                                 }
                                 clearSelection();
                                 void load();
+                                showChatArchiveUndoToast({
+                                  count: archivedStates.length,
+                                  onUndo: async () => {
+                                    for (const archived of archivedStates) {
+                                      await updateConversationFlags(archived.id, {
+                                        hidden: false,
+                                        pinned: archived.pinned,
+                                      });
+                                      patchSidebarSession(
+                                        archived.id,
+                                        {
+                                          hidden: false,
+                                          pinned: archived.pinned,
+                                        },
+                                        archived.meta,
+                                      );
+                                      try {
+                                        await emit("chat-visibility-changed", {
+                                          id: archived.id,
+                                          hidden: false,
+                                        });
+                                      } catch {
+                                        // ignore
+                                      }
+                                    }
+                                    void load();
+                                  },
+                                });
                               }}
                             >
                               <Archive className="h-3.5 w-3.5" />
@@ -878,6 +937,15 @@ export function ChatHistoryView({
                     </button>
                   )}
                 </div>
+                <Button
+                  variant="outline"
+                  className="h-9 px-3 gap-2 shrink-0 rounded-none"
+                  onClick={() => setImportDialogOpen(true)}
+                  title="Import chats"
+                >
+                  <Download className="h-4 w-4" />
+                  Import
+                </Button>
                 <Button
                   variant="default"
                   className="h-9 px-4 gap-2 shrink-0"
@@ -1074,6 +1142,16 @@ export function ChatHistoryView({
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <ImportChatsDialog
+        open={importDialogOpen}
+        onOpenChange={setImportDialogOpen}
+        onImported={() => {
+          setTab("chats");
+          setQuery("");
+          void load("reset");
+        }}
+      />
     </div>
   );
 }

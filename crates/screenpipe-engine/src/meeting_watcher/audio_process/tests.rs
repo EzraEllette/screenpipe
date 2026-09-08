@@ -5,7 +5,10 @@
 //! candidate resolution, suppression, and lifecycle, sharing common fixtures.
 
 use super::*;
-use crate::meeting_watcher::shared::calendar::find_overlapping_calendar_event;
+use crate::meeting_watcher::shared::calendar::{
+    find_calendar_event_for_meeting, find_overlapping_calendar_event, stable_event_key,
+    CalendarMatchMethod,
+};
 use screenpipe_db::DatabaseManager;
 
 fn chrome_process() -> AudioInputProcess {
@@ -1123,7 +1126,8 @@ async fn active_meeting_blocks_audio_process_insert() {
         .unwrap();
     let manual_meeting = tokio::sync::RwLock::new(None);
     let outcome =
-        start_or_adopt_auto_meeting(&db, &manual_meeting, "Google Meet", None, None).await;
+        start_or_adopt_auto_meeting(&db, &manual_meeting, "Google Meet", None, None, Utc::now())
+            .await;
     assert_eq!(outcome, AutoStartOutcome::BlockedByActive(active_id));
 
     let open_count: (i64,) =
@@ -1132,6 +1136,79 @@ async fn active_meeting_blocks_audio_process_insert() {
             .await
             .unwrap();
     assert_eq!(open_count.0, 1);
+}
+
+#[test]
+fn episode_start_utc_subtracts_monotonic_pending_duration() {
+    let action_now = Instant::now();
+    let action_now_utc = chrono::DateTime::parse_from_rfc3339("2026-08-22T20:44:50.168Z")
+        .unwrap()
+        .with_timezone(&Utc);
+
+    let start = episode_start_utc(
+        action_now - Duration::from_secs(681),
+        action_now,
+        action_now_utc,
+    );
+
+    assert_eq!(
+        start,
+        chrono::DateTime::parse_from_rfc3339("2026-08-22T20:33:29.168Z")
+            .unwrap()
+            .with_timezone(&Utc)
+    );
+}
+
+#[tokio::test]
+async fn late_browser_classification_persists_original_episode_start() {
+    let (_dir, db) = setup_db().await;
+    let action_now = Instant::now();
+    let first_seen_at = action_now - Duration::from_secs(681);
+    let action_now_utc = chrono::DateTime::parse_from_rfc3339("2026-08-22T20:44:50.168Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let process = arc_process();
+    let action = AudioProcessStateAction::StartMeeting {
+        platform: "WhatsApp".to_string(),
+        session_key: ProcessKey::from_process(&process).unwrap(),
+        meeting_url: Some("https://web.whatsapp.com".to_string()),
+        first_seen_at,
+        is_browser: true,
+        pid: process.pid,
+        bundle_id: process.bundle_id,
+    };
+    let manual_meeting = tokio::sync::RwLock::new(None);
+    let mut state = AudioProcessMeetingState::Idle;
+    let mut suppressed = Vec::new();
+    let mut flap_count = 0;
+    let in_meeting = AtomicBool::new(false);
+
+    apply_state_action(
+        action,
+        &db,
+        &manual_meeting,
+        &mut state,
+        &mut suppressed,
+        &mut flap_count,
+        &in_meeting,
+        &None,
+        None,
+        None,
+        &[],
+        action_now,
+        action_now_utc,
+    )
+    .await;
+
+    let row = db.get_most_recent_active_meeting().await.unwrap().unwrap();
+    assert_eq!(row.meeting_start, "2026-08-22T20:33:29.168Z");
+    assert!(matches!(
+        state,
+        AudioProcessMeetingState::Active {
+            first_seen_at: active_first_seen,
+            ..
+        } if active_first_seen == first_seen_at
+    ));
 }
 
 #[test]
@@ -1250,6 +1327,97 @@ fn ax_resolution_only_runs_before_a_meeting_is_active() {
 // Call signal gate tests (#4776) — WhatsApp/Signal/Telegram voice note phantom
 // meeting prevention.
 // ---------------------------------------------------------------------------
+
+fn browser_platform_candidate(
+    platform: &str,
+    process: AudioInputProcess,
+) -> ResolvedMeetingCandidate {
+    ResolvedMeetingCandidate::Browser {
+        platform: platform.to_string(),
+        meeting_url: format!("https://web.{}.com", platform.to_lowercase()),
+        browser_app: "Arc".to_string(),
+        session_key: ProcessKey::from_process(&process).unwrap(),
+        first_seen_at: Instant::now(),
+        process,
+        live_evidence: true,
+    }
+}
+
+#[test]
+fn browser_whatsapp_without_keyed_call_signal_is_blocked() {
+    let profiles = load_detection_profiles();
+    let mut candidates = vec![browser_platform_candidate("WhatsApp", arc_process())];
+
+    retain_candidates_with_required_call_signal(&mut candidates, &profiles, &[]);
+
+    assert!(candidates.is_empty());
+}
+
+#[test]
+fn browser_whatsapp_with_same_session_call_signal_passes() {
+    let profiles = load_detection_profiles();
+    let process = arc_process();
+    let session_key = ProcessKey::from_process(&process).unwrap();
+    let mut candidates = vec![browser_platform_candidate("WhatsApp", process)];
+    let evidence = [CallSignalEvidence {
+        session_key,
+        platform: "whatsapp".to_string(),
+        is_in_call: true,
+        matched_signals: vec!["Calling_Window".to_string()],
+    }];
+
+    retain_candidates_with_required_call_signal(&mut candidates, &profiles, &evidence);
+
+    assert_eq!(candidates.len(), 1);
+}
+
+#[test]
+fn call_signal_for_other_session_does_not_admit_browser_candidate() {
+    let profiles = load_detection_profiles();
+    let mut candidates = vec![browser_platform_candidate("WhatsApp", arc_process())];
+    let evidence = [CallSignalEvidence {
+        session_key: ProcessKey::from_process(&chrome_process()).unwrap(),
+        platform: "whatsapp".to_string(),
+        is_in_call: true,
+        matched_signals: vec!["Calling_Window".to_string()],
+    }];
+
+    retain_candidates_with_required_call_signal(&mut candidates, &profiles, &evidence);
+
+    assert!(candidates.is_empty());
+}
+
+#[test]
+fn browser_telegram_without_signal_is_blocked() {
+    let profiles = load_detection_profiles();
+    let mut candidates = vec![browser_platform_candidate("Telegram", arc_process())];
+
+    retain_candidates_with_required_call_signal(&mut candidates, &profiles, &[]);
+
+    assert!(candidates.is_empty());
+}
+
+#[test]
+fn required_candidate_without_pid_fails_closed() {
+    let profiles = load_detection_profiles();
+    let mut process = arc_process();
+    process.pid = None;
+    let mut candidates = vec![browser_platform_candidate("WhatsApp", process)];
+
+    retain_candidates_with_required_call_signal(&mut candidates, &profiles, &[]);
+
+    assert!(candidates.is_empty());
+}
+
+#[test]
+fn browser_google_meet_without_call_signal_is_unchanged() {
+    let profiles = load_detection_profiles();
+    let mut candidates = vec![browser_platform_candidate("Google Meet", arc_process())];
+
+    retain_candidates_with_required_call_signal(&mut candidates, &profiles, &[]);
+
+    assert_eq!(candidates.len(), 1);
+}
 
 fn whatsapp_process() -> AudioInputProcess {
     AudioInputProcess {
@@ -1486,20 +1654,13 @@ fn whatsapp_without_call_signal_blocked_by_gate() {
 
     // Simulate what build_candidates does: check call_evidence with no call signals.
     let call_evidence = [CallSignalEvidence {
+        session_key: ProcessKey::from_process(&process).unwrap(),
         platform: "whatsapp".to_string(),
         is_in_call: false,
         matched_signals: vec![],
     }];
     let mut candidates = vec![candidate];
-    candidates.retain(|c| {
-        if let ResolvedMeetingCandidate::Native { platform, .. } = c {
-            let platform_lower = platform.to_lowercase();
-            if let Some(evidence) = call_evidence.iter().find(|e| e.platform == platform_lower) {
-                return evidence.is_in_call;
-            }
-        }
-        true
-    });
+    retain_candidates_with_required_call_signal(&mut candidates, &profiles, &call_evidence);
     assert!(
         candidates.is_empty(),
         "WhatsApp without call signals should be blocked"
@@ -1526,20 +1687,13 @@ fn whatsapp_with_call_signal_passes_gate() {
     ));
 
     let call_evidence = [CallSignalEvidence {
+        session_key: ProcessKey::from_process(&process).unwrap(),
         platform: "whatsapp".to_string(),
         is_in_call: true,
         matched_signals: vec!["AutomationIdContains(Calling_Window)".to_string()],
     }];
     let mut candidates = vec![candidate];
-    candidates.retain(|c| {
-        if let ResolvedMeetingCandidate::Native { platform, .. } = c {
-            let platform_lower = platform.to_lowercase();
-            if let Some(evidence) = call_evidence.iter().find(|e| e.platform == platform_lower) {
-                return evidence.is_in_call;
-            }
-        }
-        true
-    });
+    retain_candidates_with_required_call_signal(&mut candidates, &profiles, &call_evidence);
     assert_eq!(
         candidates.len(),
         1,
@@ -1567,18 +1721,8 @@ fn zoom_not_filtered_by_call_signal_gate() {
         ResolvedMeetingCandidate::Native { ref platform, .. } if platform == "Zoom"
     ));
 
-    // No call_evidence for Zoom (scan_messaging_call_signals skips it).
-    let call_evidence: Vec<CallSignalEvidence> = vec![];
     let mut candidates = vec![candidate];
-    candidates.retain(|c| {
-        if let ResolvedMeetingCandidate::Native { platform, .. } = c {
-            let platform_lower = platform.to_lowercase();
-            if let Some(evidence) = call_evidence.iter().find(|e| e.platform == platform_lower) {
-                return evidence.is_in_call;
-            }
-        }
-        true
-    });
+    retain_candidates_with_required_call_signal(&mut candidates, &profiles, &[]);
     assert_eq!(
         candidates.len(),
         1,
@@ -2105,6 +2249,7 @@ fn calendar_event(
         start: start.to_rfc3339(),
         end: (start + lasts).to_rfc3339(),
         attendees: attendees.iter().map(|a| a.to_string()).collect(),
+        meeting_url: None,
         is_all_day: false,
     }
 }
@@ -2115,9 +2260,27 @@ async fn start_meeting_with_calendar(
     events: &[CalendarEventSignal],
     platform: &str,
 ) -> AutoStartOutcome {
+    start_meeting_with_calendar_url(db, events, platform, None).await
+}
+
+async fn start_meeting_with_calendar_url(
+    db: &DatabaseManager,
+    events: &[CalendarEventSignal],
+    platform: &str,
+    observed_meeting_url: Option<&str>,
+) -> AutoStartOutcome {
     let manual_meeting = tokio::sync::RwLock::new(None);
-    let calendar = resolve_calendar_binding(db, events, Utc::now()).await;
-    start_or_adopt_auto_meeting(db, &manual_meeting, platform, calendar.as_ref(), None).await
+    let now_utc = Utc::now();
+    let calendar = resolve_calendar_binding(db, events, now_utc, observed_meeting_url).await;
+    start_or_adopt_auto_meeting(
+        db,
+        &manual_meeting,
+        platform,
+        calendar.as_ref(),
+        None,
+        now_utc,
+    )
+    .await
 }
 
 async fn end_meeting_ago(db: &DatabaseManager, id: i64, ago: chrono::Duration) {
@@ -2125,6 +2288,66 @@ async fn end_meeting_ago(db: &DatabaseManager, id: i64, ago: chrono::Duration) {
         .format("%Y-%m-%dT%H:%M:%S%.3fZ")
         .to_string();
     db.end_meeting(id, &ended_at, None).await.unwrap();
+}
+
+#[tokio::test]
+async fn explicit_audio_process_start_is_persisted_atomically() {
+    let (_dir, db) = setup_db().await;
+    let start = chrono::DateTime::parse_from_rfc3339("2026-08-22T20:32:59.123Z")
+        .unwrap()
+        .with_timezone(&Utc);
+
+    let id = db
+        .insert_meeting_with_calendar_at(
+            "WhatsApp",
+            "audio_process",
+            Some("Call"),
+            None,
+            None,
+            start,
+        )
+        .await
+        .unwrap();
+
+    let row = db.get_meeting_by_id(id).await.unwrap();
+    assert_eq!(row.meeting_start, "2026-08-22T20:32:59.123Z");
+    assert_eq!(row.meeting_app, "WhatsApp");
+    assert_eq!(row.detection_source, "audio_process");
+    assert_eq!(row.title.as_deref(), Some("Call"));
+    assert!(row.meeting_end.is_none());
+}
+
+#[tokio::test]
+async fn calendar_conflict_retry_preserves_explicit_start() {
+    let (_dir, db) = setup_db().await;
+    let first = db
+        .insert_meeting_with_calendar("Google Meet", "audio_process", None, None, Some("evt"))
+        .await
+        .unwrap();
+    end_meeting_ago(&db, first, chrono::Duration::minutes(5)).await;
+    let start = chrono::DateTime::parse_from_rfc3339("2026-08-22T20:44:50.168Z")
+        .unwrap()
+        .with_timezone(&Utc);
+
+    let second = db
+        .insert_meeting_with_calendar_at(
+            "WhatsApp",
+            "audio_process",
+            Some("Wrong calendar title"),
+            None,
+            Some("evt"),
+            start,
+        )
+        .await
+        .unwrap();
+
+    let row = db.get_meeting_by_id(second).await.unwrap();
+    assert_eq!(row.meeting_start, "2026-08-22T20:44:50.168Z");
+    assert!(row.title.is_none());
+    assert_eq!(
+        db.meeting_id_for_calendar_event("evt").await.unwrap(),
+        Some(first)
+    );
 }
 
 /// Reproduces the 2026-08-13 incident. An 11:30–12:00 calendar event was still
@@ -2213,6 +2436,333 @@ async fn meeting_joined_shortly_before_start_still_binds_the_event() {
         row.attendees.as_deref(),
         Some("ben@example.com, louis@example.com"),
         "attendees must come along with the title"
+    );
+}
+
+/// Reproduces the reported boundary shape: detection fires 40 seconds before
+/// an unrelated URL-less event ends and the real Meet event begins. The
+/// browser room identity must beat the outgoing event's time rank and persist
+/// the target calendar id on the new meeting row.
+#[tokio::test]
+async fn exact_meet_url_beats_an_outgoing_overlapping_event() {
+    let (_dir, db) = setup_db().await;
+    let mut outgoing = calendar_event(
+        "habit-event",
+        "Outgoing focus block",
+        chrono::Duration::minutes(-44),
+        chrono::Duration::minutes(45),
+        &[],
+    );
+    outgoing.end = (Utc::now() + chrono::Duration::seconds(40)).to_rfc3339();
+
+    let mut target = calendar_event(
+        "target-event",
+        "Customer check-in",
+        chrono::Duration::seconds(40),
+        chrono::Duration::minutes(15),
+        &["guest@example.test", "host@example.test"],
+    );
+    target.meeting_url = Some("https://meet.google.com/abc-defg-hij".to_string());
+    let events = vec![outgoing, target];
+
+    let id = match start_meeting_with_calendar_url(
+        &db,
+        &events,
+        "Google Meet",
+        Some("https://meet.google.com/abc-defg-hij?authuser=0&hs=122"),
+    )
+    .await
+    {
+        AutoStartOutcome::Started(id) => id,
+        other => panic!("expected the correct meeting to start, got {other:?}"),
+    };
+
+    let row = db.get_meeting_by_id(id).await.unwrap();
+    assert_eq!(row.title.as_deref(), Some("Customer check-in"));
+    assert_eq!(
+        db.meeting_id_for_calendar_event("target-event")
+            .await
+            .unwrap(),
+        Some(id)
+    );
+    assert_eq!(
+        row.attendees.as_deref(),
+        Some("guest@example.test, host@example.test")
+    );
+}
+
+#[test]
+fn exact_conference_identity_is_order_independent() {
+    let now = Utc::now();
+    let outgoing = calendar_event(
+        "outgoing",
+        "Outgoing event",
+        chrono::Duration::minutes(-25),
+        chrono::Duration::minutes(30),
+        &[],
+    );
+    let mut target = calendar_event(
+        "target",
+        "Target event",
+        chrono::Duration::seconds(40),
+        chrono::Duration::minutes(30),
+        &[],
+    );
+    target.meeting_url = Some("meet.google.com/abc-defg-hij".to_string());
+
+    for events in [
+        vec![outgoing.clone(), target.clone()],
+        vec![target.clone(), outgoing.clone()],
+    ] {
+        let binding = find_calendar_event_for_meeting(
+            &events,
+            now,
+            Some("https://meet.google.com/abc-defg-hij?authuser=1#fragment"),
+        )
+        .expect("exact room should match");
+        assert_eq!(binding.key, "target");
+        assert_eq!(
+            binding.match_method,
+            CalendarMatchMethod::ExactConferenceUrl
+        );
+    }
+}
+
+#[test]
+fn known_room_refuses_ambiguous_time_only_candidates() {
+    let now = Utc::now();
+    let first = calendar_event(
+        "first",
+        "First event",
+        chrono::Duration::minutes(-5),
+        chrono::Duration::minutes(30),
+        &[],
+    );
+    let second = calendar_event(
+        "second",
+        "Second event",
+        chrono::Duration::minutes(-1),
+        chrono::Duration::minutes(30),
+        &[],
+    );
+    assert!(
+        find_calendar_event_for_meeting(
+            &[first, second],
+            now,
+            Some("https://meet.google.com/abc-defg-hij"),
+        )
+        .is_none(),
+        "a known room plus two URL-less events is ambiguous and must stay unenriched"
+    );
+}
+
+#[test]
+fn known_room_refuses_a_different_calendar_room() {
+    let now = Utc::now();
+    let mut event = calendar_event(
+        "wrong-room",
+        "Different Meet",
+        chrono::Duration::minutes(-5),
+        chrono::Duration::minutes(30),
+        &[],
+    );
+    event.meeting_url = Some("https://meet.google.com/wrong-room-id".to_string());
+    assert!(
+        find_calendar_event_for_meeting(
+            &[event],
+            now,
+            Some("https://meet.google.com/abc-defg-hij"),
+        )
+        .is_none(),
+        "time overlap cannot override a conflicting conference identity"
+    );
+}
+
+#[test]
+fn one_url_less_candidate_keeps_the_legacy_time_fallback() {
+    let now = Utc::now();
+    let event = calendar_event(
+        "only",
+        "Only plausible event",
+        chrono::Duration::minutes(-5),
+        chrono::Duration::minutes(30),
+        &[],
+    );
+    let binding = find_calendar_event_for_meeting(
+        &[event],
+        now,
+        Some("https://meet.google.com/abc-defg-hij"),
+    )
+    .expect("one URL-less event preserves time-only enrichment");
+    assert_eq!(binding.key, "only");
+    assert_eq!(binding.match_method, CalendarMatchMethod::TimeOnly);
+}
+
+#[test]
+fn exact_room_allows_early_join_and_small_end_grace_only() {
+    let now = Utc::now();
+    let with_offset = |id: &str, start: chrono::Duration, end: chrono::Duration| {
+        let mut event = calendar_event(id, id, start, end - start, &[]);
+        event.meeting_url = Some("https://meet.google.com/abc-defg-hij".to_string());
+        event
+    };
+
+    let early = with_offset(
+        "early",
+        chrono::Duration::minutes(8),
+        chrono::Duration::minutes(38),
+    );
+    assert_eq!(
+        find_calendar_event_for_meeting(
+            &[early],
+            now,
+            Some("https://meet.google.com/abc-defg-hij"),
+        )
+        .unwrap()
+        .key,
+        "early"
+    );
+
+    let recently_ended = with_offset(
+        "late",
+        chrono::Duration::minutes(-35),
+        chrono::Duration::minutes(-5),
+    );
+    assert_eq!(
+        find_calendar_event_for_meeting(
+            &[recently_ended],
+            now,
+            Some("https://meet.google.com/abc-defg-hij"),
+        )
+        .unwrap()
+        .key,
+        "late"
+    );
+
+    for event in [
+        with_offset(
+            "too-early",
+            chrono::Duration::minutes(11),
+            chrono::Duration::minutes(41),
+        ),
+        with_offset(
+            "too-late",
+            chrono::Duration::minutes(-41),
+            chrono::Duration::minutes(-11),
+        ),
+    ] {
+        assert!(find_calendar_event_for_meeting(
+            &[event],
+            now,
+            Some("https://meet.google.com/abc-defg-hij"),
+        )
+        .is_none());
+    }
+}
+
+#[test]
+fn zoom_web_and_join_urls_share_the_meeting_id() {
+    let now = Utc::now();
+    let mut event = calendar_event(
+        "zoom-event",
+        "Zoom call",
+        chrono::Duration::minutes(-1),
+        chrono::Duration::minutes(30),
+        &[],
+    );
+    event.meeting_url = Some("https://acme.zoom.us/j/123456789?pwd=calendar-secret".to_string());
+    let binding = find_calendar_event_for_meeting(
+        &[event],
+        now,
+        Some("https://zoom.us/wc/123456789/join?from=browser"),
+    )
+    .expect("Zoom join forms should share the numeric room identity");
+    assert_eq!(binding.key, "zoom-event");
+}
+
+#[test]
+fn teams_ignores_noise_while_webex_keeps_its_room_token() {
+    let now = Utc::now();
+    for (id, calendar_url, observed_url) in [
+        (
+            "teams-event",
+            "https://teams.microsoft.com/l/meetup-join/19%3ameeting_test/0?context=calendar",
+            "https://teams.microsoft.com/l/meetup-join/19%3Ameeting_test/0?context=browser#call",
+        ),
+        (
+            "webex-event",
+            "https://acme.webex.com/acme/j.php?MTID=room-token&utm_source=calendar",
+            "https://acme.webex.com/acme/j.php?mtid=room-token#join",
+        ),
+    ] {
+        let mut event = calendar_event(
+            id,
+            "Conference",
+            chrono::Duration::minutes(-1),
+            chrono::Duration::minutes(30),
+            &[],
+        );
+        event.meeting_url = Some(calendar_url.to_string());
+        assert_eq!(
+            find_calendar_event_for_meeting(&[event], now, Some(observed_url))
+                .expect("provider path should identify the room")
+                .key,
+            id
+        );
+    }
+
+    let mut wrong_webex = calendar_event(
+        "wrong-webex",
+        "Different Webex",
+        chrono::Duration::minutes(-1),
+        chrono::Duration::minutes(30),
+        &[],
+    );
+    wrong_webex.meeting_url =
+        Some("https://acme.webex.com/acme/j.php?MTID=different-room".to_string());
+    assert!(find_calendar_event_for_meeting(
+        &[wrong_webex],
+        now,
+        Some("https://acme.webex.com/acme/j.php?MTID=room-token"),
+    )
+    .is_none());
+}
+
+#[test]
+fn unsupported_observed_url_keeps_legacy_time_matching() {
+    let now = Utc::now();
+    let event = calendar_event(
+        "fallback",
+        "Unsupported provider",
+        chrono::Duration::minutes(-1),
+        chrono::Duration::minutes(30),
+        &[],
+    );
+    let binding = find_calendar_event_for_meeting(
+        &[event],
+        now,
+        Some("https://calls.example.test/room/opaque"),
+    )
+    .expect("unsupported providers retain the pre-existing time matcher");
+    assert_eq!(binding.key, "fallback");
+    assert_eq!(binding.match_method, CalendarMatchMethod::TimeOnly);
+}
+
+#[test]
+fn calendar_signal_deserializes_camel_case_meeting_url() {
+    let event: CalendarEventSignal = serde_json::from_value(serde_json::json!({
+        "id": "event-id",
+        "title": "Meet",
+        "start": "2026-08-26T14:00:00Z",
+        "end": "2026-08-26T14:30:00Z",
+        "attendees": [],
+        "meetingUrl": "https://meet.google.com/abc-defg-hij",
+        "isAllDay": false
+    }))
+    .unwrap();
+    assert_eq!(
+        event.meeting_url.as_deref(),
+        Some("https://meet.google.com/abc-defg-hij")
     );
 }
 
@@ -2470,6 +3020,7 @@ fn binding_key_is_stable_across_timestamp_formats() {
         start,
         end,
         attendees: vec![],
+        meeting_url: None,
         is_all_day: false,
     };
 
@@ -2484,4 +3035,1428 @@ fn binding_key_is_stable_across_timestamp_formats() {
         a.key, b.key,
         "the same instant in two RFC3339 spellings is one event"
     );
+}
+
+// ── Back-to-back meetings: room changes and the merge window ─────────────
+//
+// Regression coverage for the merge observed on 2026-08-31: leaving Google
+// Meet room A and joining room B three seconds later in the same browser kept
+// meeting A open (same process, same audio session, well inside the ending
+// grace), so both calls landed in one row until the user split it by hand.
+
+use crate::meeting_watcher::shared::calendar::{
+    calendar_event_ended, calendar_event_matches_platform,
+};
+use screenpipe_db::MEETING_END_REASON_ROOM_CHANGED;
+
+const ROOM_A: &str = "https://meet.google.com/aaa-aaaa-aaa?authuser=0";
+const ROOM_B: &str = "https://meet.google.com/bbb-bbbb-bbb?authuser=0";
+const ROOM_A_IDENTITY: &str = "google-meet:aaa-aaaa-aaa";
+const ROOM_B_IDENTITY: &str = "google-meet:bbb-bbbb-bbb";
+
+fn meet_candidate(
+    process: &AudioInputProcess,
+    url: &str,
+    first_seen_at: Instant,
+) -> ResolvedMeetingCandidate {
+    ResolvedMeetingCandidate::Browser {
+        platform: "Google Meet".to_string(),
+        meeting_url: url.to_string(),
+        browser_app: process
+            .owner_app_name
+            .clone()
+            .unwrap_or_else(|| "Arc".to_string()),
+        session_key: ProcessKey::from_process(process).unwrap(),
+        first_seen_at,
+        process: process.clone(),
+        live_evidence: false,
+    }
+}
+
+fn active_meet(
+    meeting_id: i64,
+    process: &AudioInputProcess,
+    url: &str,
+    at: Instant,
+) -> AudioProcessMeetingState {
+    AudioProcessMeetingState::Active {
+        meeting_id,
+        platform: "Google Meet".to_string(),
+        session_key: ProcessKey::from_process(process).unwrap(),
+        meeting_url: Some(url.to_string()),
+        first_seen_at: at,
+        last_seen_at: at,
+        is_browser: true,
+    }
+}
+
+fn ending_meet(
+    meeting_id: i64,
+    process: &AudioInputProcess,
+    url: &str,
+    at: Instant,
+    since: Instant,
+) -> AudioProcessMeetingState {
+    AudioProcessMeetingState::Ending {
+        meeting_id,
+        platform: "Google Meet".to_string(),
+        session_key: ProcessKey::from_process(process).unwrap(),
+        meeting_url: Some(url.to_string()),
+        first_seen_at: at,
+        since,
+        is_browser: true,
+    }
+}
+
+fn room_policy(rooms: &HashSet<String>, calendar_boundary_crossed: bool) -> RoomChangePolicy<'_> {
+    RoomChangePolicy {
+        confirm_window: Duration::from_secs(45),
+        prompt_window: Duration::from_secs(10),
+        calendar_confirm_window: Duration::from_secs(5),
+        calendar_room_identities: rooms,
+        calendar_boundary_crossed,
+    }
+}
+
+#[test]
+fn no_calendar_room_change_offers_a_fast_user_confirmed_split() {
+    let process = arc_process();
+    let t0 = Instant::now();
+    let active = active_meet(7, &process, ROOM_A, t0 - Duration::from_secs(600));
+    let room_b = meet_candidate(&process, ROOM_B, t0);
+    let rooms = HashSet::new();
+    let policy = room_policy(&rooms, false);
+    let mut tracker = RoomChangeTracker::default();
+
+    assert!(detect_room_change(
+        &active,
+        std::slice::from_ref(&room_b),
+        &mut tracker,
+        t0,
+        &policy,
+    )
+    .is_none());
+    assert!(tracker.take_offer().is_none());
+    assert!(detect_room_change(
+        &active,
+        std::slice::from_ref(&room_b),
+        &mut tracker,
+        t0 + Duration::from_secs(9),
+        &policy,
+    )
+    .is_none());
+    assert!(tracker.take_offer().is_none());
+
+    assert!(detect_room_change(
+        &active,
+        std::slice::from_ref(&room_b),
+        &mut tracker,
+        t0 + Duration::from_secs(10),
+        &policy,
+    )
+    .is_none());
+    let offer = tracker.take_offer().expect("room-change offer");
+    assert_eq!(offer.meeting_id, 7);
+    assert_eq!(offer.platform, "Google Meet");
+    assert!(tracker.take_offer().is_none(), "the offer is emitted once");
+
+    assert!(!tracker.resolve_offer(&MeetingRoomChangeResponse {
+        meeting_id: 7,
+        token: "stale-token".to_string(),
+        decision: RoomChangeChoice::Switch,
+    }));
+    assert!(!tracker.resolve_offer(&MeetingRoomChangeResponse {
+        meeting_id: 8,
+        token: offer.token.clone(),
+        decision: RoomChangeChoice::Switch,
+    }));
+    assert!(tracker.resolve_offer(&MeetingRoomChangeResponse {
+        meeting_id: 7,
+        token: offer.token,
+        decision: RoomChangeChoice::Switch,
+    }));
+
+    match detect_room_change(
+        &active,
+        std::slice::from_ref(&room_b),
+        &mut tracker,
+        t0 + Duration::from_secs(11),
+        &policy,
+    ) {
+        Some(AudioProcessStateAction::RoomChanged {
+            ended_meeting_id,
+            changed_at,
+            meeting_url,
+            ..
+        }) => {
+            assert_eq!(ended_meeting_id, 7);
+            assert_eq!(changed_at, t0);
+            assert_eq!(meeting_url.as_deref(), Some(ROOM_B));
+        }
+        other => panic!("expected user-confirmed RoomChanged, got {other:?}"),
+    }
+}
+
+#[test]
+fn keeping_an_ambiguous_room_change_suppresses_the_automatic_split() {
+    let process = arc_process();
+    let t0 = Instant::now();
+    let active = active_meet(7, &process, ROOM_A, t0 - Duration::from_secs(600));
+    let room_a = meet_candidate(&process, ROOM_A, t0);
+    let room_b = meet_candidate(&process, ROOM_B, t0);
+    let rooms = HashSet::new();
+    let policy = room_policy(&rooms, false);
+    let mut tracker = RoomChangeTracker::default();
+
+    assert!(detect_room_change(&active, &[room_b.clone()], &mut tracker, t0, &policy).is_none());
+    assert!(detect_room_change(
+        &active,
+        &[room_b.clone()],
+        &mut tracker,
+        t0 + Duration::from_secs(10),
+        &policy,
+    )
+    .is_none());
+    let offer = tracker.take_offer().expect("room-change offer");
+    assert!(tracker.resolve_offer(&MeetingRoomChangeResponse {
+        meeting_id: 7,
+        token: offer.token,
+        decision: RoomChangeChoice::Keep,
+    }));
+
+    assert!(detect_room_change(
+        &active,
+        &[room_b.clone()],
+        &mut tracker,
+        t0 + Duration::from_secs(90),
+        &policy,
+    )
+    .is_none());
+    assert!(tracker.take_offer().is_none());
+
+    // Seeing the original room again resolves the ambiguity. A later,
+    // distinct episode may offer once more instead of being ignored forever.
+    assert!(detect_room_change(
+        &active,
+        &[room_a],
+        &mut tracker,
+        t0 + Duration::from_secs(91),
+        &policy,
+    )
+    .is_none());
+    assert!(detect_room_change(
+        &active,
+        &[room_b.clone()],
+        &mut tracker,
+        t0 + Duration::from_secs(92),
+        &policy,
+    )
+    .is_none());
+    assert!(detect_room_change(
+        &active,
+        &[room_b],
+        &mut tracker,
+        t0 + Duration::from_secs(102),
+        &policy,
+    )
+    .is_none());
+    assert!(tracker.take_offer().is_some());
+}
+
+fn calendar_event_with_url(
+    id: &str,
+    title: &str,
+    starts_in: chrono::Duration,
+    lasts: chrono::Duration,
+    meeting_url: Option<&str>,
+) -> CalendarEventSignal {
+    let mut event = calendar_event(id, title, starts_in, lasts, &["host@example.com"]);
+    event.meeting_url = meeting_url.map(str::to_string);
+    event
+}
+
+#[test]
+fn ordinary_transition_revives_a_meeting_in_a_new_room_which_is_the_merge_bug() {
+    // Documents the failure the room-change pass exists for: the same audio
+    // session re-taking the mic in a DIFFERENT room revives the old meeting
+    // and keeps the OLD url. Nothing else in the state machine notices.
+    let process = arc_process();
+    let start = Instant::now();
+    let ending = ending_meet(
+        175,
+        &process,
+        ROOM_A,
+        start,
+        start + Duration::from_secs(30),
+    );
+    let room_b = meet_candidate(&process, ROOM_B, start);
+
+    let (state, action) = advance_audio_process_state(
+        ending,
+        std::slice::from_ref(&room_b),
+        std::slice::from_ref(&room_b),
+        start + Duration::from_secs(33),
+        Duration::from_secs(1),
+        Duration::from_secs(20),
+    );
+    assert!(action.is_none());
+    assert!(matches!(
+        state,
+        AudioProcessMeetingState::Active { meeting_id: 175, meeting_url: Some(ref url), .. } if url == ROOM_A
+    ));
+}
+
+#[test]
+fn mic_reacquired_in_a_different_room_rolls_the_meeting_over_immediately() {
+    let process = arc_process();
+    let start = Instant::now();
+    let released_at = start + Duration::from_secs(30);
+    let ending = ending_meet(175, &process, ROOM_A, start, released_at);
+    let room_b = meet_candidate(&process, ROOM_B, start);
+    let rooms = HashSet::new();
+    let mut tracker = RoomChangeTracker::default();
+
+    let action = detect_room_change(
+        &ending,
+        std::slice::from_ref(&room_b),
+        &mut tracker,
+        released_at + Duration::from_secs(3),
+        &room_policy(&rooms, false),
+    );
+    match action {
+        Some(AudioProcessStateAction::RoomChanged {
+            ended_meeting_id,
+            ended_session,
+            changed_at,
+            platform,
+            meeting_url,
+            is_browser,
+            pid,
+            ..
+        }) => {
+            assert_eq!(ended_meeting_id, 175);
+            assert_eq!(changed_at, released_at, "the boundary is the mic release");
+            assert_eq!(ended_session.meeting_url.as_deref(), Some(ROOM_A));
+            assert_eq!(platform, "Google Meet");
+            assert_eq!(meeting_url.as_deref(), Some(ROOM_B));
+            assert!(is_browser);
+            assert_eq!(pid, process.pid);
+        }
+        other => panic!("expected RoomChanged, got {other:?}"),
+    }
+    assert!(tracker.pending_identity().is_none());
+}
+
+#[test]
+fn new_room_while_active_needs_sustained_evidence_when_configured() {
+    let process = arc_process();
+    let t0 = Instant::now();
+    let active = active_meet(7, &process, ROOM_A, t0 - Duration::from_secs(600));
+    let room_a = meet_candidate(&process, ROOM_A, t0);
+    let room_b = meet_candidate(&process, ROOM_B, t0);
+    let rooms = HashSet::new();
+    let policy = room_policy(&rooms, false);
+    let mut tracker = RoomChangeTracker::default();
+
+    // First sighting of B: not enough on its own.
+    assert!(detect_room_change(
+        &active,
+        std::slice::from_ref(&room_b),
+        &mut tracker,
+        t0,
+        &policy
+    )
+    .is_none());
+    assert_eq!(tracker.pending_identity(), Some(ROOM_B_IDENTITY));
+    assert!(detect_room_change(
+        &active,
+        std::slice::from_ref(&room_b),
+        &mut tracker,
+        t0 + Duration::from_secs(20),
+        &policy
+    )
+    .is_none());
+
+    // Seeing both rooms does not let the old room hide the new identity.
+    let both = vec![room_a, room_b.clone()];
+    assert!(detect_room_change(
+        &active,
+        &both,
+        &mut tracker,
+        t0 + Duration::from_secs(25),
+        &policy
+    )
+    .is_none());
+    assert_eq!(tracker.pending_identity(), Some(ROOM_B_IDENTITY));
+
+    assert!(detect_room_change(
+        &active,
+        std::slice::from_ref(&room_b),
+        &mut tracker,
+        t0 + Duration::from_secs(44),
+        &policy
+    )
+    .is_none());
+    match detect_room_change(
+        &active,
+        std::slice::from_ref(&room_b),
+        &mut tracker,
+        t0 + Duration::from_secs(45),
+        &policy,
+    ) {
+        Some(AudioProcessStateAction::RoomChanged {
+            ended_meeting_id,
+            changed_at,
+            meeting_url,
+            ..
+        }) => {
+            assert_eq!(ended_meeting_id, 7);
+            assert_eq!(
+                changed_at, t0,
+                "the boundary is the first uninterrupted sighting"
+            );
+            assert_eq!(meeting_url.as_deref(), Some(ROOM_B));
+        }
+        other => panic!("expected RoomChanged, got {other:?}"),
+    }
+}
+
+#[test]
+fn ended_old_tab_left_open_does_not_hide_the_new_room() {
+    let process = arc_process();
+    let t0 = Instant::now();
+    let active = active_meet(7, &process, ROOM_A, t0 - Duration::from_secs(600));
+    let room_a = meet_candidate(&process, ROOM_A, t0);
+    let room_b = meet_candidate(&process, ROOM_B, t0);
+    let both = vec![room_a, room_b];
+    let rooms = HashSet::new();
+    let policy = RoomChangePolicy {
+        confirm_window: ROOM_CHANGE_CONFIRM_WINDOW,
+        prompt_window: ROOM_CHANGE_PROMPT_WINDOW,
+        calendar_confirm_window: ROOM_CHANGE_CALENDAR_CONFIRM_WINDOW,
+        calendar_room_identities: &rooms,
+        calendar_boundary_crossed: false,
+    };
+    let mut tracker = RoomChangeTracker::default();
+
+    match detect_room_change(&active, &both, &mut tracker, t0, &policy) {
+        Some(AudioProcessStateAction::RoomChanged {
+            ended_meeting_id,
+            meeting_url,
+            ..
+        }) => {
+            assert_eq!(ended_meeting_id, 7);
+            assert_eq!(meeting_url.as_deref(), Some(ROOM_B));
+        }
+        other => panic!("expected RoomChanged, got {other:?}"),
+    }
+    assert!(tracker.take_offer().is_none());
+}
+
+#[test]
+fn new_room_that_is_the_next_calendar_event_confirms_fast() {
+    let process = arc_process();
+    let t0 = Instant::now();
+    let active = active_meet(7, &process, ROOM_A, t0 - Duration::from_secs(600));
+    let room_b = meet_candidate(&process, ROOM_B, t0);
+    let rooms: HashSet<String> = [ROOM_B_IDENTITY.to_string()].into_iter().collect();
+    let policy = room_policy(&rooms, true);
+    let mut tracker = RoomChangeTracker::default();
+
+    assert!(detect_room_change(
+        &active,
+        std::slice::from_ref(&room_b),
+        &mut tracker,
+        t0,
+        &policy
+    )
+    .is_none());
+    assert!(detect_room_change(
+        &active,
+        std::slice::from_ref(&room_b),
+        &mut tracker,
+        t0 + Duration::from_secs(4),
+        &policy
+    )
+    .is_none());
+    assert!(matches!(
+        detect_room_change(
+            &active,
+            std::slice::from_ref(&room_b),
+            &mut tracker,
+            t0 + Duration::from_secs(5),
+            &policy
+        ),
+        Some(AudioProcessStateAction::RoomChanged {
+            ended_meeting_id: 7,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn next_calendar_room_does_not_confirm_fast_before_the_current_event_ends() {
+    // Merely opening the next scheduled room while the current call still
+    // owns the mic is a preview, not a boundary. Calendar acceleration is
+    // allowed only after the bound event has actually rolled over.
+    let process = arc_process();
+    let t0 = Instant::now();
+    let active = active_meet(7, &process, ROOM_A, t0 - Duration::from_secs(600));
+    let room_b = meet_candidate(&process, ROOM_B, t0);
+    let rooms: HashSet<String> = [ROOM_B_IDENTITY.to_string()].into_iter().collect();
+    let policy = room_policy(&rooms, false);
+    let mut tracker = RoomChangeTracker::default();
+
+    assert!(detect_room_change(
+        &active,
+        std::slice::from_ref(&room_b),
+        &mut tracker,
+        t0,
+        &policy
+    )
+    .is_none());
+    assert!(detect_room_change(
+        &active,
+        std::slice::from_ref(&room_b),
+        &mut tracker,
+        t0 + Duration::from_secs(5),
+        &policy
+    )
+    .is_none());
+}
+
+#[test]
+fn same_room_under_a_different_query_string_is_not_a_room_change() {
+    let process = arc_process();
+    let t0 = Instant::now();
+    let same_room = meet_candidate(
+        &process,
+        "https://meet.google.com/aaa-aaaa-aaa?hs=122&authuser=1&pli=1",
+        t0,
+    );
+    let rooms = HashSet::new();
+    let policy = room_policy(&rooms, false);
+    let mut tracker = RoomChangeTracker::default();
+
+    let active = active_meet(7, &process, ROOM_A, t0);
+    assert!(detect_room_change(
+        &active,
+        std::slice::from_ref(&same_room),
+        &mut tracker,
+        t0 + Duration::from_secs(120),
+        &policy
+    )
+    .is_none());
+    let ending = ending_meet(7, &process, ROOM_A, t0, t0 + Duration::from_secs(5));
+    assert!(detect_room_change(
+        &ending,
+        std::slice::from_ref(&same_room),
+        &mut tracker,
+        t0 + Duration::from_secs(8),
+        &policy
+    )
+    .is_none());
+}
+
+#[test]
+fn url_evidence_loss_other_platforms_and_idle_never_trigger_a_room_change() {
+    // The existing keep-alive behaviors must be untouched: a browser meeting
+    // whose URL evidence lapsed (UnresolvedBrowser on the same key), an empty
+    // snapshot, and a candidate on another platform all leave the ordinary
+    // transition in charge.
+    let process = arc_process();
+    let t0 = Instant::now();
+    let active = active_meet(7, &process, ROOM_A, t0);
+    let rooms = HashSet::new();
+    let policy = room_policy(&rooms, false);
+    let mut tracker = RoomChangeTracker::default();
+
+    let unresolved = ResolvedMeetingCandidate::UnresolvedBrowser {
+        browser_app: "Arc".to_string(),
+        session_key: ProcessKey::from_process(&process).unwrap(),
+        first_seen_at: t0,
+        process: process.clone(),
+    };
+    assert!(detect_room_change(
+        &active,
+        std::slice::from_ref(&unresolved),
+        &mut tracker,
+        t0 + Duration::from_secs(90),
+        &policy
+    )
+    .is_none());
+    assert!(detect_room_change(
+        &active,
+        &[],
+        &mut tracker,
+        t0 + Duration::from_secs(90),
+        &policy
+    )
+    .is_none());
+
+    let zoom_web = ResolvedMeetingCandidate::Browser {
+        platform: "Zoom".to_string(),
+        meeting_url: "https://zoom.us/j/123456789".to_string(),
+        browser_app: "Arc".to_string(),
+        session_key: ProcessKey::from_process(&process).unwrap(),
+        first_seen_at: t0,
+        process: process.clone(),
+        live_evidence: false,
+    };
+    assert!(detect_room_change(
+        &active,
+        std::slice::from_ref(&zoom_web),
+        &mut tracker,
+        t0 + Duration::from_secs(90),
+        &policy
+    )
+    .is_none());
+
+    let room_b = meet_candidate(&process, ROOM_B, t0);
+    assert!(detect_room_change(
+        &AudioProcessMeetingState::Idle,
+        std::slice::from_ref(&room_b),
+        &mut tracker,
+        t0,
+        &policy
+    )
+    .is_none());
+    let placeholder = AudioProcessMeetingState::Active {
+        meeting_id: -1,
+        platform: "Google Meet".to_string(),
+        session_key: ProcessKey::from_process(&process).unwrap(),
+        meeting_url: Some(ROOM_A.to_string()),
+        first_seen_at: t0,
+        last_seen_at: t0,
+        is_browser: true,
+    };
+    assert!(detect_room_change(
+        &placeholder,
+        std::slice::from_ref(&room_b),
+        &mut tracker,
+        t0 + Duration::from_secs(90),
+        &policy
+    )
+    .is_none());
+}
+
+#[test]
+fn new_room_on_a_new_audio_session_with_the_old_one_gone_rolls_over_at_once() {
+    // The browser minted a new audio session for the next call and the old
+    // one is gone: the old call is over even though the state never reached
+    // `Ending`. No confirm window applies.
+    let old_process = arc_process();
+    let mut new_process = arc_process();
+    new_process.audio_session_id = Some("coreaudio-process:301:input:built-in-mic".to_string());
+    new_process.audio_object_id = Some(301);
+    let t0 = Instant::now();
+    let active = active_meet(7, &old_process, ROOM_A, t0 - Duration::from_secs(600));
+    let room_b = meet_candidate(&new_process, ROOM_B, t0);
+    let rooms = HashSet::new();
+    let mut tracker = RoomChangeTracker::default();
+
+    match detect_room_change(
+        &active,
+        std::slice::from_ref(&room_b),
+        &mut tracker,
+        t0,
+        &room_policy(&rooms, false),
+    ) {
+        Some(AudioProcessStateAction::RoomChanged {
+            ended_meeting_id,
+            changed_at,
+            session_key,
+            ..
+        }) => {
+            assert_eq!(ended_meeting_id, 7);
+            assert_eq!(changed_at, t0);
+            assert_eq!(session_key, ProcessKey::from_process(&new_process).unwrap());
+        }
+        other => panic!("expected RoomChanged, got {other:?}"),
+    }
+}
+
+#[test]
+fn native_app_reacquiring_the_mic_after_a_calendar_boundary_rolls_over() {
+    // Zoom back-to-back: the app drops the mic between calls and re-takes it
+    // within the grace. Without a URL the calendar is the only discriminator,
+    // and only the mic release makes it eligible — a boundary crossing while
+    // still holding the mic is an overrun, not a new call.
+    let process = zoom_process();
+    let t0 = Instant::now();
+    let key = ProcessKey::from_process(&process).unwrap();
+    let native = ResolvedMeetingCandidate::Native {
+        platform: "Zoom".to_string(),
+        session_key: key.clone(),
+        first_seen_at: t0,
+        process: process.clone(),
+    };
+    let released_at = t0 + Duration::from_secs(1800);
+    let ending = AudioProcessMeetingState::Ending {
+        meeting_id: 184,
+        platform: "Zoom".to_string(),
+        session_key: key.clone(),
+        meeting_url: None,
+        first_seen_at: t0,
+        since: released_at,
+        is_browser: false,
+    };
+    let rooms = HashSet::new();
+    let mut tracker = RoomChangeTracker::default();
+
+    assert!(detect_room_change(
+        &ending,
+        std::slice::from_ref(&native),
+        &mut tracker,
+        released_at + Duration::from_secs(5),
+        &room_policy(&rooms, false)
+    )
+    .is_none());
+    match detect_room_change(
+        &ending,
+        std::slice::from_ref(&native),
+        &mut tracker,
+        released_at + Duration::from_secs(5),
+        &room_policy(&rooms, true),
+    ) {
+        Some(AudioProcessStateAction::RoomChanged {
+            ended_meeting_id,
+            changed_at,
+            platform,
+            meeting_url,
+            is_browser,
+            ..
+        }) => {
+            assert_eq!(ended_meeting_id, 184);
+            assert_eq!(changed_at, released_at);
+            assert_eq!(platform, "Zoom");
+            assert!(meeting_url.is_none());
+            assert!(!is_browser);
+        }
+        other => panic!("expected RoomChanged, got {other:?}"),
+    }
+
+    let active = AudioProcessMeetingState::Active {
+        meeting_id: 184,
+        platform: "Zoom".to_string(),
+        session_key: key,
+        meeting_url: None,
+        first_seen_at: t0,
+        last_seen_at: released_at,
+        is_browser: false,
+    };
+    assert!(detect_room_change(
+        &active,
+        std::slice::from_ref(&native),
+        &mut tracker,
+        released_at,
+        &room_policy(&rooms, true)
+    )
+    .is_none());
+}
+
+#[test]
+fn calendar_room_identities_cover_only_joinable_other_events() {
+    let now = Utc::now();
+    let events = vec![
+        calendar_event_with_url(
+            "cal-a",
+            "Bound, in progress",
+            chrono::Duration::minutes(-20),
+            chrono::Duration::minutes(30),
+            Some(ROOM_A),
+        ),
+        calendar_event_with_url(
+            "cal-b",
+            "Next, starts soon",
+            chrono::Duration::minutes(2),
+            chrono::Duration::minutes(15),
+            Some(ROOM_B),
+        ),
+        calendar_event_with_url(
+            "cal-c",
+            "Far future",
+            chrono::Duration::minutes(30),
+            chrono::Duration::minutes(15),
+            Some("https://meet.google.com/ccc-cccc-ccc"),
+        ),
+        calendar_event_with_url(
+            "cal-d",
+            "Already over",
+            chrono::Duration::minutes(-40),
+            chrono::Duration::minutes(20),
+            Some("https://meet.google.com/ddd-dddd-ddd"),
+        ),
+        calendar_event_with_url(
+            "cal-e",
+            "No link",
+            chrono::Duration::minutes(-1),
+            chrono::Duration::minutes(30),
+            None,
+        ),
+    ];
+    let rooms = calendar_room_identities_now(&events, now, Some("cal-a"));
+    assert_eq!(
+        rooms,
+        [ROOM_B_IDENTITY.to_string()]
+            .into_iter()
+            .collect::<HashSet<_>>()
+    );
+    // Without an exclusion the bound room is joinable too.
+    assert!(calendar_room_identities_now(&events, now, None).contains(ROOM_A_IDENTITY));
+}
+
+#[test]
+fn calendar_boundary_crossed_requires_an_ended_bound_event_and_a_compatible_next_one() {
+    let now = Utc::now();
+    let zoom_x = Some("https://zoom.us/j/111111111");
+    let zoom_y = Some("https://zoom.us/j/222222222");
+    let ended_x = calendar_event_with_url(
+        "cal-x",
+        "Coaching",
+        chrono::Duration::minutes(-60),
+        chrono::Duration::minutes(59),
+        zoom_x,
+    );
+    let live_y = calendar_event_with_url(
+        "cal-y",
+        "Next Zoom",
+        chrono::Duration::minutes(-1),
+        chrono::Duration::minutes(30),
+        zoom_y,
+    );
+
+    assert!(calendar_boundary_crossed(
+        &[ended_x.clone(), live_y.clone()],
+        now,
+        Some("cal-x"),
+        "Zoom"
+    ));
+    assert_eq!(
+        calendar_event_ended(std::slice::from_ref(&ended_x), "cal-x", now),
+        Some(true)
+    );
+    assert_eq!(
+        calendar_event_ended(std::slice::from_ref(&ended_x), "cal-missing", now),
+        None
+    );
+
+    // Bound event still in progress (overlapping events): an overrun, not a boundary.
+    let live_x = calendar_event_with_url(
+        "cal-x",
+        "Coaching",
+        chrono::Duration::minutes(-60),
+        chrono::Duration::minutes(90),
+        zoom_x,
+    );
+    assert!(!calendar_boundary_crossed(
+        &[live_x, live_y.clone()],
+        now,
+        Some("cal-x"),
+        "Zoom"
+    ));
+
+    // Next event is a Meet link: not this Zoom call.
+    let meet_y = calendar_event_with_url(
+        "cal-y",
+        "Next Meet",
+        chrono::Duration::minutes(-1),
+        chrono::Duration::minutes(30),
+        Some(ROOM_B),
+    );
+    assert!(!calendar_boundary_crossed(
+        &[ended_x.clone(), meet_y.clone()],
+        now,
+        Some("cal-x"),
+        "Zoom"
+    ));
+    assert!(!calendar_event_matches_platform(&meet_y, "Zoom"));
+    assert!(calendar_event_matches_platform(&meet_y, "Google Meet"));
+
+    // A next event without a link is compatible with any platform.
+    let plain_y = calendar_event_with_url(
+        "cal-y",
+        "Sync",
+        chrono::Duration::minutes(-1),
+        chrono::Duration::minutes(30),
+        None,
+    );
+    assert!(calendar_event_matches_platform(&plain_y, "Slack"));
+    assert!(calendar_boundary_crossed(
+        &[ended_x.clone(), plain_y],
+        now,
+        Some("cal-x"),
+        "Zoom"
+    ));
+
+    // Unknown or missing bound event: never split on calendar evidence alone.
+    assert!(!calendar_boundary_crossed(
+        &[ended_x.clone(), live_y.clone()],
+        now,
+        None,
+        "Zoom"
+    ));
+    assert!(!calendar_boundary_crossed(
+        std::slice::from_ref(&live_y),
+        now,
+        Some("cal-x"),
+        "Zoom"
+    ));
+    assert!(!calendar_boundary_crossed(
+        &[ended_x],
+        now,
+        Some("cal-x"),
+        "Zoom"
+    ));
+}
+
+#[tokio::test]
+async fn room_changed_rows_are_never_reopened_by_the_merge_window() {
+    let (_dir, db) = setup_db().await;
+    let ended_at = (Utc::now() - chrono::Duration::seconds(10))
+        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+        .to_string();
+
+    let natural = db
+        .insert_meeting("Google Meet", "audio_process", None, None)
+        .await
+        .unwrap();
+    db.end_meeting(natural, &ended_at, None).await.unwrap();
+    assert_eq!(
+        db.find_recent_meeting_for_app("Google Meet", 120)
+            .await
+            .unwrap()
+            .map(|m| m.id),
+        Some(natural),
+        "a natural end stays eligible for the merge window"
+    );
+
+    let changed = db
+        .insert_meeting("Google Meet", "audio_process", None, None)
+        .await
+        .unwrap();
+    db.end_meeting(changed, &ended_at, Some(MEETING_END_REASON_ROOM_CHANGED))
+        .await
+        .unwrap();
+    assert_eq!(
+        db.meeting_end_reason(changed).await.unwrap().as_deref(),
+        Some(MEETING_END_REASON_ROOM_CHANGED)
+    );
+    assert_eq!(
+        db.find_recent_meeting_for_app("Google Meet", 120)
+            .await
+            .unwrap()
+            .map(|m| m.id),
+        Some(natural),
+        "the room_changed row is skipped even though it ended more recently"
+    );
+}
+
+#[tokio::test]
+async fn merge_window_refuses_a_session_in_a_different_room() {
+    let (_dir, db) = setup_db().await;
+    let manual_meeting = tokio::sync::RwLock::new(None);
+    let first = match start_meeting_with_calendar(&db, &[], "Google Meet").await {
+        AutoStartOutcome::Started(id) => id,
+        other => panic!("expected a meeting to start, got {other:?}"),
+    };
+    end_meeting_ago(&db, first, chrono::Duration::seconds(10)).await;
+    let ended_room = EndedRoom {
+        meeting_id: first,
+        identity: Some(ROOM_A_IDENTITY.to_string()),
+    };
+
+    // Same room within the window: a rejoin, continue the row.
+    let same_room = ReopenGuard {
+        last_ended_room: Some(&ended_room),
+        observed_room: Some(ROOM_A_IDENTITY),
+        ..ReopenGuard::default()
+    };
+    assert_eq!(
+        start_or_adopt_auto_meeting_guarded(
+            &db,
+            &manual_meeting,
+            "Google Meet",
+            None,
+            &same_room,
+            Utc::now(),
+            Utc::now()
+        )
+        .await,
+        AutoStartOutcome::AdoptedActive(first)
+    );
+    end_meeting_ago(&db, first, chrono::Duration::seconds(10)).await;
+
+    // Different room: the next call gets its own row.
+    let other_room = ReopenGuard {
+        last_ended_room: Some(&ended_room),
+        observed_room: Some(ROOM_B_IDENTITY),
+        ..ReopenGuard::default()
+    };
+    match start_or_adopt_auto_meeting_guarded(
+        &db,
+        &manual_meeting,
+        "Google Meet",
+        None,
+        &other_room,
+        Utc::now(),
+        Utc::now(),
+    )
+    .await
+    {
+        AutoStartOutcome::Started(second) => assert_ne!(second, first),
+        other => panic!("expected a fresh meeting, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn merge_window_refuses_a_rejoin_once_the_bound_event_ended_and_the_next_began() {
+    let (_dir, db) = setup_db().await;
+    let manual_meeting = tokio::sync::RwLock::new(None);
+    let now = Utc::now();
+    let first = db
+        .insert_meeting_with_calendar_at(
+            "Zoom",
+            "audio_process",
+            Some("Coaching"),
+            None,
+            Some("cal-x"),
+            now - chrono::Duration::minutes(50),
+        )
+        .await
+        .unwrap();
+    end_meeting_ago(&db, first, chrono::Duration::seconds(10)).await;
+
+    // Bound event X still running (overlapping events): keep the row.
+    let overlapping = vec![
+        calendar_event_with_url(
+            "cal-x",
+            "Coaching",
+            chrono::Duration::minutes(-60),
+            chrono::Duration::minutes(90),
+            None,
+        ),
+        calendar_event_with_url(
+            "cal-y",
+            "Board sync",
+            chrono::Duration::minutes(-1),
+            chrono::Duration::minutes(30),
+            None,
+        ),
+    ];
+    let binding = resolve_calendar_binding(&db, &overlapping, now, None).await;
+    assert_eq!(binding.as_ref().map(|b| b.key.as_str()), Some("cal-y"));
+    let guard = ReopenGuard {
+        calendar_events: &overlapping,
+        ..ReopenGuard::default()
+    };
+    assert_eq!(
+        start_or_adopt_auto_meeting_guarded(
+            &db,
+            &manual_meeting,
+            "Zoom",
+            binding.as_ref(),
+            &guard,
+            now,
+            now
+        )
+        .await,
+        AutoStartOutcome::AdoptedActive(first)
+    );
+    end_meeting_ago(&db, first, chrono::Duration::seconds(10)).await;
+
+    // X ended, Y (no link) in progress: the calendar rolled over.
+    let rolled = vec![
+        calendar_event_with_url(
+            "cal-x",
+            "Coaching",
+            chrono::Duration::minutes(-60),
+            chrono::Duration::minutes(59),
+            None,
+        ),
+        calendar_event_with_url(
+            "cal-y",
+            "Board sync",
+            chrono::Duration::minutes(-1),
+            chrono::Duration::minutes(30),
+            None,
+        ),
+    ];
+    let binding = resolve_calendar_binding(&db, &rolled, now, None).await;
+    let guard = ReopenGuard {
+        calendar_events: &rolled,
+        ..ReopenGuard::default()
+    };
+    let second = match start_or_adopt_auto_meeting_guarded(
+        &db,
+        &manual_meeting,
+        "Zoom",
+        binding.as_ref(),
+        &guard,
+        now,
+        now,
+    )
+    .await
+    {
+        AutoStartOutcome::Started(id) => id,
+        other => panic!("expected a fresh meeting, got {other:?}"),
+    };
+    assert_ne!(second, first);
+    assert_eq!(
+        db.get_meeting_by_id(second).await.unwrap().title.as_deref(),
+        Some("Board sync")
+    );
+    assert_eq!(
+        db.get_meeting_by_id(first).await.unwrap().title.as_deref(),
+        Some("Coaching")
+    );
+    // Push `second` out of the merge window so the next check targets `third`.
+    end_meeting_ago(&db, second, chrono::Duration::minutes(10)).await;
+
+    // X ended but the next event is a Meet link: not this Zoom call, so a
+    // Zoom session within the window is still a rejoin of the Zoom row.
+    let third = db
+        .insert_meeting_with_calendar_at(
+            "Zoom",
+            "audio_process",
+            Some("Coaching 2"),
+            None,
+            Some("cal-x2"),
+            now - chrono::Duration::minutes(50),
+        )
+        .await
+        .unwrap();
+    end_meeting_ago(&db, third, chrono::Duration::seconds(10)).await;
+    let cross_provider = vec![
+        calendar_event_with_url(
+            "cal-x2",
+            "Coaching 2",
+            chrono::Duration::minutes(-60),
+            chrono::Duration::minutes(59),
+            None,
+        ),
+        calendar_event_with_url(
+            "cal-z",
+            "Meet next",
+            chrono::Duration::minutes(-1),
+            chrono::Duration::minutes(30),
+            Some(ROOM_B),
+        ),
+    ];
+    let binding = resolve_calendar_binding(&db, &cross_provider, now, None).await;
+    assert_eq!(binding.as_ref().map(|b| b.key.as_str()), Some("cal-z"));
+    let guard = ReopenGuard {
+        calendar_events: &cross_provider,
+        ..ReopenGuard::default()
+    };
+    assert_eq!(
+        start_or_adopt_auto_meeting_guarded(
+            &db,
+            &manual_meeting,
+            "Zoom",
+            binding.as_ref(),
+            &guard,
+            now,
+            now
+        )
+        .await,
+        AutoStartOutcome::AdoptedActive(third)
+    );
+}
+
+#[tokio::test]
+async fn calendar_rollover_uses_stable_keys_when_provider_ids_are_missing() {
+    let (_dir, db) = setup_db().await;
+    let manual_meeting = tokio::sync::RwLock::new(None);
+    let now = Utc::now();
+    let ended_event = calendar_event_with_url(
+        "",
+        "Coaching without provider id",
+        chrono::Duration::minutes(-60),
+        chrono::Duration::minutes(59),
+        None,
+    );
+    let next_event = calendar_event_with_url(
+        "",
+        "Board sync without provider id",
+        chrono::Duration::minutes(-1),
+        chrono::Duration::minutes(30),
+        None,
+    );
+    let ended_key = stable_event_key(&ended_event);
+    let first = db
+        .insert_meeting_with_calendar_at(
+            "Zoom",
+            "audio_process",
+            Some(&ended_event.title),
+            None,
+            Some(&ended_key),
+            now - chrono::Duration::minutes(50),
+        )
+        .await
+        .unwrap();
+    end_meeting_ago(&db, first, chrono::Duration::seconds(10)).await;
+
+    let events = vec![ended_event, next_event];
+    let binding = resolve_calendar_binding(&db, &events, now, None)
+        .await
+        .expect("the next event should resolve");
+    assert!(!binding.key.is_empty());
+    let guard = ReopenGuard {
+        calendar_events: &events,
+        ..ReopenGuard::default()
+    };
+    match start_or_adopt_auto_meeting_guarded(
+        &db,
+        &manual_meeting,
+        "Zoom",
+        Some(&binding),
+        &guard,
+        now,
+        now,
+    )
+    .await
+    {
+        AutoStartOutcome::Started(second) => assert_ne!(second, first),
+        other => panic!("expected a fresh meeting, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn room_change_action_closes_the_old_row_and_starts_the_next_calendar_meeting() {
+    let (_dir, db) = setup_db().await;
+    let process = arc_process();
+    let key = ProcessKey::from_process(&process).unwrap();
+    let manual_meeting = tokio::sync::RwLock::new(None);
+    let mut state = AudioProcessMeetingState::Idle;
+    let mut suppressed = Vec::new();
+    let mut flap_count = 3;
+    let in_meeting = AtomicBool::new(false);
+    let now = Instant::now();
+    let now_utc = Utc::now();
+    let events = vec![
+        calendar_event_with_url(
+            "cal-a",
+            "Room A event",
+            chrono::Duration::minutes(-25),
+            chrono::Duration::minutes(24),
+            Some(ROOM_A),
+        ),
+        calendar_event_with_url(
+            "cal-b",
+            "Room B event",
+            chrono::Duration::minutes(-1),
+            chrono::Duration::minutes(15),
+            Some(ROOM_B),
+        ),
+    ];
+
+    // Meeting A started 20 minutes ago in room A.
+    apply_state_action(
+        AudioProcessStateAction::StartMeeting {
+            platform: "Google Meet".to_string(),
+            session_key: key.clone(),
+            meeting_url: Some(ROOM_A.to_string()),
+            first_seen_at: now - Duration::from_secs(20 * 60),
+            is_browser: true,
+            pid: process.pid,
+            bundle_id: process.bundle_id.clone(),
+        },
+        &db,
+        &manual_meeting,
+        &mut state,
+        &mut suppressed,
+        &mut flap_count,
+        &in_meeting,
+        &None,
+        None,
+        None,
+        &events,
+        now - Duration::from_secs(20 * 60),
+        now_utc - chrono::Duration::minutes(20),
+    )
+    .await;
+    let meeting_a = match &state {
+        AudioProcessMeetingState::Active { meeting_id, .. } => *meeting_id,
+        other => panic!("expected meeting A to be active, got {other:?}"),
+    };
+    assert_eq!(
+        db.get_meeting_by_id(meeting_a)
+            .await
+            .unwrap()
+            .title
+            .as_deref(),
+        Some("Room A event")
+    );
+
+    // The browser released the mic 30s ago and re-took it in room B.
+    let changed_at = now - Duration::from_secs(30);
+    flap_count = 3;
+    apply_state_action(
+        AudioProcessStateAction::RoomChanged {
+            ended_meeting_id: meeting_a,
+            ended_session: SuppressedSession {
+                session_key: key.clone(),
+                platform: Some("Google Meet".to_string()),
+                meeting_url: Some(ROOM_A.to_string()),
+            },
+            ended_first_seen_at: now - Duration::from_secs(20 * 60),
+            ended_is_browser: true,
+            changed_at,
+            platform: "Google Meet".to_string(),
+            session_key: key.clone(),
+            meeting_url: Some(ROOM_B.to_string()),
+            is_browser: true,
+            pid: process.pid,
+            bundle_id: process.bundle_id.clone(),
+        },
+        &db,
+        &manual_meeting,
+        &mut state,
+        &mut suppressed,
+        &mut flap_count,
+        &in_meeting,
+        &None,
+        None,
+        None,
+        &events,
+        now,
+        now_utc,
+    )
+    .await;
+
+    let meeting_b = match &state {
+        AudioProcessMeetingState::Active {
+            meeting_id,
+            meeting_url,
+            ..
+        } => {
+            assert_eq!(meeting_url.as_deref(), Some(ROOM_B));
+            *meeting_id
+        }
+        other => panic!("expected meeting B to be active, got {other:?}"),
+    };
+    assert_ne!(
+        meeting_b, meeting_a,
+        "the just-closed row must not be reopened"
+    );
+    assert!(in_meeting.load(Ordering::Relaxed));
+    assert_eq!(flap_count, 0);
+
+    let row_a = db.get_meeting_by_id(meeting_a).await.unwrap();
+    let row_b = db.get_meeting_by_id(meeting_b).await.unwrap();
+    assert_eq!(
+        db.meeting_end_reason(meeting_a).await.unwrap().as_deref(),
+        Some(MEETING_END_REASON_ROOM_CHANGED)
+    );
+    assert_eq!(row_a.title.as_deref(), Some("Room A event"));
+    assert_eq!(row_b.title.as_deref(), Some("Room B event"));
+    assert_eq!(row_b.attendees.as_deref(), Some("host@example.com"));
+    assert!(row_b.meeting_end.is_none());
+    assert_eq!(
+        db.meeting_calendar_event_id(meeting_b)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("cal-b")
+    );
+
+    // Contiguous rows: A ends exactly where B starts, at the mic release.
+    let expected_boundary = now_utc - chrono::Duration::seconds(30);
+    let a_end = chrono::DateTime::parse_from_rfc3339(row_a.meeting_end.as_deref().unwrap())
+        .unwrap()
+        .with_timezone(&Utc);
+    let b_start = chrono::DateTime::parse_from_rfc3339(&row_b.meeting_start)
+        .unwrap()
+        .with_timezone(&Utc);
+    assert_eq!(
+        a_end.timestamp_millis(),
+        expected_boundary.timestamp_millis()
+    );
+    assert_eq!(
+        b_start.timestamp_millis(),
+        expected_boundary.timestamp_millis()
+    );
+
+    // The merge window cannot glue B back onto A ...
+    assert!(db
+        .find_recent_meeting_for_app("Google Meet", 120)
+        .await
+        .unwrap()
+        .is_none());
+    // ... and a stale frame of room A on the same session cannot restart A,
+    // while room B on that session is untouched.
+    let mut candidates = vec![
+        meet_candidate(&process, ROOM_A, now),
+        meet_candidate(&process, ROOM_B, now),
+    ];
+    filter_suppressed_candidates(&mut candidates, &suppressed);
+    assert_eq!(candidates.len(), 1);
+    assert!(
+        matches!(&candidates[0], ResolvedMeetingCandidate::Browser { meeting_url, .. } if meeting_url == ROOM_B)
+    );
+}
+
+#[tokio::test]
+async fn failed_room_change_close_restores_the_old_ending_state_for_retry() {
+    let (_dir, db) = setup_db().await;
+    let process = arc_process();
+    let key = ProcessKey::from_process(&process).unwrap();
+    let manual_meeting = tokio::sync::RwLock::new(None);
+    let mut state = AudioProcessMeetingState::Idle;
+    let mut suppressed = Vec::new();
+    let mut flap_count = 0;
+    let in_meeting = AtomicBool::new(true);
+    let now = Instant::now();
+    let first_seen_at = now - Duration::from_secs(600);
+    let changed_at = now - Duration::from_secs(3);
+
+    apply_state_action(
+        AudioProcessStateAction::RoomChanged {
+            ended_meeting_id: 999_999,
+            ended_session: SuppressedSession {
+                session_key: key.clone(),
+                platform: Some("Google Meet".to_string()),
+                meeting_url: Some(ROOM_A.to_string()),
+            },
+            ended_first_seen_at: first_seen_at,
+            ended_is_browser: true,
+            changed_at,
+            platform: "Google Meet".to_string(),
+            session_key: key,
+            meeting_url: Some(ROOM_B.to_string()),
+            is_browser: true,
+            pid: process.pid,
+            bundle_id: process.bundle_id.clone(),
+        },
+        &db,
+        &manual_meeting,
+        &mut state,
+        &mut suppressed,
+        &mut flap_count,
+        &in_meeting,
+        &None,
+        None,
+        None,
+        &[],
+        now,
+        Utc::now(),
+    )
+    .await;
+
+    assert!(
+        suppressed.is_empty(),
+        "the old room remains observable for retry"
+    );
+    assert!(in_meeting.load(Ordering::Relaxed));
+    assert!(matches!(
+        state,
+        AudioProcessMeetingState::Ending {
+            meeting_id: 999_999,
+            meeting_url: Some(ref url),
+            first_seen_at: seen,
+            since,
+            ..
+        } if url == ROOM_A && seen == first_seen_at && since == changed_at
+    ));
 }

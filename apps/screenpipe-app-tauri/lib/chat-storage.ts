@@ -14,6 +14,7 @@ import {
   stat,
 } from "@tauri-apps/plugin-fs";
 import type {
+  AgentHarness,
   ChatConversation,
   ConversationKind,
   PipeContext,
@@ -27,6 +28,8 @@ import {
   conversationDedupKey,
   messagesHaveCompletedReply,
 } from "@/lib/chat-dedup";
+import { mergeConversations } from "@/lib/chat-merge";
+import { isEphemeralSideConversationNamespaceId } from "@/lib/chat/ephemeral-side-conversation";
 
 // Cap on how many (most-recent) conversation files a content search will open
 // and scan. Title matches are cheap over the full ordered list; only the
@@ -130,18 +133,112 @@ async function notifySaveFailure(e: unknown): Promise<void> {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Single-writer discipline for conversation files.
+//
+// A conversation has many independent writers: the chat panel autosave, the pi
+// event router's background save, the sidebar's pin/hide/rename, the browser
+// sidebar's `browserState`, and pipe-run recording. Every one of them did a
+// read-modify-write of the whole file with no concurrency control, so two
+// writers that overlapped produced a LOST UPDATE: `rename()` is atomic, so the
+// file was never torn — the later writer simply replaced the earlier writer's
+// content wholesale. A reply that had already been persisted disappeared on
+// next load while still sitting in the in-memory store, which is what made it
+// look like a rendering bug rather than data loss.
+//
+// Two layers fix it:
+//
+//  1. Cross-webview serialization (`withConversationLock`). The Web Locks API
+//     gives every same-origin webview one shared lock namespace; the local
+//     promise queue is retained as a fallback for tests/SSR and runtimes that
+//     do not expose Web Locks. This closes the read -> rename race, not only the
+//     earlier temporary-file collision.
+//  2. Compare-and-swap across processes (`persistWithMerge`). Every save bumps
+//     a monotonic `rev`. A writer whose base `rev` is behind what's on disk
+//     lost a race, so its content is merged with the winner's rather than
+//     overwriting it. See `chat-merge.ts` for the field policy.
+//
+// A writer that never tracked `rev` reads as 0 and therefore always merges,
+// which is the safe default for the call sites that hand us a whole object
+// built from in-memory state.
+// ---------------------------------------------------------------------------
+
+const conversationWriteQueues = new Map<string, Promise<unknown>>();
+
+/** Serialize an async write against other writes for the same conversation id.
+ *  Failures are isolated: a rejected task never poisons the queue for the next
+ *  writer, and the map entry is dropped once the chain drains so long-lived
+ *  sessions don't leak one promise per conversation ever touched. */
+async function withConversationLock<T>(
+  id: string,
+  task: () => Promise<T>
+): Promise<T> {
+  const runInProcess = (): Promise<T> => {
+    const previous = conversationWriteQueues.get(id) ?? Promise.resolve();
+    // `then(task, task)` so a failed predecessor still lets us run.
+    const run = previous.then(task, task);
+    const guarded = run.catch(() => undefined);
+    conversationWriteQueues.set(id, guarded);
+    void guarded.then(() => {
+      // Only clear if nobody queued behind us in the meantime.
+      if (conversationWriteQueues.get(id) === guarded) {
+        conversationWriteQueues.delete(id);
+      }
+    });
+    return run;
+  };
+
+  // Each Tauri webview has its own JS module state, so a module-local promise
+  // queue cannot serialize the chat panel, search window, and background
+  // writers with one another. Web Locks are origin-wide and therefore make
+  // the read/revision-check/write sequence one critical section across those
+  // contexts. The current desktop webviews already use this primitive for the
+  // onboarding follow-up scheduler.
+  if (typeof navigator !== "undefined" && "locks" in navigator) {
+    return await navigator.locks.request(
+      `screenpipe-chat-conversation:${id}`,
+      runInProcess,
+    );
+  }
+
+  return runInProcess();
+}
+
+/** Reset the in-process write queues. Tests only. */
+export function __resetConversationWriteQueuesForTests(): void {
+  conversationWriteQueues.clear();
+}
+
+/** Persist a conversation, merging when the on-disk copy has moved past the
+ *  base this writer loaded. MUST be called while holding the id's lock. */
+async function persistWithMerge(conv: ChatConversation): Promise<void> {
+  const disk = await loadConversationFile(conv.id);
+  const diskRev = disk?.rev ?? 0;
+  const baseRev = conv.rev ?? 0;
+
+  // Conflict: someone else wrote this conversation after we loaded it. Keep
+  // both sides' work instead of letting the last rename win.
+  const resolved =
+    disk && diskRev > baseRev ? mergeConversations(disk, conv) : conv;
+
+  await writeConversationFile({ ...resolved, rev: Math.max(diskRev, baseRev) + 1 });
+}
+
 export async function saveConversationFile(
   conv: ChatConversation
 ): Promise<void> {
+  // Defense in depth: temporary side chats must never reach disk even if a
+  // future caller bypasses the UI/store guards.
+  if (isEphemeralSideConversationNamespaceId(conv.id)) return;
   try {
-    await saveConversationFileInner(conv);
+    await withConversationLock(conv.id, () => persistWithMerge(conv));
   } catch (e) {
     await notifySaveFailure(e);
     throw e;
   }
 }
 
-async function saveConversationFileInner(
+async function writeConversationFile(
   conv: ChatConversation
 ): Promise<void> {
   const dir = await ensureChatsDir();
@@ -184,6 +281,7 @@ async function saveConversationFileInner(
 export async function loadConversationFile(
   id: string
 ): Promise<ChatConversation | null> {
+  if (isEphemeralSideConversationNamespaceId(id)) return null;
   const dir = await getChatsDir();
   const filePath = `${dir}/${conversationFilename(id)}`;
   try {
@@ -268,6 +366,13 @@ export interface ConversationMeta {
   /** The AI preset ID last used in this conversation. Used to restore
    *  the model selection when switching between chats. */
   presetId?: string;
+  /** Provenance for a local Codex or Claude conversation copied into screenpipe. */
+  importedFrom?: {
+    source: "claude-code" | "codex";
+    sourceId: string;
+    importedAt: number;
+    harness?: AgentHarness;
+  };
 }
 
 interface ConversationEntry {
@@ -367,6 +472,7 @@ async function orderedConversationEntries(dir: string): Promise<ConversationEntr
 
 export function conversationMetaFromJson(conv: any): ConversationMeta | null {
   if (!conv || typeof conv.id !== "string") return null;
+  if (isEphemeralSideConversationNamespaceId(conv.id)) return null;
 
   const messages = Array.isArray(conv.messages) ? conv.messages : [];
   let newestUserMessageAt: number | undefined;
@@ -411,6 +517,13 @@ export function conversationMetaFromJson(conv: any): ConversationMeta | null {
     dedupKey: conversationDedupIdentity(conv) ?? undefined,
     branchedFrom: typeof conv.branchedFrom === "string" ? conv.branchedFrom : undefined,
     presetId: typeof conv.presetId === "string" ? conv.presetId : undefined,
+    importedFrom:
+      conv.importedFrom &&
+      (conv.importedFrom.source === "claude-code" || conv.importedFrom.source === "codex") &&
+      typeof conv.importedFrom.sourceId === "string" &&
+      typeof conv.importedFrom.importedAt === "number"
+        ? conv.importedFrom
+        : undefined,
   };
 }
 
@@ -671,10 +784,38 @@ export async function updateConversationFlags(
   id: string,
   patch: Partial<Pick<ChatConversation, "pinned" | "hidden" | "title" | "titleSource" | "browserState" | "lastViewedAt" | "sidebarGroup">>
 ): Promise<void> {
-  const conv = await loadConversationFile(id);
-  if (!conv) return;
-  const next: ChatConversation = { ...conv, ...patch };
-  await saveConversationFile(next);
+  if (isEphemeralSideConversationNamespaceId(id)) return;
+  // The read MUST happen inside the lock. Loading first and saving second was
+  // the original lost-update: the sidebar would load a 4-message conversation,
+  // the panel would persist a 5th message, and this write would then rename a
+  // stale 4-message copy over it — silently deleting the reply. Reading here
+  // means the base is always the newest copy this process knows about, and
+  // `persistWithMerge` covers a writer in another process.
+  try {
+    await withConversationLock(id, async () => {
+      const conv = await loadConversationFile(id);
+      if (!conv) return;
+      await persistWithMerge({ ...conv, ...patch });
+    });
+  } catch (e) {
+    await notifySaveFailure(e);
+    throw e;
+  }
+}
+
+// Check the current selection inside the write lock so deleting a preset
+// cannot overwrite a newer model choice made while dependencies were scanned.
+export async function reassignConversationPreset(
+  id: string,
+  removedIds: ReadonlySet<string>,
+  replacementId: string,
+): Promise<void> {
+  if (isEphemeralSideConversationNamespaceId(id)) return;
+  await withConversationLock(id, async () => {
+    const conv = await loadConversationFile(id);
+    if (!conv?.presetId || !removedIds.has(conv.presetId)) return;
+    await persistWithMerge({ ...conv, presetId: replacementId });
+  });
 }
 
 export async function loadAllConversations(

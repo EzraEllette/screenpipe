@@ -1230,10 +1230,11 @@ export function LiveViewCanvas({
     }
     // The recognizer proves this platform delivers native pinch, so the
     // canvas stops trusting ctrl+wheel to describe the same fingers. Latch
-    // before the focus/hover guards below: a pinch this canvas ignores still
-    // tells us the recognizer is running.
+    // before the hover guard below: a pinch outside this canvas still tells us
+    // the recognizer is running. Rust scopes native events to their source
+    // window, so an inactive window under the pointer remains interactive.
     nativeMagnifySeenRef.current = true;
-    if (!canvasActiveRef.current || !window.document.hasFocus()) return;
+    if (!canvasActiveRef.current) return;
     // A real pinch takes over from an in-flight AI focus animation, the same
     // way a trusted pan or wheel zoom does.
     cancelFocusAnimation();
@@ -1436,11 +1437,19 @@ export function LiveViewCanvas({
     TOOL_OPTIONS.find((option) => option.value === tool) ?? TOOL_OPTIONS[0];
   const ActiveToolIcon = activeTool.icon;
 
+  // Any deliberate interaction owns the viewport immediately. The toolbar is
+  // a sibling of the React Flow surface, so cancellation belongs on their
+  // common ancestor: otherwise an in-flight AI proposal focus can keep moving
+  // underneath a pointer, keyboard, or accessibility click and make that
+  // interaction appear to zoom.
   return (
     <section
       data-testid="live-view-canvas"
       className="relative min-h-0 w-full flex-1 overflow-hidden border border-border bg-background"
       aria-label="Live View process canvas"
+      onPointerDownCapture={() => cancelFocusAnimation()}
+      onClickCapture={() => cancelFocusAnimation()}
+      onKeyDownCapture={() => cancelFocusAnimation()}
     >
       <div
         ref={surfaceRef}

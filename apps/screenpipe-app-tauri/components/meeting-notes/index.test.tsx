@@ -182,7 +182,7 @@ afterEach(() => {
 });
 
 describe("MeetingNotesSection meeting selection", () => {
-  it("opens the transcript for an ordinary meeting with no saved note", async () => {
+  it("opens notes for an ordinary meeting with no saved outcome", async () => {
     mocks.localFetch.mockResolvedValue(meetingsResponse([emptyNoteMeeting]));
     renderMeetingNotes();
 
@@ -191,12 +191,13 @@ describe("MeetingNotesSection meeting selection", () => {
     );
 
     const note = await screen.findByRole("region", { name: "meeting note" });
-    expect(note).toHaveAttribute("data-transcript-open", "true");
+    expect(note).toHaveAttribute("data-transcript-open", "false");
+    expect(note).toHaveAttribute("data-active-tab", "notes");
     expect(screen.getByTestId("saved-note")).toBeEmptyDOMElement();
-    expect(screen.getByText(TRANSCRIPT)).toBeVisible();
+    expect(screen.queryByText(TRANSCRIPT)).not.toBeInTheDocument();
   });
 
-  it("shows a saved summary alongside the transcript after an ordinary open", async () => {
+  it("opens a saved summary after an ordinary completed-meeting click", async () => {
     mocks.localFetch.mockResolvedValue(meetingsResponse([summarizedMeeting]));
     renderMeetingNotes();
 
@@ -204,10 +205,13 @@ describe("MeetingNotesSection meeting selection", () => {
       await screen.findByRole("button", { name: summarizedMeeting.title! }),
     );
 
-    expect((await screen.findByTestId("saved-note")).textContent).toBe(
+    const note = await screen.findByRole("region", { name: "meeting note" });
+    expect(note).toHaveAttribute("data-transcript-open", "false");
+    expect(note).toHaveAttribute("data-active-tab", "summary");
+    expect(screen.getByTestId("saved-note").textContent).toBe(
       summarizedMeeting.note,
     );
-    expect(screen.getByText(TRANSCRIPT)).toBeVisible();
+    expect(screen.queryByText(TRANSCRIPT)).not.toBeInTheDocument();
   });
 
   it("preserves an explicit deep-link request to keep the transcript closed", async () => {
@@ -272,6 +276,10 @@ describe("MeetingNotesSection meeting selection", () => {
   });
 
   it("keeps an explicit false reopen closed after the same meeting persisted open", async () => {
+    window.sessionStorage.setItem(
+      `screenpipe:meeting:${emptyNoteMeeting.id}:transcript-open`,
+      "true",
+    );
     mocks.localFetch.mockImplementation(async (path: string) =>
       path === "/meetings/42"
         ? new Response(JSON.stringify(emptyNoteMeeting), {
@@ -282,19 +290,6 @@ describe("MeetingNotesSection meeting selection", () => {
     );
     renderMeetingNotes();
 
-    fireEvent.click(
-      await screen.findByRole("button", { name: emptyNoteMeeting.title! }),
-    );
-    expect(
-      await screen.findByRole("region", { name: "meeting note" }),
-    ).toHaveAttribute("data-transcript-open", "true");
-    expect(
-      window.sessionStorage.getItem(
-        `screenpipe:meeting:${emptyNoteMeeting.id}:transcript-open`,
-      ),
-    ).toBe("true");
-
-    fireEvent.click(screen.getByRole("button", { name: "back" }));
     await screen.findByRole("button", { name: emptyNoteMeeting.title! });
     await waitFor(() => expect(mocks.openMeetingNoteListener).not.toBeNull());
     await act(async () => {

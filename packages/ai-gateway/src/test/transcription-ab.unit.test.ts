@@ -210,6 +210,37 @@ describe('callDeepgram', () => {
       globalThis.fetch = originalFetch;
     }
   });
+
+  it('omits sample_rate for containerized browser audio', async () => {
+    const originalFetch = globalThis.fetch;
+    const urls: string[] = [];
+
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      urls.push(String(input));
+      return new Response(
+        JSON.stringify({
+          results: { channels: [{ alternatives: [{ transcript: 'browser audio' }] }] },
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    }) as typeof fetch;
+
+    try {
+      const result = await callDeepgram(
+        {
+          audioBuffer: new Uint8Array([1, 2, 3]).buffer,
+          contentType: 'audio/webm;codecs=opus',
+          languages: ['multi'],
+        },
+        { DEEPGRAM_API_KEY: 'dg-test-key' } as any,
+      );
+
+      expect(result.ok).toBe(true);
+      expect(new URL(urls[0]).searchParams.has('sample_rate')).toBe(false);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
 });
 
 describe('handleFileTranscription', () => {

@@ -8,16 +8,20 @@
 //! bundle/app metadata; browser/helper processes must resolve to a concrete
 //! meeting platform URL/profile before this watcher starts or resumes a meeting.
 
+use crate::meeting_watcher::shared::calendar::{
+    calendar_boundary_crossed, calendar_room_identities_now,
+};
 use crate::meeting_watcher::shared::ignore::{
     browser_window_matches_meeting, contains_normalized_term, is_browser_app,
     meeting_app_is_ignored_with_terms, normalize_ignored_meeting_apps,
 };
 use crate::meeting_watcher::shared::profiles::{load_detection_profiles, MeetingDetectionProfile};
 use crate::meeting_watcher::shared::telemetry::{
-    capture_detection_decision, capture_detection_outcome,
+    capture_detection_decision, capture_detection_outcome, capture_detection_transition,
+    MeetingDetectionTransitionTelemetry,
 };
 use crate::routes::meetings::{emit_meeting_status_changed, resolve_meeting_status_from};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use futures::{FutureExt, StreamExt};
 use screenpipe_audio::meeting_detector::MeetingDetector;
 use screenpipe_audio::meeting_processes::{self, AudioInputProcess};
@@ -55,6 +59,15 @@ const STICKY_PROCESS_WINDOW: Duration = Duration::from_secs(4);
 /// constant.
 const CANDIDATE_CONFIRM_WINDOW: Duration = Duration::from_secs(1);
 const ENDING_GRACE: Duration = Duration::from_secs(20);
+/// Fallback prompt threshold retained for explicitly delayed policies. The
+/// production policy below confirms a different room immediately, so this is
+/// not reached in the normal detector loop.
+const ROOM_CHANGE_PROMPT_WINDOW: Duration = Duration::from_secs(10);
+/// A different conference-room identity is an immediate boundary: end the old
+/// meeting and start the new one, even when an ended old tab remains visible.
+const ROOM_CHANGE_CONFIRM_WINDOW: Duration = Duration::ZERO;
+/// Calendar-confirmed room changes follow the same immediate rule.
+const ROOM_CHANGE_CALENDAR_CONFIRM_WINDOW: Duration = Duration::ZERO;
 const ACTIVE_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const IDLE_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const UNKNOWN_BROWSER_PLATFORM: &str = "Unknown";
@@ -80,6 +93,12 @@ pub(crate) use lifecycle::*;
 mod resolve;
 pub(crate) use resolve::*;
 
+mod room_change;
+pub(crate) use room_change::*;
+
+#[cfg(feature = "e2e")]
+pub mod e2e;
+
 mod state;
 pub(crate) use state::*;
 
@@ -103,6 +122,11 @@ pub async fn run_audio_process_meeting_detection_loop(
     let mut suppressed_sessions: Vec<SuppressedSession> = Vec::new();
     let mut flap_count = 0u32;
     let mut last_unresolved_browser_log: Option<Instant> = None;
+    let mut room_tracker = RoomChangeTracker::default();
+    let mut last_ended_room: Option<EndedRoom> = None;
+    // `(meeting_id, bound calendar event key)` for the live meeting, so the
+    // per-tick boundary check reads the DB once per meeting, not once per poll.
+    let mut bound_calendar_cache: Option<(i64, Option<String>)> = None;
 
     if close_orphaned_meetings_on_start {
         match db.close_orphaned_meetings().await {
@@ -163,6 +187,8 @@ pub async fn run_audio_process_meeting_detection_loop(
     let mut stop_sub = subscribe_to_event::<DetectorStopSignal>("detector_stop_tracking");
     let mut auto_end_sub =
         subscribe_to_event::<MeetingAutoEndRequest>("meeting_auto_end_requested");
+    let mut room_change_response_sub =
+        subscribe_to_event::<MeetingRoomChangeResponse>(ROOM_CHANGE_RESPONSE_EVENT);
 
     info!(
         "audio-process meeting detector: loop started (profiles={}, ignored_apps={})",
@@ -209,6 +235,19 @@ pub async fn run_audio_process_meeting_detection_loop(
             .await;
         }
 
+        while let Some(event) = room_change_response_sub.next().now_or_never().flatten() {
+            let response = event.data;
+            if active_or_ending_meeting_id(&state) == Some(response.meeting_id) {
+                let decision = response.decision;
+                if room_tracker.resolve_offer(&response) {
+                    info!(
+                        "audio-process meeting detector: ambiguous room change resolved by user ({:?}, meeting_id={})",
+                        decision, response.meeting_id
+                    );
+                }
+            }
+        }
+
         {
             let manual = manual_meeting.read().await;
             if manual.is_some() {
@@ -253,6 +292,7 @@ pub async fn run_audio_process_meeting_detection_loop(
             }
         };
         let now = Instant::now();
+        let now_utc = Utc::now();
 
         let (candidates, live_candidates) = build_candidates(
             &db,
@@ -268,17 +308,105 @@ pub async fn run_audio_process_meeting_detection_loop(
 
         let was_active = matches!(state, AudioProcessMeetingState::Active { .. });
         let was_ending = matches!(state, AudioProcessMeetingState::Ending { .. });
-        let (new_state, action) = advance_audio_process_state(
-            state,
-            &live_candidates,
-            &candidates,
-            now,
-            CANDIDATE_CONFIRM_WINDOW,
-            ENDING_GRACE,
-        );
+
+        // Back-to-back boundary check. Runs BEFORE the ordinary transition
+        // because that transition keeps a browser meeting alive on its audio
+        // session alone and revives an `Ending` one on the same key — both of
+        // which glue two consecutive calls in the same browser into one row.
+        let room_change = {
+            let live_meeting_id = active_or_ending_meeting_id(&state);
+            let bound_key = match live_meeting_id {
+                Some(id) => {
+                    if bound_calendar_cache.as_ref().map(|(cached, _)| *cached) != Some(id) {
+                        let key = match db.meeting_calendar_event_id(id).await {
+                            Ok(key) => key,
+                            Err(e) => {
+                                debug!(
+                                    "audio-process meeting detector: failed to read calendar binding of meeting {}: {}",
+                                    id, e
+                                );
+                                None
+                            }
+                        };
+                        bound_calendar_cache = Some((id, key));
+                    }
+                    bound_calendar_cache
+                        .as_ref()
+                        .and_then(|(_, key)| key.clone())
+                }
+                None => {
+                    bound_calendar_cache = None;
+                    None
+                }
+            };
+            let live_platform = match &state {
+                AudioProcessMeetingState::Active { platform, .. }
+                | AudioProcessMeetingState::Ending { platform, .. } => Some(platform.as_str()),
+                _ => None,
+            };
+            let calendar_rooms =
+                calendar_room_identities_now(&calendar_events, now_utc, bound_key.as_deref());
+            let boundary_crossed = live_platform.is_some_and(|platform| {
+                calendar_boundary_crossed(&calendar_events, now_utc, bound_key.as_deref(), platform)
+            });
+            let policy = RoomChangePolicy {
+                confirm_window: ROOM_CHANGE_CONFIRM_WINDOW,
+                prompt_window: ROOM_CHANGE_PROMPT_WINDOW,
+                calendar_confirm_window: ROOM_CHANGE_CALENDAR_CONFIRM_WINDOW,
+                calendar_room_identities: &calendar_rooms,
+                calendar_boundary_crossed: boundary_crossed,
+            };
+            let action = detect_room_change(&state, &candidates, &mut room_tracker, now, &policy);
+            if let Some(offer) = room_tracker.take_offer() {
+                if let Err(error) =
+                    screenpipe_events::send_event("meeting_room_change_offer", offer)
+                {
+                    warn!(
+                        "audio-process meeting detector: failed to emit room-change offer: {}",
+                        error
+                    );
+                }
+            }
+            action
+        };
+        let (new_state, action) = match room_change {
+            // `apply_state_action` installs the new `Active` state once the
+            // old row is closed and the new one inserted.
+            Some(action) => (AudioProcessMeetingState::Idle, Some(action)),
+            None => advance_audio_process_state(
+                state,
+                &live_candidates,
+                &candidates,
+                now,
+                CANDIDATE_CONFIRM_WINDOW,
+                ENDING_GRACE,
+            ),
+        };
         if is_active_ending_flap(was_active, was_ending, &new_state) {
             flap_count = flap_count.saturating_add(1);
         }
+        let transition = active_ending_transition(was_active, was_ending, &new_state).map(|edge| {
+            let published_meeting_before = detector.as_ref().and_then(|d| d.active_meeting());
+            let published_pid_before = published_meeting_before
+                .as_ref()
+                .and_then(|meeting| meeting.pid);
+            let live_pid =
+                resolved_platform_identity(&live_candidates, &edge.platform).map(|(pid, _)| pid);
+            let published_pid_in_input_snapshot = published_pid_before
+                .is_some_and(|pid| processes.iter().any(|process| process.pid == Some(pid)));
+            let live_pid_in_input_snapshot = live_pid
+                .is_some_and(|pid| processes.iter().any(|process| process.pid == Some(pid)));
+            (
+                edge,
+                published_meeting_before.is_some(),
+                published_pid_before,
+                live_pid,
+                published_pid_in_input_snapshot,
+                live_pid_in_input_snapshot,
+                !candidates.is_empty(),
+                !live_candidates.is_empty(),
+            )
+        });
         state = new_state;
 
         // A browser holding the mic that we can't attribute to a platform is
@@ -310,6 +438,28 @@ pub async fn run_audio_process_meeting_detection_loop(
         }
 
         if let Some(action) = action {
+            // Remember which room the row that is about to close was in, so
+            // the 120s merge window can refuse to reopen it for a session that
+            // is visibly a different call.
+            match &action {
+                AudioProcessStateAction::EndMeeting {
+                    meeting_id,
+                    suppressed_session,
+                } => {
+                    last_ended_room = Some(EndedRoom {
+                        meeting_id: *meeting_id,
+                        identity: suppressed_session
+                            .as_ref()
+                            .and_then(|session| room_identity(session.meeting_url.as_deref())),
+                    });
+                }
+                // A successful room change is durably excluded from reopen by
+                // `end_reason = room_changed`, and its immediate start carries
+                // its own local guard. Do not publish it here before the DB end
+                // succeeds: a failed close must remain retryable.
+                AudioProcessStateAction::RoomChanged { .. }
+                | AudioProcessStateAction::StartMeeting { .. } => {}
+            }
             apply_state_action(
                 action,
                 &db,
@@ -320,8 +470,10 @@ pub async fn run_audio_process_meeting_detection_loop(
                 &in_meeting_flag,
                 &detector,
                 last_explicit_stop_id,
+                last_ended_room.as_ref(),
                 &calendar_events,
                 now,
+                now_utc,
             )
             .await;
         }
@@ -371,6 +523,59 @@ pub async fn run_audio_process_meeting_detection_loop(
             &in_meeting_flag,
             &detector,
         );
+        if let Some((
+            edge,
+            published_meeting_before,
+            published_pid_before,
+            live_pid,
+            published_pid_in_input_snapshot,
+            live_pid_in_input_snapshot,
+            has_candidates,
+            has_live_candidates,
+        )) = transition
+        {
+            let published_meeting_after = detector.as_ref().and_then(|d| d.active_meeting());
+            let published_pid_after = published_meeting_after
+                .as_ref()
+                .and_then(|meeting| meeting.pid);
+            info!(
+                "audio-process meeting detector: transition {} (meeting_id={}, app={}, \
+                 published_meeting_before={}, published_meeting_after={}, \
+                 published_pid_before={:?}, published_pid_after={:?}, live_pid={:?}, \
+                 published_pid_in_input_snapshot={}, live_pid_in_input_snapshot={}, \
+                 candidates={}, live_candidates={}, flap_count={})",
+                edge.transition,
+                edge.meeting_id,
+                edge.platform,
+                published_meeting_before,
+                published_meeting_after.is_some(),
+                published_pid_before,
+                published_pid_after,
+                live_pid,
+                published_pid_in_input_snapshot,
+                live_pid_in_input_snapshot,
+                candidates.len(),
+                live_candidates.len(),
+                flap_count,
+            );
+            capture_detection_transition(
+                &edge.platform,
+                MeetingDetectionTransitionTelemetry {
+                    meeting_id: edge.meeting_id,
+                    transition: edge.transition,
+                    flap_count,
+                    published_meeting_before,
+                    published_meeting_after: published_meeting_after.is_some(),
+                    published_pid_before: published_pid_before.is_some(),
+                    published_pid_after: published_pid_after.is_some(),
+                    live_pid: live_pid.is_some(),
+                    published_pid_in_input_snapshot,
+                    live_pid_in_input_snapshot,
+                    has_candidates,
+                    has_live_candidates,
+                },
+            );
+        }
         interval = if processes.is_empty() {
             IDLE_POLL_INTERVAL
         } else {

@@ -339,13 +339,15 @@ impl PresetFallbackRegistry {
         // back rather than being treated as a terminal, non-retryable gate.
         if combined.contains("daily_cost_limit_exceeded")
             || combined.contains("daily_limit_exceeded")
-            || combined.contains("credits_exhausted")
-            || super::has_quota_exhausted_token(&combined)
         {
             return false;
         }
 
-        let reason = if combined.contains("rate limit")
+        let reason = if combined.contains("credits_exhausted")
+            || super::has_quota_exhausted_token(&combined)
+        {
+            FailureReason::CreditsExhausted
+        } else if combined.contains("rate limit")
             || combined.contains("rate_limit")
             || combined.contains("usage limit")
             || combined.contains("429")
@@ -565,6 +567,18 @@ mod tests {
         ));
         let presets = vec!["test".to_string()];
         assert_eq!(registry.pick_preset(&presets), Some(("test", 0)));
+    }
+
+    #[test]
+    fn test_hosted_quota_output_trips_breaker() {
+        let registry = fresh_registry("hosted_quota_trip");
+        assert!(registry.record_failure_from_output(
+            "hosted",
+            r#"429 {"error":{"type":"insufficient_quota","code":"hosted_ai_allowance_exceeded"}}"#,
+            ""
+        ));
+        let presets = vec!["hosted".to_string(), "fallback".to_string()];
+        assert_eq!(registry.pick_preset(&presets), Some(("fallback", 1)));
     }
 
     /// Hermetic registry in a unique temp dir so persisted state can't leak

@@ -83,6 +83,18 @@
         },
         {
           "url": "^obsidian://.*"
+        },
+        {
+          "url": "^claude://claude\\.ai/new\\?q=.*$"
+        },
+        {
+          "url": "^cursor://anysphere\\.cursor-deeplink/prompt\\?text=.*$"
+        },
+        {
+          "url": "^codex://threads/new\\?prompt=.*$"
+        },
+        {
+          "url": "^codex://automations(?:\\?.*)?$"
         }
       ]
     },
@@ -177,6 +189,22 @@
         },
         {
           "path": "$HOME/.screenpipe/.e2e/**",
+          "requireLiteralLeadingDot": false
+        },
+        {
+          "path": "$HOME/.screenpipe/.e2e/external-chat-home/.codex",
+          "requireLiteralLeadingDot": false
+        },
+        {
+          "path": "$HOME/.screenpipe/.e2e/external-chat-home/.codex/**",
+          "requireLiteralLeadingDot": false
+        },
+        {
+          "path": "$HOME/.screenpipe/.e2e/external-chat-home/.claude",
+          "requireLiteralLeadingDot": false
+        },
+        {
+          "path": "$HOME/.screenpipe/.e2e/external-chat-home/.claude/**",
           "requireLiteralLeadingDot": false
         },
         {

@@ -23,7 +23,7 @@
 //! Substring search is fine here because we already know the AI
 //! produced a replacement — we just need offsets for the audit trail.
 
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use tokio::{sync::Mutex, time::Instant};
@@ -272,6 +272,137 @@ impl Pipeline {
         self.pseudonyms = if is_enclave { None } else { pseudonyms };
         self
     }
+
+    /// Run cache misses through a backend that has a genuine batched
+    /// inference path. Remote adapters keep the serial path below so one
+    /// failed request does not discard earlier successful responses.
+    async fn redact_batched(
+        &self,
+        texts: &[String],
+        batch_size: usize,
+    ) -> Result<Vec<RedactionOutput>, RedactError> {
+        struct Pending {
+            output_indices: Vec<usize>,
+            key: [u8; 32],
+            current: RedactionOutput,
+        }
+
+        let Some(ai) = self.ai.as_ref() else {
+            return Err(RedactError::Unexpected(
+                "batched pipeline selected without an AI adapter".into(),
+            ));
+        };
+        let mut results: Vec<Option<RedactionOutput>> = vec![None; texts.len()];
+        let mut pending: Vec<Pending> = Vec::new();
+        let mut pending_by_key: HashMap<[u8; 32], usize> = HashMap::new();
+
+        for (output_index, text) in texts.iter().enumerate() {
+            let key = cache_key(text, self.name(), self.version());
+            if let Some(hit) = self.cache.get(&key).await {
+                results[output_index] = Some((*hit).clone());
+                continue;
+            }
+
+            let regex_out = regex_adapter::redact_one(text);
+            let current = apply_policy(regex_out, &self.cfg.policy, self.pseudonyms.as_deref());
+            let want_ai = current.input.chars().count() >= self.cfg.ai_min_chars
+                && current.spans.len() < self.cfg.ai_skip_if_regex_spans;
+
+            if !want_ai {
+                self.cache.insert(key, current.clone()).await;
+                results[output_index] = Some(current);
+                continue;
+            }
+
+            // A capture batch contains a lot of repeated accessibility chrome.
+            // Coalesce equal cache misses before inference, then fan the single
+            // result back out to every original position.
+            if let Some(&pending_index) = pending_by_key.get(&key) {
+                pending[pending_index].output_indices.push(output_index);
+            } else {
+                pending_by_key.insert(key, pending.len());
+                pending.push(Pending {
+                    output_indices: vec![output_index],
+                    key,
+                    current,
+                });
+            }
+        }
+
+        for chunk in pending.chunks_mut(batch_size.max(1)) {
+            let ai_inputs: Vec<String> = chunk
+                .iter()
+                .map(|item| item.current.redacted.clone())
+                .collect();
+            let ai_result = ai.redact_batch(&ai_inputs).await.and_then(|outputs| {
+                if outputs.len() == chunk.len() {
+                    Ok(outputs)
+                } else {
+                    Err(RedactError::Unexpected(format!(
+                        "AI redactor returned {} outputs for {} inputs",
+                        outputs.len(),
+                        chunk.len()
+                    )))
+                }
+            });
+
+            match ai_result {
+                Ok(ai_outputs) => {
+                    for (item, ai_out) in chunk.iter_mut().zip(ai_outputs) {
+                        let redacted = if ai_out.spans.is_empty() {
+                            ai_out.redacted
+                        } else {
+                            apply_policy(ai_out, &self.cfg.policy, self.pseudonyms.as_deref())
+                                .redacted
+                        };
+                        item.current = RedactionOutput {
+                            input: std::mem::take(&mut item.current.input),
+                            redacted,
+                            spans: std::mem::take(&mut item.current.spans),
+                        };
+                    }
+                }
+                Err(RedactError::Unavailable(_)) => {
+                    // Keep the regex outputs, matching the serial path.
+                }
+                Err(error) => {
+                    let mut detail = error.to_string();
+                    let mut source: Option<&dyn std::error::Error> =
+                        std::error::Error::source(&error);
+                    while let Some(next) = source {
+                        detail.push_str(" → ");
+                        detail.push_str(&next.to_string());
+                        source = next.source();
+                    }
+                    tracing::warn!(
+                        error = %error,
+                        detail = %detail,
+                        batch_rows = chunk.len(),
+                        "batched AI redactor failed; falling back to regex-only output"
+                    );
+                }
+            }
+
+            for item in chunk {
+                self.cache.insert(item.key, item.current.clone()).await;
+                for &output_index in &item.output_indices {
+                    results[output_index] = Some(item.current.clone());
+                }
+            }
+        }
+
+        results
+            .into_iter()
+            .enumerate()
+            .map(|(index, output)| {
+                output.ok_or_else(|| {
+                    RedactError::Unexpected(format!(
+                        "batched pipeline did not produce output at index {index}"
+                    ))
+                })
+            })
+            .collect()
+    }
 }
 
 #[async_trait]
@@ -298,6 +429,15 @@ impl Redactor for Pipeline {
     }
 
     async fn redact_batch(&self, texts: &[String]) -> Result<Vec<RedactionOutput>, RedactError> {
+        let preferred_batch_size = self
+            .ai
+            .as_ref()
+            .map(|ai| ai.preferred_batch_size())
+            .unwrap_or(1);
+        if preferred_batch_size > 1 && self.ai_failure_circuit.is_none() {
+            return self.redact_batched(texts, preferred_batch_size).await;
+        }
+
         let mut out = Vec::with_capacity(texts.len());
 
         for text in texts {
@@ -467,10 +607,25 @@ mod tests {
         calls: AtomicUsize,
     }
 
+    /// Local model-shaped test redactor with a real batch preference.
+    struct BatchingAi {
+        batches: AtomicUsize,
+        inputs: AtomicUsize,
+    }
+
     impl UppercaseAi {
         fn new() -> Self {
             Self {
                 calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl BatchingAi {
+        fn new() -> Self {
+            Self {
+                batches: AtomicUsize::new(0),
+                inputs: AtomicUsize::new(0),
             }
         }
     }
@@ -550,6 +705,37 @@ mod tests {
         }
     }
 
+    #[async_trait]
+    impl Redactor for BatchingAi {
+        fn name(&self) -> &str {
+            "test_onnx"
+        }
+
+        fn version(&self) -> u32 {
+            1
+        }
+
+        fn preferred_batch_size(&self) -> usize {
+            8
+        }
+
+        async fn redact_batch(
+            &self,
+            texts: &[String],
+        ) -> Result<Vec<RedactionOutput>, RedactError> {
+            self.batches.fetch_add(1, Ordering::SeqCst);
+            self.inputs.fetch_add(texts.len(), Ordering::SeqCst);
+            Ok(texts
+                .iter()
+                .map(|text| RedactionOutput {
+                    input: text.clone(),
+                    redacted: text.to_uppercase(),
+                    spans: vec![],
+                })
+                .collect())
+        }
+    }
+
     #[tokio::test]
     async fn regex_only_runs_without_ai_secret_policy() {
         // Default policy is `allow=[Secret]`, so a bare email is NOT
@@ -577,6 +763,37 @@ mod tests {
         // AI must have been invoked for an input that has no obvious
         // regex match but is long enough to clear `ai_min_chars`.
         assert_eq!(ai.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn local_ai_batches_unique_cache_misses() {
+        let ai = Arc::new(BatchingAi::new());
+        let pipeline = Pipeline::regex_then_ai(ai.clone(), PipelineConfig::default());
+        let first = "first accessibility string long enough for inference".to_string();
+        let second = "second accessibility string long enough for inference".to_string();
+        let texts = vec![
+            first.clone(),
+            second.clone(),
+            first.clone(),
+            "short".to_string(),
+        ];
+
+        let outputs = pipeline.redact_batch(&texts).await.unwrap();
+
+        assert_eq!(outputs[0].redacted, first.to_uppercase());
+        assert_eq!(outputs[1].redacted, second.to_uppercase());
+        assert_eq!(outputs[2], outputs[0]);
+        assert_eq!(outputs[3].redacted, "short");
+        assert_eq!(ai.batches.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            ai.inputs.load(Ordering::SeqCst),
+            2,
+            "duplicate cache misses must share one inference"
+        );
+
+        let cached = pipeline.redact_batch(&texts).await.unwrap();
+        assert_eq!(cached, outputs);
+        assert_eq!(ai.batches.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

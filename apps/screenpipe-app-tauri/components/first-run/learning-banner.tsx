@@ -9,17 +9,20 @@ import { emit } from "@tauri-apps/api/event";
 import posthog from "posthog-js";
 import { Clock, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { commands } from "@/lib/utils/tauri";
 import {
   formatCountdown,
   type FirstRunCapturedApp,
 } from "@/lib/first-run/learning-window";
 import { appIconUrl } from "@/lib/first-run/recent-activity";
 import { AgentHandoffPicker } from "@/components/first-run/agent-handoff-picker";
-import { useAgentHandoff } from "@/lib/first-run/use-agent-handoff";
+import { useFirstRunLearningWindow } from "@/components/first-run/learning-window-provider";
+import type { AgentHandoffTarget } from "@/lib/first-run/agent-handoff";
 import {
-  useLearningWindow,
-  type LearningWindowOptions,
-} from "@/lib/first-run/use-learning-window";
+  TRIAL_ACTIVATION_EXPERIMENT_FLAG,
+  TRIAL_ACTIVATION_TREATMENT,
+  TRIAL_ACTIVATION_UNLOCKED_STEP,
+} from "@/lib/first-run/trial-activation";
 
 function CapturedAppIcon({ app }: { app: FirstRunCapturedApp }) {
   const [failed, setFailed] = React.useState(false);
@@ -30,7 +33,7 @@ function CapturedAppIcon({ app }: { app: FirstRunCapturedApp }) {
       className="flex h-5 w-5 shrink-0 items-center justify-center overflow-hidden border border-border text-[10px] font-medium uppercase text-muted-foreground"
     >
       {failed ? (
-        (app.name.trim().charAt(0) || "?")
+        app.name.trim().charAt(0) || "?"
       ) : (
         // Icons come from the local app server, not a remote host, so
         // next/image optimization does not apply. Same as the timeline.
@@ -46,51 +49,176 @@ function CapturedAppIcon({ app }: { app: FirstRunCapturedApp }) {
   );
 }
 
+export function FirstRunReadyPanel({
+  handoffTargets,
+  handoffHint,
+  onOpenSummary,
+  onPickAgent,
+  onDismiss,
+}: {
+  handoffTargets: readonly AgentHandoffTarget[];
+  handoffHint: string | null;
+  onOpenSummary: () => void;
+  onPickAgent: (target: AgentHandoffTarget) => void;
+  onDismiss: () => void;
+}) {
+  return (
+    <div>
+      <div className="p-5">
+        <div className="flex items-center gap-2">
+          <span className="h-2 w-2 bg-signal" aria-hidden="true" />
+          <span className="font-mono text-[9px] uppercase tracking-[0.2em] text-signal">
+            first result · ready
+          </span>
+        </div>
+        <h2 className="mt-3 font-mono text-base font-semibold lowercase text-foreground">
+          screenpipe learned enough to help
+        </h2>
+        <p className="mt-2 max-w-xl text-[11px] leading-relaxed text-muted-foreground">
+          an evidence-backed summary of the apps and activity captured since
+          setup is waiting in a new chat.
+        </p>
+        <div className="mt-4 flex flex-wrap items-center gap-2">
+          <Button
+            size="sm"
+            className="h-8 border-foreground bg-foreground px-3 text-[10px] text-background hover:bg-background hover:text-foreground"
+            data-testid="first-run-open-summary"
+            onClick={onOpenSummary}
+          >
+            open the summary
+          </Button>
+          <AgentHandoffPicker targets={handoffTargets} onPick={onPickAgent} />
+        </div>
+        {handoffHint && (
+          <p
+            className="mt-2 text-[11px] leading-relaxed text-muted-foreground"
+            data-testid="first-run-ask-agent-hint"
+            role="status"
+          >
+            {handoffHint}
+          </p>
+        )}
+      </div>
+
+      <div className="flex items-center justify-between gap-4 border-t border-border px-4 py-3">
+        <p className="text-[10px] leading-relaxed text-muted-foreground">
+          this summary stays available in chat history.
+        </p>
+        <Button
+          size="sm"
+          variant="ghost"
+          className="h-7 shrink-0 px-2 text-[9px]"
+          onClick={onDismiss}
+        >
+          this is ready
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+export function FirstRunSetupReadyPanel({
+  onDismiss,
+}: {
+  onDismiss: () => void;
+}) {
+  return (
+    <div data-testid="first-run-setup-ready">
+      <div className="p-5">
+        <div className="flex items-center gap-2">
+          <span className="h-2 w-2 bg-signal" aria-hidden="true" />
+          <span className="font-mono text-[9px] uppercase tracking-[0.2em] text-signal">
+            setup · ready
+          </span>
+        </div>
+        <h2 className="mt-3 font-mono text-base font-semibold lowercase text-foreground">
+          screenpipe is ready
+        </h2>
+        <p className="mt-2 max-w-xl text-[11px] leading-relaxed text-muted-foreground">
+          there was not enough activity in this short setup window to write a
+          useful first summary. Screenpipe will keep recording in the
+          background.
+        </p>
+      </div>
+
+      <div className="flex items-center justify-between gap-4 border-t border-border px-4 py-3">
+        <p className="text-[10px] leading-relaxed text-muted-foreground">
+          ask about anything you see, say, or hear from now on.
+        </p>
+        <Button
+          size="sm"
+          variant="ghost"
+          className="h-7 shrink-0 px-2 text-[9px]"
+          data-testid="first-run-setup-complete"
+          onClick={onDismiss}
+        >
+          this is ready
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 /**
  * First-run learning window.
  *
  * Renders nothing outside the window, so it is safe to mount unconditionally
  * on the surface the user lands on after onboarding.
  */
-export function FirstRunLearningBanner(props: LearningWindowOptions = {}) {
-  const { phase, capturedApps, remainingMs, chatId, showProgress, dismiss } =
-    useLearningWindow(props);
-  const { targets: handoffTargets, hint: handoffHint, askAgent } =
-    useAgentHandoff(phase === "ready");
+export function FirstRunLearningBanner(
+  props: { fallback?: React.ReactNode } = {},
+) {
+  const { fallback } = props;
+  const { learning, handoff } = useFirstRunLearningWindow();
+  const {
+    phase,
+    capturedApps,
+    remainingMs,
+    chatId,
+    showProgress,
+    markReadyShown,
+    dismiss,
+  } = learning;
+  const { targets: handoffTargets, hint: handoffHint, askAgent } = handoff;
 
-  // Only show progress when setup just caused it, and only show a terminal
-  // outcome when there is something useful to open. Empty is an internal
-  // result/telemetry state, not a user task or an error they asked to inspect.
+  React.useEffect(() => {
+    if (phase === "ready") markReadyShown();
+  }, [markReadyShown, phase]);
+
+  // Only show progress when setup just caused it. A foreground empty result is
+  // still a terminal onboarding state: hiding it also hid the daily-summary
+  // setup and made the two-minute card appear to vanish. Background retries
+  // remain quiet unless they produce a summary worth opening.
   if (
     phase !== "ready" &&
     !(
       showProgress &&
-      (phase === "learning" || phase === "writing")
+      (phase === "learning" || phase === "writing" || phase === "empty")
     )
   ) {
-    return null;
+    return fallback ? <>{fallback}</> : null;
   }
 
   const openSummary = async () => {
     if (!chatId) return;
-    // Distinct from dismiss(). Opening the summary and clicking "Later" both
-    // close the banner, so without this they collapse into one event and the
-    // activation question this whole flow exists to answer — did the user read
-    // what we found? — becomes unmeasurable.
     posthog.capture("first_run_summary_opened");
     try {
       await emit("chat-load-conversation", { conversationId: chatId });
+      dismiss();
     } catch {
-      // The chat is still in the sidebar even if the focus hint does not land.
+      // Keep the result card so the user can retry if the summary did not open.
     }
-    dismiss({ opened: true });
   };
 
   return (
     <section
       data-testid="first-run-learning-banner"
       data-phase={phase}
-      className="mx-auto mb-4 w-full max-w-3xl border border-border bg-background p-4"
+      className={`mx-auto mb-4 w-full border border-border bg-background ${
+        phase === "ready" || phase === "empty"
+          ? "max-w-3xl overflow-hidden"
+          : "max-w-3xl p-4"
+      }`}
     >
       {phase === "learning" && (
         <div className="flex flex-col gap-2">
@@ -136,14 +264,11 @@ export function FirstRunLearningBanner(props: LearningWindowOptions = {}) {
               Writing your summary
             </p>
           </div>
-          {/* No countdown. The clock measured how long we would keep waiting
-              for something to summarize, and that question is already
-              answered; the model can take tens of seconds and outlast the
-              ceiling, so a timer here would tick to 0:00 and then keep
-              spinning. */}
+          {/* No countdown. The clock measured evidence collection; the selected
+              agent now owns this visible writing state until it finishes. */}
           <p className="text-[11px] leading-relaxed text-muted-foreground">
-            Screenpipe saw enough. Putting the summary together now — this
-            takes a few seconds.
+            Screenpipe saw enough. Your selected AI is putting the summary
+            together now — this can take a minute or two.
           </p>
           {capturedApps.length > 0 && (
             <div className="flex items-center gap-2 pt-0.5">
@@ -161,52 +286,180 @@ export function FirstRunLearningBanner(props: LearningWindowOptions = {}) {
       )}
 
       {phase === "ready" && (
-        <div className="flex flex-col gap-2">
-          <p className="text-xs font-medium text-foreground">
-            Here is what Screenpipe saw
-          </p>
-          <p className="text-[11px] leading-relaxed text-muted-foreground">
-            A summary of the apps and activity captured since setup is waiting
-            in a new chat.
-          </p>
-          <div className="flex items-center gap-2 pt-1">
-            <Button
-              size="sm"
-              variant="outline"
-              className="h-7 text-[11px]"
-              data-testid="first-run-open-summary"
-              onClick={openSummary}
-            >
-              Open the summary
-            </Button>
-            {/* Setup already wired these agents over MCP, so they can answer
-                from real captured context. Offered second, never instead: the
-                summary is guaranteed to exist, the handoff depends on another
-                app being where we think it is. */}
-            <AgentHandoffPicker
-              targets={handoffTargets}
-              onPick={(target) => void askAgent(target)}
-            />
-            <Button
-              size="sm"
-              variant="ghost"
-              className="h-7 text-[11px]"
-              onClick={() => dismiss()}
-            >
-              Later
-            </Button>
-          </div>
-          {handoffHint && (
-            <p
-              className="text-[11px] leading-relaxed text-muted-foreground"
-              data-testid="first-run-ask-agent-hint"
-              role="status"
-            >
-              {handoffHint}
-            </p>
-          )}
-        </div>
+        <FirstRunReadyPanel
+          handoffTargets={handoffTargets}
+          handoffHint={handoffHint}
+          onOpenSummary={() => void openSummary()}
+          onPickAgent={(target) => void askAgent(target)}
+          onDismiss={() => dismiss()}
+        />
+      )}
+
+      {phase === "empty" && (
+        <FirstRunSetupReadyPanel onDismiss={() => dismiss()} />
       )}
     </section>
+  );
+}
+
+export function TrialActivationSummaryExperience() {
+  const { learning } = useFirstRunLearningWindow();
+  const { phase, remainingMs, chatId, markSummaryOpened } = learning;
+
+  const openSummary = async () => {
+    if (!chatId || phase !== "ready") return;
+    posthog.capture("first_run_summary_opened", {
+      experiment: "first-summary-card-trial-v1",
+      variant: "summary_first",
+      source: "home_cta",
+    });
+    try {
+      // This CTA replaces the locked summary screen with StandaloneChat, so
+      // there is no chat-load-conversation listener until after this state
+      // change mounts Chat. Persist the handoff before mounting it; the chat
+      // routing hook consumes this key on mount.
+      localStorage.setItem("pending-chat-conversation", chatId);
+      markSummaryOpened();
+      await emit("chat-load-conversation", {
+        conversationId: chatId,
+        targetWindow: "home",
+      });
+    } catch {
+      // Keep the ready action available until the chat really opens.
+    }
+  };
+
+  const retry = async () => {
+    posthog.capture("first_run_summary_retry_clicked", {
+      experiment: "first-summary-card-trial-v1",
+      variant: "summary_first",
+    });
+    await commands.completeOnboarding();
+  };
+
+  return (
+    <main
+      className="flex h-full w-full items-center justify-center bg-background px-8"
+      data-testid="trial-activation-summary-experience"
+      data-phase={phase}
+    >
+      <section className="w-full max-w-2xl border border-border bg-background p-10 text-center">
+        <div className="mx-auto flex h-20 w-20 items-center justify-center border border-border">
+          {phase === "learning" ? (
+            <span
+              className="font-mono text-2xl tabular-nums"
+              data-testid="trial-activation-countdown"
+            >
+              {formatCountdown(remainingMs)}
+            </span>
+          ) : (
+            <Loader2 className="h-7 w-7 animate-spin text-muted-foreground" />
+          )}
+        </div>
+        <h1 className="mt-7 text-2xl font-semibold lowercase">
+          {phase === "ready"
+            ? "your first summary is ready"
+            : phase === "empty"
+              ? "we need another try"
+              : phase === "writing"
+                ? "writing your first summary"
+                : "building your first summary"}
+        </h1>
+        <p className="mx-auto mt-3 max-w-lg text-sm leading-relaxed text-muted-foreground">
+          {phase === "empty"
+            ? "Screenpipe did not capture enough valid activity to show you a useful result. Keep working normally, then retry."
+            : phase === "ready"
+              ? "Open the result to see what Screenpipe understood from your work."
+              : "Keep working normally while Screenpipe records only what it needs to build this result."}
+        </p>
+        {phase === "empty" ? (
+          <Button className="mt-8 h-12 px-8 text-sm" onClick={() => void retry()}>
+            retry summary
+          </Button>
+        ) : (
+          <Button
+            className="mt-8 h-12 min-w-56 px-8 text-sm"
+            disabled={phase !== "ready" || !chatId}
+            onClick={() => void openSummary()}
+            data-testid="trial-activation-view-summary"
+          >
+            view summary
+          </Button>
+        )}
+      </section>
+    </main>
+  );
+}
+
+export function TrialActivationUnlockPrompt({
+  onStartTrial,
+  inline = false,
+}: {
+  onStartTrial: () => void;
+  inline?: boolean;
+}) {
+  const [freeBusy, setFreeBusy] = React.useState(false);
+  const [freeError, setFreeError] = React.useState<string | null>(null);
+
+  const continueWithFree = async () => {
+    if (freeBusy) return;
+    setFreeBusy(true);
+    setFreeError(null);
+    try {
+      const result = await commands.setOnboardingStep(
+        TRIAL_ACTIVATION_UNLOCKED_STEP,
+      );
+      if (result.status === "error") throw new Error(result.error);
+      posthog.capture("onboarding_plan_activated", {
+        experiment: TRIAL_ACTIVATION_EXPERIMENT_FLAG,
+        variant: TRIAL_ACTIVATION_TREATMENT,
+        plan: "free",
+        confirmation: "free_no_card",
+        source: inline ? "timeline_lock" : "summary_lock",
+      });
+    } catch (error) {
+      setFreeBusy(false);
+      setFreeError(
+        error instanceof Error ? error.message : "could not continue with Free",
+      );
+    }
+  };
+
+  return (
+    <div
+      className={
+        inline
+          ? "z-40 flex shrink-0 justify-center border-t border-border bg-background p-4"
+          : "pointer-events-none absolute inset-0 z-40 flex items-end justify-center p-8"
+      }
+      data-testid="trial-activation-summary-lock"
+      data-layout={inline ? "inline" : "overlay"}
+    >
+      <div className="pointer-events-auto w-full max-w-xl border border-border bg-background p-5 text-center shadow-lg">
+        <div className="pointer-events-auto flex flex-col gap-3">
+          <Button
+            className="h-12 w-full px-8 text-sm"
+            data-testid="trial-activation-start-trial"
+            onClick={onStartTrial}
+          >
+            start your 7-day Business trial
+          </Button>
+          <Button
+            variant="outline"
+            className="h-11 w-full px-8 text-sm"
+            data-testid="trial-activation-continue-free"
+            disabled={freeBusy}
+            onClick={() => void continueWithFree()}
+          >
+            {freeBusy ? "continuing with Free" : "continue with Free — no card"}
+          </Button>
+        </div>
+        {freeError && (
+          <p className="mt-3 text-sm text-destructive" role="alert">
+            {freeError}
+          </p>
+        )}
+      </div>
+    </div>
   );
 }

@@ -62,6 +62,14 @@ function isProcessingPlaceholder(message: Message): boolean {
   return message.role === "assistant" && message.content.trim() === "Processing...";
 }
 
+function isTransientRetryStatus(message: Message): boolean {
+  return (
+    message.role === "assistant" &&
+    message.content.includes("Another AI request is finishing") &&
+    message.content.includes("new messages will be queued")
+  );
+}
+
 /**
  * Recover the optimistic assistant row when Pi echoes the user prompt before
  * this WebView has finished hydrating the sibling's active-turn refs.
@@ -145,6 +153,24 @@ export function shouldAdoptPersistedTranscript(
     }
   }
   if (persisted.length !== current.length) return persisted.length > current.length;
+
+  for (let index = 0; index < sharedLength; index += 1) {
+    const currentMessage = current[index];
+    const persistedMessage = persisted[index];
+    if (
+      isTransientRetryStatus(persistedMessage) &&
+      !isTransientRetryStatus(currentMessage) &&
+      !isProcessingPlaceholder(currentMessage)
+    ) {
+      return false;
+    }
+    if (
+      isTransientRetryStatus(currentMessage) &&
+      !isTransientRetryStatus(persistedMessage)
+    ) {
+      return true;
+    }
+  }
 
   const replacesPlaceholder = current.some(
     (message, index) =>

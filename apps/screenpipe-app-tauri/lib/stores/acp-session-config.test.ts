@@ -5,6 +5,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import {
   dedupedModes,
+  findAcpPermissionBooleanOption,
   useAcpSessionConfig,
   type AcpSessionConfig,
 } from "./acp-session-config";
@@ -61,7 +62,9 @@ describe("acp-session-config byAgent cache", () => {
 
     expect(useAcpSessionConfig.getState().byAgent).toEqual({});
     // The per-session state still updates for the composer.
-    expect(useAcpSessionConfig.getState().sessions["chat"].options).toHaveLength(0);
+    expect(
+      useAcpSessionConfig.getState().sessions["chat"].options,
+    ).toHaveLength(0);
   });
 
   it("session clear keeps the per-agent cache for the preset editors", () => {
@@ -74,6 +77,32 @@ describe("acp-session-config byAgent cache", () => {
 
     expect(useAcpSessionConfig.getState().sessions["chat"]).toBeUndefined();
     expect(useAcpSessionConfig.getState().byAgent["claude-acp"]).toBeDefined();
+  });
+
+  it("tracks the live client approval policy without caching it per adapter", () => {
+    useAcpSessionConfig.getState().setFromEvent("chat", {
+      type: "acp_session_config",
+      agentId: "cursor",
+      approvalMode: "allow-all",
+      configOptions: [MODEL_OPTION],
+    });
+    expect(useAcpSessionConfig.getState().sessions.chat.approvalMode).toBe(
+      "allow-all",
+    );
+    expect(
+      useAcpSessionConfig.getState().byAgent.cursor.approvalMode,
+    ).toBeUndefined();
+
+    useAcpSessionConfig.getState().setFromEvent("chat", {
+      type: "acp_session_config",
+      approvalMode: "ask",
+    });
+    expect(useAcpSessionConfig.getState().sessions.chat.approvalMode).toBe(
+      "ask",
+    );
+    expect(useAcpSessionConfig.getState().sessions.chat.options[0].id).toBe(
+      "model",
+    );
   });
 });
 
@@ -160,5 +189,36 @@ describe("acp-session-config boolean options", () => {
     expect(fast?.type).toBe("boolean");
     expect(fast?.currentValue).toBe(true);
     expect(fast?.values).toEqual([]);
+  });
+
+  it("recognizes a boolean approval capability without an adapter-id special case", () => {
+    const config: AcpSessionConfig = {
+      options: [
+        {
+          id: "allow_all",
+          name: "Allow All",
+          description: "Allow all tools without confirmation",
+          type: "boolean",
+          currentValue: false,
+          values: [],
+        },
+        {
+          id: "fast",
+          name: "Fast mode",
+          type: "boolean",
+          currentValue: true,
+          values: [],
+        },
+      ],
+      modes: null,
+    };
+
+    expect(findAcpPermissionBooleanOption(config)?.id).toBe("allow_all");
+    expect(
+      findAcpPermissionBooleanOption({
+        ...config,
+        options: config.options.filter((option) => option.id === "fast"),
+      }),
+    ).toBeNull();
   });
 });

@@ -39,6 +39,58 @@ fn main_overlay_visible(app_handle: tauri::AppHandle) -> bool {
     }
 }
 
+/// E2E helper: read the real native browser-history gesture setting from the
+/// addressed platform webview. This proves the shipped webview configuration;
+/// WebDriver cannot synthesize an operating-system trackpad gesture.
+#[command]
+async fn history_swipe_navigation_enabled(
+    app_handle: tauri::AppHandle,
+    label: String,
+) -> Result<bool, String> {
+    let window = app_handle
+        .get_webview_window(&label)
+        .ok_or_else(|| format!("webview window not found: {label}"))?;
+    crate::window::history_swipe_navigation_enabled(&window).await
+}
+
+/// E2E helper: emit the same native-scroll payload shape as a physical
+/// horizontal trackpad gesture. The production indicator owns the rendering;
+/// this only holds or dismisses the transient state for a screenshot.
+#[command]
+fn preview_history_swipe(
+    app_handle: tauri::AppHandle,
+    label: String,
+    direction: String,
+) -> Result<(), String> {
+    let window = app_handle
+        .get_webview_window(&label)
+        .ok_or_else(|| format!("webview window not found: {label}"))?;
+    let (delta_x, dismiss) = match direction.as_str() {
+        "back" => (84.0, false),
+        "forward" => (-84.0, false),
+        "dismiss" => (0.0, true),
+        _ => return Err(format!("unsupported history swipe direction: {direction}")),
+    };
+
+    window
+        .emit(
+            "native-scroll",
+            serde_json::json!({
+                "deltaX": delta_x,
+                "deltaY": 0.0,
+                "phase": 1,
+                "momentumPhase": 0,
+                "ctrlKey": false,
+                "metaKey": false,
+                "e2ePreview": true,
+                "e2ePreviewDismiss": dismiss,
+            }),
+        )
+        .map_err(|error| error.to_string())?;
+
+    Ok(())
+}
+
 /// E2E helper: backdate the recorded setup completion.
 ///
 /// The first-run window keys off how long ago setup finished, and the two
@@ -187,6 +239,14 @@ fn installed_tray_recording_status() -> Result<Option<String>, String> {
     crate::tray::installed_recording_status_text().map_err(|e| e.to_string())
 }
 
+/// E2E helper: run the same native recording toggle as the tray menu and wait
+/// for completion. No frontend shortcut event is involved, so this proves the
+/// tray remains authoritative when no webview listener is mounted.
+#[command]
+async fn trigger_tray_recording_toggle(app_handle: tauri::AppHandle) -> Result<(), String> {
+    crate::tray::toggle_recording_from_harness(app_handle).await
+}
+
 /// E2E helper: report whether the shortcut reminder overlay is visibly shown.
 ///
 /// The reminder window is hidden rather than destroyed, so WebDriver can keep a
@@ -224,6 +284,79 @@ async fn open_auto_meeting(
         .insert_meeting(&app_name, "audio_process", title.as_deref(), None)
         .await
         .map_err(|error| error.to_string())
+}
+
+/// E2E helper: reproduce a detector start with competing calendar events.
+///
+/// The real matcher and DB write run inside screenpipe-engine. The harness only
+/// supplies deterministic private-data-free inputs so CI and PR recordings do
+/// not depend on a reviewer's calendar account or a live third-party call.
+#[command]
+async fn simulate_calendar_meeting_match(
+    state: State<'_, RecordingState>,
+    observed_meeting_url: String,
+    events: serde_json::Value,
+    now: String,
+) -> Result<i64, String> {
+    let now = chrono::DateTime::parse_from_rfc3339(&now)
+        .map_err(|error| error.to_string())?
+        .with_timezone(&chrono::Utc);
+    let events_json = serde_json::to_string(&events).map_err(|error| error.to_string())?;
+    let db = {
+        let server_guard = state.server.lock().await;
+        server_guard
+            .as_ref()
+            .ok_or_else(|| "server not running".to_string())?
+            .db
+            .clone()
+    };
+    screenpipe_engine::meeting_watcher::e2e_start_calendar_matched_meeting(
+        &db,
+        &observed_meeting_url,
+        &events_json,
+        now,
+    )
+    .await
+}
+
+/// E2E helper: replay a back-to-back meeting boundary through the production
+/// detector rules and lifecycle (see
+/// `screenpipe_engine::meeting_watcher::e2e_simulate_back_to_back_rooms`).
+///
+/// The harness supplies two conference-room URLs and a calendar snapshot; the
+/// engine decides whether the second room ends the first meeting and starts a
+/// new one. Private-data-free by construction.
+#[command]
+async fn simulate_back_to_back_meeting_rooms(
+    state: State<'_, RecordingState>,
+    first_room_url: String,
+    second_room_url: String,
+    events: serde_json::Value,
+    now: String,
+    first_started_secs_ago: u64,
+) -> Result<serde_json::Value, String> {
+    let now = chrono::DateTime::parse_from_rfc3339(&now)
+        .map_err(|error| error.to_string())?
+        .with_timezone(&chrono::Utc);
+    let events_json = serde_json::to_string(&events).map_err(|error| error.to_string())?;
+    let db = {
+        let server_guard = state.server.lock().await;
+        server_guard
+            .as_ref()
+            .ok_or_else(|| "server not running".to_string())?
+            .db
+            .clone()
+    };
+    let outcome = screenpipe_engine::meeting_watcher::e2e_simulate_back_to_back_rooms(
+        &db,
+        &first_room_url,
+        &second_room_url,
+        &events_json,
+        now,
+        first_started_secs_ago,
+    )
+    .await?;
+    serde_json::to_value(outcome).map_err(|error| error.to_string())
 }
 
 /// E2E helper: report the currently open meeting, if any.
@@ -649,6 +782,50 @@ async fn owned_browser_detach() -> Result<(), String> {
 }
 
 #[command]
+async fn owned_browser_tab_snapshot(tab_id: String) -> Option<serde_json::Value> {
+    crate::owned_browser::tab_snapshot_for_harness(&tab_id).await
+}
+
+/// Drive the production tab commands from a WebDriver context that survives
+/// native child attachment. On macOS, attaching a child replaces the parent
+/// window's automation context even though the visible app stays intact.
+#[command]
+async fn owned_browser_tab_control(
+    app_handle: tauri::AppHandle,
+    tab_id: String,
+    action: String,
+    url: Option<String>,
+) -> Result<(), String> {
+    match action.as_str() {
+        "navigate" => {
+            let url = url.ok_or_else(|| "navigate requires a url".to_string())?;
+            crate::owned_browser::owned_browser_tab_navigate(
+                app_handle,
+                tab_id,
+                url,
+                Some("e2e-browser-tabs".to_string()),
+            )
+            .await
+        }
+        "show" => {
+            crate::owned_browser::owned_browser_tab_set_bounds(
+                app_handle,
+                tab_id,
+                "home".to_string(),
+                920.0,
+                120.0,
+                420.0,
+                560.0,
+            )
+            .await
+        }
+        "hide" => crate::owned_browser::owned_browser_tab_hide(tab_id).await,
+        "close" => crate::owned_browser::owned_browser_tab_close(tab_id).await,
+        _ => Err(format!("unsupported browser tab action: {action}")),
+    }
+}
+
+#[command]
 async fn inject_db_hard_fault(
     state: State<'_, RecordingState>,
 ) -> Result<serde_json::Value, String> {
@@ -698,6 +875,7 @@ async fn capture_pi_start_error(
         project_dir,
         None,
         provider_config,
+        None,
     )
     .await
     {
@@ -720,11 +898,44 @@ fn e2e_set_activation_allowed(allowed: bool) {
     let _ = allowed;
 }
 
+/// E2E helper: make the next visible-window probe take the exact production
+/// renderer-recovery path without deliberately deadlocking WebKit or the GPU.
+#[command]
+fn arm_renderer_stalls(label: String, count: u32) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    return crate::window::renderer_watchdog::arm_forced_stalls(&label, count);
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (label, count);
+        Err("renderer recovery harness is macOS-only".to_string())
+    }
+}
+
+/// E2E helper: inspect native recovery progress from the newly-created webview.
+#[command]
+fn renderer_recovery_state(app_handle: tauri::AppHandle) -> serde_json::Value {
+    #[cfg(target_os = "macos")]
+    return crate::window::renderer_watchdog::snapshot(&app_handle);
+
+    #[cfg(not(target_os = "macos"))]
+    serde_json::json!({
+        "processId": std::process::id(),
+        "recoveryCount": 0,
+        "recoveryActive": false,
+        "consecutiveRecoveries": 0,
+        "lastRecoveredLabel": null,
+        "windowLabels": app_handle.webview_windows().into_keys().collect::<Vec<_>>(),
+    })
+}
+
 pub(super) fn plugin() -> TauriPlugin<Wry> {
     Builder::<Wry>::new("e2e")
         // build.rs verifies this inventory matches the feature-only plugin ACL.
         .invoke_handler(tauri::generate_handler![
             main_overlay_visible,
+            history_swipe_navigation_enabled,
+            preview_history_swipe,
             mark_capture_intended,
             emit_disk_space_low,
             emit_disk_space_recovered,
@@ -737,8 +948,11 @@ pub(super) fn plugin() -> TauriPlugin<Wry> {
             low_disk_guard_enabled,
             set_tray_recording_status,
             installed_tray_recording_status,
+            trigger_tray_recording_toggle,
             shortcut_reminder_visible,
             open_auto_meeting,
+            simulate_calendar_meeting_match,
+            simulate_back_to_back_meeting_rooms,
             active_meeting_id,
             native_meeting_overlay_state,
             native_timeline_search_state,
@@ -757,6 +971,8 @@ pub(super) fn plugin() -> TauriPlugin<Wry> {
             recording_health_return_race,
             owned_browser_visible,
             owned_browser_detach,
+            owned_browser_tab_control,
+            owned_browser_tab_snapshot,
             inject_db_hard_fault,
             inject_db_transient_fault,
             db_retry_write_probe,
@@ -765,6 +981,8 @@ pub(super) fn plugin() -> TauriPlugin<Wry> {
             capture_pi_start_error,
             set_onboarding_completed_ago,
             e2e_set_activation_allowed,
+            arm_renderer_stalls,
+            renderer_recovery_state,
         ])
         .build()
 }

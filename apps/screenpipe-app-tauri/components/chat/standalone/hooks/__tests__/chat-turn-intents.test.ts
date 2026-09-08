@@ -4,6 +4,7 @@
 
 import { describe, expect, it } from "vitest";
 import {
+  hasPendingSteerTransition,
   normalizeTurnIntentText,
   turnIntentMatchesText,
   turnIntentTextValuesMatch,
@@ -28,5 +29,22 @@ describe("chat turn intent helpers", () => {
     expect(turnIntentMatchesText(record, "full  prompt text")).toBe(true);
     expect(turnIntentMatchesText(record, "short\nprompt")).toBe(true);
     expect(turnIntentMatchesText(record, "other prompt")).toBe(false);
+  });
+
+  it("keeps the turn active while an accepted steer is waiting to start", () => {
+    const records = [{
+      id: "steer-1",
+      sessionId: "session-1",
+      kind: "steer" as const,
+      content: "change direction",
+      preview: "change direction",
+      consumedAssistantId: "steer-assistant",
+      createdAt: Date.now(),
+    }];
+
+    expect(hasPendingSteerTransition(records, "session-1", "steer", "steer-1")).toBe(true);
+    expect(hasPendingSteerTransition(records, "session-1", null, "steer-1")).toBe(true);
+    expect(hasPendingSteerTransition(records, "session-2", "steer", "steer-1")).toBe(false);
+    expect(hasPendingSteerTransition(records, "session-1", null)).toBe(false);
   });
 });

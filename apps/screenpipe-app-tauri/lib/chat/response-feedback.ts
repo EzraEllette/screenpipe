@@ -17,8 +17,23 @@ import type {
 
 export type ChatResponseFeedbackRating = "positive" | "negative";
 export type ChatResponseFeedbackAction = "submitted" | "changed";
+export type ChatResponseFeedbackReason =
+  | "missed_context"
+  | "incorrect"
+  | "missing_tool_use"
+  | "not_useful";
 export type ChatResponseValueAction = "copy";
 export type HomeCardPresentation = "hero" | "secondary" | "quick_action";
+
+export const CHAT_RESPONSE_FEEDBACK_REASONS: ReadonlyArray<{
+  value: ChatResponseFeedbackReason;
+  label: string;
+}> = [
+  { value: "missed_context", label: "missed my context" },
+  { value: "incorrect", label: "incorrect" },
+  { value: "missing_tool_use", label: "didn't use tools" },
+  { value: "not_useful", label: "not useful" },
+];
 
 export type ChatTelemetryContext = {
   entry_source: ChatEntrySource;
@@ -173,6 +188,21 @@ export function chatEntrySourceFromMessages(messages: Message[]): ChatEntrySourc
  * Do not add message or conversation identifiers, model/provider strings,
  * prompts, responses, citations, file paths, or other user-authored values.
  */
+export function chatResponseFeedbackContext(
+  message: Message,
+  context: ChatTelemetryContext,
+  reason?: ChatResponseFeedbackReason,
+) {
+  return {
+    ...context,
+    ...(reason ? { reason } : {}),
+    has_tool_use: message.contentBlocks?.some((block) => block.type === "tool") ?? false,
+    has_sources: (message.sourceCitations?.length ?? 0) > 0,
+    was_steered: message.steeredResponse === true,
+    was_stopped: message.stoppedByUser === true,
+  };
+}
+
 export function chatResponseFeedbackProperties(
   message: Message,
   rating: ChatResponseFeedbackRating,
@@ -182,13 +212,21 @@ export function chatResponseFeedbackProperties(
   return {
     schema_version: 3,
     surface: "chat_message" as const,
-    ...context,
+    ...chatResponseFeedbackContext(message, context),
     rating,
     action,
-    has_tool_use: message.contentBlocks?.some((block) => block.type === "tool") ?? false,
-    has_sources: (message.sourceCitations?.length ?? 0) > 0,
-    was_steered: message.steeredResponse === true,
-    was_stopped: message.stoppedByUser === true,
+  };
+}
+
+export function chatResponseFeedbackReasonProperties(
+  message: Message,
+  reason: ChatResponseFeedbackReason,
+  context: ChatTelemetryContext,
+) {
+  return {
+    schema_version: 1,
+    surface: "chat_message" as const,
+    ...chatResponseFeedbackContext(message, context, reason),
   };
 }
 

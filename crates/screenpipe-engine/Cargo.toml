@@ -16,13 +16,14 @@ edition = { workspace = true }
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
+serde_yaml = { workspace = true }
 libc = { workspace = true }
 oasgen = { workspace = true }
 
 screenpipe-events = { path = "../screenpipe-events" }
 screenpipe-screen = { path = "../screenpipe-screen" }
 screenpipe-audio = { path = "../screenpipe-audio" }
-screenpipe-core = { path = "../screenpipe-core", features = ["security", "cloud-sync", "secrets"] }
+screenpipe-core = { path = "../screenpipe-core", features = ["security", "cloud-sync", "secrets", "acp"] }
 screenpipe-db = { path = "../screenpipe-db" }
 screenpipe-redact = { path = "../screenpipe-redact", features = ["opf-text"] }
 screenpipe-resource = { path = "../screenpipe-resource" }
@@ -145,6 +146,7 @@ tikv-jemallocator = { version = "0.6", optional = true }
 [dev-dependencies]
 chrono-tz = "0.10"
 env_logger = { workspace = true }
+serial_test = "3.2.0"
 tempfile = { workspace = true }
 tokio-tungstenite = { workspace = true }
 tower = { version = "0.4", features = ["util"] }
@@ -165,6 +167,7 @@ criterion = { workspace = true }
 # it, `cargo {check,clippy,build} -p screenpipe-engine` (no --features) fails
 # to compile. Mac/Win release builds layer redact-onnx-{coreml,directml} on top.
 default = ["qwen3-asr", "parakeet", "redact-onnx-cpu"]
+e2e = []
 metal = ["screenpipe-audio/metal"]
 heap-prof = ["dhat"]
 cuda = ["screenpipe-audio/cuda"]

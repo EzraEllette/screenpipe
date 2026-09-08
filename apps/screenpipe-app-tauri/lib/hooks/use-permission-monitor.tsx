@@ -8,7 +8,6 @@ import { useEffect, useRef } from "react";
 import { usePathname } from "next/navigation";
 import { listen } from "@tauri-apps/api/event";
 import { commands } from "@/lib/utils/tauri";
-import posthog from "posthog-js";
 
 interface PermissionLostPayload {
   screen_recording: boolean;
@@ -43,7 +42,7 @@ export function usePermissionMonitor() {
     if (skipPaths.some((p) => pathname?.startsWith(p))) return;
 
     const unlisten = listen<PermissionLostPayload>("permission-lost", async (event) => {
-      const { screen_recording, microphone, accessibility, browser_automation, reason } = event.payload;
+      const { screen_recording, microphone, accessibility, browser_automation } = event.payload;
 
       if (hasShownRef.current) return;
 
@@ -54,13 +53,9 @@ export function usePermissionMonitor() {
 
       hasShownRef.current = true;
 
-      posthog.capture("permission_lost", {
-        screen_recording_lost: screen_recording,
-        microphone_lost: microphone,
-        accessibility_lost: accessibility,
-        browser_automation_lost: browser_automation,
-        reason: reason ?? null,
-      });
+      // Telemetry for this event is captured backend-side
+      // (engine_events/permission.rs) — the webview does not exist in
+      // dormant/headless mode, so capturing here missed tray-only users.
 
       try {
         await commands.showWindow("PermissionRecovery");
@@ -93,8 +88,6 @@ export function usePermissionMonitor() {
     const unlistenNeeded = listen<PermissionNeededPayload>("permission_needed", async (event) => {
       const { kind } = event.payload;
       console.log("Permission needed event received:", kind);
-
-      posthog.capture("permission_needed", { kind });
 
       // If we're not on onboarding or permission-recovery, show the recovery window
       // to guide user through the permission flow

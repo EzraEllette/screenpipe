@@ -93,12 +93,14 @@ function isConnectionLikeError(errorStr: string): boolean {
     normalized.includes("connection error") ||
     normalized.includes("failed to fetch") ||
     normalized.includes("fetch failed") ||
+    normalized.includes("socket connection was closed unexpectedly") ||
     normalized.includes("econnrefused") ||
     normalized.includes("connection refused") ||
     // network/TLS signatures seen reaching the chat from the gateway, e.g. the
     // 2026-06-18 outage: reqwest "error sending request" / "tls handshake eof".
     normalized.includes("error sending request") ||
     normalized.includes("tls handshake") ||
+    normalized === "error: certificate has expired" ||
     normalized.includes("unexpected eof") ||
     normalized.includes("unexpectedeof") ||
     normalized.includes("could not connect") ||
@@ -304,15 +306,25 @@ function buildGenericProviderErrorMessage(
     if (
       normalized.includes("rate-limited") ||
       normalized.includes("rate limit") ||
-      normalized.includes("too many requests") ||
-      normalized.includes("unavailable")
+      normalized.includes("too many requests")
     ) {
-      return `You are currently rate-limited or the service is temporarily unavailable. Please wait a moment before trying again, or upgrade your plan for higher limits.`;
+      return `You are currently rate-limited. Please wait a moment before trying again, or upgrade your plan for higher limits.`;
     }
+    if (normalized.includes("unavailable")) {
+      return buildCloudConnectionMessage();
+    }
+  }
+
+  if (/"codexerrorinfo"\s*:\s*"usagelimitexceeded"/i.test(errorStr)) {
+    return "Your Codex usage limit has been reached. Wait for it to reset, upgrade your ChatGPT plan, or switch your Screenpipe AI preset.";
   }
 
   if (normalized.includes("codex error: the usage limit has been reached")) {
     return "The AI provider usage limit has been reached. Wait for it to reset, or switch your AI preset or provider.";
+  }
+
+  if (provider === "custom" && errorStr === "400 status code (no body)") {
+    return "The custom AI provider rejected the request. Verify the endpoint, model, and API key in Settings → AI.";
   }
 
   if (
@@ -369,7 +381,21 @@ export function buildProviderErrorPresentation(
   }
 
   const message = buildGenericProviderErrorMessage(errorStr, preset);
-  return message ? { kind: "provider", message, retryable: true } : null;
+  if (message) return { kind: "provider", message, retryable: true };
+
+  if (
+    isNativeOllamaProvider(preset?.provider) &&
+    errorStr.toLowerCase().includes("does not support tools")
+  ) {
+    const model = preset?.model?.trim() || "the selected model";
+    return {
+      kind: "provider",
+      message: `Ollama model "${model}" does not support tools. Switch your AI preset to an Ollama model that supports tools.`,
+      retryable: false,
+    };
+  }
+
+  return null;
 }
 
 export function buildProviderErrorMessage(

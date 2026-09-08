@@ -29,13 +29,16 @@ export async function fetchRecentActivity(
     include_key_texts: "false",
     include_recording: "false",
     include_memories: "false",
+    // Content-free and cheap: lets screenshots-off devices resolve from one
+    // sustained app once its parser has produced a useful projection.
+    include_parsed_count: "true",
     // What was actually on screen and said, rather than which app it happened
     // in. Without this the model can only restate the window list, which is
     // why the first summary read like a template even though a model wrote it.
     //
-    // `include_key_texts` stays off deliberately: the engine reuses the same
-    // a11y sample for screen snippets, so this is the bounded, deduped view of
-    // that work rather than a second scan. Measured against a real first-run
+    // `include_key_texts` stays off deliberately. The engine prefers bounded
+    // parsed records for snippets and falls back to its bounded accessibility
+    // sample only when no parsed context exists. Measured against a real first-run
     // window (48 frames, 4 windows) the detail call returns in ~1.2s with
     // snippets on and key_texts off, versus ~17.8s with key_texts on.
     include_snippets: options.withDetail ? "true" : "false",

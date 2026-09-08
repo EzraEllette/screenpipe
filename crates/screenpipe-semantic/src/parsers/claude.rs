@@ -30,9 +30,9 @@ const ASSISTANT_ANNOUNCEMENT: &str = "Claude responded:";
 const TURN_STOP_CLASSES: &[&str] = &["group/btn", "group/dd", "cds-reset"];
 const CHROME_LINES: &[&str] = &["Chat mode", "Fast mode off", "Show message actions"];
 
-/// Exact Claude conversation parser. It requires actor-bearing DOM markers and
-/// abstains on older or incompatible layouts so the shared conversation and
-/// document parsers remain available.
+/// Exact Claude conversation parser. It requires actor-bearing DOM markers,
+/// accessible turn headings, or Windows live-region announcements and
+/// abstains on incompatible layouts so the shared parsers remain available.
 pub struct ClaudeParser {
     manifest: ParserManifest,
 }
@@ -42,7 +42,7 @@ impl ClaudeParser {
         Self {
             manifest: ParserManifest {
                 id: "app.claude.message_dom".into(),
-                parser_version: "1".into(),
+                parser_version: "4".into(),
                 schema_version: 1,
                 scope: ParserScope::App,
                 platforms: vec![Platform::Macos, Platform::Windows, Platform::Linux],
@@ -82,19 +82,36 @@ impl SemanticParser for ClaudeParser {
         context: &ParseContext<'_>,
         tree: &SemanticTree,
     ) -> Result<ParseOutcome, ProjectionError> {
+        let code_surface = claude_code_surface(tree);
+        let design_surface = claude_design_surface(tree);
         let (messages, surface, key_from_url) = if let Some(messages) = dom_marker_messages(tree) {
             (messages, "actor_dom_markers", false)
+        } else if let Some(messages) = accessible_heading_messages(tree, code_surface.is_some()) {
+            (messages, "accessible_heading_markers", false)
         } else if let Some(messages) = announcement_messages(tree) {
             (messages, "sr_announcements", true)
+        } else if let Some(surface) = code_surface.as_ref() {
+            return Ok(ParseOutcome::Handled(code_surface_items(surface)));
+        } else if let Some(surface) = design_surface.as_ref() {
+            return Ok(match surface.draft.as_ref() {
+                Some(_) => ParseOutcome::Handled(design_surface_items(surface)),
+                None => ParseOutcome::Empty,
+            });
+        } else if claude_shell(tree) {
+            return Ok(ParseOutcome::Empty);
         } else {
             return Ok(ParseOutcome::NotHandled);
         };
 
-        let title = first_root_title_excluding(tree, "WinCaptionButton").unwrap_or("Claude");
+        let title = code_surface
+            .as_ref()
+            .map(|surface| surface.title.clone())
+            .or_else(|| conversation_title(tree))
+            .unwrap_or_else(|| "Claude".into());
         let key_seed = if key_from_url {
-            context.app.browser_url.as_deref().unwrap_or(title)
+            context.app.browser_url.as_deref().unwrap_or(&title)
         } else {
-            title
+            &title
         };
         let mut conversation = SemanticItem::new(
             "conversation",
@@ -102,11 +119,15 @@ impl SemanticParser for ClaudeParser {
             format!("claude:conversation:{}", key_component(key_seed)),
             IdentityQuality::Derived,
         );
-        conversation.title = Some(title.to_owned());
+        conversation.title = Some(title);
         conversation.metadata.insert("app".into(), "Claude".into());
         conversation
             .metadata
             .insert("surface".into(), surface.into());
+        if let Some(surface) = code_surface.as_ref() {
+            conversation.status = Some(if surface.working { "working" } else { "ready" }.into());
+            apply_code_metadata(&mut conversation, surface);
+        }
         conversation.source_nodes.push(messages[0].0);
 
         let mut items = Vec::with_capacity(messages.len() + 1);
@@ -126,6 +147,454 @@ impl SemanticParser for ClaudeParser {
         }
         Ok(ParseOutcome::Handled(items))
     }
+}
+
+/// Persisted macOS/Electron trees omit DOM classes but preserve one accessible
+/// heading per turn: `You said: ...` or `Claude responded: ...`. The visible
+/// body follows the heading and ends at the exact message-actions control.
+/// Button labels are excluded without trusting reconstructed ancestry because
+/// depth-gapped captures can place later response text under a tool button.
+/// Requiring both actor headings keeps partial loading states and unrelated
+/// headings from being treated as conversations.
+fn accessible_heading_messages(
+    tree: &SemanticTree,
+    allow_single_actor: bool,
+) -> Option<Vec<(NodeId, &'static str, String)>> {
+    let order: Vec<NodeId> = all_nodes(tree).collect();
+    let mut markers: Vec<(usize, NodeId, &'static str, String)> = Vec::new();
+    for (position, &node) in order.iter().enumerate() {
+        if !tree.role(node).is_some_and(|role| {
+            role.eq_ignore_ascii_case("AXHeading") || role.eq_ignore_ascii_case("Heading")
+        }) {
+            continue;
+        }
+        let Some((actor, remainder)) = turn_marker(tree, node) else {
+            continue;
+        };
+        markers.push((position, node, actor, remainder.to_owned()));
+        if markers.len() == MAX_MESSAGES {
+            break;
+        }
+    }
+    let has_user = markers.iter().any(|(_, _, actor, _)| *actor == "[user]");
+    let has_assistant = markers.iter().any(|(_, _, actor, _)| *actor == "Claude");
+    if (!has_user || !has_assistant) && !allow_single_actor {
+        return None;
+    }
+
+    let mut messages = Vec::new();
+    let mut retained_bytes = 0usize;
+    for (index, (position, node, actor, remainder)) in markers.iter().enumerate() {
+        let window_end = markers.get(index + 1).map_or(order.len(), |next| next.0);
+        let body = accessible_turn_body(
+            tree,
+            actor,
+            &order[position + 1..window_end],
+            &mut retained_bytes,
+        )
+        .or_else(|| (!remainder.is_empty()).then(|| remainder.clone()));
+        if let Some(body) = body {
+            messages.push((*node, *actor, body));
+        }
+    }
+    (!messages.is_empty()).then_some(messages)
+}
+
+fn accessible_turn_body(
+    tree: &SemanticTree,
+    actor: &str,
+    window: &[NodeId],
+    retained_bytes: &mut usize,
+) -> Option<String> {
+    let mut lines = Vec::<String>::new();
+    for &node in window {
+        if is_composer_text_area(tree, node) {
+            break;
+        }
+        if is_button_role(tree.role(node)) {
+            if let Some(content) = node_content(tree, node) {
+                if content.eq_ignore_ascii_case("Show message actions")
+                    || (actor == "[user]" && content.eq_ignore_ascii_case("Show more"))
+                {
+                    break;
+                }
+            }
+            continue;
+        }
+        if !is_message_text_role(tree.role(node)) {
+            continue;
+        }
+        let Some(content) = node_content(tree, node) else {
+            continue;
+        };
+        if has_button_ancestor_with_same_content(tree, node, content) {
+            continue;
+        }
+        if content.eq_ignore_ascii_case("Chat mode")
+            || content.starts_with("Claude is AI and can make mistakes")
+        {
+            break;
+        }
+        for line in content
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+        {
+            if line.starts_with(USER_ANNOUNCEMENT)
+                || line.starts_with(ASSISTANT_ANNOUNCEMENT)
+                || CHROME_LINES
+                    .iter()
+                    .chain(IGNORED_ACTIONS.iter())
+                    .any(|chrome| line.eq_ignore_ascii_case(chrome))
+                || is_claude_time_label(line)
+                || lines.last().is_some_and(|previous| previous == line)
+            {
+                continue;
+            }
+            let separator = usize::from(!lines.is_empty());
+            let remaining = MAX_BODY_BYTES.saturating_sub(*retained_bytes + separator);
+            if remaining == 0 {
+                break;
+            }
+            let line = truncate_str(line, remaining);
+            if line.is_empty() {
+                break;
+            }
+            *retained_bytes += line.len() + separator;
+            lines.push(line.to_owned());
+        }
+        if *retained_bytes == MAX_BODY_BYTES {
+            break;
+        }
+    }
+    (!lines.is_empty()).then(|| lines.join("\n"))
+}
+
+fn has_button_ancestor_with_same_content(tree: &SemanticTree, node: NodeId, content: &str) -> bool {
+    let mut current = tree.parent(node);
+    while let Some(parent) = current {
+        if is_button_role(tree.role(parent))
+            && node_content(tree, parent).is_some_and(|label| label.eq_ignore_ascii_case(content))
+        {
+            return true;
+        }
+        current = tree.parent(parent);
+    }
+    false
+}
+
+fn is_claude_time_label(line: &str) -> bool {
+    line.eq_ignore_ascii_case("just now") || (line.len() <= 32 && line.ends_with(" ago"))
+}
+
+struct ClaudeCodeSurface {
+    title: String,
+    title_node: NodeId,
+    draft: Option<(NodeId, String)>,
+    project: Option<String>,
+    environment: Option<String>,
+    branch: Option<String>,
+    model: Option<String>,
+    effort: Option<String>,
+    worktree: bool,
+    working: bool,
+}
+
+fn claude_code_surface(tree: &SemanticTree) -> Option<ClaudeCodeSurface> {
+    let mut terminal = false;
+    let mut diff = false;
+    let mut browser = false;
+    let mut session_actions_index = None;
+    let mut remote_control_index = None;
+    let mut local_index = None;
+    let mut project = None;
+    let mut branch = None;
+    let mut worktree = false;
+    let mut model = None;
+    let mut effort = None;
+    let mut working = false;
+
+    for index in 0..tree.len() {
+        let node = NodeId(index as u32);
+        let role = tree.role(node).unwrap_or("");
+        let Some(content) = node_content(tree, node) else {
+            continue;
+        };
+        terminal |=
+            role.eq_ignore_ascii_case("AXCheckBox") && content.eq_ignore_ascii_case("Terminal");
+        diff |= role.eq_ignore_ascii_case("AXCheckBox") && content.eq_ignore_ascii_case("Diff");
+        browser |=
+            role.eq_ignore_ascii_case("AXCheckBox") && content.eq_ignore_ascii_case("Browser");
+        if content.starts_with("Session actions") {
+            session_actions_index = Some(index);
+        }
+        if content.eq_ignore_ascii_case("Remote Control") {
+            remote_control_index = Some(index);
+        }
+        if role.eq_ignore_ascii_case("AXPopUpButton") && content.eq_ignore_ascii_case("Local") {
+            local_index = Some(index);
+        } else if local_index.is_some_and(|local| index == local + 1)
+            && role.eq_ignore_ascii_case("AXPopUpButton")
+        {
+            project = Some(content.to_owned());
+        }
+        if role.eq_ignore_ascii_case("AXComboBox") {
+            branch = Some(content.to_owned());
+        }
+        worktree |=
+            role.eq_ignore_ascii_case("AXCheckBox") && content.eq_ignore_ascii_case("worktree");
+        if role.eq_ignore_ascii_case("AXPopUpButton")
+            && ["Opus ", "Sonnet ", "Haiku "]
+                .iter()
+                .any(|prefix| content.starts_with(prefix))
+        {
+            model = Some(content.to_owned());
+        }
+        if role.eq_ignore_ascii_case("AXPopUpButton") && content.starts_with("Effort: ") {
+            effort = content.strip_prefix("Effort: ").map(str::to_owned);
+        }
+        working |= content.eq_ignore_ascii_case("Stop")
+            || content.eq_ignore_ascii_case("Claude is responding");
+    }
+
+    let active_scaffold = terminal && diff && browser && session_actions_index.is_some();
+    let new_task_scaffold = local_index.is_some() && branch.is_some() && worktree;
+    if !active_scaffold && !new_task_scaffold {
+        return None;
+    }
+
+    let title_anchor = remote_control_index.or(session_actions_index);
+    let title = title_anchor
+        .and_then(|anchor| previous_button_label(tree, anchor))
+        .unwrap_or_else(|| "New task".into());
+    let title_node = title_anchor
+        .and_then(|anchor| previous_button_node(tree, anchor))
+        .unwrap_or(NodeId(0));
+    Some(ClaudeCodeSurface {
+        title,
+        title_node,
+        draft: claude_composer(tree),
+        project,
+        environment: local_index.map(|_| "Local".into()),
+        branch,
+        model,
+        effort,
+        worktree,
+        working,
+    })
+}
+
+fn previous_button_label(tree: &SemanticTree, before: usize) -> Option<String> {
+    previous_button_node(tree, before).and_then(|node| node_content(tree, node).map(str::to_owned))
+}
+
+fn previous_button_node(tree: &SemanticTree, before: usize) -> Option<NodeId> {
+    (0..before).rev().find_map(|index| {
+        let node = NodeId(index as u32);
+        tree.role(node)
+            .is_some_and(|role| role.eq_ignore_ascii_case("AXButton"))
+            .then_some(node)
+    })
+}
+
+fn claude_composer(tree: &SemanticTree) -> Option<(NodeId, String)> {
+    for index in 0..tree.len() {
+        let node = NodeId(index as u32);
+        if !is_composer_text_area(tree, node) {
+            continue;
+        }
+        let Some(body) = node_content(tree, node) else {
+            continue;
+        };
+        let has_send_control = ((index + 1)..tree.len().min(index + 8)).any(|following| {
+            let candidate = NodeId(following as u32);
+            node_content(tree, candidate).is_some_and(|content| {
+                ["Send", "Stop", "Send message"]
+                    .iter()
+                    .any(|label| content.eq_ignore_ascii_case(label))
+            })
+        });
+        if has_send_control && !is_composer_placeholder(body) {
+            return Some((node, body.to_owned()));
+        }
+    }
+    None
+}
+
+fn is_composer_text_area(tree: &SemanticTree, node: NodeId) -> bool {
+    tree.role(node)
+        .is_some_and(|role| role.eq_ignore_ascii_case("AXTextArea"))
+}
+
+fn is_composer_placeholder(value: &str) -> bool {
+    [
+        "Type / for commands",
+        "Write a message…",
+        "Write a message...",
+        "Describe a task or ask a question",
+        "Describe what you want to create...",
+        "Attach a file, link your design system, or describe what you want to make",
+    ]
+    .iter()
+    .any(|placeholder| value.eq_ignore_ascii_case(placeholder))
+}
+
+fn code_surface_items(surface: &ClaudeCodeSurface) -> Vec<SemanticItem> {
+    let mut conversation = SemanticItem::new(
+        "conversation",
+        SemanticKind::Conversation,
+        format!("claude:conversation:{}", key_component(&surface.title)),
+        IdentityQuality::Derived,
+    );
+    conversation.title = Some(surface.title.clone());
+    conversation.status = Some(if surface.working { "working" } else { "ready" }.into());
+    conversation.metadata.insert("app".into(), "Claude".into());
+    conversation
+        .metadata
+        .insert("surface".into(), "claude_code".into());
+    apply_code_metadata(&mut conversation, surface);
+    conversation.source_nodes.push(surface.title_node);
+    let mut items = vec![conversation];
+    if let Some((node, body)) = surface.draft.as_ref() {
+        let mut message = SemanticItem::new(
+            "message-0",
+            SemanticKind::Message,
+            "claude:draft",
+            IdentityQuality::Ephemeral,
+        );
+        message.parent_local_id = Some("conversation".into());
+        message.actor = Some("[user]".into());
+        message.body = Some(body.clone());
+        message.status = Some("draft".into());
+        message.source_nodes.push(*node);
+        items.push(message);
+    }
+    items
+}
+
+fn apply_code_metadata(conversation: &mut SemanticItem, surface: &ClaudeCodeSurface) {
+    for (key, value) in [
+        ("project", surface.project.as_ref()),
+        ("environment", surface.environment.as_ref()),
+        ("branch", surface.branch.as_ref()),
+        ("model", surface.model.as_ref()),
+        ("effort", surface.effort.as_ref()),
+    ] {
+        if let Some(value) = value {
+            conversation.metadata.insert(key.into(), value.clone());
+        }
+    }
+    if surface.worktree {
+        conversation
+            .metadata
+            .insert("worktree".into(), "true".into());
+    }
+}
+
+struct ClaudeDesignSurface {
+    draft: Option<(NodeId, String)>,
+}
+
+fn claude_design_surface(tree: &SemanticTree) -> Option<ClaudeDesignSurface> {
+    let design = all_nodes(tree).any(|node| {
+        node_content(tree, node).is_some_and(|content| {
+            content.eq_ignore_ascii_case("Claude Design")
+                || content.eq_ignore_ascii_case("Claude Design Beta")
+        })
+    });
+    design.then(|| ClaudeDesignSurface {
+        draft: first_meaningful_text_area(tree),
+    })
+}
+
+fn first_meaningful_text_area(tree: &SemanticTree) -> Option<(NodeId, String)> {
+    all_nodes(tree).find_map(|node| {
+        is_composer_text_area(tree, node)
+            .then(|| node_content(tree, node))
+            .flatten()
+            .filter(|body| !is_composer_placeholder(body))
+            .map(|body| (node, body.to_owned()))
+    })
+}
+
+fn design_surface_items(surface: &ClaudeDesignSurface) -> Vec<SemanticItem> {
+    let mut conversation = SemanticItem::new(
+        "conversation",
+        SemanticKind::Conversation,
+        "claude:conversation:design",
+        IdentityQuality::Derived,
+    );
+    conversation.title = Some("Claude Design".into());
+    conversation.metadata.insert("app".into(), "Claude".into());
+    conversation
+        .metadata
+        .insert("surface".into(), "claude_design".into());
+    let mut items = vec![conversation];
+    if let Some((node, body)) = surface.draft.as_ref() {
+        let mut message = SemanticItem::new(
+            "message-0",
+            SemanticKind::Message,
+            "claude:design-draft",
+            IdentityQuality::Ephemeral,
+        );
+        message.parent_local_id = Some("conversation".into());
+        message.actor = Some("[user]".into());
+        message.body = Some(body.clone());
+        message.status = Some("draft".into());
+        message.source_nodes.push(*node);
+        items.push(message);
+    }
+    items
+}
+
+fn claude_shell(tree: &SemanticTree) -> bool {
+    let mut web_area = false;
+    for node in all_nodes(tree) {
+        let Some(content) = node_content(tree, node) else {
+            continue;
+        };
+        if tree
+            .role(node)
+            .is_some_and(|role| role.eq_ignore_ascii_case("AXWebArea"))
+        {
+            web_area |= content.eq_ignore_ascii_case("Claude")
+                || content.ends_with(" - Claude")
+                || tree.text(node).is_some_and(|text| {
+                    text.eq_ignore_ascii_case("Claude") || text.ends_with(" - Claude")
+                });
+        }
+    }
+    web_area
+}
+
+fn conversation_title(tree: &SemanticTree) -> Option<String> {
+    for node in all_nodes(tree) {
+        if tree
+            .role(node)
+            .is_some_and(|role| role.eq_ignore_ascii_case("AXWebArea"))
+        {
+            let title = tree
+                .title(node)
+                .or_else(|| tree.text(node))
+                .or_else(|| tree.value(node))
+                .or_else(|| tree.description(node))
+                .map(str::trim);
+            if let Some(title) = title.filter(|title| {
+                !title.eq_ignore_ascii_case("Claude")
+                    && !title.eq_ignore_ascii_case("standard window")
+                    && !title.eq_ignore_ascii_case("HTML content")
+                    && title.len() <= 240
+                    && !title.contains(['\n', '\r'])
+            }) {
+                return Some(title.to_owned());
+            }
+        }
+    }
+    first_root_title_excluding(tree, "WinCaptionButton")
+        .filter(|title| {
+            !title.eq_ignore_ascii_case("Claude") && !title.eq_ignore_ascii_case("standard window")
+        })
+        .map(str::to_owned)
 }
 
 /// Web/macOS surface: actor-bearing DOM marker classes. Unchanged behavior.
@@ -208,6 +677,10 @@ fn announcement(tree: &SemanticTree, node: NodeId) -> Option<(&'static str, &str
     if !has_class(tree, node, "sr-only") {
         return None;
     }
+    turn_marker(tree, node)
+}
+
+fn turn_marker(tree: &SemanticTree, node: NodeId) -> Option<(&'static str, &str)> {
     let text = node_content(tree, node)?;
     text.strip_prefix(USER_ANNOUNCEMENT)
         .map(|remainder| ("[user]", remainder.trim()))
@@ -235,10 +708,7 @@ fn assistant_body(
             }
             skip_under = None;
         }
-        if tree
-            .role(node)
-            .is_some_and(|role| role.eq_ignore_ascii_case("Button"))
-        {
+        if is_button_role(tree.role(node)) {
             if has_class(tree, node, "sr-only") {
                 break;
             }
@@ -484,6 +954,12 @@ fn is_message_text_role(role: Option<&str>) -> bool {
         ]
         .iter()
         .any(|candidate| candidate.eq_ignore_ascii_case(role))
+    })
+}
+
+fn is_button_role(role: Option<&str>) -> bool {
+    role.is_some_and(|role| {
+        role.eq_ignore_ascii_case("AXButton") || role.eq_ignore_ascii_case("Button")
     })
 }
 

@@ -147,6 +147,26 @@ pub(crate) enum ResolvedMeetingCandidate {
 }
 
 impl ResolvedMeetingCandidate {
+    pub(crate) fn call_signal_identity(
+        &self,
+    ) -> Option<(&str, &ProcessKey, &AudioInputProcess, bool)> {
+        match self {
+            Self::Native {
+                platform,
+                session_key,
+                process,
+                ..
+            } => Some((platform, session_key, process, false)),
+            Self::Browser {
+                platform,
+                session_key,
+                process,
+                ..
+            } => Some((platform, session_key, process, true)),
+            _ => None,
+        }
+    }
+
     pub(crate) fn resolved_session(&self) -> Option<ResolvedSession> {
         match self {
             Self::Native {
@@ -227,12 +247,13 @@ pub(crate) struct ResolvedSession {
 
 /// Result of scanning a messaging app's AX tree for call UI evidence.
 ///
-/// When a native platform has `requires_call_signal: true`, the audio-process
-/// detector runs this scan before promoting the candidate to `Native`. If
-/// `is_in_call` is false the candidate is downgraded to `NonMeeting`,
-/// blocking phantom meetings from voice notes (#4776).
+/// When a resolved platform has `requires_call_signal: true`, the audio-process
+/// detector runs this scan before promoting either a native or browser
+/// candidate. Evidence is tied to the candidate's audio session so one process
+/// cannot authorize another process that happens to resolve to the same app.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CallSignalEvidence {
+    pub session_key: ProcessKey,
     /// Lowercased platform name (e.g. "whatsapp", "signal", "telegram").
     pub platform: String,
     /// Whether the AX scan found call signals confirming a real call.
@@ -246,4 +267,15 @@ pub(crate) struct SuppressedSession {
     pub(crate) session_key: ProcessKey,
     pub(crate) platform: Option<String>,
     pub(crate) meeting_url: Option<String>,
+}
+
+/// The most recently ended meeting and the conference room it was in, kept in
+/// the detection loop so the 120s auto-merge window can refuse to reopen a
+/// row when the next session is visibly a different room.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct EndedRoom {
+    pub(crate) meeting_id: i64,
+    /// `meeting_url_identity` of the ended meeting's URL; `None` for native
+    /// apps and browser sessions whose URL never resolved to a room.
+    pub(crate) identity: Option<String>,
 }

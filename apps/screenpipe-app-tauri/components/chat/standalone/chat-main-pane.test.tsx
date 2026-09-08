@@ -13,8 +13,8 @@ const { messageListUnmounted, firstRunBannerUnmounted } = vi.hoisted(() => ({
   firstRunBannerUnmounted: vi.fn(),
 }));
 
-// The real banner owns the first-run window's ceiling timer. This stand-in
-// only has to prove it stays mounted, so it reports its own teardown.
+// The persistent main layout owns the first-run window. This stand-in only has
+// to prove Home keeps presenting its state after the user sends a message.
 vi.mock("@/components/first-run/learning-banner", async () => {
   const ReactModule = await import("react");
   return {
@@ -74,8 +74,6 @@ function paneProps(conversationId: string, messages: Message[]) {
     onOpenPipeSettings: vi.fn(),
     summaryCardsProps: {},
     messageListProps: { messages },
-    isUserScrolledUp: false,
-    scrollToBottom: vi.fn(),
   } as React.ComponentProps<typeof ChatMainPane>;
 }
 
@@ -110,17 +108,16 @@ describe("ChatMainPane", () => {
   });
 
   it("keeps the first-run banner mounted once the user sends a message", () => {
-    // The regression this guards. The banner used to render behind
-    // `messages.length === 0`, so the first message tore it down along with
-    // the ceiling timer it owns: the first-run window then never settled and
-    // emitted no event at all. Typing is the behaviour we want, so it must not
-    // destroy the first-run summary.
+    // The banner used to render behind `messages.length === 0`, so the first
+    // message hid the activation state even while its persistent owner kept
+    // working. Typing is the behaviour we want, so it must not hide the result.
     const enabled = {
       ...paneProps("chat", []),
       firstRunLearningEnabled: true,
     };
     const { rerender } = render(<ChatMainPane {...enabled} />);
     expect(screen.getByTestId("first-run-banner")).toBeInTheDocument();
+    expect(screen.queryByTestId("summary-cards")).not.toBeInTheDocument();
 
     const sent: Message = {
       id: "sent-message",
@@ -142,5 +139,30 @@ describe("ChatMainPane", () => {
   it("does not mount the lifecycle in a non-owner webview", () => {
     render(<ChatMainPane {...paneProps("chat", [])} />);
     expect(screen.queryByTestId("first-run-banner")).not.toBeInTheDocument();
+  });
+
+  it("renders a pending follow-up after durable chat history", () => {
+    const existingMessage: Message = {
+      id: "existing-message",
+      role: "user",
+      content: "existing durable message",
+      timestamp: Date.now(),
+    };
+
+    render(
+      <ChatMainPane
+        {...paneProps("chat", [existingMessage])}
+        pendingSend={{ text: "follow-up message" }}
+      />,
+    );
+
+    const messageList = screen.getByTestId("message-list");
+    const pendingBubble = screen.getByTestId("chat-pending-user-message");
+    expect(messageList).toHaveTextContent("1");
+    expect(pendingBubble).toHaveTextContent("follow-up message");
+    expect(
+      messageList.compareDocumentPosition(pendingBubble) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).not.toBe(0);
   });
 });

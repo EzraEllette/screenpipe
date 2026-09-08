@@ -48,6 +48,11 @@ export function ChatInspectorPopover({
   sources,
   onOpenFile,
 }: ChatInspectorPopoverProps) {
+  // Keep the control out of the toolbar until there is something to inspect,
+  // while still mounting it when an explicit action such as `/inspector`
+  // opens the empty state.
+  if (!open && outputs.length === 0 && sources.length === 0) return null;
+
   return (
     <Popover open={open} onOpenChange={onOpenChange}>
       <PopoverTrigger asChild>
@@ -71,7 +76,7 @@ export function ChatInspectorPopover({
       <PopoverContent
         align="end"
         sideOffset={8}
-        className="w-[22rem] max-w-[calc(100vw-2rem)] rounded-2xl p-0 shadow-xl"
+        className="w-[22rem] max-w-[calc(100vw-2rem)] rounded-lg p-0 shadow-xl"
         onInteractOutside={(event) => event.preventDefault()}
       >
         <ChatInspector

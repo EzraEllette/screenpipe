@@ -112,6 +112,11 @@ export interface ResponseFormat {
 	schema?: InputSchema;
 	name?: string;
 	description?: string;
+	json_schema?: {
+		schema: InputSchema;
+		name: string;
+		description?: string;
+	};
 }
 
 export interface ImageContent {
@@ -151,8 +156,6 @@ export interface Env {
 	AI: Ai;
 	/** GPT-5.6 prompt caching: `system` (default/kill switch) or `history`. */
 	GPT56_HISTORY_CACHE_MODE?: string;
-	/** Hosted chat rollout switch. Any value other than `cloudflare` is legacy. */
-	HOSTED_CHAT_GATEWAY_MODE?: string;
 	/** Same-account Cloudflare AI Gateway used by the Workers AI binding. */
 	CLOUDFLARE_AI_GATEWAY_ID?: string;
 	/** Local-dev only: Gateway root or compat chat URL when remote binding URL resolution is unavailable. */
@@ -217,6 +220,8 @@ export interface Env {
 	// fallback. Set this separately only if you need to rotate it
 	// independently of the gemma4-31b path.
 	SCREENPIPE_ENCLAVE_API_KEY?: string;
+	/** Container-owned bearer for the co-hosted GLM-5.3 Flash endpoint. */
+	TINFOIL_GLM_API_KEY?: string;
 	// Admin API auth
 	ADMIN_SECRET: string;
 	// Transcription A/B/C test routing
@@ -283,6 +288,12 @@ export interface Env {
 	LIMIT_SUBSCRIBED_FREE_RPM?: string;
 	LIMIT_BUSINESS_MAX_FREE_RPM?: string;
 	LIMIT_BUSINESS_ULTRA_FREE_RPM?: string;
+	/** Proactive background-Pipe allowance warning thresholds. Percentages and
+	 * timing are UX knobs only; internal cost/margin numbers never leave the
+	 * Worker. */
+	PIPE_ALLOWANCE_WARN_REMAINING_PERCENT?: string;
+	PIPE_ALLOWANCE_WARN_MIN_RESET_HOURS?: string;
+	PIPE_ALLOWANCE_WARN_COOLDOWN_HOURS?: string;
 }
 
 // User tier for rate limiting and model access

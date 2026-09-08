@@ -89,7 +89,7 @@ async function openHomeForAgentExtensionsCatalog(): Promise<void> {
   }
 }
 
-describe('Agent extensions catalog', function () {
+describe('AI tools catalog', function () {
   this.timeout(t(180_000));
 
   before(async () => {
@@ -105,34 +105,52 @@ describe('Agent extensions catalog', function () {
     await browser.waitUntil(
       async () => {
         const body = (await browser.execute(() => document.body.innerText.toLowerCase())) as string;
-        return body.includes('connections') && body.includes('agent extensions');
+        return body.includes('connections') &&
+          body.includes('ai tools') &&
+          body.includes('choose what your ai can use');
       },
-      { timeout: t(12_000), timeoutMsg: 'Connections did not render Agent extensions entry' },
+      { timeout: t(12_000), timeoutMsg: 'Connections did not render the AI tools settings' },
     );
 
     await browser.execute(() => {
       const buttons = Array.from(document.querySelectorAll('button'));
       const target = buttons.find((button) =>
-        button.textContent?.toLowerCase().includes('agent extensions'),
-      ) ?? buttons.find((button) => button.textContent?.toLowerCase().includes('manage'));
+        button.textContent?.trim().toLowerCase() === 'manage' &&
+        button.parentElement?.textContent?.toLowerCase().includes('ai tools'),
+      );
       target?.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
     });
 
     await browser.waitUntil(
       async () => {
-        const body = (await browser.execute(() => document.body.innerText.toLowerCase())) as string;
-        return body.includes('screenpipe extensions use acp client middleware') &&
-          body.includes('screen history') &&
-          body.includes('all acp agents') &&
-          body.includes('pi only') &&
-          body.includes('subagents') &&
-          body.includes('web agent') &&
-          body.includes('ask user');
+        const state = (await browser.execute(() => {
+          const headings = Array.from(document.querySelectorAll('h4'));
+          const recommended = headings.find((heading) =>
+            heading.textContent?.trim().toLowerCase() === 'recommended',
+          );
+          const included = headings.find((heading) =>
+            heading.textContent?.trim().toLowerCase() === 'included',
+          );
+          return {
+            body: document.body.innerText.toLowerCase(),
+            recommendedComesFirst: !!recommended && !!included && !!(
+              recommended.compareDocumentPosition(included) & Node.DOCUMENT_POSITION_FOLLOWING
+            ),
+          };
+        })) as { body: string; recommendedComesFirst: boolean };
+        return state.recommendedComesFirst &&
+          state.body.includes('community tools can run code') &&
+          state.body.includes('screen history') &&
+          state.body.includes('ready in every agent') &&
+          state.body.includes('screenpipe only') &&
+          state.body.includes('subagents') &&
+          state.body.includes('web agent') &&
+          state.body.includes('ask user');
       },
-      { timeout: t(12_000), timeoutMsg: 'Agent extensions catalog did not open' },
+      { timeout: t(12_000), timeoutMsg: 'AI tools catalog did not open' },
     );
 
-    const search = await $('input[placeholder="Search Pi packages..."]');
+    const search = await $('input[placeholder="Search tools..."]');
     await search.waitForExist({ timeout: t(8_000) });
     await search.setValue('web');
 
@@ -140,10 +158,10 @@ describe('Agent extensions catalog', function () {
       async () => {
         const body = (await browser.execute(() => document.body.innerText.toLowerCase())) as string;
         return body.includes('web agent') &&
-          body.includes('npm:@demigodmode/pi-web-agent') &&
-          !body.includes('delegate work to focused child agents');
+          body.includes('@demigodmode/pi-web-agent') &&
+          body.includes('delegate work to focused child agents');
       },
-      { timeout: t(8_000), timeoutMsg: 'Agent extensions catalog search did not filter to web agent' },
+      { timeout: t(8_000), timeoutMsg: 'AI tools catalog search did not filter to web agent' },
     );
 
     const filepath = await saveScreenshot('connections-agent-extensions');

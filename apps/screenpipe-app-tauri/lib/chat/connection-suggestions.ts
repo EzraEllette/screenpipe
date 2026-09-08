@@ -26,6 +26,41 @@ export type ConnectionListItem = ConnectedIntegration & {
   supports_oauth_instances?: boolean;
 };
 export type ActivityAppItem = { name: string; count: number; app_name?: string };
+type ComparableConnectionState = ConnectedIntegration &
+  Partial<
+    Pick<
+      ConnectionListItem,
+      | "connected"
+      | "mcp"
+      | "mcp_server_id"
+      | "is_oauth"
+      | "supports_oauth_instances"
+    >
+  >;
+
+export function connectionListsEqual(
+  left: ComparableConnectionState[],
+  right: ComparableConnectionState[],
+): boolean {
+  if (left === right) return true;
+  if (left.length !== right.length) return false;
+  return left.every((connection, index) => {
+    const candidate = right[index];
+    return (
+      connection.id === candidate.id &&
+      connection.name === candidate.name &&
+      connection.icon === candidate.icon &&
+      connection.category === candidate.category &&
+      connection.description === candidate.description &&
+      connection.connected === candidate.connected &&
+      connection.mcp === candidate.mcp &&
+      connection.mcp_server_id === candidate.mcp_server_id &&
+      connection.is_oauth === candidate.is_oauth &&
+      connection.supports_oauth_instances ===
+        candidate.supports_oauth_instances
+    );
+  });
+}
 
 export function normalizeConnectionForPlatform<T extends ConnectedIntegration>(connection: T, isWindows: boolean): T {
   if (isWindows && connection.id === "apple-calendar") {

@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 
 import { openHomeWindow, waitForAppReady, t } from "../helpers/test-utils.js";
 import { invokeOrThrow } from "../helpers/tauri.js";
+import { saveScreenshot } from "../helpers/screenshot-utils.js";
 
 type AgentEnvelope = {
   source?: string;
@@ -42,7 +43,7 @@ type ProcessMarker = {
   descendantPid?: number;
 };
 
-type AcpScenario = "normal" | "malformed" | "exit" | "auth" | "mcp" | "tree" | "terminal" | "subagent" | "resume";
+type AcpScenario = "normal" | "malformed" | "exit" | "auth" | "mcp" | "tree" | "terminal" | "subagent" | "metadata" | "repeated-tools" | "resume";
 
 const fixturePath = fileURLToPath(new URL("../fixtures/mock-acp-agent.ts", import.meta.url));
 let normalSession = "";
@@ -55,6 +56,8 @@ let treeSession = "";
 let mcpSession = "";
 let terminalSession = "";
 let subagentSession = "";
+let metadataSession = "";
+let repeatedToolsSession = "";
 let resumeSession = "";
 let orphanedPresetSession = "";
 let treeMarkerPrefix = "";
@@ -71,6 +74,8 @@ function resetRunIdentifiers(): void {
   mcpSession = randomUUID();
   terminalSession = randomUUID();
   subagentSession = randomUUID();
+  metadataSession = randomUUID();
+  repeatedToolsSession = randomUUID();
   resumeSession = randomUUID();
   orphanedPresetSession = randomUUID();
   treeMarkerPrefix = path.join(os.tmpdir(), `screenpipe-acp-process-${treeSession}`);
@@ -85,7 +90,11 @@ function acpProviderConfig(
   return {
     backend: "acp",
     acpAgent: {
-      id: "custom",
+      id: scenario === "metadata"
+        ? "pi-acp"
+        : scenario === "repeated-tools"
+          ? "claude-acp"
+          : "custom",
       command: process.execPath,
       args: [fixturePath, `--scenario=${scenario}`],
       env,
@@ -143,6 +152,7 @@ async function resetCapturedState(): Promise<void> {
     delete (window as any).__e2eAcpPromptState;
     delete (window as any).__e2eAcpStartState;
     delete (window as any).__e2eAcpNewSessionState;
+    delete (window as any).__e2eExpandToolActivity;
   });
 }
 
@@ -304,7 +314,7 @@ async function answerAgentAction(
 
 async function startAcp(
   sessionId: string,
-  scenario: "normal" | "malformed" | "mcp" | "tree" | "terminal" | "subagent" | "resume",
+  scenario: "normal" | "malformed" | "mcp" | "tree" | "terminal" | "subagent" | "metadata" | "resume",
   env: Record<string, string> = {},
   userToken: string | null = null,
   resumeSessionId: string | null = null,
@@ -552,6 +562,8 @@ describe("ACP backend", function () {
     await invokeOrThrow("pi_stop", { sessionId: treeSession }).catch(() => undefined);
     await invokeOrThrow("pi_stop", { sessionId: mcpSession }).catch(() => undefined);
     await invokeOrThrow("pi_stop", { sessionId: terminalSession }).catch(() => undefined);
+    await invokeOrThrow("pi_stop", { sessionId: metadataSession }).catch(() => undefined);
+    await invokeOrThrow("pi_stop", { sessionId: repeatedToolsSession }).catch(() => undefined);
     rmSync(processMarkerPath("adapter"), { force: true });
     rmSync(processMarkerPath("descendant"), { force: true });
   });
@@ -911,6 +923,196 @@ describe("ACP backend", function () {
       "mock-task-1",
     ]);
     await stopAndAssertGone(subagentSession);
+  });
+
+  it("preserves terminal ACP metadata and renders traceable tool activity", async () => {
+    await startAcp(metadataSession, "metadata");
+    await foregroundChat(metadataSession);
+    await browser.execute(() => {
+      (window as any).__e2eExpandToolActivity = true;
+    });
+    await beginPrompt(metadataSession, "refine late tool metadata");
+    const prompt = await waitForPromptDone();
+    expect(prompt.error).toBeUndefined();
+    await browser.waitUntil(
+      async () => (await capturedEvents(metadataSession)).some(
+        (envelope) => envelope.event?.type === "agent_end",
+      ),
+      {
+        timeout: t(10_000),
+        interval: 100,
+        timeoutMsg: "metadata refinement turn did not complete",
+      },
+    );
+
+    const widgets = await $$('[data-testid="tool-activity-widget"]');
+    expect(widgets.length).toBeGreaterThan(0);
+    const widget = widgets[widgets.length - 1];
+    const list = await widget.$('[data-testid="tool-activity-list"]');
+    await list.waitForExist({ timeout: t(10_000) });
+    const rows = await widget.$$('[data-testid="tool-activity-item"]');
+    expect(rows).toHaveLength(2);
+    const listText = await list.getText();
+    expect(listText).toContain("Searched your history");
+    expect(listText).toContain("Used a Pi tool");
+    expect(listText).not.toContain("Completed a background step");
+
+    await rows[0].click();
+    await browser.waitUntil(async () => (await widget.getText()).includes("late ACP metadata"), {
+      timeout: t(5_000),
+      interval: 100,
+      timeoutMsg: "refined ACP arguments were not disclosed in the tool row",
+    });
+    const variant = process.env.SCREENPIPE_PR_PROOF_VARIANT ?? "after";
+    const screenshot = await saveScreenshot(`acp-tool-metadata-${variant}`);
+    expect(existsSync(screenshot)).toBe(true);
+
+    const terminal = (await capturedEvents(metadataSession)).find(
+      (envelope) =>
+        envelope.event?.type === "tool_execution_end" &&
+        envelope.event?.toolCallId === "mock-refined",
+    )?.event;
+    expect(terminal).toMatchObject({
+      toolName: "mcp__screenpipe__search-content",
+      agentId: "pi-acp",
+      kind: "search",
+      args: { query: "late ACP metadata" },
+      isError: true,
+    });
+    await stopAndAssertGone(metadataSession);
+  });
+
+  it("compacts repeated Claude recording queries behind one drill-down row", async () => {
+    await startAcp(repeatedToolsSession, "repeated-tools");
+    await foregroundChat(repeatedToolsSession);
+    await browser.execute(() => {
+      (window as any).__e2eExpandToolActivity = true;
+    });
+    await beginPrompt(repeatedToolsSession, "review my recording history");
+    const prompt = await waitForPromptDone();
+    expect(prompt.error).toBeUndefined();
+    await browser.waitUntil(
+      async () => (await capturedEvents(repeatedToolsSession)).some(
+        (envelope) => envelope.event?.type === "agent_end",
+      ),
+      {
+        timeout: t(10_000),
+        interval: 100,
+        timeoutMsg: "repeated Claude tool turn did not complete",
+      },
+    );
+
+    const latestWidget = async (expectedCount: number) => {
+      await browser.waitUntil(
+        async () => (await $$('[data-testid="tool-activity-widget"]')).length >= expectedCount,
+        {
+          timeout: t(10_000),
+          interval: 100,
+          timeoutMsg: `expected ${expectedCount} Claude tool activity widgets`,
+        },
+      );
+      const widgets = await $$('[data-testid="tool-activity-widget"]');
+      return widgets[widgets.length - 1];
+    };
+
+    const widget = await latestWidget(1);
+    const list = await widget.$('[data-testid="tool-activity-list"]');
+    await list.waitForExist({ timeout: t(10_000) });
+
+    const compactRows = await widget.$$('[data-testid="tool-activity-item"]');
+    expect(compactRows).toHaveLength(1);
+    expect(await compactRows[0].getText()).toContain("Searched recordings");
+    expect(await compactRows[0].getText()).toContain("25 queries");
+    const compactScreenshot = await saveScreenshot("acp-repeated-tools-compact");
+    expect(existsSync(compactScreenshot)).toBe(true);
+
+    await compactRows[0].click();
+    await browser.waitUntil(
+      async () => (await widget.$$('[data-testid="tool-activity-item"]')).length === 26,
+      {
+        timeout: t(5_000),
+        interval: 100,
+        timeoutMsg: "individual recording query details were not disclosed",
+      },
+    );
+    // Let the parent rail finish its disclosure transition before opening a
+    // nested query, keeping the visual proof deterministic in WebKit.
+    await browser.pause(350);
+    const detailedRows = await widget.$$('[data-testid="tool-activity-item"]');
+    await detailedRows[1].click();
+    expect(await widget.getText()).toContain("2026-08-01T00:00:00Z");
+    await browser.pause(350);
+    await browser.execute((element) => {
+      element.scrollIntoView({ block: "center", inline: "nearest" });
+    }, detailedRows[1]);
+    await browser.pause(100);
+    const firstDetailIsVisible = await browser.execute((element) => {
+      const rect = element.getBoundingClientRect();
+      let current: HTMLElement | null = element;
+      while (current) {
+        const style = window.getComputedStyle(current);
+        if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") {
+          return false;
+        }
+        current = current.parentElement;
+      }
+      return rect.width > 0
+        && rect.height > 0
+        && rect.top >= 0
+        && rect.left >= 0
+        && rect.bottom <= window.innerHeight
+        && rect.right <= window.innerWidth;
+    }, detailedRows[1]);
+    expect(firstDetailIsVisible).toBe(true);
+    const expandedScreenshot = await saveScreenshot("acp-repeated-tools-expanded");
+    expect(existsSync(expandedScreenshot)).toBe(true);
+
+    await detailedRows[25].click();
+    expect(await widget.getText()).toContain("2026-08-25T00:00:00Z");
+    const expandedRows = await widget.$$('[data-testid="tool-activity-item"]');
+    await browser.execute((element) => {
+      element.scrollIntoView({ block: "center", inline: "nearest" });
+    }, expandedRows[0]);
+    await expandedRows[0].click();
+
+    await beginPrompt(repeatedToolsSession, "show the recording query failure state");
+    const failurePrompt = await waitForPromptDone();
+    expect(failurePrompt.error).toBeUndefined();
+    const failureWidget = await latestWidget(2);
+    await browser.waitUntil(
+      async () => (await failureWidget.getAttribute("data-activity-state")) === "error",
+      {
+        timeout: t(5_000),
+        interval: 100,
+        timeoutMsg: "failed Claude query widget did not settle into its error state",
+      },
+    );
+    const failureRows = await failureWidget.$$('[data-testid="tool-activity-item"]');
+    expect(failureRows).toHaveLength(2);
+    expect(await failureRows[0].getText()).toContain("3 queries");
+    expect(await failureRows[1].getText()).toContain("failed");
+    const failureScreenshot = await saveScreenshot("acp-repeated-tools-failure");
+    expect(existsSync(failureScreenshot)).toBe(true);
+
+    await beginPrompt(repeatedToolsSession, "show a short recording query sequence");
+    const shortPrompt = await waitForPromptDone();
+    expect(shortPrompt.error).toBeUndefined();
+    const shortWidget = await latestWidget(3);
+    await browser.waitUntil(
+      async () => (await shortWidget.getAttribute("data-activity-state")) === "completed",
+      {
+        timeout: t(5_000),
+        interval: 100,
+        timeoutMsg: "short Claude query widget did not settle into its completed state",
+      },
+    );
+    const shortRows = await shortWidget.$$('[data-testid="tool-activity-item"]');
+    expect(shortRows).toHaveLength(2);
+    expect(await shortWidget.getText()).not.toContain("2 queries");
+    const shortScreenshot = await saveScreenshot("acp-repeated-tools-short");
+    expect(existsSync(shortScreenshot)).toBe(true);
+
+    await stopAndAssertGone(repeatedToolsSession);
   });
 
   it("reattaches to a prior session via session/resume when one is provided", async () => {

@@ -222,7 +222,9 @@ jobs:
   lint-gate:
     name: Clippy & Format
     needs: [changes, lint]
-    if: always()
+    # Preserve a failed required check for real lint failures, but do not turn
+    # workflow cancellation from a superseding push into a new red failure.
+    if: ${{ always() && !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - name: Verify routed check
@@ -237,7 +239,7 @@ jobs:
   optimize-gate:
     name: Dependency & Performance Checks
     needs: [changes, optimize]
-    if: always()
+    if: ${{ always() && !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - name: Verify routed check
@@ -252,7 +254,7 @@ jobs:
   lockfiles-gate:
     name: Cargo.lock freshness
     needs: [changes, lockfiles]
-    if: always()
+    if: ${{ always() && !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - name: Verify routed check
@@ -267,7 +269,7 @@ jobs:
   knip-gate:
     name: Knip (frontend dead code)
     needs: [changes, knip]
-    if: always()
+    if: ${{ always() && !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - name: Verify routed check

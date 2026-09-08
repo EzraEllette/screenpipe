@@ -499,7 +499,7 @@ function SeeAllRow({ label, onClick }: { label: string; onClick: () => void }) {
   return (
     <button
       onClick={onClick}
-      className="flex w-full items-center gap-1 rounded-[6px] px-2 py-2 text-xs font-medium text-foreground/80 transition-colors hover:bg-muted/50 hover:text-foreground"
+      className="flex w-full items-center gap-1 rounded-md px-2 py-2 text-xs font-medium text-foreground/80 transition-colors hover:bg-muted/50 hover:text-foreground"
     >
       {label}
       <span aria-hidden>→</span>
@@ -565,7 +565,7 @@ function UiEventItem({ evt, onNavigate, selected = false, navIndex, onHover }: {
       onClick={onNavigate}
       title={evt.text_content ?? undefined}
       className={cn(
-        "w-full flex items-start gap-2.5 px-2 py-2 rounded-[6px] cursor-pointer transition-colors",
+        "w-full flex items-start gap-2.5 px-2 py-2 rounded-md cursor-pointer transition-colors",
         selected ? "bg-muted" : "hover:bg-muted/50",
       )}
     >
@@ -2376,10 +2376,9 @@ export function SearchModal({ isOpen, onClose, onNavigateToTimestamp, embedded =
       // text-only because no single icon reads as "everything". Selection
       // changes colour only — never size or content — so the row never
       // reflows as you switch.
-      // Explicit radii: the theme sets --radius: 0, so rounded-md/lg both
-      // compute to 0 and render as bare rectangles. ~25% of the control's
-      // height — softened, not pill-shaped.
-      <div className="flex items-center gap-0.5 shrink-0 rounded-[8px] bg-muted/60 p-0.5">
+      // The outer surface and its controls follow the shared 8px / 6px tiers.
+      // At roughly 25% of the control height they stay softened, not pill-shaped.
+      <div className="flex items-center gap-0.5 shrink-0 rounded-lg bg-muted/60 p-0.5">
         {([
           { key: "all" as ContentFilter, label: "all", icon: null },
           { key: "screen" as ContentFilter, label: "screen", icon: Monitor },
@@ -2394,7 +2393,7 @@ export function SearchModal({ isOpen, onClose, onNavigateToTimestamp, embedded =
               aria-pressed={isActive}
               onClick={() => { setContentFilter(key); setNavIndex(0); }}
               className={cn(
-                "inline-flex h-7 min-w-[58px] items-center justify-center gap-1.5 rounded-[6px] px-2.5 text-xs capitalize transition-colors",
+                "inline-flex h-7 min-w-[58px] items-center justify-center gap-1.5 rounded-md px-2.5 text-xs capitalize transition-colors",
                 isActive
                   ? "bg-background text-foreground shadow-sm"
                   : "text-muted-foreground hover:text-foreground",
@@ -2481,7 +2480,7 @@ export function SearchModal({ isOpen, onClose, onNavigateToTimestamp, embedded =
               <button
                 onClick={() => { setSpeakerAppFilter(null); setSelectedTranscriptionIndex(0); }}
                 className={cn(
-                  "inline-flex h-7 items-center gap-1.5 whitespace-nowrap shrink-0 rounded-[6px] border px-2.5 text-[11px] transition-colors",
+                  "inline-flex h-7 items-center gap-1.5 whitespace-nowrap shrink-0 rounded-md border px-2.5 text-[11px] transition-colors",
                   !speakerAppFilter
                     ? "bg-foreground text-background border-foreground"
                     : "border-border text-muted-foreground hover:border-foreground/40"
@@ -2494,7 +2493,7 @@ export function SearchModal({ isOpen, onClose, onNavigateToTimestamp, embedded =
                   key={app}
                   onClick={() => { setSpeakerAppFilter(speakerAppFilter === app ? null : app); setSelectedTranscriptionIndex(0); }}
                   className={cn(
-                    "inline-flex h-7 items-center gap-1.5 whitespace-nowrap shrink-0 rounded-[6px] border px-2.5 text-[11px] transition-colors",
+                    "inline-flex h-7 items-center gap-1.5 whitespace-nowrap shrink-0 rounded-md border px-2.5 text-[11px] transition-colors",
                     speakerAppFilter === app
                       ? "bg-foreground text-background border-foreground"
                       : "border-border text-muted-foreground hover:border-foreground/40"
@@ -2519,7 +2518,7 @@ export function SearchModal({ isOpen, onClose, onNavigateToTimestamp, embedded =
               <button
                 onClick={() => { setSpeakerTimeFilter(null); setSelectedTranscriptionIndex(0); }}
                 className={cn(
-                  "inline-flex h-7 items-center gap-1.5 whitespace-nowrap shrink-0 rounded-[6px] border px-2.5 text-[11px] transition-colors",
+                  "inline-flex h-7 items-center gap-1.5 whitespace-nowrap shrink-0 rounded-md border px-2.5 text-[11px] transition-colors",
                   !speakerTimeFilter
                     ? "bg-foreground text-background border-foreground"
                     : "border-border text-muted-foreground hover:border-foreground/40"
@@ -2533,7 +2532,7 @@ export function SearchModal({ isOpen, onClose, onNavigateToTimestamp, embedded =
                   key={range.dateKey}
                   onClick={() => { setSpeakerTimeFilter(speakerTimeFilter === range.dateKey ? null : range.dateKey); setSelectedTranscriptionIndex(0); }}
                   className={cn(
-                    "inline-flex h-7 items-center gap-1.5 whitespace-nowrap shrink-0 rounded-[6px] border px-2.5 text-[11px] transition-colors",
+                    "inline-flex h-7 items-center gap-1.5 whitespace-nowrap shrink-0 rounded-md border px-2.5 text-[11px] transition-colors",
                     speakerTimeFilter === range.dateKey
                       ? "bg-foreground text-background border-foreground"
                       : "border-border text-muted-foreground hover:border-foreground/40"
@@ -2673,7 +2672,7 @@ export function SearchModal({ isOpen, onClose, onNavigateToTimestamp, embedded =
                 <div
                   key={i}
                   className={cn(
-                    "rounded-[6px] bg-muted animate-pulse",
+                    "rounded-md bg-muted animate-pulse",
                     contentFilter === "input" ? "h-14" : "h-9",
                   )}
                 />
@@ -2730,10 +2729,9 @@ export function SearchModal({ isOpen, onClose, onNavigateToTimestamp, embedded =
                         setSearchEpoch((epoch) => epoch + 1);
                       }}
                       className={cn(
-                        // rounded-[6px], not rounded-full: the scope switcher
-                        // and every result row use the same softened corner,
-                        // and the theme's --radius: 0 makes rounded-md a no-op.
-                        "inline-flex items-center gap-1 px-2.5 py-1 text-xs rounded-[6px] border transition-colors cursor-pointer",
+                        // rounded-md, not rounded-full: the scope switcher and
+                        // every result row use the same 6px control corner.
+                        "inline-flex items-center gap-1 px-2.5 py-1 text-xs rounded-md border transition-colors cursor-pointer",
                         isActive
                           ? "bg-foreground text-background border-foreground"
                           : "border-border text-foreground/70 hover:bg-muted hover:border-foreground/30"
@@ -2778,7 +2776,7 @@ export function SearchModal({ isOpen, onClose, onNavigateToTimestamp, embedded =
                       !embedded,
                     );
                   }}
-                  className="cursor-pointer rounded-[6px] overflow-hidden border border-border hover:border-foreground/50 transition-colors"
+                  className="cursor-pointer rounded-md overflow-hidden border border-border hover:border-foreground/50 transition-colors"
                 >
                   <FrameThumbnail
                     key={frame.frame_id}
@@ -2841,7 +2839,7 @@ export function SearchModal({ isOpen, onClose, onNavigateToTimestamp, embedded =
                       setSelectedApp(app);
                       setNavIndex(0);
                     }}
-                    className="w-full flex items-center gap-2.5 px-2 py-1.5 rounded-[6px] text-left hover:bg-muted transition-colors"
+                    className="w-full flex items-center gap-2.5 px-2 py-1.5 rounded-md text-left hover:bg-muted transition-colors"
                   >
                     <AppWindow className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
                     <span className="text-sm text-foreground truncate">{app.name}</span>
@@ -2881,12 +2879,12 @@ export function SearchModal({ isOpen, onClose, onNavigateToTimestamp, embedded =
               {/* Skeleton filter chips */}
               <div className="flex gap-1.5 mb-2 overflow-hidden">
                 {Array.from({ length: 5 }).map((_, i) => (
-                  <div key={i} className="h-6 bg-muted animate-pulse rounded-[6px] shrink-0" style={{ width: `${60 + i * 12}px` }} />
+                  <div key={i} className="h-6 bg-muted animate-pulse rounded-md shrink-0" style={{ width: `${60 + i * 12}px` }} />
                 ))}
               </div>
               <div className="flex gap-1.5 mb-3 overflow-hidden">
                 {Array.from({ length: 4 }).map((_, i) => (
-                  <div key={i} className="h-6 bg-muted animate-pulse rounded-[6px] shrink-0" style={{ width: `${50 + i * 15}px` }} />
+                  <div key={i} className="h-6 bg-muted animate-pulse rounded-md shrink-0" style={{ width: `${50 + i * 15}px` }} />
                 ))}
               </div>
               {/* Skeleton thumbnail grid — same cell size as the real one */}
@@ -2897,7 +2895,7 @@ export function SearchModal({ isOpen, onClose, onNavigateToTimestamp, embedded =
                 }}
               >
                 {Array.from({ length: 6 }).map((_, i) => (
-                  <div key={i} className="bg-muted animate-pulse rounded-[6px] overflow-hidden">
+                  <div key={i} className="bg-muted animate-pulse rounded-md overflow-hidden">
                     <div className="aspect-video" />
                     <div className="p-2 space-y-1">
                       <div className="h-3 bg-muted-foreground/20 rounded w-16" />
@@ -3042,7 +3040,7 @@ export function SearchModal({ isOpen, onClose, onNavigateToTimestamp, embedded =
                 }}
               >
                 {Array.from({ length: 6 }).map((_, i) => (
-                  <div key={i} className="bg-muted animate-pulse rounded-[6px] overflow-hidden">
+                  <div key={i} className="bg-muted animate-pulse rounded-md overflow-hidden">
                     <div className="aspect-video" />
                     <div className="p-2 space-y-1">
                       <div className="h-3 bg-muted-foreground/20 rounded w-16" />
@@ -3139,7 +3137,7 @@ export function SearchModal({ isOpen, onClose, onNavigateToTimestamp, embedded =
                       key={app}
                       onClick={() => { const newApp = appFilter === app ? null : app; setAppFilter(newApp); if (newApp) setDomainFilter(null); setNavIndex(0); }}
                       className={cn(
-                        "inline-flex h-7 items-center gap-1.5 whitespace-nowrap shrink-0 rounded-[6px] border px-2.5 text-[11px] transition-colors",
+                        "inline-flex h-7 items-center gap-1.5 whitespace-nowrap shrink-0 rounded-md border px-2.5 text-[11px] transition-colors",
                         appFilter === app
                           ? "border-foreground bg-muted text-foreground"
                           : "border-border text-muted-foreground hover:border-foreground/40"
@@ -3168,7 +3166,7 @@ export function SearchModal({ isOpen, onClose, onNavigateToTimestamp, embedded =
                       key={domain}
                       onClick={() => { setDomainFilter(domainFilter === domain ? null : domain); setNavIndex(0); }}
                       className={cn(
-                        "inline-flex h-7 items-center gap-1.5 whitespace-nowrap shrink-0 rounded-[6px] border px-2.5 text-[11px] transition-colors",
+                        "inline-flex h-7 items-center gap-1.5 whitespace-nowrap shrink-0 rounded-md border px-2.5 text-[11px] transition-colors",
                         domainFilter === domain
                           ? "border-foreground bg-muted text-foreground"
                           : "border-border text-muted-foreground hover:border-foreground/40"
@@ -3194,7 +3192,7 @@ export function SearchModal({ isOpen, onClose, onNavigateToTimestamp, embedded =
                       key={range.dateKey}
                       onClick={() => applyTimeFilter(timeFilter === range.dateKey ? null : range.dateKey)}
                       className={cn(
-                        "inline-flex h-7 items-center gap-1.5 whitespace-nowrap shrink-0 rounded-[6px] border px-2.5 text-[11px] transition-colors",
+                        "inline-flex h-7 items-center gap-1.5 whitespace-nowrap shrink-0 rounded-md border px-2.5 text-[11px] transition-colors",
                         timeFilter === range.dateKey
                           ? "border-foreground bg-muted text-foreground"
                           : "border-border text-muted-foreground hover:border-foreground/40"
@@ -3259,7 +3257,7 @@ export function SearchModal({ isOpen, onClose, onNavigateToTimestamp, embedded =
                       // card nudged its neighbours and made arrow-key movement
                       // feel like the grid was breathing. Colour only.
                       className={cn(
-                        "rounded-[6px] overflow-hidden border transition-colors",
+                        "rounded-md overflow-hidden border transition-colors",
                         thumbnailReady ? "cursor-pointer" : "cursor-wait",
                         isActive
                           ? "border-foreground bg-muted"
@@ -3358,7 +3356,7 @@ export function SearchModal({ isOpen, onClose, onNavigateToTimestamp, embedded =
                     <button
                       type="button"
                       onClick={loadMoreOcr}
-                      className="rounded-[6px] border border-border px-3 py-1.5 text-xs text-muted-foreground transition-colors hover:border-foreground/50 hover:text-foreground"
+                      className="rounded-md border border-border px-3 py-1.5 text-xs text-muted-foreground transition-colors hover:border-foreground/50 hover:text-foreground"
                     >
                       load more
                     </button>
@@ -3379,7 +3377,7 @@ export function SearchModal({ isOpen, onClose, onNavigateToTimestamp, embedded =
                 <button
                   type="button"
                   onClick={loadMoreOcr}
-                  className="rounded-[6px] border border-border px-3 py-1.5 text-xs text-muted-foreground transition-colors hover:border-foreground/50 hover:text-foreground"
+                  className="rounded-md border border-border px-3 py-1.5 text-xs text-muted-foreground transition-colors hover:border-foreground/50 hover:text-foreground"
                 >
                   search more frames
                 </button>
@@ -3470,7 +3468,7 @@ export function SearchModal({ isOpen, onClose, onNavigateToTimestamp, embedded =
           // stretched card would just paint white space under short lists.
           // Deliberately not max-h-full: the card must be free to exceed the
           // current (80px) window height, or measuring it could never grow it.
-          standalone ? "h-fit rounded-xl border border-border/50 shadow-2xl overflow-hidden" : "h-full",
+          standalone ? "h-fit rounded-lg border border-border/50 shadow-2xl overflow-hidden" : "h-full",
         )}>
         {/* Search Input — Raycast-style large input */}
         <div className={cn(

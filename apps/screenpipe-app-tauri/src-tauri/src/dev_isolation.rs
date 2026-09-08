@@ -11,9 +11,9 @@
 //! * **Dev exited instead of launching.** `main()` POSTs `/focus` on the focus
 //!   port and `exit(0)`s if anything answers, so a running production app made
 //!   `bun tauri dev` silently focus *production* and quit.
-//! * **Dev killed production's engine.** The recording supervisor calls
-//!   `kill_process_on_port(3030)`, which `kill -9`s every foreign PID holding
-//!   the port — i.e. the production engine, mid-write to a multi-GB SQLite DB.
+//! * **Dev could kill production's engine.** The old recording supervisor used
+//!   to `kill -9` every foreign PID associated with port 3030 — including the
+//!   production engine mid-write to a multi-GB SQLite DB.
 //! * **Dev shared the production database, settings store, secret store and
 //!   pipes** via `~/.screenpipe`.
 //! * **Dev rewrote the user's real agent configs.** With a fresh data dir
@@ -107,7 +107,7 @@ fn apply_inner() -> bool {
         eprintln!(
             "screenpipe[dev]: {OPT_OUT_ENV} set — using the PRODUCTION profile \
              (~/.screenpipe, port 3030). Quit the installed app first; this build \
-             will kill whatever holds its ports."
+             will refuse to start recording while its ports are occupied."
         );
         return false;
     }

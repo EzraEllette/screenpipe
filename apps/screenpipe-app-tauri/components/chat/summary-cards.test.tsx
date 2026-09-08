@@ -89,6 +89,127 @@ describe("SummaryCards", () => {
     expect(screen.queryByTestId("summary-cards-more")).not.toBeInTheDocument();
   });
 
+  it("progressively reveals external-agent actions on every runnable card", () => {
+    render(
+      <SummaryCards
+        onSendMessage={vi.fn()}
+        customTemplates={[
+          {
+            id: "tpl-1",
+            title: "Client recap",
+            prompt: "recap my client work",
+            timeRange: "today",
+          } as never,
+        ]}
+        onSaveCustomTemplate={vi.fn()}
+        onUpdateCustomTemplate={vi.fn()}
+        onDeleteCustomTemplate={vi.fn()}
+        userGoalCategory="work_memory"
+      />,
+    );
+
+    const dayRecapActions = screen.getByTestId(
+      "home-card-agent-actions-day-recap",
+    );
+    const missedTodoActions = screen.getByTestId(
+      "home-card-agent-actions-missed-todos",
+    );
+    expect(dayRecapActions).toHaveClass("opacity-0", "pointer-events-none");
+    expect(dayRecapActions.className).toContain(
+      "group-hover/home-card:opacity-100",
+    );
+    expect(dayRecapActions.className).toContain(
+      "group-focus-within/home-card:opacity-100",
+    );
+    expect(missedTodoActions).toBeInTheDocument();
+
+    for (const slug of [
+      "time-breakdown",
+      "automate-my-work",
+      "meeting-prep",
+      "blockers",
+      "custom-tpl-1",
+    ]) {
+      expect(
+        screen.getByTestId(`home-card-agent-actions-${slug}`),
+      ).toHaveAttribute("data-placement", "chip");
+    }
+    expect(
+      screen.getAllByRole("button", { name: "Run in Claude" }),
+    ).toHaveLength(7);
+
+    const card = screen.getByTestId("summary-card-day-recap");
+    const claude = screen.getAllByRole("button", { name: "Run in Claude" })[0];
+    expect(card.contains(claude)).toBe(false);
+    const timeBreakdown = screen.getByTestId("summary-card-time-breakdown");
+    const timeBreakdownClaude = screen
+      .getByTestId("home-card-agent-actions-time-breakdown")
+      .querySelector('[aria-label="Run in Claude"]');
+    expect(timeBreakdown.contains(timeBreakdownClaude)).toBe(false);
+    expect(
+      screen.getByRole("button", { name: "+ custom" }),
+    ).toBeInTheDocument();
+  });
+
+  it("makes available home actions visibly interactive and keyboard focusable", () => {
+    render(
+      <SummaryCards
+        onSendMessage={vi.fn()}
+        customTemplates={[]}
+        onSaveCustomTemplate={vi.fn()}
+        onUpdateCustomTemplate={vi.fn()}
+        onDeleteCustomTemplate={vi.fn()}
+        userGoalCategory="work_memory"
+      />,
+    );
+
+    for (const slug of ["day-recap", "missed-todos"]) {
+      const card = screen.getByTestId(`summary-card-${slug}`);
+      expect(card).toHaveClass("bg-card", "cursor-pointer");
+      expect(card.className).toContain("border-foreground/");
+      expect(card.className).toContain("focus-visible:ring-1");
+      expect(card.className).toContain("motion-reduce:transition-none");
+      expect(screen.getByTestId(`home-card-arrow-${slug}`)).toBeInTheDocument();
+    }
+
+    const quickAction = screen.getByRole("button", { name: "Time Breakdown" });
+    expect(quickAction).toHaveClass("bg-card", "text-foreground/75");
+    expect(quickAction.className).toContain("focus-visible:ring-1");
+  });
+
+  it("previews a card prompt on hover and keyboard focus without sending", () => {
+    const onPreviewPrompt = vi.fn();
+    const onSendMessage = vi.fn();
+    render(
+      <SummaryCards
+        onSendMessage={onSendMessage}
+        onPreviewPrompt={onPreviewPrompt}
+        customTemplates={[]}
+        onSaveCustomTemplate={vi.fn()}
+        onUpdateCustomTemplate={vi.fn()}
+        onDeleteCustomTemplate={vi.fn()}
+        userGoalCategory="work_memory"
+      />,
+    );
+
+    const card = screen.getByTestId("summary-card-day-recap");
+    fireEvent.mouseEnter(card);
+    expect(onPreviewPrompt).toHaveBeenLastCalledWith(
+      "Summarize what I worked on today",
+    );
+    expect(onSendMessage).not.toHaveBeenCalled();
+
+    fireEvent.mouseLeave(card);
+    expect(onPreviewPrompt).toHaveBeenLastCalledWith(null);
+
+    fireEvent.focus(card);
+    expect(onPreviewPrompt).toHaveBeenLastCalledWith(
+      "Summarize what I worked on today",
+    );
+    fireEvent.blur(card);
+    expect(onPreviewPrompt).toHaveBeenLastCalledWith(null);
+  });
+
   it("keeps the user's saved templates alongside the built-in actions", () => {
     render(
       <SummaryCards

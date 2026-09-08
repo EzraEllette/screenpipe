@@ -22,6 +22,23 @@ export function turnIntentMatchesText(record: TurnIntentRecord, text: string) {
   return turnIntentTextValuesMatch(record.content, text) || turnIntentTextValuesMatch(record.preview, text);
 }
 
+export function hasPendingSteerTransition(
+  records: TurnIntentRecord[],
+  sessionId: string | null | undefined,
+  pendingIntent: "steer" | null,
+  optimisticTurnIntentId?: string,
+) {
+  if (!sessionId || (pendingIntent !== "steer" && !optimisticTurnIntentId)) {
+    return false;
+  }
+  return records.some(
+    (record) =>
+      record.sessionId === sessionId &&
+      record.kind === "steer" &&
+      (!optimisticTurnIntentId || record.id === optimisticTurnIntentId),
+  );
+}
+
 export function useChatTurnIntents() {
   const turnIntentLedgerRef = useRef<TurnIntentRecord[]>([]);
 

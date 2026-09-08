@@ -17,10 +17,53 @@ import { execFileSync } from "node:child_process";
 import { saveScreenshot } from "../helpers/screenshot-utils.js";
 import { openHomeWindow, waitForAppReady, t } from "../helpers/test-utils.js";
 import { getAppPid } from "../helpers/app-launcher.js";
+import { invokeOrThrow } from "../helpers/tauri.js";
 
 const STREAMING_PERF_SESSION = "33333333-3333-3333-3333-333333333333";
 const DELTA_COUNT = 240;
 const PIPE_DELTA_COUNT = 800;
+const RICH_MARKDOWN_CHUNK_DELAY_MS = 80;
+const CI_VALUE = process.env.CI;
+// Background WebKit views clamp or suspend timers, so frame probes are only
+// authoritative when CI (or an explicit local opt-in) can activate Home.
+const REQUIRE_FOREGROUND_FRAMES =
+  (CI_VALUE !== undefined &&
+    CI_VALUE !== "" &&
+    CI_VALUE !== "0" &&
+    CI_VALUE !== "false") ||
+  process.env.SCREENPIPE_E2E_ALLOW_ACTIVATION === "1" ||
+  process.env.SCREENPIPE_E2E_ALLOW_ACTIVATION === "true";
+const RICH_MARKDOWN_CHUNKS = [
+  "## streamed ",
+  "finding\n\n",
+  "Paragraph with [Screenpipe",
+  "](https://screenpi.pe) and ",
+  "`inline code`.\n\n",
+  "- first item\n",
+  "- second item\n\n",
+  "| metric | value |\n",
+  "| --- | ---: |\n",
+  "| rendering | bounded |\n\n",
+  "The code fence deliberately remains open across the scheduled rich-render boundary.\n\n",
+  "`",
+  "``ts\n",
+  "const answer = ",
+  "42;\n",
+  "const values = [\n",
+  "  1,\n",
+  "  2,\n",
+  "  3,\n",
+  "];\n",
+  "const total = values.reduce((sum, value) => sum + value, 0);\n",
+  "console.log(answer, total);\n",
+  ...Array.from(
+    { length: 32 },
+    (_, index) => `// open fence chunk ${index + 1}\n`,
+  ),
+  "`",
+  "``\n\n",
+  "FINAL-RICH-STREAM-COMPLETE",
+] as const;
 const CPU_SAMPLE_INTERVAL_MS = 250;
 const CHAT_CPU_AVG_MAX_PERCENT = Number(
   process.env.SCREENPIPE_E2E_CHAT_CPU_AVG_MAX_PERCENT ?? "85",
@@ -28,6 +71,7 @@ const CHAT_CPU_AVG_MAX_PERCENT = Number(
 const CHAT_CPU_P95_MAX_PERCENT = Number(
   process.env.SCREENPIPE_E2E_CHAT_CPU_P95_MAX_PERCENT ?? "120",
 );
+let launchedAppPid: number | null = null;
 
 interface StreamingPerfResult {
   emittedDeltas: number;
@@ -53,6 +97,15 @@ interface PipeBurstPerfResult {
   maxFrameGapMs: number;
   mutationCount: number;
   error?: string;
+}
+
+interface RichMarkdownStreamResult extends StreamingPerfResult {
+  headingText: string;
+  headingVisibleDuringStream: boolean;
+  externalLinkHref: string;
+  tableCount: number;
+  codeText: string;
+  streamingTailCount: number;
 }
 
 interface CpuSampledResult<T> {
@@ -101,8 +154,10 @@ function readCpuTimeSeconds(pid: number): number | null {
   }
 }
 
-async function sampleAppCpuWhile<T>(work: () => Promise<T>): Promise<CpuSampledResult<T>> {
-  const pid = getAppPid();
+async function sampleAppCpuWhile<T>(
+  work: () => Promise<T>,
+): Promise<CpuSampledResult<T>> {
+  const pid = launchedAppPid;
   if (!pid) {
     throw new Error("screenpipe app pid is not available for CPU sampling");
   }
@@ -120,10 +175,18 @@ async function sampleAppCpuWhile<T>(work: () => Promise<T>): Promise<CpuSampledR
   let result: T | undefined;
   try {
     result = await work();
-    await new Promise((resolve) => setTimeout(resolve, CPU_SAMPLE_INTERVAL_MS * 2));
+    await new Promise((resolve) =>
+      setTimeout(resolve, CPU_SAMPLE_INTERVAL_MS * 2),
+    );
     sample();
   } finally {
     clearInterval(timer);
+  }
+
+  if (samples.length < 2) {
+    throw new Error(
+      `screenpipe app pid ${pid} stopped producing CPU samples`,
+    );
   }
 
   const intervalPercents: number[] = [];
@@ -141,8 +204,12 @@ async function sampleAppCpuWhile<T>(work: () => Promise<T>): Promise<CpuSampledR
   }
 
   const sorted = [...intervalPercents].sort((a, b) => a - b);
-  const avg = totalWallSeconds > 0 ? (totalCpuSeconds / totalWallSeconds) * 100 : 0;
-  const p95Index = Math.min(sorted.length - 1, Math.floor(sorted.length * 0.95));
+  const avg =
+    totalWallSeconds > 0 ? (totalCpuSeconds / totalWallSeconds) * 100 : 0;
+  const p95Index = Math.min(
+    sorted.length - 1,
+    Math.floor(sorted.length * 0.95),
+  );
   return {
     result: result as T,
     sampleCount: samples.length,
@@ -152,16 +219,25 @@ async function sampleAppCpuWhile<T>(work: () => Promise<T>): Promise<CpuSampledR
   };
 }
 
-async function emitFromWebview(eventName: string, payload: unknown): Promise<void> {
+async function emitFromWebview(
+  eventName: string,
+  payload: unknown,
+): Promise<void> {
   await browser.executeAsync(
     (name: string, p: unknown, done: (v?: unknown) => void) => {
       const g = globalThis as unknown as {
-        __TAURI__?: { event?: { emit: (n: string, p: unknown) => Promise<unknown> } };
-        __TAURI_INTERNALS__?: { invoke: (cmd: string, args: object) => Promise<unknown> };
+        __TAURI__?: {
+          event?: { emit: (n: string, p: unknown) => Promise<unknown> };
+        };
+        __TAURI_INTERNALS__?: {
+          invoke: (cmd: string, args: object) => Promise<unknown>;
+        };
       };
       const emit = g.__TAURI__?.event?.emit;
       if (emit) {
-        void emit(name, p).then(() => done()).catch(() => done());
+        void emit(name, p)
+          .then(() => done())
+          .catch(() => done());
       } else if (g.__TAURI_INTERNALS__) {
         void g.__TAURI_INTERNALS__
           .invoke("plugin:event|emit", { event: name, payload: p })
@@ -209,7 +285,9 @@ async function runStreamingStress(
         __TAURI__?: {
           core?: { invoke: (cmd: string, args?: object) => Promise<unknown> };
         };
-        __TAURI_INTERNALS__?: { invoke: (cmd: string, args: object) => Promise<unknown> };
+        __TAURI_INTERNALS__?: {
+          invoke: (cmd: string, args: object) => Promise<unknown>;
+        };
         __e2eSeedUserMessage?: (sid: string, text: string) => void;
       };
 
@@ -323,6 +401,141 @@ async function runStreamingStress(
   )) as StreamingPerfResult;
 }
 
+async function runRichMarkdownStreamingStress(
+  sessionId: string,
+  chunks: readonly string[],
+  chunkDelayMs: number,
+): Promise<RichMarkdownStreamResult> {
+  return (await browser.executeAsync(
+    (
+      sid: string,
+      pieces: string[],
+      delayMs: number,
+      done: (result: RichMarkdownStreamResult) => void,
+    ) => {
+      const g = globalThis as unknown as {
+        __TAURI__?: {
+          core?: { invoke: (cmd: string, args?: object) => Promise<unknown> };
+        };
+        __TAURI_INTERNALS__?: {
+          invoke: (cmd: string, args: object) => Promise<unknown>;
+        };
+        __e2eSeedUserMessage?: (sessionId: string, text: string) => void;
+      };
+      const invoke = g.__TAURI__?.core?.invoke ?? g.__TAURI_INTERNALS__?.invoke;
+      let running = true;
+      let frames = 0;
+      let maxFrameGapMs = 0;
+      let lastFrameAt = performance.now();
+      let mutationCount = 0;
+      let frameTimer: number | undefined;
+      let headingVisibleDuringStream = false;
+
+      const assistant = () => {
+        const messages = Array.from(
+          document.querySelectorAll<HTMLElement>(
+            '[data-testid="chat-message-assistant"]',
+          ),
+        );
+        return messages[messages.length - 1] ?? null;
+      };
+      const observer = new MutationObserver((records) => {
+        mutationCount += records.length;
+      });
+      const frameLoop = () => {
+        const now = performance.now();
+        maxFrameGapMs = Math.max(maxFrameGapMs, now - lastFrameAt);
+        lastFrameAt = now;
+        frames += 1;
+        if (running) frameTimer = window.setTimeout(frameLoop, 16);
+      };
+      const snapshot = (
+        result: Partial<RichMarkdownStreamResult>,
+      ): RichMarkdownStreamResult => {
+        const message = assistant();
+        return {
+          emittedDeltas: pieces.length,
+          emitMs: 0,
+          frames,
+          maxFrameGapMs,
+          mutationCount,
+          assistantText: message?.textContent ?? "",
+          headingText: message?.querySelector("h2")?.textContent ?? "",
+          headingVisibleDuringStream,
+          externalLinkHref:
+            message
+              ?.querySelector<HTMLAnchorElement>('a[href*="screenpi.pe"]')
+              ?.getAttribute("href") ?? "",
+          tableCount: message?.querySelectorAll("table").length ?? 0,
+          codeText:
+            message?.querySelector('[data-testid="markdown-code-block"]')
+              ?.textContent ?? "",
+          streamingTailCount:
+            message?.querySelectorAll('[data-testid="streaming-markdown-tail"]')
+              .length ?? 0,
+          ...result,
+        };
+      };
+      const finish = (result: Partial<RichMarkdownStreamResult>) => {
+        running = false;
+        if (frameTimer !== undefined) window.clearTimeout(frameTimer);
+        observer.disconnect();
+        done(snapshot(result));
+      };
+      const emitAgentEvent = async (event: object) => {
+        if (!invoke)
+          throw new Error("Tauri invoke is not available in this context");
+        await invoke("plugin:event|emit", {
+          event: "agent_event",
+          payload: { source: "pi", sessionId: sid, event },
+        });
+      };
+
+      const run = async () => {
+        try {
+          observer.observe(document.body, {
+            childList: true,
+            subtree: true,
+            characterData: true,
+          });
+          frameTimer = window.setTimeout(frameLoop, 16);
+          g.__e2eSeedUserMessage?.(sid, "(e2e) rich Markdown streaming prompt");
+
+          const startedAt = performance.now();
+          await emitAgentEvent({
+            type: "message_start",
+            message: { role: "assistant" },
+          });
+          for (const delta of pieces) {
+            await emitAgentEvent({
+              type: "message_update",
+              assistantMessageEvent: { type: "text_delta", delta },
+            });
+            await new Promise((resolve) => window.setTimeout(resolve, delayMs));
+            const liveHeading =
+              assistant()?.querySelector("h2")?.textContent ?? "";
+            if (liveHeading === "streamed finding") {
+              headingVisibleDuringStream = true;
+            }
+          }
+          await emitAgentEvent({ type: "agent_end" });
+          await new Promise((resolve) => window.setTimeout(resolve, 700));
+          finish({ emitMs: performance.now() - startedAt });
+        } catch (error) {
+          finish({
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      };
+
+      void run();
+    },
+    sessionId,
+    [...chunks],
+    chunkDelayMs,
+  )) as RichMarkdownStreamResult;
+}
+
 async function runUiProbe(durationMs: number): Promise<UiProbeResult> {
   return (await browser.executeAsync(
     (duration: number, done: (result: UiProbeResult) => void) => {
@@ -375,14 +588,18 @@ async function runUiProbe(durationMs: number): Promise<UiProbeResult> {
   )) as UiProbeResult;
 }
 
-async function runBackgroundPipeBurst(deltaCount: number): Promise<PipeBurstPerfResult> {
+async function runBackgroundPipeBurst(
+  deltaCount: number,
+): Promise<PipeBurstPerfResult> {
   return (await browser.executeAsync(
     (count: number, done: (result: PipeBurstPerfResult) => void) => {
       const g = globalThis as unknown as {
         __TAURI__?: {
           core?: { invoke: (cmd: string, args?: object) => Promise<unknown> };
         };
-        __TAURI_INTERNALS__?: { invoke: (cmd: string, args: object) => Promise<unknown> };
+        __TAURI_INTERNALS__?: {
+          invoke: (cmd: string, args: object) => Promise<unknown>;
+        };
       };
       const invoke = g.__TAURI__?.core?.invoke ?? g.__TAURI_INTERNALS__?.invoke;
 
@@ -436,7 +653,9 @@ async function runBackgroundPipeBurst(deltaCount: number): Promise<PipeBurstPerf
           }).catch(() =>
             invoke("plugin:e2e|emit_pipe_stream", {
               pipe_name: "e2e-background-pipe",
-              execution_id: Math.floor(performance.timeOrigin + performance.now()),
+              execution_id: Math.floor(
+                performance.timeOrigin + performance.now(),
+              ),
               delta_count: count,
             }),
           )) as {
@@ -473,6 +692,30 @@ async function runBackgroundPipeBurst(deltaCount: number): Promise<PipeBurstPerf
   )) as PipeBurstPerfResult;
 }
 
+async function openMeasuredHomeWindow(): Promise<boolean> {
+  await openHomeWindow();
+  if (!REQUIRE_FOREGROUND_FRAMES) return false;
+
+  await invokeOrThrow("show_window_activated", {
+    window: { Home: { page: null } },
+  });
+  await browser.execute(() => window.focus());
+  await browser.waitUntil(
+    async () =>
+      Boolean(
+        await browser.execute(
+          () => document.visibilityState === "visible" && document.hasFocus(),
+        ),
+      ),
+    {
+      timeout: t(10_000),
+      interval: 100,
+      timeoutMsg: "Home WebKit view did not become visible and focused",
+    },
+  );
+  return true;
+}
+
 describe("Chat streaming performance", function () {
   this.timeout(180_000);
 
@@ -481,10 +724,14 @@ describe("Chat streaming performance", function () {
       this.skip();
     }
     await waitForAppReady();
+    launchedAppPid = getAppPid();
+    if (!launchedAppPid) {
+      throw new Error("screenpipe app pid is not available after startup");
+    }
   });
 
   it("keeps the Mac chat UI responsive while a long response streams", async () => {
-    await openHomeWindow();
+    const foreground = await openMeasuredHomeWindow();
     const home = await $('[data-testid="section-home"]');
     await home.waitForExist({ timeout: t(15_000) });
 
@@ -528,15 +775,18 @@ describe("Chat streaming performance", function () {
       maxCpuPercent: Math.round(cpu.maxCpuPercent),
       avgCpuDeltaPercent: Math.round(avgCpuDeltaPercent),
       p95CpuDeltaPercent: Math.round(p95CpuDeltaPercent),
+      foreground,
     });
 
     expect(probeCpu.result.error).toBeUndefined();
     expect(result.error).toBeUndefined();
     expect(result.assistantText).toContain("token-0");
     expect(result.assistantText).toContain(`token-${DELTA_COUNT - 1}`);
-    expect(probeCpu.result.frames).toBeGreaterThan(5);
-    expect(result.frames).toBeGreaterThan(5);
-    expect(result.maxFrameGapMs).toBeLessThan(t(1_000));
+    if (foreground) {
+      expect(probeCpu.result.frames).toBeGreaterThan(5);
+      expect(result.frames).toBeGreaterThan(5);
+      expect(result.maxFrameGapMs).toBeLessThan(t(1_000));
+    }
     expect(result.mutationCount).toBeLessThan(DELTA_COUNT);
     expect(idleCpu.sampleCount).toBeGreaterThan(1);
     expect(probeCpu.sampleCount).toBeGreaterThan(1);
@@ -548,8 +798,72 @@ describe("Chat streaming performance", function () {
     expect(existsSync(filepath)).toBe(true);
   });
 
+  it("preserves rich Markdown split across live chunks and completion", async () => {
+    const foreground = await openMeasuredHomeWindow();
+    const home = await $('[data-testid="section-home"]');
+    await home.waitForExist({ timeout: t(15_000) });
+
+    const sessionId = `${STREAMING_PERF_SESSION}-rich`;
+    await switchToSession(sessionId);
+    await waitForChatSeedHook();
+
+    const probeCpu = await sampleAppCpuWhile(() => runUiProbe(t(1_200)));
+    const cpu = await sampleAppCpuWhile(() =>
+      runRichMarkdownStreamingStress(
+        sessionId,
+        RICH_MARKDOWN_CHUNKS,
+        t(RICH_MARKDOWN_CHUNK_DELAY_MS),
+      ),
+    );
+    const result = cpu.result;
+    const avgCpuDeltaPercent = Math.max(
+      0,
+      cpu.avgCpuPercent - probeCpu.avgCpuPercent,
+    );
+    const p95CpuDeltaPercent = Math.max(
+      0,
+      cpu.p95CpuPercent - probeCpu.p95CpuPercent,
+    );
+
+    console.log("chat rich Markdown streaming perf", {
+      emittedDeltas: result.emittedDeltas,
+      emitMs: Math.round(result.emitMs),
+      frames: result.frames,
+      maxFrameGapMs: Math.round(result.maxFrameGapMs),
+      mutationCount: result.mutationCount,
+      headingVisibleDuringStream: result.headingVisibleDuringStream,
+      avgCpuPercent: Math.round(cpu.avgCpuPercent),
+      p95CpuPercent: Math.round(cpu.p95CpuPercent),
+      avgCpuDeltaPercent: Math.round(avgCpuDeltaPercent),
+      p95CpuDeltaPercent: Math.round(p95CpuDeltaPercent),
+      foreground,
+    });
+
+    expect(result.error).toBeUndefined();
+    expect(result.emittedDeltas).toBe(RICH_MARKDOWN_CHUNKS.length);
+    expect(result.headingVisibleDuringStream).toBe(true);
+    expect(result.headingText).toBe("streamed finding");
+    expect(result.externalLinkHref).toContain("screenpi.pe");
+    expect(result.tableCount).toBe(1);
+    expect(result.codeText).toContain("const answer = 42;");
+    expect(result.codeText).toContain("console.log(answer, total);");
+    expect(result.assistantText).toContain("FINAL-RICH-STREAM-COMPLETE");
+    expect(result.assistantText).not.toContain("```ts");
+    expect(result.streamingTailCount).toBe(0);
+    if (foreground) {
+      expect(result.frames).toBeGreaterThan(5);
+      expect(result.maxFrameGapMs).toBeLessThan(t(1_000));
+    }
+    expect(cpu.sampleCount).toBeGreaterThan(1);
+    expect(avgCpuDeltaPercent).toBeLessThan(CHAT_CPU_AVG_MAX_PERCENT);
+    expect(p95CpuDeltaPercent).toBeLessThan(CHAT_CPU_P95_MAX_PERCENT);
+
+    const filepath = await saveScreenshot("chat-rich-markdown-streaming");
+    expect(existsSync(filepath)).toBe(true);
+  });
+
   it("keeps chat responsive while scheduled pipe output streams in the background", async () => {
-    await openHomeWindow();
+    const foreground = await openMeasuredHomeWindow();
     const home = await $('[data-testid="section-home"]');
     await home.waitForExist({ timeout: t(15_000) });
 
@@ -588,14 +902,17 @@ describe("Chat streaming performance", function () {
       maxCpuPercent: Math.round(cpu.maxCpuPercent),
       avgCpuDeltaPercent: Math.round(avgCpuDeltaPercent),
       p95CpuDeltaPercent: Math.round(p95CpuDeltaPercent),
+      foreground,
     });
 
     expect(probeCpu.result.error).toBeUndefined();
     expect(result.error).toBeUndefined();
     expect(result.emittedDeltas).toBe(PIPE_DELTA_COUNT);
-    expect(probeCpu.result.frames).toBeGreaterThan(5);
-    expect(result.frames).toBeGreaterThan(5);
-    expect(result.maxFrameGapMs).toBeLessThan(t(1_000));
+    if (foreground) {
+      expect(probeCpu.result.frames).toBeGreaterThan(5);
+      expect(result.frames).toBeGreaterThan(5);
+      expect(result.maxFrameGapMs).toBeLessThan(t(1_000));
+    }
     expect(result.mutationCount).toBeLessThan(PIPE_DELTA_COUNT);
     expect(probeCpu.sampleCount).toBeGreaterThan(1);
     expect(cpu.sampleCount).toBeGreaterThan(1);

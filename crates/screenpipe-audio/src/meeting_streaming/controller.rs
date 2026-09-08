@@ -13,6 +13,7 @@ use tokio::{
     time::{sleep, Duration, Instant},
 };
 use tracing::{debug, info, warn};
+use uuid::Uuid;
 
 use crate::{core::engine::AudioTranscriptionEngine, transcription::engine::TranscriptionEngine};
 
@@ -598,13 +599,19 @@ async fn persist_live_final_once(
     }
 
     let id = db
-        .insert_meeting_transcript_segment(
+        .insert_meeting_transcript_segment_with_identity(
             event.meeting_id,
             &event.provider,
             event.model.as_deref(),
             &event.item_id,
             &event.device_name,
             &event.device_type,
+            if event.stream_id.is_empty() {
+                "legacy"
+            } else {
+                &event.stream_id
+            },
+            event.session_speaker_id.as_deref(),
             event.speaker_name.as_deref(),
             transcript,
             event.captured_at,
@@ -673,12 +680,17 @@ fn route_frame_to_provider(
 
     if !session.device_senders.contains_key(&key) {
         let (tx, rx) = mpsc::channel(128);
+        // A provider may reconnect several times during one meeting. Deepgram's
+        // timestamps and diarization labels restart from zero each time, so the
+        // stream generation is part of both transcript and speaker identity.
+        let stream_id = Uuid::new_v4().simple().to_string();
         match config.provider {
             MeetingStreamingProvider::SelectedEngine => {
                 selected_engine::spawn_selected_engine_stream(
                     config.clone(),
                     transcription_engine.clone(),
                     session.meeting_id,
+                    stream_id,
                     frame.device_name.clone(),
                     frame.device_type.clone(),
                     rx,
@@ -689,6 +701,7 @@ fn route_frame_to_provider(
                 deepgram_live::spawn_deepgram_live_stream(
                     config.clone(),
                     session.meeting_id,
+                    stream_id,
                     frame.device_name.clone(),
                     frame.device_type.clone(),
                     rx,

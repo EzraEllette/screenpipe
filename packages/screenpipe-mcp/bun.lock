@@ -4,11 +4,9 @@
   "workspaces": {
     "": {
       "name": "screenpipe-mcp",
-      "dependencies": {
+      "devDependencies": {
         "@modelcontextprotocol/sdk": "^1.27.1",
         "@sentry/node": "^10.64.0",
-      },
-      "devDependencies": {
         "@types/node": "^25.3.5",
         "ts-node": "^10.9.2",
         "typescript": "^5.9.3",

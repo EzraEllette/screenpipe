@@ -35,12 +35,11 @@ const MACOS_CAPTURE_TIMEOUT: Duration = Duration::from_secs(12);
 const MACOS_CG_FALLBACK_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// ScreenCaptureKit can stop delivering the `SCShareableContent` completion
-/// callback after a capture teardown or update. Serialize healthy calls, but
-/// reserve one worker for a fresh retry after the first Apple callback wedges.
+/// callback after a capture teardown or update. Serialize healthy calls; the
+/// async sck-rs API makes a timed-out enumeration cancellable without leaving
+/// a blocking worker behind.
 static SCK_MONITOR_ENUMERATION_SERIALIZER: Lazy<tokio::sync::Mutex<()>> =
     Lazy::new(|| tokio::sync::Mutex::new(()));
-static SCK_MONITOR_ENUMERATION_WORKERS: Lazy<Arc<tokio::sync::Semaphore>> =
-    Lazy::new(|| Arc::new(tokio::sync::Semaphore::new(2)));
 static XCAP_MONITOR_ENUMERATION_SERIALIZER: Lazy<tokio::sync::Mutex<()>> =
     Lazy::new(|| tokio::sync::Mutex::new(()));
 static XCAP_MONITOR_ENUMERATION_WORKERS: Lazy<Arc<tokio::sync::Semaphore>> =
@@ -208,7 +207,7 @@ where
 {
     // Bounding only the holder leaves the wait unbounded, so a queued caller
     // inherits the sum of every holder ahead of it. See the same repair and
-    // reasoning in `run_bounded_sck_enumeration`; this is the capture-path twin
+    // reasoning in `run_async_sck_enumeration`; this is the capture-path twin
     // and sits directly under the capture loop's own bounded await.
     // See tests::capture_wait_stays_bounded_when_callers_queue.
     let Ok(_serial_guard) = tokio::time::timeout(timeout, serializer.lock()).await else {
@@ -466,28 +465,18 @@ fn is_clamshell_inactive_builtin(display_id: u32) -> bool {
     screenpipe_core::display_topology::is_clamshell_inactive_builtin(display_id)
 }
 
-async fn run_bounded_sck_enumeration<T, F>(
+async fn run_async_sck_enumeration<T, F, Fut>(
     serializer: &tokio::sync::Mutex<()>,
-    workers: Arc<tokio::sync::Semaphore>,
     timeout: Duration,
     enumerate: F,
 ) -> std::result::Result<T, MonitorListError>
 where
-    T: Send + 'static,
-    F: FnOnce() -> std::result::Result<T, MonitorListError> + Send + 'static,
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = std::result::Result<T, MonitorListError>>,
 {
-    // Healthy enumeration stays single-file. After a timeout this guard is
-    // released, allowing one genuinely fresh SCK request to recover capture.
-    //
-    // Bounding only the holder is not enough. Each holder is capped at
-    // `timeout`, but an unbounded wait here lets a queued caller inherit the
-    // sum of every holder ahead of it: with callbacks that are slow yet do
-    // return, permits recycle, nobody fast-fails, and the Nth caller waits
-    // N * timeout. That is the #3939 shape — a 250ms-bounded await in the
-    // capture loop reported frozen for 73-299s, which is 5-20 holders deep at
-    // the 15s production timeout. Cap the wait so a caller never blocks for
-    // more than roughly twice the timeout it asked for.
-    // See tests::enumeration_wait_stays_bounded_when_callers_queue.
+    // Bound both the serializer queue and the Apple callback. Dropping the
+    // async sck-rs future cancels our wait while cidre keeps any escaping
+    // Objective-C block state alive for a late callback.
     let _serial_guard = match tokio::time::timeout(timeout, serializer.lock()).await {
         Ok(guard) => guard,
         Err(_) => {
@@ -498,32 +487,8 @@ where
         }
     };
 
-    // A timed-out spawn_blocking task cannot be cancelled because the Apple
-    // callback is outside Rust's control. Two permits bound the damage while
-    // still leaving capacity for one fresh recovery attempt.
-    let permit = workers.try_acquire_owned().map_err(|e| match e {
-        tokio::sync::TryAcquireError::NoPermits => MonitorListError::Other(
-            "ScreenCaptureKit monitor enumeration retry budget exhausted; two Apple callbacks remain blocked, restart screenpipe to recover"
-                .to_string(),
-        ),
-        tokio::sync::TryAcquireError::Closed => MonitorListError::Other(
-            "ScreenCaptureKit monitor enumeration worker pool closed".to_string(),
-        ),
-    })?;
-
-    let task = tokio::task::spawn_blocking(move || {
-        // Keep the permit inside the blocking task. If the async caller times
-        // out, the OS call may still be running and must continue to consume
-        // one of the two bounded worker slots until it really returns.
-        let _permit = permit;
-        enumerate()
-    });
-
-    match tokio::time::timeout(timeout, task).await {
-        Ok(Ok(result)) => result,
-        Ok(Err(e)) => Err(MonitorListError::Other(format!(
-            "macOS monitor enumeration task failed: {e}"
-        ))),
+    match tokio::time::timeout(timeout, enumerate()).await {
+        Ok(result) => result,
         Err(_) => {
             let message = format!(
                 "macOS monitor enumeration timed out after {}s; ScreenCaptureKit/replayd did not reply",
@@ -535,7 +500,19 @@ where
     }
 }
 
-fn enumerate_sck_monitors() -> std::result::Result<Vec<SafeMonitor>, MonitorListError> {
+async fn enumerate_sck_monitors() -> std::result::Result<Vec<SafeMonitor>, MonitorListError> {
+    #[cfg(feature = "e2e")]
+    if std::env::var("SCREENPIPE_E2E_SCK_RELAUNCH_POISONED")
+        .ok()
+        .as_deref()
+        == Some("1")
+    {
+        tracing::warn!(
+            "e2e: simulating persistent ScreenCaptureKit permission denial after early updater relaunch"
+        );
+        return Err(MonitorListError::PermissionDenied);
+    }
+
     #[cfg(debug_assertions)]
     if std::env::var("SCREENPIPE_E2E_SEED")
         .ok()
@@ -547,13 +524,11 @@ fn enumerate_sck_monitors() -> std::result::Result<Vec<SafeMonitor>, MonitorList
         && !SCK_E2E_HANG_INJECTED.swap(true, std::sync::atomic::Ordering::SeqCst)
     {
         tracing::warn!("e2e: injecting one blocked ScreenCaptureKit monitor enumeration callback");
-        loop {
-            std::thread::park();
-        }
+        std::future::pending::<()>().await;
     }
 
     tracing::debug!("Using sck-rs for screen capture (macOS 12.3+)");
-    match SckMonitor::all() {
+    match SckMonitor::all_async().await {
         Ok(monitors) if monitors.is_empty() => Err(MonitorListError::NoMonitorsFound),
         Ok(monitors) => Ok(monitors
             .into_iter()
@@ -607,7 +582,8 @@ pub fn e2e_arm_sck_lookup_hang_fault() -> bool {
 }
 
 #[cfg(debug_assertions)]
-fn enumerate_sck_monitors_for_lookup() -> std::result::Result<Vec<SafeMonitor>, MonitorListError> {
+async fn enumerate_sck_monitors_for_lookup(
+) -> std::result::Result<Vec<SafeMonitor>, MonitorListError> {
     if e2e_lookup_hang_enabled()
         && SCK_E2E_LOOKUP_HANG_ARMED.load(std::sync::atomic::Ordering::SeqCst)
         && !SCK_E2E_LOOKUP_HANG_INJECTED.swap(true, std::sync::atomic::Ordering::SeqCst)
@@ -619,16 +595,15 @@ fn enumerate_sck_monitors_for_lookup() -> std::result::Result<Vec<SafeMonitor>, 
                 b"1",
             );
         }
-        loop {
-            std::thread::park();
-        }
+        std::future::pending::<()>().await;
     }
-    enumerate_sck_monitors()
+    enumerate_sck_monitors().await
 }
 
 #[cfg(not(debug_assertions))]
-fn enumerate_sck_monitors_for_lookup() -> std::result::Result<Vec<SafeMonitor>, MonitorListError> {
-    enumerate_sck_monitors()
+async fn enumerate_sck_monitors_for_lookup(
+) -> std::result::Result<Vec<SafeMonitor>, MonitorListError> {
+    enumerate_sck_monitors().await
 }
 
 /// How long a successful enumeration may answer `get_monitor_by_id`.
@@ -640,7 +615,8 @@ fn enumerate_sck_monitors_for_lookup() -> std::result::Result<Vec<SafeMonitor>, 
 /// [`monitor_lookup_timeout`], those calls time out, leak a wedged worker
 /// apiece, and saturate the shared cap so real capture is refused.
 ///
-/// Only the *lookup* path reads this cache. `list_monitors_detailed` always
+/// Only capture lookups apply this TTL and validity bit. Focus resolution may
+/// read the stored last-known geometry, but `list_monitors_detailed` always
 /// enumerates fresh and overwrites it, so display connect/disconnect detection
 /// in the monitor watcher keeps its existing accuracy.
 const MONITOR_LOOKUP_CACHE_TTL: Duration = Duration::from_secs(10);
@@ -648,6 +624,7 @@ const MONITOR_LOOKUP_CACHE_TTL: Duration = Duration::from_secs(10);
 struct CachedMonitorList {
     monitors: Vec<SafeMonitor>,
     captured_at: Instant,
+    valid_for_lookup: bool,
 }
 
 static MONITOR_LOOKUP_CACHE: Lazy<RwLock<Option<CachedMonitorList>>> =
@@ -661,36 +638,15 @@ fn store_monitor_lookup_cache(monitors: &[SafeMonitor]) {
     *guard = Some(CachedMonitorList {
         monitors: monitors.to_vec(),
         captured_at: Instant::now(),
+        valid_for_lookup: true,
     });
 }
 
-/// How long a successful enumeration may answer reads that only need the set
-/// of displays and their geometry, rather than connect/disconnect detection.
+/// Run `f` against a valid cached enumeration when it is younger than `ttl`.
 ///
-/// The macOS focus tracker calls [`list_monitors`] from a 5s safety-net poll
-/// and again from every `didActivateApplication` / `activeSpaceDidChange`
-/// notification, purely to resolve which display the cursor sits on. That is
-/// upwards of 720 `SCShareableContent` round-trips an hour before a single app
-/// switch is counted, and every one of them can strand a worker: sck-rs
-/// charges a live-call slot before the call and a hung completion handler
-/// never releases it, so six unlucky calls across the whole process lifetime
-/// saturate the cap and refuse capture until relaunch. Serving these reads
-/// from the last enumeration removes the traffic.
-///
-/// Sized to the monitor watcher's own 60s backstop, which keeps calling
-/// [`list_monitors_detailed`] and refreshing this cache. Connect/disconnect
-/// detection is unchanged — it runs on that fresh path, never this one — and
-/// in steady state the watcher keeps the entry warm so focus resolution costs
-/// no SCK calls at all.
-const MONITOR_TOPOLOGY_CACHE_TTL: Duration = Duration::from_secs(60);
-
-/// Run `f` against the cached enumeration when it is younger than `ttl`.
-///
-/// Two read paths share one cache with different freshness needs: a lookup
-/// wants one display's geometry, a topology read wants the whole set. Taking
-/// the TTL as an argument keeps both explicit about how stale an answer they
-/// accept, without a second cache to keep in sync. `f` runs under the read
-/// lock so the by-id path still clones a single monitor rather than the list.
+/// Capture lookups use this path and must reject explicitly invalidated or
+/// expired geometry. The focus tracker reads the same stored geometry through
+/// [`last_known_monitor_list`] without treating itself as a topology owner.
 fn with_fresh_monitor_cache<T>(
     now: Instant,
     ttl: Duration,
@@ -700,7 +656,7 @@ fn with_fresh_monitor_cache<T>(
         .read()
         .unwrap_or_else(|e| e.into_inner());
     let cached = guard.as_ref()?;
-    if now.duration_since(cached.captured_at) >= ttl {
+    if !cached.valid_for_lookup || now.duration_since(cached.captured_at) >= ttl {
         return None;
     }
     Some(f(&cached.monitors))
@@ -714,20 +670,39 @@ fn cached_monitor_by_id(id: u32, now: Instant) -> Option<SafeMonitor> {
     .flatten()
 }
 
-/// Read the whole cached enumeration when it is younger than `ttl`.
-fn cached_monitor_list(now: Instant, ttl: Duration) -> Option<Vec<SafeMonitor>> {
-    with_fresh_monitor_cache(now, ttl, <[SafeMonitor]>::to_vec)
+/// Return the last monitor geometry supplied by the topology owner.
+///
+/// Unlike capture lookups, focus resolution may use stale geometry while a
+/// display reconfiguration is being reconciled. It must never initiate an SCK
+/// enumeration: a failed lock/wake enumeration would otherwise leave this hot
+/// path retrying `SCShareableContent` every five seconds and on every app or
+/// Space switch.
+fn last_known_monitor_list() -> Vec<SafeMonitor> {
+    MONITOR_LOOKUP_CACHE
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .map(|cached| cached.monitors.clone())
+        .unwrap_or_default()
 }
 
-/// Drop the cached enumeration.
+/// Mark the cached enumeration stale for capture lookups.
 ///
-/// Call this the moment the display topology is known to have changed, rather
-/// than waiting for a TTL to lapse. `sleep_monitor` already owns the two
-/// authoritative signals — the CoreGraphics display-reconfiguration callback,
-/// and wake/unlock — and both are exactly when a cached list stops describing
-/// reality. Wiring them here means the TTLs are only a backstop for changes
-/// nobody told us about, not the primary correctness mechanism.
+/// Capture lookups must re-enumerate after a display change, but the focus
+/// tracker retains the last-known geometry until the monitor watcher replaces
+/// it with fresh topology. Clearing the geometry here would make the focus
+/// tracker's five-second safety poll become an independent SCK retry loop.
 pub fn invalidate_monitor_lookup_cache() {
+    let mut guard = MONITOR_LOOKUP_CACHE
+        .write()
+        .unwrap_or_else(|e| e.into_inner());
+    if let Some(cached) = guard.as_mut() {
+        cached.valid_for_lookup = false;
+    }
+}
+
+#[cfg(test)]
+fn clear_monitor_lookup_cache() {
     *MONITOR_LOOKUP_CACHE
         .write()
         .unwrap_or_else(|e| e.into_inner()) = None;
@@ -851,15 +826,14 @@ fn sck_monitor_error_allows_fallback(error: &MonitorListError) -> bool {
 
 /// List monitors with detailed error information (permission denied vs no monitors)
 pub async fn list_monitors_detailed() -> std::result::Result<Vec<SafeMonitor>, MonitorListError> {
-    // Wrap the ObjC call paths in an autorelease pool. Tokio blocking workers
-    // are long-lived; without a per-call drain these objects accumulate.
-    // See monitor::tests::repro_list_monitors_autorelease_leak.
+    // sck-rs initiates the callback and converts the returned topology inside
+    // scoped autorelease pools. The legacy xcap path retains its blocking
+    // worker pool below.
     let result: std::result::Result<Vec<SafeMonitor>, MonitorListError> = if use_sck_rs() {
-        let sck_result = run_bounded_sck_enumeration(
+        let sck_result = run_async_sck_enumeration(
             &SCK_MONITOR_ENUMERATION_SERIALIZER,
-            SCK_MONITOR_ENUMERATION_WORKERS.clone(),
             MONITOR_ENUMERATION_TIMEOUT,
-            || cidre::objc::ar_pool(enumerate_sck_monitors),
+            enumerate_sck_monitors,
         )
         .await;
         match sck_result {
@@ -888,29 +862,22 @@ pub async fn list_monitors() -> Vec<SafeMonitor> {
 
 /// List monitors for callers that only need the current display geometry.
 ///
-/// Answers from the last enumeration while it is younger than
-/// [`MONITOR_TOPOLOGY_CACHE_TTL`], falling back to a fresh [`list_monitors`]
-/// (which refreshes the cache) on a miss. Use this for cursor-to-display
-/// resolution and other geometry reads on a hot path; use
-/// [`list_monitors_detailed`] when the caller is responsible for noticing that
-/// a display appeared or disappeared.
-///
-/// Only errors are uncached, so a miss after a failed enumeration re-attempts
-/// rather than serving an empty list as truth.
+/// Returns only the last topology supplied by [`list_monitors_detailed`]. It
+/// deliberately never enumerates: the macOS focus tracker calls this every
+/// five seconds and on app/Space changes, so a miss must not turn it into an
+/// independent `SCShareableContent` retry loop while the screen is locked or
+/// replayd is unhealthy. The monitor watcher remains the fresh topology owner.
+/// Before its first successful enumeration this returns an empty list.
 pub async fn list_monitors_cached() -> Vec<SafeMonitor> {
-    if let Some(monitors) = cached_monitor_list(Instant::now(), MONITOR_TOPOLOGY_CACHE_TTL) {
-        return monitors;
-    }
-    list_monitors().await
+    last_known_monitor_list()
 }
 
 pub async fn get_default_monitor() -> Option<SafeMonitor> {
     if use_sck_rs() {
-        let sck_result = run_bounded_sck_enumeration(
+        let sck_result = run_async_sck_enumeration(
             &SCK_MONITOR_ENUMERATION_SERIALIZER,
-            SCK_MONITOR_ENUMERATION_WORKERS.clone(),
             monitor_lookup_timeout(),
-            || cidre::objc::ar_pool(enumerate_sck_monitors_for_lookup),
+            enumerate_sck_monitors_for_lookup,
         )
         .await;
         match sck_result {
@@ -938,11 +905,10 @@ pub async fn get_monitor_by_id(id: u32) -> Option<SafeMonitor> {
         return Some(monitor);
     }
     if use_sck_rs() {
-        match run_bounded_sck_enumeration(
+        match run_async_sck_enumeration(
             &SCK_MONITOR_ENUMERATION_SERIALIZER,
-            SCK_MONITOR_ENUMERATION_WORKERS.clone(),
             monitor_lookup_timeout(),
-            || cidre::objc::ar_pool(enumerate_sck_monitors_for_lookup),
+            enumerate_sck_monitors_for_lookup,
         )
         .await
         {
@@ -1074,13 +1040,20 @@ mod tests {
         }
     }
 
+    fn read_focus_monitor_cache() -> Vec<SafeMonitor> {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("test runtime")
+            .block_on(list_monitors_cached())
+    }
+
     /// The production failure this cache exists for: a caller asking for the
     /// same display several times a second must not produce one
     /// `SCShareableContent` round-trip per call.
     #[test]
     fn monitor_lookup_is_served_from_a_recent_enumeration() {
         let _guard = lock_lookup_cache_tests();
-        invalidate_monitor_lookup_cache();
+        clear_monitor_lookup_cache();
         let now = Instant::now();
         assert!(cached_monitor_by_id(1, now).is_none());
 
@@ -1098,7 +1071,7 @@ mod tests {
         // caller re-enumerates rather than silently failing.
         assert!(cached_monitor_by_id(99, Instant::now()).is_none());
 
-        invalidate_monitor_lookup_cache();
+        clear_monitor_lookup_cache();
     }
 
     /// The production failure this path exists for: the focus tracker polls
@@ -1106,77 +1079,66 @@ mod tests {
     /// each of those was an `SCShareableContent` round-trip that could strand
     /// a worker for the life of the process.
     #[test]
-    fn topology_reads_are_served_from_a_recent_enumeration() {
+    fn focus_reads_are_served_from_the_last_enumeration() {
         let _guard = lock_lookup_cache_tests();
-        invalidate_monitor_lookup_cache();
-        assert!(cached_monitor_list(Instant::now(), MONITOR_TOPOLOGY_CACHE_TTL).is_none());
+        clear_monitor_lookup_cache();
+        assert!(last_known_monitor_list().is_empty());
 
         store_monitor_lookup_cache(&[cache_test_monitor(1), cache_test_monitor(2)]);
-        let stored_at = Instant::now();
-
-        let served = cached_monitor_list(stored_at, MONITOR_TOPOLOGY_CACHE_TTL)
-            .expect("a fresh enumeration must answer topology reads");
+        let served = read_focus_monitor_cache();
         assert_eq!(
             served.iter().map(|m| m.id()).collect::<Vec<_>>(),
             vec![1, 2],
-            "the cached read must return the whole set, not just one display"
+            "focus resolution must receive the whole last-known display set"
         );
 
-        invalidate_monitor_lookup_cache();
+        clear_monitor_lookup_cache();
     }
 
-    /// Topology reads accept a staler answer than lookups, but both must
-    /// eventually miss so a disconnected display stops being handed out.
+    /// Focus resolution must not become an SCK retry owner when the capture
+    /// lookup TTL expires. The monitor watcher replaces this geometry after a
+    /// successful fresh enumeration.
     #[test]
-    fn topology_cache_outlives_the_lookup_ttl_then_expires() {
+    fn focus_reads_survive_capture_lookup_expiration() {
         let _guard = lock_lookup_cache_tests();
-        invalidate_monitor_lookup_cache();
+        clear_monitor_lookup_cache();
         store_monitor_lookup_cache(&[cache_test_monitor(3)]);
         let stored_at = Instant::now();
 
-        // Past the lookup TTL the by-id path re-enumerates while the topology
-        // path is still happy — that difference is the whole point of the
-        // separate TTL, so pin it.
-        assert!(MONITOR_TOPOLOGY_CACHE_TTL > MONITOR_LOOKUP_CACHE_TTL);
         assert!(cached_monitor_by_id(3, stored_at + MONITOR_LOOKUP_CACHE_TTL).is_none());
-        assert!(cached_monitor_list(
-            stored_at + MONITOR_LOOKUP_CACHE_TTL,
-            MONITOR_TOPOLOGY_CACHE_TTL
-        )
-        .is_some());
+        assert_eq!(
+            read_focus_monitor_cache()
+                .iter()
+                .map(|monitor| monitor.id())
+                .collect::<Vec<_>>(),
+            vec![3]
+        );
 
-        assert!(cached_monitor_list(
-            stored_at + MONITOR_TOPOLOGY_CACHE_TTL,
-            MONITOR_TOPOLOGY_CACHE_TTL
-        )
-        .is_none());
-        assert!(cached_monitor_list(
-            stored_at + MONITOR_TOPOLOGY_CACHE_TTL * 2,
-            MONITOR_TOPOLOGY_CACHE_TTL
-        )
-        .is_none());
-
-        invalidate_monitor_lookup_cache();
+        clear_monitor_lookup_cache();
     }
 
-    /// A display reconfiguration or wake must drop the cache immediately
-    /// rather than let a stale layout answer until the TTL lapses.
-    /// `sleep_monitor` wires the CoreGraphics reconfiguration callback and the
-    /// wake/unlock transitions to this, so the TTL is only a backstop.
+    /// Wake and display changes invalidate capture lookups immediately, while
+    /// focus resolution keeps using the last-known geometry instead of issuing
+    /// its own SCK request during reconciliation.
     #[test]
-    fn topology_reads_miss_after_an_explicit_invalidation() {
+    fn focus_reads_survive_lookup_invalidation() {
         let _guard = lock_lookup_cache_tests();
-        invalidate_monitor_lookup_cache();
+        clear_monitor_lookup_cache();
         store_monitor_lookup_cache(&[cache_test_monitor(1), cache_test_monitor(2)]);
-        assert!(cached_monitor_list(Instant::now(), MONITOR_TOPOLOGY_CACHE_TTL).is_some());
 
         invalidate_monitor_lookup_cache();
 
-        assert!(
-            cached_monitor_list(Instant::now(), MONITOR_TOPOLOGY_CACHE_TTL).is_none(),
-            "a display change must force the next read to re-enumerate"
+        assert_eq!(
+            read_focus_monitor_cache()
+                .iter()
+                .map(|monitor| monitor.id())
+                .collect::<Vec<_>>(),
+            vec![1, 2],
+            "focus resolution must not re-enumerate while topology reconciles"
         );
         assert!(cached_monitor_by_id(1, Instant::now()).is_none());
+
+        clear_monitor_lookup_cache();
     }
 
     /// The watcher's fresh enumeration is what keeps the topology cache warm,
@@ -1184,25 +1146,24 @@ mod tests {
     #[test]
     fn newer_enumeration_replaces_the_cached_topology() {
         let _guard = lock_lookup_cache_tests();
-        invalidate_monitor_lookup_cache();
+        clear_monitor_lookup_cache();
         store_monitor_lookup_cache(&[cache_test_monitor(1), cache_test_monitor(2)]);
         store_monitor_lookup_cache(&[cache_test_monitor(1)]);
 
-        let served = cached_monitor_list(Instant::now(), MONITOR_TOPOLOGY_CACHE_TTL)
-            .expect("the newer enumeration must answer");
+        let served = last_known_monitor_list();
         assert_eq!(
             served.iter().map(|m| m.id()).collect::<Vec<_>>(),
             vec![1],
             "a display that disappeared must stop being served"
         );
 
-        invalidate_monitor_lookup_cache();
+        clear_monitor_lookup_cache();
     }
 
     #[test]
     fn monitor_lookup_cache_expires_and_can_be_invalidated() {
         let _guard = lock_lookup_cache_tests();
-        invalidate_monitor_lookup_cache();
+        clear_monitor_lookup_cache();
         store_monitor_lookup_cache(&[cache_test_monitor(7)]);
         let stored_at = Instant::now();
 
@@ -1217,6 +1178,7 @@ mod tests {
         assert!(cached_monitor_by_id(7, Instant::now()).is_some());
         invalidate_monitor_lookup_cache();
         assert!(cached_monitor_by_id(7, Instant::now()).is_none());
+        clear_monitor_lookup_cache();
     }
 
     /// A later enumeration is authoritative: a display that disappeared must
@@ -1224,14 +1186,14 @@ mod tests {
     #[test]
     fn newer_enumeration_replaces_the_cached_set() {
         let _guard = lock_lookup_cache_tests();
-        invalidate_monitor_lookup_cache();
+        clear_monitor_lookup_cache();
         store_monitor_lookup_cache(&[cache_test_monitor(1), cache_test_monitor(2)]);
         store_monitor_lookup_cache(&[cache_test_monitor(1)]);
 
         assert!(cached_monitor_by_id(1, Instant::now()).is_some());
         assert!(cached_monitor_by_id(2, Instant::now()).is_none());
 
-        invalidate_monitor_lookup_cache();
+        clear_monitor_lookup_cache();
     }
 
     #[test]
@@ -1272,18 +1234,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn monitor_enumeration_timeout_allows_one_bounded_retry() {
         let serializer = tokio::sync::Mutex::new(());
-        let workers = Arc::new(tokio::sync::Semaphore::new(2));
-        let (release_tx, release_rx) = std::sync::mpsc::channel();
-
-        let first = run_bounded_sck_enumeration(
-            &serializer,
-            workers.clone(),
-            Duration::from_millis(25),
-            move || {
-                release_rx.recv().expect("release first enumeration");
-                Ok(1u8)
-            },
-        )
+        let first = run_async_sck_enumeration(&serializer, Duration::from_millis(25), || async {
+            std::future::pending::<std::result::Result<u8, MonitorListError>>().await
+        })
         .await;
         assert!(matches!(
             first,
@@ -1291,108 +1244,32 @@ mod tests {
                 if message.contains("ScreenCaptureKit/replayd did not reply")
         ));
 
-        let second = run_bounded_sck_enumeration(
-            &serializer,
-            workers.clone(),
-            Duration::from_secs(1),
-            || Ok(2u8),
-        )
-        .await;
+        let second =
+            run_async_sck_enumeration(&serializer, Duration::from_secs(1), || async { Ok(2u8) })
+                .await;
         assert!(matches!(second, Ok(2)), "a fresh retry should recover");
-
-        release_tx.send(()).expect("unblock first enumeration");
-        let recovered =
-            run_bounded_sck_enumeration(&serializer, workers, Duration::from_secs(1), || Ok(3u8))
-                .await;
-        assert!(matches!(recovered, Ok(3)));
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn monitor_enumeration_never_exceeds_two_blocked_workers() {
-        let serializer = tokio::sync::Mutex::new(());
-        let workers = Arc::new(tokio::sync::Semaphore::new(2));
-        let (release_first_tx, release_first_rx) = std::sync::mpsc::channel();
-        let (release_second_tx, release_second_rx) = std::sync::mpsc::channel();
-
-        for release_rx in [release_first_rx, release_second_rx] {
-            let result = run_bounded_sck_enumeration(
-                &serializer,
-                workers.clone(),
-                Duration::from_millis(25),
-                move || {
-                    release_rx.recv().expect("release blocked enumeration");
-                    Ok(1u8)
-                },
-            )
-            .await;
-            assert!(matches!(
-                result,
-                Err(MonitorListError::Other(ref message))
-                    if message.contains("ScreenCaptureKit/replayd did not reply")
-            ));
-        }
-
-        let third_ran = Arc::new(AtomicBool::new(false));
-        let third_ran_in_task = third_ran.clone();
-        let third = run_bounded_sck_enumeration(
-            &serializer,
-            workers.clone(),
-            Duration::from_secs(1),
-            move || {
-                third_ran_in_task.store(true, Ordering::SeqCst);
-                Ok(3u8)
-            },
-        )
-        .await;
-        assert!(matches!(
-            third,
-            Err(MonitorListError::Other(ref message))
-                if message.contains("retry budget exhausted")
-        ));
-        assert!(!third_ran.load(Ordering::SeqCst));
-
-        release_first_tx.send(()).expect("release first worker");
-        release_second_tx.send(()).expect("release second worker");
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while workers.available_permits() < 2 {
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .expect("blocked worker permits should be released");
-        let recovered =
-            run_bounded_sck_enumeration(&serializer, workers, Duration::from_secs(1), || Ok(4u8))
-                .await;
-        assert!(matches!(recovered, Ok(4)));
     }
 
     /// Production #3939 freezes report 73-299s frozen in a 250ms-bounded await.
-    /// `run_bounded_sck_enumeration` bounds the *holder* at `timeout`, but the
-    /// wait for `serializer` is unbounded, so queued callers inherit the sum of
-    /// every holder ahead of them. With callbacks that are slow but do return,
-    /// permits recycle, nobody fast-fails, and the queue grows without limit.
+    /// The enumeration wrapper must bound both the holder and the serializer
+    /// wait so queued callers cannot inherit every deadline ahead of them.
     ///
     /// A caller must never wait for more than a small multiple of the timeout
     /// it asked for, however many callers are queued.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn enumeration_wait_stays_bounded_when_callers_queue() {
         const TIMEOUT: Duration = Duration::from_millis(100);
-        // Longer than TIMEOUT so every holder times out, but finite so the
-        // permit recycles and later callers never hit the retry budget.
         const CALLBACK: Duration = Duration::from_millis(160);
         const CALLERS: usize = 6;
 
         let serializer: &'static tokio::sync::Mutex<()> =
             Box::leak(Box::new(tokio::sync::Mutex::new(())));
-        let workers = Arc::new(tokio::sync::Semaphore::new(2));
-
         let started = Instant::now();
         let mut handles = Vec::new();
         for _ in 0..CALLERS {
-            let workers = workers.clone();
             handles.push(tokio::spawn(async move {
-                let _ = run_bounded_sck_enumeration(serializer, workers, TIMEOUT, move || {
-                    std::thread::sleep(CALLBACK);
+                let _ = run_async_sck_enumeration(serializer, TIMEOUT, move || async move {
+                    tokio::time::sleep(CALLBACK).await;
                     Ok(1u8)
                 })
                 .await;
@@ -1405,14 +1282,13 @@ mod tests {
             worst = worst.max(handle.await.expect("caller task panicked"));
         }
 
-        // Two permits let two holders overlap, so ~2x TIMEOUT is the honest
-        // ceiling for a bounded design. Allow 3x for scheduling slack.
+        // One timeout for the active holder, one for this caller's own future,
+        // plus scheduling slack on loaded CI hosts.
         let ceiling = TIMEOUT * 3;
         assert!(
             worst <= ceiling,
             "queued caller waited {worst:?} for a {TIMEOUT:?} bounded call \
-             ({CALLERS} callers, ceiling {ceiling:?}) — the serializer wait is unbounded, \
-             so waiters inherit every holder ahead of them"
+             ({CALLERS} callers, ceiling {ceiling:?})"
         );
     }
 
@@ -1459,53 +1335,6 @@ mod tests {
             worst <= ceiling,
             "queued capture caller waited {worst:?} for a {TIMEOUT:?} bounded call \
              ({CALLERS} callers, ceiling {ceiling:?})"
-        );
-    }
-
-    /// The other regime, for contrast: when callbacks never return, both
-    /// permits stay pinned and later callers fast-fail on the retry budget
-    /// instead of queueing. This caps the wait at ~2x timeout, which means a
-    /// permanent wedge alone cannot explain a multi-minute production freeze.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn enumeration_fast_fails_once_both_permits_are_pinned() {
-        const TIMEOUT: Duration = Duration::from_millis(100);
-        const CALLERS: usize = 6;
-
-        let serializer: &'static tokio::sync::Mutex<()> =
-            Box::leak(Box::new(tokio::sync::Mutex::new(())));
-        let workers = Arc::new(tokio::sync::Semaphore::new(2));
-        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
-        let release_rx = Arc::new(std::sync::Mutex::new(release_rx));
-
-        let started = Instant::now();
-        let mut handles = Vec::new();
-        for _ in 0..CALLERS {
-            let workers = workers.clone();
-            let release_rx = release_rx.clone();
-            handles.push(tokio::spawn(async move {
-                let _ = run_bounded_sck_enumeration(serializer, workers, TIMEOUT, move || {
-                    // Park until the test releases us; models an Apple callback
-                    // that never comes back.
-                    let _ = release_rx.lock().expect("release lock").recv();
-                    Ok(1u8)
-                })
-                .await;
-                started.elapsed()
-            }));
-        }
-
-        let mut worst = Duration::ZERO;
-        for handle in handles {
-            worst = worst.max(handle.await.expect("caller task panicked"));
-        }
-        for _ in 0..CALLERS {
-            let _ = release_tx.send(());
-        }
-
-        assert!(
-            worst <= TIMEOUT * 4,
-            "with both permits pinned every later caller should fast-fail, \
-             but the worst wait was {worst:?}"
         );
     }
 
@@ -1648,14 +1477,11 @@ mod tests {
         let baseline = peak_rss_bytes();
         eprintln!("[repro] baseline peak RSS: {}", fmt_mb(baseline));
 
-        // -- Phase 1: drive the code path AS-WRITTEN (should leak) --
-        // We call `SckMonitor::all()` directly on a tokio blocking worker,
-        // matching what `list_monitors_detailed` does today.
+        // -- Phase 1: reproduce the historical unpooled sync path --
         let before_phase1 = peak_rss_bytes();
         for _ in 0..N {
             tokio::task::spawn_blocking(|| {
-                // No ar_pool — matches current production path in
-                // list_monitors_detailed on macOS.
+                // No ar_pool — the pre-fix production shape.
                 let _ = sck_rs::Monitor::all();
             })
             .await

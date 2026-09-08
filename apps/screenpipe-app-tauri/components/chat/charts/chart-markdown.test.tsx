@@ -11,24 +11,35 @@
  * to the markdown pipeline that stops delivering `chart` fences fails here.
  */
 
-import * as React from "react";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
-import { MarkdownBlock } from "@/components/chat/markdown-block";
-import { renderChartFence } from "./chat-chart";
+import { MessageContent } from "@/components/chat/standalone/message-content";
+import type { Message } from "@/lib/chat/types";
 
 vi.mock("@tauri-apps/api/event", () => ({ emit: vi.fn() }));
 vi.mock("@/lib/utils/tauri", () => ({
   commands: { copyTextToClipboard: vi.fn().mockResolvedValue(undefined) },
 }));
 
-function renderAssistant(text: string) {
+function renderAssistant(
+  text: string,
+  options: {
+    isGenerating?: boolean;
+    onSendPrompt?: (prompt: string, displayLabel: string) => void;
+  } = {},
+) {
+  const message: Message = {
+    id: "assistant-chart",
+    role: "assistant",
+    content: text,
+    timestamp: Date.now(),
+  };
   return render(
-    <MarkdownBlock
-      text={text}
-      isUser={false}
-      renderSpecialCodeBlock={renderChartFence}
+    <MessageContent
+      message={message}
+      isGenerating={options.isGenerating}
+      onSendPrompt={options.onSendPrompt}
     />,
   );
 }
@@ -77,6 +88,31 @@ describe("chart fence inside assistant markdown", () => {
     expect(charts).toHaveLength(2);
     expect(charts[0]).toHaveAttribute("data-chart-type", "bar");
     expect(charts[1]).toHaveAttribute("data-chart-type", "line");
+  });
+
+  it("routes the Live View action through the current chat", () => {
+    const onSendPrompt = vi.fn();
+    renderAssistant(CHART_FENCE, { onSendPrompt });
+
+    fireEvent.keyDown(screen.getByRole("button", { name: "chart actions" }), {
+      key: "ArrowDown",
+    });
+    fireEvent.click(screen.getByRole("menuitem", { name: /add to live view/i }));
+
+    expect(onSendPrompt).toHaveBeenCalledOnce();
+    expect(onSendPrompt.mock.calls[0][0]).toContain('"title": "time by app"');
+    expect(onSendPrompt.mock.calls[0][1]).toBe("Add chart to a Live View");
+  });
+
+  it("waits for a streaming answer to finish before exposing chart actions", () => {
+    renderAssistant(CHART_FENCE, {
+      isGenerating: true,
+      onSendPrompt: vi.fn(),
+    });
+
+    expect(
+      screen.queryByRole("button", { name: "chart actions" }),
+    ).toBeNull();
   });
 
   it("falls back to a readable code block when the payload is malformed", () => {

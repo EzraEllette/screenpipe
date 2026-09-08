@@ -74,6 +74,7 @@ import {
   dedupeConversationMetas,
   listConversations,
   loadConversationFile,
+  reassignConversationPreset,
   saveConversationFile,
   searchConversations,
   type ConversationDedupCandidate,
@@ -81,6 +82,23 @@ import {
 } from "../chat-storage";
 
 const CHATS_DIR = "/Users/test/.screenpipe/chats";
+
+it("reassigns a deleted chat preset without changing messages or a newer selection", async () => {
+  putConversation("reassigned", { updatedAt: 100, content: "keep these messages" });
+  const path = `${CHATS_DIR}/reassigned.json`;
+  const original = JSON.parse(fsMock.files.get(path)!.text);
+  fsMock.files.set(path, { text: JSON.stringify({ ...original, presetId: "removed" }), mtime: 100 });
+
+  await reassignConversationPreset("reassigned", new Set(["removed"]), "default");
+  const saved = await loadConversationFile("reassigned");
+  expect(saved?.presetId).toBe("default");
+  expect(saved?.messages).toEqual(original.messages);
+  expect(saved?.updatedAt).toBe(original.updatedAt);
+
+  // A later user choice must survive even if deletion discovered the old ID.
+  await reassignConversationPreset("reassigned", new Set(["removed"]), "other");
+  expect((await loadConversationFile("reassigned"))?.presetId).toBe("default");
+});
 
 function putConversation(
   id: string,
@@ -144,6 +162,33 @@ describe("chat-storage bounded history", () => {
     fsMock.reads.length = 0;
     fsMock.stats.length = 0;
     __resetChatStorageCachesForTests();
+  });
+
+  it("blocks temporary side chats at the storage and history boundary", async () => {
+    const id = "temporary-side-chat-11111111-1111-4111-8111-111111111111";
+    const conversation = {
+      id,
+      title: "temporary side chat",
+      messages: [
+        { id: "u1", role: "user", content: "private draft", timestamp: 100 },
+      ],
+      createdAt: 100,
+      updatedAt: 100,
+    };
+
+    await saveConversationFile(conversation);
+    expect(fsMock.files.size).toBe(0);
+    expect(await loadConversationFile(id)).toBeNull();
+
+    // Simulate a leaked file from a future caller that bypasses the public
+    // save API. User-facing list/search and metadata parsing still reject it.
+    putConversation(id, {
+      updatedAt: 100,
+      content: "private draft",
+    });
+    expect(conversationMetaFromJson(conversation)).toBeNull();
+    expect(await listConversations()).toEqual([]);
+    expect(await searchConversations("private draft")).toEqual([]);
   });
 
   it("loads only the newest 50 conversation files for the default history view", async () => {
@@ -298,6 +343,29 @@ describe("chat-storage bounded history", () => {
     expect(conv?.lastViewedAt).toBe(150);
     expect(meta?.lastViewedAt).toBe(150);
     expect(meta?.lastContentAt).toBe(200);
+  });
+
+  it("preserves imported agent provenance in conversation metadata", () => {
+    const meta = conversationMetaFromJson({
+      id: "imported-codex-thread",
+      title: "agent task",
+      createdAt: 100,
+      updatedAt: 200,
+      messages: [{ id: "u1", role: "user", content: "hello", timestamp: 100 }],
+      importedFrom: {
+        source: "codex",
+        sourceId: "thread-1",
+        importedAt: 300,
+        harness: "cursor",
+      },
+    });
+
+    expect(meta?.importedFrom).toEqual({
+      source: "codex",
+      sourceId: "thread-1",
+      importedAt: 300,
+      harness: "cursor",
+    });
   });
 
   it("re-throws and reports when the disk write fails (forbidden path, #5306)", async () => {

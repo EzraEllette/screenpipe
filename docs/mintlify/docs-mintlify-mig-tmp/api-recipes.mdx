@@ -1,7 +1,7 @@
 ---
 title: "screenpipe API recipes"
 sidebarTitle: "API recipes"
-description: "Copy-paste recipes for the most useful screenpipe API workflows: search, meetings, speakers, frames, memories, retention, archive, and safe data deletion."
+description: "Copy-paste recipes for the most useful screenpipe API workflows: search, meetings, speakers, frames, memories, retention, and safe data deletion."
 icon: "terminal"
 ---
 
@@ -45,7 +45,14 @@ curl -H "Authorization: Bearer $SCREENPIPE_API_KEY" \
   "http://localhost:3030/search?browser_url=github.com&limit=20&start_time=24h+ago&end_time=now"
 ```
 
-use `app_name` for desktop app names and `browser_url` for web activity captured through browser metadata.
+`browser_url` is matched against captured browser metadata; it is not a URL substring search. To find pages whose captured URL contains a domain or path, use `q` instead:
+
+```bash
+curl -H "Authorization: Bearer $SCREENPIPE_API_KEY" \
+  "http://localhost:3030/search?q=github.com&limit=20&start_time=24h+ago&end_time=now"
+```
+
+use `app_name` for desktop app names and `browser_url` for exact or normalized URL filtering. URLs are also returned as metadata in matching results.
 
 ## 4. search a precise time window
 
@@ -163,19 +170,9 @@ curl -X POST http://localhost:3030/retention/configure \
   -d '{"enabled": true, "days": 30}'
 ```
 
-retention keeps disk usage bounded. pair it with archive if you want old recordings moved out before deletion.
+retention keeps disk usage bounded. back up anything you need before cleanup because deleted ranges are not recoverable.
 
-## 14. archive old data
-
-```bash
-curl -H "Authorization: Bearer $SCREENPIPE_API_KEY" "http://localhost:3030/archive/status"
-curl -X POST http://localhost:3030/archive/run \
-  -H "Authorization: Bearer $SCREENPIPE_API_KEY"
-```
-
-archive is for moving older media to encrypted storage while keeping the local timeline searchable.
-
-## 15. delete a time range
+## 14. delete a time range
 
 ```bash
 curl -X POST http://localhost:3030/data/delete-range \
@@ -185,7 +182,7 @@ curl -X POST http://localhost:3030/data/delete-range \
 ```
 
 <Warning>
-replace both placeholders with reviewed ISO 8601 UTC timestamps. data deletion is permanent; export or archive anything you need before deleting a range or device.
+replace both placeholders with reviewed ISO 8601 UTC timestamps. data deletion is permanent; make a reviewed backup before deleting a range or device.
 </Warning>
 
 ## filter cheat sheet
@@ -196,7 +193,7 @@ replace both placeholders with reviewed ISO 8601 UTC timestamps. data deletion i
 | `content_type` | narrowing to `ocr`, `audio`, `input`, `accessibility`, or `all` |
 | `app_name` | filtering to a desktop app |
 | `window_name` | filtering to a window title |
-| `browser_url` | filtering to a website or URL pattern |
+| `browser_url` | exact or normalized filtering on captured browser metadata; use `q` for URL substring searches |
 | `speaker_name` | finding what one person said |
 | `speaker_ids` | using exact speaker IDs after cleanup |
 | `start_time` / `end_time` | constraining a meeting, work block, or incident |

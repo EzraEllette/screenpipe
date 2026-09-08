@@ -5,6 +5,7 @@
 import { homeDir } from "@tauri-apps/api/path";
 import { getVersion } from "@tauri-apps/api/app";
 import { commands } from "@/lib/utils/tauri";
+import { saveWithPresetReassignment } from "@/lib/ai-preset-deletion";
 import { platform } from "@tauri-apps/plugin-os";
 import { Store } from "@tauri-apps/plugin-store";
 import { emit, listen } from "@tauri-apps/api/event";
@@ -47,6 +48,7 @@ import {
 } from "@/lib/live-views/onboarding-activation";
 import {
 	cloneLocalDesktopRemotePolicy,
+	LOCAL_DESKTOP_REMOTE_POLICY,
 	NEW_INSTALL_REMOTE_CONTROL_PREFERENCES,
 	normalizeDesktopRemotePolicySnapshot,
 	normalizeDesktopRemotePreferences,
@@ -78,6 +80,14 @@ export type AcpAgentPresetConfig = {
 	args?: string[];
 	/** Empty values mean "inherit this variable from the app environment". */
 	env?: Record<string, string>;
+	/** Session option defaults advertised by the selected adapter. */
+	config?: Record<string, string>;
+	/** Session mode default advertised by the selected adapter. */
+	modeId?: string | null;
+	/** Screenpipe-owned ACP permission response policy. */
+	approvalMode?: "ask" | "allow-all" | null;
+	/** True when this ACP agent's model calls use Screenpipe Cloud allowance. */
+	useScreenpipeCloud?: boolean | null;
 };
 
 export type EmbeddedLLMConfig = {
@@ -131,13 +141,15 @@ export type AIPreset = {
 	  }
 );
 
-export type UpdateChannel = "stable" | "beta";
+export type UpdateChannel = "stable" | "pre-release";
 
 // Chat history types
 export interface ChatMessage {
 	id: string;
 	role: "user" | "assistant";
 	content: string;
+	/** Local history source for messages copied from another agent client. */
+	importedFrom?: "claude-code" | "codex";
 	intent?: "steer";
 	turnIntentId?: string;
 	timestamp: number;
@@ -185,6 +197,9 @@ export interface ChatMessage {
  *                    rather than "Recents". */
 export type ConversationKind = "chat" | "pipe-watch" | "pipe-run";
 
+/** The client surface that hosted an imported agent conversation. */
+export type AgentHarness = "terminal" | "cursor" | "github-copilot" | "screenpipe";
+
 /** Pipe-specific context attached to `pipe-watch` / `pipe-run`
  *  conversations. Drives the in-panel banner and the sidebar
  *  grouping. */
@@ -200,6 +215,14 @@ export interface ChatConversation {
 	messages: ChatMessage[];
 	createdAt: number;
 	updatedAt: number;
+	/** Provenance for an explicitly imported local agent conversation. */
+	importedFrom?: {
+		source: "claude-code" | "codex";
+		sourceId: string;
+		importedAt: number;
+		/** Optional when the transcript exposes which client hosted the run. */
+		harness?: AgentHarness;
+	};
 	/** User pinned this conversation in the chat sidebar — keeps it at the top.
 	 *  Persists across app restarts via the on-disk conversation file. */
 	pinned?: boolean;
@@ -231,6 +254,12 @@ export interface ChatConversation {
 	 *  "branch in new chat". Exempts the branch from first-user-message
 	 *  dedup — it deliberately shares its parent's opening message. */
 	branchedFrom?: string;
+	/** Monotonic write counter, bumped by `saveConversationFile` on every
+	 *  persist. Drives compare-and-swap: a writer whose `rev` is behind the
+	 *  on-disk copy lost a race, so its save merges instead of overwriting.
+	 *  Absent on files written before CAS landed — treated as 0, which makes
+	 *  legacy writers merge rather than clobber. */
+	rev?: number;
 	/** Last URL the agent navigated the embedded browser sidebar to.
 	 *  Drives the right-side `<BrowserSidebar />` panel: when the user
 	 *  re-opens this conversation the panel restores to this URL.
@@ -266,6 +295,22 @@ export interface ChatHistoryStore {
 
 // Extend SettingsStore with fields added before Rust types are regenerated
 export type Settings = SettingsStore & {
+	/** Enable account data sync for this device. Default false. */
+	dataSyncEnabled?: boolean;
+	/** Friendly name used to partition this device's synced data. */
+	dataSyncDeviceName?: string;
+	/** Start boundary for this device's current explicit opt-in. */
+	dataSyncEnabledAt?: string;
+	/** Account that explicitly enabled Data Sync on this device. */
+	dataSyncAccountId?: string;
+	/** Enable automatic Activities generation. Default false. */
+	activitiesEnabled?: boolean;
+	/** Native Activity generation cadence in minutes. Default 15. */
+	activitiesIntervalMinutes?: number;
+	/** AI preset used by native Activity generation. */
+	activitiesAiPresetId?: string;
+	/** Next native Activity generation run as an ISO timestamp. */
+	activitiesNextRunAt?: string;
 	/** Goal used to prioritize the Home cards. Persisted in store.bin. */
 	userGoalCategory?: UserGoalCategory;
 	/** Where the user says they found screenpipe, answered once during setup.
@@ -283,7 +328,6 @@ export type Settings = SettingsStore & {
 	remoteControlPolicy?: DesktopRemotePolicySnapshot;
 	updateChannel?: UpdateChannel;
 	chatHistory?: ChatHistoryStore;
-	ignoredUrls?: string[];
 	/**
 	 * Entries the capture-category switches created, so turning a category off
 	 * removes only those and never a rule the user wrote by hand.
@@ -416,11 +460,6 @@ export type Settings = SettingsStore & {
 	 *  Meetings ships hidden, which is what puts its compact icon in the
 	 *  top-left chrome strip instead. See `lib/utils/sidebar-nav-layout`. */
 	sidebarNavLayout?: SidebarNavLayout;
-	/** Rollout gate for right-click + drag sidebar customization. Owned by the
-	 *  typed PostHog registry (`sidebar-customization-control`); a persisted
-	 *  layout is still honored when the gate is off, so turning the flag off
-	 *  removes the editing affordances without resetting anyone's sidebar. */
-	enableSidebarCustomization?: boolean;
 	/** Show the chat suggestion chips above the input — the "follow up"
 	 *  questions and the connection-aware suggested prompts. The single inline
 	 *  X on the chips flips this to false; re-enable from Settings → Display.
@@ -450,6 +489,9 @@ export type Settings = SettingsStore & {
 		captureStalls: boolean;
 		appUpdates: boolean;
 		pipeNotifications: boolean;
+		/** In-app /notify before background scheduled tasks burn most of hosted-AI allowance.
+		 *  Default true; still gated by master notifications and pipe notifications. */
+		pipeAllowanceWarnings?: boolean;
 		/** Toast when a monitor is plugged, unplugged, or switched (clamshell, dock). Default true. */
 		displayChanges?: boolean;
 		/** Live-note prompt when a meeting is detected. Default true. */
@@ -627,10 +669,6 @@ export function makeDefaultPresets(isPro: boolean): AIPreset[] {
 	];
 }
 
-// Seed value — module load can't know pro status yet, so fall back to non-pro.
-// ensureDefaultPreset() re-seeds with pro status once settings.user is loaded.
-const DEFAULT_CLOUD_PRESET: AIPreset = makeDefaultPresets(false)[0];
-
 const DEFAULT_AUDIO_ENGINE = "whisper-large-v3-turbo-quantized";
 
 // "Paid" = any active app entitlement (Basic / Business / Enterprise / Lifetime)
@@ -671,9 +709,13 @@ const applyProCloudAudioDefaults = (settings: Settings): Settings => {
 };
 
 let DEFAULT_SETTINGS: Settings = {
+			dataSyncEnabled: false,
+			activitiesEnabled: false,
+			activitiesIntervalMinutes: 15,
 			aiPresets: makeDefaultPresets(false) as any,
 			userGoalCategory: DEFAULT_USER_GOAL_CATEGORY,
-			deviceId: crypto.randomUUID(),
+			// Native startup persists the device identity before opening a webview.
+			deviceId: "",
 			deepgramApiKey: "",
 			isLoading: false,
 			userId: "",
@@ -705,6 +747,7 @@ let DEFAULT_SETTINGS: Settings = {
 			],
 			includedWindows: [],
 			ignoredUrls: [],
+			includedUrls: [],
 			ignoredMeetingApps: [],
 			teamFilters: { ignoredWindows: [], includedWindows: [], ignoredUrls: [] },
 
@@ -782,7 +825,6 @@ let DEFAULT_SETTINGS: Settings = {
 			meetingSummaryPipeSlug: "meeting-summary",
 			filterMusic: true,
 			prioritizeInputLatency: false,
-			enableSidebarCustomization: false,
 			allowHidingShortcutOverlay: false,
 			showShortcutOverlay: true,
 			shortcutOverlaySnoozedUntil: null,
@@ -796,7 +838,7 @@ let DEFAULT_SETTINGS: Settings = {
 			keepComputerAwake: false,
 			showRestartNotifications: false,
 			experimentalCoreaudioSystemAudio: true,
-			experimentalMeetingPiggyback: false,
+			experimentalMeetingPiggyback: LOCAL_DESKTOP_REMOTE_POLICY.boolean.smartRecording.defaultEnabled,
 			alwaysRecordBluetoothMic: false,
 			windowsInputAecEnabled: false,
 			macosInputVpioEnabled: false,
@@ -849,14 +891,29 @@ export function normalizeSettingsArrays(settings: Settings): boolean {
 		aiPresets: makeDefaultPresets(settings.user?.cloud_subscribed === true),
 	};
 	let changed = false;
+	const presets = settings.aiPresets;
+	if (!Array.isArray(presets) || presets.length === 0) {
+		settings.aiPresets = [defaults.aiPresets[0]] as any;
+		changed = true;
+	}
 
 	for (const [key, fallback] of Object.entries(defaults)) {
+		if (key === "aiPresets") continue;
 		if (!Array.isArray(fallback) || Array.isArray(settings[key])) continue;
 		settings[key] = [...fallback];
 		changed = true;
 	}
 
 	return changed;
+}
+
+export function assertValidAiPresetUpdate(value: Partial<Settings>): void {
+	if (
+		"aiPresets" in value &&
+		(!Array.isArray(value.aiPresets) || value.aiPresets.length === 0)
+	) {
+		throw new Error("At least one AI preset is required");
+	}
 }
 
 // Store singleton
@@ -1161,13 +1218,6 @@ function createSettingsStore() {
 		// installs default to "meetings-only" (via createDefaultSettingsObject, which
 		// get() returns directly when there are no stored settings).
 
-		// Migration: Add default presets if user has none
-		if (!Array.isArray(settings.aiPresets) || settings.aiPresets.length === 0) {
-			const isPro = settings.user?.cloud_subscribed === true;
-			settings.aiPresets = makeDefaultPresets(isPro) as any;
-			needsUpdate = true;
-		}
-
 		// b2 seed: the first time we see a logged-in user, replace the anonymous
 		// "screenpipe" placeholder with the pro pair (chat + pipes) IF they're pro.
 		// Anonymous users keep the placeholder forever (which is correct — non-pro
@@ -1200,18 +1250,6 @@ function createSettingsStore() {
 			settings.aiPresets = settings.aiPresets.map((p: any) =>
 				p.id === "pi-agent" ? { ...p, id: "screenpipe-cloud" } : p
 			);
-			needsUpdate = true;
-		}
-
-		// Migration: Add screenpipe-cloud preset for existing users (without touching their existing presets)
-		const hasCloudPreset = settings.aiPresets?.some(
-			(p: any) => p.id === "screenpipe-cloud" || p.provider === "screenpipe-cloud"
-		);
-		if (settings.aiPresets && settings.aiPresets.length > 0 && !hasCloudPreset) {
-			// Only set as default if no other preset is already default
-			const hasDefault = settings.aiPresets.some((p: any) => p.defaultPreset);
-			const cloudPreset = { ...DEFAULT_CLOUD_PRESET, defaultPreset: !hasDefault };
-			settings.aiPresets = [cloudPreset as any, ...settings.aiPresets];
 			needsUpdate = true;
 		}
 
@@ -1386,6 +1424,7 @@ function createSettingsStore() {
 
 	const set = (value: Partial<Settings>) =>
 		enqueueSettingsStoreWrite(async () => {
+			assertValidAiPresetUpdate(value);
 			const store = await getStore();
 			const current = await get();
 			const managedValues = await activeManagedValues(current);
@@ -1404,8 +1443,10 @@ function createSettingsStore() {
 			) as Settings;
 			if (managedValues) newSettings.enterpriseManagedSettings = managedValues;
 			else delete newSettings.enterpriseManagedSettings;
-			await setSettingsStripped(store, newSettings);
-			await saveAndEncrypt(store);
+			await saveWithPresetReassignment(current, newSettings, async (reassigned) => {
+				await setSettingsStripped(store, reassigned);
+				await saveAndEncrypt(store);
+			});
 		});
 
 	const reset = () =>
@@ -1414,7 +1455,7 @@ function createSettingsStore() {
 			const current = await get();
 			const managedValues = await activeManagedValues(current);
 			const defaults = applyManagedOverrides(
-				createDefaultSettingsObject() as Record<string, unknown>,
+				{ ...createDefaultSettingsObject(), deviceId: current.deviceId } as Record<string, unknown>,
 				managedValues
 			) as Settings;
 			if (managedValues) defaults.enterpriseManagedSettings = managedValues;
@@ -1423,6 +1464,7 @@ function createSettingsStore() {
 		});
 
 	const resetSetting = async <K extends keyof Settings>(key: K) => {
+		if (key === "deviceId") return;
 		const current = await get();
 		const defaultValue = createDefaultSettingsObject()[key];
 		await set({ [key]: defaultValue } as Partial<Settings>);
@@ -1454,6 +1496,40 @@ function createSettingsStore() {
 }
 
 const settingsStore = createSettingsStore();
+const E2E_ACCOUNT_FIXTURE_ACTIVE_KEY =
+	"screenpipe_e2e_account_fixture_active";
+
+const hasActiveE2EAccountFixture = (): boolean => {
+	if (process.env.NEXT_PUBLIC_SCREENPIPE_E2E !== "true") return false;
+	try {
+		return (
+			typeof window !== "undefined" &&
+			window.localStorage?.getItem(E2E_ACCOUNT_FIXTURE_ACTIVE_KEY) === "1"
+		);
+	} catch {
+		return false;
+	}
+};
+
+/**
+ * E2E account fixtures carry complete user and plan truth in the shared store.
+ * Read that authoritative state instead of a particular webview's React copy:
+ * Home and Onboarding can mount at different times, while either may initiate
+ * a background account verification.
+ */
+const hasPersistedE2EAccountFixture = async (): Promise<boolean> => {
+	if (process.env.NEXT_PUBLIC_SCREENPIPE_E2E !== "true") return false;
+	// The fixture owner writes this sentinel before its asynchronous store
+	// update. localStorage is shared by the app's same-origin webviews, so stale
+	// Home/Onboarding copies can reject an old 401 without waiting for a store
+	// broadcast or racing the queued write.
+	if (hasActiveE2EAccountFixture()) return true;
+	const persisted = await settingsStore.get();
+	return (
+		(persisted.user as User & { __e2eSkipAccountRefresh?: boolean })
+			?.__e2eSkipAccountRefresh === true
+	);
+};
 
 // Context for React
 interface SettingsContextType {
@@ -1533,6 +1609,7 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 	// Install global fetch interceptor to catch 401s from screenpipe.com
 	const settingsRef = useRef(settings);
 	settingsRef.current = settings;
+	const settingsUpdateGenerationRef = useRef(0);
 
 	// Monotonic auth generation, bumped on every explicit sign-out. A
 	// loadUser() call snapshots this at entry; if a sign-out bumps it while the
@@ -1544,8 +1621,29 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
 	useEffect(() => {
 		installAuthInterceptor(
-			() => settingsRef.current.user?.token ?? undefined,
+			() => {
+				const user = settingsRef.current.user as
+					| (User & { __e2eSkipAccountRefresh?: boolean })
+					| null
+					| undefined;
+				// Synthetic E2E sessions intentionally use tokens the production web
+				// service cannot verify. A background cloud request may still return
+				// 401 while the native onboarding flow is under test; do not let that
+				// unrelated response erase the fixture from every app window.
+				if (
+					process.env.NEXT_PUBLIC_SCREENPIPE_E2E === "true" &&
+					(hasActiveE2EAccountFixture() ||
+						user?.__e2eSkipAccountRefresh === true)
+				) {
+					return undefined;
+				}
+				return user?.token ?? undefined;
+			},
 			async () => {
+				// Any webview can observe a 401 from an unrelated cloud request. An
+				// E2E fixture is intentionally synthetic, so consult the shared store
+				// before allowing that response to erase the account across windows.
+				if (await hasPersistedE2EAccountFixture()) return;
 				// A response from the website auth surface definitively rejected the
 				// credential. Clear the account so it cannot be confused with a
 				// transient secret-store hydration miss.
@@ -1584,6 +1682,18 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 		if (!isSettingsLoaded) return;
 		const token = settings.user?.token;
 		if (!token) return;
+		// E2E account seeds already contain the exact server response that their
+		// scenario is exercising. Sending their synthetic token to the production
+		// account API immediately converts a deterministic native-app test into a
+		// real-network 401. This branch is compiled into E2E bundles only; normal
+		// app authentication and refresh behavior are unchanged.
+		if (
+			process.env.NEXT_PUBLIC_SCREENPIPE_E2E === "true" &&
+			(settings.user as User & { __e2eSkipAccountRefresh?: boolean })
+				.__e2eSkipAccountRefresh === true
+		) {
+			return;
+		}
 
 		let cancelled = false;
 		const MAX_RETRIES = 3;
@@ -1747,6 +1857,16 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 	}, [settings.fontSize]);
 
 	const updateSettings = async (updates: Partial<Settings>) => {
+		assertValidAiPresetUpdate(updates);
+		const updateGeneration = ++settingsUpdateGenerationRef.current;
+		const settingsBeforeUpdate = settingsRef.current;
+
+		// Controlled switches and checkboxes must reflect the click immediately.
+		// Waiting for the asynchronous store listener makes React render the old
+		// value again, so the first click appears to undo itself. Persistence stays
+		// authoritative: a failed latest write is rolled back below.
+		setSettings((current) => ({ ...current, ...updates }) as Settings);
+
 		// Every settings mutation funnels through here, which makes this the one
 		// place that can answer "which controls do people actually change" without
 		// wiring ~40 call sites. The payload is redacted to booleans and numbers
@@ -1770,7 +1890,20 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 			// session. Fire-and-forget; the listener above bumps each window's ref.
 			emit("screenpipe-auth-signout").catch(() => {});
 		}
-		await settingsStore.set(updates);
+		try {
+			await settingsStore.set(updates);
+		} catch (error) {
+			// Do not let an older failed write overwrite a newer optimistic click.
+			// The queued newer write (and its store event) owns reconciliation.
+			if (settingsUpdateGenerationRef.current === updateGeneration) {
+				try {
+					setSettings(await settingsStore.get());
+				} catch {
+					setSettings(settingsBeforeUpdate);
+				}
+			}
+			throw error;
+		}
 		// Settings will be updated via the listener
 		if (clearsAccount) {
 			// Account changes must not alter the user's local retention policy.
@@ -1823,6 +1956,23 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 	};
 
 	const loadUser = async (token: string, verify = false) => {
+		// Every background verifier funnels through loadUser. E2E account fixtures
+		// already contain their scenario's exact server response, and their tokens
+		// must never be sent to the production account API. Check this webview's
+		// optimistic React state first: updateSettings publishes it before the
+		// queued durable write, so consulting only the store leaves a brief window
+		// where the auto-refresh effect can race the fixture persistence.
+		// Keep the environment check outside the await: production loadUser must
+		// snapshot authGeneration synchronously so a same-tick logout cannot race it.
+		if (
+			process.env.NEXT_PUBLIC_SCREENPIPE_E2E === "true" &&
+			((settingsRef.current.user as User & {
+				__e2eSkipAccountRefresh?: boolean;
+			})?.__e2eSkipAccountRefresh === true ||
+				(await hasPersistedE2EAccountFixture()))
+		) {
+			return;
+		}
 		// Snapshot the auth generation at the start of the request. If the user
 		// signs out while this fetch is in flight, the generation changes and we
 		// abort the write below instead of resurrecting the cleared session.
@@ -1861,6 +2011,16 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 			if (!response.ok) {
 				const body = await response.text().catch(() => "<no body>");
 				if (response.status === 401 || response.status === 403) {
+					// A peer webview can finish a request for the preceding CI seed
+					// after the shared store has installed a new E2E account. Its
+					// React ref may still name the old token, so recheck the durable
+					// fixture before clearing or surfacing a stale auth failure.
+					if (
+						process.env.NEXT_PUBLIC_SCREENPIPE_E2E === "true" &&
+						(await hasPersistedE2EAccountFixture())
+					) {
+						return;
+					}
 					await clearRejectedSession();
 				}
 				throw new Error(

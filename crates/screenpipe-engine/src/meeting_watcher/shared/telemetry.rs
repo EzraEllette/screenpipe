@@ -110,6 +110,56 @@ pub(crate) fn capture_detection_outcome(
     );
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct MeetingDetectionTransitionTelemetry {
+    pub meeting_id: i64,
+    pub transition: &'static str,
+    pub flap_count: u32,
+    pub published_meeting_before: bool,
+    pub published_meeting_after: bool,
+    pub published_pid_before: bool,
+    pub published_pid_after: bool,
+    pub live_pid: bool,
+    pub published_pid_in_input_snapshot: bool,
+    pub live_pid_in_input_snapshot: bool,
+    pub has_candidates: bool,
+    pub has_live_candidates: bool,
+}
+
+fn detection_transition_props(
+    platform: &str,
+    transition: MeetingDetectionTransitionTelemetry,
+) -> serde_json::Value {
+    json!({
+        "meeting_event_key": meeting_event_key(transition.meeting_id),
+        "transition": transition.transition,
+        "app_bucket": app_bucket(platform),
+        "flap_bucket": flap_bucket(transition.flap_count),
+        "published_meeting_before": transition.published_meeting_before,
+        "published_meeting_after": transition.published_meeting_after,
+        "published_pid_before": transition.published_pid_before,
+        "published_pid_after": transition.published_pid_after,
+        "live_pid": transition.live_pid,
+        "published_pid_in_input_snapshot": transition.published_pid_in_input_snapshot,
+        "live_pid_in_input_snapshot": transition.live_pid_in_input_snapshot,
+        "has_candidates": transition.has_candidates,
+        "has_live_candidates": transition.has_live_candidates,
+    })
+}
+
+/// Emitted only on `Active -> Ending` and `Ending -> Active`. Properties use
+/// booleans and stable buckets so process IDs and raw application names never
+/// leave the device.
+pub(crate) fn capture_detection_transition(
+    platform: &str,
+    transition: MeetingDetectionTransitionTelemetry,
+) {
+    analytics::capture_event_nonblocking(
+        "meeting_detection_transition",
+        detection_transition_props(platform, transition),
+    );
+}
+
 /// Bucket the Active<->Ending oscillation count so we never emit a raw,
 /// fingerprintable number.
 fn flap_bucket(flaps: u32) -> &'static str {
@@ -331,6 +381,36 @@ mod tests {
         assert!(props.contains("\"flap_bucket\":\"high\""));
         assert!(props.contains("\"end_reason\":\"auto_timeout\""));
         assert!(props.contains("\"app_bucket\":\"zoom\""));
+    }
+
+    #[test]
+    fn transition_props_bucket_identity_without_raw_values() {
+        let props = detection_transition_props(
+            "Unexpected Private App Name",
+            MeetingDetectionTransitionTelemetry {
+                meeting_id: 99,
+                transition: "ending_to_active",
+                flap_count: 4,
+                published_meeting_before: false,
+                published_meeting_after: false,
+                published_pid_before: false,
+                published_pid_after: false,
+                live_pid: true,
+                published_pid_in_input_snapshot: false,
+                live_pid_in_input_snapshot: true,
+                has_candidates: true,
+                has_live_candidates: true,
+            },
+        )
+        .to_string();
+
+        assert!(!props.contains("Unexpected Private App Name"));
+        assert!(!props.contains("\"meeting_id\""));
+        assert!(props.contains("\"app_bucket\":\"other_meeting_app\""));
+        assert!(props.contains("\"flap_bucket\":\"elevated\""));
+        assert!(props.contains("\"published_meeting_after\":false"));
+        assert!(props.contains("\"published_pid_after\":false"));
+        assert!(props.contains("\"live_pid\":true"));
     }
 
     #[test]

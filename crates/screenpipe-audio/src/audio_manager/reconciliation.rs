@@ -1759,8 +1759,8 @@ mod tests {
     // ── pending-chunk durable recovery (SCREENPIPE-CLI-RC) ──────────────────
 
     async fn temp_db(dir: &Path) -> DatabaseManager {
-        let db_path = dir.join("db.sqlite");
-        DatabaseManager::new(&format!("sqlite:{}", db_path.display()), Default::default())
+        let db_path = dir.join("db.sqlite").to_string_lossy().into_owned();
+        DatabaseManager::new(&db_path, Default::default())
             .await
             .expect("open temp db")
     }

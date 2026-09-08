@@ -11,6 +11,8 @@ mod first_responder;
 mod focus;
 mod gesture;
 mod panel;
+#[cfg(target_os = "macos")]
+pub(crate) mod renderer_watchdog;
 mod show;
 mod util;
 
@@ -160,6 +162,17 @@ pub(crate) fn make_panel_key_if_allowed(panel: &tauri_nspanel::raw_nspanel::RawN
     if window_activation_allowed() {
         panel.make_key_window();
     }
+}
+
+/// Whether a visible panel belongs to the user's currently active macOS Space.
+///
+/// `isVisible` remains true for windows pinned to a different Space, so callers
+/// must use this when deciding whether an invocation should hide the panel or
+/// move it to the Space the user is currently viewing.
+#[cfg(target_os = "macos")]
+pub(crate) fn panel_is_on_active_space(panel: &tauri_nspanel::raw_nspanel::RawNSPanel) -> bool {
+    use objc::{msg_send, sel, sel_impl};
+    unsafe { msg_send![panel, isOnActiveSpace] }
 }
 
 /// `[NSApp activateIgnoringOtherApps:YES]`, unless an e2e run is non-activating.
@@ -379,7 +392,10 @@ impl<R: tauri::Runtime, M: tauri::Manager<R>> GatedWindowPlacement
 /// Keep this as the single post-build entrypoint for window creation callsites.
 pub fn finalize_webview_window(window: tauri::WebviewWindow) -> tauri::WebviewWindow {
     #[cfg(any(target_os = "macos", target_os = "windows"))]
-    setup_content_process_handler(&window);
+    {
+        setup_content_process_handler(&window);
+        gesture::configure_history_swipe_navigation(&window);
+    }
     if let Err(error) = capture_protection::apply_to_new_window(&window) {
         tracing::warn!("{error}");
     }
@@ -387,6 +403,33 @@ pub fn finalize_webview_window(window: tauri::WebviewWindow) -> tauri::WebviewWi
     // place a non-intrusive e2e run can be kept off the developer's screen.
     sink_below_apps_if_non_intrusive(&window);
     window
+}
+
+/// Apply the frontend's experimental rollout decision to native history swipes.
+/// The platform implementation keeps every non-Home webview forced off.
+#[tauri::command]
+#[specta::specta]
+pub async fn set_history_swipe_navigation_enabled(
+    window: tauri::WebviewWindow,
+    enabled: bool,
+) -> Result<(), String> {
+    gesture::set_history_swipe_navigation_enabled(window, enabled).await
+}
+
+/// Record that a webview renderer's main event loop is responsive.
+///
+/// The macOS renderer watchdog compares this monotonic heartbeat with the
+/// moment a window was shown. If WebKit wedges while submitting a paint to its
+/// GPU process, JavaScript cannot advance its event loop and the native shell
+/// can rebuild the stale UI without restarting capture.
+#[tauri::command]
+#[specta::specta]
+pub fn webview_renderer_heartbeat(window: tauri::WebviewWindow) {
+    #[cfg(target_os = "macos")]
+    renderer_watchdog::record_heartbeat(window.label());
+
+    #[cfg(not(target_os = "macos"))]
+    let _ = window;
 }
 
 /// Make the live app match the enterprise hidden-UI policy.
@@ -477,6 +520,8 @@ pub(crate) use capture_protection::{native_overlay_is_capturable, overlay_is_cap
 pub use capture_protection::{
     get_app_screen_capture_protection, set_app_screen_capture_protection,
 };
+#[cfg(feature = "e2e")]
+pub(crate) use gesture::history_swipe_navigation_enabled;
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 pub use content_process::setup_content_process_handler;
@@ -492,6 +537,8 @@ pub use focus::clear_frontmost_app;
 pub use focus::restore_frontmost_app;
 #[cfg(target_os = "macos")]
 pub use panel::{reset_to_regular_and_refresh_tray, MAIN_PANEL_SHOWN};
+#[cfg(target_os = "macos")]
+pub(crate) use renderer_watchdog::{watch_focused, watch_visible};
 #[cfg(target_os = "macos")]
 pub use show::apply_chat_panel_on_top;
 #[cfg(target_os = "macos")]

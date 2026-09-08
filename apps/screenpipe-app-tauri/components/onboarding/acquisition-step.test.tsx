@@ -6,12 +6,16 @@ import "@testing-library/jest-dom/vitest";
 import React from "react";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import AcquisitionStep, { ACQUISITION_SOURCES } from "./acquisition-step";
+import AcquisitionStep, {
+  ACQUISITION_SOURCES,
+  buildAcquisitionAnalyticsProperties,
+} from "./acquisition-step";
 
 const mocks = vi.hoisted(() => ({
   updateSettings: vi.fn().mockResolvedValue(undefined),
   capture: vi.fn(),
   setPerson: vi.fn(),
+  getOnboardingAttribution: vi.fn().mockResolvedValue(null),
 }));
 
 vi.mock("@/lib/hooks/use-settings", () => ({
@@ -25,6 +29,12 @@ vi.mock("posthog-js", () => ({
   default: {
     capture: mocks.capture,
     people: { set: mocks.setPerson },
+  },
+}));
+
+vi.mock("@/lib/utils/tauri", () => ({
+  commands: {
+    getOnboardingAttribution: mocks.getOnboardingAttribution,
   },
 }));
 
@@ -48,7 +58,12 @@ describe("acquisition step", () => {
     });
     expect(mocks.capture).toHaveBeenCalledWith(
       "onboarding_acquisition_answered",
-      expect.objectContaining({ source: "reddit", answered: true }),
+      expect.objectContaining({
+        source: "reddit",
+        acquisition_source: "reddit",
+        answered: true,
+        attribution_available: false,
+      }),
     );
   });
 
@@ -62,7 +77,12 @@ describe("acquisition step", () => {
     expect(mocks.updateSettings).not.toHaveBeenCalled();
     expect(mocks.capture).toHaveBeenCalledWith(
       "onboarding_acquisition_answered",
-      expect.objectContaining({ source: "skipped", answered: false }),
+      expect.objectContaining({
+        source: "skipped",
+        acquisition_source: "skipped",
+        answered: false,
+        attribution_available: false,
+      }),
     );
   });
 
@@ -75,6 +95,45 @@ describe("acquisition step", () => {
     fireEvent.click(screen.getByTestId("acquisition-option-search"));
 
     await waitFor(() => expect(next).toHaveBeenCalledTimes(1));
+    expect(mocks.capture).toHaveBeenCalledWith(
+      "onboarding_acquisition_answered",
+      expect.objectContaining({ acquisition_source: "search" }),
+    );
+  });
+
+  it("puts observed website attribution beside the self-reported answer", async () => {
+    mocks.getOnboardingAttribution.mockResolvedValueOnce({
+      utmSource: "chatgpt.com",
+      utmMedium: "referral",
+      utmCampaign: "launch",
+      utmContent: null,
+      utmTerm: null,
+    });
+    const next = vi.fn();
+    render(<AcquisitionStep handleNextSlide={next} />);
+
+    fireEvent.click(screen.getByTestId("acquisition-option-ai_assistant"));
+
+    await waitFor(() => expect(next).toHaveBeenCalledTimes(1));
+    expect(mocks.capture).toHaveBeenCalledWith(
+      "onboarding_acquisition_answered",
+      expect.objectContaining({
+        acquisition_source: "ai_assistant",
+        attribution_available: true,
+        utm_source: "chatgpt.com",
+        utm_medium: "referral",
+        utm_campaign: "launch",
+      }),
+    );
+  });
+
+  it("omits absent UTM fields instead of inventing direct attribution", () => {
+    expect(buildAcquisitionAnalyticsProperties("friend", null)).toEqual({
+      source: "friend",
+      acquisition_source: "friend",
+      answered: true,
+      attribution_available: false,
+    });
   });
 
   it("offers every source and never a free-text field", () => {

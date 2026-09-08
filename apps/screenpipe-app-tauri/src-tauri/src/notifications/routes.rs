@@ -325,81 +325,66 @@ pub async fn send_notification(
         );
     }
 
-    // Only explicitly high-priority work interrupts the human; normal results
-    // wait in the inbox. Producers must opt into interruption instead of
-    // earning it accidentally by attaching a button or choosing a broad
-    // notification type. (Low and lifecycle types are transient — delivery is
-    // unchanged for them, they just leave no row behind.)
-    if priority == NotificationPriority::High {
-        let panel_json = panel_payload.to_string();
-        let app = state.app_handle.clone();
-        let delivery_id = panel_id.clone();
-        let delivery_title = payload.title.clone();
-        let delivery_type = panel_payload["type"].as_str().unwrap_or("pipe").to_string();
-        tokio::spawn(async move {
-            match tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                // `false`: the repeat gate already ran above, and it records as
-                // well as checks — running it again here would collide with the
-                // record this same alert just wrote and drop every notification.
-                crate::commands::deliver_notification_panel(app, panel_json, false),
-            )
-            .await
-            {
-                Ok(Ok(delivery)) => {
-                    // Report what happened, not that we asked. The delivery path
-                    // still drops alerts at the reduced-state gate, so a blanket
-                    // "shown" here hid real suppressions in the logs.
-                    if delivery.was_shown() {
-                        info!(
-                            id = %delivery_id,
-                            notification_type = %delivery_type,
-                            outcome = %delivery.as_str(),
-                            "High-priority notification shown"
-                        );
-                    } else {
-                        info!(
-                            id = %delivery_id,
-                            notification_type = %delivery_type,
-                            outcome = %delivery.as_str(),
-                            "High-priority notification suppressed before display"
-                        );
-                    }
-                }
-                Ok(Err(e)) => {
-                    error!(
+    // Every accepted notification surfaces in the top-right panel. Priority
+    // organizes the inbox and persistence policy; it must not silently turn a
+    // producer's notification into an inbox-only entry.
+    let panel_json = panel_payload.to_string();
+    let app = state.app_handle.clone();
+    let delivery_id = panel_id.clone();
+    let delivery_title = payload.title.clone();
+    let delivery_type = panel_payload["type"].as_str().unwrap_or("pipe").to_string();
+    tokio::spawn(async move {
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            // The route only peeked at the repeat ledger above. The shared
+            // delivery path remains the single check-and-record owner.
+            crate::commands::deliver_notification_panel(app, panel_json),
+        )
+        .await
+        {
+            Ok(Ok(delivery)) => {
+                // Report what happened, not that we asked. The delivery path
+                // still drops alerts at the reduced-state gate, so a blanket
+                // "shown" here would hide real suppressions in the logs.
+                if delivery.was_shown() {
+                    info!(
                         id = %delivery_id,
-                        title = %delivery_title,
                         notification_type = %delivery_type,
-                        "Failed to show notification panel: {}",
-                        e
+                        priority = ?priority,
+                        outcome = %delivery.as_str(),
+                        "Notification shown"
                     );
-                }
-                Err(_) => {
-                    error!(
+                } else {
+                    info!(
                         id = %delivery_id,
-                        title = %delivery_title,
                         notification_type = %delivery_type,
-                        "Timed out showing notification panel"
+                        priority = ?priority,
+                        outcome = %delivery.as_str(),
+                        "Notification suppressed before display"
                     );
                 }
             }
-        });
-    } else if transient {
-        debug!(
-            id = %panel_id,
-            notification_type = %resolved_type,
-            priority = ?priority,
-            "Transient notification delivered without interrupting"
-        );
-    } else {
-        debug!(
-            id = %panel_id,
-            notification_type = %resolved_type,
-            priority = ?priority,
-            "Notification saved to inbox without interrupting"
-        );
-    }
+            Ok(Err(e)) => {
+                error!(
+                    id = %delivery_id,
+                    title = %delivery_title,
+                    notification_type = %delivery_type,
+                    priority = ?priority,
+                    "Failed to show notification panel: {}",
+                    e
+                );
+            }
+            Err(_) => {
+                error!(
+                    id = %delivery_id,
+                    title = %delivery_title,
+                    notification_type = %delivery_type,
+                    priority = ?priority,
+                    "Timed out showing notification panel"
+                );
+            }
+        }
+    });
 
     Ok(Json(ApiResponse {
         success: true,

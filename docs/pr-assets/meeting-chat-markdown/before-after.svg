@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="820" viewBox="0 0 1440 820">
+  <rect width="1440" height="820" fill="#F2EFE6"/>
+  <text x="70" y="68" font-family="IBM Plex Mono, monospace" font-size="18" letter-spacing="3" fill="#78786F">MEETING CHAT · BEFORE / AFTER</text>
+
+  <g transform="translate(70 110)">
+    <rect width="620" height="620" fill="#050505"/>
+    <text x="34" y="42" font-family="IBM Plex Mono, monospace" font-size="15" letter-spacing="2" fill="#78786F">BEFORE · RAW MARKERS + VAGUE WARNING</text>
+    <rect x="362" y="72" width="224" height="48" fill="#252525"/>
+    <text x="384" y="103" font-family="Space Grotesk, sans-serif" font-size="20" fill="#F2EFE6">why did this fail?</text>
+    <text x="34" y="164" font-family="Space Grotesk, sans-serif" font-size="20" fill="#B8B8B0">The evidence shows a gap:</text>
+    <text x="34" y="208" font-family="Space Grotesk, sans-serif" font-size="20" fill="#B8B8B0">at **11:25**, Whitney wanted *tips*;</text>
+    <text x="34" y="244" font-family="Space Grotesk, sans-serif" font-size="20" fill="#B8B8B0">at **11:32**, usage was maybe **5%**.</text>
+    <line x1="0" y1="470" x2="620" y2="470" stroke="#383833"/>
+    <text x="34" y="518" font-family="Space Grotesk, sans-serif" font-size="22" fill="#F2EFE6">summary needs attention</text>
+    <text x="34" y="558" font-family="Space Grotesk, sans-serif" font-size="18" fill="#B8B8B0">Your meeting and transcript are safe.</text>
+    <text x="34" y="590" font-family="Space Grotesk, sans-serif" font-size="18" fill="#B8B8B0">Retry when you&apos;re ready.</text>
+  </g>
+
+  <g transform="translate(750 110)">
+    <rect width="620" height="620" fill="#050505"/>
+    <text x="34" y="42" font-family="IBM Plex Mono, monospace" font-size="15" letter-spacing="2" fill="#C7FF3E">AFTER · FORMATTED + ACTIONABLE</text>
+    <rect x="362" y="72" width="224" height="48" fill="#252525"/>
+    <text x="384" y="103" font-family="Space Grotesk, sans-serif" font-size="20" fill="#F2EFE6">why did this fail?</text>
+    <text x="34" y="164" font-family="Space Grotesk, sans-serif" font-size="20" fill="#B8B8B0">The evidence shows a gap:</text>
+    <circle cx="43" cy="204" r="3" fill="#78786F"/>
+    <text x="60" y="211" font-family="Space Grotesk, sans-serif" font-size="20" fill="#B8B8B0">at </text>
+    <text x="86" y="211" font-family="IBM Plex Mono, monospace" font-size="18" font-weight="700" text-decoration="underline" fill="#F2EFE6">11:25</text>
+    <text x="148" y="211" font-family="Space Grotesk, sans-serif" font-size="20" fill="#B8B8B0">, Whitney wanted </text>
+    <text x="306" y="211" font-family="Space Grotesk, sans-serif" font-size="20" font-style="italic" fill="#B8B8B0">tips</text>
+    <text x="340" y="211" font-family="Space Grotesk, sans-serif" font-size="20" fill="#B8B8B0">.</text>
+    <circle cx="43" cy="244" r="3" fill="#78786F"/>
+    <text x="60" y="251" font-family="Space Grotesk, sans-serif" font-size="20" fill="#B8B8B0">at </text>
+    <text x="86" y="251" font-family="IBM Plex Mono, monospace" font-size="18" font-weight="700" text-decoration="underline" fill="#F2EFE6">11:32</text>
+    <text x="148" y="251" font-family="Space Grotesk, sans-serif" font-size="20" fill="#B8B8B0">, usage was maybe </text>
+    <text x="328" y="251" font-family="Space Grotesk, sans-serif" font-size="20" font-weight="700" fill="#F2EFE6">5%</text>
+    <text x="360" y="251" font-family="Space Grotesk, sans-serif" font-size="20" fill="#B8B8B0">.</text>
+    <line x1="0" y1="470" x2="620" y2="470" stroke="#383833"/>
+    <text x="34" y="518" font-family="Space Grotesk, sans-serif" font-size="22" fill="#F2EFE6">summary needs attention</text>
+    <text x="34" y="558" font-family="Space Grotesk, sans-serif" font-size="18" fill="#B8B8B0">Couldn&apos;t authenticate with the AI provider.</text>
+    <text x="34" y="590" font-family="Space Grotesk, sans-serif" font-size="18" fill="#B8B8B0">Check its API key or switch models, then retry.</text>
+  </g>
+
+  <text x="70" y="775" font-family="IBM Plex Mono, monospace" font-size="16" fill="#78786F">TIMES REMAIN CLICKABLE TRANSCRIPT JUMPS · IMAGES STAY OUT OF THE THREAD</text>
+</svg>

@@ -103,14 +103,10 @@ describe("DisplaySection sidebar layout", () => {
     });
   });
 
-  it("explains customization only once the rollout gate is on", () => {
-    render(<DisplaySection />);
-    expect(screen.getByText(/rolling out/i)).toBeInTheDocument();
-    cleanup();
-
-    mocks.settings = { ...mocks.settings, enableSidebarCustomization: true };
+  it("explains how to customize the sidebar", () => {
     render(<DisplaySection />);
     expect(screen.getByText(/Drag sidebar rows/i)).toBeInTheDocument();
+    expect(screen.queryByText(/rolling out/i)).toBeNull();
   });
 
   // settings-search asserts every indexed label maps to a rendered heading.

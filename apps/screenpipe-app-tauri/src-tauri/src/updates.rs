@@ -8,9 +8,12 @@ use crate::store::{get_store, SettingsStore};
 use crate::RecordingState;
 use anyhow::Error;
 use dark_light::Mode;
+use futures::StreamExt;
 use log::{debug, error, info, warn};
 use semver::Version;
 use serde_json;
+#[cfg(any(target_os = "macos", test))]
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -25,6 +28,19 @@ use tokio::sync::oneshot;
 use tokio::sync::Mutex;
 use tokio::time::interval;
 
+fn consumer_update_channel(settings: Option<&SettingsStore>) -> &'static str {
+    match settings.map(|settings| settings.update_channel.as_str()) {
+        Some("pre-release") => "pre-release",
+        _ => "stable",
+    }
+}
+
+fn consumer_update_endpoint(channel: &str) -> String {
+    format!(
+        "https://screenpipe.com/api/app-update/{channel}/{{{{target}}}}-{{{{arch}}}}/{{{{current_version}}}}"
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Rollback: download a specific older version from R2 via the website API
 // ---------------------------------------------------------------------------
@@ -33,6 +49,11 @@ use tokio::time::interval;
 /// The website's /rollback endpoint returns a manifest with a fake high version
 /// so the updater accepts it as an "update".
 pub async fn install_specific_version(app: &tauri::AppHandle, version: &str) -> Result<(), String> {
+    if crate::enterprise_persistence::installed() {
+        return Err(
+            "rollback is unavailable for persistence-managed enterprise installations".to_string(),
+        );
+    }
     let target_arch = get_target_arch();
     let rollback_url = format!(
         "https://screenpipe.com/api/app-update/rollback/{}/{}",
@@ -122,7 +143,7 @@ pub fn is_source_build(_app: &tauri::AppHandle) -> bool {
     !cfg!(feature = "official-build") && !cfg!(feature = "enterprise-build")
 }
 
-/// Enterprise build: updates are managed by IT (Intune/RoboPack), not in-app.
+/// Enterprise build: update transport is selected by the administrator policy.
 pub fn is_enterprise_build(_app: &tauri::AppHandle) -> bool {
     cfg!(feature = "enterprise-build")
 }
@@ -145,17 +166,40 @@ fn enterprise_update_mode(app: &tauri::AppHandle) -> Option<String> {
         .map(|mode| mode.to_lowercase())
 }
 
-fn enterprise_updates_managed_locally(app: &tauri::AppHandle) -> bool {
-    let metadata = crate::enterprise_install_metadata::get_enterprise_install_metadata();
-    match enterprise_update_mode(app).as_deref() {
-        Some("screenpipe") => false,
-        Some("auto_detect") => metadata.managed,
-        Some("mdm") | Some("manual") => true,
-        // Missing/unknown policy → behave like a new org with the consumer
-        // banner flow. Existing orgs are explicitly pinned to "manual" via
-        // the website migration so they hit the arm above, not this one.
-        _ => false,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EnterpriseUpdateRoute {
+    Tauri,
+    PersistentPackage,
+    ExternalManager,
+}
+
+fn enterprise_update_route_for(
+    mode: Option<&str>,
+    metadata_managed: bool,
+    persistence_installed: bool,
+) -> EnterpriseUpdateRoute {
+    let external = matches!(mode, Some("mdm") | Some("manual"))
+        || mode == Some("auto_detect") && metadata_managed;
+    if external {
+        EnterpriseUpdateRoute::ExternalManager
+    } else if persistence_installed {
+        // The privileged supervisor owns the whole persistence-capable package.
+        // Never replace only the app bundle: the package route establishes a
+        // trusted maintenance window and reconciles the privileged components.
+        EnterpriseUpdateRoute::PersistentPackage
+    } else {
+        EnterpriseUpdateRoute::Tauri
     }
+}
+
+fn enterprise_update_route(app: &tauri::AppHandle) -> EnterpriseUpdateRoute {
+    let metadata = crate::enterprise_install_metadata::get_enterprise_install_metadata();
+    let mode = enterprise_update_mode(app);
+    enterprise_update_route_for(
+        mode.as_deref(),
+        metadata.managed,
+        crate::enterprise_persistence::installed(),
+    )
 }
 
 /// Snapshot of a pending update, exposed to the frontend via
@@ -169,6 +213,9 @@ pub struct PendingUpdateSnapshot {
     pub downloaded: bool,
     /// True when download failed with 401/403 — user must sign in.
     pub auth_required: bool,
+    /// True when the privileged persistence supervisor must apply the complete
+    /// system package rather than the ordinary Tauri app-only artifact.
+    pub persistent: bool,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -244,7 +291,8 @@ const BANNER_GATE_TIMEOUT_SECS: u64 = 60;
 /// inflated the `app_downloaded` metric ~12x. While a version is in cooldown
 /// we still hit the cheap CHECK endpoint but skip the binary download until
 /// the window elapses, a newer version ships, or the user retries manually
-/// (which passes `force=true`). In-memory only — a restart re-attempts once.
+/// (which passes `force=true`). A durable failed-install marker carries the
+/// cooldown across the relaunch that discovered the failure.
 const UPDATE_FAILURE_COOLDOWN: Duration = Duration::from_secs(6 * 60 * 60);
 
 /// Wait for boot to reach a settled state, with timeout. Logs the
@@ -310,6 +358,55 @@ pub async fn await_safe_restart(timeout_secs: Option<u64>) -> String {
 /// second trigger from starting a parallel teardown+relaunch.
 static UPDATE_RESTART_STARTED: AtomicBool = AtomicBool::new(false);
 
+fn request_persistent_update_for_restart() -> Result<(), String> {
+    let result = crate::enterprise_persistence::request_staged_update().and_then(|version| {
+        version.ok_or_else(|| {
+            "persistent update is no longer staged; check for updates again".to_string()
+        })
+    });
+    if result.is_err() {
+        // No privileged handoff occurred. A deleted/failed staging write must
+        // remain retryable, rather than permanently latching "restarting".
+        UPDATE_RESTART_STARTED.store(false, Ordering::SeqCst);
+    }
+    result.map(|_| ())
+}
+
+async fn meeting_active(app: &tauri::AppHandle) -> bool {
+    let state = app.state::<RecordingState>();
+    let server = state.server.lock().await;
+    let Some(server) = server.as_ref() else {
+        return false;
+    };
+    screenpipe_engine::routes::meetings::resolve_meeting_status_from(
+        server.db.as_ref(),
+        server.manual_meeting.as_ref(),
+    )
+    .await
+    .map(|status| status.active)
+    .unwrap_or_else(|error| {
+        warn!("auto-update: could not verify meeting status: {}", error);
+        true
+    })
+}
+
+/// Require 30 meeting-free seconds before an automatic restart.
+async fn wait_for_meeting_restart_window(app: &tauri::AppHandle) {
+    let mut started = screenpipe_events::subscribe_to_event::<serde_json::Value>("meeting_started");
+    let mut ended = screenpipe_events::subscribe_to_event::<serde_json::Value>("meeting_ended");
+
+    if meeting_active(app).await {
+        ended.next().await;
+    }
+
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(30)) => return,
+            _ = started.next() => { ended.next().await; }
+        }
+    }
+}
+
 /// Banner-click restart. Mirror the auto-update path: gate, stop server, then
 /// spawn the replacement app and `_exit` the old process so C/C++ atexit
 /// handlers cannot abort during restart. See 2026-06-10 and 2026-07-02 reports.
@@ -335,6 +432,18 @@ pub async fn restart_for_update(
         format!("failed to persist settings before update restart: {err}")
     })?;
 
+    let persistent_version = if is_enterprise_build(&app)
+        && enterprise_update_route(&app) == EnterpriseUpdateRoute::PersistentPackage
+    {
+        Some(
+            crate::enterprise_persistence::staged_version().ok_or_else(|| {
+                "persistent update is no longer staged; check for updates again".to_string()
+            })?,
+        )
+    } else {
+        None
+    };
+
     // Only the first trigger applies; later ones ride the in-flight restart.
     if UPDATE_RESTART_STARTED.swap(true, Ordering::SeqCst) {
         info!("banner restart: update-restart already in progress, ignoring");
@@ -344,9 +453,20 @@ pub async fn restart_for_update(
     // Durable "we are about to apply vX" marker: the next boot compares it
     // with the running version, so a swap that silently failed to apply is
     // detected instead of the app just quietly staying old.
-    #[cfg(target_os = "macos")]
-    if let Some(to_version) = crate::staged_update::staged_version() {
+    if let Some(to_version) = persistent_version.clone().or_else(|| {
+        #[cfg(target_os = "macos")]
+        {
+            crate::staged_update::staged_version()
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            None
+        }
+    }) {
         record_update_attempt(&app, &to_version);
+    }
+    if persistent_version.is_some() {
+        request_persistent_update_for_restart()?;
     }
 
     info!("banner restart: gate passed, shutting down for update");
@@ -375,11 +495,15 @@ pub async fn restart_for_update(
     }
 
     // Off-thread so the IPC reply flushes before runtime teardown.
-    crate::process_exit::request_app_relaunch(
-        app.clone(),
-        "banner update restart",
-        Duration::from_millis(250),
-    );
+    if persistent_version.is_some() {
+        crate::process_exit::request_app_quit(app.clone());
+    } else {
+        crate::process_exit::request_app_relaunch(
+            app.clone(),
+            "banner update restart",
+            Duration::from_millis(250),
+        );
+    }
 
     Ok("proceed".to_string())
 }
@@ -537,7 +661,7 @@ pub async fn trigger_update_now(app: tauri::AppHandle) {
     let manager = app.state::<Arc<UpdatesManager>>().inner().clone();
     if manager.has_update_installed().await {
         // Immediate feedback in the menu itself: the install + relaunch can
-        // take a few seconds even on the rename fast path.
+        // take several seconds while the verified installer extracts the update.
         manager.set_menu_installing();
         match restart_for_update(app.clone(), None).await {
             Ok(outcome) if outcome == "proceed" => {
@@ -584,6 +708,27 @@ fn failed_version_in_cooldown(
     cooldown: Duration,
 ) -> bool {
     matches!(last_failed, Some((v, elapsed)) if v == version && elapsed < cooldown)
+}
+
+/// Carry a failed exit-path install into the existing per-version cooldown.
+/// Without this bridge, the durable marker added in #6147 reports the failure
+/// but the boot check immediately downloads, restarts, and fails again.
+fn cooldown_from_failed_attempt(
+    failed_attempt: Option<&UpdateAttempt>,
+) -> Option<(String, std::time::Instant)> {
+    failed_attempt.map(|attempt| (attempt.to_version.clone(), std::time::Instant::now()))
+}
+
+/// The Tauri updater replaces the bundle containing its configured executable.
+/// Gatekeeper App Translocation and mounted disk images are read-only launch
+/// locations, so attempting an in-place update there can only relaunch the old
+/// version. macOS requires the user to move the app to an install location.
+#[cfg(any(target_os = "macos", test))]
+fn macos_update_location_is_protected(executable: &Path) -> bool {
+    executable
+        .components()
+        .any(|component| component.as_os_str() == "AppTranslocation")
+        || executable.starts_with("/Volumes")
 }
 
 /// Whether `candidate` is a strictly higher semantic version than `current`.
@@ -692,8 +837,8 @@ fn load_auto_update_enabled(app: &tauri::AppHandle) -> bool {
     let app_ui_hidden = crate::enterprise_policy::is_app_ui_hidden();
     // mdm/manual (and auto_detect-with-MDM) => updates are managed outside the
     // app; don't override that even when hidden.
-    let updates_managed_externally =
-        is_enterprise_build(app) && enterprise_updates_managed_locally(app);
+    let updates_managed_externally = is_enterprise_build(app)
+        && enterprise_update_route(app) == EnterpriseUpdateRoute::ExternalManager;
     if app_ui_hidden && !settings_enabled && !updates_managed_externally {
         info!(
             "enterprise: forcing auto-update ON in hidden UI mode \
@@ -791,6 +936,7 @@ impl UpdatesManager {
 
         // Did the previous process quit to apply an update that never landed?
         let failed_attempt = consume_update_attempt_marker(app);
+        let last_failed_update = cooldown_from_failed_attempt(failed_attempt.as_ref());
 
         let update_menu_item = if is_enterprise_build(app) {
             None
@@ -819,7 +965,7 @@ impl UpdatesManager {
             app: app.clone(),
             update_menu_item,
             is_checking: AtomicBool::new(false),
-            last_failed_update: Arc::new(Mutex::new(None)),
+            last_failed_update: Arc::new(Mutex::new(last_failed_update)),
         })
     }
 
@@ -848,9 +994,14 @@ impl UpdatesManager {
         }
         let _guard = CheckGuard(&self.is_checking);
 
-        // Enterprise: default to IT-managed updates unless the dashboard policy
-        // explicitly allows the Screenpipe updater for this install context.
-        if is_enterprise_build(&self.app) && enterprise_updates_managed_locally(&self.app) {
+        // Enterprise: honor the dashboard-selected external, ordinary in-app,
+        // or privileged persistent-package transport for this install context.
+        let enterprise_route = if is_enterprise_build(&self.app) {
+            enterprise_update_route(&self.app)
+        } else {
+            EnterpriseUpdateRoute::Tauri
+        };
+        if enterprise_route == EnterpriseUpdateRoute::ExternalManager {
             info!(
                 "enterprise build, updates managed outside app (mode={:?})",
                 enterprise_update_mode(&self.app)
@@ -873,9 +1024,34 @@ impl UpdatesManager {
                 return Result::Ok(false);
             }
         }
-        if cfg!(debug_assertions) {
+        if cfg!(debug_assertions) && !cfg!(feature = "e2e") {
             info!("dev mode is enabled, skipping update check");
             return Result::Ok(false);
+        }
+
+        #[cfg(target_os = "macos")]
+        if let Ok(executable) = std::env::current_exe() {
+            if macos_update_location_is_protected(&executable) {
+                warn!(
+                    "updater disabled: app is running from protected macOS location {}",
+                    executable.display()
+                );
+                if let Some(ref item) = self.update_menu_item {
+                    item.set_enabled(true)?;
+                    item.set_text("Move screenpipe to Applications to update")?;
+                }
+                if show_dialog {
+                    self.app
+                        .dialog()
+                        .message(
+                            "Quit screenpipe, move screenpipe.app to Applications, then reopen it. macOS prevents apps launched from Downloads or a disk image from updating themselves.",
+                        )
+                        .title("Move screenpipe to Applications")
+                        .buttons(MessageDialogButtons::Ok)
+                        .show(|_| {});
+                }
+                return Result::Ok(false);
+            }
         }
 
         if let Err(err) = self.app.emit("update-all-pipes", ()) {
@@ -892,6 +1068,12 @@ impl UpdatesManager {
         );
         // Build updater with auth header so paid users can download from R2
         let mut builder = self.app.updater_builder();
+        let settings = SettingsStore::get(&self.app).ok().flatten();
+        let is_beta_build = self.app.config().identifier.contains("beta");
+        if !is_enterprise_build(&self.app) && !is_beta_build {
+            let channel = consumer_update_channel(settings.as_ref());
+            builder = builder.endpoints(vec![consumer_update_endpoint(channel).parse()?])?;
+        }
         if is_enterprise_build(&self.app) {
             if let Some(license_key) = crate::commands::get_enterprise_license_key() {
                 builder = builder.header("X-License-Key", license_key)?;
@@ -899,7 +1081,7 @@ impl UpdatesManager {
             if let Some(token) = crate::commands::get_cloud_token() {
                 builder = builder.header("Authorization", format!("Bearer {token}"))?;
             }
-        } else if let Ok(Some(settings)) = SettingsStore::get(&self.app) {
+        } else if let Some(settings) = settings {
             if let Some(token) = settings
                 .user
                 .token
@@ -1000,6 +1182,7 @@ impl UpdatesManager {
                 body: update.body.clone().unwrap_or_default(),
                 downloaded: false,
                 auth_required: false,
+                persistent: enterprise_route == EnterpriseUpdateRoute::PersistentPackage,
             });
 
             let auto_update = load_auto_update_enabled(&self.app);
@@ -1048,7 +1231,7 @@ impl UpdatesManager {
             // the user's banner click; the frontend handler in
             // update-banner.tsx re-checks and runs downloadAndInstall itself.
             #[cfg(target_os = "windows")]
-            if !auto_update {
+            if !auto_update && enterprise_route != EnterpriseUpdateRoute::PersistentPackage {
                 info!(
                     "auto-update disabled on windows; deferring installer to user banner click (v{})",
                     update.version
@@ -1067,7 +1250,8 @@ impl UpdatesManager {
 
                 let update_info = serde_json::json!({
                     "version": update.version,
-                    "body": update.body.clone().unwrap_or_default()
+                    "body": update.body.clone().unwrap_or_default(),
+                    "persistent": false
                 });
                 if let Err(e) = self.app.emit("update-available", update_info) {
                     error!("Failed to emit update-available event: {}", e);
@@ -1104,6 +1288,9 @@ impl UpdatesManager {
 
             #[cfg(target_os = "windows")]
             {
+                if auto_update {
+                    wait_for_meeting_restart_window(&self.app).await;
+                }
                 // Windows: stop screenpipe before replacing the binary
                 if let Err(err) =
                     stop_screenpipe(self.app.state::<RecordingState>(), self.app.clone()).await
@@ -1152,32 +1339,56 @@ impl UpdatesManager {
                     // the running bundle into a temp dir, which breaks TCC
                     // attribution for the live process (ScreenCaptureKit -3801)
                     // until relaunch. Download + stage only; the install runs
-                    // on the exit path (see staged_update.rs). stage() now also
-                    // pre-extracts the ~160 MB archive (seconds of gunzip), so
+                    // on the exit path (see staged_update.rs). Persisting the
+                    // ~160 MB archive includes blocking file I/O and fsync, so
                     // it runs on the blocking pool, not an async worker.
+                    let persistent_package =
+                        enterprise_route == EnterpriseUpdateRoute::PersistentPackage;
+                    #[cfg(any(target_os = "macos", target_os = "windows"))]
+                    let persistent_result = if persistent_package {
+                        Some(
+                            crate::enterprise_persistence::stage_update(&self.app, &update)
+                                .await
+                                .map_err(|error| {
+                                    tauri_plugin_updater::Error::Io(std::io::Error::other(error))
+                                }),
+                        )
+                    } else {
+                        None
+                    };
                     #[cfg(target_os = "macos")]
-                    let result = match update.download(on_chunk, || {}).await {
-                        Ok(bytes) => {
-                            let app = self.app.clone();
-                            let staged_update = update.clone();
-                            match tauri::async_runtime::spawn_blocking(move || {
-                                crate::staged_update::stage(&app, staged_update, &bytes)
-                            })
-                            .await
-                            {
-                                Ok(stage_result) => {
-                                    stage_result.map_err(tauri_plugin_updater::Error::Io)
-                                }
-                                Err(join_err) => {
-                                    Err(tauri_plugin_updater::Error::Io(std::io::Error::other(
-                                        format!("stage task panicked: {join_err}"),
-                                    )))
+                    let result = if let Some(result) = persistent_result {
+                        result
+                    } else {
+                        match update.download(on_chunk, || {}).await {
+                            Ok(bytes) => {
+                                let app = self.app.clone();
+                                let staged_update = update.clone();
+                                match tauri::async_runtime::spawn_blocking(move || {
+                                    crate::staged_update::stage(&app, staged_update, &bytes)
+                                })
+                                .await
+                                {
+                                    Ok(stage_result) => {
+                                        stage_result.map_err(tauri_plugin_updater::Error::Io)
+                                    }
+                                    Err(join_err) => {
+                                        Err(tauri_plugin_updater::Error::Io(std::io::Error::other(
+                                            format!("stage task panicked: {join_err}"),
+                                        )))
+                                    }
                                 }
                             }
+                            Err(e) => Err(e),
                         }
-                        Err(e) => Err(e),
                     };
-                    #[cfg(not(target_os = "macos"))]
+                    #[cfg(target_os = "windows")]
+                    let result = if let Some(result) = persistent_result {
+                        result
+                    } else {
+                        update.download_and_install(on_chunk, || {}).await
+                    };
+                    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
                     let result = update.download_and_install(on_chunk, || {}).await;
 
                     match &result {
@@ -1318,7 +1529,8 @@ impl UpdatesManager {
             // Emit event to frontend for in-app banner (visible if window is open)
             let update_info = serde_json::json!({
                 "version": update.version,
-                "body": update.body.clone().unwrap_or_default()
+                "body": update.body.clone().unwrap_or_default(),
+                "persistent": enterprise_route == EnterpriseUpdateRoute::PersistentPackage
             });
             if let Err(e) = self.app.emit("update-available", update_info) {
                 error!("Failed to emit update-available event: {}", e);
@@ -1369,6 +1581,9 @@ impl UpdatesManager {
 
                 record_update_attempt(&self.app, &update.version);
 
+                let persistent_update =
+                    enterprise_route == EnterpriseUpdateRoute::PersistentPackage;
+
                 let _ = self.app.emit(
                     "update-restarting",
                     serde_json::json!({
@@ -1376,7 +1591,10 @@ impl UpdatesManager {
                         "delay_secs": 30,
                     }),
                 );
-                tokio::time::sleep(Duration::from_secs(30)).await;
+                wait_for_meeting_restart_window(&self.app).await;
+                if persistent_update {
+                    request_persistent_update_for_restart().map_err(std::io::Error::other)?;
+                }
                 // Time-bounded: never let a wedged capture/audio teardown stall
                 // the relaunch (see PRE_EXIT_TEARDOWN_TIMEOUT / 2026-06-26 report).
                 match bounded_teardown(
@@ -1394,11 +1612,15 @@ impl UpdatesManager {
                         PRE_EXIT_TEARDOWN_TIMEOUT.as_secs()
                     ),
                 }
-                crate::process_exit::request_app_relaunch(
-                    self.app.clone(),
-                    "auto-update restart",
-                    Duration::from_millis(0),
-                );
+                if persistent_update {
+                    crate::process_exit::request_app_quit(self.app.clone());
+                } else {
+                    crate::process_exit::request_app_relaunch(
+                        self.app.clone(),
+                        "auto-update restart",
+                        Duration::from_millis(0),
+                    );
+                }
             }
 
             return Result::Ok(true);
@@ -1782,6 +2004,43 @@ mod tests {
     }
 
     #[test]
+    fn failed_install_marker_arms_the_existing_cooldown_on_boot() {
+        let attempt = UpdateAttempt {
+            from_version: "2.6.77".into(),
+            to_version: "2.6.81".into(),
+            ts_epoch_secs: 0,
+        };
+        let cooldown = cooldown_from_failed_attempt(Some(&attempt));
+        assert!(failed_version_in_cooldown(
+            cooldown
+                .as_ref()
+                .map(|(version, started)| (version.as_str(), started.elapsed())),
+            "2.6.81",
+            UPDATE_FAILURE_COOLDOWN,
+        ));
+    }
+
+    #[test]
+    fn protected_macos_launch_locations_cannot_self_update() {
+        assert!(macos_update_location_is_protected(Path::new(
+            "/private/var/folders/xx/T/AppTranslocation/UUID/d/screenpipe.app/Contents/MacOS/screenpipe-app"
+        )));
+        assert!(macos_update_location_is_protected(Path::new(
+            "/Volumes/screenpipe/screenpipe.app/Contents/MacOS/screenpipe-app"
+        )));
+    }
+
+    #[test]
+    fn installed_macos_launch_locations_remain_updateable() {
+        assert!(!macos_update_location_is_protected(Path::new(
+            "/Applications/screenpipe.app/Contents/MacOS/screenpipe-app"
+        )));
+        assert!(!macos_update_location_is_protected(Path::new(
+            "/Users/ezra/Applications/screenpipe.app/Contents/MacOS/screenpipe-app"
+        )));
+    }
+
+    #[test]
     fn version_newer_rejects_equal() {
         assert!(!version_is_newer("2.5.165", "2.5.165"));
     }
@@ -1863,6 +2122,26 @@ mod tests {
     }
 
     #[test]
+    fn old_settings_use_stable_update_channel() {
+        assert_eq!(consumer_update_channel(None), "stable");
+        assert!(
+            consumer_update_endpoint(consumer_update_channel(None)).contains("/app-update/stable/")
+        );
+    }
+
+    #[test]
+    fn selected_pre_release_changes_only_the_channel_path() {
+        let mut settings = SettingsStore::default();
+        settings.update_channel = "pre-release".to_string();
+
+        assert_eq!(consumer_update_channel(Some(&settings)), "pre-release");
+        assert_eq!(
+            consumer_update_endpoint("pre-release"),
+            "https://screenpipe.com/api/app-update/pre-release/{{target}}-{{arch}}/{{current_version}}"
+        );
+    }
+
+    #[test]
     fn auto_update_setting_respects_true() {
         let mut settings = SettingsStore::default();
         settings.auto_update = true;
@@ -1897,6 +2176,50 @@ mod tests {
         assert!(!resolve_auto_update_enabled(false, true, true));
         // and an explicitly-on setting is still honored
         assert!(resolve_auto_update_enabled(true, true, true));
+    }
+
+    #[test]
+    fn persistent_enterprise_package_uses_privileged_updates_when_self_managed() {
+        assert_eq!(
+            enterprise_update_route_for(None, false, true),
+            EnterpriseUpdateRoute::PersistentPackage
+        );
+        assert_eq!(
+            enterprise_update_route_for(Some("screenpipe"), false, true),
+            EnterpriseUpdateRoute::PersistentPackage
+        );
+        assert_eq!(
+            enterprise_update_route_for(Some("auto_detect"), false, true),
+            EnterpriseUpdateRoute::PersistentPackage
+        );
+        assert_eq!(
+            enterprise_update_route_for(Some("auto_detect"), true, true),
+            EnterpriseUpdateRoute::ExternalManager
+        );
+        assert_eq!(
+            enterprise_update_route_for(Some("manual"), false, true),
+            EnterpriseUpdateRoute::ExternalManager
+        );
+    }
+
+    #[test]
+    fn ordinary_enterprise_update_policy_is_unchanged() {
+        assert_eq!(
+            enterprise_update_route_for(None, false, false),
+            EnterpriseUpdateRoute::Tauri
+        );
+        assert_eq!(
+            enterprise_update_route_for(Some("screenpipe"), true, false),
+            EnterpriseUpdateRoute::Tauri
+        );
+        assert_eq!(
+            enterprise_update_route_for(Some("auto_detect"), true, false),
+            EnterpriseUpdateRoute::ExternalManager
+        );
+        assert_eq!(
+            enterprise_update_route_for(Some("manual"), false, false),
+            EnterpriseUpdateRoute::ExternalManager
+        );
     }
 
     #[test]

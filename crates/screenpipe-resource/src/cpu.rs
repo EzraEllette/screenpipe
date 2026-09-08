@@ -12,6 +12,8 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 /// One fully occupied core is 100%, even on a multi-core machine.
 pub const DEFAULT_BACKGROUND_CPU_PERCENT: f32 = 30.0;
 
+const DEFAULT_FAST_SLICES_BEFORE_GROWTH: u8 = 3;
+
 #[derive(Clone, Copy, Debug)]
 pub struct CpuBudgetConfig {
     pub target_process_cpu_percent: f32,
@@ -22,6 +24,100 @@ impl Default for CpuBudgetConfig {
         Self {
             target_process_cpu_percent: DEFAULT_BACKGROUND_CPU_PERCENT,
         }
+    }
+}
+
+/// Bounds the uninterrupted work issued by one cooperative background loop.
+///
+/// The process-wide CPU lane and cooldown control concurrency and long-run
+/// average CPU. This controller limits the peak-producing interval before a
+/// caller reaches that cooldown boundary. Each workload should keep its own
+/// controller because the cost of one unit differs across redaction, indexing,
+/// and maintenance.
+#[derive(Clone, Copy, Debug)]
+pub struct WorkSliceConfig {
+    /// Hard ceiling for units in one uninterrupted work slice.
+    pub max_units: u32,
+    /// Units in the first slice, before timing feedback is available.
+    pub initial_units: u32,
+    /// Desired upper bound for one uninterrupted work slice.
+    pub target_duration: Duration,
+    /// Consecutive slices at or below half the target required before growth.
+    pub fast_slices_before_growth: u8,
+}
+
+impl Default for WorkSliceConfig {
+    fn default() -> Self {
+        Self {
+            max_units: 16,
+            initial_units: 4,
+            target_duration: Duration::from_millis(250),
+            fast_slices_before_growth: DEFAULT_FAST_SLICES_BEFORE_GROWTH,
+        }
+    }
+}
+
+/// Timing-feedback controller for one kind of cooperative background work.
+#[derive(Debug, Clone)]
+pub struct WorkSliceController {
+    current: u32,
+    max: u32,
+    target: Duration,
+    fast_slices: u8,
+    fast_slices_before_growth: u8,
+}
+
+impl WorkSliceController {
+    pub fn new(config: WorkSliceConfig) -> Self {
+        let max = config.max_units.max(1);
+        Self {
+            current: config.initial_units.max(1).min(max),
+            max,
+            target: config.target_duration.max(Duration::from_millis(1)),
+            fast_slices: 0,
+            fast_slices_before_growth: config.fast_slices_before_growth.max(1),
+        }
+    }
+
+    /// Units to issue in the next uninterrupted work slice.
+    pub fn current_units(&self) -> u32 {
+        self.current
+    }
+
+    pub fn target_duration(&self) -> Duration {
+        self.target
+    }
+
+    /// Record one completed slice and return the units for the next slice.
+    ///
+    /// Slow slices shrink proportionally, with at least one unit of progress.
+    /// Growth is deliberately slower: several slices must complete at or below
+    /// half the target before the limit doubles toward the configured ceiling.
+    pub fn observe(&mut self, worked: Duration) -> u32 {
+        if worked > self.target {
+            self.fast_slices = 0;
+            if self.current > 1 {
+                // Use a duration ratio instead of multiplying nanoseconds by
+                // the unit count. Public callers may configure very large
+                // durations, and that integer product can overflow `u128`.
+                let scaled = (f64::from(self.current) * self.target.as_secs_f64()
+                    / worked.as_secs_f64())
+                .floor()
+                .clamp(1.0, f64::from(self.max)) as u32;
+                // Every over-budget slice must make forward progress even
+                // when integer rounding would otherwise preserve the limit.
+                self.current = scaled.min(self.current - 1).max(1);
+            }
+        } else if worked <= self.target / 2 && self.current < self.max {
+            self.fast_slices = self.fast_slices.saturating_add(1);
+            if self.fast_slices >= self.fast_slices_before_growth {
+                self.current = self.current.saturating_mul(2).min(self.max);
+                self.fast_slices = 0;
+            }
+        } else {
+            self.fast_slices = 0;
+        }
+        self.current
     }
 }
 
@@ -245,5 +341,100 @@ mod tests {
             &ResourceGovernor::global(),
             &ResourceGovernor::global()
         ));
+    }
+
+    #[test]
+    fn work_slice_starts_below_the_maximum_and_clamps_invalid_limits() {
+        assert_eq!(
+            WorkSliceController::new(WorkSliceConfig::default()).current_units(),
+            4
+        );
+        assert_eq!(
+            WorkSliceController::new(WorkSliceConfig {
+                max_units: 2,
+                initial_units: 4,
+                ..WorkSliceConfig::default()
+            })
+            .current_units(),
+            2
+        );
+        assert_eq!(
+            WorkSliceController::new(WorkSliceConfig {
+                max_units: 0,
+                initial_units: 0,
+                target_duration: Duration::ZERO,
+                fast_slices_before_growth: 0,
+            })
+            .current_units(),
+            1
+        );
+    }
+
+    #[test]
+    fn slow_work_slice_shrinks_in_proportion_to_elapsed_time() {
+        let mut controller = WorkSliceController::new(WorkSliceConfig {
+            max_units: 16,
+            initial_units: 8,
+            ..WorkSliceConfig::default()
+        });
+        assert_eq!(controller.observe(Duration::from_secs(1)), 2);
+        assert_eq!(controller.observe(Duration::from_secs(1)), 1);
+    }
+
+    #[test]
+    fn work_slice_growth_requires_repeated_fast_slices() {
+        let mut controller = WorkSliceController::new(WorkSliceConfig::default());
+        assert_eq!(controller.observe(Duration::from_millis(50)), 4);
+        assert_eq!(controller.observe(Duration::from_millis(50)), 4);
+        assert_eq!(controller.observe(Duration::from_millis(50)), 8);
+        assert_eq!(controller.observe(Duration::from_millis(200)), 8);
+        assert_eq!(controller.observe(Duration::from_millis(50)), 8);
+    }
+
+    #[test]
+    fn extreme_durations_shrink_without_overflowing() {
+        let mut controller = WorkSliceController::new(WorkSliceConfig {
+            max_units: u32::MAX,
+            initial_units: u32::MAX,
+            target_duration: Duration::from_secs(u64::MAX / 2),
+            fast_slices_before_growth: 1,
+        });
+
+        let next = controller.observe(Duration::MAX);
+        assert!(next >= 1);
+        assert!(next < u32::MAX);
+    }
+
+    #[tokio::test]
+    async fn background_lane_serializes_callers_until_the_permit_drops() {
+        let governor = ResourceGovernor::new(CpuBudgetConfig::default());
+        let first = governor.acquire_background_cpu().await;
+        let (attempting_tx, attempting_rx) = tokio::sync::oneshot::channel();
+        let mut task = {
+            let governor = Arc::clone(&governor);
+            tokio::spawn(async move {
+                attempting_tx
+                    .send(())
+                    .expect("test stopped before the second acquire attempt");
+                governor.acquire_background_cpu().await
+            })
+        };
+
+        attempting_rx
+            .await
+            .expect("second workload never attempted to enter the lane");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut task)
+                .await
+                .is_err(),
+            "a second background workload entered before the lane was released"
+        );
+
+        drop(first);
+        let second = tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("second workload did not enter after the lane was released")
+            .expect("second workload task panicked");
+        drop(second);
     }
 }

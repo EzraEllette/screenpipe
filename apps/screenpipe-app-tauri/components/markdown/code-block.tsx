@@ -6,7 +6,6 @@
 import * as React from "react";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { Check, Copy } from "lucide-react";
-import { PrismAsyncLight as SyntaxHighlighter } from "react-syntax-highlighter";
 import {
   coldarkCold,
   coldarkDark,
@@ -14,6 +13,9 @@ import {
 import type { Options } from "react-markdown";
 import { cn } from "@/lib/utils";
 import { commands } from "@/lib/utils/tauri";
+import { SyntaxHighlighter } from "./prism-languages";
+
+export { SyntaxHighlighter };
 
 /**
  * One markdown surface, one code block.
@@ -23,7 +25,8 @@ import { commands } from "@/lib/utils/tauri";
  * plain, never-highlighted `<code>`; the viewer used Prism with a fixed-dark
  * style. This module is the single source of truth so a fenced ```ts block
  * looks identical — and readable in BOTH light and dark mode — wherever it
- * shows up.
+ * shows up. Grammars are registered synchronously in `prism-languages.ts`
+ * because PrismAsyncLight's extra chunks never load in the Tauri export.
  */
 
 // ---------------------------------------------------------------------------
@@ -267,7 +270,7 @@ export function createCodeMarkdownComponents(
     code({ node: _node, className, children, ...props }) {
       const content = String(children).replace(/\n$/, "");
       const match = /language-([\w-]+)/.exec(className || "");
-      const language = match?.[1] ?? "";
+      const language = (match?.[1] ?? "").toLowerCase();
       const isBlock = Boolean(match) || content.includes("\n");
 
       if (isBlock) {

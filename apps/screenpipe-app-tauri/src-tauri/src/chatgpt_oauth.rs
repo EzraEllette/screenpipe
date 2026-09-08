@@ -40,6 +40,8 @@ struct OAuthTokens {
     access_token: String,
     refresh_token: String,
     expires_at: Option<u64>,
+    #[serde(default)]
+    reauth_required: bool,
 }
 
 #[derive(Serialize, Deserialize, specta::Type)]
@@ -172,6 +174,11 @@ const MISSING_ACCOUNT_ID_MSG: &str = "This ChatGPT account can't be used for cha
     token has no ChatGPT account id. This usually means an Enterprise/Business workspace where \
     the admin hasn't enabled Codex local app access. Ask your workspace admin to enable it, or \
     sign in with a personal ChatGPT account.";
+const REAUTH_REQUIRED_MSG: &str =
+    "Your ChatGPT session expired. Sign in again to continue using ChatGPT in screenpipe.";
+const REFRESH_LEASE_SECONDS: u64 = 45;
+const REFRESH_LEASE_WAIT_ATTEMPTS: usize = 140;
+const REFRESH_LEASE_WAIT: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// Extract the `chatgpt_account_id` claim from an access token JWT.
 /// Returns `None` for non-JWT strings (e.g. API keys) or tokens without
@@ -209,11 +216,104 @@ fn generate_pkce() -> (String, String) {
 
 // ── Token refresh ──────────────────────────────────────────────────────
 
-async fn do_refresh_token(refresh_token: &str) -> Result<OAuthTokens, String> {
+#[derive(Debug)]
+enum RefreshError {
+    ReauthRequired(String),
+    Transient(String),
+}
+
+impl std::fmt::Display for RefreshError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ReauthRequired(message) | Self::Transient(message) => f.write_str(message),
+        }
+    }
+}
+
+fn refresh_error(status: reqwest::StatusCode, body: &str) -> RefreshError {
+    let code = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| value.pointer("/error/code")?.as_str().map(str::to_owned));
+    if matches!(
+        code.as_deref(),
+        Some("refresh_token_reused" | "invalid_grant")
+    ) {
+        RefreshError::ReauthRequired(REAUTH_REQUIRED_MSG.to_string())
+    } else {
+        RefreshError::Transient(format!("token refresh failed ({status}): {body}"))
+    }
+}
+
+async fn save_reauth_required(
+    store: &screenpipe_secrets::SecretStore,
+    tokens: &mut OAuthTokens,
+) -> Result<(), RefreshError> {
+    tokens.reauth_required = true;
+    let json = serde_json::to_vec(tokens).map_err(|e| {
+        RefreshError::Transient(format!("failed to serialize reauthentication state: {e}"))
+    })?;
+    store.set(SECRET_KEY, &json).await.map_err(|e| {
+        RefreshError::Transient(format!("failed to save reauthentication state: {e:#}"))
+    })
+}
+
+async fn do_refresh_token(refresh_token: &str) -> Result<OAuthTokens, RefreshError> {
+    let store = open_secret_store().await.map_err(RefreshError::Transient)?;
+    let lease_owner = uuid::Uuid::new_v4().simple().to_string();
+    let mut acquired = false;
+    for _ in 0..REFRESH_LEASE_WAIT_ATTEMPTS {
+        acquired = store
+            .try_acquire_refresh_lease(SECRET_KEY, &lease_owner, REFRESH_LEASE_SECONDS)
+            .await
+            .map_err(|error| {
+                RefreshError::Transient(format!("refresh coordination failed: {error:#}"))
+            })?;
+        if acquired {
+            break;
+        }
+        tokio::time::sleep(REFRESH_LEASE_WAIT).await;
+    }
+    if !acquired {
+        return Err(RefreshError::Transient(
+            "timed out waiting for another ChatGPT token refresh".to_string(),
+        ));
+    }
+
+    let result = do_refresh_token_as_owner(&store, refresh_token).await;
+    if let Err(error) = store.release_refresh_lease(SECRET_KEY, &lease_owner).await {
+        warn!("failed to release ChatGPT refresh lease: {error:#}");
+    }
+    result
+}
+
+async fn do_refresh_token_as_owner(
+    store: &screenpipe_secrets::SecretStore,
+    refresh_token: &str,
+) -> Result<OAuthTokens, RefreshError> {
+    let bytes = store
+        .get(SECRET_KEY)
+        .await
+        .map_err(|error| {
+            RefreshError::Transient(format!("failed to reread ChatGPT token: {error:#}"))
+        })?
+        .ok_or_else(|| RefreshError::ReauthRequired(REAUTH_REQUIRED_MSG.to_string()))?;
+    let mut current: OAuthTokens = serde_json::from_slice(&bytes).map_err(|error| {
+        RefreshError::Transient(format!("failed to parse stored ChatGPT token: {error}"))
+    })?;
+
+    if current.reauth_required {
+        return Err(RefreshError::ReauthRequired(
+            REAUTH_REQUIRED_MSG.to_string(),
+        ));
+    }
+    if current.refresh_token != refresh_token {
+        return Ok(current);
+    }
+
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
-        .map_err(|e| format!("failed to build HTTP client: {}", e))?;
+        .map_err(|e| RefreshError::Transient(format!("failed to build HTTP client: {e}")))?;
 
     let resp = client
         .post(TOKEN_URL)
@@ -226,23 +326,37 @@ async fn do_refresh_token(refresh_token: &str) -> Result<OAuthTokens, String> {
         }))
         .send()
         .await
-        .map_err(|e| format!("token refresh request failed: {}", e))?;
+        .map_err(|e| RefreshError::Transient(format!("token refresh request failed: {e}")))?;
 
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        return Err(format!("token refresh failed ({}): {}", status, body));
+        let error = refresh_error(status, &body);
+        if matches!(error, RefreshError::ReauthRequired(_)) {
+            save_reauth_required(store, &mut current).await?;
+        }
+        return Err(error);
     }
 
-    let v: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("failed to parse refresh response: {}", e))?;
+    let v: serde_json::Value = match resp.json().await {
+        Ok(value) => value,
+        Err(error) => {
+            save_reauth_required(store, &mut current).await?;
+            return Err(RefreshError::ReauthRequired(format!(
+                "{REAUTH_REQUIRED_MSG} The refreshed credential could not be read: {error}"
+            )));
+        }
+    };
 
-    let new_access_token = v["access_token"]
-        .as_str()
-        .ok_or("no access_token in refresh response")?
-        .to_string();
+    let new_access_token = match v["access_token"].as_str() {
+        Some(token) => token.to_string(),
+        None => {
+            save_reauth_required(store, &mut current).await?;
+            return Err(RefreshError::ReauthRequired(
+                REAUTH_REQUIRED_MSG.to_string(),
+            ));
+        }
+    };
 
     let new_refresh_token = v["refresh_token"]
         .as_str()
@@ -256,16 +370,26 @@ async fn do_refresh_token(refresh_token: &str) -> Result<OAuthTokens, String> {
     // instead of overwriting a working credential.
     if extract_chatgpt_account_id(&new_access_token).is_none() {
         warn!("ChatGPT token refresh returned a token without chatgpt_account_id — not storing it");
-        return Err(MISSING_ACCOUNT_ID_MSG.to_string());
+        save_reauth_required(store, &mut current).await?;
+        return Err(RefreshError::ReauthRequired(
+            MISSING_ACCOUNT_ID_MSG.to_string(),
+        ));
     }
 
     let tokens = OAuthTokens {
         access_token: new_access_token,
         refresh_token: new_refresh_token,
         expires_at: Some(unix_now() + expires_in),
+        reauth_required: false,
     };
 
-    write_tokens_to_store(&tokens).await?;
+    if let Err(error) = write_tokens_to_store(&tokens).await {
+        warn!("refreshed ChatGPT token could not be persisted: {error}");
+        let _ = save_reauth_required(store, &mut current).await;
+        return Err(RefreshError::ReauthRequired(
+            REAUTH_REQUIRED_MSG.to_string(),
+        ));
+    }
     info!("ChatGPT token refreshed successfully");
     Ok(tokens)
 }
@@ -281,9 +405,14 @@ pub async fn get_valid_token() -> Result<String, String> {
         Err(e) => return Err(e),
     };
 
+    if tokens.reauth_required {
+        return Err(REAUTH_REQUIRED_MSG.to_string());
+    }
+
     if is_token_expired(&tokens) {
         match do_refresh_token(&tokens.refresh_token).await {
             Ok(refreshed) => return Ok(refreshed.access_token),
+            Err(RefreshError::ReauthRequired(message)) => return Err(message),
             Err(first_err) => {
                 warn!(
                     "ChatGPT token refresh failed, retrying in 1s: {}",
@@ -292,6 +421,7 @@ pub async fn get_valid_token() -> Result<String, String> {
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 match do_refresh_token(&tokens.refresh_token).await {
                     Ok(refreshed) => return Ok(refreshed.access_token),
+                    Err(RefreshError::ReauthRequired(message)) => return Err(message),
                     Err(retry_err) => {
                         return Err(format!("token refresh failed after retry: {}", retry_err));
                     }
@@ -345,6 +475,10 @@ pub fn start_background_refresh() {
 
             match read_tokens_from_store().await {
                 Ok(Some(tokens)) => {
+                    if tokens.reauth_required {
+                        tokio::time::sleep(REFRESH_CHECK_INTERVAL).await;
+                        continue;
+                    }
                     let needs_refresh = match tokens.expires_at {
                         Some(exp) => {
                             let soon = unix_now().saturating_add(REFRESH_SOON_WINDOW.as_secs());
@@ -357,6 +491,10 @@ pub fn start_background_refresh() {
                         match do_refresh_token(&tokens.refresh_token).await {
                             Ok(_) => {
                                 info!("chatgpt background refresh: token refreshed proactively");
+                                consecutive_failures = 0;
+                            }
+                            Err(RefreshError::ReauthRequired(e)) => {
+                                warn!("chatgpt background refresh: reauthentication required: {e}");
                                 consecutive_failures = 0;
                             }
                             Err(e) => {
@@ -549,6 +687,7 @@ pub async fn chatgpt_oauth_login(
         access_token,
         refresh_token,
         expires_at: Some(unix_now() + expires_in),
+        reauth_required: false,
     };
 
     write_tokens_to_store(&tokens).await?;
@@ -564,12 +703,13 @@ pub async fn chatgpt_oauth_login(
 #[tauri::command]
 #[specta::specta]
 pub async fn chatgpt_oauth_status() -> Result<ChatGptOAuthStatus, String> {
-    // Only check token existence — no network refresh here.
+    // Check token existence and the persisted reauthentication marker — no
+    // network refresh here.
     // Refresh happens lazily in chatgpt_oauth_get_token when actually needed.
     // 3-second timeout guards against a locked/slow SQLite DB.
     match tokio::time::timeout(std::time::Duration::from_secs(3), read_tokens_from_store()).await {
-        Ok(Ok(Some(_))) => Ok(ChatGptOAuthStatus {
-            logged_in: true,
+        Ok(Ok(Some(tokens))) => Ok(ChatGptOAuthStatus {
+            logged_in: !tokens.reauth_required,
             error: None,
         }),
         Ok(Ok(None)) => Ok(ChatGptOAuthStatus {
@@ -714,5 +854,43 @@ mod tests {
             extract_chatgpt_account_id("head.%%%not-base64%%%.sig"),
             None
         );
+    }
+
+    #[test]
+    fn reused_refresh_token_requires_reauthentication() {
+        let error = refresh_error(
+            reqwest::StatusCode::UNAUTHORIZED,
+            r#"{"error":{"code":"refresh_token_reused"}}"#,
+        );
+        assert!(matches!(error, RefreshError::ReauthRequired(_)));
+    }
+
+    #[test]
+    fn invalid_grant_requires_reauthentication() {
+        let error = refresh_error(
+            reqwest::StatusCode::BAD_REQUEST,
+            r#"{"error":{"code":"invalid_grant"}}"#,
+        );
+        assert!(matches!(error, RefreshError::ReauthRequired(_)));
+    }
+
+    #[test]
+    fn server_failure_remains_retryable() {
+        let error = refresh_error(
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            r#"{"error":{"code":"temporarily_unavailable"}}"#,
+        );
+        assert!(matches!(error, RefreshError::Transient(_)));
+    }
+
+    #[test]
+    fn existing_tokens_default_to_no_reauthentication_required() {
+        let tokens: OAuthTokens = serde_json::from_value(serde_json::json!({
+            "access_token": "access",
+            "refresh_token": "refresh",
+            "expires_at": 123
+        }))
+        .unwrap();
+        assert!(!tokens.reauth_required);
     }
 }

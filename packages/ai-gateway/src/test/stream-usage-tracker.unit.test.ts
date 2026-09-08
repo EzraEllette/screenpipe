@@ -91,6 +91,36 @@ describe('trackStreamUsage — anthropic format', () => {
 });
 
 describe('trackStreamUsage — openai format', () => {
+	it('keeps a silent thinking stream connected without fabricating output', async () => {
+		const finalEvent = `data: ${JSON.stringify({
+			choices: [],
+			usage: { prompt_tokens: 44, completion_tokens: 7 },
+		})}\n\ndata: [DONE]\n\n`;
+		const source = new ReadableStream<Uint8Array>({
+			start(controller) {
+				setTimeout(() => {
+					controller.enqueue(new TextEncoder().encode(finalEvent));
+					controller.close();
+				}, 35);
+			},
+		});
+		const { response, usage } = trackResponseUsage(
+			new Response(source),
+			'openai',
+			10,
+		);
+
+		const out = await drain(response.body!);
+		expect(out).toContain(': keep-alive\n\n');
+		expect(out.endsWith(finalEvent)).toBe(true);
+		expect(await usage).toMatchObject({
+			input_tokens: 44,
+			output_tokens: 7,
+			usage_complete: true,
+			termination: 'complete',
+		});
+	});
+
 	it('captures cached_tokens from prompt_tokens_details and custom cache_creation field', async () => {
 		const events = [
 			`data: ${JSON.stringify({ choices: [{ delta: { content: 'hello' } }] })}\n\n`,

@@ -769,6 +769,10 @@ fn default_per_pipe_limit() -> u32 {
 
 #[derive(OaSchema, Deserialize)]
 pub(crate) struct ListArtifactsQuery {
+    /// Exact registered output id. When set, skips filesystem discovery and
+    /// returns at most one artifact so durable app links do not depend on the
+    /// newest-page limit.
+    pub id: Option<i64>,
     /// Case-insensitive substring match over title, source, preview, and paths.
     pub q: Option<String>,
     /// Exact source match (pipe name or chat source).
@@ -812,6 +816,26 @@ pub(crate) struct ArtifactItem {
     pub saf_version: Option<i64>,
     pub modified_at: String,
     pub created_at: Option<String>,
+}
+
+fn output_record_to_artifact_item(record: OutputRecord) -> ArtifactItem {
+    ArtifactItem {
+        registered: true,
+        id: Some(record.id),
+        source: record.source,
+        source_type: record.source_type,
+        title: record.title,
+        kind: record.kind,
+        path: record.output_path,
+        original_path: record.original_path,
+        size_bytes: record.size_bytes,
+        preview: record.preview,
+        saf_kind: record.saf_kind,
+        artifact_id: record.artifact_id,
+        saf_version: record.saf_version,
+        modified_at: record.updated_at,
+        created_at: Some(record.created_at),
+    }
 }
 
 #[derive(OaSchema, Serialize)]
@@ -858,6 +882,51 @@ pub(crate) async fn list_artifacts_handler(
     Query(params): Query<ListArtifactsQuery>,
 ) -> Result<JsonResponse<ArtifactListResponse>, (StatusCode, JsonResponse<Value>)> {
     let limit = params.limit.min(ARTIFACTS_LIMIT_MAX);
+
+    if let Some(id) = params.id {
+        if id <= 0 {
+            return Ok(JsonResponse(ArtifactListResponse {
+                data: Vec::new(),
+                pagination: PaginationInfo {
+                    limit: 1,
+                    offset: 0,
+                    total: 0,
+                },
+                sources: Vec::new(),
+            }));
+        }
+
+        let record = match state.db.get_output_by_id(id).await {
+            Ok(record) => record,
+            Err(sqlx::Error::RowNotFound) => {
+                return Ok(JsonResponse(ArtifactListResponse {
+                    data: Vec::new(),
+                    pagination: PaginationInfo {
+                        limit: 1,
+                        offset: 0,
+                        total: 0,
+                    },
+                    sources: Vec::new(),
+                }));
+            }
+            Err(error) => {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    JsonResponse(json!({"error": error.to_string()})),
+                ));
+            }
+        };
+        let source = record.source.clone();
+        return Ok(JsonResponse(ArtifactListResponse {
+            data: vec![output_record_to_artifact_item(record)],
+            pagination: PaginationInfo {
+                limit: 1,
+                offset: 0,
+                total: 1,
+            },
+            sources: vec![source],
+        }));
+    }
 
     // Registered outputs from the DB.
     let registered_fetch_limit = params.offset.saturating_add(limit).min(ARTIFACTS_LIMIT_MAX);
@@ -908,23 +977,7 @@ pub(crate) async fn list_artifacts_handler(
         if let Some(orig) = &r.original_path {
             registered_paths.insert(orig.clone());
         }
-        items.push(ArtifactItem {
-            registered: true,
-            id: Some(r.id),
-            source: r.source,
-            source_type: r.source_type,
-            title: r.title,
-            kind: r.kind,
-            path: r.output_path,
-            original_path: r.original_path,
-            size_bytes: r.size_bytes,
-            preview: r.preview,
-            saf_kind: r.saf_kind,
-            artifact_id: r.artifact_id,
-            saf_version: r.saf_version,
-            modified_at: r.updated_at,
-            created_at: Some(r.created_at),
-        });
+        items.push(output_record_to_artifact_item(r));
     }
 
     // Pipe filesystem artifacts (derived; capped per pipe).
@@ -2104,23 +2157,8 @@ mod tests {
         assert_eq!(chat_rows[0].id, id);
 
         // Verify display_source grouping: source_type="chat" → "display: chat"
-        let item = ArtifactItem {
-            registered: true,
-            id: Some(row.id),
-            source: row.source,
-            source_type: row.source_type.clone(),
-            title: row.title.clone(),
-            kind: row.kind.clone(),
-            path: row.output_path.clone(),
-            original_path: row.original_path.clone(),
-            size_bytes: row.size_bytes,
-            preview: row.preview.clone(),
-            saf_kind: row.saf_kind,
-            artifact_id: row.artifact_id,
-            saf_version: row.saf_version,
-            modified_at: row.updated_at.clone(),
-            created_at: Some(row.created_at.clone()),
-        };
+        let item = output_record_to_artifact_item(row);
+        assert_eq!(item.id, Some(id));
         // Verify display_source grouping: source_type="chat" → "display: chat"
         let display_source = |i: &ArtifactItem| -> String {
             if i.source_type == "chat" {

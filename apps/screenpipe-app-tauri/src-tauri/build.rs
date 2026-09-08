@@ -514,6 +514,8 @@ fn generate_and_validate_tauri_commands() {
 
 const E2E_COMMANDS: &[&str] = &[
     "main_overlay_visible",
+    "history_swipe_navigation_enabled",
+    "preview_history_swipe",
     "mark_capture_intended",
     "emit_disk_space_low",
     "emit_disk_space_recovered",
@@ -526,8 +528,11 @@ const E2E_COMMANDS: &[&str] = &[
     "low_disk_guard_enabled",
     "set_tray_recording_status",
     "installed_tray_recording_status",
+    "trigger_tray_recording_toggle",
     "shortcut_reminder_visible",
     "open_auto_meeting",
+    "simulate_calendar_meeting_match",
+    "simulate_back_to_back_meeting_rooms",
     "active_meeting_id",
     "native_meeting_overlay_state",
     "native_timeline_search_state",
@@ -546,6 +551,8 @@ const E2E_COMMANDS: &[&str] = &[
     "recording_health_return_race",
     "owned_browser_visible",
     "owned_browser_detach",
+    "owned_browser_tab_control",
+    "owned_browser_tab_snapshot",
     "inject_db_hard_fault",
     "inject_db_transient_fault",
     "db_retry_write_probe",
@@ -554,6 +561,8 @@ const E2E_COMMANDS: &[&str] = &[
     "capture_pi_start_error",
     "set_onboarding_completed_ago",
     "e2e_set_activation_allowed",
+    "arm_renderer_stalls",
+    "renderer_recovery_state",
 ];
 
 fn validate_e2e_command_inventory() {

@@ -7,30 +7,9 @@
  *
  * Onboarding ends before we have observed any of the user's work, so the first
  * thing we can honestly show is not a finished dashboard — it is evidence that
- * capture is working on *their* apps. This module owns that bounded window:
- * we watch real capture for a short period, then resolve into a summary built
- * from what we actually saw.
- *
- * Two deliberate choices:
- *
- * 1. The window closes on EVIDENCE, not on the clock. Measured on a warm
- *    install, a 2 minute window yielded 2 frames from 1 app while 5 minutes
- *    yielded 31 frames from 2 apps; frame counts depend on how much the screen
- *    actually changes, so a fixed countdown would resolve into a summary with
- *    nothing in it. We show a ceiling so the wait is bounded and predictable,
- *    but resolve as soon as there is enough to say something true.
- *
- * 2. The summary has a DETERMINISTIC floor. `buildLearningSummary` renders it
- *    from /activity-summary fields with no model call, so there is always a
- *    real summary available instantly, offline and free, and one that cannot
- *    hallucinate on thin evidence.
- *
- *    The window does then offer the user's own AI preset a chance to say it
- *    better, grounded on exactly those same facts (see `summarize-with-ai`),
- *    and takes the deterministic text whenever the model is absent, declines,
- *    errors, or returns something the validator rejects. This comment used to
- *    claim there was no model call at all, which was true of the builder and
- *    false of the window; the AI attempt is why the `writing` phase exists.
+ * capture is working on *their* apps. Rust owns the durable lifecycle in
+ * `first_run_summary.rs`; this module contains its webview projection and the
+ * pure formatting helpers used by the card and tests.
  */
 
 export type FirstRunLearningPhase =
@@ -40,11 +19,9 @@ export type FirstRunLearningPhase =
    * Evidence is in and the summary is being produced.
    *
    * Split out of `learning` because the two are not the same wait and the UI
-   * cannot honestly show the same thing for both. Writing awaits a model, which
-   * the code below notes can take tens of seconds, so the countdown can reach
-   * zero while this is still running — leaving a spinner next to `0:00` and no
-   * explanation. Nothing is owed to the clock any more once we get here: the
-   * window has what it needs and is only waiting on the summary.
+   * cannot honestly show the same thing for both. The native job may outlive
+   * any webview, so this state remains valid across reloads until Rust emits a
+   * durable ready or empty result.
    */
   | "writing"
   | "ready"
@@ -73,6 +50,7 @@ export type FirstRunEmptyReason =
 export type FirstRunCapturedApp = {
   name: string;
   frameCount: number;
+  activeMinutes?: number;
   lastSeenAt: number;
 };
 
@@ -92,6 +70,18 @@ export type FirstRunLearningState = {
   /** Set once a summary lands, so a reload cannot re-seed a second chat. */
   seededAt: string | null;
   chatId: string | null;
+  /** Set when Home has rendered the ready card at least once. */
+  readyShownAt: string | null;
+  /**
+   * Set after the user opens the summary.
+   *
+   * Opening the result is not the same as finishing setup. Keeping this
+   * separate lets Home collapse the large result card into a durable setup
+   * dock while the summary conversation remains usable underneath it.
+   */
+  summaryOpenedAt: string | null;
+  /** Set only after /notify accepts the one-shot ready notification. */
+  notificationSentAt: string | null;
   emptyReason: FirstRunEmptyReason | null;
   /**
    * Set when a window is settled by rehydration rather than by the ceiling
@@ -100,6 +90,8 @@ export type FirstRunLearningState = {
    * times the banner remounts.
    */
   pendingEmptyReport: boolean;
+  /** Prevents an expired first attempt from reopening on every app launch. */
+  lateRetryUsed: boolean;
   /** Live-only, never persisted: rehydrating these would show stale apps. */
   capturedApps: FirstRunCapturedApp[];
 };
@@ -182,8 +174,12 @@ const EMPTY_STATE: FirstRunLearningState = {
   showProgress: false,
   seededAt: null,
   chatId: null,
+  readyShownAt: null,
+  summaryOpenedAt: null,
+  notificationSentAt: null,
   emptyReason: null,
   pendingEmptyReport: false,
+  lateRetryUsed: false,
   capturedApps: [],
 };
 
@@ -214,7 +210,7 @@ export type ActivityWindow = {
  * is why the summary reads like a real observation instead of a window list.
  */
 export type ActivitySnippet = {
-  /** "screen" | "audio" */
+  /** "parsed" | "screen" (accessibility fallback) | "audio" */
   source?: string;
   text?: string;
   app_name?: string | null;
@@ -225,6 +221,7 @@ export type ActivitySnapshot = {
   data_status?: string;
   total_frames?: number;
   total_active_minutes?: number;
+  parsed_context_count?: number;
   apps?: ActivityApp[] | null;
   windows?: ActivityWindow[] | null;
   edited_files?: ActivityEditedFile[] | null;
@@ -296,6 +293,7 @@ export function capturedAppsFrom(
     .map((app) => ({
       name: app.name.trim(),
       frameCount: Number.isFinite(app.frame_count) ? Number(app.frame_count) : 0,
+      activeMinutes: Number.isFinite(app.minutes) ? Number(app.minutes) : 0,
       lastSeenAt: now,
     }))
     .sort((left, right) => right.frameCount - left.frameCount)
@@ -316,6 +314,18 @@ export function hasEnoughEvidence(activity: ActivitySnapshot): boolean {
   const appCount = capturedAppsFrom(activity, 0).length;
   const audioSegments = Number(activity.audio_summary?.segment_count ?? 0);
   const activeMinutes = Number(activity.total_active_minutes ?? 0);
+  const parsedContexts = Number(activity.parsed_context_count ?? 0);
+
+  // Parsed records say what happened inside the app, so one sustained app is
+  // enough when at least one parser projection exists. This is the important
+  // low-tier path: it does not depend on screenshots, Timeline, or pixels.
+  if (
+    appCount >= 1 &&
+    parsedContexts > 0 &&
+    activeMinutes >= MIN_EVIDENCE_ACTIVE_MINUTES
+  ) {
+    return true;
+  }
 
   // Several apps over real observed time, with no frame floor beside it.
   //
@@ -558,62 +568,11 @@ function normalize(value: unknown): FirstRunLearningState {
       ? state.startedAt
       : null;
 
-  // A window that outlived its ceiling cannot resume as "learning" — the user
-  // closed the app mid-wait and reopening it to a countdown that already
-  // expired would be a lie. Settle it instead.
-  //
-  // This is the only settle path with no telemetry of its own: the ceiling
-  // effect in `use-learning-window` emits `first_run_learning_empty`, but it
-  // never runs here because it is gated on `phase === "learning"` and this
-  // function has already moved past it. Flag the settle so the hook reports it
-  // once on mount, otherwise the most common first-run outcome is silent.
-  if (phase === "learning") {
-    if (!startedAt) return { ...EMPTY_STATE };
-    if (Date.now() - Date.parse(startedAt) > LEARNING_WINDOW_CEILING_MS) {
-      return {
-        ...EMPTY_STATE,
-        phase: "empty",
-        startedAt,
-        // Deliberately still `unknown`, not a new reason. The hook re-derives
-        // the real engine reason from `pendingEmptyReport` below, exactly as
-        // the ceiling effect would have, so diagnostics keep their fidelity.
-        emptyReason: "unknown",
-        pendingEmptyReport: true,
-      };
-    }
-  }
-
-  // `writing` cannot survive the process that was doing the writing. The model
-  // call died with it, and the seed claim is already spent, so nothing will
-  // pick the work back up. Resume to whatever actually landed: the chat if it
-  // was seeded before the app went away, otherwise a silent settled state.
-  // Leaving it as `writing` would restore a spinner that can never finish,
-  // which is the failure this phase exists to remove.
-  if (phase === "writing") {
-    if (typeof state.chatId === "string" && state.chatId) {
-      return {
-        phase: "ready",
-        startedAt,
-        showProgress: false,
-        seededAt: typeof state.seededAt === "string" ? state.seededAt : null,
-        chatId: state.chatId,
-        emptyReason: null,
-        pendingEmptyReport: false,
-        capturedApps: [],
-      };
-    }
-    return {
-      ...EMPTY_STATE,
-      phase: "empty",
-      startedAt,
-      emptyReason: "unknown",
-      // NOT flagged for reporting, unlike the expired-learning path above. A
-      // `writing` window that lost its process may still have an in-flight
-      // resolve that is about to seed a chat; re-deriving and rewriting state
-      // from here races it and can clear the chat id out from under a summary
-      // that actually landed.
-      pendingEmptyReport: false,
-    };
+  // Native owns both the evidence deadline and the AI process. Learning and
+  // writing therefore survive webview reloads exactly as persisted; only the
+  // native state machine may settle them.
+  if ((phase === "learning" || phase === "writing") && !startedAt) {
+    return { ...EMPTY_STATE };
   }
 
   return {
@@ -625,8 +584,19 @@ function normalize(value: unknown): FirstRunLearningState {
     showProgress: state.showProgress === true,
     seededAt: typeof state.seededAt === "string" ? state.seededAt : null,
     chatId: typeof state.chatId === "string" ? state.chatId : null,
+    readyShownAt:
+      typeof state.readyShownAt === "string" ? state.readyShownAt : null,
+    summaryOpenedAt:
+      typeof state.summaryOpenedAt === "string"
+        ? state.summaryOpenedAt
+        : null,
+    notificationSentAt:
+      typeof state.notificationSentAt === "string"
+        ? state.notificationSentAt
+        : null,
     emptyReason: state.emptyReason ?? null,
     pendingEmptyReport: state.pendingEmptyReport === true,
+    lateRetryUsed: state.lateRetryUsed === true,
     // Always live; see the type comment.
     capturedApps: [],
   };
@@ -655,12 +625,14 @@ function writeLearningWindow(state: FirstRunLearningState): FirstRunLearningStat
 export function beginLearningWindow(
   startedAt = new Date().toISOString(),
   showProgress = true,
+  lateRetryUsed = false,
 ) {
   return writeLearningWindow({
     ...EMPTY_STATE,
     phase: "learning",
     startedAt,
     showProgress,
+    lateRetryUsed,
   });
 }
 
@@ -706,7 +678,50 @@ export function markLearningWriting(): FirstRunLearningState {
 
 export function markLearningReady(chatId: string): FirstRunLearningState {
   const current = readLearningWindow();
-  return writeLearningWindow({ ...current, phase: "ready", chatId });
+  return writeLearningWindow({
+    ...current,
+    phase: "ready",
+    chatId,
+    readyShownAt: current.chatId === chatId ? current.readyShownAt : null,
+  });
+}
+
+/** Persist that the one-shot ready card reached the user's Home surface. */
+export function markLearningReadyShown(
+  shownAt = new Date().toISOString(),
+): FirstRunLearningState {
+  const current = readLearningWindow();
+  if (current.phase !== "ready" || current.readyShownAt) return current;
+  return writeLearningWindow({ ...current, readyShownAt: shownAt });
+}
+
+/**
+ * Remember that the result was opened without retiring its setup controls.
+ *
+ * This is deliberately a no-op outside `ready`: a stale click or duplicate
+ * event must not revive onboarding after the user explicitly finished it.
+ */
+export function markLearningSummaryOpened(
+  openedAt = new Date().toISOString(),
+): FirstRunLearningState {
+  const current = readLearningWindow();
+  if (current.phase !== "ready") return current;
+  return writeLearningWindow({ ...current, summaryOpenedAt: openedAt });
+}
+
+/**
+ * Latch the ready notification after the local app server accepts it.
+ *
+ * The /notify payload also has a deterministic id, which closes the tiny race
+ * between two mounted Home windows. This persisted latch prevents fresh
+ * requests after reload and lets a failed request retry on the next mount.
+ */
+export function markLearningNotificationSent(
+  sentAt = new Date().toISOString(),
+): FirstRunLearningState {
+  const current = readLearningWindow();
+  if (current.phase !== "ready" || !current.chatId) return current;
+  return writeLearningWindow({ ...current, notificationSentAt: sentAt });
 }
 
 export function markLearningEmpty(
@@ -752,6 +767,7 @@ export function markLearningDone(): FirstRunLearningState {
  * already-cleared storage and reaches the same result.
  */
 export const LEARNING_WINDOW_RESET_EVENT = "first-run-learning-window-reset";
+export const LEARNING_SUMMARY_OPENED_EVENT = "first-run-summary-opened";
 
 export function resetLearningWindow(): void {
   if (typeof window === "undefined") return;

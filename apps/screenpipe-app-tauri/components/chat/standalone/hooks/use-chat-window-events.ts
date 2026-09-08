@@ -17,7 +17,10 @@ import type { ContentBlock, Message, OptimisticSteerPayload } from "@/lib/chat/t
 import { normalizeImageDataUrls } from "@/lib/chat/image-content";
 import type { ChatConversation } from "@/lib/hooks/use-settings";
 import type { AIPreset } from "@/lib/utils/tauri";
-import { useChatStore } from "@/lib/stores/chat-store";
+import {
+  useChatStore,
+  type SessionRecord,
+} from "@/lib/stores/chat-store";
 import { useChatPrefillEvents } from "@/components/chat/standalone/hooks/use-chat-prefill-events";
 
 type SendMessageRef = React.MutableRefObject<
@@ -101,6 +104,11 @@ interface UseChatPrefillListenerOptions {
   setIsStreaming: React.Dispatch<React.SetStateAction<boolean>>;
   setMessages: React.Dispatch<React.SetStateAction<Message[]>>;
   setConversationId: React.Dispatch<React.SetStateAction<string | null>>;
+  openFilePreview: (
+    path: string,
+    previousMode?: "browser" | "hidden",
+    targetConversationId?: string | null,
+  ) => void;
 }
 
 export function useChatPrefillListener({
@@ -124,6 +132,7 @@ export function useChatPrefillListener({
   setIsStreaming,
   setMessages,
   setConversationId,
+  openFilePreview,
 }: UseChatPrefillListenerOptions) {
   const prefillInFlightRef = useRef(false);
   const { claimPrefillHandling } = useChatPrefillEvents();
@@ -138,8 +147,19 @@ export function useChatPrefillListener({
       autoSend?: boolean;
       source?: string;
       targetWindow?: string;
+      filePreviewPath?: string;
     }>("chat-prefill", (event) => {
-      const { context, prompt, displayLabel, frameId, images, autoSend, source, targetWindow } = event.payload;
+      const {
+        context,
+        prompt,
+        displayLabel,
+        frameId,
+        images,
+        autoSend,
+        source,
+        targetWindow,
+        filePreviewPath,
+      } = event.payload;
       const prefillImages = normalizeImageDataUrls(images);
 
       if (!shouldHandleChatPrefillForWindow({ targetWindow, autoSend }, getCurrentWindow().label)) return;
@@ -215,6 +235,9 @@ export function useChatPrefillListener({
       if (prompt) {
         setInput(prompt);
       }
+      if (filePreviewPath) {
+        openFilePreview(filePreviewPath, "hidden");
+      }
       setTimeout(() => inputRef.current?.focus(), 100);
     });
 
@@ -232,8 +255,24 @@ interface UseChatConversationRoutingEventsOptions {
   startNewConversation: (conversationId?: string) => Promise<void>;
   tryInChatStartNewRef: React.MutableRefObject<(() => Promise<void> | void) | null>;
   piSessionIdRef: React.MutableRefObject<string>;
+  renderedMessagesRef: React.MutableRefObject<Message[]>;
   focusMessageById: (messageId: string) => void;
   openFilePreview: (path: string, previousMode?: "browser" | "hidden", targetConversationId?: string | null) => void;
+}
+
+export function hasRenderableConversationState(
+  session:
+    | Pick<SessionRecord, "hydratedAt" | "messageCount" | "messages">
+    | undefined,
+  renderedMessageCount: number,
+): boolean {
+  if (renderedMessageCount > 0) return true;
+  if (!session) return false;
+  return Boolean(
+    session.hydratedAt &&
+      session.messageCount === 0 &&
+      Array.isArray(session.messages),
+  );
 }
 
 export function useChatConversationRoutingEvents({
@@ -241,6 +280,7 @@ export function useChatConversationRoutingEvents({
   startNewConversation,
   tryInChatStartNewRef,
   piSessionIdRef,
+  renderedMessagesRef,
   focusMessageById,
   openFilePreview,
 }: UseChatConversationRoutingEventsOptions) {
@@ -252,9 +292,20 @@ export function useChatConversationRoutingEvents({
 
   const openConversationLocally = useCallback(async (convId: string) => {
     const { loadConversationFile } = await import("@/lib/chat-storage");
+    const state = useChatStore.getState();
+    const currentSession = state.sessions[convId];
 
-    if (convId === piSessionIdRef.current) {
-      useChatStore.getState().actions.setCurrent(convId);
+    // A renderer reload can restore the tab/sidebar metadata before the
+    // transcript. Do not treat matching ids as proof that the message pane is
+    // ready: doing so permanently strands a saved chat on the blank shell.
+    if (
+      convId === piSessionIdRef.current &&
+      hasRenderableConversationState(
+        currentSession,
+        renderedMessagesRef.current.length,
+      )
+    ) {
+      state.actions.setCurrent(convId);
       emit("chat-current-session", { id: convId });
       return;
     }
@@ -266,7 +317,7 @@ export function useChatConversationRoutingEvents({
     }
 
     const session = useChatStore.getState().sessions[convId];
-    if (session?.messages && session.messages.length > 0) {
+    if (session) {
       loadConversationRef.current({
         id: convId,
         title: session.title || "untitled",
@@ -279,7 +330,7 @@ export function useChatConversationRoutingEvents({
 
     await startNewConversationRef.current(convId);
     emit("chat-current-session", { id: convId });
-  }, [piSessionIdRef]);
+  }, [piSessionIdRef, renderedMessagesRef]);
 
   useEffect(() => {
     const unlisten = listen<ChatLoadConversationPayload>("chat-load-conversation", async (event) => {
@@ -323,6 +374,7 @@ export function useChatConversationRoutingEvents({
 }
 
 interface UseChatE2EGlobalsOptions {
+  openFilePreview: (path: string) => void;
   setMessages: React.Dispatch<React.SetStateAction<Message[]>>;
   setConversationId: React.Dispatch<React.SetStateAction<string | null>>;
   piSessionIdRef: React.MutableRefObject<string>;
@@ -330,13 +382,16 @@ interface UseChatE2EGlobalsOptions {
   piStreamingTextRef: React.MutableRefObject<string>;
   piMessageIdRef: React.MutableRefObject<string | null>;
   piContentBlocksRef: React.MutableRefObject<ContentBlock[]>;
+  piStartInFlightRef: React.MutableRefObject<boolean>;
   forceQueueModeRef: React.MutableRefObject<boolean>;
   sendDispatchInFlightRef: React.MutableRefObject<boolean>;
   setIsLoading: React.Dispatch<React.SetStateAction<boolean>>;
   setIsStreaming: React.Dispatch<React.SetStateAction<boolean>>;
+  setPiStarting: React.Dispatch<React.SetStateAction<boolean>>;
 }
 
 export function useChatE2EGlobals({
+  openFilePreview,
   setMessages,
   setConversationId,
   piSessionIdRef,
@@ -344,10 +399,12 @@ export function useChatE2EGlobals({
   piStreamingTextRef,
   piMessageIdRef,
   piContentBlocksRef,
+  piStartInFlightRef,
   forceQueueModeRef,
   sendDispatchInFlightRef,
   setIsLoading,
   setIsStreaming,
+  setPiStarting,
 }: UseChatE2EGlobalsOptions) {
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -430,6 +487,9 @@ export function useChatE2EGlobals({
           contentBlocks?: Message["contentBlocks"];
           sourceCitations?: unknown[];
           storeOnlyActive?: boolean;
+          stoppedByUser?: boolean;
+          interruptedByQuit?: boolean;
+          workDurationMs?: number;
         },
       ) => void;
     }).__e2eSeedAssistantMessage = (
@@ -439,6 +499,9 @@ export function useChatE2EGlobals({
         contentBlocks?: Message["contentBlocks"];
         sourceCitations?: unknown[];
         storeOnlyActive?: boolean;
+        stoppedByUser?: boolean;
+        interruptedByQuit?: boolean;
+        workDurationMs?: number;
       },
     ) => {
       const id = `e2e-assistant-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -451,6 +514,9 @@ export function useChatE2EGlobals({
           contentBlocks: payload.contentBlocks,
           timestamp: Date.now(),
           sourceCitations: payload.sourceCitations as Message["sourceCitations"],
+          stoppedByUser: payload.stoppedByUser,
+          interruptedByQuit: payload.interruptedByQuit,
+          workDurationMs: payload.workDurationMs,
         },
         (payload.content ?? "").slice(0, 60),
       );
@@ -476,6 +542,12 @@ export function useChatE2EGlobals({
       // foreground event yet. The runtime store bridge must activate it.
       setIsLoading(false);
       setIsStreaming(false);
+    };
+
+    (window as unknown as {
+      __e2eOpenFilePreview?: (path: string) => void;
+    }).__e2eOpenFilePreview = (path: string) => {
+      openFilePreview(path);
     };
 
     (window as unknown as {
@@ -523,22 +595,72 @@ export function useChatE2EGlobals({
       setIsStreaming(true);
     };
 
+    // Reproduce the earlier send-preflight window: the UI has acknowledged
+    // Send, but no durable user row exists yet. New chat must still allocate a
+    // distinct id instead of reusing this apparently-empty session.
+    (window as unknown as {
+      __e2eLatchPreflightSend?: (sid: string) => void;
+    }).__e2eLatchPreflightSend = (sid: string) => {
+      const store = useChatStore.getState();
+      if (!store.sessions[sid]) {
+        store.actions.upsert({
+          id: sid,
+          title: "untitled",
+          preview: "",
+          status: "idle",
+          messageCount: 0,
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+          pinned: false,
+          unread: false,
+          draft: true,
+          messages: [],
+        });
+      }
+      store.actions.setCurrent(sid);
+      store.actions.setPanelSession(sid);
+      store.actions.setStreaming(sid, { isLoading: true, isStreaming: false });
+      setMessages([]);
+      setConversationId(sid);
+      piSessionIdRef.current = sid;
+      piSessionSyncedRef.current = true;
+      setIsLoading(true);
+      setIsStreaming(false);
+      void emit("chat-current-session", { id: sid });
+    };
+
+    // Hold/release the same readiness gate owned by real background starts.
+    // Visual E2E uses this to keep the handshake pending long enough to prove
+    // the composer remains editable and an early send waits without dispatch.
+    (window as unknown as {
+      __e2eSetPiStartInFlight?: (inFlight: boolean) => void;
+    }).__e2eSetPiStartInFlight = (inFlight: boolean) => {
+      piStartInFlightRef.current = inFlight;
+      setPiStarting(inFlight);
+    };
+
     return () => {
       delete (window as unknown as { __e2eSeedUserMessage?: unknown }).__e2eSeedUserMessage;
       delete (window as unknown as { __e2eSeedAssistantMessage?: unknown }).__e2eSeedAssistantMessage;
+      delete (window as unknown as { __e2eOpenFilePreview?: unknown }).__e2eOpenFilePreview;
       delete (window as unknown as { __e2eReadActiveTurn?: unknown }).__e2eReadActiveTurn;
       delete (window as unknown as { __e2eLatchActiveSend?: unknown }).__e2eLatchActiveSend;
+      delete (window as unknown as { __e2eLatchPreflightSend?: unknown }).__e2eLatchPreflightSend;
+      delete (window as unknown as { __e2eSetPiStartInFlight?: unknown }).__e2eSetPiStartInFlight;
     };
   }, [
     forceQueueModeRef,
+    openFilePreview,
     sendDispatchInFlightRef,
     piContentBlocksRef,
     piMessageIdRef,
     piSessionIdRef,
     piSessionSyncedRef,
+    piStartInFlightRef,
     piStreamingTextRef,
     setConversationId,
     setIsLoading,
+    setPiStarting,
     setIsStreaming,
     setMessages,
   ]);

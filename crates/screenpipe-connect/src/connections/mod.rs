@@ -78,7 +78,7 @@ pub mod zendesk;
 pub mod zoom;
 
 use crate::oauth;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use screenpipe_core::connections::sync as core_connections_sync;
 use screenpipe_secrets::SecretStore;
@@ -742,12 +742,72 @@ impl ConnectionManager {
     }
 
     pub async fn disconnect(&self, id: &str) -> Result<()> {
-        let result =
-            remove_connection(self.secret_store.as_deref(), &self.screenpipe_dir, id).await;
-        if result.is_ok() {
-            core_connections_sync::record_connection_tombstone(&self.screenpipe_dir, id);
+        let agent_copy = self.agent_memory_copy(id).await?;
+        remove_connection(self.secret_store.as_deref(), &self.screenpipe_dir, id).await?;
+
+        if let Some((destination, home, connection)) = agent_copy {
+            if let Err(cleanup_error) =
+                screenpipe_core::memories::external_sync::remove_agent_injection(
+                    &destination,
+                    &home,
+                )
+            {
+                if let Err(restore_error) = save_connection(
+                    self.secret_store.as_deref(),
+                    &self.screenpipe_dir,
+                    id,
+                    &connection,
+                )
+                .await
+                {
+                    return Err(anyhow::anyhow!(
+                        "remove screenpipe memory copy from {}: {}; restoring the connection also failed: {}",
+                        destination.target_path(&home).display(),
+                        cleanup_error,
+                        restore_error
+                    ));
+                }
+                return Err(cleanup_error).with_context(|| {
+                    format!(
+                        "remove screenpipe memory copy from {}; connection restored for retry",
+                        destination.target_path(&home).display()
+                    )
+                });
+            }
         }
-        result
+
+        core_connections_sync::record_connection_tombstone(&self.screenpipe_dir, id);
+        Ok(())
+    }
+
+    async fn agent_memory_copy(
+        &self,
+        id: &str,
+    ) -> Result<
+        Option<(
+            screenpipe_core::memories::external_sync::Destination,
+            PathBuf,
+            SavedConnection,
+        )>,
+    > {
+        let Some(connection) =
+            load_connection(self.secret_store.as_deref(), &self.screenpipe_dir, id).await
+        else {
+            return Ok(None);
+        };
+
+        let (destination, home) = match id {
+            "claude-code" => (
+                screenpipe_core::memories::external_sync::Destination::CLAUDE_CODE,
+                claude_code::resolve_home_path(&connection.credentials)?,
+            ),
+            "codex" => (
+                screenpipe_core::memories::external_sync::Destination::CODEX,
+                codex::resolve_home_path(&connection.credentials)?,
+            ),
+            _ => return Ok(None),
+        };
+        Ok(Some((destination, home, connection)))
     }
 
     pub async fn test(&self, id: &str, creds: &Map<String, Value>) -> Result<String> {
@@ -1187,6 +1247,71 @@ mod tests {
             Value::String("https://example.com/webhook".to_string()),
         );
         creds
+    }
+
+    #[tokio::test]
+    async fn disconnect_removes_only_agent_memory_copy() {
+        use screenpipe_core::memories::external_sync::{
+            marker_start, write_atomic, write_atomic_full, Destination,
+        };
+
+        for (id, destination) in [
+            ("claude-code", Destination::CLAUDE_CODE),
+            ("codex", Destination::CODEX),
+        ] {
+            let screenpipe_dir = temp_screenpipe_dir();
+            let agent_home = screenpipe_dir.join("agent-home");
+            std::fs::create_dir_all(&agent_home).unwrap();
+            let manager = ConnectionManager::new(screenpipe_dir.clone(), None);
+            let mut credentials = Map::new();
+            credentials.insert(
+                "home_path".to_string(),
+                Value::String(agent_home.to_string_lossy().into_owned()),
+            );
+            manager.connect(id, credentials).await.unwrap();
+
+            let target = destination.target_path(&agent_home);
+            std::fs::write(&target, "# user-authored instructions\n").unwrap();
+            write_atomic(&target, "screenpipe-owned copy").unwrap();
+            if let Some(sidecar) = destination.sidecar_path(&agent_home) {
+                write_atomic_full(&sidecar, "screenpipe-owned sidecar").unwrap();
+                assert!(sidecar.exists());
+            }
+
+            manager.disconnect(id).await.unwrap();
+
+            let outer = std::fs::read_to_string(&target).unwrap();
+            assert!(outer.contains("# user-authored instructions"));
+            assert!(!outer.contains(&marker_start()));
+            assert!(!outer.contains("screenpipe-owned copy"));
+            if let Some(sidecar) = destination.sidecar_path(&agent_home) {
+                assert!(!sidecar.exists());
+            }
+            assert!(load_connection(None, &screenpipe_dir, id).await.is_none());
+            let _ = std::fs::remove_dir_all(screenpipe_dir);
+        }
+    }
+
+    #[tokio::test]
+    async fn disconnect_restores_connection_when_memory_cleanup_fails() {
+        let screenpipe_dir = temp_screenpipe_dir();
+        let agent_home = screenpipe_dir.join("agent-home");
+        std::fs::create_dir_all(agent_home.join("AGENTS.md")).unwrap();
+        let manager = ConnectionManager::new(screenpipe_dir.clone(), None);
+        let mut credentials = Map::new();
+        credentials.insert(
+            "home_path".to_string(),
+            Value::String(agent_home.to_string_lossy().into_owned()),
+        );
+        manager.connect("codex", credentials).await.unwrap();
+
+        let error = manager.disconnect("codex").await.unwrap_err();
+
+        assert!(error.to_string().contains("connection restored for retry"));
+        assert!(load_connection(None, &screenpipe_dir, "codex")
+            .await
+            .is_some());
+        let _ = std::fs::remove_dir_all(screenpipe_dir);
     }
 
     #[test]

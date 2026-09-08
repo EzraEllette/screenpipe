@@ -48,8 +48,9 @@ If you're not using the desktop app, edit your Claude Desktop config:
 
 Requires Node/`npx` on `PATH`. Pin `@latest` so the first install doesn't cache a
 stale version forever. Get your key with `screenpipe auth token`. If you omit the
-key, the server will try to discover it (bundled bun → npx → local DB) — this works
-but is slower and can time out on first run.
+key, the server will try to discover it through the bundled Screenpipe CLI and
+then `npx`. It never opens the live SQLite database directly. Discovery can be
+slower on first run, so setting the environment variable is still recommended.
 
 Enterprise admins: add `SCREENPIPE_ENTERPRISE_TOKEN` (and, for orgs running their
 own query gateway, `SCREENPIPE_TEAM_API_URL`) to the same `env` block to get the
@@ -138,10 +139,10 @@ Then configure Claude Desktop:
 
 ## Enterprise team tools (`team-*`)
 
-`team-search`, `team-devices` and `team-records` query your whole org instead of
-just this machine. They are registered **only** when an enterprise admin token is
-present, and they need **two** independent settings: a token, and the base URL of
-the API that token is valid for.
+`team-search`, `team-devices`, `team-records`, and `team-frame` query your whole
+org instead of just this machine. They are registered **only** when an enterprise
+admin token is present, and they need **two** independent settings: a token, and
+the base URL of the API that token is valid for.
 
 ### 1. The token
 
@@ -309,8 +310,8 @@ List available monitors/screens for capture.
 ### list-pipes / create-pipe / run-pipe / pipe-logs
 Manage pipes — scheduled AI automations that run a markdown prompt on a schedule (e.g. "every day at 9am"). `list-pipes` shows enabled state + schedule; `create-pipe` creates one; `run-pipe` triggers a one-off test run; `pipe-logs` fetches recent execution output.
 
-### team-search / team-devices / team-records
-Team-tier tools, registered only when an enterprise admin token is configured. `team-search` runs substring search across the entire org's telemetry, `team-devices` lists enrolled devices (hostname, OS), and `team-records` dumps chronological frame, parsed-app, or audio data for a time window. Orgs running their own query gateway must also set `SCREENPIPE_TEAM_API_URL` — see [Enterprise team tools](#enterprise-team-tools-team-) for the full precedence order.
+### team-search / team-devices / team-records / team-frame
+Team-tier tools, registered only when an enterprise admin token is configured. `team-search` runs substring search across the entire org's telemetry, `team-devices` lists enrolled devices (hostname, OS), `team-records` dumps chronological frame, parsed-app, or audio data for a time window, and `team-frame` returns one bounded PII-redacted JPEG using IDs from search or records. Orgs running their own query gateway must also set `SCREENPIPE_TEAM_API_URL` — see [Enterprise team tools](#enterprise-team-tools-team-) for the full precedence order.
 
 ## Example Queries in Claude
 
@@ -363,7 +364,10 @@ To disable crash/error reporting, set any of:
 ### Data usage
 Tool calls are passed straight through to your local Screenpipe daemon
 and the results stream back to Claude. The MCP server doesn't keep
-anything.
+anything. Database access stays inside Screenpipe's daemon and first-party CLI,
+which own SQLite lifecycle and locking; the MCP server never opens, copies, or
+mutates the live database, WAL, or shared-memory files. Use MCP tools such as
+`query_recordings` for SQL-shaped analysis.
 
 ### Data storage
 Nothing is stored by the MCP server itself. Recordings, OCR text,

@@ -92,12 +92,23 @@ pub fn should_retry_database(err: &str) -> bool {
 
 /// Count failed availability retries only for notification deduplication.
 /// Unrelated failures reset the notice streak when no DB incident is pending.
-pub async fn note_respawn_failure(_app: &tauri::AppHandle, err: &str) {
+pub async fn note_respawn_failure(app: &tauri::AppHandle, err: &str) {
     if manual_recovery_required() {
         crate::health::set_boot_error(
             "database damage verified; recording paused for protected repair",
         );
-        surface_quarantined_recovery_at_launch(&active_database_path()).await;
+        let headless = crate::headless::is_dormant();
+        surface_quarantined_recovery_at_launch(&active_database_path(), !headless).await;
+        if headless {
+            if let Err(error) =
+                crate::db_recovery_notifications::start_headless_quarantined_database_recovery(
+                    app.clone(),
+                    active_data_dir(),
+                )
+            {
+                error!("failed to start automatic protected database recovery: {error}");
+            }
+        }
         return;
     }
     if !should_retry_database(err) {
@@ -144,7 +155,10 @@ pub async fn surface_manual_recovery(reason: &str) {
 /// Report a durable quarantine found at launch through the existing Sentry
 /// tracing layer. Only bounded marker metadata is attached: never its path,
 /// file identity, or free-form reason.
-pub async fn surface_quarantined_recovery_at_launch(database_path: &Path) {
+pub async fn surface_quarantined_recovery_at_launch(
+    database_path: &Path,
+    publish_recovery_event: bool,
+) {
     if !screenpipe_db::sqlite_confirmed_corruption_exists(database_path)
         || RECOVERY_NOTIFIED.swap(true, Ordering::SeqCst)
     {
@@ -172,8 +186,10 @@ pub async fn surface_quarantined_recovery_at_launch(database_path: &Path) {
         sqlite_marker_age = marker_age,
         "db recovery: durable SQLite quarantine was present at app launch"
     );
-    let evt = screenpipe_events::DbRecoveryEvent::needs_recovery();
-    let _ = screenpipe_events::send_event(evt.event_name(), evt);
+    if publish_recovery_event {
+        let evt = screenpipe_events::DbRecoveryEvent::needs_recovery();
+        let _ = screenpipe_events::send_event(evt.event_name(), evt);
+    }
 }
 
 fn quarantine_age_bucket(detected_at_unix_ms: u64) -> &'static str {

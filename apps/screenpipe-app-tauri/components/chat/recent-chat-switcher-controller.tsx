@@ -8,7 +8,8 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   useChatStore,
-  selectRecentSwitcherSessions,
+  nextOpenChatTabId,
+  selectVisibleOpenChatTabs,
 } from "@/lib/stores/chat-store";
 import {
   RECENT_CHAT_SEARCH_HANDOFF_EVENT,
@@ -16,6 +17,10 @@ import {
   type RecentChatSearchHandoffPayload,
 } from "@/lib/chat-utils";
 import { RecentChatSwitcher } from "@/components/chat/recent-chat-switcher";
+import {
+  CHAT_SHORTCUT_ACTION_EVENT,
+  type ChatShortcutAction,
+} from "@/lib/shortcuts";
 
 interface RecentChatSwitcherControllerProps {
   onActivateConversation: (id: string) => void | Promise<void>;
@@ -25,11 +30,12 @@ export function RecentChatSwitcherController({
   onActivateConversation,
 }: RecentChatSwitcherControllerProps) {
   const sessionsMap = useChatStore((s) => s.sessions);
+  const openChatIds = useChatStore((s) => s.openChatIds);
   const currentId = useChatStore((s) => s.currentId);
   const panelSessionId = useChatStore((s) => s.panelSessionId);
-  const recentSwitcherSessions = useMemo(
-    () => selectRecentSwitcherSessions({ sessions: sessionsMap }),
-    [sessionsMap]
+  const openTabs = useMemo(
+    () => selectVisibleOpenChatTabs({ sessions: sessionsMap, openChatIds }),
+    [openChatIds, sessionsMap],
   );
   const [open, setOpen] = useState(false);
   const [selectedId, setSelectedIdRaw] = useState<string | null>(null);
@@ -49,53 +55,43 @@ export function RecentChatSwitcherController({
   }, [setSelectedId]);
 
   const moveSelection = useCallback((direction: 1 | -1) => {
-    if (recentSwitcherSessions.length === 0) {
-      openRef.current = true;
-      setOpen(true);
-      setSelectedId(null);
-      return;
-    }
-    const ids = recentSwitcherSessions.map((session) => session.id);
+    if (openTabs.length < 2) return;
+    const ids = openTabs.map((session) => session.id);
     const baseId = openRef.current
       ? selectedIdRef.current
       : currentId ?? panelSessionId;
-    const currentIndex = baseId ? ids.indexOf(baseId) : -1;
-    const nextIndex =
-      currentIndex >= 0
-        ? (currentIndex + direction + ids.length) % ids.length
-        : direction === 1
-          ? 0
-          : ids.length - 1;
+    const nextId = nextOpenChatTabId(ids, baseId, direction);
+    if (!nextId) return;
     openRef.current = true;
     setOpen(true);
     hoverLockUntilRef.current = Date.now() + 120;
-    setSelectedId(ids[nextIndex]);
-  }, [currentId, panelSessionId, recentSwitcherSessions, setSelectedId]);
+    setSelectedId(nextId);
+  }, [currentId, openTabs, panelSessionId, setSelectedId]);
 
   const commitConversationById = useCallback(async (id: string | null) => {
     const selected = id
-      ? recentSwitcherSessions.find((session) => session.id === id) ?? null
+      ? openTabs.find((session) => session.id === id) ?? null
       : null;
     closeSwitcher();
     if (!selected) return;
     if (selected.id === (currentId ?? panelSessionId)) return;
     await onActivateConversation(selected.id);
-  }, [closeSwitcher, currentId, onActivateConversation, panelSessionId, recentSwitcherSessions]);
+  }, [closeSwitcher, currentId, onActivateConversation, openTabs, panelSessionId]);
 
   useEffect(() => {
     if (!open) return;
-    if (recentSwitcherSessions.length === 0) {
-      setSelectedId(null);
+    if (openTabs.length < 2) {
+      closeSwitcher();
       return;
     }
     if (
       selectedIdRef.current &&
-      recentSwitcherSessions.some((session) => session.id === selectedIdRef.current)
+      openTabs.some((session) => session.id === selectedIdRef.current)
     ) {
       return;
     }
-    setSelectedId(recentSwitcherSessions[0]?.id ?? null);
-  }, [open, closeSwitcher, recentSwitcherSessions, setSelectedId]);
+    setSelectedId(openTabs[0]?.id ?? null);
+  }, [open, closeSwitcher, openTabs, setSelectedId]);
 
   useEffect(() => {
     const handleEscape = (event: KeyboardEvent) => {
@@ -122,15 +118,31 @@ export function RecentChatSwitcherController({
       if (openRef.current) closeSwitcher();
     };
 
+    const handleCommand = (event: Event) => {
+      const action = (event as CustomEvent<ChatShortcutAction>).detail;
+      if (action !== "next_recent_chat" && action !== "previous_recent_chat") {
+        return;
+      }
+      moveSelection(action === "next_recent_chat" ? 1 : -1);
+      // A command-menu selection has no held Control key to release. Commit
+      // after moveSelection synchronously updates selectedIdRef, while the
+      // physical Ctrl+Tab path keeps its preview-until-release behavior.
+      queueMicrotask(() => {
+        void commitConversationById(selectedIdRef.current);
+      });
+    };
+
     window.addEventListener("keydown", handleEscape, true);
     window.addEventListener("keydown", handleKeyDown, true);
     window.addEventListener("keyup", handleKeyUp, true);
     window.addEventListener("blur", handleBlur);
+    window.addEventListener(CHAT_SHORTCUT_ACTION_EVENT, handleCommand);
     return () => {
       window.removeEventListener("keydown", handleEscape, true);
       window.removeEventListener("keydown", handleKeyDown, true);
       window.removeEventListener("keyup", handleKeyUp, true);
       window.removeEventListener("blur", handleBlur);
+      window.removeEventListener(CHAT_SHORTCUT_ACTION_EVENT, handleCommand);
     };
   }, [closeSwitcher, commitConversationById, moveSelection]);
 
@@ -152,7 +164,7 @@ export function RecentChatSwitcherController({
   return (
     <RecentChatSwitcher
       open={open}
-      sessions={recentSwitcherSessions}
+      sessions={openTabs}
       selectedId={selectedId}
       onHoverSelect={(id) => {
         if (Date.now() < hoverLockUntilRef.current) return;

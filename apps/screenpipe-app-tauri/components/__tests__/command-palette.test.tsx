@@ -68,12 +68,14 @@ function makeDeps(overrides: Partial<CommandPaletteDeps> = {}): CommandPaletteDe
     newChat: vi.fn(),
     pauseRecording: vi.fn(),
     resumeRecording: vi.fn(),
+    switchRecentChat: vi.fn(),
     goToSection: vi.fn(),
     toggleSidebar: vi.fn(),
+    openShortcutGuide: vi.fn(),
     openSettings: vi.fn(),
     sections: [
       { id: "home", label: "Chat" },
-      { id: "brain", label: "Brain" },
+      { id: "brain", label: "Library" },
       { id: "meetings", label: "Meetings" },
     ],
     timelineDisabled: false,
@@ -140,13 +142,36 @@ describe("buildPaletteEntries", () => {
     const entries = buildPaletteEntries(makeDeps(), mocks.settings, true);
     const goTo = entries.filter((e) => e.group === "go to");
     expect(goTo.map((e) => e.id)).toEqual(["go_chat", "go_brain", "go_meetings"]);
-    expect(goTo.map((e) => e.label)).toEqual(["Chat", "Brain", "Meetings"]);
+    expect(goTo.map((e) => e.label)).toEqual(["Chat", "Library", "Meetings"]);
   });
 
   it("uses word-form hints for in-app chords off macOS", () => {
     const entries = buildPaletteEntries(makeDeps(), mocks.settings, false);
     expect(entries.find((e) => e.id === "new_chat")?.hint).toBe("Ctrl+N");
     expect(entries.find((e) => e.id === "toggle_sidebar")?.hint).toBe("Ctrl+B");
+  });
+
+  it("hides recent-chat and shortcut-guide commands by default", () => {
+    const entries = buildPaletteEntries(makeDeps(), mocks.settings, true);
+
+    expect(entries.some((entry) => entry.id === "next_recent_chat")).toBe(false);
+    expect(entries.some((entry) => entry.id === "previous_recent_chat")).toBe(false);
+    expect(entries.some((entry) => entry.id === "open_shortcut_guide")).toBe(false);
+  });
+
+  it("exposes recent-chat and shortcut-guide commands for experimental users", () => {
+    const deps = makeDeps();
+    const entries = buildPaletteEntries(deps, mocks.settings, true, true);
+
+    entries.find((entry) => entry.id === "next_recent_chat")?.run();
+    entries.find((entry) => entry.id === "open_shortcut_guide")?.run();
+
+    expect(deps.switchRecentChat).toHaveBeenCalledWith(1);
+    expect(deps.openShortcutGuide).toHaveBeenCalledTimes(1);
+    expect(entries.find((e) => e.id === "next_recent_chat")?.hint).toBe(
+      "⌃Tab",
+    );
+    expect(entries.some((entry) => entry.id.includes("open_chat"))).toBe(false);
   });
 });
 

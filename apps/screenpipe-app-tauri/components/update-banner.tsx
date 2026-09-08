@@ -17,11 +17,13 @@ import { useToast } from "@/components/ui/use-toast";
 import { cn } from "@/lib/utils";
 import { screenpipeWebUrl } from "@/lib/web-url";
 import { enterpriseUpdateAuthHeaders } from "@/lib/enterprise-auth-recovery";
-import { flushPendingSettingsWrites } from "@/lib/hooks/use-settings";
+import { flushPendingSettingsWrites, useSettings, type Settings } from "@/lib/hooks/use-settings";
+import { resolveConsumerUpdateChannel } from "@/lib/update-channel";
 
 interface UpdateInfo {
   version: string;
   body: string;
+  persistent?: boolean;
 }
 
 interface AuthRequiredInfo {
@@ -71,10 +73,12 @@ interface UpdateBannerProps {
   variant?: "default" | "sidebar";
 }
 
-async function getWindowsUpdateOptions() {
+async function getWindowsUpdateOptions(settings: Settings | null | undefined) {
   const cpuArch = arch();
   const isEnterprise = await commands.isEnterpriseBuildCmd().catch(() => false);
-  const channel = isEnterprise ? "enterprise" : "stable";
+  const channel = isEnterprise
+    ? "enterprise"
+    : resolveConsumerUpdateChannel(settings);
   const headers: Record<string, string> = {};
 
   if (isEnterprise) {
@@ -102,6 +106,7 @@ async function getWindowsUpdateOptions() {
 export function UpdateBanner({ className, compact = false, variant = "default" }: UpdateBannerProps) {
   const { isVisible, updateInfo, isInstalling, setIsInstalling, pendingUpdate, authRequired, dismiss } = useUpdateBanner();
   const { toast } = useToast();
+  const { settings } = useSettings();
 
   const handleUpdate = async () => {
     setIsInstalling(true);
@@ -132,7 +137,7 @@ export function UpdateBanner({ className, compact = false, variant = "default" }
       // ExitRequested handler — plain relaunch is fine. macOS/Linux go through
       // restart_for_update which sets QUIT_REQUESTED so the exit isn't blocked
       // by main.rs (2026-06-10 "stuck on still starting" report).
-      if (os === "windows") {
+      if (os === "windows" && !updateInfo?.persistent) {
         const gate = await commands.awaitSafeRestart(60);
         if (gate !== "proceed") {
           setIsInstalling(false);
@@ -161,7 +166,7 @@ export function UpdateBanner({ className, compact = false, variant = "default" }
 
         // Get or check for the update
         let update = pendingUpdate;
-        const { checkOptions, downloadOptions } = await getWindowsUpdateOptions();
+        const { checkOptions, downloadOptions } = await getWindowsUpdateOptions(settings);
         if (!update) {
           update = await check(checkOptions as any);
         }
@@ -353,6 +358,7 @@ interface PendingUpdateSnapshot {
   body: string;
   downloaded: boolean;
   auth_required: boolean;
+  persistent: boolean;
 }
 
 // Hook to listen for update events from Rust.
@@ -404,7 +410,11 @@ export function useUpdateListener() {
           if (pending.auth_required) {
             showAuthIfNotDismissed({ version: pending.version, message: "sign in to get the latest update" });
           } else if (pending.downloaded) {
-            showIfNotDismissed({ version: pending.version, body: pending.body });
+            showIfNotDismissed({
+              version: pending.version,
+              body: pending.body,
+              persistent: pending.persistent,
+            });
           }
         }
       } catch (e) {

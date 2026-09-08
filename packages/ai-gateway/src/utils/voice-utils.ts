@@ -188,9 +188,9 @@ export async function textToSpeech(text: string, env: Env, options: TTSOptions =
 
 		const url = new URL('https://api.deepgram.com/v1/speak');
 		url.searchParams.set('model', voice);
-
-		if (encoding !== 'linear16') {
-			url.searchParams.set('encoding', encoding);
+		url.searchParams.set('encoding', encoding);
+		if (encoding === 'linear16') {
+			url.searchParams.set('container', 'wav');
 		}
 
 		const response = await fetch(url.toString(), {
@@ -209,6 +209,9 @@ export async function textToSpeech(text: string, env: Env, options: TTSOptions =
 		}
 
 		const audioBuffer = await response.arrayBuffer();
+		if (encoding === 'linear16' && !hasWavHeader(audioBuffer)) {
+			throw new Error('Deepgram TTS returned non-WAV audio for a WAV request');
+		}
 		console.log(`Received audio response: ${audioBuffer.byteLength} bytes`);
 
 		return audioBuffer;
@@ -216,4 +219,17 @@ export async function textToSpeech(text: string, env: Env, options: TTSOptions =
 		console.error('Error in text-to-speech:', error);
 		return null;
 	}
+}
+
+function hasWavHeader(audioBuffer: ArrayBuffer): boolean {
+	if (audioBuffer.byteLength < 12) return false;
+	const bytes = new Uint8Array(audioBuffer, 0, 12);
+	return bytes[0] === 0x52
+		&& bytes[1] === 0x49
+		&& bytes[2] === 0x46
+		&& bytes[3] === 0x46
+		&& bytes[8] === 0x57
+		&& bytes[9] === 0x41
+		&& bytes[10] === 0x56
+		&& bytes[11] === 0x45;
 }

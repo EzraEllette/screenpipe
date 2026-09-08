@@ -16,6 +16,11 @@ use std::sync::{Mutex, RwLock};
 
 static HIDDEN_SECTIONS: Lazy<RwLock<HashSet<String>>> = Lazy::new(|| RwLock::new(HashSet::new()));
 static SERVER_POLICY_RECEIVED: AtomicBool = AtomicBool::new(false);
+// A process-local grant set only after the control plane accepts an enterprise
+// credential. It is deliberately not restored from disk: the presence of an
+// `enterprise.json` or registry key proves enrollment intent, not that the key
+// is still valid or that the account remains a member.
+static RECORDING_AUTHORIZED: AtomicBool = AtomicBool::new(false);
 static IMMUTABLE_DEPLOYMENT_APP_UI_HIDDEN: Lazy<bool> =
     Lazy::new(|| env_hides_app_ui() || bundled_enterprise_config_hides_app_ui());
 static PERSISTED_APP_UI_HIDDEN: Lazy<bool> = Lazy::new(user_enterprise_config_hides_app_ui);
@@ -23,9 +28,10 @@ static ENFORCE_AUTO_START: Lazy<AtomicBool> =
     Lazy::new(|| AtomicBool::new(read_persisted_enforce_auto_start()));
 static POLICY_UPDATE_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
-/// Per-stream sync policy. Defaults to all-true so an unconfigured device
-/// behaves exactly like before this feature shipped. The frontend pulls the
-/// admin's choices from `GET /api/enterprise/policy` (`syncStreams` field) on
+/// Per-stream sync policy. Established streams preserve their historical
+/// defaults, while richer semantic streams require an explicit opt-in. The
+/// frontend pulls the admin's choices from `GET /api/enterprise/policy`
+/// (`syncStreams` field) on
 /// the 5-min poll and pushes them in via `set_sync_streams`. The sync state
 /// machine in `enterprise_sync::run_one_sync` reads this on every tick.
 /// How many frame images (screenshots) may leave this device — the org's
@@ -100,6 +106,7 @@ impl FeedbackSyncMode {
 pub struct SyncStreams {
     pub frames: bool,
     pub parsed: bool,
+    pub activities: bool,
     pub audio: bool,
     pub ui_events: bool,
     pub memories: bool,
@@ -113,6 +120,7 @@ impl Default for SyncStreams {
         Self {
             frames: true,
             parsed: false,
+            activities: false,
             audio: true,
             ui_events: true,
             memories: true,
@@ -342,6 +350,24 @@ pub fn set_enterprise_policy(hidden_sections: Vec<String>, enforce_auto_start: b
     }
 }
 
+/// Update the process-local Enterprise recording grant. This is intentionally
+/// not a Tauri command: webview callers must pass through the native
+/// control-plane verification in `enterprise_recording_access`.
+pub(crate) fn update_recording_authorized(authorized: bool) {
+    let previous = RECORDING_AUTHORIZED.swap(authorized, Ordering::SeqCst);
+    if previous != authorized {
+        tracing::info!(
+            "enterprise: recording authorization {}",
+            if authorized { "granted" } else { "revoked" }
+        );
+    }
+}
+
+/// Current process-local Enterprise recording grant.
+pub fn recording_authorized() -> bool {
+    RECORDING_AUTHORIZED.load(Ordering::SeqCst)
+}
+
 /// Current startup enrollment policy. The first read restores the last
 /// successfully persisted server decision so enforcement survives an offline
 /// restart. Only an explicit cached boolean `true` enables it.
@@ -369,9 +395,14 @@ pub fn set_sync_streams(
 ) {
     let feedback = FeedbackSyncMode::parse(&feedback);
     let frame_images = FrameImagesMode::parse(&frame_images);
+    let activities = SYNC_STREAMS
+        .read()
+        .map(|guard| guard.activities)
+        .unwrap_or(false);
     let next = SyncStreams {
         frames,
         parsed,
+        activities,
         audio,
         ui_events,
         memories,
@@ -382,9 +413,10 @@ pub fn set_sync_streams(
     if let Ok(mut guard) = SYNC_STREAMS.write() {
         if *guard != next {
             tracing::info!(
-                "enterprise: sync streams updated frames={} parsed={} audio={} ui={} memories={} snapshots={} feedback={} frame_images={}",
+                "enterprise: sync streams updated frames={} parsed={} activities={} audio={} ui={} memories={} snapshots={} feedback={} frame_images={}",
                 frames,
                 parsed,
+                activities,
                 audio,
                 ui_events,
                 memories,
@@ -397,10 +429,20 @@ pub fn set_sync_streams(
     }
 }
 
+#[tauri::command]
+#[specta::specta]
+pub fn set_activity_sync_enabled(activities: bool) {
+    if let Ok(mut guard) = SYNC_STREAMS.write() {
+        if guard.activities != activities {
+            tracing::info!("enterprise: activity sync stream updated activities={activities}");
+            guard.activities = activities;
+        }
+    }
+}
+
 /// Snapshot of the current per-stream sync policy. Read by the sync state
-/// machine on every tick. Returns the defaults (all-true) if the lock is
-/// poisoned — fail-open here mirrors the centralized-data master-switch
-/// behavior: the ingest endpoint will still enforce policy server-side.
+/// machine on every tick. Returns the per-stream defaults if the lock is
+/// poisoned; the ingest endpoint still enforces policy server-side.
 //
 // Available under `enterprise-build` (the sync state machine in
 // enterprise_sync::run_one_sync reads it on every tick) and under `test`.
@@ -548,6 +590,7 @@ mod tests {
         let s = SyncStreams::default();
         assert!(s.frames);
         assert!(!s.parsed);
+        assert!(!s.activities);
         assert!(s.audio);
         assert!(s.ui_events);
         assert!(s.memories);

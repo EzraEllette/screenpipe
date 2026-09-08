@@ -19,6 +19,10 @@ on:
         description: "Windows launch-smoke run only: build the Windows CLI package and run the native + Intel SDE (non-AVX2) probes; skip macOS/Linux builds, EV signing, Sentry symbols, npm publish, and the GitHub release (publish-npm/release skip via their skipped needs)"
         type: boolean
         default: false
+      npm_only:
+        description: "Build and publish the npm packages without creating or updating the rolling GitHub CLI release"
+        type: boolean
+        default: false
 
 concurrency:
   # Serialize releases — aborting a release mid-flight is worse than waiting.
@@ -26,7 +30,7 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   GIT_LFS_SKIP_SMUDGE: 1
@@ -885,6 +889,9 @@ jobs:
 
   publish-npm:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     # smoke-windows: nothing ships unless the package launches + inits ONNX
     # on non-AVX2 CPUs (#3125 regression guard).
     needs: [build-macos, build-windows, build-linux, smoke-windows]
@@ -895,7 +902,8 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          # npm trusted publishing requires Node >=22.14 and npm >=11.5.1.
+          node-version: "24"
           registry-url: "https://registry.npmjs.org"
 
       - name: Setup Bun
@@ -982,13 +990,17 @@ jobs:
       # every error — versions 0.3.290..0.3.295 all "succeeded" without ever
       # publishing because the npm token had expired and nobody noticed.
       - name: Publish platform packages
+        # npm prefers the job's OIDC identity when a package has trusted
+        # publishing configured, then falls back to this shared release token.
+        # Keep the fallback until every platform package has its own trusted
+        # publisher configuration on npm.
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           for pkg in screenpipe-darwin-arm64 screenpipe-darwin-x64 screenpipe-linux-x64 screenpipe-win32-x64; do
             cd packages/cli/$pkg
             err=$(mktemp)
-            if npm publish --access public 2>"$err"; then
+            if npm publish --access public --tag latest 2>"$err"; then
               echo "::notice::published $pkg"
             else
               if grep -q "You cannot publish over the previously published versions" "$err"; then
@@ -1048,7 +1060,7 @@ jobs:
         run: |
           cd packages/cli/screenpipe
           err=$(mktemp)
-          if npm publish --access public 2>"$err"; then
+          if npm publish --access public --tag latest 2>"$err"; then
             echo "::notice::published main package"
           else
             if grep -q "You cannot publish over the previously published versions" "$err"; then
@@ -1061,6 +1073,9 @@ jobs:
 
   release:
     runs-on: ubuntu-latest
+    if: ${{ !inputs.npm_only }}
+    permissions:
+      contents: write
     # smoke-windows: nothing ships unless the package launches + inits ONNX
     # on non-AVX2 CPUs (#3125 regression guard).
     needs: [build-macos, build-windows, build-linux, smoke-windows]

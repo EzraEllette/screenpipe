@@ -77,6 +77,7 @@ hook_before="$(sha256sum "${APPDIR}/apprun-hooks/linuxdeploy-existing-hook.sh")"
 "${BUNDLER}" "${APPDIR}"
 
 client="${APPDIR}/usr/lib/libpipewire-0.3.so.0"
+test -e "${APPDIR}/usr/lib/libgfortran.so.5"
 config="${APPDIR}/usr/share/pipewire/client.conf"
 module_dir="${APPDIR}/usr/lib/pipewire-0.3"
 spa_dir="${APPDIR}/usr/lib/spa-0.2"

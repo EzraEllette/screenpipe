@@ -43,6 +43,7 @@
 import {
   mountAgentEventBus,
   registerDefault,
+  hasForegroundHandler,
   onTerminated,
   onEvicted,
   type Unregister,
@@ -70,7 +71,7 @@ import {
 } from "@/lib/chat-utils";
 import { deriveFallbackConversationTitle } from "@/lib/utils/chat-title";
 import { optimisticAssistantForUserEcho } from "@/lib/chat/cross-window-transcript-sync";
-import { isInternalTitleSession } from "@/lib/utils/internal-session";
+import { isInternalAgentSession } from "@/lib/utils/internal-session";
 import { useAcpSessionConfig } from "@/lib/stores/acp-session-config";
 import {
   agentActionMessage,
@@ -81,6 +82,7 @@ import type { Message } from "@/lib/chat/types";
 import { isPendingAgentActionMessage } from "@/lib/chat/message-rendering";
 import {
   getPersistedViewedAt,
+  isEphemeralSideConversationId,
   useChatStore,
   isSessionForeground,
   sessionRecordFromMeta,
@@ -90,6 +92,11 @@ import {
 import { connectionActionFromToolResult } from "@/components/chat/standalone/hooks/pi-event-handlers";
 import { normalizePlanEntries, upsertPlanBlock } from "@/lib/chat/acp-plan";
 import type { ContentBlock } from "@/lib/chat/types";
+import {
+  finalizeAssistantTextPhases,
+  markPendingAssistantTextAsCommentary,
+} from "@/lib/chat/assistant-text-phases";
+import { commands } from "@/lib/utils/tauri";
 
 // Module-level state — the router is a singleton process-wide.
 let mounted = false;
@@ -194,7 +201,19 @@ export async function handlePiEvent(envelope: AgentEventEnvelope) {
   const inner = envelope.event;
   if (!sid || !inner) return; // events without a session id or body can't be routed
   // Internal Pi sessions (title generation, etc.) — never routed to chat store
-  if (isInternalTitleSession(sid)) return;
+  if (isInternalAgentSession(sid)) return;
+  // A closed side chat can still have buffered backend events in flight. The
+  // tombstone blocks those in the creating renderer, while the reserved id
+  // namespace blocks them after reload and in other renderers that never held
+  // the temporary record. Without this guard, the lazy-create path below would
+  // resurrect the chat as a durable "untitled" history row.
+  const initialChatState = useChatStore.getState();
+  if (
+    !initialChatState.sessions[sid] &&
+    isEphemeralSideConversationId(initialChatState, sid)
+  ) {
+    return;
+  }
   // ACP adapters advertise their model/mode selectors per session. Pure
   // runtime metadata: capture it for the composer picker and stop — it must
   // not lazy-create a chat row or touch message content.
@@ -261,6 +280,17 @@ export async function handlePiEvent(envelope: AgentEventEnvelope) {
       updatedAt: now,
       pinned: false,
       unread: false,
+      // Born hidden, exactly like the "+ new chat" row. A Pi process exists
+      // for plenty of session ids that are not a conversation yet: the chat
+      // panel spawns one for its mount-time uuid, each window (home + the
+      // pre-created chat panel) prewarms its own, and crashes auto-restart
+      // them. Those processes emit startup/state/lifecycle events, and
+      // lazy-creating a *visible* row for them is what put an empty
+      // "untitled" chat in RECENTS every time the user opened a new chat.
+      // The row is revealed by the paths that prove real content exists:
+      // `applyEventToSessionContent` on a user `message_start`, and
+      // `persistBackgroundSession` after the first save.
+      draft: true,
       // Set lastContentAt on first touch only when there's actual content.
       // isUnread() in the store will compute the correct unread boolean.
       ...(snippet ? { lastContentAt: now } : {}),
@@ -284,6 +314,13 @@ export async function handlePiEvent(envelope: AgentEventEnvelope) {
   // Status mirroring below still runs for both Pi and Pipe sessions.
   if (envelope.source === "pi") {
     applyEventToSessionContent(sid, inner);
+    // Content is the proof a draft row was waiting for. Reveal it as soon as
+    // the session actually holds a message — a backgrounded reply must show
+    // up in RECENTS while it streams, not only after the agent_end save.
+    const afterContent = useChatStore.getState().sessions[sid];
+    if (afterContent?.draft && (afterContent.messages?.length ?? 0) > 0) {
+      store.actions.patch(sid, { draft: false });
+    }
   }
 
   // Decide whether to write a preview update — throttled per session.
@@ -325,13 +362,24 @@ export async function handlePiEvent(envelope: AgentEventEnvelope) {
   store.actions.patch(sid, patch);
 }
 
-function handleSessionEvicted(payload: AgentSessionEvictedPayload) {
-  // The Pi process for this session has been killed by the pool. Drop the
-  // record from the in-memory store so the sidebar reflects reality. The
-  // on-disk transcript is preserved — user can re-open the conversation
-  // and a fresh Pi process will be started for the same id.
-  previewLastEmittedAt.delete(payload.sessionId);
-  useChatStore.getState().actions.drop(payload.sessionId);
+export function handleSessionEvicted(payload: AgentSessionEvictedPayload) {
+  // Pool eviction only kills the Pi process. The conversation still exists
+  // on disk and in the sidebar — dropping the store row made RECENTS jump:
+  // the chat vanished, then the next token lazy-created it as untitled with
+  // createdAt=now (no lastUserMessageAt), so it popped to a new position.
+  // Stay put and go idle, same as a clean process exit. The next send
+  // respawns Pi under this same id.
+  const sid = payload.sessionId;
+  if (!sid) return;
+  previewLastEmittedAt.delete(sid);
+  const store = useChatStore.getState();
+  if (!store.sessions[sid]) return;
+  store.actions.patch(sid, {
+    status: "idle",
+    lastError: undefined,
+    updatedAt: Date.now(),
+  });
+  store.actions.endTurn(sid);
 }
 
 export function handleTerminated(payload: AgentTerminatedPayload) {
@@ -754,17 +802,25 @@ function applyEventToSessionContent(sid: string, payload: PiInnerEvent) {
     if (!cur?.streamingMessageId) return;
     const msgId = cur.streamingMessageId;
     const parentToolCallId = (payload as any).parentToolCallId;
+    const agentId = (payload as any).agentId;
+    const toolKind = (payload as any).kind;
     const tool = {
       id: (payload as any).toolCallId || `${Date.now()}`,
       toolName: (payload as any).toolName || "unknown",
       args: (payload as any).args || {},
       isRunning: true,
       startedAtMs: Date.now(),
+      ...(typeof agentId === "string" && agentId ? { agentId } : {}),
+      ...(typeof toolKind === "string" && toolKind ? { kind: toolKind } : {}),
       ...(typeof parentToolCallId === "string" && parentToolCallId
         ? { parentToolCallId }
         : {}),
+      ...((payload as any).subagent === true ? { subagent: true } : {}),
     };
-    const blocks = [...((cur.contentBlocks as any[]) ?? []), { type: "tool", toolCall: tool }];
+    const phasedBlocks = markPendingAssistantTextAsCommentary(
+      (cur.contentBlocks as ContentBlock[] | undefined) ?? [],
+    );
+    const blocks = [...phasedBlocks, { type: "tool" as const, toolCall: tool }];
     store.actions.setStreaming(sid, { contentBlocks: blocks });
     store.actions.patchMessage(sid, msgId, (m: any) => ({
       ...m,
@@ -815,6 +871,9 @@ function applyEventToSessionContent(sid: string, payload: PiInnerEvent) {
       if (typeof p.subagentType === "string") next.subagentType = p.subagentType;
       if (p.retry !== undefined) next.retry = p.retry;
       if (typeof p.title === "string" && p.title) next.toolName = p.title;
+      if (typeof p.agentId === "string" && p.agentId) next.agentId = p.agentId;
+      if (typeof p.kind === "string" && p.kind) next.kind = p.kind;
+      if (p.args && typeof p.args === "object" && !Array.isArray(p.args)) next.args = p.args;
       if (typeof p.outputDelta === "string" && p.outputDelta) {
         const combined = `${next.progress ?? ""}${p.outputDelta}`;
         next.progress = combined.length > 4000 ? combined.slice(-4000) : combined;
@@ -848,6 +907,12 @@ function applyEventToSessionContent(sid: string, payload: PiInnerEvent) {
             ...b,
             toolCall: {
               ...b.toolCall,
+              ...((payload as any).toolName ? { toolName: (payload as any).toolName } : {}),
+              ...((payload as any).agentId ? { agentId: (payload as any).agentId } : {}),
+              ...((payload as any).kind ? { kind: (payload as any).kind } : {}),
+              ...((payload as any).args && typeof (payload as any).args === "object"
+                ? { args: (payload as any).args }
+                : {}),
               isRunning: false,
               result: truncated,
               isError: (payload as any).isError,
@@ -892,8 +957,29 @@ function applyEventToSessionContent(sid: string, payload: PiInnerEvent) {
   // a chat that completes while the user is looking elsewhere still
   // ends up on disk and survives a restart.
   if (t === "agent_end") {
+    const willRetry = (payload as { willRetry?: boolean }).willRetry === true;
+    const active = store.sessions[sid];
+    if (!willRetry && active?.streamingMessageId) {
+      const blocks = finalizeAssistantTextPhases(
+        (active.contentBlocks as ContentBlock[] | undefined) ?? [],
+      );
+      store.actions.patchMessage(sid, active.streamingMessageId, (message: any) => ({
+        ...message,
+        contentBlocks: blocks,
+      }));
+    }
     store.actions.endTurn(sid);
-    void persistBackgroundSession(sid);
+    void persistBackgroundSession(sid).finally(() => {
+      // A hidden conversation may finish after its panel's unmount cleanup saw
+      // it as busy. Re-check atomically once its transcript is durable, then
+      // reap the heavyweight agent tree. Foreground chats stay warm for the
+      // next prompt, and automatic retries keep their live process.
+      if (!willRetry && !hasForegroundHandler(sid)) {
+        void commands.piStopIfIdle(sid).catch((error) => {
+          console.warn("[router] failed to release idle background session:", error);
+        });
+      }
+    });
     return;
   }
 }
@@ -909,10 +995,15 @@ const saveQueue = new Map<string, Promise<void>>();
  *  the window closes. Used by the close-on-quit hook in
  *  `mountPiEventRouter`. */
 export async function flushPendingSaves(): Promise<void> {
-  const sessions = useChatStore.getState().sessions;
+  const state = useChatStore.getState();
+  const sessions = state.sessions;
   const ids = Object.keys(sessions).filter((id) => {
     const s = sessions[id];
-    return !!s.messages && s.messages.length > 0;
+    return (
+      !isEphemeralSideConversationId(state, id) &&
+      !!s.messages &&
+      s.messages.length > 0
+    );
   });
   await Promise.all(ids.map((id) => persistBackgroundSession(id)));
   // Also await any queue tails that were already in-flight before this
@@ -946,7 +1037,9 @@ async function persistBackgroundSession(
   const next = prev
     .catch(() => undefined)
     .then(async () => {
-      const session = useChatStore.getState().sessions[sid];
+      const state = useChatStore.getState();
+      if (isEphemeralSideConversationId(state, sid)) return;
+      const session = state.sessions[sid];
       if (!session) return;
       // Pipe transcripts are persisted by their dedicated writers. This guard
       // also protects close/termination flushes from overwriting a recorder
@@ -1103,6 +1196,12 @@ async function persistBackgroundSession(
         ...(browserState ? { browserState } : {}),
         // Keep the live ACP session id (if any) so a reopen can resume it.
         ...(acpSessionId ? { acpSessionId } : existing?.acpSessionId ? { acpSessionId: existing.acpSessionId } : {}),
+        // Carry the base revision we loaded above so the save's compare-and-
+        // swap can tell "nobody else wrote" from "we lost a race". Without it
+        // this writer always reads as rev 0, always takes the conflict path,
+        // and disk-wins-scalars would silently drop the fields this save
+        // legitimately intends to change (browserState in particular).
+        ...(existing?.rev !== undefined ? { rev: existing.rev } : {}),
       };
 
       try {

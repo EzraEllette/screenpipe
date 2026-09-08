@@ -8,6 +8,7 @@ import { Download, ExternalLink, Loader2, RefreshCw } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { commands, type AcpAgentInstallStatus } from "@/lib/utils/tauri";
 import { Button } from "@/components/ui/button";
+import { AcpSetupProgress } from "@/components/settings/acp-setup-progress";
 import { cn } from "@/lib/utils";
 
 /**
@@ -23,6 +24,7 @@ export function AcpInstallGate({
   agentName,
   onBlockedChange,
   onSwitchToDefault,
+  onInstalled,
   compact = false,
 }: {
   agentId: string;
@@ -32,6 +34,8 @@ export function AcpInstallGate({
    *  mid-chat (a running chat whose agent CLI is missing); the preset editor
    *  omits it — there you just pick a different agent. */
   onSwitchToDefault?: () => void;
+  /** Keeps the completed Install step visible when the preset probe takes over. */
+  onInstalled?: () => void;
   compact?: boolean;
 }) {
   const [status, setStatus] = useState<AcpAgentInstallStatus | null>(null);
@@ -80,6 +84,7 @@ export function AcpInstallGate({
       const result = await commands.piAcpAgentInstall(agentId);
       if (result.status === "error") throw new Error(result.error);
       applyStatus(result.data);
+      if (result.data.installed) onInstalled?.();
       if (result.data.requiresInstall && !result.data.installed) {
         setInstallError(
           `the installer finished, but ${result.data.command ?? "the command"} is still unavailable.`,
@@ -120,6 +125,18 @@ export function AcpInstallGate({
 
   const blocked = Boolean(status && status.requiresInstall && !status.installed);
   if (!blocked) return null;
+
+  if (installing) {
+    return (
+      <AcpSetupProgress
+        agentName={agentName}
+        phase="installing"
+        includesInstall
+        installKind="install"
+        compact={compact}
+      />
+    );
+  }
 
   const command = status?.command;
   const url = status?.installUrl;

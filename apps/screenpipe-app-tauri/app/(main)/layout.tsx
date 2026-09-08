@@ -15,18 +15,25 @@
 
 import { AppSidebarLayout, SidebarProvider } from "@/components/app-sidebar";
 import { CardAskProvider } from "@/components/card-ask-provider";
+import { FirstRunLearningWindowProvider } from "@/components/first-run/learning-window-provider";
 
-export default function MainLayout({ children }: { children: React.ReactNode }) {
+export default function MainLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
   return (
-    <SidebarProvider>
-      <AppSidebarLayout>{children}</AppSidebarLayout>
-      {/*
-        Mounted here, not at "/" — the root route is a deliberate no-op so no
-        window executes another window's code. This layout is the main window
-        only, which is where every card-ask trigger originates and where the
-        single localStorage partition owning the arm assignment lives.
-      */}
-      <CardAskProvider />
-    </SidebarProvider>
+    <FirstRunLearningWindowProvider>
+      <SidebarProvider>
+        <AppSidebarLayout>{children}</AppSidebarLayout>
+        {/*
+          Mounted here, not at "/" — the root route is a deliberate no-op so no
+          window executes another window's code. This layout is the main window
+          only, which is where every card-ask trigger originates and where the
+          single localStorage partition owning the arm assignment lives.
+        */}
+        <CardAskProvider />
+      </SidebarProvider>
+    </FirstRunLearningWindowProvider>
   );
 }

@@ -5,9 +5,12 @@
 import { describe, expect, it } from "vitest";
 import {
   modelAllowanceNotice,
+  presetAllowanceExemption,
   modelAllowanceTier,
+  presetUsesHostedAllowance,
   usesHostedAllowance,
 } from "../model-allowance-cost";
+import type { AIPreset } from "@/lib/utils/tauri";
 
 describe("modelAllowanceTier", () => {
   it("classifies frontier models as highest", () => {
@@ -61,6 +64,42 @@ describe("usesHostedAllowance", () => {
   });
 });
 
+describe("presetUsesHostedAllowance", () => {
+  it("is true for a direct Screenpipe Cloud preset", () => {
+    expect(presetUsesHostedAllowance({
+      provider: "screenpipe-cloud",
+    } as AIPreset)).toBe(true);
+  });
+
+  it("is false for local and BYOK presets", () => {
+    expect(presetUsesHostedAllowance({ provider: "native-ollama" } as AIPreset)).toBe(false);
+    expect(presetUsesHostedAllowance({ provider: "anthropic" } as AIPreset)).toBe(false);
+    expect(presetUsesHostedAllowance({ provider: "openai" } as AIPreset)).toBe(false);
+  });
+
+  it("follows the explicit billing route for a routeable ACP agent", () => {
+    expect(presetUsesHostedAllowance({
+      provider: "acp",
+      acpAgent: { id: "claude-acp", useScreenpipeCloud: true },
+    } as AIPreset)).toBe(true);
+    expect(presetUsesHostedAllowance({
+      provider: "acp",
+      acpAgent: { id: "claude-acp", useScreenpipeCloud: false },
+    } as AIPreset)).toBe(false);
+    expect(presetUsesHostedAllowance({
+      provider: "acp",
+      acpAgent: { id: "claude-acp" },
+    } as AIPreset)).toBe(false);
+  });
+
+  it("does not claim cloud usage for an ACP adapter that cannot route there", () => {
+    expect(presetUsesHostedAllowance({
+      provider: "acp",
+      acpAgent: { id: "codex-acp", useScreenpipeCloud: true },
+    } as AIPreset)).toBe(false);
+  });
+});
+
 describe("modelAllowanceNotice", () => {
   it("warns for expensive hosted models", () => {
     const notice = modelAllowanceNotice("screenpipe-cloud", "claude-opus-5");
@@ -94,5 +133,58 @@ describe("modelAllowanceNotice", () => {
       const text = `${notice?.label} ${notice?.description}`;
       expect(text).not.toMatch(/\$|usd|per request|\d+\s*x/i);
     }
+  });
+});
+
+describe("presetAllowanceExemption", () => {
+  it("is null exactly when the preset spends the allowance", () => {
+    expect(
+      presetAllowanceExemption({ provider: "screenpipe-cloud" } as AIPreset),
+    ).toBeNull();
+    expect(
+      presetAllowanceExemption({
+        provider: "acp",
+        acpAgent: { id: "claude-acp", useScreenpipeCloud: true },
+      } as AIPreset),
+    ).toBeNull();
+  });
+
+  it("names the agent that is billed instead", () => {
+    // Cursor has no cloud routing in the catalog at all, so the opt-in is
+    // irrelevant: its own service is always the one charging.
+    expect(
+      presetAllowanceExemption({
+        provider: "acp",
+        acpAgent: { id: "cursor", useScreenpipeCloud: true },
+      } as AIPreset),
+    ).toMatch(/bills to your Cursor account/);
+    // Routeable, but explicitly pointed at its own account.
+    expect(
+      presetAllowanceExemption({
+        provider: "acp",
+        acpAgent: { id: "claude-acp", useScreenpipeCloud: false },
+      } as AIPreset),
+    ).toMatch(/bills to your Claude Code account/);
+  });
+
+  it("distinguishes a local model from a key the user pays for", () => {
+    expect(
+      presetAllowanceExemption({ provider: "native-ollama" } as AIPreset),
+    ).toMatch(/runs on your machine/);
+    expect(
+      presetAllowanceExemption({ provider: "openai" } as AIPreset),
+    ).toMatch(/your own OpenAI key/);
+    expect(
+      presetAllowanceExemption({ provider: "custom" } as AIPreset),
+    ).toMatch(/your own custom provider key/);
+  });
+
+  it("still explains itself for an unknown or missing preset", () => {
+    expect(presetAllowanceExemption(null)).toMatch(
+      /does not use Screenpipe Cloud/,
+    );
+    expect(presetAllowanceExemption({ provider: "wat" } as AIPreset)).toMatch(
+      /does not use Screenpipe Cloud/,
+    );
   });
 });

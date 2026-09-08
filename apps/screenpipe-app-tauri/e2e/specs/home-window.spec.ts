@@ -8,7 +8,7 @@ import { saveScreenshot } from '../helpers/screenshot-utils.js';
 
 const SECTIONS = [
   { id: 'home', label: 'Home', sectionTestId: 'section-home', urlMatch: /section=home|\/home(\?|$)/ },
-  { id: 'pipes', label: 'Scheduled', sectionTestId: 'section-pipes', urlMatch: /section=pipes/ },
+  { id: 'pipes', label: 'Automations', sectionTestId: 'section-pipes', urlMatch: /section=pipes/ },
   { id: 'timeline', label: 'Timeline', sectionTestId: 'section-timeline', urlMatch: /section=timeline/ },
   { id: 'help', label: 'Help', sectionTestId: 'section-help', urlMatch: /section=help/ },
   // Settings reopens whichever section was last visited
@@ -67,5 +67,30 @@ describe('Home window', () => {
       const filepath = await saveScreenshot(`home-${id}`);
       expect(existsSync(filepath)).toBe(true);
     }
+  });
+
+  it('hides recording status while the sidebar is collapsed', async () => {
+    await openHomeWindow();
+
+    const recordingStatus = await $('[data-testid="recording-status-trigger"]');
+    await recordingStatus.waitForExist({ timeout: t(10000) });
+
+    const collapseSidebar = await $('[aria-label="collapse sidebar"]');
+    await collapseSidebar.click();
+
+    await recordingStatus.waitForExist({
+      reverse: true,
+      timeout: t(5000),
+    });
+    const expandSidebar = await $('[aria-label="expand sidebar"]');
+    await expandSidebar.waitForExist({ timeout: t(5000) });
+
+    const filepath = await saveScreenshot('home-sidebar-collapsed');
+    expect(existsSync(filepath)).toBe(true);
+
+    await expandSidebar.click();
+    await (await $('[data-testid="recording-status-trigger"]')).waitForExist({
+      timeout: t(5000),
+    });
   });
 });

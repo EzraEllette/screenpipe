@@ -215,6 +215,9 @@ struct TimelineKeyHandler {
                 model.emitAction("copy_text")
             }
             return true
+        case "b" where command && !shift && !option && !control && embedded:
+            model.emitAction("toggle_sidebar")
+            return true
         case "l" where control && command:
             if let action = model.askAISelectionAction() {
                 model.emitAction(action)
@@ -332,21 +335,37 @@ final class TimelineOriginChrome: ObservableObject {
         showsActivityReturn = false
         TimelineActionBridge.shared.emit("return_to_activity")
     }
+}
 
-    func dismissActivityReturn() {
-        guard showsActivityReturn else { return }
-        showsActivityReturn = false
-        TimelineActionBridge.shared.emit("dismiss_activity_return")
+@MainActor
+final class TimelineWindowGeometry: ObservableObject {
+    @Published private(set) var topSafeInset: CGFloat = 0
+
+    func update(windowFrame: NSRect, visibleFrame: NSRect?) {
+        let inset = visibleFrame.map {
+            TimelineTopChromeLayout.safeInset(
+                windowMaxY: windowFrame.maxY,
+                visibleFrameMaxY: $0.maxY
+            )
+        } ?? 0
+        if abs(topSafeInset - inset) > 0.5 {
+            topSafeInset = inset
+        }
     }
 }
 
 struct TimelineHostView: View {
     @ObservedObject var model: TimelineViewModel
     @ObservedObject var originChrome: TimelineOriginChrome
+    @ObservedObject var geometry: TimelineWindowGeometry
     var embedded: Bool
 
     var body: some View {
-        TimelineRootView(model: model, embedded: embedded)
+        TimelineRootView(
+            model: model,
+            embedded: embedded,
+            topSafeInset: geometry.topSafeInset
+        )
             .overlay(alignment: .topLeading) {
                 if originChrome.showsActivityReturn {
                     Button(action: originChrome.returnToActivity) {
@@ -363,13 +382,6 @@ struct TimelineHostView: View {
                     .padding(16)
                 }
             }
-            .simultaneousGesture(
-                TapGesture().onEnded {
-                    DispatchQueue.main.async {
-                        originChrome.dismissActivityReturn()
-                    }
-                }
-            )
     }
 }
 
@@ -407,6 +419,32 @@ struct TimelineSearchNavigationRequest: Equatable {
 final class TimelineWindow: NSWindow {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
+
+    /// The click that focuses an attached timeline must also do its job.
+    ///
+    /// AppKit spends the mouse-down that makes a window key on the activation
+    /// alone, unless the view under the pointer accepts first mouse. Over a
+    /// frame that view is VisionKit's `ImageAnalysisOverlayView`, which is
+    /// `final` — there is no override to add. Taking key before the event is
+    /// dispatched turns it into an ordinary click, so the first drag selects
+    /// text instead of only waking the window up.
+    override func sendEvent(_ event: NSEvent) {
+        if event.type == .leftMouseDown, !isKeyWindow { makeKey() }
+        super.sendEvent(event)
+    }
+}
+
+/// Being able to become key is not the same as becoming key.
+///
+/// Attached mode never makes this window key — the host webview keeps that, so
+/// the timeline does not steal keystrokes the moment it appears. The click that
+/// does make it key is AppKit's "first mouse", and by default a view is not
+/// sent that event: it only activates the window. So the first drag over a
+/// transcript selected nothing, and the user had to click something else first
+/// to wake the window up. Accepting first mouse spends that click on the
+/// gesture as well as the activation.
+final class TimelineHostingView<Content: View>: NSHostingView<Content> {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 
 @MainActor
@@ -618,6 +656,7 @@ final class TimelineWindowController: NSObject, NSWindowDelegate {
     private var window: NSWindow?
     private var model: TimelineViewModel?
     private let originChrome = TimelineOriginChrome()
+    private let geometry = TimelineWindowGeometry()
     private var keyMonitor: Any?
     private var scrollMonitor: Any?
     private var scrollHandler: TimelineScrollHandler?
@@ -667,6 +706,16 @@ final class TimelineWindowController: NSObject, NSWindowDelegate {
                   !self.attachedHierarchyHasKeyWindow() else { return }
             TimelineActionBridge.shared.emit("close_window", windowLabel: hostWindowLabel)
         }
+    }
+
+    func windowDidResize(_ notification: Notification) {
+        guard notification.object as? NSWindow === window else { return }
+        updateTopSafeInset()
+    }
+
+    func windowDidMove(_ notification: Notification) {
+        guard notification.object as? NSWindow === window else { return }
+        updateTopSafeInset()
     }
 
     /// Focus may move into a native child such as a Live Text surface or back
@@ -726,10 +775,11 @@ final class TimelineWindowController: NSObject, NSWindowDelegate {
             model.beginExternalNavigation()
         }
 
-        let hosting = NSHostingView(
+        let hosting = TimelineHostingView(
             rootView: TimelineHostView(
                 model: model,
                 originChrome: originChrome,
+                geometry: geometry,
                 embedded: embedded
             )
         )
@@ -762,6 +812,7 @@ final class TimelineWindowController: NSObject, NSWindowDelegate {
         window.contentView = hosting
         window.delegate = self
         self.window = window
+        updateTopSafeInset()
 
         installKeyMonitor(model: model, embedded: embedded, closeOnEscape: closeOnEscape)
         installScrollMonitor(model: model)
@@ -888,6 +939,18 @@ final class TimelineWindowController: NSObject, NSWindowDelegate {
 
     private func applyAttachedFrame(host: NSWindow, rect: NSRect) {
         window?.setFrame(attachedFrame(host: host, rect: rect), display: true)
+        updateTopSafeInset()
+    }
+
+    private func updateTopSafeInset() {
+        guard let window else {
+            geometry.update(windowFrame: .zero, visibleFrame: nil)
+            return
+        }
+        let center = NSPoint(x: window.frame.midX, y: window.frame.midY)
+        let screen = window.screen
+            ?? NSScreen.screens.first { NSMouseInRect(center, $0.frame, false) }
+        geometry.update(windowFrame: window.frame, visibleFrame: screen?.visibleFrame)
     }
 
     private func observeParent(_ host: NSWindow) {
@@ -1072,6 +1135,9 @@ public func timeline_show(_ json: UnsafePointer<CChar>?) -> Int32 {
         if let port = obj["port"] as? Int { config.port = port }
         if let host = obj["host"] as? String, !host.isEmpty { config.host = host }
         if let key = obj["apiKey"] as? String, !key.isEmpty { config.apiKey = key }
+        if let value = obj["historyAccessRestricted"] as? Bool {
+            config.historyAccessRestricted = value
+        }
         if let value = obj["embedded"] as? Bool { embedded = value }
         if let value = obj["closeOnEscape"] as? Bool { closeOnEscape = value }
         if let value = obj["showActivityReturn"] as? Bool { showActivityReturn = value }

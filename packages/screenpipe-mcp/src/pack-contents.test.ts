@@ -64,17 +64,8 @@ const PUBLISHED_0_18_15_FILES: string[] = [
 ];
 
 describe("pack-contents gate — file list", () => {
-  it("rejects the tarball npm actually published as 0.18.15", () => {
-    const missing: string[] = gate.missingFrom(PUBLISHED_0_18_15_FILES);
-    // It had dist/cli.js, dist/index.js, dist/http-server.js and package.json,
-    // so the separately compiled modules imported by today's entry point were absent.
-    expect(missing).toEqual([
-      "dist/activity-summary-tool.js",
-      "dist/activity-summary-format.js",
-      "dist/time-normalization.js",
-      "dist/team-config.js",
-      "dist/version.js",
-    ]);
+  it("recognizes the three public bundle entry points", () => {
+    expect(gate.missingFrom(PUBLISHED_0_18_15_FILES)).toEqual([]);
   });
 
   it("accepts a file list that has every required path", () => {
@@ -85,36 +76,24 @@ describe("pack-contents gate — file list", () => {
     expect(gate.missingFrom([])).toEqual(gate.REQUIRED_PATHS);
   });
 
-  it("requires dist/team-config.js — the file whose absence caused the incident", () => {
-    expect(gate.REQUIRED_PATHS).toContain("dist/team-config.js");
-  });
-
-  it("requires the local-calendar module imported by the MCP entry point", () => {
-    expect(gate.REQUIRED_PATHS).toContain("dist/time-normalization.js");
-  });
-
-  it("requires the activity-summary formatter imported by the MCP entry point", () => {
-    expect(gate.REQUIRED_PATHS).toContain("dist/activity-summary-format.js");
-  });
-
-  it("requires the activity-summary orchestrator imported by the MCP entry point", () => {
-    expect(gate.REQUIRED_PATHS).toContain("dist/activity-summary-tool.js");
+  it("requires every public entry point", () => {
+    expect(gate.REQUIRED_PATHS).toEqual(
+      expect.arrayContaining(["dist/cli.js", "dist/http-server.js", "dist/index.js"]),
+    );
   });
 });
 
 describe("pack-contents gate — built-file contents", () => {
   /** A dist/ built from THIS tree: every marker present, no hardcoded base. */
   const goodDist: Record<string, string> = {
-    "dist/team-config.js":
+    "dist/index.js":
       'exports.HOSTED_TEAM_API = "https://screenpi.pe/api/enterprise/v1";\n' +
       "const base = flagOverride || env.SCREENPIPE_TEAM_API_URL || fromFile;\n" +
-      "const url = typeof parsed?.gateway_url === \"string\" ? parsed.gateway_url : \"\";\n",
-    "dist/index.js":
+      "const url = typeof parsed?.gateway_url === \"string\" ? parsed.gateway_url : \"\";\n" +
       'else if (args[i] === "--team-api-url" && args[i + 1]) {\n' +
-      "const TEAM_API = (0, team_config_1.discoverTeamApiBase)(teamApiOverride);\n",
-    "dist/activity-summary-format.js":
-      'return ["Authoritative active time", "Never convert frame counts"];\n',
-    "dist/time-normalization.js":
+      "const TEAM_API = discoverTeamApiBase(teamApiOverride);\n" +
+      'const unavailable = "Do not claim to have seen this image";\n' +
+      'return ["Authoritative active time", "Never convert frame counts"];\n' +
       "const midnight = new Date(reference.getFullYear(), reference.getMonth(), reference.getDate());\n",
   };
 
@@ -125,10 +104,12 @@ describe("pack-contents gate — built-file contents", () => {
     expect(gate.markerFailures(reader(goodDist))).toEqual([]);
   });
 
-  it("fails when team-config.js is present but predates the env override", () => {
+  it("fails when the bundle predates the env and file overrides", () => {
     const stale = {
       ...goodDist,
-      "dist/team-config.js": 'exports.HOSTED_TEAM_API = "https://screenpi.pe/api/enterprise/v1";\n',
+      "dist/index.js": goodDist["dist/index.js"]
+        .replace("SCREENPIPE_TEAM_API_URL", "MISSING_ENV_OVERRIDE")
+        .replaceAll("gateway_url", "missing_file_override"),
     };
     const failures: string[] = gate.markerFailures(reader(stale));
     expect(failures).toHaveLength(2);
@@ -140,16 +121,49 @@ describe("pack-contents gate — built-file contents", () => {
     // Verbatim line 271 of the published 0.18.15 dist/index.js.
     const reverted = {
       ...goodDist,
-      "dist/index.js": 'const TEAM_API = "https://screenpi.pe/api/enterprise/v1";\n',
+      "dist/index.js":
+        goodDist["dist/index.js"] + 'const TEAM_API = "https://screenpi.pe/api/enterprise/v1";\n',
     };
     const failures: string[] = gate.markerFailures(reader(reverted));
     expect(failures.some((f) => f.includes("forbidden"))).toBe(true);
-    expect(failures.some((f) => f.includes("--team-api-url"))).toBe(true);
+  });
+
+  it("rejects the former direct live-database authentication fallback", () => {
+    const unsafe = {
+      ...goodDist,
+      "dist/index.js":
+        goodDist["dist/index.js"] +
+        'execFile("sqlite3", ["/home/user/.screenpipe/db.sqlite", "SELECT value FROM secrets"]);\n',
+    };
+    const failures: string[] = gate.markerFailures(reader(unsafe));
+
+    expect(failures.some((failure) => failure.includes("sqlite3"))).toBe(true);
+    expect(failures.some((failure) => failure.includes("db\\.sqlite"))).toBe(true);
   });
 
   it("fails loudly when a required built file is missing entirely", () => {
     const failures: string[] = gate.markerFailures(() => null);
     expect(failures).toHaveLength(gate.REQUIRED_MARKERS.length);
     for (const f of failures) expect(f).toContain("unreadable");
+  });
+});
+
+describe("pack-contents gate — runtime install surface", () => {
+  it("accepts a package with no runtime dependencies", () => {
+    expect(gate.runtimeDependencyFailures({ devDependencies: { typescript: "1" } })).toEqual([]);
+  });
+
+  it("rejects every dependency that bunx or npx would install at runtime", () => {
+    expect(
+      gate.runtimeDependencyFailures({
+        dependencies: {
+          "@modelcontextprotocol/sdk": "^1.27.1",
+          "@sentry/node": "^10.64.0",
+        },
+      }),
+    ).toEqual([
+      "package.json: runtime dependency @modelcontextprotocol/sdk defeats the self-contained bundle",
+      "package.json: runtime dependency @sentry/node defeats the self-contained bundle",
+    ]);
   });
 });

@@ -4,10 +4,8 @@
 
 import { useEffect, useRef } from "react";
 import type * as React from "react";
-import { emit } from "@tauri-apps/api/event";
 import {
   mountAgentEventBus,
-  onEvicted as onAgentEvicted,
   registerForeground,
 } from "@/lib/events/bus";
 import { useChatPipeWatch } from "@/components/chat/standalone/hooks/use-chat-pipe-watch";
@@ -15,6 +13,7 @@ import { useChatStore } from "@/lib/stores/chat-store";
 import { handlePiEvent } from "@/lib/stores/pi-event-router";
 import { parsePipeSessionId } from "@/lib/events/types";
 import type { ContentBlock, Message } from "@/lib/chat/types";
+import { commands } from "@/lib/utils/tauri";
 
 interface UseChatSessionRuntimeOptions {
   conversationId: string | null;
@@ -31,7 +30,6 @@ interface UseChatSessionRuntimeOptions {
   isStreamingRef: React.MutableRefObject<boolean>;
   messagesRef: React.MutableRefObject<Message[]>;
   handleAgentEventDataRef: React.MutableRefObject<((data: any) => void) | null>;
-  startNewConversationRef: React.MutableRefObject<(() => Promise<void>) | null>;
   forceQueueModeRef: React.MutableRefObject<boolean>;
   sendDispatchInFlightRef: React.MutableRefObject<boolean>;
 }
@@ -43,6 +41,27 @@ interface UseChatSessionRuntimeOptions {
  *  the length of one disk write. This is comfortably longer than that window
  *  and short enough that a stuck composer recovers on its own. */
 const TURN_GUARD_HEAL_GRACE_MS = 750;
+const IDLE_AGENT_RELEASE_GRACE_MS = 250;
+const pendingIdleAgentReleases = new Map<string, ReturnType<typeof setTimeout>>();
+
+function cancelIdleAgentRelease(sessionId: string): void {
+  const pending = pendingIdleAgentReleases.get(sessionId);
+  if (!pending) return;
+  clearTimeout(pending);
+  pendingIdleAgentReleases.delete(sessionId);
+}
+
+function scheduleIdleAgentRelease(sessionId: string): void {
+  cancelIdleAgentRelease(sessionId);
+  const timer = setTimeout(() => {
+    if (pendingIdleAgentReleases.get(sessionId) !== timer) return;
+    pendingIdleAgentReleases.delete(sessionId);
+    void commands.piStopIfIdle(sessionId).catch((error) => {
+      console.warn("[Pi] Failed to release idle background session:", error);
+    });
+  }, IDLE_AGENT_RELEASE_GRACE_MS);
+  pendingIdleAgentReleases.set(sessionId, timer);
+}
 
 export function useChatSessionRuntime({
   conversationId,
@@ -59,7 +78,6 @@ export function useChatSessionRuntime({
   isStreamingRef,
   messagesRef,
   handleAgentEventDataRef,
-  startNewConversationRef,
   forceQueueModeRef,
   sendDispatchInFlightRef,
 }: UseChatSessionRuntimeOptions) {
@@ -71,6 +89,15 @@ export function useChatSessionRuntime({
       mountedRef.current = false;
     };
   }, []);
+
+  useEffect(() => {
+    if (!conversationId) return;
+    // React Strict Mode and fast route transitions can unmount/remount the same
+    // chat back-to-back. Cancel its delayed release when foreground ownership
+    // returns; otherwise release only after the panel is genuinely gone.
+    cancelIdleAgentRelease(conversationId);
+    return () => scheduleIdleAgentRelease(conversationId);
+  }, [conversationId]);
 
   const currentSessionKind = useChatStore((state) =>
     state.currentId ? state.sessions[state.currentId]?.kind : undefined,
@@ -307,29 +334,6 @@ export function useChatSessionRuntime({
     piSessionIdRef,
     piStreamingTextRef,
   ]);
-
-  useEffect(() => {
-    let cancelled = false;
-    let off: (() => void) | null = null;
-    (async () => {
-      await mountAgentEventBus();
-      if (cancelled) return;
-      off = onAgentEvicted(async (payload) => {
-        if (cancelled) return;
-        if (payload.sessionId !== piSessionIdRef.current) return;
-        await startNewConversationRef.current?.();
-        emit("chat-current-session", { id: piSessionIdRef.current });
-      });
-    })();
-    return () => {
-      cancelled = true;
-      try {
-        off?.();
-      } catch {
-        // ignore
-      }
-    };
-  }, [piSessionIdRef, startNewConversationRef]);
 
   return {
     ...pipeWatch,

@@ -12,12 +12,29 @@ import {
   Loader2,
   Plus,
   RefreshCw,
+  ShieldCheck,
   Sparkles,
   Trash2,
 } from "lucide-react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { commands, type DeviceSkill, type ImportedSkill } from "@/lib/utils/tauri";
+import {
+  commands,
+  type DeviceSkill,
+  type ImportedSkill,
+  type ManagedTeamSkillLocal,
+} from "@/lib/utils/tauri";
 import { SkillsBrowser } from "./skills-browser";
+import { ProviderSkillCatalog } from "./provider-skill-catalog";
+
+const DESTINATION_LABELS: Record<string, string> = {
+  screenpipe: "screenpipe",
+  "claude-code": "Claude Code",
+  codex: "Codex",
+  cursor: "Cursor",
+  gemini: "Gemini CLI",
+  openclaw: "OpenClaw",
+  hermes: "Hermes",
+};
 
 /**
  * Manage the agent's skills: a skill is a folder with a `SKILL.md` (the same
@@ -27,6 +44,7 @@ import { SkillsBrowser } from "./skills-browser";
 export function SkillsCard({ onChanged }: { onChanged?: () => void }) {
   const [imported, setImported] = useState<ImportedSkill[]>([]);
   const [device, setDevice] = useState<DeviceSkill[]>([]);
+  const [managed, setManaged] = useState<ManagedTeamSkillLocal[]>([]);
   const [loaded, setLoaded] = useState(false);
   // The path or name currently being imported/removed, to show a spinner.
   const [busyKey, setBusyKey] = useState<string | null>(null);
@@ -35,15 +53,18 @@ export function SkillsCard({ onChanged }: { onChanged?: () => void }) {
 
   const refresh = useCallback(async () => {
     try {
-      const [imp, dev] = await Promise.all([
+      const [imp, dev, org] = await Promise.all([
         commands.listImportedSkills(),
         commands.scanDeviceSkills(),
+        commands.listManagedTeamSkills(),
       ]);
       setImported(imp.status === "ok" ? imp.data : []);
       setDevice(dev.status === "ok" ? dev.data : []);
+      setManaged(org.status === "ok" ? org.data : []);
     } catch {
       setImported([]);
       setDevice([]);
+      setManaged([]);
     } finally {
       setLoaded(true);
     }
@@ -101,6 +122,11 @@ export function SkillsCard({ onChanged }: { onChanged?: () => void }) {
     [refresh, onChanged],
   );
 
+  const handleRegistryInstalled = useCallback(() => {
+    void refresh();
+    onChanged?.();
+  }, [refresh, onChanged]);
+
   // Device skills the user hasn't imported yet.
   const importable = device.filter((d) => !d.imported);
 
@@ -113,6 +139,8 @@ export function SkillsCard({ onChanged }: { onChanged?: () => void }) {
         screenpipe&apos;s agent loads them in chat and in every scheduled task.
       </p>
 
+      <ProviderSkillCatalog onInstalled={handleRegistryInstalled} />
+
       <Button
         variant="outline"
         size="sm"
@@ -121,23 +149,80 @@ export function SkillsCard({ onChanged }: { onChanged?: () => void }) {
         disabled={!loaded}
       >
         <Sparkles className="h-3.5 w-3.5 mr-1.5" />
-        Browse skills
+        Browse all skills
       </Button>
 
       <SkillsBrowser
         open={browsing}
         onClose={() => setBrowsing(false)}
         installedNames={imported.map((s) => s.name)}
-        onInstalled={() => {
-          refresh();
-          onChanged?.();
-        }}
+        onInstalled={handleRegistryInstalled}
       />
 
       {error && (
         <div className="flex items-start gap-1.5 text-xs rounded-md border border-destructive/40 bg-destructive/5 text-destructive p-2.5">
           <AlertCircle className="h-3 w-3 mt-0.5 shrink-0" />
           <span className="break-all">{error}</span>
+        </div>
+      )}
+
+      {/* Organization skills are assigned by an admin and intentionally
+          read-only here. This panel reports verified local installations. */}
+      {managed.length > 0 && (
+        <div className="space-y-1.5" data-testid="organization-skills">
+          <div className="flex items-center justify-between">
+            <div>
+              <h4 className="text-xs font-medium text-foreground">
+                Organization ({managed.length})
+              </h4>
+              <p className="text-[10px] text-muted-foreground">
+                Verified on this device · managed by your organization
+              </p>
+            </div>
+            <ShieldCheck className="h-3.5 w-3.5 text-muted-foreground" />
+          </div>
+          <div className="space-y-1.5">
+            {managed.map((skill) => (
+              <div
+                key={skill.artifact_id}
+                className="border border-border px-2.5 py-2"
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="text-xs font-medium truncate">
+                      {skill.name}
+                    </div>
+                    {skill.description && (
+                      <div className="text-[11px] text-muted-foreground line-clamp-2">
+                        {skill.description}
+                      </div>
+                    )}
+                  </div>
+                  <span className="shrink-0 border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                    release v{skill.release_version} · policy r{skill.version}
+                  </span>
+                </div>
+                <div className="mt-1 text-[10px] text-muted-foreground">
+                  {skill.file_count} files · discovery {skill.discovery_chars} chars · activated {skill.activation_chars} chars · scripts {skill.has_scripts ? "yes" : "no"}
+                </div>
+                {skill.digest && (
+                  <div className="mt-1 truncate font-mono text-[9px] text-muted-foreground/70" title={skill.digest}>
+                    sha256 {skill.digest}
+                  </div>
+                )}
+                <div className="mt-2 flex flex-wrap gap-1">
+                  {skill.destinations.map((destination) => (
+                    <span
+                      key={destination}
+                      className="border border-border bg-muted/30 px-1.5 py-0.5 text-[10px] text-muted-foreground"
+                    >
+                      {DESTINATION_LABELS[destination] ?? destination}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
         </div>
       )}
 

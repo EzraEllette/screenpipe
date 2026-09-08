@@ -413,19 +413,22 @@ const proposeParameters = {
       description:
         "One sentence telling the user what visibly changes and why. Do not claim a change the operations do not make.",
     },
-    title: { type: "string", description: "New dashboard title. Create only." },
+    title: {
+      type: "string",
+      description: "New dashboard title. Create or whole-dashboard replacement only.",
+    },
     timeRange: { type: "string", enum: TIME_RANGES },
     timeRangeBehavior: { type: "string", enum: ["selectable", "fixed"] },
     blocks: {
       type: "array",
       description:
-        "Complete Block list. Use only when creating a new dashboard.",
+        "Complete Block list. Use when creating a new dashboard or when the prompt explicitly asks for a whole-dashboard replacement.",
       items: blockSchema,
     },
     operations: {
       type: "array",
       description:
-        "Targeted changes to an existing dashboard. Use instead of blocks whenever a current view was supplied.",
+        "Targeted changes to an existing dashboard. Use instead of blocks for edits that preserve unrelated Blocks; do not use for an explicit whole-dashboard replacement.",
       items: {
         type: "object",
         properties: {

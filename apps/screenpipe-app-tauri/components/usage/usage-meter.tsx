@@ -53,11 +53,14 @@ const RING_CIRCUMFERENCE = 2 * Math.PI * RING_RADIUS;
 export function UsageRing({
   percent,
   state,
+  measured = true,
   className,
 }: {
   /** 0-100; clamped here so a stale over-100 reading can't overdraw the arc. */
   percent: number;
   state: UsageAllowanceState;
+  /** False keeps the familiar circle affordance without implying a 0% value. */
+  measured?: boolean;
   className?: string;
 }) {
   const clamped = Math.min(100, Math.max(0, percent));
@@ -77,20 +80,22 @@ export function UsageRing({
         strokeWidth="3"
         className="stroke-current opacity-20"
       />
-      <circle
-        cx="10"
-        cy="10"
-        r={RING_RADIUS}
-        fill="none"
-        strokeWidth="3"
-        strokeLinecap="round"
-        strokeDasharray={RING_CIRCUMFERENCE}
-        strokeDashoffset={RING_CIRCUMFERENCE * (1 - clamped / 100)}
-        className={cn(
-          "transition-[stroke-dashoffset] duration-300",
-          usageStrokeClass(state),
-        )}
-      />
+      {measured && (
+        <circle
+          cx="10"
+          cy="10"
+          r={RING_RADIUS}
+          fill="none"
+          strokeWidth="3"
+          strokeLinecap="round"
+          strokeDasharray={RING_CIRCUMFERENCE}
+          strokeDashoffset={RING_CIRCUMFERENCE * (1 - clamped / 100)}
+          className={cn(
+            "transition-[stroke-dashoffset] duration-300",
+            usageStrokeClass(state),
+          )}
+        />
+      )}
     </svg>
   );
 }

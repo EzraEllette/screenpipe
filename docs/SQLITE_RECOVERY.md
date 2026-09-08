@@ -4,9 +4,9 @@
 
 # SQLite quarantine and recovery
 
-<!-- doc-covers: crates/screenpipe-sqlite-recovery, crates/screenpipe-sqlite-coordinator -->
-<!-- doc-verified: b402c7be54024d8c81500291ef174808d362a3b6 -->
-> **Updated in this change.** Error handling verified with real SQLite fault-injection and generation-reopen tests (2026-09-08).
+<!-- doc-covers: crates/screenpipe-sqlite-recovery, crates/screenpipe-sqlite-coordinator, crates/screenpipe-engine/src/cli/db.rs -->
+<!-- doc-verified: 746776403d0a7f20bf9c3a05fe9d2daf2e628d34 -->
+> **Merged contract.** Preserves the diagnosis-first policy from 0890ec79f6 and recovery safeguards from 746776403d.
 
 Screenpipe retires the current connection generation after `SQLITE_IOERR`,
 `SQLITE_CORRUPT`, `SQLITE_FULL`, or `SQLITE_NOTADB`. These errors request diagnosis;
@@ -52,8 +52,8 @@ enters verification rather than permanently requiring repair. Healthy admission
 checks the generation and incident again, archives the incident, and installs a
 new writer gate; every old gate stays closed.
 
-Desktop database availability retries continue with a 60-second backoff, even
-if the engine has never started successfully. User stop/quit intent still wins.
+Desktop database availability retries continue with a 60-second backoff and no
+retry limit, even if the engine has never started successfully. User stop/quit intent still wins.
 Verified physical damage keeps writes stopped until protected repair succeeds.
 
 ## Authoritative file lifecycles
@@ -75,8 +75,8 @@ Every production credential caller resolves `secrets.sqlite` through
 `SecretStore::open_for_data_dir`. On the first upgraded launch, legacy rows are
 copied from `db.sqlite.secrets` and the completion marker is committed in the
 same credential-database transaction. The legacy table remains unchanged for
-downgrade safety. A quarantined legacy generation cannot be opened to perform a
-first migration; after migration is complete, a capture quarantine does not
+downgrade safety. A legacy generation with confirmed damage cannot be opened
+to perform a first migration; after migration is complete, a capture quarantine does not
 make already-separated credentials unreadable.
 
 Live capture checkpoints use `PASSIVE` for routine copying and serialized
@@ -99,12 +99,16 @@ snapshot impossible.
    Verify the installed generation first: healthy data resumes without a
    rebuild; unavailable data remains retryable. Only verified damage proceeds
    to copy repair and durable quarantine.
-2. Copy the DB/WAL/SHM bytes to a working directory without opening or
-   checkpointing the quarantined generation. Compare file identity, length, and
-   nanosecond modification time before/after the copy and again before swap; if
-   anything changed, refuse recovery because the source was not truly offline.
+2. Hard-link the main DB into a private working directory, and copy WAL/SHM to
+   that directory. Every input SQLite connection opens the main file read-only;
+   no checkpoint or database write is permitted through the shared file. If
+   hard links are unavailable, copy the main DB too. Compare file identity,
+   length, and nanosecond modification time before/after preparation and again
+   before swap. Reject DB/WAL changes; tolerate only a newly created empty WAL
+   and timestamp-only changes to the transient SHM index. SHM identity, size,
+   and presence changes still reject installation.
 3. Run SQLite's official page-level Recovery API, compiled into Screenpipe,
-   against only that working copy. Recovery never depends on a host `sqlite3`
+   against only that working path. Recovery never depends on a host `sqlite3`
    executable or package-manager installation.
 4. Require the candidate's physical identity to differ from every quarantined
    identity.
@@ -116,20 +120,50 @@ snapshot impossible.
 8. Repeat fresh-identity, integrity, foreign-key, and write-canary verification
    at the installed path.
 9. Atomically archive the quarantine marker as `resolved-quarantine.json`.
+10. Remove the disposable working directory; retain the exact original in
+    `source-generation` for rollback/inspection.
+
+Disk preflight budgets a candidate the size of the original DB/WAL/SHM,
+the private sidecar copies, and a 1 GiB reserve. Without hard-link support,
+it also budgets a full main-database copy. For a 122 GiB main file with small
+sidecars, the linked path therefore avoids roughly 122 GiB of allocation and
+copy I/O. File browsers may count the linked file twice, but the links share
+the same physical storage. Candidate/index/journal growth can still exhaust
+space; recovery errors must leave the original generation recoverable.
 
 The original generation is never checkpointed, truncated, or used as the
-recovery destination. Quarantine clears only after a real write advances and is
-read back from the verified replacement.
+recovery destination. Confirmed-corruption quarantine clears only after a real
+write advances and is read back from the verified replacement.
+
+## Resume a verified candidate
+
+If recovery finished verification but refused installation (for example,
+v0.4.48 rejected an SHM timestamp-only change), keep the recovery directory and
+run `screenpipe db recover --resume` with Screenpipe fully stopped.
+
+This selects the newest retained `candidate.sqlite` with a candidate-verified
+manifest. It requires the original physical database identity and surviving
+read-only input hard link, DB/WAL modification times older than that recovery's
+start, and byte-for-byte equality between the original WAL and private input
+WAL. This supports v0.4.48 manifests without trusting an unrecorded fingerprint.
+Missing evidence, a changed candidate identity, or an already-started archive
+fails closed. A copied (rather than linked) main input cannot be resumed.
+
+The candidate undergoes the same integrity, foreign-key, FTS, fresh-identity,
+write-canary, schema-parity, and installation checks as a new recovery. Source
+fingerprints are checked again before the swap. This does not redo page-level
+recovery or allocate another full database; validation still scans the candidate
+and can take time. If no eligible candidate exists, the command stops without
+starting a new recovery. Original DB/WAL/SHM remain recoverable on failure.
 
 ## Crash behavior
 
 Each recovery phase writes a synced manifest. The durable marker blocks writes
 throughout the operation. If the process dies while DB/WAL/SHM are being moved,
 startup or the next recovery invocation reconciles the interrupted swap before
-normal database admission. A
-normal install or post-install verification error also rolls the original files
+normal database admission. A normal install or post-install verification error also rolls the original files
 back and leaves quarantine active.
 
-Recovery artifacts are retained for inspection until the user runs
+The original generation and failed-attempt artifacts are retained until the user runs
 `screenpipe db cleanup --apply`. Cleanup refuses to delete recovery directories
 while an active quarantine marker exists.

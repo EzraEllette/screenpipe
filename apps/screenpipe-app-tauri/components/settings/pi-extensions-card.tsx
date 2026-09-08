@@ -6,7 +6,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   AlertCircle,
-  Blocks,
   CheckCircle2,
   Clock3,
   ExternalLink,
@@ -22,7 +21,6 @@ import { Switch } from "@/components/ui/switch";
 import { useToast } from "@/components/ui/use-toast";
 import { commands, type PiExtensionPackage } from "@/lib/utils/tauri";
 import {
-  filterPiExtensionCatalog,
   installedPiPackageSourceSet,
   normalizePiPackageSource,
   PI_EXTENSION_CATALOG,
@@ -45,8 +43,10 @@ const COMPATIBILITY_CLASS = {
 } as const;
 
 function compatibilityLabel(item: PiExtensionCatalogItem): string {
-  if (item.compatibility === "pi-only") return "Pi only";
-  return item.compatibilityVerified ? "all ACP agents" : "portable candidate";
+  if (item.compatibility === "pi-only") return "screenpipe only";
+  return item.compatibilityVerified
+    ? "works with every agent"
+    : "may work with other agents";
 }
 
 function compatibilityClass(item: PiExtensionCatalogItem): string {
@@ -59,7 +59,11 @@ function compatibilityClass(item: PiExtensionCatalogItem): string {
 function packageErrorMessage(error: unknown): string {
   if (typeof error === "string") return error;
   if (error instanceof Error) return error.message;
-  return "Something went wrong while changing this Pi extension.";
+  return "Something went wrong while changing this tool.";
+}
+
+function packageDisplayName(source: string): string {
+  return source.replace(/^npm:/, "");
 }
 
 function relativeDate(value?: string): string | null {
@@ -152,7 +156,9 @@ function PiExtensionRow({
       </p>
 
       <div className="mt-auto flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 border-t border-border pt-2.5 text-[10px] text-muted-foreground">
-        <span className="max-w-full truncate font-mono">{item.source}</span>
+        <span className="max-w-full truncate font-mono">
+          {packageDisplayName(item.source)}
+        </span>
         {published && (
           <span className="inline-flex items-center gap-1">
             <Clock3 className="h-3 w-3" />
@@ -164,7 +170,7 @@ function PiExtensionRow({
           onClick={() => openUrl(item.npmUrl)}
           className="ml-auto inline-flex items-center gap-1 underline-offset-4 hover:underline"
         >
-          npm <ExternalLink className="h-3 w-3" />
+          package <ExternalLink className="h-3 w-3" />
         </button>
         {item.sourceUrl && (
           <button
@@ -172,7 +178,7 @@ function PiExtensionRow({
             onClick={() => openUrl(item.sourceUrl!)}
             className="inline-flex items-center gap-1 underline-offset-4 hover:underline"
           >
-            source <ExternalLink className="h-3 w-3" />
+            code <ExternalLink className="h-3 w-3" />
           </button>
         )}
       </div>
@@ -186,38 +192,18 @@ function PortableExtensionRow({
   item: PortableAgentExtensionCatalogItem;
 }) {
   return (
-    <article className="flex min-h-[148px] flex-col border border-border bg-card p-3.5 transition-colors hover:border-foreground/30">
+    <article className="flex min-h-[112px] flex-col border border-border bg-card p-3.5 transition-colors hover:border-foreground/30">
       <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0 space-y-1.5">
-          <div className="flex flex-wrap items-center gap-1.5">
-            <h4 className="text-sm font-medium leading-tight text-foreground">{item.name}</h4>
-            <span className="inline-flex items-center gap-1 border border-foreground/30 bg-foreground px-1.5 py-0.5 text-[10px] font-medium text-background">
-              <Blocks className="h-3 w-3" />
-              all ACP agents
-            </span>
-          </div>
-          <span className="font-mono text-[10px] text-muted-foreground">
-            ACP client middleware · MCP
-          </span>
-        </div>
-        <Switch
-          checked
-          disabled
-          aria-label={`${item.name} available to all agents`}
-          className="shrink-0"
-        />
+        <h4 className="text-sm font-medium leading-tight text-foreground">{item.name}</h4>
+        <span
+          aria-label={`${item.name} ready`}
+          className="inline-flex shrink-0 items-center gap-1 text-[10px] font-medium text-muted-foreground"
+        >
+          <CheckCircle2 className="h-3.5 w-3.5" />
+          ready
+        </span>
       </div>
       <p className="mt-2.5 text-xs leading-relaxed text-muted-foreground">{item.summary}</p>
-      <div className="mt-auto flex flex-wrap gap-1.5 border-t border-border pt-2.5">
-        {item.tools.map((tool) => (
-          <span
-            key={tool}
-            className="border border-border px-1.5 py-0.5 font-mono text-[9px] text-muted-foreground"
-          >
-            {tool}
-          </span>
-        ))}
-      </div>
     </article>
   );
 }
@@ -380,7 +366,7 @@ export function PiExtensionsCard({ onChanged }: { onChanged?: () => void }) {
     [packages],
   );
 
-  const visibleItems = useMemo(() => filterPiExtensionCatalog(query), [query]);
+  const visibleItems = PI_EXTENSION_CATALOG;
   const changingPackage = busySource !== null;
   const visibleSources = useMemo(
     () => installedPiPackageSourceSet(visibleItems.map((item) => item.source)),
@@ -423,7 +409,7 @@ export function PiExtensionsCard({ onChanged }: { onChanged?: () => void }) {
         if (res.status === "error") {
           setError(res.error);
           toast({
-            title: "Pi extension failed",
+            title: "Tool could not be changed",
             description: res.error,
             variant: "destructive",
           });
@@ -439,14 +425,16 @@ export function PiExtensionsCard({ onChanged }: { onChanged?: () => void }) {
           title: checked ? `${item.name} enabled` : `${item.name} disabled`,
           description:
             checked && changedPackage?.acpCompatible
-              ? "New ACP sessions mount this package through its portable MCP entrypoint."
-              : "Pi reloads idle sessions so the next turn uses the new package list.",
+              ? "Ready to use in new agent chats."
+              : checked
+                ? "Ready to use in new Pi chats."
+                : "Removed from new Pi chats.",
         });
       } catch (err) {
         const message = packageErrorMessage(err);
         setError(message);
         toast({
-          title: "Pi extension failed",
+          title: "Tool could not be changed",
           description: message,
           variant: "destructive",
         });
@@ -466,7 +454,7 @@ export function PiExtensionsCard({ onChanged }: { onChanged?: () => void }) {
         if (res.status === "error") {
           setError(res.error);
           toast({
-            title: "Pi extension failed",
+            title: "Tool could not be changed",
             description: res.error,
             variant: "destructive",
           });
@@ -476,14 +464,14 @@ export function PiExtensionsCard({ onChanged }: { onChanged?: () => void }) {
         setPackages(res.data);
         onChanged?.();
         toast({
-          title: "Pi extension disabled",
-          description: "Pi reloads idle sessions so the next turn uses the new package list.",
+          title: "Tool removed",
+          description: "It will no longer be available in new Pi chats.",
         });
       } catch (err) {
         const message = packageErrorMessage(err);
         setError(message);
         toast({
-          title: "Pi extension failed",
+          title: "Tool could not be changed",
           description: message,
           variant: "destructive",
         });
@@ -498,12 +486,9 @@ export function PiExtensionsCard({ onChanged }: { onChanged?: () => void }) {
     <div className="space-y-4 text-sm">
       <div className="space-y-2">
         <div className="flex items-center justify-between gap-3">
-          <div>
-            <h3 className="text-sm font-medium text-foreground">Agent extensions</h3>
-            <p className="text-xs leading-relaxed text-muted-foreground">
-              One catalog with an explicit runtime boundary for every provider.
-            </p>
-          </div>
+          <p className="text-xs leading-relaxed text-muted-foreground">
+            Add new tools for your AI to use.
+          </p>
           <Button
             variant="ghost"
             size="sm"
@@ -514,30 +499,55 @@ export function PiExtensionsCard({ onChanged }: { onChanged?: () => void }) {
             <RefreshCw className="h-3.5 w-3.5" />
           </Button>
         </div>
+      </div>
 
-        <div className="border border-border bg-muted/25 p-3">
-          <div className="flex items-start gap-2">
-            <ShieldAlert className="mt-0.5 h-4 w-4 text-muted-foreground" />
-            <div className="space-y-1 text-xs leading-relaxed text-muted-foreground">
-              <p>
-                Screenpipe extensions use ACP client middleware and work in every agent. Third-party Pi packages can execute local code and influence agent behavior.
-              </p>
-              <p>
-                Portable candidates advertise the catalog keyword; Screenpipe validates their MCP manifest and path after install. Pi-only lifecycle, provider, and terminal UI hooks stay in Pi.
+      {!loaded ? (
+        <div className="flex items-center gap-2 text-xs text-muted-foreground">
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          loading tools...
+        </div>
+      ) : (
+        <div className="space-y-2">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <h4 className="text-xs font-medium uppercase tracking-[0.14em] text-muted-foreground">
+                Recommended
+              </h4>
+              <p className="mt-1 text-[11px] text-muted-foreground">
+                Turn tools on or off for new chats.
               </p>
             </div>
+            <span className="text-[11px] tabular-nums text-muted-foreground">
+              {visibleItems.length}
+            </span>
+          </div>
+          <div className="grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-3">
+            {visibleItems.map((item) => {
+              const normalized = normalizePiPackageSource(item.source);
+              return (
+                <PiExtensionRow
+                  key={item.id}
+                  item={effectiveItem(item)}
+                  enabled={item.required || configuredSources.has(normalized)}
+                  stale={missingSources.has(normalized)}
+                  busy={busySource === item.source}
+                  disabled={changingPackage && busySource !== item.source}
+                  onToggle={(checked) => togglePackage(item, checked)}
+                />
+              );
+            })}
           </div>
         </div>
-      </div>
+      )}
 
       <div className="space-y-2">
         <div className="flex items-center justify-between gap-3">
           <div>
             <h4 className="text-xs font-medium uppercase tracking-[0.14em] text-muted-foreground">
-              All agents
+              Included
             </h4>
             <p className="mt-1 text-[11px] text-muted-foreground">
-              Built into the ACP client. No provider-specific install.
+              Ready in every agent. Nothing to set up.
             </p>
           </div>
           <span className="text-[11px] tabular-nums text-muted-foreground">
@@ -551,12 +561,22 @@ export function PiExtensionsCard({ onChanged }: { onChanged?: () => void }) {
         </div>
       </div>
 
+      <div className="border border-border bg-muted/25 p-3">
+        <div className="flex items-start gap-2">
+          <ShieldAlert className="mt-0.5 h-4 w-4 text-muted-foreground" />
+          <p className="text-xs leading-relaxed text-muted-foreground">
+            Community tools can run code and change how your agents behave. Only add tools you
+            trust.
+          </p>
+        </div>
+      </div>
+
       <div className="relative">
         <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
         <Input
           value={query}
           onChange={(event) => setQuery(event.target.value)}
-          placeholder="Search Pi packages..."
+          placeholder="Search tools..."
           className="h-8 rounded-none pl-8 text-xs"
         />
       </div>
@@ -568,53 +588,16 @@ export function PiExtensionsCard({ onChanged }: { onChanged?: () => void }) {
         </div>
       )}
 
-      {!loaded ? (
-        <div className="flex items-center gap-2 text-xs text-muted-foreground">
-          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-          loading Pi packages...
-        </div>
-      ) : (
+      {loaded && (
         <div className="space-y-4">
-          <div className="space-y-2">
-            <div className="flex items-center justify-between gap-3">
-              <h4 className="text-xs font-medium uppercase tracking-[0.14em] text-muted-foreground">
-                Curated
-              </h4>
-              <span className="text-[11px] tabular-nums text-muted-foreground">
-                {visibleItems.length}
-              </span>
-            </div>
-            <div className="grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-3">
-              {visibleItems.map((item) => {
-                const normalized = normalizePiPackageSource(item.source);
-                return (
-                  <PiExtensionRow
-                    key={item.id}
-                    item={effectiveItem(item)}
-                    enabled={item.required || configuredSources.has(normalized)}
-                    stale={missingSources.has(normalized)}
-                    busy={busySource === item.source}
-                    disabled={changingPackage && busySource !== item.source}
-                    onToggle={(checked) => togglePackage(item, checked)}
-                  />
-                );
-              })}
-            </div>
-            {visibleItems.length === 0 && (
-              <div className="border border-border bg-muted/25 p-3 text-xs text-muted-foreground">
-                No matching curated Pi packages.
-              </div>
-            )}
-          </div>
-
           {recentRegistryItems.length > 0 && (
             <div className="space-y-2">
               <div className="flex items-center justify-between gap-3">
                 <h4 className="text-xs font-medium uppercase tracking-[0.14em] text-muted-foreground">
-                  Recently published
+                  Recently added
                 </h4>
                 <span className="text-[11px] text-muted-foreground">
-                  from npm
+                  community
                 </span>
               </div>
               <div className="grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-4">
@@ -639,19 +622,19 @@ export function PiExtensionsCard({ onChanged }: { onChanged?: () => void }) {
           <div className="space-y-2">
             <div className="flex items-center justify-between gap-3">
               <h4 className="text-xs font-medium uppercase tracking-[0.14em] text-muted-foreground">
-                All packages
+                Community
               </h4>
               <span className="text-[11px] text-muted-foreground">
                 {registryLoading
                   ? "searching..."
                   : registryTotal === null
-                    ? "registry"
-                    : `${visibleRegistryItems.length} shown / ${registryTotal.toLocaleString()} matches`}
+                    ? "tools"
+                    : `${visibleRegistryItems.length} shown / ${registryTotal.toLocaleString()} found`}
               </span>
             </div>
             {registryError && (
               <div className="border border-border bg-muted/25 p-3 text-xs text-muted-foreground">
-                Could not search npm right now. Curated packages are still available.
+                Could not search for tools right now. Recommended tools are still available.
               </div>
             )}
             <div className="grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-3">
@@ -672,18 +655,18 @@ export function PiExtensionsCard({ onChanged }: { onChanged?: () => void }) {
             </div>
             {!registryLoading && !registryError && visibleRegistryItems.length === 0 && (
               <div className="border border-border bg-muted/25 p-3 text-xs text-muted-foreground">
-                No npm Pi packages matched this search.
+                No community tools match this search.
               </div>
             )}
             {registryLoading && visibleRegistryItems.length === 0 && (
               <div className="flex items-center gap-2 border border-border bg-muted/25 p-3 text-xs text-muted-foreground">
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                searching npm packages...
+                searching tools...
               </div>
             )}
           </div>
 
-          {visibleItems.length === 0 && visibleRegistryItems.length === 0 && registryError && (
+          {visibleRegistryItems.length === 0 && registryError && (
             <div className="border border-border bg-muted/25 p-3 text-xs text-muted-foreground">
               Try another search or refresh the catalog.
             </div>
@@ -693,23 +676,25 @@ export function PiExtensionsCard({ onChanged }: { onChanged?: () => void }) {
 
       {unknownPackages.length > 0 && (
         <div className="space-y-2">
-          <h4 className="text-xs font-medium text-muted-foreground">Installed outside this list</h4>
+          <h4 className="text-xs font-medium text-muted-foreground">Other installed tools</h4>
           <div className="space-y-1.5">
             {unknownPackages.map((pkg) => (
               <div
                 key={pkg.source}
                 className="flex items-center justify-between gap-2 border border-border px-2.5 py-2 text-xs"
               >
-                <span className="min-w-0 truncate font-mono">{pkg.source}</span>
+                <span className="min-w-0 truncate font-mono">
+                  {packageDisplayName(pkg.source)}
+                </span>
                 <div className="flex shrink-0 items-center gap-2">
                   <span className="text-[11px] text-muted-foreground">
                     {pkg.filtered
-                      ? "filtered"
+                      ? "unavailable"
                       : !pkg.installed
                         ? "repair needed"
                         : pkg.acpCompatible
-                          ? "all ACP agents"
-                          : "Pi only"}
+                          ? "works with every agent"
+                          : "screenpipe only"}
                   </span>
                   {busySource === pkg.source ? (
                     <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
@@ -720,7 +705,7 @@ export function PiExtensionsCard({ onChanged }: { onChanged?: () => void }) {
                       onCheckedChange={(checked) => {
                         if (!checked) removePackageSource(pkg.source);
                       }}
-                      aria-label={`Disable ${pkg.source}`}
+                      aria-label={`Disable ${packageDisplayName(pkg.source)}`}
                     />
                   )}
                 </div>

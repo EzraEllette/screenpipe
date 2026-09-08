@@ -5,11 +5,23 @@
 import { describe, expect, test } from "bun:test";
 import {
   formatDuration,
+  mergeConfig,
+  nativeTestCommand,
   parseWorktreeList,
   sccacheHasBaseDirectories,
 } from "./native-build-queue";
 
 describe("native build queue helpers", () => {
+  test("merges persistence overrides into the enterprise config", () => {
+    expect(mergeConfig(
+      { productName: "enterprise", bundle: { updater: true, resources: ["base"] } },
+      { bundle: { updater: false, resources: ["persistent"], signCommand: null } },
+    )).toEqual({
+      productName: "enterprise",
+      bundle: { updater: false, resources: ["persistent"], signCommand: null },
+    });
+  });
+
   test("extracts worktree paths and ignores porcelain metadata", () => {
     expect(parseWorktreeList([
       "worktree /code/screenpipe",
@@ -36,5 +48,22 @@ describe("native build queue helpers", () => {
     expect(sccacheHasBaseDirectories(stats, ["/code/a", "/code/b"])).toBe(true);
     expect(sccacheHasBaseDirectories(stats, ["/code/a", "/code/c"])).toBe(false);
     expect(sccacheHasBaseDirectories("Base directories                (none)\n", ["/code/a"])).toBe(false);
+  });
+
+  test("matches Windows worktree paths against normalized sccache output", () => {
+    const output = "Base directories                d:/screenpipe/, d:/screenpipe-worktrees/enterprise-persistence/";
+    expect(sccacheHasBaseDirectories(output, [
+      "D:\\screenpipe",
+      "D:\\screenpipe-worktrees\\enterprise-persistence",
+    ])).toBe(true);
+  });
+
+  test("routes native tests through the debug-dev app manifest", () => {
+    expect(nativeTestCommand(["--features", "e2e", "staged_update::"])).toEqual([
+      "cargo", "test", "-p", "screenpipe-app",
+      "--manifest-path", "src-tauri/Cargo.toml",
+      "--profile", "debug-dev",
+      "--features", "e2e", "staged_update::",
+    ]);
   });
 });

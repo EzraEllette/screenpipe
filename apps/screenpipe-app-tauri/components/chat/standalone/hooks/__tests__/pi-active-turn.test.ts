@@ -6,7 +6,10 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
-import { hasAuthoritativeActivePiTurn } from "../use-pi-send-transport";
+import {
+  hasAuthoritativeActivePiTurn,
+  shouldInterruptActivePiTurn,
+} from "../use-pi-send-transport";
 
 const TRANSPORT = join(__dirname, "..", "use-pi-send-transport.ts");
 
@@ -33,6 +36,15 @@ describe("Pi active-turn detection", () => {
 
     expect(start).toBeGreaterThan(-1);
     expect(end).toBeGreaterThan(start);
-    expect(source.slice(start, end)).toContain("hasAuthoritativeActivePiTurn({");
+    expect(source.slice(start, end)).toContain("shouldInterruptActivePiTurn({");
+  });
+
+  it("does not interrupt a fresh process before dispatching its first prompt", () => {
+    expect(shouldInterruptActivePiTurn({
+      startedFreshPiSession: true,
+      isLoading: false,
+      isStreaming: true,
+      assistantMessageId: "stale-assistant",
+    })).toBe(false);
   });
 });

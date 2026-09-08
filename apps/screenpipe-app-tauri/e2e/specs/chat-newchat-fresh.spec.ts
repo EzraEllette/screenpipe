@@ -29,17 +29,24 @@ import { openHomeWindow, waitForAppReady, t } from "../helpers/test-utils.js";
 const MARKER = "E2E-NEWCHAT-FRESH-MARKER-9F2K7X";
 // A stable id for the "existing, non-empty" chat we foreground in Case 3.
 const EXISTING_CHAT = "77777777-cccc-4ccc-8ccc-cccccccccccc";
+const PREFLIGHT_CHAT = "88888888-dddd-4ddd-8ddd-dddddddddddd";
 
 async function emitTauri(event: string, payload: unknown): Promise<void> {
   await browser.executeAsync(
     (evt: string, p: unknown, done: (v?: unknown) => void) => {
       const g = globalThis as unknown as {
-        __TAURI__?: { event?: { emit: (n: string, p: unknown) => Promise<unknown> } };
-        __TAURI_INTERNALS__?: { invoke: (cmd: string, args: object) => Promise<unknown> };
+        __TAURI__?: {
+          event?: { emit: (n: string, p: unknown) => Promise<unknown> };
+        };
+        __TAURI_INTERNALS__?: {
+          invoke: (cmd: string, args: object) => Promise<unknown>;
+        };
       };
       const emit = g.__TAURI__?.event?.emit;
       if (emit) {
-        void emit(evt, p).then(() => done()).catch(() => done());
+        void emit(evt, p)
+          .then(() => done())
+          .catch(() => done());
       } else if (g.__TAURI_INTERNALS__) {
         void g.__TAURI_INTERNALS__
           .invoke("plugin:event|emit", { event: evt, payload: p })
@@ -60,7 +67,11 @@ async function waitForChatSeedHook(): Promise<void> {
       (await browser.execute(
         () => typeof (window as any).__e2eSeedUserMessage === "function",
       )) as boolean,
-    { timeout: t(10_000), interval: 100, timeoutMsg: "E2E chat seed hook did not mount" },
+    {
+      timeout: t(10_000),
+      interval: 100,
+      timeoutMsg: "E2E chat seed hook did not mount",
+    },
   );
 }
 
@@ -104,8 +115,15 @@ async function waitForeground(
 /** Fire the real "+ new chat" shortcut (Cmd/Ctrl+N) the home window listens for. */
 async function pressNewChat(): Promise<void> {
   await browser.execute(() => {
+    const isMac = /mac/i.test(navigator.platform || navigator.userAgent);
     window.dispatchEvent(
-      new KeyboardEvent("keydown", { key: "n", metaKey: true, ctrlKey: true, bubbles: true }),
+      new KeyboardEvent("keydown", {
+        key: "n",
+        code: "KeyN",
+        metaKey: isMac,
+        ctrlKey: !isMac,
+        bubbles: true,
+      }),
     );
   });
 }
@@ -126,7 +144,10 @@ describe("New chat opens fresh + reuses blank (#4719)", function () {
       conversationId: EXISTING_CHAT,
       targetWindow: "home",
     });
-    await waitForeground((id) => id === EXISTING_CHAT, "existing chat never foregrounded");
+    await waitForeground(
+      (id) => id === EXISTING_CHAT,
+      "existing chat never foregrounded",
+    );
     await seedUserMessage(EXISTING_CHAT, MARKER);
     await browser.pause(t(400));
 
@@ -145,7 +166,10 @@ describe("New chat opens fresh + reuses blank (#4719)", function () {
     // results). Record it, then press again twice — because the chat is empty,
     // getOrCreateEmptyChatId must REUSE it, so the foreground id stays constant.
     await pressNewChat();
-    const first = await waitForeground(() => true, "no chat foregrounded after first + new chat");
+    const first = await waitForeground(
+      () => true,
+      "no chat foregrounded after first + new chat",
+    );
 
     await pressNewChat();
     await browser.pause(t(500));
@@ -158,5 +182,23 @@ describe("New chat opens fresh + reuses blank (#4719)", function () {
     // Reuse means the blank chat's id is stable across repeated presses.
     expect(second).toBe(first);
     expect(third).toBe(first);
+  });
+
+  it("Case 5: '+ new chat' works while a send is still in preflight", async () => {
+    await browser.execute((sid: string) => {
+      (window as any).__e2eLatchPreflightSend(sid);
+    }, PREFLIGHT_CHAT);
+    await waitForeground(
+      (id) => id === PREFLIGHT_CHAT,
+      "preflight chat never foregrounded",
+    );
+
+    await pressNewChat();
+    const fresh = await waitForeground(
+      (id) => id !== PREFLIGHT_CHAT,
+      "'+ new chat' reused the loading preflight chat",
+    );
+
+    expect(fresh).not.toBe(PREFLIGHT_CHAT);
   });
 });

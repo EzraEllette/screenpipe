@@ -37,8 +37,18 @@ use tracing::{debug, error, info, warn};
 /// timeout. The desktop keys its fresh-process recovery off the exact error
 /// below (see `await_prompt_start` in pi.rs).
 pub const PROMPT_START_TIMEOUT: Duration = Duration::from_secs(15);
+
+// Windows can spend tens of seconds loading Bun, Pi, and its extension tree on
+// the first prompt (especially while Defender scans a freshly updated install).
+// Once the process has accepted one prompt, the normal watchdog is enough and
+// keeps later wedges actionable instead of making every failure wait longer.
+#[cfg(windows)]
+const FIRST_PROMPT_START_TIMEOUT: Duration = Duration::from_secs(45);
+#[cfg(not(windows))]
+const FIRST_PROMPT_START_TIMEOUT: Duration = PROMPT_START_TIMEOUT;
+
 pub const PROMPT_START_TIMEOUT_ERROR: &str =
-    "AI agent did not start responding within 15 seconds";
+    "AI agent did not start responding within its startup grace period";
 
 fn is_already_processing_rejection(error: &str) -> bool {
     error.to_ascii_lowercase().contains("already processing")
@@ -72,6 +82,9 @@ pub struct PiCommand {
     /// Channel to notify the caller when the command has been written to stdin
     /// (for fire-and-forget prompts) or when `done` is received (for blocking commands).
     pub reply: oneshot::Sender<Result<(), String>>,
+    /// Optional second receipt for callers that must know the whole turn
+    /// finished, not merely that Pi accepted the prompt.
+    pub completion: Option<oneshot::Sender<Result<(), String>>>,
     /// Set on user-prompt commands so the queue can publish "what's pending"
     /// to subscribers. None for new_session / abort / internal commands.
     pub prompt_meta: Option<PiQueuedPrompt>,
@@ -528,6 +541,7 @@ impl PiQueueHandle {
                 payload,
                 wait_mode,
                 reply: tx,
+                completion: None,
                 prompt_meta: None,
             }))
             .await
@@ -545,6 +559,54 @@ impl PiQueueHandle {
         wait_mode: WaitMode,
         preview: String,
         force_visible_queue: bool,
+    ) -> Result<(String, oneshot::Receiver<Result<(), String>>), String> {
+        self.send_prompt_with_completion(
+            payload,
+            wait_mode,
+            preview,
+            force_visible_queue,
+            None,
+        )
+        .await
+    }
+
+    /// Enqueue a prompt and return both its acceptance receipt and its terminal
+    /// turn receipt. Scheduled chat destinations use the latter so a Pipe is
+    /// never marked successful just because its message entered the queue.
+    pub async fn send_prompt_tracked(
+        &self,
+        payload: Value,
+        wait_mode: WaitMode,
+        preview: String,
+        force_visible_queue: bool,
+    ) -> Result<
+        (
+            String,
+            oneshot::Receiver<Result<(), String>>,
+            oneshot::Receiver<Result<(), String>>,
+        ),
+        String,
+    > {
+        let (completion_tx, completion_rx) = oneshot::channel();
+        let (id, acceptance_rx) = self
+            .send_prompt_with_completion(
+                payload,
+                wait_mode,
+                preview,
+                force_visible_queue,
+                Some(completion_tx),
+            )
+            .await?;
+        Ok((id, acceptance_rx, completion_rx))
+    }
+
+    async fn send_prompt_with_completion(
+        &self,
+        payload: Value,
+        wait_mode: WaitMode,
+        preview: String,
+        force_visible_queue: bool,
+        completion: Option<oneshot::Sender<Result<(), String>>>,
     ) -> Result<(String, oneshot::Receiver<Result<(), String>>), String> {
         let id = format!("q_{}", uuid::Uuid::new_v4().simple());
         let queued_at_ms = std::time::SystemTime::now()
@@ -574,6 +636,7 @@ impl PiQueueHandle {
                 payload,
                 wait_mode,
                 reply: tx,
+                completion,
                 prompt_meta: Some(meta),
             }))
             .await
@@ -667,7 +730,11 @@ impl PiQueueHandle {
     /// mode selectors could not take effect until the reply finished. Like
     /// abort/steer, these are delivered immediately and correlated by request
     /// id, so they never wait on the turn.
-    pub async fn send_immediate_awaited(&self, cmd_type_label: &str, mut payload: Value) -> Result<(), String> {
+    pub async fn send_immediate_awaited(
+        &self,
+        cmd_type_label: &str,
+        mut payload: Value,
+    ) -> Result<(), String> {
         let stdin = self
             .stdin
             .as_ref()
@@ -677,23 +744,39 @@ impl PiQueueHandle {
         if let Some(obj) = payload.as_object_mut() {
             obj.insert("id".to_string(), json!(&req_id));
         }
+        let is_steer = payload.get("type").and_then(Value::as_str) == Some("steer");
         let cmd_str = serde_json::to_string(&payload).map_err(|e| e.to_string())?;
         // Register before the write so an immediate response can't be lost.
         let response_rx = self.state.register_response(&req_id);
+        // Keep the logical turn busy across the old agent_end -> steered
+        // agent_start gap. This must be set before the write because Pi can
+        // emit the old turn's terminal event immediately after accepting steer.
+        if is_steer {
+            self.state.set_steer_in_flight();
+        }
         let write_result = {
             let mut stdin_guard = stdin.lock().await;
-            info!("pi_command_queue: writing immediate {} ({})", cmd_type_label, req_id);
+            info!(
+                "pi_command_queue: writing immediate {} ({})",
+                cmd_type_label, req_id
+            );
             writeln!(*stdin_guard, "{}", cmd_str)
                 .and_then(|_| stdin_guard.flush())
                 .map_err(|e| format!("{cmd_type_label} write failed: {e}"))
         };
         if let Err(error) = write_result {
             self.state.cancel_response(&req_id);
+            if is_steer {
+                self.state.clear_steer_in_flight();
+            }
             return Err(error);
         }
         let result =
             wait_for_response_or_terminated(response_rx, &mut alive_rx, cmd_type_label).await;
         self.state.cancel_response(&req_id);
+        if is_steer && result.is_err() {
+            self.state.clear_steer_in_flight();
+        }
         result
     }
 
@@ -795,15 +878,38 @@ pub fn spawn_queue(
     state: Arc<PiQueueState>,
     request_id_start: u64,
 ) -> (PiQueueHandle, tokio::task::JoinHandle<()>) {
-    spawn_queue_with_prompt_start_timeout(stdin, state, request_id_start, PROMPT_START_TIMEOUT)
+    spawn_queue_with_prompt_start_timeouts(
+        stdin,
+        state,
+        request_id_start,
+        FIRST_PROMPT_START_TIMEOUT,
+        PROMPT_START_TIMEOUT,
+    )
 }
 
 /// Like [`spawn_queue`] but with an explicit prompt-start watchdog timeout, so
-/// tests can drive the watchdog on a short clock instead of the 15s default.
+/// tests can drive the watchdog on a short clock instead of the production
+/// defaults.
 pub(crate) fn spawn_queue_with_prompt_start_timeout(
     stdin: Arc<Mutex<ChildStdin>>,
     state: Arc<PiQueueState>,
     request_id_start: u64,
+    prompt_start_timeout: Duration,
+) -> (PiQueueHandle, tokio::task::JoinHandle<()>) {
+    spawn_queue_with_prompt_start_timeouts(
+        stdin,
+        state,
+        request_id_start,
+        prompt_start_timeout,
+        prompt_start_timeout,
+    )
+}
+
+fn spawn_queue_with_prompt_start_timeouts(
+    stdin: Arc<Mutex<ChildStdin>>,
+    state: Arc<PiQueueState>,
+    request_id_start: u64,
+    first_prompt_start_timeout: Duration,
     prompt_start_timeout: Duration,
 ) -> (PiQueueHandle, tokio::task::JoinHandle<()>) {
     let (tx, mut rx) = mpsc::channel::<QueueMessage>(32);
@@ -815,6 +921,7 @@ pub(crate) fn spawn_queue_with_prompt_start_timeout(
 
     let join = tokio::spawn(async move {
         let mut request_id = request_id_start;
+        let mut prompt_attempts = 0usize;
         let mut alive_rx = state.alive.subscribe();
 
         info!("pi_command_queue: drain loop started");
@@ -838,7 +945,7 @@ pub(crate) fn spawn_queue_with_prompt_start_timeout(
             }
 
             match msg {
-                QueueMessage::Command(cmd) => {
+                QueueMessage::Command(mut cmd) => {
                     let prompt_id = cmd.prompt_meta.as_ref().map(|m| m.id.clone());
                     let is_prompt = prompt_id.is_some();
 
@@ -1036,12 +1143,18 @@ pub(crate) fn spawn_queue_with_prompt_start_timeout(
                             if let Some(pid) = &prompt_id {
                                 state.dequeue_prompt(pid);
                             }
+                            let start_timeout = if prompt_attempts == 0 {
+                                first_prompt_start_timeout
+                            } else {
+                                prompt_start_timeout
+                            };
+                            prompt_attempts = prompt_attempts.saturating_add(1);
                             let (accepted, remaining_response) = wait_for_prompt_acceptance(
                                 &state,
                                 &mut alive_rx,
                                 &cmd_type,
                                 response_rx,
-                                prompt_start_timeout,
+                                start_timeout,
                             )
                             .await;
                             let rejected = accepted.is_err();
@@ -1055,6 +1168,11 @@ pub(crate) fn spawn_queue_with_prompt_start_timeout(
                             // plain rejection (process still alive) just skips
                             // this one prompt and drains the next.
                             let wedged = matches!(&accepted, Err(error) if error == PROMPT_START_TIMEOUT_ERROR);
+                            if let Err(error) = &accepted {
+                                if let Some(completion) = cmd.completion.take() {
+                                    let _ = completion.send(Err(error.clone()));
+                                }
+                            }
                             let _ = cmd.reply.send(accepted);
                             if rejected {
                                 state.cancel_response(&req_id);
@@ -1070,11 +1188,24 @@ pub(crate) fn spawn_queue_with_prompt_start_timeout(
                                 std::time::Duration::from_secs(300),
                             )
                             .await;
-                            if let PromptWait::Rejected(error) = wait {
-                                warn!(
-                                    "pi_command_queue: {} was rejected after starting: {}",
-                                    cmd_type, error
-                                );
+                            let completion = match wait {
+                                PromptWait::Idle => Ok(()),
+                                PromptWait::Terminated => {
+                                    Err(format!("Pi process died during {cmd_type}"))
+                                }
+                                PromptWait::TimedOut => Err(format!(
+                                    "AI agent did not finish {cmd_type} within its idle timeout"
+                                )),
+                                PromptWait::Rejected(error) => {
+                                    warn!(
+                                        "pi_command_queue: {} was rejected after starting: {}",
+                                        cmd_type, error
+                                    );
+                                    Err(error)
+                                }
+                            };
+                            if let Some(receipt) = cmd.completion.take() {
+                                let _ = receipt.send(completion);
                             }
                             state.cancel_response(&req_id);
                         }
@@ -1383,6 +1514,17 @@ async fn wait_for_response_or_terminated(
 mod tests {
     use super::*;
 
+    #[test]
+    fn test_first_prompt_start_timeout_platform_policy() {
+        #[cfg(windows)]
+        assert_eq!(
+            FIRST_PROMPT_START_TIMEOUT,
+            std::time::Duration::from_secs(45)
+        );
+        #[cfg(not(windows))]
+        assert_eq!(FIRST_PROMPT_START_TIMEOUT, PROMPT_START_TIMEOUT);
+    }
+
     async fn wait_for_response_id(state: &PiQueueState) -> String {
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
             loop {
@@ -1522,6 +1664,57 @@ mod tests {
         assert_eq!(result, Ok(()));
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_immediate_steer_waits_for_ack_and_keeps_transition_busy() {
+        use std::process::{Command as StdCommand, Stdio};
+
+        let mut child = StdCommand::new("cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn cat as a fake pi stdin");
+        let stdin = Arc::new(Mutex::new(child.stdin.take().expect("child stdin")));
+        let state = PiQueueState::new();
+        let (tx, _rx) = mpsc::channel::<QueueMessage>(1);
+        let handle = PiQueueHandle {
+            tx,
+            stdin: Some(stdin),
+            state: state.clone(),
+        };
+
+        let send = tokio::spawn(async move {
+            handle
+                .send_immediate_awaited(
+                    "steer",
+                    json!({ "type": "steer", "message": "change direction" }),
+                )
+                .await
+        });
+
+        let request_id = wait_for_response_id(&state).await;
+        assert!(
+            state.is_steer_in_flight(),
+            "the old agent_end must not make the turn idle before steer starts"
+        );
+        assert!(
+            !send.is_finished(),
+            "the frontend command must wait for Pi's correlated steer response"
+        );
+
+        state.signal_response(&request_id, Ok(()));
+        assert_eq!(send.await.expect("steer task"), Ok(()));
+        assert!(
+            state.is_steer_in_flight(),
+            "acceptance is not the start event; keep the transition busy"
+        );
+
+        state.clear_steer_in_flight();
+        drop(state);
+        let _ = child.wait();
+    }
+
     #[tokio::test]
     async fn test_queue_handle_send_returns_receiver() {
         // Verify the handle API works without a real subprocess
@@ -1552,6 +1745,92 @@ mod tests {
 
         let result = h.await.unwrap();
         assert!(result.is_ok());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn tracked_prompt_receipt_waits_for_terminal_idle() {
+        use std::process::{Command as StdCommand, Stdio};
+
+        let mut child = StdCommand::new("cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn fake pi");
+        let stdin = Arc::new(Mutex::new(child.stdin.take().expect("fake pi stdin")));
+        let state = PiQueueState::new();
+        let (handle, join) = spawn_queue(stdin, state.clone(), 0);
+
+        let (_, acceptance, mut completion) = handle
+            .send_prompt_tracked(
+                json!({ "type": "prompt", "message": "scheduled work" }),
+                WaitMode::Prompt,
+                "scheduled work".into(),
+                true,
+            )
+            .await
+            .expect("enqueue tracked prompt");
+        let request_id = wait_for_response_id(&state).await;
+        state.mark_agent_active();
+        state.signal_response(&request_id, Ok(()));
+        assert_eq!(acceptance.await.expect("acceptance receipt"), Ok(()));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(25), &mut completion)
+                .await
+                .is_err(),
+            "terminal receipt must not resolve while the turn is active"
+        );
+
+        state.mark_agent_idle();
+        state.signal_done();
+        assert_eq!(completion.await.expect("completion receipt"), Ok(()));
+
+        state.signal_terminated();
+        drop(handle);
+        join.await.expect("queue join");
+        let _ = child.wait();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn tracked_prompt_receipt_reports_process_death() {
+        use std::process::{Command as StdCommand, Stdio};
+
+        let mut child = StdCommand::new("cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn fake pi");
+        let stdin = Arc::new(Mutex::new(child.stdin.take().expect("fake pi stdin")));
+        let state = PiQueueState::new();
+        let (handle, join) = spawn_queue(stdin, state.clone(), 0);
+
+        let (_, acceptance, completion) = handle
+            .send_prompt_tracked(
+                json!({ "type": "prompt", "message": "scheduled work" }),
+                WaitMode::Prompt,
+                "scheduled work".into(),
+                true,
+            )
+            .await
+            .expect("enqueue tracked prompt");
+        let request_id = wait_for_response_id(&state).await;
+        state.mark_agent_active();
+        state.signal_response(&request_id, Ok(()));
+        assert_eq!(acceptance.await.expect("acceptance receipt"), Ok(()));
+
+        state.signal_terminated();
+        let terminal = completion
+            .await
+            .expect("terminal receipt")
+            .expect_err("process death must fail the tracked turn");
+        assert!(terminal.contains("process died"));
+
+        drop(handle);
+        join.await.expect("queue join");
+        let _ = child.wait();
     }
 
     #[cfg(unix)]
@@ -2318,6 +2597,80 @@ mod tests {
             !state.has_active_turn_work(),
             "start timeout must release the pending-turn reservation"
         );
+
+        state.signal_terminated();
+        drop(handle);
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), join).await;
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_only_first_prompt_gets_cold_start_grace() {
+        use std::process::{Command as StdCommand, Stdio};
+
+        let mut child = StdCommand::new("cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn fake pi");
+        let stdin = Arc::new(Mutex::new(child.stdin.take().expect("fake pi stdin")));
+        let state = PiQueueState::new();
+        let (handle, join) = spawn_queue_with_prompt_start_timeouts(
+            stdin,
+            state.clone(),
+            0,
+            std::time::Duration::from_millis(250),
+            std::time::Duration::from_millis(50),
+        );
+
+        let (_, first_reply) = handle
+            .send_prompt(
+                json!({ "type": "prompt", "message": "slow cold start" }),
+                WaitMode::Prompt,
+                "slow cold start".into(),
+                true,
+            )
+            .await
+            .expect("enqueue first prompt");
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !state.is_prompt_pending() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("first prompt should become pending");
+
+        // This acknowledgement arrives after the steady-state watchdog would
+        // fire, but inside the first-prompt grace period.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        state.mark_agent_active();
+        let first_result = tokio::time::timeout(std::time::Duration::from_secs(2), first_reply)
+            .await
+            .expect("cold-start grace should keep the first prompt alive")
+            .expect("first reply channel open");
+        assert_eq!(first_result, Ok(()));
+
+        state.mark_agent_idle();
+        state.signal_done();
+
+        let (_, second_reply) = handle
+            .send_prompt(
+                json!({ "type": "prompt", "message": "steady-state wedge" }),
+                WaitMode::Prompt,
+                "steady-state wedge".into(),
+                true,
+            )
+            .await
+            .expect("enqueue second prompt");
+        let second_result = tokio::time::timeout(std::time::Duration::from_secs(2), second_reply)
+            .await
+            .expect("steady watchdog should still fire promptly")
+            .expect("second reply channel open");
+        assert_eq!(second_result, Err(PROMPT_START_TIMEOUT_ERROR.to_string()));
 
         state.signal_terminated();
         drop(handle);

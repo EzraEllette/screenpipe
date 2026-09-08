@@ -11,10 +11,9 @@ import type { ActivitySnapshot } from "./learning-window";
 // so the session lifecycle (start → prompt → stream → settle → stop) can run
 // under vitest and be asserted directly. vi.mock factories hoist above the
 // file, so spies must come from vi.hoisted.
-const { piStart, piStop, piPrompt, handlers } = vi.hoisted(() => ({
-  piStart: vi.fn(async () => ({ status: "ok", data: { running: true } })),
+const { piStartAndPrompt, piStop, handlers } = vi.hoisted(() => ({
+  piStartAndPrompt: vi.fn(async () => ({ status: "ok", data: "req_1" })),
   piStop: vi.fn(async () => ({ status: "ok" })),
-  piPrompt: vi.fn(async () => ({ status: "ok" })),
   handlers: [] as Array<(envelope: AgentEventEnvelope) => void>,
 }));
 
@@ -30,7 +29,11 @@ vi.mock("@/lib/events/bus", () => ({
   }),
 }));
 vi.mock("@/lib/utils/tauri", () => ({
-  commands: { piStart, piStop, piPrompt },
+  commands: {
+    piStartAndPrompt,
+    piStop,
+    writeBrowserLog: vi.fn(async () => {}),
+  },
 }));
 
 import { summarizeFirstRunWithAi } from "./summarize-with-ai";
@@ -46,7 +49,7 @@ const preset = { provider: "screenpipe-cloud", model: "auto" } as never;
 
 /** Drive the stream the way Pi does, once the session is registered. */
 async function emit(events: Array<Record<string, unknown>>) {
-  // Let summarizeFirstRunWithAi reach registerForeground + piPrompt first.
+  // Let summarizeFirstRunWithAi register before the atomic start-and-prompt.
   await vi.waitFor(() => expect(handlers.length).toBeGreaterThan(0));
   const handler = handlers[handlers.length - 1];
   for (const event of events) {
@@ -56,11 +59,9 @@ async function emit(events: Array<Record<string, unknown>>) {
 
 function reset() {
   handlers.length = 0;
-  piStart.mockClear();
+  piStartAndPrompt.mockClear();
   piStop.mockClear();
-  piPrompt.mockClear();
-  piStart.mockResolvedValue({ status: "ok", data: { running: true } } as never);
-  piPrompt.mockResolvedValue({ status: "ok" } as never);
+  piStartAndPrompt.mockResolvedValue({ status: "ok", data: "req_1" } as never);
 }
 
 const GOOD =
@@ -82,7 +83,7 @@ describe("summarizeFirstRunWithAi — session lifecycle", () => {
     expect(await pending).toBe(GOOD);
 
     // Runs in its own throwaway session so it can never reach the sidebar.
-    const [sessionId, dir, token] = piStart.mock.calls[0] as unknown as string[];
+    const [sessionId, dir, token] = piStartAndPrompt.mock.calls[0] as unknown as string[];
     expect(sessionId.startsWith("__title:first-run-")).toBe(true);
     expect(dir).toContain("pi-first-run");
     expect(token).toBe("token");
@@ -99,7 +100,9 @@ describe("summarizeFirstRunWithAi — session lifecycle", () => {
     await emit([{ type: "text_delta", delta: GOOD }, { type: "agent_end" }]);
     await pending;
 
-    const prompt = String((piPrompt.mock.calls[0] as unknown as string[])[1]);
+    const prompt = String(
+      (piStartAndPrompt.mock.calls[0] as unknown as string[])[4],
+    );
     expect(prompt).toContain("learning-window.ts");
     expect(prompt).toContain("screens_indexed: 31");
     expect(prompt).toContain("Do not use any tools");
@@ -164,18 +167,12 @@ describe("summarizeFirstRunWithAi — session lifecycle", () => {
     expect(await pending).toBeNull();
   });
 
-  it("returns null without starting a session for ACP or a missing preset", async () => {
+  it("returns null without starting a session for a missing preset", async () => {
     reset();
-    expect(
-      await summarizeFirstRunWithAi(activity, {
-        elapsedMs: 60_000,
-        preset: { provider: "acp", model: "" } as never,
-      }),
-    ).toBeNull();
     expect(
       await summarizeFirstRunWithAi(activity, { elapsedMs: 60_000, preset: null }),
     ).toBeNull();
-    expect(piStart).not.toHaveBeenCalled();
+    expect(piStartAndPrompt).not.toHaveBeenCalled();
   });
 
   // A hosted preset with no signed-in token cannot authenticate, so spawning
@@ -191,12 +188,12 @@ describe("summarizeFirstRunWithAi — session lifecycle", () => {
         userToken: null,
       }),
     ).toBeNull();
-    expect(piStart).not.toHaveBeenCalled();
+    expect(piStartAndPrompt).not.toHaveBeenCalled();
   });
 
   it("returns null when the session fails to start", async () => {
     reset();
-    piStart.mockResolvedValue({ status: "error" } as never);
+    piStartAndPrompt.mockResolvedValue({ status: "error" } as never);
     expect(
       await summarizeFirstRunWithAi(activity, {
         elapsedMs: 60_000,
@@ -204,7 +201,6 @@ describe("summarizeFirstRunWithAi — session lifecycle", () => {
         userToken: "token",
       }),
     ).toBeNull();
-    expect(piPrompt).not.toHaveBeenCalled();
   });
 
   // Every fallback above was reported only to a webview console, which never
@@ -225,6 +221,55 @@ describe("summarizeFirstRunWithAi — session lifecycle", () => {
       onFallback: (reason) => reasons.push(reason),
     });
     expect(reasons).toEqual(["no_preset", "cloud_preset_without_token"]);
+  });
+
+  it("keeps waiting for the selected agent instead of timing it out", async () => {
+    reset();
+    vi.useFakeTimers();
+    const pending = summarizeFirstRunWithAi(activity, {
+      elapsedMs: 60_000,
+      preset,
+      userToken: "token",
+    });
+    await vi.waitFor(() => expect(handlers.length).toBeGreaterThan(0));
+
+    let settled = false;
+    void pending.then(() => {
+      settled = true;
+    });
+    await vi.advanceTimersByTimeAsync(2 * 60_000);
+    expect(settled).toBe(false);
+
+    handlers[handlers.length - 1]({
+      sessionId: "x",
+      event: { type: "text_delta", delta: GOOD },
+    } as unknown as AgentEventEnvelope);
+    handlers[handlers.length - 1]({
+      sessionId: "x",
+      event: { type: "agent_end" },
+    } as unknown as AgentEventEnvelope);
+    await expect(pending).resolves.toBe(GOOD);
+    vi.useRealTimers();
+  });
+
+  it("passes an ACP preset through to the selected agent backend", async () => {
+    reset();
+    const acpPreset = {
+      provider: "acp",
+      model: "",
+      acpAgent: { id: "codex-acp" },
+    } as never;
+    const pending = summarizeFirstRunWithAi(activity, {
+      elapsedMs: 60_000,
+      preset: acpPreset,
+    });
+    await emit([{ type: "text_delta", delta: GOOD }, { type: "agent_end" }]);
+    await expect(pending).resolves.toBe(GOOD);
+    expect(piStartAndPrompt.mock.calls[0]?.[3]).toMatchObject({
+      backend: "acp",
+      acpAgent: { id: "codex-acp" },
+      model: "codex-acp",
+    });
   });
 
   it("does not call back when the model wrote the summary", async () => {

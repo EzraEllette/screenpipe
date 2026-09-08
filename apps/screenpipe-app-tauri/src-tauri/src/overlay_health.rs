@@ -10,7 +10,8 @@
 //! pauses, wake-from-sleep and post-restart grace. This module runs the
 //! overlay-facing state machine
 //!
-//!   normal → failure → fixing → recovered → normal
+//!   normal → failure → recovering → recovered → normal
+//!                       ↘ fixing ↗
 //!
 //! and pushes every transition to both overlay surfaces (the macOS SwiftUI
 //! panel via FFI, the Tauri webview via event) — the surfaces render pushed
@@ -36,9 +37,31 @@ const FIXING_CONFIRM_TICKS: u32 = 2;
 const PASSIVE_RECOVERY_CONFIRM_TICKS: u32 = 90;
 /// A user-triggered recovery must never remain in `fixing` forever while a
 /// checked-out SQLite connection prevents graceful pool close. Past this
-/// bound, a process relaunch is the only safe way to prove every connection is
-/// gone before recording resumes.
+/// bound, keep the app running and ask the user to quit and reopen it manually.
 const USER_RESTART_TEARDOWN_TIMEOUT: Duration = Duration::from_secs(15);
+
+pub(crate) const MANUAL_SCREEN_CAPTURE_RECOVERY_DETAIL: &str =
+    "quit and reopen screenpipe to restore screen capture";
+const MANUAL_RECORDING_RECOVERY_DETAIL: &str = "quit and reopen screenpipe to recover recording";
+pub(crate) const MANUAL_PERMISSION_RECOVERY_DETAIL: &str =
+    "quit and reopen screenpipe to finish screen recording access";
+const MANUAL_RECOVERY_ACTION: &str = "manual-reopen";
+
+fn manual_recovery_detail(detail: &str) -> Option<&'static str> {
+    match detail {
+        MANUAL_SCREEN_CAPTURE_RECOVERY_DETAIL => Some(MANUAL_SCREEN_CAPTURE_RECOVERY_DETAIL),
+        MANUAL_RECORDING_RECOVERY_DETAIL => Some(MANUAL_RECORDING_RECOVERY_DETAIL),
+        MANUAL_PERMISSION_RECOVERY_DETAIL => Some(MANUAL_PERMISSION_RECOVERY_DETAIL),
+        _ => None,
+    }
+}
+
+fn pending_manual_recovery_detail() -> Option<&'static str> {
+    let inner = INNER.lock().ok()?;
+    (inner.state == OverlayHealthState::Failure)
+        .then(|| manual_recovery_detail(&inner.last_detail))
+        .flatten()
+}
 
 fn passive_recovery_confirm_ticks() -> u32 {
     if crate::stale_tier::capture_loop_silent_e2e_started() {
@@ -52,6 +75,7 @@ fn passive_recovery_confirm_ticks() -> u32 {
 pub enum OverlayHealthState {
     Normal,
     Failure,
+    Recovering,
     Fixing,
     Recovered,
 }
@@ -61,6 +85,7 @@ impl OverlayHealthState {
         match self {
             OverlayHealthState::Normal => "normal",
             OverlayHealthState::Failure => "failure",
+            OverlayHealthState::Recovering => "recovering",
             OverlayHealthState::Fixing => "fixing",
             OverlayHealthState::Recovered => "recovered",
         }
@@ -169,6 +194,25 @@ fn disable_alert_state(inner: &mut Inner) -> TickEffect {
     }
 }
 
+fn stand_down_incident(inner: &mut Inner) -> TickEffect {
+    inner.healthy_ticks = 0;
+    inner.not_broken_ticks += 1;
+    if inner.not_broken_ticks < 3 {
+        return TickEffect::None;
+    }
+
+    inner.state = OverlayHealthState::Normal;
+    inner.not_broken_ticks = 0;
+    inner.dismissed = false;
+    info!("overlay health: incident no longer applies — standing down");
+    if inner.auto_revealed {
+        inner.auto_revealed = false;
+        TickEffect::PushAndUnreveal(OverlayHealthState::Normal)
+    } else {
+        TickEffect::Push(OverlayHealthState::Normal, None)
+    }
+}
+
 /// Pure overlay state transition. All Tauri/Swift side effects stay in
 /// `on_tick`; keeping the reducer independent lets tests drive long temporal
 /// sequences with an injected clock and boot phase.
@@ -200,8 +244,10 @@ fn transition_tick_with_stand_down(
             if healthy {
                 // Passive recovery must outlive the 60s freshness window of a
                 // single frame. Today's incident produced a brief frame burst,
-                // looked healthy, then wedged again; one tick is not proof.
-                inner.healthy_ticks = inner.healthy_ticks.saturating_add(1);
+                // looked healthy, then wedged again; one tick is not proof. It
+                // is enough to stop claiming recording is currently broken.
+                inner.state = OverlayHealthState::Recovering;
+                inner.healthy_ticks = 1;
                 inner.not_broken_ticks = 0;
                 let confirm_ticks = passive_recovery_confirm_ticks();
                 if inner.healthy_ticks >= confirm_ticks {
@@ -213,7 +259,8 @@ fn transition_tick_with_stand_down(
                     );
                     TickEffect::Push(OverlayHealthState::Recovered, None)
                 } else {
-                    TickEffect::None
+                    info!("overlay health: recording is healthy — confirming recovery");
+                    TickEffect::Push(OverlayHealthState::Recovering, None)
                 }
             } else if stand_down {
                 // The incident evaporated without a healthy engine — the
@@ -221,23 +268,46 @@ fn transition_tick_with_stand_down(
                 // pause took over, etc. Nothing recovered, so no green
                 // confirmation: stand down quietly (debounced so a flap
                 // between broken-reasons doesn't flicker the pill).
+                stand_down_incident(inner)
+            } else {
                 inner.healthy_ticks = 0;
-                inner.not_broken_ticks += 1;
-                if inner.not_broken_ticks >= 3 {
-                    inner.state = OverlayHealthState::Normal;
-                    inner.not_broken_ticks = 0;
-                    inner.dismissed = false;
-                    info!("overlay health: incident no longer applies — standing down");
-                    if inner.auto_revealed {
-                        inner.auto_revealed = false;
-                        TickEffect::PushAndUnreveal(OverlayHealthState::Normal)
-                    } else {
-                        TickEffect::Push(OverlayHealthState::Normal, None)
-                    }
+                inner.not_broken_ticks = 0;
+                TickEffect::None
+            }
+        }
+        OverlayHealthState::Recovering => {
+            if healthy {
+                inner.healthy_ticks = inner.healthy_ticks.saturating_add(1);
+                inner.not_broken_ticks = 0;
+                let confirm_ticks = passive_recovery_confirm_ticks();
+                if inner.healthy_ticks >= confirm_ticks {
+                    inner.state = OverlayHealthState::Recovered;
+                    inner.recovered_at = Some(now);
+                    inner.last_detail.clear();
+                    info!(
+                        "overlay health: recording recovery remained healthy for {} checks",
+                        confirm_ticks
+                    );
+                    TickEffect::Push(OverlayHealthState::Recovered, None)
                 } else {
                     TickEffect::None
                 }
+            } else if stand_down {
+                stand_down_incident(inner)
+            } else if broken {
+                // Recovery confirmation failed. Restore the prior reason so
+                // the pill never falls back to a less useful generic error.
+                inner.state = OverlayHealthState::Failure;
+                inner.healthy_ticks = 0;
+                inner.not_broken_ticks = 0;
+                TickEffect::Push(
+                    OverlayHealthState::Failure,
+                    (!inner.last_detail.is_empty()).then(|| inner.last_detail.clone()),
+                )
             } else {
+                // One missing health response is unknown, not proof that the
+                // incident returned. Keep the truthful confirmation state but
+                // require a fresh run of consecutive healthy checks.
                 inner.healthy_ticks = 0;
                 inner.not_broken_ticks = 0;
                 TickEffect::None
@@ -338,6 +408,15 @@ fn apply_failure_detail(
 ) -> TickEffect {
     match inner.state {
         OverlayHealthState::Failure => {
+            // A failed spawn has the exact permission result. The following
+            // health tick only knows the engine did not start, so do not let
+            // that generic classification erase the actionable explanation.
+            if broken
+                && failure_detail == "recording engine could not start"
+                && is_specific_permission_restart_detail(&inner.last_detail)
+            {
+                return effect;
+            }
             let next_detail = if broken && !failure_detail.is_empty() {
                 failure_detail
             } else if previous_state == OverlayHealthState::Fixing {
@@ -368,7 +447,7 @@ fn apply_failure_detail(
             inner.last_detail.clear();
             effect
         }
-        OverlayHealthState::Fixing => effect,
+        OverlayHealthState::Recovering | OverlayHealthState::Fixing => effect,
     }
 }
 
@@ -432,20 +511,33 @@ fn mark_capture_recovery_e2e() {
 #[cfg(not(all(debug_assertions, feature = "e2e")))]
 fn mark_capture_recovery_e2e() {}
 
-/// Wire format for both overlay surfaces: `state`, `state|detail`, or
-/// `state|detail|subsystem`.
+/// Wire format for both overlay surfaces: `state`, `state|detail`,
+/// `state|detail|subsystem`, or `state|detail|subsystem|action`.
 ///
 /// The subsystem is appended rather than inlined so the pill can name what
 /// actually failed (#6126) while `detail` keeps its existing meaning and
 /// position. It is only present for a failure the engine could attribute to a
 /// single subsystem; both renderers fall back to the generic wording without
-/// it. Neither field ever contains a `|`, so a fixed 3-way split is exact.
+/// it. Manual recovery adds an explicit action field so neither renderer
+/// infers behavior from user-facing English. No field contains a `|`.
 pub(crate) fn build_health_payload(state: OverlayHealthState, detail: Option<&str>) -> String {
     let detail = detail.unwrap_or("");
     if detail.is_empty() {
         return state.as_str().to_string();
     }
-    match crate::health::overlay_failure_subsystem(detail) {
+    let subsystem = crate::health::overlay_failure_subsystem(detail);
+    let manual_recovery =
+        state == OverlayHealthState::Failure && manual_recovery_detail(detail).is_some();
+    if manual_recovery {
+        return format!(
+            "{}|{}|{}|{}",
+            state.as_str(),
+            detail,
+            subsystem,
+            MANUAL_RECOVERY_ACTION
+        );
+    }
+    match subsystem {
         "" => format!("{}|{}", state.as_str(), detail),
         subsystem => format!("{}|{}|{}", state.as_str(), detail, subsystem),
     }
@@ -622,6 +714,28 @@ async fn reveal_overlay_if_hidden(app: &tauri::AppHandle) {
 /// platforms run the identical sequence, and the health loop — not this
 /// function — confirms the recovery.
 pub async fn restart_recording(app: tauri::AppHandle) {
+    // A recorder-only restart cannot release leaked process-wide native
+    // workers. More importantly, this health path must never terminate the app:
+    // it may interrupt unrelated user work and its terminal classification is
+    // deliberately conservative. Keep the current process alive and leave the
+    // final quit/reopen decision to the user.
+    let process_exhausted = screenpipe_screen::screencapturekit_process_exhausted();
+    let pending_manual_detail = pending_manual_recovery_detail();
+    if restart_preflight_action(process_exhausted, pending_manual_detail.is_some())
+        == RestartPreflightAction::ShowManualRecovery
+    {
+        let detail = if process_exhausted {
+            MANUAL_SCREEN_CAPTURE_RECOVERY_DETAIL
+        } else {
+            pending_manual_detail.unwrap_or(MANUAL_RECORDING_RECOVERY_DETAIL)
+        };
+        warn!(
+            "overlay health: manual-only recovery is still active; refusing recorder restart and keeping app running"
+        );
+        show_manual_recovery_failure(&app, detail);
+        return;
+    }
+
     {
         let Ok(mut inner) = INNER.lock() else { return };
         if !begin_fixing(&mut inner, Instant::now()) {
@@ -640,54 +754,104 @@ pub async fn restart_recording(app: tauri::AppHandle) {
         crate::recording::stop_screenpipe(app.state(), app.clone()),
     )
     .await;
-    if recording_restart_action(&teardown) == RecordingRestartAction::RelaunchApp {
-        match teardown {
-            crate::recording::TeardownOutcome::Failed(error) => warn!(
-                "overlay health: stop before restart failed ({error}); relaunching app"
-            ),
+    if recording_restart_action(&teardown) == RecordingRestartAction::KeepAppRunningWithFailure {
+        match &teardown {
+            crate::recording::TeardownOutcome::Failed(error) => {
+                warn!(
+                    "overlay health: stop before restart failed ({error}); keeping app running for manual recovery"
+                )
+            }
             crate::recording::TeardownOutcome::TimedOut => warn!(
-                "overlay health: stop before restart exceeded {:?}; relaunching app",
+                "overlay health: stop before restart exceeded {:?}; keeping app running for manual recovery",
                 USER_RESTART_TEARDOWN_TIMEOUT
             ),
             crate::recording::TeardownOutcome::Completed => unreachable!(),
         }
-        crate::process_exit::request_app_relaunch(
-            app,
-            "recording recovery teardown did not complete",
-            Duration::from_millis(250),
-        );
+        show_manual_recovery_failure(&app, MANUAL_RECORDING_RECOVERY_DETAIL);
         return;
     }
     tokio::time::sleep(Duration::from_secs(2)).await;
+    // A bounded native call can finish after recorder teardown and change the
+    // process-wide status while we wait for macOS resources to settle. Re-check
+    // immediately before spawning so that late terminal evidence cannot race
+    // us into an in-process restart that ScreenCaptureKit cannot recover from.
+    if screenpipe_screen::screencapturekit_process_exhausted() {
+        warn!(
+            "overlay health: ScreenCaptureKit process worker ceiling reached during recorder restart; keeping app running for manual recovery"
+        );
+        show_manual_recovery_failure(&app, MANUAL_SCREEN_CAPTURE_RECOVERY_DETAIL);
+        return;
+    }
     if let Err(e) = crate::recording::spawn_screenpipe(app.state(), app.clone(), None).await {
         warn!("overlay health: spawn during restart failed: {}", e);
+        let detail = restart_failure_detail(&e);
         if let Ok(mut inner) = INNER.lock() {
             fixing_failed(&mut inner);
-            inner.last_detail = "recording did not restart".to_string();
+            inner.last_detail = detail.to_string();
         }
-        push_state(
-            &app,
-            OverlayHealthState::Failure,
-            Some("recording did not restart"),
-        );
+        push_state(&app, OverlayHealthState::Failure, Some(detail));
+    }
+}
+
+fn show_manual_recovery_failure(app: &tauri::AppHandle, detail: &'static str) {
+    if let Ok(mut inner) = INNER.lock() {
+        fixing_failed(&mut inner);
+        inner.last_detail = detail.to_string();
+    }
+    push_state(app, OverlayHealthState::Failure, Some(detail));
+}
+
+fn restart_failure_detail(error: &str) -> &'static str {
+    let error = error.to_ascii_lowercase();
+    if error.contains("screen recording permission was granted") {
+        MANUAL_PERMISSION_RECOVERY_DETAIL
+    } else if error.contains("screen recording permission") {
+        "screen recording permission is required"
+    } else if error.contains("server not") {
+        "recording engine did not restart"
+    } else {
+        "recording did not restart"
+    }
+}
+
+fn is_specific_permission_restart_detail(detail: &str) -> bool {
+    matches!(
+        detail,
+        "screen recording permission is required"
+            | MANUAL_PERMISSION_RECOVERY_DETAIL
+    )
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum RestartPreflightAction {
+    RestartRecorder,
+    ShowManualRecovery,
+}
+
+fn restart_preflight_action(
+    process_exhausted: bool,
+    manual_recovery_pending: bool,
+) -> RestartPreflightAction {
+    if process_exhausted || manual_recovery_pending {
+        RestartPreflightAction::ShowManualRecovery
+    } else {
+        RestartPreflightAction::RestartRecorder
     }
 }
 
 #[derive(Debug, PartialEq, Eq)]
 enum RecordingRestartAction {
     SpawnInProcess,
-    RelaunchApp,
+    KeepAppRunningWithFailure,
 }
 
-fn recording_restart_action(
-    outcome: &crate::recording::TeardownOutcome,
-) -> RecordingRestartAction {
+fn recording_restart_action(outcome: &crate::recording::TeardownOutcome) -> RecordingRestartAction {
     match outcome {
-        crate::recording::TeardownOutcome::Completed => {
-            RecordingRestartAction::SpawnInProcess
-        }
+        crate::recording::TeardownOutcome::Completed => RecordingRestartAction::SpawnInProcess,
         crate::recording::TeardownOutcome::Failed(_)
-        | crate::recording::TeardownOutcome::TimedOut => RecordingRestartAction::RelaunchApp,
+        | crate::recording::TeardownOutcome::TimedOut => {
+            RecordingRestartAction::KeepAppRunningWithFailure
+        }
     }
 }
 
@@ -760,6 +924,31 @@ mod tests {
         );
     }
 
+    #[test]
+    fn manual_recovery_is_an_explicit_wire_action() {
+        assert_eq!(
+            build_health_payload(
+                OverlayHealthState::Failure,
+                Some(MANUAL_SCREEN_CAPTURE_RECOVERY_DETAIL),
+            ),
+            "failure|quit and reopen screenpipe to restore screen capture|screen|manual-reopen",
+        );
+        assert_eq!(
+            build_health_payload(
+                OverlayHealthState::Failure,
+                Some(MANUAL_RECORDING_RECOVERY_DETAIL),
+            ),
+            "failure|quit and reopen screenpipe to recover recording||manual-reopen",
+        );
+        assert_eq!(
+            build_health_payload(
+                OverlayHealthState::Failure,
+                Some(MANUAL_PERMISSION_RECOVERY_DETAIL),
+            ),
+            "failure|quit and reopen screenpipe to finish screen recording access|screen|manual-reopen",
+        );
+    }
+
     /// An unattributable failure keeps the two-field shape, so the renderers
     /// fall back to the generic wording rather than inventing a subsystem.
     #[test]
@@ -784,6 +973,7 @@ mod tests {
         for state in [
             OverlayHealthState::Normal,
             OverlayHealthState::Failure,
+            OverlayHealthState::Recovering,
             OverlayHealthState::Fixing,
             OverlayHealthState::Recovered,
         ] {
@@ -792,29 +982,34 @@ mod tests {
         }
     }
 
-    /// The renderers split on `|` into at most three parts, so no field may
-    /// contain one — otherwise the subsystem would absorb part of the reason.
+    /// The renderers split on `|` into at most four parts, so no field may
+    /// contain one — otherwise a later field would absorb part of the reason.
     #[test]
     fn no_payload_field_contains_the_separator() {
         for detail in [
             "audio capture is not updating",
             "screen capture is not updating",
+            MANUAL_SCREEN_CAPTURE_RECOVERY_DETAIL,
+            MANUAL_RECORDING_RECOVERY_DETAIL,
+            MANUAL_PERMISSION_RECOVERY_DETAIL,
             "audio and screen capture are not updating",
             "multiple recording errors detected",
             "recording data cannot be saved",
             "recording engine could not start",
+            "recording engine did not restart",
             "recording engine stopped",
             "recording stopped unexpectedly",
             "recording did not restart",
+            "screen recording permission is required",
             "simulated recording failure",
             "updating database",
         ] {
             let payload = build_health_payload(OverlayHealthState::Failure, Some(detail));
             assert!(
-                payload.matches('|').count() <= 2,
-                "{payload:?} would not parse into state/detail/subsystem",
+                payload.matches('|').count() <= 3,
+                "{payload:?} would not parse into state/detail/subsystem/action",
             );
-            let parts: Vec<&str> = payload.splitn(3, '|').collect();
+            let parts: Vec<&str> = payload.splitn(4, '|').collect();
             assert_eq!(parts[1], detail, "detail must survive the round trip");
         }
     }
@@ -834,18 +1029,76 @@ mod tests {
     }
 
     #[test]
-    fn user_restart_relaunches_when_teardown_cannot_prove_pools_closed() {
+    fn user_restart_never_relaunches_the_app() {
+        assert_eq!(
+            restart_preflight_action(false, false),
+            RestartPreflightAction::RestartRecorder
+        );
+        assert_eq!(
+            restart_preflight_action(true, false),
+            RestartPreflightAction::ShowManualRecovery,
+            "terminal native evidence must remain advisory"
+        );
+        assert_eq!(
+            restart_preflight_action(false, true),
+            RestartPreflightAction::ShowManualRecovery,
+            "a stale or malformed UI must not bypass a manual-only incident"
+        );
         assert_eq!(
             recording_restart_action(&TeardownOutcome::Completed),
             RecordingRestartAction::SpawnInProcess
         );
         assert_eq!(
             recording_restart_action(&TeardownOutcome::TimedOut),
-            RecordingRestartAction::RelaunchApp
+            RecordingRestartAction::KeepAppRunningWithFailure
+        );
+        let failed = TeardownOutcome::Failed("pool closed".to_string());
+        assert_eq!(
+            recording_restart_action(&failed),
+            RecordingRestartAction::KeepAppRunningWithFailure
+        );
+    }
+
+    #[test]
+    fn restart_failure_surfaces_known_permission_and_engine_errors() {
+        assert_eq!(
+            restart_failure_detail(
+                "Screen recording permission was granted, but Screenpipe must restart before it can be used."
+            ),
+            MANUAL_PERMISSION_RECOVERY_DETAIL
         );
         assert_eq!(
-            recording_restart_action(&TeardownOutcome::Failed("pool closed".to_string())),
-            RecordingRestartAction::RelaunchApp
+            restart_failure_detail("Screen recording permission required"),
+            "screen recording permission is required"
+        );
+        assert_eq!(
+            restart_failure_detail("Server not running — cannot start capture"),
+            "recording engine did not restart"
+        );
+        assert_eq!(
+            restart_failure_detail("audio device failed"),
+            "recording did not restart"
+        );
+    }
+
+    #[test]
+    fn generic_health_tick_keeps_the_specific_permission_restart_detail() {
+        let mut inner = test_inner(OverlayHealthState::Failure);
+        inner.last_detail = "screen recording permission is required".to_string();
+
+        assert_eq!(
+            apply_failure_detail(
+                &mut inner,
+                OverlayHealthState::Failure,
+                true,
+                "recording engine could not start",
+                TickEffect::None,
+            ),
+            TickEffect::None
+        );
+        assert_eq!(
+            inner.last_detail,
+            "screen recording permission is required"
         );
     }
 
@@ -860,7 +1113,13 @@ mod tests {
         );
         inner.auto_revealed = true;
 
-        for tick in 1..PASSIVE_RECOVERY_CONFIRM_TICKS {
+        assert_eq!(
+            transition_tick(&mut inner, false, true, start + Duration::from_secs(1), ""),
+            TickEffect::Push(OverlayHealthState::Recovering, None)
+        );
+        assert_eq!(inner.state, OverlayHealthState::Recovering);
+
+        for tick in 2..PASSIVE_RECOVERY_CONFIRM_TICKS {
             assert_eq!(
                 transition_tick(
                     &mut inner,
@@ -872,7 +1131,7 @@ mod tests {
                 TickEffect::None,
                 "passive recovery must remain unconfirmed at healthy tick {tick}"
             );
-            assert_eq!(inner.state, OverlayHealthState::Failure);
+            assert_eq!(inner.state, OverlayHealthState::Recovering);
         }
 
         let recovered_at = start + Duration::from_secs(PASSIVE_RECOVERY_CONFIRM_TICKS.into());
@@ -1238,7 +1497,7 @@ mod tests {
     #[test]
     fn recovered_relapse_returns_to_failure_without_a_second_reveal() {
         let start = Instant::now();
-        let mut inner = test_inner(OverlayHealthState::Failure);
+        let mut inner = test_inner(OverlayHealthState::Recovering);
         inner.healthy_ticks = PASSIVE_RECOVERY_CONFIRM_TICKS - 1;
         transition_tick(&mut inner, false, true, start, "");
         assert_eq!(inner.state, OverlayHealthState::Recovered);
@@ -1258,8 +1517,20 @@ mod tests {
     fn transient_passive_recovery_resets_without_false_green_or_silent_stand_down() {
         let start = Instant::now();
         let mut inner = test_inner(OverlayHealthState::Failure);
+        inner.last_detail = "screen capture is not updating".to_string();
 
-        for tick in 1..=60 {
+        assert_eq!(
+            transition_tick_with_stand_down(
+                &mut inner,
+                false,
+                true,
+                false,
+                start + Duration::from_secs(1),
+                "",
+            ),
+            TickEffect::Push(OverlayHealthState::Recovering, None)
+        );
+        for tick in 2..=60 {
             assert_eq!(
                 transition_tick_with_stand_down(
                     &mut inner,
@@ -1273,6 +1544,7 @@ mod tests {
             );
         }
         assert_eq!(inner.healthy_ticks, 60);
+        assert_eq!(inner.state, OverlayHealthState::Recovering);
 
         for tick in 61..=95 {
             assert_eq!(
@@ -1285,13 +1557,29 @@ mod tests {
                     "",
                 ),
                 TickEffect::None,
-                "an unconfirmed recovery must stay visible while failure is re-debounced"
+                "an unknown check must not claim the failure returned"
             );
-            assert_eq!(inner.state, OverlayHealthState::Failure);
+            assert_eq!(inner.state, OverlayHealthState::Recovering);
         }
         assert_eq!(inner.healthy_ticks, 0);
 
-        for tick in 96..=98 {
+        assert_eq!(
+            transition_tick_with_stand_down(
+                &mut inner,
+                true,
+                false,
+                false,
+                start + Duration::from_secs(96),
+                "",
+            ),
+            TickEffect::Push(
+                OverlayHealthState::Failure,
+                Some("screen capture is not updating".to_string())
+            ),
+            "a confirmed relapse must restore the prior failure"
+        );
+
+        for tick in 97..=99 {
             let effect = transition_tick_with_stand_down(
                 &mut inner,
                 false,
@@ -1300,7 +1588,7 @@ mod tests {
                 start + Duration::from_secs(tick),
                 "",
             );
-            if tick < 98 {
+            if tick < 99 {
                 assert_eq!(effect, TickEffect::None);
             } else {
                 assert_eq!(
@@ -1334,12 +1622,13 @@ mod tests {
     #[test]
     fn overlay_state_machine_exhaustively_checks_65536_operation_sequences() {
         let start = Instant::now();
-        let mut transitions_seen = [[false; 4]; 4];
+        let mut transitions_seen = [[false; 5]; 5];
         let state_index = |state: OverlayHealthState| match state {
             OverlayHealthState::Normal => 0,
             OverlayHealthState::Failure => 1,
-            OverlayHealthState::Fixing => 2,
-            OverlayHealthState::Recovered => 3,
+            OverlayHealthState::Recovering => 2,
+            OverlayHealthState::Fixing => 3,
+            OverlayHealthState::Recovered => 4,
         };
 
         // Operations are neutral tick, broken tick, healthy tick, and restart.
@@ -1388,16 +1677,21 @@ mod tests {
         for (from, to) in [
             (0, 0),
             (0, 1),
-            (0, 2),
+            (0, 3),
             (1, 0),
             (1, 1),
             (1, 2),
+            (1, 3),
+            (2, 0),
+            (2, 1),
             (2, 2),
             (2, 3),
-            (3, 0),
-            (3, 1),
-            (3, 2),
             (3, 3),
+            (3, 4),
+            (4, 0),
+            (4, 1),
+            (4, 3),
+            (4, 4),
         ] {
             assert!(transitions_seen[from][to], "missing transition {from} -> {to}");
         }

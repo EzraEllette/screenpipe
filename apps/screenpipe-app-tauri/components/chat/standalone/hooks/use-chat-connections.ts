@@ -7,6 +7,7 @@ import { useCallback, useEffect, useState } from "react";
 import { localFetch } from "@/lib/api";
 import {
   buildConnectionSetupSuggestions,
+  connectionListsEqual,
   fetchConnectionPreviewSuggestions,
   mergeConnectionSuggestions,
   normalizeConnectionForPlatform,
@@ -124,8 +125,19 @@ export function useChatConnections({
           mcp_server_id: connection.mcp_server_id,
         }));
 
-      setAllConnectionItems(allConnections);
-      setConnections(connectedConnections);
+      // Focus and connection events can legitimately refresh this endpoint
+      // more than once. Preserve identity for an unchanged payload so the
+      // calendar preview and Pi prompt lifecycle do not restart downstream.
+      setAllConnectionItems((previous) =>
+        connectionListsEqual(previous, allConnections)
+          ? previous
+          : allConnections,
+      );
+      setConnections((previous) =>
+        connectionListsEqual(previous, connectedConnections)
+          ? previous
+          : connectedConnections,
+      );
     } catch {
       // silent — connection-aware UI simply won't surface stale data
     }

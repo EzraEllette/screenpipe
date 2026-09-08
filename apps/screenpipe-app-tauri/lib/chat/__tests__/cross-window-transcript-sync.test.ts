@@ -97,6 +97,42 @@ describe("cross-window transcript sync", () => {
     expect(shouldAdoptPersistedTranscript(current, persisted)).toBe(false);
   });
 
+  it("does not replace a successful answer with a longer transient retry snapshot", () => {
+    const current: Message[] = [
+      user,
+      { id: "assistant-1", role: "assistant", content: "done", timestamp: 2 },
+    ];
+    const persisted: Message[] = [
+      user,
+      {
+        id: "assistant-1",
+        role: "assistant",
+        content:
+          "Another AI request is finishing. Retrying in 4s. You can keep going; new messages will be queued.",
+        timestamp: 2,
+      },
+    ];
+    expect(shouldAdoptPersistedTranscript(current, persisted)).toBe(false);
+  });
+
+  it("adopts a successful answer that settles transient retry feedback", () => {
+    const current: Message[] = [
+      user,
+      {
+        id: "assistant-1",
+        role: "assistant",
+        content:
+          "Another AI request is finishing. Retrying in 4s. You can keep going; new messages will be queued.",
+        timestamp: 2,
+      },
+    ];
+    const persisted: Message[] = [
+      user,
+      { id: "assistant-1", role: "assistant", content: "done", timestamp: 2 },
+    ];
+    expect(shouldAdoptPersistedTranscript(current, persisted)).toBe(true);
+  });
+
   it("does not replace a different local turn just because disk has more rows", () => {
     const current: Message[] = [{ ...user, id: "new-local-turn" }];
     const persisted: Message[] = [

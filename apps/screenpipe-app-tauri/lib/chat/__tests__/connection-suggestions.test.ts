@@ -6,11 +6,31 @@ import { describe, expect, it } from "vitest";
 import type { Suggestion } from "../../hooks/use-auto-suggestions";
 import {
   buildConnectionSetupSuggestions,
+  connectionListsEqual,
   connectionMentionTag,
   mergeConnectionSuggestions,
   normalizeConnectionForPlatform,
   type ConnectionListItem,
 } from "../connection-suggestions";
+
+describe("connectionListsEqual", () => {
+  const calendar = {
+    id: "google-calendar",
+    name: "Google Calendar",
+    connected: true,
+    category: "calendar",
+  };
+
+  it("preserves state identity for equivalent refresh payloads", () => {
+    expect(connectionListsEqual([calendar], [{ ...calendar }])).toBe(true);
+  });
+
+  it("detects connection status changes", () => {
+    expect(
+      connectionListsEqual([calendar], [{ ...calendar, connected: false }]),
+    ).toBe(false);
+  });
+});
 
 describe("connection suggestions", () => {
   it("normalizes Apple Calendar labels and mentions on Windows", () => {

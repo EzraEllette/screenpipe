@@ -856,6 +856,53 @@ private func testSearchReview(shots: String) {
     expect(model.searchReview == nil, "the pill is dismissed")
 }
 
+/// Search requests a narrow window around the clicked result before the full
+/// day finishes streaming. The exact hit is commonly index zero in that first
+/// batch. A later day batch must keep that hit anchored instead of applying
+/// the live-edge rule and replacing it with the newest incoming frame.
+@MainActor
+private func testSearchResultSurvivesDayBackfill() {
+    let model = offlineModel()
+    model.setHealthForTesting(HealthStatus(status: "healthy", frameStatus: "ok"))
+
+    let targetDate = Date().addingTimeInterval(-2 * 24 * 60 * 60)
+    var target = fixtureFrames(count: 1, base: targetDate)[0]
+    target.devices[0].frameId = "950000"
+    model.injectForTesting(frames: [target])
+
+    let highlight = TimelineSearchTextPosition(
+        text: "anchored",
+        confidence: 0.99,
+        bounds: TimelineSearchTextBounds(left: 0.2, top: 0.3, width: 0.2, height: 0.05)
+    )
+    let result = TimelineSearchResult(
+        frameId: "950000",
+        timestamp: targetDate,
+        textPositions: [highlight]
+    )
+    model.navigateToSearchResult(
+        timestamp: targetDate,
+        frameId: "950000",
+        query: "anchored",
+        results: [result],
+        terms: ["anchored"],
+        navigationId: "backfill-search-click"
+    )
+    expectEqual(model.currentIndex, 0, "the narrow search batch starts at index zero")
+    expectEqual(model.displayFrameId, "950000", "the narrow batch selects the clicked frame")
+
+    var newer = fixtureFrames(count: 3, base: targetDate.addingTimeInterval(5 * 60))
+    for index in newer.indices {
+        newer[index].devices[0].frameId = String(950100 + index)
+    }
+    model.injectForTesting(frames: newer)
+
+    expectEqual(model.displayFrameId, "950000", "day backfill keeps the clicked frame selected")
+    expectEqual(model.currentIndex, 3, "the clicked frame shifts behind three newer frames")
+    expectEqual(model.activeSearchHighlightPositions, [highlight],
+                "day backfill keeps the clicked result highlight visible")
+}
+
 @MainActor
 private func testTagToolbarRenders(shots: String) {
     let model = populatedModel()
@@ -1120,6 +1167,7 @@ struct TimelineRenderTests {
                 ("connection failure presentation", testConnectionFailurePresentation),
                 ("playback", testPlayback),
                 ("search review", { testSearchReview(shots: shots) }),
+                ("search result survives day backfill", testSearchResultSurvivesDayBackfill),
                 ("tag toolbar", { testTagToolbarRenders(shots: shots) }),
                 ("transcript panel", { testTranscriptPanel(shots: shots) }),
                 ("hover preview and popover", { testHoverPreviewAndPopover(shots: shots) }),

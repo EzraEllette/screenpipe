@@ -4,7 +4,7 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useEnterpriseBuildStatus } from "./use-is-enterprise-build";
-import { commands } from "@/lib/utils/tauri";
+import { commands, type ManagedTeamSkill } from "@/lib/utils/tauri";
 import { isLocalControlPlaneBase, tauriFetchWithDeadline } from "@/lib/http/tauri-fetch";
 import { getStore, useSettings } from "./use-settings";
 import {
@@ -51,10 +51,14 @@ interface EnterprisePolicy {
   aiPresetPolicy: EnterpriseAiPresetPolicy;
   appUpdatePolicy: EnterpriseAppUpdatePolicy;
   managedPipes: ManagedPipe[];
+  managedSkills: ManagedTeamSkill[];
   orgName: string;
   /** Admin requires employees to sign in with their screenpipe account —
    *  the enterprise license key alone must not authenticate this device. */
   requireAccountLogin: boolean;
+  /** False pauses new capture for this stable seat installation while keeping
+   *  Enterprise authentication and the rest of the app available. */
+  recordingAllowed: boolean;
 }
 
 const EMPTY_POLICY: EnterprisePolicy = {
@@ -64,12 +68,17 @@ const EMPTY_POLICY: EnterprisePolicy = {
   aiPresetPolicy: DEFAULT_ENTERPRISE_AI_PRESET_POLICY,
   appUpdatePolicy: DEFAULT_ENTERPRISE_APP_UPDATE_POLICY,
   managedPipes: [],
+  managedSkills: [],
   orgName: "",
   requireAccountLogin: false,
+  recordingAllowed: true,
 };
 
 const ACCOUNT_LOGIN_REQUIRED_ERROR =
   "your organization requires signing in with your screenpipe account";
+const NATIVE_RECORDING_AUTH_ERROR =
+  "enterprise access was verified, but recording could not be enabled - check enrollment, seat availability, and your connection, then try again";
+const RECORDING_DISABLED_BY_ADMIN_CODE = "recording_disabled_by_admin";
 
 // Sections always hidden in enterprise builds (regardless of policy).
 // "account" is deliberately NOT here: authentication is handled by onboarding
@@ -82,6 +91,10 @@ const ENTERPRISE_DEFAULT_HIDDEN = ["referral"];
 // Re-fetch policy every 5 minutes so admin changes propagate without app restart
 const POLL_INTERVAL_MS = 5 * 60 * 1000;
 const LOCAL_POLICY_COMMAND_TIMEOUT_MS = 8_000;
+// Native authorization verifies both policy and seat-bearing enrollment. Each
+// control-plane request has a 9s native timeout, so leave enough room for the
+// sequential pair plus IPC scheduling without allowing a late grant.
+const NATIVE_AUTHORIZATION_COMMAND_TIMEOUT_MS = 20_000;
 const ENGINE_RESTART_COMMAND_TIMEOUT_MS = 12_000;
 
 /**
@@ -173,6 +186,7 @@ function readE2ePolicyMock(licenseKey: string): E2ePolicyMockResult {
         aiPresetPolicy: DEFAULT_ENTERPRISE_AI_PRESET_POLICY,
         appUpdatePolicy: DEFAULT_ENTERPRISE_APP_UPDATE_POLICY,
         managedPipes: [],
+        managedSkills: [],
         orgName: "E2E Enterprise",
         requireAccountLogin: false,
         ...policy,
@@ -411,7 +425,12 @@ type HeartbeatResult =
   | { ok: true }
   | {
       ok: false;
-      reason: "seat_limit" | "invalid_credential" | "expired_key" | "network_error";
+      reason:
+        | "seat_limit"
+        | "invalid_credential"
+        | "expired_key"
+        | "recording_disabled"
+        | "network_error";
       error?: string;
     };
 
@@ -421,7 +440,7 @@ type EnterpriseCredential =
 
 async function sendHeartbeat(
   credential: EnterpriseCredential,
-  options: { timeoutMs?: number } = {}
+  options: { timeoutMs?: number; deploymentLicenseKey?: string | null } = {}
 ): Promise<HeartbeatResult> {
   const e2eHeartbeat = readE2eHeartbeatMock();
   if (e2eHeartbeat) return e2eHeartbeat;
@@ -465,6 +484,9 @@ async function sendHeartbeat(
     const credentialHeaders: Record<string, string> = credential.type === "license_key"
       ? { "X-License-Key": credential.value }
       : { Authorization: `Bearer ${credential.value}` };
+    if (credential.type === "account" && options.deploymentLicenseKey) {
+      credentialHeaders["X-License-Key"] = options.deploymentLicenseKey;
+    }
     const res = await tauriFetchWithDeadline(
       screenpipeWebUrl("/api/enterprise/heartbeat", "https://screenpipe.com"),
       {
@@ -498,6 +520,14 @@ async function sendHeartbeat(
     );
 
     if (res.status === 403) {
+      const body = await res.json().catch(() => ({}));
+      if (body?.code === RECORDING_DISABLED_BY_ADMIN_CODE) {
+        return {
+          ok: false,
+          reason: "recording_disabled",
+          error: "recording disabled by workspace admin",
+        };
+      }
       return { ok: false, reason: "seat_limit", error: "license seat limit reached" };
     }
     if (res.status === 401) {
@@ -549,8 +579,10 @@ function loadCachedPolicy(): EnterprisePolicy | null {
         ),
         appUpdatePolicy: normalizeEnterpriseAppUpdatePolicy(policy.appUpdatePolicy),
         managedPipes: Array.isArray(policy.managedPipes) ? policy.managedPipes : [],
+        managedSkills: Array.isArray(policy.managedSkills) ? policy.managedSkills : [],
         orgName: typeof policy.orgName === "string" ? policy.orgName : "",
         requireAccountLogin: policy.requireAccountLogin === true,
+        recordingAllowed: policy.recordingAllowed !== false,
       };
     }
   } catch {}
@@ -644,6 +676,34 @@ export function useEnterprisePolicyRuntime() {
     initialCheckAbortRef.current = null;
   }, []);
 
+  const setNativeRecordingAuthorized = useCallback(async (
+    authorized: boolean,
+    credential?: EnterpriseCredential,
+  ): Promise<boolean> => {
+    if (!isEnterprise) return true;
+    try {
+      const result = await withTimeout(
+        `enterprise recording authorization ${authorized ? "grant" : "revoke"}`,
+        commands.setEnterpriseRecordingAuthorized(
+          authorized,
+          credential?.type ?? null,
+          credential?.value ?? null,
+        ),
+        NATIVE_AUTHORIZATION_COMMAND_TIMEOUT_MS,
+      );
+      if (result.status === "error") {
+        throw new Error(result.error);
+      }
+      return true;
+    } catch (error) {
+      console.warn(
+        `[enterprise] failed to ${authorized ? "grant" : "revoke"} native recording authorization:`,
+        error,
+      );
+      return false;
+    }
+  }, [isEnterprise]);
+
   const fetchPolicy = useCallback(async (
     credential: EnterpriseCredential,
     options: FetchPolicyOptions = {}
@@ -655,6 +715,7 @@ export function useEnterprisePolicyRuntime() {
       let deviceId = "unknown";
       let cloudToken: string | null =
         credential.type === "account" ? credential.value : null;
+      let deploymentLicenseKey: string | null = null;
       try {
         const store = await getStore();
         const settings = (await store.get<Record<string, unknown>>("settings")) || {};
@@ -689,12 +750,31 @@ export function useEnterprisePolicyRuntime() {
         }
       }
 
+      // If IT also deployed a key, pair it with account auth. The control
+      // plane accepts matching credentials and rejects a member account from a
+      // different Enterprise organization. Account-only companies simply have
+      // no key and continue with bearer auth alone.
+      if (credential.type === "account") {
+        try {
+          deploymentLicenseKey = await withTimeout(
+            "enterprise getEnterpriseLicenseKey for account scope",
+            commands.getEnterpriseLicenseKey(),
+            LOCAL_POLICY_COMMAND_TIMEOUT_MS,
+          );
+        } catch (error) {
+          console.warn("[enterprise] could not read deployment key for account scope:", error);
+        }
+      }
+
       const headers: Record<string, string> = { "X-Device-Id": deviceId };
       if (credential.type === "license_key") {
         headers["X-License-Key"] = credential.value;
       }
       if (cloudToken) {
         headers["Authorization"] = `Bearer ${cloudToken}`;
+      }
+      if (credential.type === "account" && deploymentLicenseKey) {
+        headers["X-License-Key"] = deploymentLicenseKey;
       }
       let data: any;
       const e2ePolicy = readE2ePolicyMock(
@@ -761,8 +841,10 @@ export function useEnterprisePolicyRuntime() {
         aiPresetPolicy,
         appUpdatePolicy,
         managedPipes: data.managedPipes || [],
+        managedSkills: Array.isArray(data.managedSkills) ? data.managedSkills : [],
         orgName: data.orgName || "",
         requireAccountLogin: data.requireAccountLogin === true,
+        recordingAllowed: data.recordingAllowed !== false,
       };
 
       console.log(
@@ -804,7 +886,7 @@ export function useEnterprisePolicyRuntime() {
       }
 
       // Fire-and-forget heartbeat
-      sendHeartbeat(credential).then((heartbeat) => {
+      sendHeartbeat(credential, { deploymentLicenseKey }).then((heartbeat) => {
         if (!heartbeat.ok) {
           console.warn("[enterprise] heartbeat failed:", heartbeat.reason, heartbeat.error);
         }
@@ -820,6 +902,26 @@ export function useEnterprisePolicyRuntime() {
       }).catch((e) =>
         console.warn("[enterprise] failed to sync managed pipes:", e)
       );
+
+      // Organization skills are a separate, explicit desired state. Omission
+      // means the control plane is older or could not read the registry, so we
+      // preserve the last valid local install. A returned empty array is the
+      // only signal that authorizes pruning screenpipe-owned managed folders.
+      if (Array.isArray(data.managedSkills)) {
+        commands
+          .syncManagedTeamSkills(result.managedSkills, true)
+          .then((response) => {
+            if (response.status === "error") {
+              console.warn(
+                "[enterprise] failed to sync managed skills:",
+                response.error,
+              );
+            }
+          })
+          .catch((e) =>
+            console.warn("[enterprise] failed to sync managed skills:", e),
+          );
+      }
 
       // Push hidden sections to Rust so tray menu can use them
       try {
@@ -881,6 +983,11 @@ export function useEnterprisePolicyRuntime() {
             feedback,
             frameImages,
           ),
+          LOCAL_POLICY_COMMAND_TIMEOUT_MS
+        );
+        await withTimeout(
+          "enterprise setActivitySyncEnabled",
+          commands.setActivitySyncEnabled(streams.activities === true),
           LOCAL_POLICY_COMMAND_TIMEOUT_MS
         );
       } catch (e) {
@@ -967,8 +1074,16 @@ export function useEnterprisePolicyRuntime() {
             });
             if (reauthentication.authenticated) return;
           }
+          await setNativeRecordingAuthorized(false);
           setAuthenticationState("account");
           setAuthenticationError(ACCOUNT_LOGIN_REQUIRED_ERROR);
+          return;
+        }
+        if (!result.policy.recordingAllowed) {
+          await setNativeRecordingAuthorized(false);
+          setAuthenticationError(null);
+          setAuthenticationState("authenticated");
+          return;
         }
       } else if (result.reason === "invalid_key") {
         console.warn("[enterprise] saved key is no longer valid, falling back to account auth");
@@ -982,6 +1097,7 @@ export function useEnterprisePolicyRuntime() {
           });
           return;
         }
+        await setNativeRecordingAuthorized(false);
         setAuthenticationState("account");
         setAuthenticationError(ROTATED_ENTERPRISE_KEY_ERROR);
       } else if (result.reason === "expired_key") {
@@ -996,17 +1112,19 @@ export function useEnterprisePolicyRuntime() {
           });
           return;
         }
+        await setNativeRecordingAuthorized(false);
         setAuthenticationState("account");
         setAuthenticationError(ROTATED_ENTERPRISE_KEY_ERROR);
       } else if (result.reason === "not_member") {
         console.warn("[enterprise] signed-in account is no longer an organization member");
         stopPolling();
+        await setNativeRecordingAuthorized(false);
         setAuthenticationState("account");
         setAuthenticationError("this account is not associated with the enterprise organization");
       }
       // network_error: silently keep polling, use cached policy
     }, POLL_INTERVAL_MS);
-  }, [fetchPolicy, stopPolling]);
+  }, [fetchPolicy, setNativeRecordingAuthorized, stopPolling]);
 
   const authenticateCredential = useCallback(async (
     credential: EnterpriseCredential,
@@ -1049,8 +1167,33 @@ export function useEnterprisePolicyRuntime() {
       // already applied by fetchPolicy; only authentication is refused.
       if (credential.type === "license_key" && result.policy.requireAccountLogin) {
         setPolicy(result.policy);
+        // A saved account is the next credential in this same startup check.
+        // Keep the existing process-local grant while that viable credential is
+        // still being verified; revoking here stops capture between two successful
+        // checks and races the account grant against the in-flight teardown. The
+        // account attempt below still revokes on an explicit denial, and a key-only
+        // device still fails closed immediately.
+        if (accountTokenRef.current) {
+          setAuthenticationState("checking");
+          setAuthenticationError(null);
+          return { authenticated: false, retryable: false };
+        }
+        await setNativeRecordingAuthorized(false);
         setAuthenticationState("account");
         setAuthenticationError(ACCOUNT_LOGIN_REQUIRED_ERROR);
+        return { authenticated: false, retryable: false };
+      }
+      if (!result.policy.recordingAllowed) {
+        await setNativeRecordingAuthorized(false);
+        setAuthenticationError(null);
+        setAuthenticationState("authenticated");
+        setPolicy(result.policy);
+        startPolling(credential);
+        return { authenticated: true, retryable: false };
+      }
+      if (!await setNativeRecordingAuthorized(true, credential)) {
+        setAuthenticationState(credential.type);
+        setAuthenticationError(NATIVE_RECORDING_AUTH_ERROR);
         return { authenticated: false, retryable: false };
       }
       setAuthenticationError(null);
@@ -1061,6 +1204,7 @@ export function useEnterprisePolicyRuntime() {
     }
 
     if (result.reason === "invalid_key") {
+      await setNativeRecordingAuthorized(false);
       setAuthenticationState(
         authenticationStateAfterKeyRejection(Boolean(accountTokenRef.current)),
       );
@@ -1068,6 +1212,7 @@ export function useEnterprisePolicyRuntime() {
       return { authenticated: false, retryable: false };
     }
     if (result.reason === "expired_key") {
+      await setNativeRecordingAuthorized(false);
       setAuthenticationState(
         authenticationStateAfterKeyRejection(Boolean(accountTokenRef.current)),
       );
@@ -1075,6 +1220,7 @@ export function useEnterprisePolicyRuntime() {
       return { authenticated: false, retryable: false };
     }
     if (result.reason === "not_member") {
+      await setNativeRecordingAuthorized(false);
       setAuthenticationState("account");
       setAuthenticationError("this account is not associated with the enterprise organization");
       return { authenticated: false, retryable: false };
@@ -1083,10 +1229,11 @@ export function useEnterprisePolicyRuntime() {
     // Connectivity (unreachable, timed out, unusable response): route to the
     // credential prompt with retryable copy, and tell the caller it is worth
     // trying again.
+    await setNativeRecordingAuthorized(false);
     setAuthenticationState(credential.type);
     setAuthenticationError("could not verify enterprise access - check your connection and try again");
     return { authenticated: false, retryable: true };
-  }, [fetchPolicy, startPolling]);
+  }, [fetchPolicy, setNativeRecordingAuthorized, startPolling]);
   authenticateCredentialRef.current = authenticateCredential;
 
   /**
@@ -1100,6 +1247,7 @@ export function useEnterprisePolicyRuntime() {
     const credential: EnterpriseCredential = { type: "license_key", value: key };
     const result = await fetchPolicy(credential, { applyLocalPolicy: false });
     if (!result.ok) {
+      await setNativeRecordingAuthorized(false);
       return {
         ok: false,
         error: result.reason === "invalid_key"
@@ -1113,6 +1261,7 @@ export function useEnterprisePolicyRuntime() {
     // Org policy forbids key-only activation: route the employee to account
     // sign-in instead of saving the key.
     if (result.policy.requireAccountLogin) {
+      await setNativeRecordingAuthorized(false);
       setPolicy(result.policy);
       setAuthenticationState("account");
       setAuthenticationError(ACCOUNT_LOGIN_REQUIRED_ERROR);
@@ -1131,16 +1280,22 @@ export function useEnterprisePolicyRuntime() {
       reason: "network_error",
       error: String(e),
     }));
+    const recordingDisabledByAdmin =
+      !result.policy.recordingAllowed ||
+      (!heartbeat.ok && heartbeat.reason === "recording_disabled");
     if (!heartbeat.ok && heartbeat.reason === "seat_limit") {
+      await setNativeRecordingAuthorized(false);
       return {
         ok: false,
         error: "license seat limit reached - contact your admin to add seats",
       };
     }
     if (!heartbeat.ok && heartbeat.reason === "invalid_credential") {
+      await setNativeRecordingAuthorized(false);
       return { ok: false, error: "invalid enterprise key" };
     }
     if (!heartbeat.ok && heartbeat.reason === "expired_key") {
+      await setNativeRecordingAuthorized(false);
       return { ok: false, error: "enterprise key has expired - contact your admin" };
     }
 
@@ -1154,10 +1309,28 @@ export function useEnterprisePolicyRuntime() {
         LOCAL_POLICY_COMMAND_TIMEOUT_MS
       );
       if (saveResult.status === "error") {
+        await setNativeRecordingAuthorized(false);
         return { ok: false, error: saveResult.error };
       }
     } catch (e) {
+      await setNativeRecordingAuthorized(false);
       return { ok: false, error: `failed to save: ${e}` };
+    }
+
+    if (recordingDisabledByAdmin) {
+      await setNativeRecordingAuthorized(false);
+      setAuthenticationError(null);
+      setAuthenticationState("authenticated");
+      setPolicy({ ...result.policy, recordingAllowed: false });
+      startPolling(credential);
+      return { ok: true };
+    }
+
+    // Grant native recording before publishing the authenticated React state.
+    // AppEntitlementGate reacts to that state by calling spawnScreenpipe; the
+    // native guard must already be open when that restart reaches Rust.
+    if (!await setNativeRecordingAuthorized(true, credential)) {
+      return { ok: false, error: NATIVE_RECORDING_AUTH_ERROR };
     }
 
     // Apply the policy and start polling
@@ -1177,16 +1350,26 @@ export function useEnterprisePolicyRuntime() {
       });
 
     return { ok: true };
-  }, [abandonInitialCheck, fetchPolicy, startPolling]);
+  }, [abandonInitialCheck, fetchPolicy, setNativeRecordingAuthorized, startPolling]);
 
   const selectAuthenticationMethod = useCallback((method: EnterpriseAuthenticationMethod) => {
     abandonInitialCheck();
     setAuthenticationError(null);
     setAuthenticationState(method);
     if (method === "account" && accountToken) {
-      void authenticateCredential({ type: "account", value: accountToken });
+      void (async () => {
+        await setNativeRecordingAuthorized(false);
+        await authenticateCredential({ type: "account", value: accountToken });
+      })();
+    } else {
+      void setNativeRecordingAuthorized(false);
     }
-  }, [abandonInitialCheck, accountToken, authenticateCredential]);
+  }, [
+    abandonInitialCheck,
+    accountToken,
+    authenticateCredential,
+    setNativeRecordingAuthorized,
+  ]);
 
   useEffect(() => {
     if (!isEnterprise) return;
@@ -1277,6 +1460,7 @@ export function useEnterprisePolicyRuntime() {
       }
 
       if (!key && initialCheckActive()) {
+        await setNativeRecordingAuthorized(false);
         setAuthenticationError(null);
         setAuthenticationState("choice");
         setPolicy({ ...EMPTY_POLICY, hiddenSections: ENTERPRISE_DEFAULT_HIDDEN });
@@ -1293,7 +1477,14 @@ export function useEnterprisePolicyRuntime() {
       abandonInitialCheck();
       stopPolling();
     };
-  }, [isEnterprise, accountToken, abandonInitialCheck, authenticateCredential, stopPolling]);
+  }, [
+    isEnterprise,
+    accountToken,
+    abandonInitialCheck,
+    authenticateCredential,
+    setNativeRecordingAuthorized,
+    stopPolling,
+  ]);
 
   // Consumer builds: stable no-op functions (no network calls, no re-renders)
   const noop = useCallback(() => false, []);

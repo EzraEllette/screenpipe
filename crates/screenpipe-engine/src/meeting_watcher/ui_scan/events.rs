@@ -93,13 +93,13 @@ pub(crate) async fn handle_auto_end_request(
                 if let Ok(status) = resolve_meeting_status_from(db, manual_meeting).await {
                     emit_meeting_status_changed(&status);
                 }
-                if let Err(e) = screenpipe_events::send_event(
-                    "meeting_ended",
-                    serde_json::json!({
-                        "meeting_id": request.meeting_id,
-                        "meeting_end": persisted_end,
-                    }),
-                ) {
+                let event_data = crate::meeting_watcher::shared::events::meeting_ended_event_data(
+                    db,
+                    request.meeting_id,
+                    &persisted_end,
+                )
+                .await;
+                if let Err(e) = screenpipe_events::send_event("meeting_ended", event_data) {
                     warn!("meeting v2: failed to emit meeting_ended event: {}", e);
                 }
             }

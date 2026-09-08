@@ -20,6 +20,10 @@ struct TimelineRootView: View {
     /// Embedded inside the main window rather than the fullscreen overlay: the
     /// webview varies its insets and hides window-level actions the same way.
     var embedded: Bool = false
+    /// Distance from the top of this child window to the display's visible
+    /// work area. Nonzero only when fullscreen content reaches into macOS's
+    /// menu-bar/camera-housing band.
+    var topSafeInset: CGFloat = 0
 
     @StateObject private var thumbnailLoader = ThumbnailLoader()
 
@@ -59,7 +63,7 @@ struct TimelineRootView: View {
 
             VStack(spacing: 0) {
                 TimelineControlBar(model: model, embedded: embedded)
-                    .padding(.top, embedded ? 8 : 24)
+                    .padding(.top, topSafeInset + (embedded ? 8 : 24))
                 if let url = model.displayFrame.flatMap(TimelineFrames.browserURL) {
                     TimelineURLPill(url: url)
                         .padding(.top, 6)
@@ -79,7 +83,7 @@ struct TimelineRootView: View {
 
             TimelineFilterRail(model: model)
                 .padding(.leading, 12)
-                .padding(.top, 72)
+                .padding(.top, topSafeInset + 72)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
 
             if let selection = model.selection, selection.isMultiFrame {
@@ -129,7 +133,7 @@ struct TimelineRootView: View {
             if model.showAudioTranscript {
                 TimelineTranscriptPanel(model: model)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
-                    .padding(.top, 72)
+                    .padding(.top, topSafeInset + 72)
                     .padding(.trailing, 20)
             }
         }
@@ -630,6 +634,7 @@ struct TimelineCalendarPopover: View {
             HStack {
                 Button { shiftMonth(-1) } label: { Image(systemName: "chevron.left") }
                     .buttonStyle(TimelinePlainButtonStyle())
+                    .disabled(!canShiftMonth(-1))
                 Spacer()
                 Text(monthLabel).font(.system(size: 12, weight: .semibold))
                 Spacer()
@@ -655,8 +660,10 @@ struct TimelineCalendarPopover: View {
                 // An empty set means the day index has not loaded; disabling
                 // everything then would look like a broken calendar.
                 let hasData = model.daysWithData.isEmpty || model.daysWithData.contains(key)
-                let isFuture = day > Date()
-                let enabled = hasData && !isFuture
+                let enabled = hasData && TimelineDateNavigation.isCalendarDateAllowed(
+                    day,
+                    historyAccessRestricted: model.historyAccessRestricted
+                )
                 Button {
                     model.changeDate(to: day)
                     isPresented = false
@@ -686,9 +693,23 @@ struct TimelineCalendarPopover: View {
     }
 
     private func shiftMonth(_ delta: Int) {
-        if let next = Calendar.current.date(byAdding: .month, value: delta, to: month) {
+        if canShiftMonth(delta),
+           let next = Calendar.current.date(byAdding: .month, value: delta, to: month) {
             month = next
         }
+    }
+
+    private func canShiftMonth(_ delta: Int) -> Bool {
+        let cal = Calendar.current
+        guard let next = cal.date(byAdding: .month, value: delta, to: month) else { return false }
+        if delta > 0 {
+            return cal.compare(next, to: Date(), toGranularity: .month) != .orderedDescending
+        }
+        guard model.historyAccessRestricted else { return true }
+        let earliest = TimelineDateNavigation.earliestAccessibleDay(
+            historyAccessRestricted: true
+        )
+        return cal.compare(next, to: earliest, toGranularity: .month) != .orderedAscending
     }
 
     private var daysInMonth: [Date?] {

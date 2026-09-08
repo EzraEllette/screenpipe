@@ -1,6 +1,6 @@
 ---
 name: screenpipe-api
-description: Query the user's screen recordings, audio, UI elements, and usage analytics via the local Screenpipe REST API at localhost:3030. Use when the user asks about their screen activity, meetings, apps, productivity, media export, retranscription, or connected services.
+description: Query the user's local and synced-device Screenpipe data via the REST API at localhost:3030. Use for screen activity, meetings, apps, productivity, other-device or cross-device history, media export, retranscription, or connected services.
 ---
 
 # Screenpipe API
@@ -81,6 +81,22 @@ Decision tree:
 - "What button did I click?" → Step 3 (`/elements` with role=AXButton)
 - "Show me what I saw" → Step 2 (find frame_id) → Step 4
 
+### Attached activity episodes
+
+Chat messages can include `[Context from activity episode: ...]` with an exact
+Time range plus cited screen, audio, or meeting artifacts. Treat those values as
+retrieval anchors. The Activity title and Summary are generated labels, not
+captured content and not search terms.
+
+- For questions about the episode's details, takeaways, decisions, or cause,
+  fetch the underlying content before answering. Start with the exact Time range
+  and no `q`: inspect cited screens with `/frames/{frame_id}/context`, query
+  cited audio with `content_type=audio`, use the cited meeting id for its
+  transcript, or query `content_type=all` for a mixed-source interval.
+- Never derive `q` from the Activity title or Summary. Use `q` only when the user
+  explicitly asks to locate a literal word or phrase.
+- Analyze the fetched content. Do not merely restate the generated Summary.
+
 ### Tags — linking people, projects, topics
 
 Tags are a shared label layer across screen, audio, and memories under one string namespace. Use namespaced tags: `person:ada`, `project:atlas`, `topic:pricing`. Two items sharing a tag are connected.
@@ -125,6 +141,29 @@ curl -H "Authorization: Bearer $SCREENPIPE_LOCAL_API_KEY" \
 ```
 
 > **Note**: The `"OCR"` type label is used for all screen text results, including text captured via the accessibility tree. Most screen text comes from accessibility, not OCR.
+
+---
+
+## Synced devices — `GET /data-sync/devices` and `/data-sync/search`
+
+Use these endpoints when the user says **another device**, **across devices**, or
+names a machine that is not the current one. For the current machine only, keep
+using `/search`; it is faster and has richer local filters.
+
+```bash
+curl -H "Authorization: Bearer $SCREENPIPE_LOCAL_API_KEY" \
+  "http://localhost:3030/data-sync/devices"
+
+curl -H "Authorization: Bearer $SCREENPIPE_LOCAL_API_KEY" \
+  "http://localhost:3030/data-sync/search?device_name=MacBook&since_hours_ago=24&q=pricing&limit=10"
+```
+
+Start with `/data-sync/devices` when the device name is ambiguous. Search accepts
+`q`, `device_name`, `device_id`, `app_name`, `since`, `until`,
+`since_hours_ago`, and `limit`. Cite the returned device and timestamp. If Data
+Sync is disabled or unavailable, say so plainly; never ask for a cloud token,
+account ID, user ID, or R2 bucket and never access R2 directly. The local API
+supplies the signed-in identity.
 
 ---
 
@@ -534,7 +573,7 @@ Send a notification to the screenpipe desktop UI. This uses the Tauri sidecar se
 
 The notification body supports **markdown**: `**bold**`, `` `inline code` ``, and `[link text](url)`. Links can be web URLs, file paths, or screenpipe deeplinks.
 
-Set `priority` to `high`, `normal` (default), or `low`. Reserve `high` for a time-sensitive failure or a decision that genuinely needs the human now: it triggers the toast and appears in the focused Priority inbox. `normal` and `low` are stored in All without interrupting. Completion logs and routine syncs should never be high.
+Set `priority` to `high`, `normal` (default), or `low`. Every priority appears in the top-right notification panel. Reserve `high` for a time-sensitive failure or a decision that genuinely needs the human now; it also appears in the focused Priority inbox. `normal` stays in All, while `low` is toast-only by default. Completion logs and routine syncs should never be high.
 
 ```bash
 # Simple notification
@@ -601,7 +640,7 @@ curl -X POST http://localhost:11435/notify \
 | `title` | string | **Yes** | Notification title |
 | `body` | string | **Yes** | Markdown body (`**bold**`, `` `code` ``, `[text](url)`) |
 | `type` | string | No | Category (default "pipe") |
-| `priority` | `high` \| `normal` \| `low` | No | Default `normal`; only `high` interrupts and enters the focused Priority view |
+| `priority` | `high` \| `normal` \| `low` | No | Default `normal`; all priorities appear top-right, while only `high` enters the focused Priority view |
 | `timeout` | integer | No | Auto-dismiss in ms (default 20000) |
 | `autoDismissMs` | integer | No | Alias for timeout |
 | `actions` | array | No | Action buttons (up to 5; each needs `id`, `label`, `type`) |

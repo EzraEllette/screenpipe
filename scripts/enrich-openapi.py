@@ -400,33 +400,6 @@ ENRICHMENTS = {
             "summary": "Pull pipe configs from cloud",
         }
     },
-    # Archive
-    "/archive/init": {
-        "post": {
-            "tag": "Cloud Archive",
-            "summary": "Initialize cloud archive",
-            "description": "Set up cloud archive for encrypted off-device backup of old data.",
-        }
-    },
-    "/archive/configure": {
-        "post": {
-            "tag": "Cloud Archive",
-            "summary": "Configure archive settings",
-        }
-    },
-    "/archive/status": {
-        "get": {
-            "tag": "Cloud Archive",
-            "summary": "Get archive status",
-        }
-    },
-    "/archive/run": {
-        "post": {
-            "tag": "Cloud Archive",
-            "summary": "Run archive now",
-            "description": "Trigger an immediate archive upload cycle.",
-        }
-    },
     # Retention
     "/retention/configure": {
         "post": {
@@ -485,7 +458,6 @@ TAG_ORDER = [
     ("Activity", "Activity summaries and analytics"),
     ("Vault", "Encrypt/decrypt all data at rest"),
     ("Cloud Sync", "Sync data across devices via cloud"),
-    ("Cloud Archive", "Archive old data to cloud storage"),
     ("Data Retention", "Auto-delete old data locally"),
     ("Data Management", "Manual data deletion and storage info"),
     ("Database", "Direct database access"),
@@ -496,6 +468,18 @@ TAG_ORDER = [
 
 def enrich(spec):
     """Add tags, summaries, and descriptions to the OpenAPI spec."""
+    # The consumer archive product was removed from Storage settings.
+    # Legacy endpoints remain only to disable old state and must not be advertised.
+    paths = spec.setdefault("paths", {})
+    for path in list(paths):
+        if path.startswith("/archive/"):
+            del paths[path]
+
+    schemas = spec.setdefault("components", {}).setdefault("schemas", {})
+    for name in list(schemas):
+        if name.startswith("Archive"):
+            del schemas[name]
+
     # Add tag definitions at the top level
     spec["tags"] = [
         {"name": name, "description": desc} for name, desc in TAG_ORDER
@@ -511,7 +495,6 @@ def enrich(spec):
     )
 
     # Enrich each path/method
-    paths = spec.get("paths", {})
     for path, methods in paths.items():
         enrichment = ENRICHMENTS.get(path, {})
         for method, operation in methods.items():
@@ -562,7 +545,6 @@ def _auto_tag(path):
         "/memories": "Memories",
         "/vault": "Vault",
         "/sync": "Cloud Sync",
-        "/archive": "Cloud Archive",
         "/retention": "Data Retention",
         "/data": "Data Management",
         "/health": "System",
@@ -593,7 +575,6 @@ def _auto_summary(operation_id, method, path):
         "routes_vault_",
         "routes_activity_summary_",
         "sync_api_",
-        "archive_",
         "retention_",
     ]:
         if name.startswith(prefix):

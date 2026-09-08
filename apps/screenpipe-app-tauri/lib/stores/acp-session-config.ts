@@ -12,8 +12,7 @@ export interface AcpConfigValue {
 }
 
 /** An ACP session configuration option (model, ...) as advertised by the
- *  adapter in acp_session_config events. Only select options are surfaced
- *  in the UI for now. */
+ *  adapter in acp_session_config events. */
 export interface AcpConfigOption {
   id: string;
   name: string;
@@ -32,6 +31,8 @@ export interface AcpSessionModes {
 export interface AcpSessionConfig {
   options: AcpConfigOption[];
   modes: AcpSessionModes | null;
+  /** Screenpipe's client-side response policy for ACP permission requests. */
+  approvalMode?: "ask" | "allow-all";
   /** The live ACP session id for this chat, for reopen-time resume. */
   sessionId?: string;
 }
@@ -54,7 +55,7 @@ export function findAcpModeOption(
 }
 
 const PERMISSION_MODE_SIGNAL =
-  /permission|approval|sandbox|read.?only|full.?access|accept.?edit|dont.?ask|bypass|unrestricted/;
+  /permission|approval|sandbox|read.?only|full.?access|allow.?all|accept.?edit|dont.?ask|bypass|unrestricted/;
 
 function looksLikePermissionModes(
   values: AcpConfigValue[],
@@ -84,6 +85,24 @@ export function findAcpPermissionModeOption(
   )
     ? option
     : null;
+}
+
+/** Some adapters expose the approval boundary as one boolean instead of a
+ *  list of modes. GitHub Copilot's `Allow All` is the canonical example. Keep
+ *  the detection capability-driven so another ACP adapter with the same
+ *  contract gets the shared permission control without an agent-id matrix. */
+export function findAcpPermissionBooleanOption(
+  config: AcpSessionConfig | null | undefined,
+): AcpConfigOption | null {
+  return (
+    (config?.options ?? []).find(
+      (option) =>
+        option.type === "boolean" &&
+        PERMISSION_MODE_SIGNAL.test(
+          `${option.id} ${option.name} ${option.description ?? ""}`.toLowerCase(),
+        ),
+    ) ?? null
+  );
 }
 
 export function hasAcpPermissionModes(
@@ -217,6 +236,10 @@ export const useAcpSessionConfig = create<AcpSessionConfigState>()((set) => ({
           ? parseOptions(raw.configOptions)
           : (prior?.options ?? []),
         modes: raw?.modes !== undefined ? parseModes(raw.modes) : (prior?.modes ?? null),
+        approvalMode:
+          raw?.approvalMode === "allow-all" || raw?.approvalMode === "ask"
+            ? raw.approvalMode
+            : (prior?.approvalMode ?? "ask"),
         sessionId:
           typeof raw?.sessionId === "string" ? raw.sessionId : prior?.sessionId,
       };
@@ -249,6 +272,7 @@ export const useAcpSessionConfig = create<AcpSessionConfigState>()((set) => ({
           [sessionId]: {
             options: prior?.options ?? [],
             modes: prior?.modes ?? null,
+            approvalMode: prior?.approvalMode ?? "ask",
             sessionId: acpSessionId,
           },
         },

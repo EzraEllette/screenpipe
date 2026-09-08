@@ -15,6 +15,7 @@ import {
   mentionSuggestionIdentity,
   normalizeComposerMentionsForModel,
   parseMentions,
+  replaceComposerMentionAtCursor,
   resolvePinnedMentionIndex,
   TIME_RANGE_MENTION_SUGGESTIONS,
 } from "../../lib/chat-utils";
@@ -238,6 +239,55 @@ describe("global chat mentions", () => {
     ).toEqual([skills[0]]);
   });
 
+  it("also discovers installed skills through the slash palette", () => {
+    const skills = buildSkillMentionSuggestions([
+      {
+        name: "PDF tools",
+        description: "Read and edit PDFs",
+        path: "/Users/me/.screenpipe/skills/pdf-tools",
+      },
+      {
+        name: "Weekly Report",
+        description: "Summarize the week",
+        path: "/Users/me/.screenpipe/skills/weekly-report",
+      },
+    ]);
+    const base = {
+      atMentionSuggestions: [],
+      skillMentionSuggestions: skills,
+      tagMentionSuggestions: [],
+      allTagMentionSuggestions: [],
+      tagSearchSuggestions: [],
+      speakerSuggestions: [],
+    };
+
+    expect(
+      filterMentionSuggestions({
+        ...base,
+        mentionTrigger: "/",
+        mentionFilter: "",
+      }),
+    ).toEqual([...COMPOSER_COMMAND_SUGGESTIONS, ...skills]);
+    expect(
+      filterMentionSuggestions({
+        ...base,
+        mentionTrigger: "/",
+        mentionFilter: "weekly",
+      }),
+    ).toEqual([skills[1]]);
+  });
+
+  it("turns a slash-discovered skill into its normal composer token", () => {
+    expect(
+      replaceComposerMentionAtCursor({
+        input: "/pdf",
+        cursorPos: 4,
+        trigger: "/",
+        replacement: "$pdf-tools",
+      }),
+    ).toBe("$pdf-tools ");
+  });
+
   it.each([
     {
       token: "~7days",
@@ -391,6 +441,7 @@ describe("global chat mentions", () => {
     ["/n", "n"],
     ["/new", "new"],
     ["/clear-filters", "clear-filters"],
+    ["/pdf.tools", "pdf.tools"],
   ])("opens the command palette for %s", (input, filter) => {
     expect(findComposerMention(input)).toEqual({ trigger: "/", filter });
   });
@@ -432,7 +483,7 @@ describe("global chat mentions", () => {
       filterMentionSuggestions({
         ...base,
         mentionTrigger: "/",
-        mentionFilter: "inspector",
+        mentionFilter: "trace",
       }).map((suggestion) => suggestion.tag),
     ).toEqual(["/inspector"]);
   });

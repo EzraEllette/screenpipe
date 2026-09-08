@@ -75,6 +75,7 @@ const SETTINGS_SECTIONS = [
   { id: 'general', keywords: ['general', 'startup', 'language', 'auto'] },
   { id: 'ai', keywords: ['ai', 'model', 'preset', 'openai', 'ollama'] },
   { id: 'ai-settings', keywords: ['ai', 'analysis', 'chat', 'enhanced'] },
+  { id: 'activities', keywords: ['activities', 'interval', 'summaries'] },
   { id: 'recording', keywords: ['screen', 'fps', 'capture', 'monitor'] },
   { id: 'audio', keywords: ['audio', 'meeting', 'transcription', 'microphone'] },
   { id: 'shortcuts', keywords: ['shortcut', 'keyboard', 'hotkey', 'overlay'] },
@@ -653,7 +654,7 @@ describe('Settings sections', () => {
   it('survives rapid section switching without a blank crash (Windows COM/DPI regression)', async () => {
     // Click through every section quickly — this has historically caused a white
     // blank render on Windows due to COM apartment threading issues (TESTING.md §14).
-    const sectionIds = ['general', 'recording', 'audio', 'ai', 'ai-settings', 'display', 'shortcuts', 'speakers', 'privacy', 'permissions', 'storage'];
+    const sectionIds = ['general', 'recording', 'audio', 'ai', 'ai-settings', 'activities', 'display', 'shortcuts', 'speakers', 'privacy', 'permissions', 'storage'];
     for (const id of sectionIds) {
       const btn = await $(`[data-testid="settings-nav-${id}"]`);
       if (await btn.isExisting()) {

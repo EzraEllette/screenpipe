@@ -135,6 +135,12 @@ use app recording filters when you want to include or exclude specific apps, win
 - on macOS: grant microphone permission in System Settings → Privacy & Security → Microphone
 - verify audio is being recorded: `curl "http://localhost:3030/search?content_type=audio&limit=1"`
 
+### external soundcard or dock microphone is missing
+
+when a USB interface or dock is plugged in or removed, screenpipe may keep the previous device selection. Re-select the intended input in **settings → recording**, then unplug and reconnect the interface and restart screenpipe. If it still does not appear, verify the device is visible in the operating system's audio input settings and test the built-in microphone. Select only the input you need; duplicate or stale dock devices can result in silence or gaps. Include the exact device name and whether it was connected through a dock when reporting the issue.
+
+If the selected device is disconnected during capture, choose **Follow System Default** in **settings → recording** to follow the operating system's current input as devices are plugged in or removed. When a pinned device disappears temporarily, screenpipe can also use the current system-default input as a fallback; capture returns to the selected device when it is available again.
+
 ### windows microphones record silence or near-silence
 
 on Windows 11 24H2, some USB and communications-class microphones can expose formats that look valid but produce unusably quiet audio. if transcripts are empty or audio is around silent:
@@ -311,14 +317,14 @@ debug the pipeline in pieces:
 
 - screenpipe uses ~30 GB/month at 1 FPS — this is normal
 - reduce capture rate in settings
-- data is stored in `~/.screenpipe/data/` — you can delete old recordings
-- use cloud archive to offload and restore older data ([learn more →](/cloud-archive))
+- use **settings → storage** to shorten local retention or remove old media
+- compact the database after deletion to return unused space to the operating system
 
 ### can I store data on a NAS or external drive?
 
-you can back up `~/.screenpipe/` to external storage. be careful with active database and media writes on slow or unreliable network drives; they can make the app feel broken or risk corruption.
+you can back up `~/.screenpipe/` to external storage. quit screenpipe before copying the directory, keep the backup encrypted, and test a restore before relying on it.
 
-for active long-term retention, prefer [cloud archive](/cloud-archive) or a stable local disk plus backup. if you do use a NAS, test recording, search, restart, and recovery before relying on it.
+keep the live database on a stable local disk. slow or unreliable network drives can make the app feel broken or risk corruption.
 
 ### screenpipe using too much RAM
 

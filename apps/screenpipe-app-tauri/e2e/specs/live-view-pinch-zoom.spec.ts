@@ -16,18 +16,16 @@ import { saveScreenshot } from "../helpers/screenshot-utils.js";
 // same "native-magnify" payload the macOS NSMagnificationGestureRecognizer
 // emits.
 //
-// Scope note: the canvas ignores a pinch unless `document.hasFocus()` is true,
-// because `native-magnify` is an app-wide event that must not zoom a
-// background window. WKWebView under WebDriver does not reliably receive
-// OS-level focus — window-activation.spec.ts records the same limitation on
-// hosted macOS runners, and `show_window_activated` does not change it. So the
-// focused zoom arithmetic (1 + magnification per frame) is asserted in
-// components/settings/__tests__/live-view-canvas.test.tsx, and this spec covers
-// what the real app can prove without OS focus:
+// Rust routes native magnification only to the WebviewWindow under the
+// gesture. WKWebView under WebDriver does not reliably receive OS-level focus
+// — window-activation.spec.ts records the same limitation on hosted macOS
+// runners — so this spec intentionally proves that window-scoped pinch still
+// works without DOM focus:
 //
-//   - a pinch arriving at an unfocused canvas changes nothing
+//   - a pinch targeted at the canvas window works even without DOM focus
 //   - once the recognizer has spoken, the duplicate ctrl+wheel for the same
 //     gesture stops zooming, while plain scroll still pans
+//   - ordinary pane, Block, and double clicks do not change the viewport
 //   - the canvas zoom controls stay anchored, clamped, and persisted
 
 const VIEW_ID = "pinch-zoom-e2e";
@@ -149,7 +147,8 @@ async function seedEntitledAccount(): Promise<void> {
 }
 
 async function emitNativeMagnify(magnification: number): Promise<void> {
-  await invokeOrThrow("plugin:event|emit", {
+  await invokeOrThrow("plugin:event|emit_to", {
+    target: { kind: "AnyLabel", label: "home" },
     event: "native-magnify",
     payload: magnification,
   });
@@ -344,12 +343,13 @@ describe("Live View canvas pinch zoom", function () {
     const afterBrowserPinch = await paintedViewport();
     expect(afterBrowserPinch.zoom).toBeGreaterThan(before.zoom);
 
-    // The recognizer now proves it is running. Even though this canvas ignores
-    // the gesture itself while unfocused, it must stop trusting ctrl+wheel to
-    // describe the same fingers.
+    // The recognizer now proves it is running. The native step applies even
+    // without DOM focus because the event is scoped to this window, and the
+    // canvas must stop trusting ctrl+wheel to describe the same fingers.
     await emitNativeMagnify(0.05);
     await browser.pause(t(200));
     const afterRecognizer = await paintedViewport();
+    expect(afterRecognizer.zoom).toBeGreaterThan(afterBrowserPinch.zoom);
 
     await dispatchWheel(anchor, true);
     const afterDuplicate = await paintedViewport();
@@ -364,29 +364,32 @@ describe("Live View canvas pinch zoom", function () {
     expect(existsSync(screenshot)).toBe(true);
   });
 
-  it("ignores an app-wide pinch while the canvas window is not focused", async () => {
-    // native-magnify is emitted app-wide from the gesture recognizer, so a
-    // canvas that does not have focus must not move.
-    const focused = (await browser.execute(() =>
-      document.hasFocus(),
-    )) as boolean;
-    if (focused) {
-      // If a runner ever does grant focus, assert the gesture is honoured
-      // rather than silently skipping the case.
-      const before = await paintedViewport();
-      await pinchBurst(0.02, 6);
-      const after = await paintedViewport();
-      expect(after.zoom).toBeGreaterThan(before.zoom);
-      expect(after.zoom).toBeLessThan(before.zoom * 1.5);
-      return;
-    }
-
+  it("honours a window-scoped pinch", async () => {
     const before = await paintedViewport();
-    await pinchBurst(0.02, 12);
+    await pinchBurst(0.02, 6);
     const after = await paintedViewport();
-    expect(after.zoom).toBeCloseTo(before.zoom, 5);
+    expect(after.zoom).toBeGreaterThan(before.zoom);
+    expect(after.zoom).toBeLessThan(before.zoom * 1.5);
+  });
+
+  it("keeps ordinary pane, Block, and double clicks at the same zoom", async () => {
+    const before = await paintedViewport();
+    await browser.execute(() => {
+      const pane = document.querySelector<HTMLElement>(".react-flow__pane");
+      const block = document.querySelector<HTMLElement>(
+        "[data-testid='canvas-block-tracked-work']",
+      );
+      if (!pane || !block) throw new Error("canvas click targets not found");
+      pane.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      pane.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+      block.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await browser.pause(t(200));
+
+    const after = await paintedViewport();
     expect(after.x).toBeCloseTo(before.x, 5);
     expect(after.y).toBeCloseTo(before.y, 5);
+    expect(after.zoom).toBeCloseTo(before.zoom, 5);
   });
 
   it("keeps canvas zoom bounded, anchored, and persisted", async () => {

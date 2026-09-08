@@ -112,7 +112,16 @@ export function nextActivityHistoryRange(
   for (const range of mergeActivityHistoryCoverage(coverage)) {
     const parsed = finiteRange(range)!;
     if (parsed.end <= cursor) continue;
-    if (parsed.start > cursor + COVERAGE_SLOP_MS) break;
+    if (parsed.start > cursor + COVERAGE_SLOP_MS) {
+      const start =
+        cursor > requestedStart
+          ? Math.max(requestedStart, cursor - Math.max(0, overlapMs))
+          : requestedStart;
+      return {
+        start: new Date(start),
+        end: new Date(Math.min(requestedEnd, parsed.start)),
+      };
+    }
     cursor = Math.max(cursor, parsed.end);
     if (cursor >= requestedEnd - COVERAGE_SLOP_MS) return null;
   }

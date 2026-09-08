@@ -16,6 +16,8 @@ import {
   hasPersistedEntitlementEvidence,
   hasVerifiedPaidPlan,
   isAuthenticatedFreeUser,
+  isFreeOrUnattributedUser,
+  isDevLoginSkipEnabled,
   isSignedInCloudSubscriber,
   isTokenHydrationCandidate,
   isTokenHydrationPending,
@@ -44,6 +46,15 @@ describe("app entitlement", () => {
     vi.setSystemTime(NOW);
     vi.stubEnv("TAURI_ENV_DEBUG", "false");
     vi.stubEnv("NEXT_PUBLIC_SCREENPIPE_DEV_BILLING_BYPASS", "false");
+    vi.stubEnv("NEXT_PUBLIC_SCREENPIPE_DEV_LOGIN_SKIP", "false");
+  });
+
+  it("shows the login skip only when its dedicated build flag is enabled", () => {
+    vi.stubEnv("TAURI_ENV_DEBUG", "true");
+    expect(isDevLoginSkipEnabled()).toBe(false);
+
+    vi.stubEnv("NEXT_PUBLIC_SCREENPIPE_DEV_LOGIN_SKIP", "true");
+    expect(isDevLoginSkipEnabled()).toBe(true);
   });
 
   afterEach(() => {
@@ -601,6 +612,7 @@ describe("isAuthenticatedFreeUser", () => {
 
   it("recognizes only a signed-in account with explicit verified free-plan truth", () => {
     expect(isAuthenticatedFreeUser(explicitFree())).toBe(true);
+    expect(isFreeOrUnattributedUser(explicitFree())).toBe(true);
     const tokenlessCachedFreeUser = explicitFree({ token: null });
     expect(isAuthenticatedFreeUser(tokenlessCachedFreeUser)).toBe(false);
     expect(hasFreePlanPolicy(tokenlessCachedFreeUser)).toBe(true);
@@ -687,7 +699,15 @@ describe("isAuthenticatedFreeUser", () => {
     ).toBe("unknown");
   });
 
-  it.each(["standard", "pro", "team", "enterprise", "lifetime"])(
+  it.each([
+    "basic",
+    "standard",
+    "business",
+    "pro",
+    "team",
+    "enterprise",
+    "lifetime",
+  ])(
     "preserves retention choice for the paid %s plan",
     (plan) => {
       const paid = user({
@@ -704,6 +724,7 @@ describe("isAuthenticatedFreeUser", () => {
       });
       expect(isAuthenticatedFreeUser(paid)).toBe(false);
       expect(hasVerifiedPaidPlan(paid)).toBe(true);
+      expect(isFreeOrUnattributedUser(paid)).toBe(false);
     },
   );
 
@@ -722,6 +743,7 @@ describe("isAuthenticatedFreeUser", () => {
     });
     expect(hasVerifiedPaidPlan(fabricated)).toBe(false);
     expect(getLocalPlanPolicy(fabricated)).toBe("unknown");
+    expect(isFreeOrUnattributedUser(fabricated)).toBe(true);
   });
 
   it("does not classify manual, enterprise, lifetime, dev, grace, or cloud grants as free", () => {

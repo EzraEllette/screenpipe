@@ -19,11 +19,18 @@ struct TimelineAPIConfig: Equatable {
     var host: String
     var port: Int
     var apiKey: String?
+    var historyAccessRestricted: Bool
 
-    init(host: String = "127.0.0.1", port: Int = 3030, apiKey: String? = nil) {
+    init(
+        host: String = "127.0.0.1",
+        port: Int = 3030,
+        apiKey: String? = nil,
+        historyAccessRestricted: Bool = false
+    ) {
         self.host = host
         self.port = port
         self.apiKey = apiKey
+        self.historyAccessRestricted = historyAccessRestricted
     }
 
     /// Port 0 is not a real port; it means "do not talk to a server at all",

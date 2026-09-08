@@ -56,6 +56,7 @@ on:
     paths: &paths
       - "crates/screenpipe-screen/**"
       - "crates/screenpipe-audio/src/meeting_processes.rs"
+      - "crates/screenpipe-engine/src/meeting_watcher/ui_scan/**"
       - "crates/screenpipe-engine/src/event_driven_capture.rs"
       - "crates/screenpipe-engine/src/hd_recorder.rs"
       - "crates/screenpipe-engine/src/vision_manager/**"
@@ -190,6 +191,27 @@ jobs:
             meeting_processes::platform::runtime_smoke::repeated_input_process_snapshots_do_not_crash \
             -- --exact --nocapture
 
+      - name: Smoke-test meeting UI app discovery under process churn
+        shell: bash
+        env:
+          # Reuse the artifacts produced by the Tauri build above instead of
+          # compiling screenpipe-engine's native dependency graph again.
+          CARGO_TARGET_DIR: apps/screenpipe-app-tauri/src-tauri/target
+        run: |
+          set -euo pipefail
+
+          # This API is forbidden in the meeting scanner. On Intel it can
+          # return an invalid CFString while a process exits, which crashes in
+          # CFStringGetLength before Rust can recover.
+          if rg -n 'localized_name\s*\(' crates/screenpipe-engine/src/meeting_watcher/ui_scan/macos.rs; then
+            echo "::error::Meeting UI scanner must use checked libproc names, not NSRunningApplication.localizedName"
+            exit 1
+          fi
+
+          cargo test -p screenpipe-engine --lib --no-default-features \
+            meeting_watcher::ui_scan::macos::runtime_smoke \
+            -- --nocapture
+
       - name: Wrap binary as .app bundle for tcc-grant
         id: wrap_bundle
         shell: bash
@@ -255,9 +277,11 @@ jobs:
           # Whisper/VAD/diarization initialization can consume the entire watch
           # window before VisionManager starts and turn a healthy launch red.
           # `no-audio` is the existing vision-only E2E mode documented by
-          # e2e/helpers/app-launcher.ts.
+          # e2e/helpers/app-launcher.ts. The existing cloud-authenticated seed
+          # satisfies the debug app's account gate so capture actually starts;
+          # without it the process stays healthy but never creates VisionManager.
           SCREENPIPE_DATA_DIR="$DATA_DIR" \
-          SCREENPIPE_E2E_SEED="onboarding,no-audio" \
+          SCREENPIPE_E2E_SEED="onboarding,no-audio,cloud-authenticated" \
           SCREENPIPE_FOCUS_PORT="11436" \
           RUST_BACKTRACE=1 \
             "$APP_BIN" >"$LOG" 2>&1 &

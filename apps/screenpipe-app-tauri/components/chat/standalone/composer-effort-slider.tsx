@@ -192,7 +192,29 @@ export function ComposerEffortSlider({
 }
 
 /**
- * Whether an advertised option is the effort axis rather than a plain list.
+ * Whether an advertised option names the effort axis rather than a plain list.
+ *
+ * Detection is deliberately separate from slider eligibility. An ACP adapter
+ * may advertise only two effort values; that is still an effort control worth
+ * surfacing in the composer, but a two-stop dial would falsely imply a useful
+ * scale. Callers can render that edge case as a select instead.
+ */
+export function isEffortAxis(option: {
+  id: string;
+  name: string;
+  values: readonly { value: string }[];
+}): boolean {
+  if (option.values.length === 0) return false;
+  const haystack = `${option.id} ${option.name}`.toLowerCase();
+  return (
+    haystack.includes("effort") ||
+    haystack.includes("reasoning") ||
+    haystack.includes("thinking")
+  );
+}
+
+/**
+ * Whether an advertised effort axis has enough ordered values for the dial.
  *
  * Deliberately narrow. Misreading an unordered option as a scale would put a
  * "faster to smarter" claim on something that has no such ordering, which is
@@ -205,10 +227,5 @@ export function isEffortOption(option: {
   values: readonly { value: string }[];
 }): boolean {
   if (option.values.length < 3 || option.values.length > 6) return false;
-  const haystack = `${option.id} ${option.name}`.toLowerCase();
-  return (
-    haystack.includes("effort") ||
-    haystack.includes("reasoning") ||
-    haystack.includes("thinking")
-  );
+  return isEffortAxis(option);
 }

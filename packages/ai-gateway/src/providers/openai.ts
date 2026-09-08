@@ -23,11 +23,10 @@ type Gpt56CachedChatParams = ChatCompletionCreateParams & {
 
 const GPT56_MAX_READ_BREAKPOINTS = 50;
 const GPT56_HISTORY_BREAKPOINTS = GPT56_MAX_READ_BREAKPOINTS - 1;
+const GPT5_MIN_OUTPUT_LIMIT_RETRY = 16_000;
+const GPT5_MAX_OUTPUT_LIMIT_RETRY = 128_000;
 const CACHEABLE_CONTENT_TYPES = new Set([
 	'text',
-	'image_url',
-	'input_audio',
-	'file',
 	'refusal',
 ]);
 
@@ -50,14 +49,6 @@ function isCacheableContentPart(part: any): boolean {
 			return typeof part.text === 'string' && part.text.length > 0;
 		case 'refusal':
 			return typeof part.refusal === 'string' && part.refusal.length > 0;
-		case 'image_url':
-			return typeof part.image_url === 'string'
-				? part.image_url.length > 0
-				: Boolean(part.image_url?.url);
-		case 'input_audio':
-			return Boolean(part.input_audio?.data);
-		case 'file':
-			return Boolean(part.file?.file_id || part.file?.filename || part.file?.file_data);
 		default:
 			return false;
 	}
@@ -257,9 +248,14 @@ export class OpenAIProvider implements AIProvider {
 		this.chatTemplateKwargs = chatTemplateKwargs;
 	}
 
-	private applyProviderOptions(params: ChatCompletionCreateParams): void {
-		if (this.chatTemplateKwargs) {
-			Object.assign(params, { chat_template_kwargs: this.chatTemplateKwargs });
+	protected getChatTemplateKwargs(_body: RequestBody): Record<string, unknown> | undefined {
+		return this.chatTemplateKwargs;
+	}
+
+	private applyProviderOptions(params: ChatCompletionCreateParams, body: RequestBody): void {
+		const chatTemplateKwargs = this.getChatTemplateKwargs(body);
+		if (chatTemplateKwargs) {
+			Object.assign(params, { chat_template_kwargs: chatTemplateKwargs });
 		}
 	}
 
@@ -281,11 +277,15 @@ export class OpenAIProvider implements AIProvider {
 		switch (format.type) {
 			case 'json_object':
 				return { type: 'json_object' };
-			case 'json_schema':
-				if (!format.schema || !format.name) {
+			case 'json_schema': {
+				const schema = format.json_schema?.schema ?? format.schema;
+				const name = format.json_schema?.name ?? format.name;
+				const description = format.json_schema?.description ?? format.description;
+				if (!schema || !name) {
 					throw new Error('Schema and name are required for json_schema response format');
 				}
-				return this.createJSONSchemaFormat(format.schema, format.name, format.description);
+				return this.createJSONSchemaFormat(schema, name, description);
+			}
 			default:
 				return undefined;
 		}
@@ -333,12 +333,40 @@ export class OpenAIProvider implements AIProvider {
 		return /must contain the word 'json'/i.test(msg);
 	}
 
+	private raiseOutputLimitAfterRejection(
+		current: ChatCompletionCreateParams & Record<string, unknown>,
+		error: any,
+		canRetry: boolean,
+	): boolean {
+		if (error?.status !== 400) return false;
+		const message = String(error?.message ?? error?.error?.message ?? '');
+		if (!/max_tokens or model output limit was reached/i.test(message)) return false;
+
+		const model = String(current.model ?? '');
+		if (!/^gpt-5(?:$|[.-])/i.test(model)) return false;
+		const key = this.usesMaxCompletionTokens(model) || current.max_completion_tokens !== undefined
+			? 'max_completion_tokens'
+			: 'max_tokens';
+		const requested = Number(current[key]);
+		const finiteRequested = Number.isFinite(requested) && requested > 0 ? Math.floor(requested) : 0;
+		const next = Math.min(
+			GPT5_MAX_OUTPUT_LIMIT_RETRY,
+			Math.max(GPT5_MIN_OUTPUT_LIMIT_RETRY, finiteRequested * 4),
+		);
+		error.screenpipeOutputLimitTokens = finiteRequested;
+		if (!canRetry || next <= finiteRequested) return false;
+		current[key] = next;
+		error.screenpipeOutputLimitRetryTokens = next;
+		return true;
+	}
+
 	private async createWithUnsupportedParamRetry<T>(
 		params: ChatCompletionCreateParams,
 		invoke: (p: ChatCompletionCreateParams) => Promise<T>,
 	): Promise<T> {
 		// Bounded fix-and-retry loop: each pass repairs one distinct rejection
-		// (an unsupported sampling param, a missing "json" mention). Anything
+		// (an unsupported sampling param, a missing "json" mention, or an output
+		// limit OpenAI explicitly says can be retried higher). Anything
 		// unfixable rethrows immediately; the cap guards against an upstream
 		// that keeps rejecting repaired requests.
 		let current = params as ChatCompletionCreateParams & Record<string, unknown>;
@@ -346,6 +374,7 @@ export class OpenAIProvider implements AIProvider {
 			try {
 				return await invoke(current as ChatCompletionCreateParams);
 			} catch (error: any) {
+				if (this.raiseOutputLimitAfterRejection(current, error, attempt < 3)) continue;
 				if (attempt >= 3) throw error;
 				const unsupported = this.isUnsupportedSamplingParamError(error);
 				if (unsupported && current[unsupported] !== undefined) {
@@ -379,12 +408,13 @@ export class OpenAIProvider implements AIProvider {
 	}
 
 	private applyToolCompatibilityOptions(params: ChatCompletionCreateParams, body: RequestBody): void {
-		// GPT-5.5 and GPT-5.6 accept function tools through Chat Completions only when
-		// reasoning_effort is "none". Pi speaks the Chat Completions protocol,
-		// so preserve tool support there rather than silently cascading a Luna
-		// request to another provider. Agentic callers that need reasoning plus
-		// tools can use the Responses API directly.
-		if (/^gpt-5\.(?:5|6)(?:$|[.-])/i.test(body.model) && Array.isArray(body.tools) && body.tools.length > 0) {
+		// The whole GPT-5 family accepts function tools through Chat Completions
+		// only when reasoning_effort is "none" — including the 5.4 tier, which
+		// background pipes reach with an injected effort (applyBackgroundReasoningDefault).
+		// Pi speaks the Chat Completions protocol, so preserve tool support here
+		// rather than silently cascading the request to another provider. Agentic
+		// callers that need reasoning plus tools can use the Responses API directly.
+		if (/^gpt-5(?:$|[.-])/i.test(body.model) && Array.isArray(body.tools) && body.tools.length > 0) {
 			Object.assign(params, { reasoning_effort: 'none' });
 		}
 	}
@@ -405,7 +435,7 @@ export class OpenAIProvider implements AIProvider {
 		this.applyGenerationOptions(params, body);
 		this.applyTokenLimit(params, body);
 		this.applyToolCompatibilityOptions(params, body);
-		this.applyProviderOptions(params);
+		this.applyProviderOptions(params, body);
 		await applyGpt56PromptCaching(params, body.gpt56HistoryCacheEligible === true);
 
 		const response = await this.createWithUnsupportedParamRetry(params, (p) =>
@@ -439,7 +469,7 @@ export class OpenAIProvider implements AIProvider {
 		this.applyGenerationOptions(params, body);
 		this.applyTokenLimit(params, body);
 		this.applyToolCompatibilityOptions(params, body);
-		this.applyProviderOptions(params);
+		this.applyProviderOptions(params, body);
 		await applyGpt56PromptCaching(params, body.gpt56HistoryCacheEligible === true);
 
 		const stream = (await this.createWithUnsupportedParamRetry(params, (p) =>
@@ -499,6 +529,24 @@ export class OpenAIProvider implements AIProvider {
 								new TextEncoder().encode(
 									`data: ${JSON.stringify({
 										choices: [{ delta: { tool_calls: toolCalls } }],
+									})}\n\n`
+								)
+							);
+						}
+						// OpenAI-compatible reasoning models (notably llama.cpp GLM)
+						// stream their work before final text. Preserve the first
+						// supported reasoning field so Pi receives thinking deltas and
+						// the UI can show liveness instead of appearing frozen. This is
+						// also the only model output when generation ends inside the
+						// reasoning budget, so dropping it produced an empty response.
+						const delta = choice?.delta as Record<string, unknown> | undefined;
+						const reasoningField = ['reasoning_content', 'reasoning', 'reasoning_text']
+							.find((field) => typeof delta?.[field] === 'string' && (delta[field] as string).length > 0);
+						if (reasoningField && delta) {
+							controller.enqueue(
+								new TextEncoder().encode(
+									`data: ${JSON.stringify({
+										choices: [{ delta: { [reasoningField]: delta[reasoningField] } }],
 									})}\n\n`
 								)
 							);

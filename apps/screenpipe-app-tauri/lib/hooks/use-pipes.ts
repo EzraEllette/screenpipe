@@ -11,6 +11,8 @@ export interface TemplatePipe {
   name: string;
   title: string;
   description: string;
+  /** Concise user-facing prompt shown when previewing a Home card. */
+  previewPrompt?: string;
   icon: string;
   featured: boolean;
   prompt: string;

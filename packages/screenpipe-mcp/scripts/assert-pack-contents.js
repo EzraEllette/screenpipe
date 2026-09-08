@@ -6,28 +6,23 @@
  * Assert that the npm tarball this tree would publish is actually a
  * gateway-capable build (SCR-352).
  *
- * The incident this exists to prevent: `screenpipe-mcp@0.18.15` was published
- * from a tree that predated `src/team-config.ts`. Its tarball contained no
- * `dist/team-config.js` at all, so the `team-*` tools registered off the token
- * alone and then failed with HTTP 401 against every customer query gateway —
- * and nothing in the release path looked at what it was shipping. A version
- * bump does not prove the artifact is right; the file list and the built
- * bytes do.
+ * The gate now covers two incidents. `screenpipe-mcp@0.18.15` omitted compiled
+ * modules entirely. `screenpipe-mcp@0.19.1` shipped a large runtime dependency
+ * tree that Bun/npx can corrupt when several agents cold-start concurrently;
+ * production then fails on a random missing AJV, Zod, SDK, locale, or local
+ * module. A later audit also found an MCP authentication fallback that opened
+ * the recorder's live SQLite database outside Screenpipe's locking boundary.
+ * The package must therefore ship self-contained entry bundles, no runtime
+ * dependency installation surface, and no direct recording-database access.
  *
  * Two independent classes of failure are checked, because they fail
  * differently:
- *   - REQUIRED_PATHS  — the file is absent from the tarball (what 0.18.15 did).
- *     Note how load-bearing that is here: `.gitignore` lists `dist/`, and the
- *     only reason the build output ships at all is that npm ≥ 8
- *     (npm-packlist ≥ 5) dropped the `.gitignore`-as-`.npmignore` fallback —
- *     measured on npm 10.8.2 / npm-packlist 8.0.2. Add an `.npmignore` with a
- *     `dist/*` rule and the tarball silently shrinks to the `main`/`bin`
- *     entries npm force-includes: `dist/team-config.js` and `dist/version.js`
- *     disappear — precisely the two files 0.18.15 was missing — with no error
- *     anywhere. This list is what turns that into a red build.
+ *   - REQUIRED_PATHS — all three public entry bundles must be present.
  *   - REQUIRED_MARKERS / FORBIDDEN_MARKERS — the file is present but was built
  *     from the wrong tree (stale `dist/`, or a revert of the gateway support).
  *     Grepping the built bytes is the only check that can tell those apart.
+ *   - runtimeDependencyFailures — package.json must not make bunx/npx install
+ *     the dependency graph that produced the observed shared-cache races.
  *
  * Usage (both `test-mcp.yml` and `release-mcp.yml` call this — the release job
  * runs it immediately before `npm publish`, since that is the only place where
@@ -51,11 +46,6 @@ const REQUIRED_PATHS = [
   "dist/cli.js", // bin: screenpipe-mcp
   "dist/http-server.js", // bin: screenpipe-mcp-http
   "dist/index.js", // main — the stdio server
-  "dist/activity-summary-tool.js", // bounded activity orchestration imported by dist/index.js
-  "dist/activity-summary-format.js", // authoritative time + bounded context formatter imported by dist/index.js
-  "dist/time-normalization.js", // local-calendar literals imported by dist/index.js
-  "dist/team-config.js", // the whole point of 0.19.0
-  "dist/version.js", // single source of truth for the reported version
 ];
 
 /**
@@ -64,12 +54,12 @@ const REQUIRED_PATHS = [
  */
 const REQUIRED_MARKERS = [
   {
-    file: "dist/team-config.js",
+    file: "dist/index.js",
     marker: "SCREENPIPE_TEAM_API_URL",
     why: "the env-var override is how gateway orgs repoint the team-* tools",
   },
   {
-    file: "dist/team-config.js",
+    file: "dist/index.js",
     marker: "gateway_url",
     why: "the ~/.screenpipe/enterprise.json fallback in the precedence ladder",
   },
@@ -79,12 +69,17 @@ const REQUIRED_MARKERS = [
     why: "the CLI flag override must survive compilation",
   },
   {
-    file: "dist/activity-summary-format.js",
+    file: "dist/index.js",
+    marker: "Do not claim to have seen this image",
+    why: "missing frames must stay explicit instead of becoming invented visual evidence",
+  },
+  {
+    file: "dist/index.js",
     marker: "Authoritative active time",
     why: "activity summaries must preserve server-owned time instead of inferring it from capture counts",
   },
   {
-    file: "dist/time-normalization.js",
+    file: "dist/index.js",
     marker: "getFullYear",
     why: "calendar literals must resolve from the runtime local date, not the UTC date",
   },
@@ -94,8 +89,18 @@ const REQUIRED_MARKERS = [
 const FORBIDDEN_MARKERS = [
   {
     file: "dist/index.js",
-    pattern: /TEAM_API\s*=\s*"https/,
+    pattern: /\bTEAM_API\s*=\s*"https/,
     why: "the team API base must be resolved at runtime (discoverTeamApiBase), never a literal — a hardcoded base is exactly what 401'd for gateway orgs",
+  },
+  {
+    file: "dist/index.js",
+    pattern: /\bsqlite3(?:\.exe)?\b/i,
+    why: "the MCP must use Screenpipe's authenticated API or CLI and never spawn an external SQLite client",
+  },
+  {
+    file: "dist/index.js",
+    pattern: /\bdb\.sqlite(?:-wal|-shm)?\b/i,
+    why: "the MCP must never open or copy the recorder's live database files",
   },
 ];
 
@@ -129,6 +134,15 @@ function markerFailures(read) {
   return failures;
 }
 
+/** @param {Record<string, unknown>} packageJson */
+function runtimeDependencyFailures(packageJson) {
+  const dependencies = Object.keys(packageJson.dependencies || {});
+  return dependencies.map(
+    (dependency) =>
+      `package.json: runtime dependency ${dependency} defeats the self-contained bundle`,
+  );
+}
+
 /** The paths `npm publish` would ship, straight from npm's own packer. */
 function packedFiles() {
   const out = execFileSync("npm", ["pack", "--dry-run", "--json"], {
@@ -148,12 +162,14 @@ function readFromDisk(file) {
 }
 
 function main() {
-  const version = JSON.parse(
+  const packageJson = JSON.parse(
     fs.readFileSync(path.join(PKG_ROOT, "package.json"), "utf-8"),
-  ).version;
+  );
+  const version = packageJson.version;
   const files = packedFiles();
   const missing = missingFrom(files);
   const failures = markerFailures(readFromDisk);
+  const dependencyFailures = runtimeDependencyFailures(packageJson);
 
   if (missing.length) {
     console.error(
@@ -164,10 +180,11 @@ function main() {
     );
   }
   for (const f of failures) console.error(`built artifact wrong: ${f}`);
+  for (const f of dependencyFailures) console.error(`runtime install surface: ${f}`);
 
-  if (missing.length || failures.length) {
+  if (missing.length || failures.length || dependencyFailures.length) {
     console.error(
-      `\nREFUSING screenpipe-mcp@${version}: this tarball is not a gateway-capable build. ` +
+      `\nREFUSING screenpipe-mcp@${version}: this tarball is not self-contained and gateway-capable. ` +
         `Run \`npm run build\` and re-check; see packages/screenpipe-mcp/RELEASE.md.`,
     );
     process.exit(1);
@@ -176,7 +193,8 @@ function main() {
   console.log(
     `pack contents OK — screenpipe-mcp@${version}, ${files.length} files, ` +
       `${REQUIRED_PATHS.length} required paths present, ` +
-      `${REQUIRED_MARKERS.length} content markers verified, no hardcoded team base.`,
+      `${REQUIRED_MARKERS.length} content markers verified, ` +
+      `zero runtime dependencies, no hardcoded team base, no direct SQLite access.`,
   );
 }
 
@@ -186,6 +204,7 @@ module.exports = {
   FORBIDDEN_MARKERS,
   missingFrom,
   markerFailures,
+  runtimeDependencyFailures,
   packedFiles,
 };
 

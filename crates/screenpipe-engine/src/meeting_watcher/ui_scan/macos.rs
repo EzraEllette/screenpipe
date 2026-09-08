@@ -5,8 +5,53 @@
 //! macOS AX-tree scanning backend for meeting detection.
 
 use super::*;
+use std::ffi::c_void;
 use std::time::{Duration, Instant};
 use tracing::{debug, warn};
+
+#[link(name = "proc")]
+extern "C" {
+    fn proc_name(pid: i32, buffer: *mut c_void, buffersize: u32) -> i32;
+}
+
+const PROCESS_NAME_BUFFER_SIZE: usize = 1024;
+
+fn decode_process_name(buffer: &[u8], written: i32) -> Option<String> {
+    if written <= 0 {
+        return None;
+    }
+
+    let end = (written as usize).min(buffer.len());
+    let bytes = &buffer[..end];
+    let nul = bytes
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(bytes.len());
+    let name = String::from_utf8_lossy(&bytes[..nul]).trim().to_owned();
+    (!name.is_empty()).then_some(name)
+}
+
+/// Resolve a process name without touching nullable Foundation strings.
+///
+/// `NSRunningApplication.localizedName` has repeatedly returned an invalid
+/// CFString while an app is exiting on Intel macOS. Formatting that value
+/// segfaults in `CFStringGetLength`, so every meeting-scanner app-name lookup
+/// goes through libproc instead.
+fn process_name_for_pid(pid: i32) -> Option<String> {
+    if pid <= 0 {
+        return None;
+    }
+
+    let mut buffer = [0_u8; PROCESS_NAME_BUFFER_SIZE];
+    let written = unsafe {
+        proc_name(
+            pid,
+            buffer.as_mut_ptr().cast::<c_void>(),
+            buffer.len() as u32,
+        )
+    };
+    decode_process_name(&buffer, written)
+}
 
 /// Walk an AX element's subtree looking for call signals.
 ///
@@ -254,10 +299,7 @@ pub(crate) fn get_ax_identifier(elem: &cidre::ax::UiElement) -> Option<String> {
 
 /// Get the app name for a PID on macOS.
 pub(crate) fn get_app_name_for_pid(pid: i32) -> Option<String> {
-    cidre::objc::ar_pool(|| -> Option<String> {
-        let app = cidre::ns::RunningApp::with_pid(pid)?;
-        app.localized_name().map(|s| s.to_string())
-    })
+    process_name_for_pid(pid)
 }
 
 /// Find running processes that match any meeting detection profile.
@@ -285,9 +327,8 @@ pub fn find_running_meeting_apps(
         for i in 0..apps.len() {
             let app = &apps[i];
             let pid = app.pid();
-            let name = match app.localized_name() {
-                Some(n) => n.to_string(),
-                None => continue,
+            let Some(name) = process_name_for_pid(pid) else {
+                continue;
             };
             let name_lower = name.to_lowercase();
 
@@ -568,10 +609,8 @@ pub(crate) fn resolve_browser_pid(app: &str) -> i32 {
         let apps = ws.running_apps();
         for i in 0..apps.len() {
             let a = &apps[i];
-            if let Some(n) = a.localized_name() {
-                if n.to_string().to_lowercase() == app_lower {
-                    return a.pid();
-                }
+            if process_name_for_pid(a.pid()).is_some_and(|name| name.to_lowercase() == app_lower) {
+                return a.pid();
             }
         }
         -1
@@ -611,10 +650,7 @@ mod live_tests {
                 let running = workspace.running_apps();
                 for i in 0..running.len() {
                     let app = &running[i];
-                    let name = app
-                        .localized_name()
-                        .map(|s| s.to_string())
-                        .unwrap_or_default();
+                    let name = process_name_for_pid(app.pid()).unwrap_or_default();
                     let name_lower = name.to_lowercase();
                     if BROWSER_NAMES.iter().any(|b| name_lower.contains(b)) {
                         println!("\nBROWSER: {} (pid={})", name, app.pid());
@@ -688,10 +724,7 @@ mod live_tests2 {
             let running = workspace.running_apps();
             for i in 0..running.len() {
                 let app = &running[i];
-                let name = app
-                    .localized_name()
-                    .map(|s| s.to_string())
-                    .unwrap_or_default();
+                let name = process_name_for_pid(app.pid()).unwrap_or_default();
                 if name != "Arc" {
                     continue;
                 }
@@ -750,5 +783,46 @@ mod live_tests2 {
                 }
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod runtime_smoke {
+    use super::*;
+    use std::process::Command;
+
+    #[test]
+    fn process_name_decoder_handles_bounds_nul_and_invalid_utf8() {
+        assert_eq!(
+            decode_process_name(b"screenpipe\0ignored", 18),
+            Some("screenpipe".into())
+        );
+        assert_eq!(decode_process_name(b" app ", 5), Some("app".into()));
+        assert_eq!(
+            decode_process_name(b"app-\xff", 5),
+            Some("app-\u{fffd}".into())
+        );
+        assert_eq!(decode_process_name(b"screenpipe", 0), None);
+        assert_eq!(decode_process_name(b"\0ignored", 8), None);
+    }
+
+    #[test]
+    fn repeated_app_discovery_and_process_exit_do_not_crash() {
+        let current_pid = std::process::id() as i32;
+        assert!(process_name_for_pid(current_pid).is_some());
+
+        for _ in 0..250 {
+            let mut child = Command::new("/usr/bin/true")
+                .spawn()
+                .expect("spawn short-lived process");
+            let pid = child.id() as i32;
+            let _ = process_name_for_pid(pid);
+            child.wait().expect("wait for short-lived process");
+            let _ = process_name_for_pid(pid);
+
+            // Exercise the production NSWorkspace enumeration plus libproc
+            // naming while the system process table is actively changing.
+            let _ = find_running_meeting_apps(&[], None);
+        }
     }
 }

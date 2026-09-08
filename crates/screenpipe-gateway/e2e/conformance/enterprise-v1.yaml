@@ -206,7 +206,7 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/DeviceList" }
-        "400": { $ref: "#/components/responses/BadRequest" }
+        "400": { $ref: "#/components/responses/InvalidBody" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "500": { $ref: "#/components/responses/ServerError" }
@@ -456,6 +456,72 @@ paths:
         "501": { $ref: "#/components/responses/NotServedByGateway" }
         "502": { $ref: "#/components/responses/ServerError" }
 
+  /api/enterprise/v1/skills:
+    get:
+      operationId: listTeamSkills
+      summary: List approved team skills or fetch one exact package
+      description: >-
+        HOSTED ONLY. Lists compact discovery metadata by default. Pass an id
+        with view=full only when an agent activates or installs that skill.
+        The gateway answers a typed 501 because this is control-plane state,
+        not telemetry from the customer-run archive.
+      x-scope: read:skills
+      x-targets: [hosted]
+      parameters:
+        - name: id
+          in: query
+          required: false
+          schema: { type: string, pattern: "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$" }
+        - name: view
+          in: query
+          required: false
+          schema: { type: string, enum: [metadata, full], default: metadata }
+      responses:
+        "200":
+          description: Compact approved-skill metadata, or one activated package
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - { $ref: "#/components/schemas/TeamSkillList" }
+                  - { $ref: "#/components/schemas/TeamSkillDetail" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "501": { $ref: "#/components/responses/NotServedByGateway" }
+        "502": { $ref: "#/components/responses/ServerError" }
+    post:
+      operationId: proposeTeamSkill
+      summary: Propose a private portable skill bundle for admin review
+      description: >-
+        HOSTED ONLY. Creates an idempotent proposal. This scope cannot approve,
+        assign, install, or schedule the skill. The gateway answers a typed 501.
+      x-scope: write:skill-proposals
+      x-targets: [hosted]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TeamSkillProposal" }
+      responses:
+        "200":
+          description: An identical proposal already exists
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TeamSkillProposalReceipt" }
+        "201":
+          description: A private proposal was created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TeamSkillProposalReceipt" }
+        "400": { $ref: "#/components/responses/InvalidBody" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "501": { $ref: "#/components/responses/NotServedByGateway" }
+        "500": { $ref: "#/components/responses/ServerError" }
+
   /api/enterprise/v1/pipes:
     post:
       operationId: pushPipe
@@ -622,7 +688,7 @@ components:
         application/json:
           schema: { $ref: "#/components/schemas/CodedError" }
     InvalidBody:
-      description: A request body we cannot accept (POST /pipes only)
+      description: A request body or identifier we cannot accept
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
@@ -643,6 +709,17 @@ components:
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
+    Conflict:
+      description: A deterministic proposal id already refers to different content
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [error, code]
+            properties:
+              error: { type: string }
+              code: { type: string, const: version_conflict }
     WriteOnlyArchive:
       description: >-
         The organization runs a write-only archive, so no Screenpipe-hosted
@@ -1028,6 +1105,128 @@ components:
           items:
             type: object
             additionalProperties: true
+
+    TeamSkillPackageFile:
+      type: object
+      additionalProperties: false
+      required: [path, content, sha256, bytes]
+      properties:
+        path: { type: string, maxLength: 240 }
+        content: { type: string, maxLength: 262144 }
+        sha256: { type: string, pattern: "^[a-f0-9]{64}$" }
+        bytes: { type: integer, minimum: 0, maximum: 262144 }
+
+    TeamSkillPackage:
+      type: object
+      additionalProperties: false
+      required: [format, package_version, entrypoint, digest, name, description, files, context, risk]
+      properties:
+        format: { type: string, const: agentskills.io/v1 }
+        package_version: { type: integer, minimum: 1 }
+        entrypoint: { type: string, const: SKILL.md }
+        digest: { type: string, pattern: "^[a-f0-9]{64}$" }
+        name: { type: string, pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$", maxLength: 64 }
+        description: { type: string, minLength: 1, maxLength: 1024 }
+        files:
+          type: array
+          minItems: 1
+          maxItems: 64
+          items: { $ref: "#/components/schemas/TeamSkillPackageFile" }
+        context:
+          type: object
+          additionalProperties: false
+          required: [discovery_chars, activation_chars]
+          properties:
+            discovery_chars: { type: integer, minimum: 0 }
+            activation_chars: { type: integer, minimum: 0 }
+        risk:
+          type: object
+          additionalProperties: false
+          required: [has_scripts]
+          properties:
+            has_scripts: { type: boolean }
+
+    TeamSkillPackageInput:
+      type: object
+      additionalProperties: true
+      required: [files]
+      properties:
+        package_version: { type: integer, minimum: 1, default: 1 }
+        files:
+          type: array
+          minItems: 1
+          maxItems: 64
+          items:
+            type: object
+            additionalProperties: false
+            required: [path, content]
+            properties:
+              path: { type: string, maxLength: 240 }
+              content: { type: string, maxLength: 262144 }
+
+    TeamSkillSummary:
+      type: object
+      additionalProperties: false
+      required: [id, title, status, policy_version, release_version, digest, description, context, risk, file_count, destinations, updated_at]
+      properties:
+        id: { type: string }
+        title: { type: string }
+        status: { type: string, enum: [auto, curated] }
+        policy_version: { type: integer, minimum: 1 }
+        release_version: { type: integer, minimum: 1 }
+        digest: { type: string, pattern: "^[a-f0-9]{64}$" }
+        description: { type: string }
+        context: { $ref: "#/components/schemas/TeamSkillPackage/properties/context" }
+        risk: { $ref: "#/components/schemas/TeamSkillPackage/properties/risk" }
+        file_count: { type: integer, minimum: 1, maximum: 64 }
+        destinations:
+          type: array
+          items: { type: string, enum: [screenpipe, claude-code, codex, cursor, gemini, openclaw, hermes] }
+        updated_at: { type: string }
+        package: { $ref: "#/components/schemas/TeamSkillPackage" }
+
+    TeamSkillList:
+      type: object
+      additionalProperties: false
+      required: [skills, count, updated_at]
+      properties:
+        skills:
+          type: array
+          items: { $ref: "#/components/schemas/TeamSkillSummary" }
+        count: { type: integer, minimum: 0 }
+        updated_at: { type: [string, "null"] }
+
+    TeamSkillDetail:
+      type: object
+      additionalProperties: false
+      required: [skill]
+      properties:
+        skill: { $ref: "#/components/schemas/TeamSkillSummary" }
+
+    TeamSkillProposal:
+      type: object
+      additionalProperties: false
+      required: [package]
+      properties:
+        title: { type: string, maxLength: 120 }
+        package: { $ref: "#/components/schemas/TeamSkillPackageInput" }
+
+    TeamSkillProposalReceipt:
+      type: object
+      additionalProperties: false
+      required: [ok, unchanged, proposal, receipt]
+      properties:
+        ok: { type: boolean, const: true }
+        unchanged: { type: boolean }
+        proposal: { $ref: "#/components/schemas/TeamSkillSummary" }
+        receipt:
+          type: object
+          additionalProperties: false
+          required: [proposal_status, installed, assigned]
+          properties:
+            proposal_status: { type: string }
+            installed: { type: boolean, const: false }
+            assigned: { type: boolean, const: false }
 
     PipePush:
       type: object

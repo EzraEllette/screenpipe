@@ -38,10 +38,16 @@ import { optimisticAssistantForUserEcho } from "@/lib/chat/cross-window-transcri
 import { qualifiedValue } from "@/lib/analytics/qualified-value";
 import { acpAdapterInfo } from "@/lib/utils/preset-appearance";
 import { normalizePlanEntries, upsertPlanBlock } from "@/lib/chat/acp-plan";
+import {
+  finalizeAssistantTextPhases,
+  markPendingAssistantTextAsCommentary,
+} from "@/lib/chat/assistant-text-phases";
 import { useAcpBootState } from "@/lib/stores/acp-boot-state";
 import { toast } from "@/components/ui/use-toast";
 import { registerPiLogListener } from "@/components/chat/standalone/hooks/pi-log-listener";
 import { registerPiReauthListener } from "@/components/chat/standalone/hooks/pi-reauth-listener";
+import { hasPendingSteerTransition } from "@/components/chat/standalone/hooks/use-chat-turn-intents";
+import { extractFinalSteerMessage } from "@/components/chat/standalone/hooks/pi-steering-helpers";
 import {
   connectionActionFromToolResult,
   firstAgentEndAssistantError,
@@ -116,7 +122,9 @@ export function usePiForegroundEvents({
   setPiInfo,
   settings,
   syncThinkingLevelAfterStart,
+  turnIntentLedgerRef,
   turnIntentTextValuesMatch,
+  noteTurnLivenessEvent,
 }: PiForegroundEventsOptions) {
   const getActivePreset = () => activePresetRef?.current ?? activePreset;
   // Error classification names the agent rather than saying "the agent", so a
@@ -159,6 +167,39 @@ export function usePiForegroundEvents({
     // unlisten handles below so the cleanup section drains them
     // uniformly.
     const busUnregistrations: Array<() => void> = [];
+
+    const traceE2ETurnTarget = (
+      stage: string,
+      rows: Message[] = messagesRef.current,
+    ) => {
+      if (
+        process.env.NEXT_PUBLIC_SCREENPIPE_E2E !== "true" ||
+        typeof window === "undefined"
+      ) {
+        return;
+      }
+      const sessionId = piSessionIdRef.current;
+      const stored = sessionId
+        ? useChatStore.getState().sessions[sessionId]
+        : undefined;
+      const target = window as typeof window & {
+        __e2eTurnTargetTrace?: unknown[];
+      };
+      target.__e2eTurnTargetTrace = target.__e2eTurnTargetTrace ?? [];
+      target.__e2eTurnTargetTrace.push({
+        stage,
+        targetId: piMessageIdRef.current,
+        streamingText: piStreamingTextRef.current,
+        rows: rows.map((message) => ({
+          id: message.id,
+          role: message.role,
+          content: message.content.slice(0, 60),
+        })),
+        storeTargetId: stored?.streamingMessageId ?? null,
+        storeLoading: stored?.isLoading ?? null,
+        storeStreaming: stored?.isStreaming ?? null,
+      });
+    };
 
     // Shared handler for Pi event data — used by both pi_event and pipe_event.
     //
@@ -213,6 +254,14 @@ export function usePiForegroundEvents({
     const handlePiEventData = (payload: unknown) => {
       const data = piEventDataFromUnknown(payload);
       if (!data) return;
+      noteTurnLivenessEvent(data);
+
+      const pendingSteerTransition = data.type === "agent_end" && hasPendingSteerTransition(
+        turnIntentLedgerRef.current,
+        piSessionIdRef.current,
+        pendingNextPiUserIntentRef.current,
+        optimisticSteerRef.current?.turnIntentId,
+      );
 
       const actionSessionId = piSessionIdRef.current;
       if (actionSessionId && handleAgentActionEvent(data, actionSessionId)) return;
@@ -236,8 +285,8 @@ export function usePiForegroundEvents({
       }
 
       if (data.type === "acp_external_auth_required") {
-        // The agent (Kimi, OpenCode) can't sign in over ACP — its login is a
-        // CLI step. Treat this like an intentional stop so the crash-recovery
+        // The agent (Cursor, Kimi, OpenCode) can't sign in over ACP — its login
+        // is a CLI step. Treat this like an intentional stop so crash recovery
         // loop does NOT silently restart into the default provider (that was
         // the "fell back to pi" bug); instead tell the user how to sign in.
         useAcpBootState.getState().finish(stringValue(data.agentId));
@@ -366,7 +415,9 @@ export function usePiForegroundEvents({
         // thinking / tool / idle / error per `statusForEvent`.
         try {
           const sid = piSessionIdRef.current;
-          const next = sid ? statusForEvent(data) : null;
+          const next = sid
+            ? (pendingSteerTransition ? "streaming" : statusForEvent(data))
+            : null;
           if (sid && next) {
             const store = useChatStore.getState();
             const cur = store.sessions[sid]?.status;
@@ -405,8 +456,25 @@ export function usePiForegroundEvents({
           const evt = data.assistantMessageEvent;
           const delta = stringValue(evt.delta);
           if (evt.type === "text_delta" && delta) {
+            traceE2ETurnTarget("text-delta:before-target");
+            // Some Pi versions omit the assistant message_start on recovery.
+            // Foreground ownership can also move between chat surfaces during
+            // backoff, losing closure-local retry bookkeeping. Make the token
+            // boundary authoritative and fall back to the visible retry row,
+            // which is durable React transcript state in the owning surface.
+            if (!piMessageIdRef.current) {
+              const visibleRetryTargetId = messagesRef.current.findLast(
+                (message) =>
+                  message.role === "assistant" &&
+                  message.content.includes("new messages will be queued"),
+              )?.id;
+              if (visibleRetryTargetId) {
+                piMessageIdRef.current = visibleRetryTargetId;
+              }
+            }
             // First delta of a queued turn → create the placeholder lazily.
             if (!ensureAssistantPlaceholder()) return;
+            traceE2ETurnTarget("text-delta:after-target");
             piStreamingTextRef.current += delta;
             emitSessionActivity({
               status: "streaming",
@@ -491,6 +559,7 @@ export function usePiForegroundEvents({
           if (piMessageIdRef.current) {
             const msgId = piMessageIdRef.current;
             const parentToolCallId = stringValue(data.parentToolCallId);
+            const agentId = stringValue(data.agentId);
             const toolKind = stringValue(data.kind);
             const toolCall: ToolCall = {
               id: stringValue(data.toolCallId, Date.now().toString()),
@@ -498,11 +567,16 @@ export function usePiForegroundEvents({
               args: isRecord(data.args) ? data.args : {},
               isRunning: true,
               startedAtMs: Date.now(),
+              ...(agentId ? { agentId } : {}),
               ...(toolKind ? { kind: toolKind } : {}),
               ...(parentToolCallId ? { parentToolCallId } : {}),
               ...(data.subagent === true ? { subagent: true } : {}),
             };
-            // Add tool block (text before it is already its own block)
+            // Seal prose before the tool as visible progress, then keep the
+            // tool in the same ordered transcript.
+            piContentBlocksRef.current = markPendingAssistantTextAsCommentary(
+              piContentBlocksRef.current,
+            );
             piContentBlocksRef.current.push({ type: "tool", toolCall });
             const contentBlocks = [...piContentBlocksRef.current];
             setMessages((prev) =>
@@ -543,6 +617,11 @@ export function usePiForegroundEvents({
               if (data.retry !== undefined) block.toolCall.retry = data.retry;
               const title = stringValue(data.title);
               if (title) block.toolCall.toolName = title;
+              const agentId = stringValue(data.agentId);
+              if (agentId) block.toolCall.agentId = agentId;
+              const kind = stringValue(data.kind);
+              if (kind) block.toolCall.kind = kind;
+              if (isRecord(data.args)) block.toolCall.args = data.args;
               const outputDelta = stringValue(data.outputDelta);
               if (outputDelta) {
                 const combined = `${block.toolCall.progress ?? ""}${outputDelta}`;
@@ -566,6 +645,13 @@ export function usePiForegroundEvents({
             // Update the tool block in-place
             for (const block of piContentBlocksRef.current) {
               if (block.type === "tool" && block.toolCall.id === toolCallId) {
+                const toolName = stringValue(data.toolName);
+                if (toolName) block.toolCall.toolName = toolName;
+                const agentId = stringValue(data.agentId);
+                if (agentId) block.toolCall.agentId = agentId;
+                const kind = stringValue(data.kind);
+                if (kind) block.toolCall.kind = kind;
+                if (isRecord(data.args)) block.toolCall.args = data.args;
                 block.toolCall.isRunning = false;
                 block.toolCall.result = truncated;
                 block.toolCall.isError = data.isError === true;
@@ -618,6 +704,16 @@ export function usePiForegroundEvents({
           }
           setIsLoading(true);
           setIsStreaming(true);
+          const retrySessionId = piSessionIdRef.current;
+          if (retrySessionId) {
+            useChatStore.getState().actions.setStreaming(retrySessionId, {
+              streamingMessageId: piMessageIdRef.current,
+              streamingText: piStreamingTextRef.current,
+              contentBlocks: [...piContentBlocksRef.current],
+              isLoading: true,
+              isStreaming: true,
+            });
+          }
           emitSessionActivity({ status: "streaming" });
         } else if (data.type === "auto_retry_end" && data.success === false) {
           // Pi exhausted retries on a transient error (rate limit, overloaded, etc.)
@@ -754,8 +850,18 @@ export function usePiForegroundEvents({
           // there's nothing streamed yet (clearing would orphan the
           // placeholder and re-create a duplicate on the first delta).
           const rawText = textFromMessageContent(data.message?.content);
-          const text = extractInjectedUserText(rawText) ?? rawText;
+          const unwrappedText = extractInjectedUserText(rawText) ?? rawText;
+          const text = extractFinalSteerMessage(unwrappedText) ?? unwrappedText;
           const sidForStartedUser = piSessionIdRef.current;
+          const preMatchedTurnIntent = findTurnIntentForUserStart(
+            sidForStartedUser,
+            text,
+            pendingNextPiUserDisplayRef.current,
+          );
+          const precreatedSteerAssistantId =
+            preMatchedTurnIntent?.kind === "steer"
+              ? (preMatchedTurnIntent.consumedAssistantId ?? null)
+              : null;
 
           // A sibling WebView can receive this Pi echo before React commits
           // the saved transcript and active assistant ref locally. The
@@ -782,7 +888,11 @@ export function usePiForegroundEvents({
           if (hasStreamedContent) {
             flushStreamingMessageRender();
             piStreamingTextRef.current = "";
-            piMessageIdRef.current = null;
+            // A steer owns the continuation row created at submission time.
+            // Keep that target across Pi's injected user turn so the actual
+            // steered response replaces residual old-turn text in the same
+            // row instead of creating a second assistant below it.
+            piMessageIdRef.current = precreatedSteerAssistantId;
             piContentBlocksRef.current = [];
             // Don't touch isLoading/isStreaming — pi-mono is still busy
             // processing the followUp turn.
@@ -795,7 +905,16 @@ export function usePiForegroundEvents({
             pendingOptimisticSteer.content.trim() === text.trim()
           );
           const shouldConsumePendingOptimisticSteer = isPendingOptimisticSteerEcho;
-          const preMatchedTurnIntent = findTurnIntentForUserStart(piSessionIdRef.current, text, pendingNextPiUserDisplayRef.current);
+
+          // Rust drains queued prompts only after the previous logical turn
+          // settles. A matching queued intent therefore owns a fresh response,
+          // even if foreground ownership moved and left stale streaming refs
+          // behind in this surface.
+          if (preMatchedTurnIntent?.kind === "queued") {
+            piStreamingTextRef.current = "";
+            piMessageIdRef.current = null;
+            piContentBlocksRef.current = [];
+          }
 
           if (!piMessageIdRef.current || isPendingOptimisticSteerEcho || preMatchedTurnIntent?.kind === "steer") {
             const pendingDisplay = pendingNextPiUserDisplayRef.current &&
@@ -839,7 +958,7 @@ export function usePiForegroundEvents({
             if (isOptimisticSteerEcho || shouldConsumePendingOptimisticSteer) {
               optimisticSteerRef.current = null;
             }
-            if (matchedTurnIntent?.kind === "steer") {
+            if (matchedTurnIntent) {
               markTurnIntentConsumed(matchedTurnIntent.id, queuedTurnAssistantId);
             }
             const startedUser: Message | null = isOptimisticSteerEcho ? null : {
@@ -871,6 +990,7 @@ export function usePiForegroundEvents({
                 ? [...prev, startedUser, assistantPlaceholder]
                 : [...prev, assistantPlaceholder];
               nextRows = rows;
+              traceE2ETurnTarget("queued-user:rows-appended", rows);
               return rows;
             });
             if (nextRows) {
@@ -964,9 +1084,44 @@ export function usePiForegroundEvents({
             // made composer submissions bypass the queue during retry backoff.
           }
         } else if (data.type === "agent_end") {
+          traceE2ETurnTarget(
+            data.willRetry === true ? "agent-end:will-retry" : "agent-end:terminal",
+          );
           // When watching a pipe, agent_end fires before pipe_done — don't
           // clear pipe refs here, let pipe_done handle cleanup instead.
           const isPipeWatch = piMessageIdRef.current?.startsWith("pipe-");
+          const hasPendingQueuedFollowUp = turnIntentLedgerRef.current.some(
+            (record) =>
+              record.sessionId === piSessionIdRef.current &&
+              record.kind === "queued" &&
+              !record.consumedAssistantId,
+          );
+
+          // Native steering closes the old assistant turn before the steered
+          // continuation starts. The optimistic steering row and its fresh
+          // assistant placeholder already belong to that continuation, so the
+          // old agent_end must not finalize or clear them. Preserve one pending
+          // steering item targeted at the active turn until Pi echoes the
+          // steered user message.
+          if (!isPipeWatch && pendingSteerTransition) {
+            setIsLoading(true);
+            setIsStreaming(true);
+            const steeringSessionId = piSessionIdRef.current;
+            if (steeringSessionId) {
+              useChatStore.getState().actions.setStreaming(steeringSessionId, {
+                streamingMessageId: piMessageIdRef.current,
+                streamingText: piStreamingTextRef.current,
+                contentBlocks: [...piContentBlocksRef.current],
+                isLoading: true,
+                isStreaming: true,
+              });
+              useChatStore.getState().actions.patch(steeringSessionId, {
+                status: "streaming",
+              });
+            }
+            emitSessionActivity({ status: "streaming" });
+            return;
+          }
 
           if (!isPipeWatch && data.willRetry === true) {
             // Pi retries anything that mentions 429 — including terminal
@@ -983,6 +1138,20 @@ export function usePiForegroundEvents({
             } else {
               setIsLoading(true);
               setIsStreaming(true);
+              const retrySessionId = piSessionIdRef.current;
+              if (retrySessionId) {
+                // Keep the store authoritative during Pi's retry backoff. If
+                // it remains idle here, the dispatch-guard healer clears the
+                // original assistant target before the successful retry can
+                // replace the transient error message.
+                useChatStore.getState().actions.setStreaming(retrySessionId, {
+                  streamingMessageId: piMessageIdRef.current,
+                  streamingText: piStreamingTextRef.current,
+                  contentBlocks: [...piContentBlocksRef.current],
+                  isLoading: true,
+                  isStreaming: true,
+                });
+              }
               emitSessionActivity({ status: "streaming" });
               return;
             }
@@ -990,7 +1159,7 @@ export function usePiForegroundEvents({
 
           // Always clear loading/streaming state on agent_end, even if piMessageIdRef is null
           // This fixes the "stuck loading" bug when the ref was cleared prematurely
-          if (!isPipeWatch) {
+          if (!isPipeWatch && !hasPendingQueuedFollowUp) {
             setIsLoading(false);
             setIsStreaming(false);
             emitSessionActivity({ status: "idle" });
@@ -1041,7 +1210,10 @@ export function usePiForegroundEvents({
 
             // Snapshot refs BEFORE setMessages — React's batching may defer the
             // functional updater until after the refs are cleared below.
-            const blocksSnapshot = [...piContentBlocksRef.current];
+            const blocksSnapshot = finalizeAssistantTextPhases(
+              piContentBlocksRef.current,
+            );
+            piContentBlocksRef.current = blocksSnapshot;
             const streamedText = piStreamingTextRef.current;
             const wasStoppedByUser = piActiveStopRequestedRef.current;
             const hasNonEmptyChatResult =
@@ -1057,6 +1229,7 @@ export function usePiForegroundEvents({
             // Check if content was already set by error handlers above
             setMessages((prev) => {
               const existing = prev.find((m) => m.id === msgId);
+              traceE2ETurnTarget("agent-end:finalize", prev);
               // Don't overwrite error messages with "Done" or empty content
               const isErrorMessage = existing?.content?.includes("daily") && existing?.content?.includes("limit") ||
                 existing?.content?.includes("free queries") ||
@@ -1117,7 +1290,7 @@ export function usePiForegroundEvents({
               if (!streamedText && content && !hasTextBlock) {
                 contentBlocks.push({ type: "text", text: content });
               }
-              return prev.map((m) => m.id === msgId
+              const nextMessages = prev.map((m) => m.id === msgId
                 ? {
                     ...m,
                     content,
@@ -1131,6 +1304,14 @@ export function usePiForegroundEvents({
                     ...(emptyResponseRetryPrompt ? { retryPrompt: emptyResponseRetryPrompt } : {}),
                   }
                 : m);
+              messagesRef.current = nextMessages;
+              const finalizedSessionId = piSessionIdRef.current;
+              if (finalizedSessionId) {
+                useChatStore
+                  .getState()
+                  .actions.setMessages(finalizedSessionId, nextMessages as any);
+              }
+              return nextMessages;
             });
             if (!isPipeWatch) {
               const telemetryContext = chatTelemetryContextForResponse(
@@ -1159,11 +1340,26 @@ export function usePiForegroundEvents({
             piLastErrorRef.current = null;
             piActiveStopRequestedRef.current = false;
             piThinkingStartRef.current = null;
-            forceQueueModeRef.current = false;
+            forceQueueModeRef.current = hasPendingQueuedFollowUp;
             piRateLimitRetries.current = 0;
-            setIsLoading(false);
-            setIsStreaming(false);
-            emitSessionActivity({ status: "idle" });
+            setIsLoading(hasPendingQueuedFollowUp);
+            setIsStreaming(hasPendingQueuedFollowUp);
+            const settledSessionId = piSessionIdRef.current;
+            if (settledSessionId) {
+              useChatStore.getState().actions.setStreaming(settledSessionId, {
+                streamingMessageId: null,
+                streamingText: "",
+                contentBlocks: [],
+                isLoading: hasPendingQueuedFollowUp,
+                isStreaming: hasPendingQueuedFollowUp,
+              });
+              useChatStore.getState().actions.patch(settledSessionId, {
+                status: hasPendingQueuedFollowUp ? "streaming" : "idle",
+              });
+            }
+            emitSessionActivity({
+              status: hasPendingQueuedFollowUp ? "streaming" : "idle",
+            });
             if (pendingSteerBatchRef.current.some((item: { sessionId: string }) => item.sessionId === piSessionIdRef.current)) {
               void flushPendingSteerBatch();
             }
@@ -1201,6 +1397,12 @@ export function usePiForegroundEvents({
             piRateLimitRetries.current += 1;
             const attempt = piRateLimitRetries.current;
             const waitSecs = parseRateLimitWaitSeconds(errorStr);
+            noteTurnLivenessEvent({
+              type: "auto_retry_start",
+              attempt,
+              maxAttempts: PI_MAX_RATE_LIMIT_RETRIES,
+              delayMs: waitSecs * 1_000,
+            });
             const retrySession = piSessionIdRef.current;
             const retryPrompt = lastUserMessageRef.current;
             console.warn(`[Pi] rate limited, auto-retry ${attempt}/${PI_MAX_RATE_LIMIT_RETRIES} in ${waitSecs}s:`, errorStr);

@@ -123,6 +123,8 @@ const USER_INPUT_TOO_LARGE_PATTERNS = [
   /maximum context length/i,
   /context length.*exceeded/i,
   /request payload size exceeds/i,
+  /input tokens exceed the configured limit/i,
+  /exceeds the available context size/i,
   // Vertex MaaS (glm-5 etc): "The input (325052 tokens) is longer than the
   // model's context length (202752 tokens)" — SCREENPIPE-AI-PROXY-C, 28 users.
   /longer than the model'?s context length/i,
@@ -143,6 +145,10 @@ const CLIENT_PAYLOAD_PATTERNS: Array<{ re: RegExp; message: string }> = [
   {
     re: /at least one message is required/i,
     message: 'The request must include at least one user or assistant message.',
+  },
+  {
+    re: /tool_calls.*array too long.*maximum length/i,
+    message: 'A message contains too many tool calls. Start a new chat or compact the conversation and try again.',
   },
 ];
 
@@ -348,6 +354,10 @@ async function tryModel(
     }
     const msg = String(error?.message || '');
     const transient = isTransient(status, msg);
+    const outputLimitTokens = Number(error?.screenpipeOutputLimitTokens);
+    const outputLimitTag = Number.isFinite(outputLimitTokens) && outputLimitTokens > 0
+      ? { output_limit_tokens: String(outputLimitTokens) }
+      : {};
     error.status = status;
     error.transient = transient;
 
@@ -415,7 +425,7 @@ async function tryModel(
       if (!SENTRY_SKIP_STATUSES.has(status) && !upstream500) {
         try {
           captureException(error, {
-            tags: { model, error_path: `${ctx}_cascade`, status: String(status) },
+            tags: { model, error_path: `${ctx}_cascade`, status: String(status), ...outputLimitTag },
             level: 'warning',
           });
         } catch {}
@@ -424,7 +434,7 @@ async function tryModel(
       // Non-transient (400/401) — real client/config bug, always log.
       try {
         captureException(error, {
-          tags: { model, error_path: `${ctx}_fatal`, status: String(status) },
+          tags: { model, error_path: `${ctx}_fatal`, status: String(status), ...outputLimitTag },
           level: 'error',
         });
       } catch {}

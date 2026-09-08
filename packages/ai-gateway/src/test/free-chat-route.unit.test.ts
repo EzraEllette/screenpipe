@@ -264,7 +264,7 @@ describe('/v1/chat/completions free-plan route policy', () => {
 			cost_limit_reached: boolean;
 			hosted_ai: {
 				plan: string;
-				included_credits: number;
+				included_credits: number | null;
 				model_access: string[];
 			};
 		};
@@ -272,10 +272,11 @@ describe('/v1/chat/completions free-plan route policy', () => {
 		expect(response.status).toBe(200);
 		expect(body).toMatchObject({
 			tier: 'anonymous',
-			cost_limit_reached: false,
+			cost_limit_reached: null,
 			hosted_ai: {
 				plan: 'free',
-				included_credits: 10,
+				included_credits: null,
+				allowance_managed_by: 'cloudflare',
 			},
 		});
 		expect(body.hosted_ai.model_access).toContain('auto');
@@ -415,6 +416,7 @@ describe('/v1/chat/completions free-plan route policy', () => {
 		'/v1/tinfoil/chat/completions',
 		'/v1/tinfoil/responses',
 		'/v1/voice/query',
+		'/v1/text-to-speech',
 		'/v1/voice/chat',
 		'/v1/web-search',
 		'/v1/messages',
@@ -439,7 +441,7 @@ describe('/v1/chat/completions free-plan route policy', () => {
 		expect(await errorCode(response)).toBe('free_plan_alternate_hosted_ai_disabled');
 	});
 
-	it('keeps speech routes on their existing policy, outside the two-message chat preview', async () => {
+	it('keeps transcription routes on their existing policy, outside the two-message chat preview', async () => {
 		globalThis.fetch = mock(async (input: RequestInfo | URL) => {
 			const url = String(input);
 			if (url === 'https://screenpipe.com/api/user') {
@@ -469,14 +471,105 @@ describe('/v1/chat/completions free-plan route policy', () => {
 			headers: auth,
 		}), env, ctx);
 		const transcribe = await handleRequest(request(auth, '/v1/voice/transcribe'), env, ctx);
-		const textToSpeech = await handleRequest(request(auth, '/v1/text-to-speech'), env, ctx);
 
-		// These are speech features with their own quotas/input validation. They
+		// These are transcription features with their own quotas/input validation. They
 		// deliberately do not consume or bypass hosted-chat daily turns.
 		expect(listen.status).toBe(200);
 		expect(realtime.status).toBe(426);
 		expect(transcribe.status).toBe(400);
-		expect(textToSpeech.status).toBe(400);
+	});
+
+	it('rejects anonymous text-to-speech before parsing the request or reaching Deepgram', async () => {
+		const response = await handleRequest(
+			request({}, '/v1/text-to-speech'),
+			env,
+			ctx,
+		);
+
+		expect(response.status).toBe(401);
+		expect(await errorCode(response)).toBe('authentication_required');
+		expect(globalThis.fetch).not.toHaveBeenCalled();
+	});
+
+	it('lets verified Basic text-to-speech reach Deepgram', async () => {
+		globalThis.fetch = mock(async (input: RequestInfo | URL) => {
+			const url = String(input);
+			if (url === 'https://screenpipe.com/api/user') {
+				return new Response(JSON.stringify({
+					success: true,
+					user: {
+						clerk_id: 'user_tts_basic',
+						cloud_subscribed: false,
+						app_entitled: true,
+						subscription_plan: 'standard',
+						entitlement: { active: true, plan: 'standard', features: { app: true } },
+					},
+				}), { status: 200 });
+			}
+			if (url.startsWith('https://api.deepgram.com/v1/speak')) {
+				const upstream = new URL(url);
+				expect(upstream.searchParams.get('model')).toBe('aura-asteria-en');
+				expect(upstream.searchParams.get('encoding')).toBe('linear16');
+				expect(upstream.searchParams.get('container')).toBe('wav');
+				return new Response(new Uint8Array([
+					0x52, 0x49, 0x46, 0x46,
+					0x04, 0x00, 0x00, 0x00,
+					0x57, 0x41, 0x56, 0x45,
+				]), { status: 200 });
+			}
+			throw new Error(`unexpected fetch: ${url}`);
+		}) as typeof fetch;
+
+		const response = await handleRequest(new Request('https://gateway.test/v1/text-to-speech', {
+			method: 'POST',
+			headers: {
+				Authorization: 'Bearer eyJ.standard.tts',
+				'content-type': 'application/json',
+			},
+			body: JSON.stringify({ text: 'hello' }),
+		}), env, ctx);
+
+		expect(response.status).toBe(200);
+		expect(response.headers.get('content-type')).toBe('audio/wav');
+		const audio = new Uint8Array(await response.arrayBuffer());
+		expect(new TextDecoder().decode(audio.slice(0, 4))).toBe('RIFF');
+		expect(new TextDecoder().decode(audio.slice(8, 12))).toBe('WAVE');
+		expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+	});
+
+	it('rejects non-WAV bytes instead of returning a false audio/wav response', async () => {
+		globalThis.fetch = mock(async (input: RequestInfo | URL) => {
+			const url = String(input);
+			if (url === 'https://screenpipe.com/api/user') {
+				return new Response(JSON.stringify({
+					success: true,
+					user: {
+						clerk_id: 'user_tts_non_wav',
+						cloud_subscribed: false,
+						app_entitled: true,
+						subscription_plan: 'standard',
+						entitlement: { active: true, plan: 'standard', features: { app: true } },
+					},
+				}), { status: 200 });
+			}
+			if (url.startsWith('https://api.deepgram.com/v1/speak')) {
+				return new Response(new Uint8Array([0xff, 0xf3, 0x60, 0xc4]), { status: 200 });
+			}
+			throw new Error(`unexpected fetch: ${url}`);
+		}) as typeof fetch;
+
+		const response = await handleRequest(new Request('https://gateway.test/v1/text-to-speech', {
+			method: 'POST',
+			headers: {
+				Authorization: 'Bearer eyJ.standard.tts.non-wav',
+				'content-type': 'application/json',
+			},
+			body: JSON.stringify({ text: 'hello' }),
+		}), env, ctx);
+
+		expect(response.status).toBe(500);
+		expect(response.headers.get('content-type')).toBe('application/json');
+		expect(await response.text()).toContain('Failed to convert text to speech');
 	});
 
 	it.each([
@@ -583,7 +676,7 @@ describe('/v1/chat/completions free-plan route policy', () => {
 			hosted_ai: {
 				plan: string;
 				trial: boolean;
-				included_credits: number;
+				included_credits: number | null;
 				model_access: string[];
 			};
 		};
@@ -592,13 +685,14 @@ describe('/v1/chat/completions free-plan route policy', () => {
 		expect(result.hosted_ai).toMatchObject({
 			plan: 'business',
 			trial: true,
-			included_credits: 400,
+			included_credits: null,
+			allowance_managed_by: 'cloudflare',
 		});
 		expect(result.hosted_ai.model_access).toContain('claude-fable-5');
 		expect(result.hosted_ai.model_access).not.toContain('*');
 	});
 
-	it('fails the usage endpoint closed when private controls are missing', async () => {
+	it('does not depend on retired private text-cost controls for usage', async () => {
 		globalThis.fetch = mock(async (input: RequestInfo | URL) => {
 			const url = String(input);
 			if (url === 'https://screenpipe.com/api/user') {
@@ -630,8 +724,10 @@ describe('/v1/chat/completions free-plan route policy', () => {
 			headers: { Authorization: 'Bearer eyJ.missing.private.controls' },
 		}), missingControlsEnv as unknown as Env, ctx);
 
-		expect(response.status).toBe(503);
-		expect(await errorCode(response)).toBe('cost_control_unavailable');
+		expect(response.status).toBe(200);
+		expect(await response.json()).toMatchObject({
+			hosted_ai: { allowance_managed_by: 'cloudflare' },
+		});
 	});
 
 	it.each([
@@ -732,7 +828,6 @@ describe('/v1/chat/completions free-plan route policy', () => {
 		}) as typeof fetch;
 		const cloudflareEnv = {
 			...env,
-			HOSTED_CHAT_GATEWAY_MODE: 'cloudflare',
 			CLOUDFLARE_AI_GATEWAY_ID: gatewayId,
 			CLOUDFLARE_ACCOUNT_ID: '9850df1eb8fd807eb8e06f4057b473f1',
 			CLOUDFLARE_API_TOKEN: 'read-only-token',
@@ -782,7 +877,7 @@ describe('/v1/chat/completions free-plan route policy', () => {
 			allowances: expectedAllowances,
 		});
 		const expectedFrontierModels = cloudSubscribed
-			? ['gpt-5.6', 'gpt-5.6-sol', 'gpt-5.5', 'gpt-5.5-pro', 'gpt-5.4-pro', 'claude-opus-5', 'claude-fable-5']
+			? ['gpt-6-astra', 'gpt-5.6', 'gpt-5.6-sol', 'gpt-5.5', 'gpt-5.5-pro', 'gpt-5.4-pro', 'claude-opus-5', 'claude-fable-5']
 			: [];
 		expect(body.hosted_ai.frontier_models).toEqual(expectedFrontierModels);
 		expect(body.hosted_ai.required_plan).toBe(expectedUpgrade?.requiredPlan ?? null);
@@ -798,7 +893,7 @@ describe('/v1/chat/completions free-plan route policy', () => {
 		]);
 	});
 
-	it('bypasses legacy paid admission and reaches Gateway routing when D1 is unavailable', async () => {
+	it('always reaches Gateway routing when legacy D1 admission is unavailable', async () => {
 		let gatewayCalls = 0;
 		const d1Statements: string[] = [];
 		globalThis.fetch = mock(async (input: RequestInfo | URL) => {
@@ -819,7 +914,6 @@ describe('/v1/chat/completions free-plan route policy', () => {
 		}) as typeof fetch;
 		const cloudflareEnv = {
 			...env,
-			HOSTED_CHAT_GATEWAY_MODE: 'cloudflare',
 			CLOUDFLARE_AI_GATEWAY_ID: 'hosted-chat-test',
 			OPENAI_API_KEY: '',
 			AI: {
@@ -850,8 +944,8 @@ describe('/v1/chat/completions free-plan route policy', () => {
 			ctx,
 		);
 
-		// A legacy admission read would return cost_control_unavailable before
-		// provider routing. The intentional 502 proves Gateway resolution ran.
+		// The intentional 502 proves Gateway resolution ran without a mode variable
+		// or a legacy admission read.
 		expect(response.status).toBe(502);
 		expect(gatewayCalls).toBeGreaterThan(0);
 		expect(await response.text()).not.toContain('cost_control_unavailable');
@@ -859,9 +953,9 @@ describe('/v1/chat/completions free-plan route policy', () => {
 	});
 
 	it('returns canonical Max and Ultra capacity from desktop-compatible user responses', async () => {
-		for (const [billingPlan, usageTier, dailyLimit] of [
-			['pro_max', 'business_max', 120],
-			['pro_ultra', 'business_ultra', 240],
+		for (const [billingPlan, usageTier, dailyLimit, upgradeEligible] of [
+			['pro_max', 'business_max', 120, true],
+			['pro_ultra', 'business_ultra', 240, false],
 		] as const) {
 			const clerkId = `user_${billingPlan}`;
 			verifyTokenMock.mockImplementation(async () => ({ sub: clerkId }) as any);
@@ -888,8 +982,8 @@ describe('/v1/chat/completions free-plan route policy', () => {
 				limit_today: dailyLimit,
 				remaining: dailyLimit,
 				upsell_banner: false,
-				upgrade_eligible: false,
-				cost_limit_reached: false,
+				upgrade_eligible: upgradeEligible,
+				cost_limit_reached: null,
 			});
 		}
 	});
@@ -983,7 +1077,6 @@ describe('/v1/chat/completions free-plan route policy', () => {
 	});
 
 	it.each([
-		'/v1/chat/completions',
 		'/v1/web-search',
 		'/v1/tinfoil/chat/completions',
 		'/v1/tinfoil/responses',

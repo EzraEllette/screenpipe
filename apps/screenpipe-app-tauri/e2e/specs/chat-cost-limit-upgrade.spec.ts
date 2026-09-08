@@ -8,7 +8,7 @@
  * A local OpenAI-compatible provider returns the exact structured 429 contracts
  * used by the gateway across the self-serve plan ladder. Each request travels
  * through Pi and the real foreground event bus, proving desktop renders a
- * concise failure message and a phosphor primary recovery action without
+ * concise failure message and a neutral primary recovery action without
  * waiting for `remaining` to hit zero or for the proactive PostHog upsell gate.
  */
 
@@ -188,7 +188,7 @@ describe("Hosted AI usage-limit upgrade recovery", function () {
     rmSync(CHAT_FILE, { force: true });
   });
 
-  it("shows a phosphor primary action for every server-backed upgrade plan", async () => {
+  it("shows a neutral primary action for every server-backed upgrade plan", async () => {
     await browser.execute(() => {
       const target = window as Window & {
         __SCREENPIPE_E2E_OPEN_URLS?: string[];
@@ -244,9 +244,9 @@ describe("Hosted AI usage-limit upgrade recovery", function () {
         };
       }, ctaLabel);
       expect(style).toEqual({
-        backgroundColor: "rgb(199, 255, 62)",
-        borderColor: "rgb(74, 107, 0)",
-        color: "rgb(0, 0, 0)",
+        backgroundColor: "rgb(245, 245, 245)",
+        borderColor: "rgb(245, 245, 245)",
+        color: "rgb(10, 10, 10)",
       });
 
       const screenshot = await saveScreenshot(upgradeCase.screenshot);

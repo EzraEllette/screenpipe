@@ -14,9 +14,27 @@ import {
   buildDesktopRemoteControlPatch,
   readDesktopRemotePolicySnapshot,
 } from "@/lib/desktop-remote-control";
+import {
+  TRIAL_ACTIVATION_FORCE_UNLOCK_FLAG,
+  TRIAL_ACTIVATION_UNLOCKED_STEP,
+  trialActivationState,
+} from "@/lib/first-run/trial-activation";
 
 const REFRESH_INTERVAL_MS = 60_000;
 const RESTART_SETTLE_MS = 500;
+
+async function applyTrialActivationForceUnlock(): Promise<boolean> {
+  const status = await commands.getOnboardingStatus();
+  if (status.status !== "ok") return false;
+  const state = trialActivationState(status.data.currentStep);
+  if (state !== "summary" && state !== "paywall") return false;
+
+  const unlocked = await commands.setOnboardingStep(
+    TRIAL_ACTIVATION_UNLOCKED_STEP,
+  );
+  if (unlocked.status === "error") throw new Error(unlocked.error);
+  return true;
+}
 
 async function restartRunningCapture(): Promise<boolean> {
   let paused: boolean;
@@ -77,6 +95,23 @@ export function DesktopRemoteControl({ enabled }: { enabled: boolean }) {
       reconcileRef.current = reconcileRef.current
         .then(async () => {
           if (cancelled) return;
+          // This is deliberately one-way. A targeted or global flag can free
+          // an already-enrolled install immediately, while turning the flag
+          // back off never re-locks it. The native command persists the
+          // unlocked sentinel and resumes capture when the paywall had stopped it.
+          if (
+            posthog.getFeatureFlag(TRIAL_ACTIVATION_FORCE_UNLOCK_FLAG, {
+              send_event: sendExposure,
+            }) === true
+          ) {
+            const unlocked = await applyTrialActivationForceUnlock();
+            if (unlocked && sendExposure) {
+              posthog.capture("trial_activation_force_unlocked", {
+                source: "posthog_feature_flag",
+              });
+            }
+          }
+
           const current = settingsRef.current;
           const {
             patch,

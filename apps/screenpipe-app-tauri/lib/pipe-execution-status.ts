@@ -17,6 +17,20 @@ export function pipeExecutionConversationId(
 }
 
 /**
+ * Pipe-owned chats always use the `pipe:<name>:` namespace. Any other saved
+ * conversation id points at a real user chat selected as the run destination;
+ * it must be opened as-is and never materialized from execution stdout.
+ */
+export function pipeExecutionUsesExistingChat(
+  execution: PipeExecutionChatIdentity,
+): boolean {
+  const conversationId = execution.conversation_id;
+  return Boolean(
+    conversationId && !conversationId.startsWith(`pipe:${execution.pipe_name}:`),
+  );
+}
+
+/**
  * Deleting a per-run chat can tombstone its stable id forever because that id
  * belongs to only one execution. A continued chat needs an execution-scoped
  * tombstone so the row stays gone now but comes back after a genuinely new run.

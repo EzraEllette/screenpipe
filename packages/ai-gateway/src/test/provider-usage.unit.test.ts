@@ -140,6 +140,28 @@ describe('OpenAIProvider usage reporting', () => {
 		expect(calls[0].reasoning_effort).toBe('none');
 	});
 
+	// Regression for the top ai-proxy 400 (47k events, all model:gpt-5.4-nano):
+	// background pipes get reasoning_effort injected by
+	// applyBackgroundReasoningDefault, and the 5.4 tier rejects function tools
+	// unless that effort is "none" — same Chat Completions rule as 5.5/5.6.
+	it('sets reasoning_effort to none for GPT-5.4 function tools with an injected background effort', async () => {
+		const { provider, calls } = makeOpenAIProvider(async () => ({
+			choices: [{ message: { content: 'answer', role: 'assistant' } }],
+		}));
+		const tools: any = [{
+			type: 'function',
+			function: {
+				name: 'search_screenpipe',
+				parameters: { type: 'object', properties: {} },
+			},
+		}];
+
+		await provider.createCompletion({ ...body, model: 'gpt-5.4-nano', reasoning_effort: 'low', tools });
+
+		expect(calls).toHaveLength(1);
+		expect(calls[0].reasoning_effort).toBe('none');
+	});
+
 	it('does not disable reasoning for GPT-5.6 requests without tools', async () => {
 		async function* stream() {
 			yield { choices: [{ delta: { content: 'ok' }, finish_reason: 'stop' }] };

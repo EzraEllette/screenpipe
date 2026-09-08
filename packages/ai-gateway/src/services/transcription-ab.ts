@@ -27,7 +27,8 @@ export type TranscriptionProvider = 'deepgram' | 'whisper' | 'parakeet';
 export interface TranscriptionRequest {
   audioBuffer: ArrayBuffer;
   contentType: string;
-  sampleRate: string;
+  /** Required for raw audio; omit for containerized audio so the provider reads its header. */
+  sampleRate?: string;
   languages: string[];
 }
 
@@ -150,9 +151,12 @@ export async function callDeepgram(
   env: Env,
 ): Promise<TranscriptionResult> {
   const start = Date.now();
+  const sampleRateQuery = req.sampleRate
+    ? `&sample_rate=${encodeURIComponent(req.sampleRate)}`
+    : '';
   const url =
-    'https://api.deepgram.com/v1/listen?model=nova-3&smart_format=true&diarize=true&utterances=true&sample_rate=' +
-    req.sampleRate +
+    'https://api.deepgram.com/v1/listen?model=nova-3&smart_format=true&diarize=true&utterances=true' +
+    sampleRateQuery +
     deepgramLanguageQuery(req.languages);
 
   const MAX_ATTEMPTS = 2;
@@ -226,8 +230,8 @@ async function callSelfHosted(
   const params = new URLSearchParams({
     model: 'nova-3',
     smart_format: 'true',
-    sample_rate: req.sampleRate,
   });
+  if (req.sampleRate) params.set('sample_rate', req.sampleRate);
   if (req.languages.length > 0) {
     params.set('detect_language', req.languages.join(','));
   }

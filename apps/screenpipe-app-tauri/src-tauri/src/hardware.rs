@@ -47,3 +47,27 @@ pub fn detect_hardware_capability() -> HardwareCapability {
 pub fn get_hardware_capability() -> HardwareCapability {
     detect_hardware_capability()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn hardware_detection_uses_macos_26_compatible_vm_stats_count() {
+        const MACOS_26_MAX_HOST_VM_INFO64_COUNT: u32 = 62;
+
+        assert!(
+            libc::HOST_VM_INFO64_COUNT <= MACOS_26_MAX_HOST_VM_INFO64_COUNT,
+            "host_statistics64 count {} exceeds the macOS 26 maximum {}",
+            libc::HOST_VM_INFO64_COUNT,
+            MACOS_26_MAX_HOST_VM_INFO64_COUNT
+        );
+
+        for _ in 0..16 {
+            let capability = detect_hardware_capability();
+            assert!(capability.cpu_cores > 0);
+            assert!(capability.total_memory_gb > 0.0);
+        }
+    }
+}

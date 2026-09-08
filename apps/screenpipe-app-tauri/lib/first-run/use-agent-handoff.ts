@@ -15,11 +15,13 @@ import {
   isCursorMcpInstalled,
 } from "@/lib/hooks/use-hardcoded-tiles";
 import {
-  HANDOFF_PROMPT,
   handoffTargets,
+  performAgentHandoff,
   pickHandoffTargets,
+  preferredHandoffTargetForRecentApps,
   type AgentHandoffTarget,
 } from "@/lib/first-run/agent-handoff";
+import type { FirstRunCapturedApp } from "@/lib/first-run/learning-window";
 import { commands } from "@/lib/utils/tauri";
 
 /**
@@ -60,6 +62,10 @@ export type AgentHandoffView = {
    * whenever the user has none.
    */
   targets: AgentHandoffTarget[];
+  /** True after detection and connection probes have settled, even if empty. */
+  resolved: boolean;
+  /** Connected agent with the strongest local activity match, never guessed. */
+  preferredTarget: AgentHandoffTarget | null;
   /** Shown only after a click, so the banner stays quiet until it is useful. */
   hint: string | null;
   askAgent: (target: AgentHandoffTarget) => Promise<void>;
@@ -73,12 +79,19 @@ export type AgentHandoffView = {
  * banner: this touches the filesystem several times and only the `ready` phase
  * can act on the answer.
  */
-export function useAgentHandoff(enabled: boolean): AgentHandoffView {
+export function useAgentHandoff(
+  enabled: boolean,
+  recentApps: readonly FirstRunCapturedApp[] = [],
+): AgentHandoffView {
   const [targets, setTargets] = useState<AgentHandoffTarget[]>([]);
+  const [resolved, setResolved] = useState(false);
   const [hint, setHint] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!enabled) return;
+    if (!enabled) {
+      setResolved(false);
+      return;
+    }
     let cancelled = false;
 
     void (async () => {
@@ -96,6 +109,7 @@ export function useAgentHandoff(enabled: boolean): AgentHandoffView {
         if (cancelled) return;
         const resolved = pickHandoffTargets(connected);
         setTargets(resolved);
+        setResolved(true);
         if (resolved.length > 0) {
           // The impression. Without it `handoff_clicked` has no denominator:
           // a quiet week is indistinguishable from "we never offered", and
@@ -108,7 +122,10 @@ export function useAgentHandoff(enabled: boolean): AgentHandoffView {
       } catch {
         // A failed probe means no handoff, never a broken banner. The summary
         // is still there and is still the primary action.
-        if (!cancelled) setTargets([]);
+        if (!cancelled) {
+          setTargets([]);
+          setResolved(true);
+        }
       }
     })();
 
@@ -120,51 +137,64 @@ export function useAgentHandoff(enabled: boolean): AgentHandoffView {
   const askAgent = useCallback(async (target: AgentHandoffTarget) => {
     if (!target) return;
 
-    // Copy first. If the clipboard write fails there is nothing to paste, so
-    // opening the app would strand the user in an empty composer with no way
-    // back to the question.
-    try {
-      await commands.copyTextToClipboard(HANDOFF_PROMPT);
-    } catch {
-      setHint("Could not copy the question. Open the summary instead.");
+    // Copy first as a fallback for older app builds, missing protocol handlers,
+    // and CLI-only Codex installs. The verified deeplinks carry their own prompt,
+    // so a clipboard failure must not block the primary prefilled handoff.
+    const result = await performAgentHandoff(target, {
+      copyText: async (text) => {
+        const copied = await commands.copyTextToClipboard(text);
+        if (copied.status === "error") throw new Error(copied.error);
+      },
+      openUrl: async (url) => {
+        const { openUrl } = await import("@tauri-apps/plugin-opener");
+        await openUrl(url);
+      },
+    });
+    if (!result.copied) {
       posthog.capture("first_run_agent_handoff_failed", {
         agent: target.id,
         stage: "clipboard",
       });
+    }
+
+    if (result.failedStage) {
+      // When the clipboard succeeded this degrades to copy-only. When both
+      // paths fail, the in-app summary remains the recovery action.
+      posthog.capture("first_run_agent_handoff_failed", {
+        agent: target.id,
+        stage: result.failedStage,
+      });
+    }
+
+    if (result.prefilled) {
+      setHint(target.hint);
+    } else if (result.copied) {
+      setHint(`Question copied. Open ${target.label} and paste it.`);
+    } else {
+      setHint(
+        `Could not open ${target.label} or copy the question. Open the summary instead.`,
+      );
       return;
     }
-
-    let opened = false;
-    if (target.deeplink) {
-      try {
-        const { openUrl } = await import("@tauri-apps/plugin-opener");
-        await openUrl(target.deeplink);
-        opened = true;
-      } catch {
-        // The question is already on the clipboard, so this degrades to the
-        // copy-only path rather than failing outright.
-        posthog.capture("first_run_agent_handoff_failed", {
-          agent: target.id,
-          stage: "open",
-        });
-      }
-    }
-
-    setHint(
-      opened || !target.deeplink
-        ? target.hint
-        : `Question copied. Open ${target.label} and paste it.`,
-    );
 
     // The loop closes outside this app: screenpipe-mcp reports a privacy-safe
     // `client` on every tool call, so a call arriving from this agent shortly
     // after is the completion signal for this event.
     posthog.capture("first_run_agent_handoff_clicked", {
       agent: target.id,
-      opened,
-      copy_only: !target.deeplink,
+      opened: result.launched,
+      prefilled: result.prefilled,
+      replayed: result.replayed,
+      copy_only: !result.prefilled,
+      clipboard_copied: result.copied,
     });
   }, []);
 
-  return { targets, hint, askAgent };
+  return {
+    targets,
+    resolved,
+    preferredTarget: preferredHandoffTargetForRecentApps(targets, recentApps),
+    hint,
+    askAgent,
+  };
 }

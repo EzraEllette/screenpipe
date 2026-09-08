@@ -47,6 +47,26 @@ async fn speaker_count(db: &DatabaseManager) -> usize {
         .len()
 }
 
+fn cosine_distance(a: &[f32], b: &[f32]) -> f32 {
+    let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
+    let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if na == 0.0 || nb == 0.0 {
+        return 1.0;
+    }
+    1.0 - dot / (na * nb)
+}
+
+fn normalized(values: impl IntoIterator<Item = f32>) -> Vec<f32> {
+    let mut values: Vec<f32> = values.into_iter().collect();
+    let norm = values.iter().map(|x| x * x).sum::<f32>().sqrt();
+    assert!(norm > 0.0, "test embedding must have a non-zero norm");
+    for value in &mut values {
+        *value /= norm;
+    }
+    values
+}
+
 /// The identification path exactly as it behaved before the duration gate:
 /// match an existing speaker, otherwise create one, with no regard for how much
 /// speech produced the embedding.
@@ -215,21 +235,66 @@ async fn real_multi_speaker_audio_still_separates_speakers() {
     );
 }
 
+/// Build a deliberately ambiguous probe from two embeddings produced by the
+/// real WAV -> pyannote -> CAM++ pipeline. The probe is long enough to create a
+/// profile, so only the runner-up margin prevents a bogus third identity and
+/// prevents either real profile from learning the mixed voice.
+#[tokio::test]
+#[ignore = "loads pyannote + CAM++ ONNX models from the repo"]
+async fn real_audio_ambiguous_voice_abstains_without_profile_pollution() {
+    let segments = real_segments(&load_fixture("6_speakers.wav"));
+    let qualifying: Vec<_> = segments
+        .iter()
+        .filter(|(duration, _)| *duration >= 2.0)
+        .collect();
+
+    let mut pair = None;
+    'outer: for (index, (_, first)) in qualifying.iter().enumerate() {
+        for (_, second) in qualifying.iter().skip(index + 1) {
+            let distance = cosine_distance(first, second);
+            if (0.15..1.0).contains(&distance) {
+                pair = Some((first.as_slice(), second.as_slice(), distance));
+                break 'outer;
+            }
+        }
+    }
+    let (first, second, source_distance) =
+        pair.expect("real multi-speaker fixture must yield two distinct usable embeddings");
+    let first = normalized(first.iter().copied());
+    let second = normalized(second.iter().copied());
+    let ambiguous = normalized(first.iter().zip(&second).map(|(a, b)| a + b));
+    let first_distance = cosine_distance(&first, &ambiguous);
+    let second_distance = cosine_distance(&second, &ambiguous);
+
+    println!(
+        "real source distance={source_distance:.4}; ambiguous probe distances={first_distance:.4}/{second_distance:.4}"
+    );
+    assert!(first_distance < 0.55 && second_distance < 0.55);
+    assert!((first_distance - second_distance).abs() < 0.0001);
+
+    let db = test_db().await;
+    db.insert_speaker(&first)
+        .await
+        .expect("insert first real-audio profile");
+    db.insert_speaker(&second)
+        .await
+        .expect("insert second real-audio profile");
+
+    let result = get_or_create_speaker_from_embedding(&db, &ambiguous, 8.0)
+        .await
+        .expect("real-audio ambiguity check must not error");
+    assert!(
+        result.is_none(),
+        "equidistant real-audio probe must abstain"
+    );
+    assert_eq!(speaker_count(&db).await, 2, "must not mint a third profile");
+}
+
 /// Diagnostic: measure real same-fixture cosine distances so threshold work is
 /// driven by data rather than by tuning until a number looks right.
 #[tokio::test]
 #[ignore = "loads pyannote + CAM++ ONNX models from the repo"]
 async fn report_real_embedding_distance_distribution() {
-    fn cosine_distance(a: &[f32], b: &[f32]) -> f32 {
-        let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
-        let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-        let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-        if na == 0.0 || nb == 0.0 {
-            return 1.0;
-        }
-        1.0 - dot / (na * nb)
-    }
-
     for fixture in ["obama.wav", "6_speakers.wav"] {
         let segments = real_segments(&load_fixture(fixture));
         let qualifying: Vec<_> = segments

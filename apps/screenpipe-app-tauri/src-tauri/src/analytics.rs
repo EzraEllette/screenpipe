@@ -14,7 +14,8 @@ use sysinfo::{System, SystemExt};
 use tokio::sync::Mutex;
 use tokio::time::interval;
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
 pub struct Attribution {
     pub utm_source: Option<String>,
     pub utm_medium: Option<String>,
@@ -49,6 +50,55 @@ pub struct AnalyticsManager {
 
 fn pipeline_ocr_cache_hit_rate(health: &serde_json::Value) -> Option<f64> {
     health["pipeline"]["ocr_cache_hit_rate"].as_f64()
+}
+
+fn health_audio_capture_mode(health: &serde_json::Value) -> &str {
+    health["audio_capture_mode"].as_str().unwrap_or("unknown")
+}
+
+fn audio_capture_mode_setting(settings: &serde_json::Value) -> &'static str {
+    match settings
+        .get("audioCaptureMode")
+        .and_then(|value| value.as_str())
+    {
+        Some("meetings-only") => "meetings-only",
+        Some("disabled") => "disabled",
+        // Missing and malformed values follow the engine's historical default.
+        _ => "always",
+    }
+}
+
+/// Report the backend the engine will actually use without forwarding an
+/// arbitrary persisted string to PostHog. `cloud` and `enclave` are legacy
+/// aliases that still select Tinfoil in `server_core`; every other value
+/// follows the engine's local fallback.
+fn effective_pii_backend_setting(settings: &serde_json::Value) -> &'static str {
+    match settings.get("piiBackend").and_then(|value| value.as_str()) {
+        Some("tinfoil" | "cloud" | "enclave") => "tinfoil",
+        _ => "local",
+    }
+}
+
+fn smart_pii_settings(settings: &serde_json::Value) -> serde_json::Value {
+    let text_enabled = settings
+        .get("asyncPiiRedaction")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    let image_enabled = settings
+        .get("asyncImagePiiRedaction")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    let backend = effective_pii_backend_setting(settings);
+
+    json!({
+        "setting_async_pii_redaction": text_enabled,
+        "setting_async_image_pii_redaction": image_enabled,
+        "setting_pii_backend": backend,
+        // A backend choice alone does not generate enclave traffic. This
+        // derived field identifies installs where at least one Smart PII
+        // worker is enabled and will therefore use Tinfoil.
+        "setting_tinfoil_pii_active": backend == "tinfoil" && (text_enabled || image_enabled),
+    })
 }
 
 impl AnalyticsManager {
@@ -130,6 +180,13 @@ impl AnalyticsManager {
         }
     }
 
+    /// Return the website attribution cached at app startup without making
+    /// another network request. The onboarding webview uses this snapshot to
+    /// put the observed UTM fields on the same event as the user's answer.
+    pub async fn attribution_snapshot(&self) -> Option<Attribution> {
+        self.attribution.lock().await.clone()
+    }
+
     /// Send a $create_alias event so PostHog merges the email-based identity
     /// (used by the website download endpoint) with this app's analytics UUID.
     pub async fn send_alias(&self, alias: &str) {
@@ -186,7 +243,12 @@ impl AnalyticsManager {
                     "os_name": os_name,
                     "os_version": os_version,
                 },
-                "$set_once": {},
+                // A successful desktop launch is direct evidence that this is a
+                // real Screenpipe user. Set it once so a server-side fraud
+                // decision (`bot`) always remains authoritative.
+                "$set_once": {
+                    "screenpipe_user_type": "real",
+                },
             },
         });
 
@@ -327,7 +389,9 @@ impl AnalyticsManager {
 
                 // Send periodic event with health data + feature config
                 if let Err(e) = self.send_event("app_still_running", Some(props)).await {
-                    error!("failed to send periodic posthog event: {}", e);
+                    // Analytics transport is best-effort. Offline machines and
+                    // transient PostHog outages must not become app errors.
+                    warn!("failed to send periodic posthog event: {}", e);
                 }
             }
         }
@@ -360,7 +424,7 @@ impl AnalyticsManager {
                 .unwrap_or(0)
         };
 
-        json!({
+        let mut feature_config = json!({
             // Screen capture
             "setting_disable_vision": get_bool("disableVision").unwrap_or(false),
             "setting_ocr_engine": get_str("ocrEngine").unwrap_or("unknown"),
@@ -370,6 +434,7 @@ impl AnalyticsManager {
 
             // Audio
             "setting_disable_audio": get_bool("disableAudio").unwrap_or(false),
+            "setting_audio_capture_mode": audio_capture_mode_setting(settings),
             "setting_audio_device_count": get_arr_len("audioDevices"),
             "setting_audio_transcription_engine": get_str("audioTranscriptionEngine").unwrap_or("unknown"),
             "setting_audio_chunk_duration": get_f64("audioChunkDuration").unwrap_or(30.0),
@@ -384,7 +449,16 @@ impl AnalyticsManager {
             "setting_use_pii_removal": get_bool("usePiiRemoval").unwrap_or(true),
             "setting_auto_update": get_bool("autoUpdate").unwrap_or(true),
             "setting_languages_count": get_arr_len("languages"),
-        })
+        });
+
+        let pii_settings = smart_pii_settings(settings);
+        if let (Some(feature_config), Some(pii_settings)) =
+            (feature_config.as_object_mut(), pii_settings.as_object())
+        {
+            feature_config.extend(pii_settings.clone());
+        }
+
+        feature_config
     }
 
     async fn check_recording_health(
@@ -412,6 +486,7 @@ impl AnalyticsManager {
         // Extract relevant status fields
         let frame_status = health["frame_status"].as_str().unwrap_or("unknown");
         let audio_status = health["audio_status"].as_str().unwrap_or("unknown");
+        let audio_capture_mode = health_audio_capture_mode(&health);
         let ui_status = health["ui_status"].as_str().unwrap_or("unknown");
 
         // Consider healthy if all enabled systems are "ok"
@@ -429,6 +504,7 @@ impl AnalyticsManager {
             "is_healthy": is_healthy,
             "frame_status": frame_status,
             "audio_status": audio_status,
+            "audio_capture_mode": audio_capture_mode,
             "ui_status": ui_status,
             // Vision pipeline quality
             "pipeline_uptime_secs": pipeline["uptime_secs"].as_f64(),
@@ -559,7 +635,9 @@ pub fn start_analytics(
                 .send_event("app_started", Some(feature_config))
                 .await
             {
-                error!("Failed to send initial PostHog event: {}", e);
+                // A telemetry outage must never make a healthy app startup an
+                // error; the next periodic event provides another opportunity.
+                warn!("Failed to send initial PostHog event: {}", e);
             }
         }
     });
@@ -584,5 +662,139 @@ mod tests {
         let health = json!({"pipeline": {"ocr_cache_hit_rate": 0.4}});
 
         assert_eq!(pipeline_ocr_cache_hit_rate(&health), Some(0.4));
+    }
+
+    #[test]
+    fn health_properties_forward_effective_audio_capture_mode() {
+        assert_eq!(
+            health_audio_capture_mode(&json!({"audio_capture_mode": "meetings-only"})),
+            "meetings-only"
+        );
+        assert_eq!(health_audio_capture_mode(&json!({})), "unknown");
+    }
+
+    #[test]
+    fn audio_capture_mode_setting_tracks_supported_modes() {
+        assert_eq!(
+            audio_capture_mode_setting(&json!({"audioCaptureMode": "always"})),
+            "always"
+        );
+        assert_eq!(
+            audio_capture_mode_setting(&json!({"audioCaptureMode": "meetings-only"})),
+            "meetings-only"
+        );
+        assert_eq!(
+            audio_capture_mode_setting(&json!({"audioCaptureMode": "disabled"})),
+            "disabled"
+        );
+    }
+
+    #[test]
+    fn audio_capture_mode_setting_uses_engine_default_for_missing_or_malformed_values() {
+        assert_eq!(audio_capture_mode_setting(&json!({})), "always");
+        assert_eq!(
+            audio_capture_mode_setting(&json!({"audioCaptureMode": "unexpected"})),
+            "always"
+        );
+        assert_eq!(
+            audio_capture_mode_setting(&json!({"audioCaptureMode": false})),
+            "always"
+        );
+    }
+
+    #[test]
+    fn smart_pii_settings_track_effective_backend_and_enabled_workers() {
+        assert_eq!(
+            smart_pii_settings(&json!({
+                "asyncPiiRedaction": true,
+                "asyncImagePiiRedaction": false,
+                "piiBackend": "tinfoil",
+            })),
+            json!({
+                "setting_async_pii_redaction": true,
+                "setting_async_image_pii_redaction": false,
+                "setting_pii_backend": "tinfoil",
+                "setting_tinfoil_pii_active": true,
+            })
+        );
+    }
+
+    #[test]
+    fn smart_pii_settings_match_engine_defaults_and_legacy_aliases() {
+        assert_eq!(effective_pii_backend_setting(&json!({})), "local");
+        assert_eq!(
+            effective_pii_backend_setting(&json!({"piiBackend": "cloud"})),
+            "tinfoil"
+        );
+        assert_eq!(
+            effective_pii_backend_setting(&json!({"piiBackend": "enclave"})),
+            "tinfoil"
+        );
+        assert_eq!(
+            smart_pii_settings(&json!({"piiBackend": "tinfoil"}))["setting_tinfoil_pii_active"],
+            false
+        );
+        assert_eq!(
+            effective_pii_backend_setting(&json!({"piiBackend": "unexpected"})),
+            "local"
+        );
+    }
+
+    #[test]
+    fn feature_config_includes_smart_pii_settings_from_store() {
+        let dir = tempfile::tempdir().expect("temporary screenpipe data directory");
+        std::fs::write(
+            dir.path().join("store.bin"),
+            json!({
+                "settings": {
+                    "asyncPiiRedaction": false,
+                    "asyncImagePiiRedaction": true,
+                    "piiBackend": "tinfoil",
+                }
+            })
+            .to_string(),
+        )
+        .expect("write settings store");
+        let manager = AnalyticsManager::new(
+            "posthog-key".to_string(),
+            "analytics-id".to_string(),
+            String::new(),
+            1,
+            "http://127.0.0.1:3030".to_string(),
+            None,
+            dir.path().to_path_buf(),
+            false,
+        );
+
+        let config = manager.read_feature_config();
+
+        assert_eq!(config["setting_async_pii_redaction"], false);
+        assert_eq!(config["setting_async_image_pii_redaction"], true);
+        assert_eq!(config["setting_pii_backend"], "tinfoil");
+        assert_eq!(config["setting_tinfoil_pii_active"], true);
+    }
+
+    #[tokio::test]
+    async fn attribution_snapshot_returns_the_cached_first_touch_values() {
+        let manager = AnalyticsManager::new(
+            "posthog-key".to_string(),
+            "analytics-id".to_string(),
+            String::new(),
+            1,
+            "http://127.0.0.1:3030".to_string(),
+            None,
+            PathBuf::new(),
+            false,
+        );
+        let expected = Attribution {
+            utm_source: Some("chatgpt.com".to_string()),
+            utm_medium: Some("referral".to_string()),
+            utm_campaign: None,
+            utm_content: None,
+            utm_term: None,
+        };
+        *manager.attribution.lock().await = Some(expected.clone());
+
+        assert_eq!(manager.attribution_snapshot().await, Some(expected));
     }
 }

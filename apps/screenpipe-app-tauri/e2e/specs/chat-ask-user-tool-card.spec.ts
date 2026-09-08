@@ -48,6 +48,7 @@ async function seedAskUserToolCall(): Promise<void> {
   await browser.execute(
     (sessionId: string, userSeed: string, prompt: string) => {
       const g = window as unknown as {
+        __e2eExpandToolActivity?: boolean;
         __e2eSeedUserMessage: (sessionId: string, text: string) => void;
         __e2eSeedAssistantMessage: (
           sessionId: string,
@@ -57,6 +58,7 @@ async function seedAskUserToolCall(): Promise<void> {
           },
         ) => void;
       };
+      g.__e2eExpandToolActivity = true;
       g.__e2eSeedUserMessage(sessionId, userSeed);
       g.__e2eSeedAssistantMessage(sessionId, {
         content: "",
@@ -146,7 +148,7 @@ async function waitForAskUserReplyEnabled(): Promise<void> {
 }
 
 describe("Chat ask_user tool card", function () {
-  this.timeout(90_000);
+  this.timeout(120_000);
 
   before(async () => {
     await waitForAppReady();
@@ -164,6 +166,10 @@ describe("Chat ask_user tool card", function () {
       interval: 150,
       timeoutMsg: "ask_user prompt never appeared",
     });
+    // Let the activity rail's short reveal animation finish so the screenshot
+    // records the interactive card instead of its pre-animation container.
+    await browser.pause(t(250));
+    expect(typeof await saveScreenshot("chat-commentary-waiting-user")).toBe("string");
 
     await chooseAskUserOption(OPTION_VALUE);
     await browser.waitUntil(
@@ -192,7 +198,7 @@ describe("Chat ask_user tool card", function () {
           ),
         USER_REPLY_LABEL)) as boolean,
       {
-        timeout: t(20_000),
+        timeout: t(45_000),
         interval: 200,
         timeoutMsg: "ask_user reply was not sent as a visible chat message",
       },

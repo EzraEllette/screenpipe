@@ -150,11 +150,27 @@ async function callActivitySummaryThroughMcp(
       await waitForAppReady();
     });
 
-    it("connects detected Codex, Cursor, and Runner configs in the Rust background task", async () => {
+    it("connects detected Claude Code, Codex, Cursor, Gemini, and Runner configs in the Rust background task", async () => {
+      const claudeCodeConfig = resolve(E2E_AI_TOOLS_HOME, ".claude.json");
       const codexConfig = resolve(E2E_AI_TOOLS_HOME, ".codex", "config.toml");
       const cursorConfig = resolve(E2E_AI_TOOLS_HOME, ".cursor", "mcp.json");
+      const geminiConfig = resolve(E2E_AI_TOOLS_HOME, ".gemini", "settings.json");
       const runnerConfig = resolve(E2E_AI_TOOLS_HOME, ".runner", "mcp.json");
       const requiredSkills = [
+        resolve(
+          E2E_AI_TOOLS_HOME,
+          ".claude",
+          "skills",
+          "screenpipe-api",
+          "SKILL.md",
+        ),
+        resolve(
+          E2E_AI_TOOLS_HOME,
+          ".claude",
+          "skills",
+          "screenpipe-cli",
+          "SKILL.md",
+        ),
         resolve(
           E2E_AI_TOOLS_HOME,
           ".codex",
@@ -179,6 +195,20 @@ async function callActivitySummaryThroughMcp(
         resolve(
           E2E_AI_TOOLS_HOME,
           ".cursor",
+          "skills",
+          "screenpipe-cli",
+          "SKILL.md",
+        ),
+        resolve(
+          E2E_AI_TOOLS_HOME,
+          ".gemini",
+          "skills",
+          "screenpipe-api",
+          "SKILL.md",
+        ),
+        resolve(
+          E2E_AI_TOOLS_HOME,
+          ".gemini",
           "skills",
           "screenpipe-cli",
           "SKILL.md",
@@ -188,8 +218,16 @@ async function callActivitySummaryThroughMcp(
       await browser.waitUntil(
         () =>
           requiredSkills.every(existsSync) &&
+          Boolean(
+            JSON.parse(readFileSync(claudeCodeConfig, "utf8")).mcpServers
+              ?.screenpipe,
+          ) &&
           readFileSync(codexConfig, "utf8").includes(
             "[mcp_servers.screenpipe]",
+          ) &&
+          Boolean(
+            JSON.parse(readFileSync(geminiConfig, "utf8")).mcpServers
+              ?.screenpipe,
           ) &&
           JSON.parse(readFileSync(runnerConfig, "utf8")).mcpServers
             ?.screenpipe?.type === "stdio",
@@ -214,6 +252,11 @@ async function callActivitySummaryThroughMcp(
       );
       expect(codex).toContain('SCREENPIPE_MCP_CLIENT = "codex"');
 
+      const claudeCode = JSON.parse(readFileSync(claudeCodeConfig, "utf8"));
+      expect(claudeCode.mcpServers.screenpipe.env.SCREENPIPE_MCP_CLIENT).toBe(
+        "claude-code",
+      );
+
       const cursor = JSON.parse(readFileSync(cursorConfig, "utf8"));
       expect(cursor.theme).toBe("dark");
       expect(cursor.mcpServers.existing.command).toBe("existing-server");
@@ -221,6 +264,15 @@ async function callActivitySummaryThroughMcp(
         SCREENPIPE_API_URL: `http://localhost:${api.port}`,
         SCREENPIPE_LOCAL_API_KEY: api.key,
         SCREENPIPE_MCP_CLIENT: "cursor",
+      });
+
+      const gemini = JSON.parse(readFileSync(geminiConfig, "utf8"));
+      expect(gemini.ui.theme).toBe("GitHub");
+      expect(gemini.mcpServers.existing.command).toBe("gemini-existing");
+      expect(gemini.mcpServers.screenpipe.env).toEqual({
+        SCREENPIPE_API_URL: `http://localhost:${api.port}`,
+        SCREENPIPE_LOCAL_API_KEY: api.key,
+        SCREENPIPE_MCP_CLIENT: "gemini",
       });
 
       const runner = JSON.parse(readFileSync(runnerConfig, "utf8"));
@@ -236,6 +288,7 @@ async function callActivitySummaryThroughMcp(
       if (process.platform !== "win32") {
         expect(statSync(codexConfig).mode & 0o777).toBe(0o600);
         expect(statSync(cursorConfig).mode & 0o777).toBe(0o600);
+        expect(statSync(geminiConfig).mode & 0o777).toBe(0o600);
         expect(statSync(runnerConfig).mode & 0o777).toBe(0o600);
       }
 
@@ -251,11 +304,10 @@ async function callActivitySummaryThroughMcp(
       );
     });
 
-    it("resumes a saved connection slide at the engine step and finishes setup", async () => {
-      // Retries must start from an incomplete store. The engine slide finishes
-      // setup on its own, and once `isCompleted` is true `show_window` correctly
-      // routes Onboarding to Home — so without this reset, attempt 2 would fail
-      // waiting for an `onboarding` handle that must never appear again.
+    it("resumes a saved connection slide through the engine and finishes setup", async () => {
+      // Retries must start from an incomplete store. Once `isCompleted` is true
+      // `show_window` correctly routes Onboarding to Home, so without this reset
+      // attempt 2 would wait for an `onboarding` handle that must never appear.
       await invokeOrThrow("reset_onboarding");
       await invokeOrThrow("set_onboarding_step", { step: "connect-apps" });
 
@@ -270,8 +322,8 @@ async function callActivitySummaryThroughMcp(
       await browser.switchToWindow("onboarding");
       await waitForWindowUrl("/onboarding", undefined, t(15_000));
 
-      // Best effort: the engine slide completes setup on its own, so the window
-      // can go away while this runs. The contract below is what actually gates.
+      // Best effort: the window can move from engine to recommended setup while
+      // this runs. The contract below is what actually gates.
       try {
         await saveScreenshot("onboarding-legacy-connect-apps-resume");
       } catch {
@@ -279,57 +331,77 @@ async function callActivitySummaryThroughMcp(
       }
 
       // The contract: a saved `connect-apps` install must not get stuck on the
-      // removed slide — it resumes at the engine and finishes. Sample the body
-      // while the window is alive so we can prove the removed slides never
-      // rendered, and stop as soon as the store says setup completed.
+      // removed slide. It resumes at the engine, advances to the new optional
+      // recommended-setup step, and finishes when the user continues. Sample
+      // the body while the window is alive so we can prove the removed slides
+      // never rendered.
       //
       // Which window each half runs in is load-bearing. `invoke` executes in
-      // whichever window is currently switched to, and the engine slide closes
-      // Onboarding the moment it finishes setup. Polling the store from the
-      // onboarding handle therefore races its own success condition: completion
-      // destroys the context the completion check runs in, and the driver fails
-      // the whole `waitUntil` with "No window could be found" instead of
-      // reporting `isCompleted: true`. So the store is read from Home, which is
-      // opened above and outlives Onboarding, and only the body sample runs
-      // against Onboarding while that handle still exists.
+      // whichever window is currently switched to, and completing recommended
+      // setup closes Onboarding. The store is therefore read from Home, which
+      // is opened above and outlives Onboarding.
       const seen: string[] = [];
       await browser.waitUntil(
         async () => {
-          // Driver-level, so it stays valid even with no live current window.
           const handles = await browser.getWindowHandles();
           if (!handles.includes("home")) {
             throw new Error(
-              "home window disappeared; it is the surviving context this poll reads the onboarding store from",
+              "home window disappeared while waiting for recommended setup",
             );
           }
 
           if (handles.includes("onboarding")) {
             try {
               await browser.switchToWindow("onboarding");
-              seen.push(
-                (
-                  (await browser.execute(
-                    () => document.body?.innerText || "",
-                  )) as string
-                ).toLowerCase(),
+              const snapshot = (
+                (await browser.execute(
+                  () => document.body?.innerText || "",
+                )) as string
+              ).toLowerCase();
+              seen.push(snapshot);
+              return Boolean(
+                await browser.execute(
+                  () =>
+                    !!document.querySelector(
+                      '[data-testid="onboarding-final-setup"]',
+                    ),
+                ),
               );
             } catch {
-              // Window closed underneath the sample. Expected once setup
-              // completes; the status check below settles it.
+              // Window changed underneath the sample; retry from the surviving
+              // Home context so a native-window transition cannot fail the test.
             }
           }
 
           await browser.switchToWindow("home");
+          return false;
+        },
+        {
+          timeout: t(30_000),
+          interval: 250,
+          timeoutMsg:
+            "legacy connect-apps step never advanced through engine to recommended setup",
+        },
+      );
+
+      await browser.switchToWindow("onboarding");
+      const continueButton = await $("button=continue");
+      await continueButton.waitForClickable({ timeout: t(10_000) });
+      await continueButton.click();
+
+      await browser.switchToWindow("home");
+      await browser.waitUntil(
+        async () => {
           const status = await invokeOrThrow<{ isCompleted: boolean }>(
             "get_onboarding_status",
           );
           return status.isCompleted;
         },
         {
-          timeout: t(30_000),
+          timeout: t(15_000),
           interval: 250,
           timeoutMsg:
-            "legacy connect-apps step never resumed at the engine slide and finished setup",
+            "recommended setup did not complete the restored onboarding flow",
         },
       );
 

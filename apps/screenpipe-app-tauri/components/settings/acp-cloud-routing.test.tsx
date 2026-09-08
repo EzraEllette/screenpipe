@@ -12,7 +12,7 @@
 
 import { describe, expect, it } from "vitest";
 import { acpAdapterInfo } from "@/lib/utils/preset-appearance";
-import catalog from "@/lib/acp/agents.json";
+import catalog from "../../../../crates/screenpipe-core/assets/acp/agents.json";
 
 type CatalogEntry = { id: string; cloudRouting?: Record<string, unknown> };
 

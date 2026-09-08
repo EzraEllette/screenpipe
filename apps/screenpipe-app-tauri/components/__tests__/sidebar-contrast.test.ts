@@ -57,7 +57,7 @@ describe("sidebar text contrast", () => {
       "hsl(var(--foreground) / 0.65)",
     ]);
     expect(colorFor(".sidebar-text-tertiary")).toEqual([
-      "hsl(var(--foreground) / 0.55)",
+      "hsl(var(--foreground) / 0.58)",
     ]);
     expect(colorFor(".vibrant-nav-item")).toEqual([
       "hsl(var(--foreground) / 0.65)",
@@ -69,23 +69,23 @@ describe("sidebar text contrast", () => {
       "hsl(0 0% 0% / 0.65)",
     ]);
     expect(colorFor("html:not(.dark) .sidebar-text-tertiary")).toEqual([
-      "hsl(0 0% 0% / 0.55)",
+      "hsl(0 0% 0% / 0.58)",
     ]);
     expect(colorFor("html:not(.light) .sidebar-text-secondary")).toEqual([
       "hsl(0 0% 100% / 0.65)",
     ]);
     expect(colorFor("html:not(.light) .sidebar-text-tertiary")).toEqual([
-      "hsl(0 0% 100% / 0.55)",
+      "hsl(0 0% 100% / 0.58)",
     ]);
   });
 
   it("meets AA contrast on the bone and dark app surfaces", () => {
-    const bone = [242, 239, 230] as const;
-    const dark = [18, 18, 18] as const;
-    const ink = [0, 0, 0] as const;
-    const white = [255, 255, 255] as const;
+    const bone = [246, 246, 243] as const;
+    const dark = [10, 10, 10] as const;
+    const ink = [10, 10, 10] as const;
+    const white = [245, 245, 245] as const;
 
-    expect(contrast(blend(ink, bone, 0.55), bone)).toBeGreaterThanOrEqual(4.5);
-    expect(contrast(blend(white, dark, 0.55), dark)).toBeGreaterThanOrEqual(4.5);
+    expect(contrast(blend(ink, bone, 0.58), bone)).toBeGreaterThanOrEqual(4.5);
+    expect(contrast(blend(white, dark, 0.58), dark)).toBeGreaterThanOrEqual(4.5);
   });
 });

@@ -11,10 +11,18 @@ const runtimeMocks = vi.hoisted(() => ({
   foregroundHandler: null as ((envelope: any) => void) | null,
   startPipeExecution: vi.fn(),
   clearPipeExecution: vi.fn(),
+  piStopIfIdle: vi.fn(async () => ({
+    status: "ok" as const,
+    data: { running: false, busy: false },
+  })),
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({
   emit: vi.fn(async () => undefined),
+}));
+
+vi.mock("@/lib/utils/tauri", () => ({
+  commands: { piStopIfIdle: runtimeMocks.piStopIfIdle },
 }));
 
 vi.mock("@/lib/events/bus", () => ({
@@ -52,7 +60,6 @@ function useRuntimeHarness() {
   const isStreamingRef = useRef(false);
   const messagesRef = useRef([]);
   const handleAgentEventDataRef = useRef<((data: unknown) => void) | null>(null);
-  const startNewConversationRef = useRef<(() => Promise<void>) | null>(null);
   const forceQueueModeRef = useRef(false);
   const sendDispatchInFlightRef = useRef(false);
 
@@ -71,7 +78,6 @@ function useRuntimeHarness() {
     isStreamingRef,
     messagesRef,
     handleAgentEventDataRef,
-    startNewConversationRef,
     forceQueueModeRef,
     sendDispatchInFlightRef,
   });
@@ -96,6 +102,7 @@ describe("useChatSessionRuntime", () => {
     runtimeMocks.foregroundHandler = null;
     runtimeMocks.startPipeExecution.mockClear();
     runtimeMocks.clearPipeExecution.mockClear();
+    runtimeMocks.piStopIfIdle.mockClear();
     useChatStore.setState({
       sessions: {},
       currentId: null,
@@ -175,6 +182,17 @@ describe("useChatSessionRuntime", () => {
       });
     });
     expect(runtimeMocks.clearPipeExecution).toHaveBeenCalled();
+  });
+
+  it("releases the idle agent after the chat panel unmounts", async () => {
+    const { unmount } = renderHook(() => useRuntimeHarness());
+
+    unmount();
+
+    await waitFor(() => {
+      expect(runtimeMocks.piStopIfIdle).toHaveBeenCalledTimes(1);
+      expect(runtimeMocks.piStopIfIdle).toHaveBeenCalledWith(SESSION_ID);
+    });
   });
 
   // Regression: a turn that ends without this panel's foreground handler

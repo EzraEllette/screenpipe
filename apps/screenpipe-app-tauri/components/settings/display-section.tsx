@@ -402,9 +402,8 @@ export function DisplaySection() {
                 />
               </div>
               <p className="ml-[26px] text-xs text-muted-foreground">
-                {settings?.enableSidebarCustomization
-                  ? "Drag sidebar rows to reorder them, or right-click one to move, hide, or restore it."
-                  : "Reordering and hiding other sidebar rows is rolling out."}
+                Drag sidebar rows to reorder them, or right-click one to move,
+                hide, or restore it.
               </p>
               {!isSidebarNavLayoutDefault(sidebarLayout) && (
                 <div className="ml-[26px]">

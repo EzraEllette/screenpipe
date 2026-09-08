@@ -675,7 +675,7 @@ export function NotificationBell() {
           className="relative p-1.5 rounded-md hover:bg-muted/60 transition-colors"
         >
           <Bell className="h-3.5 w-3.5 text-muted-foreground" />
-          {/* Only high-priority unread work interrupts the app chrome. */}
+          {/* Only high-priority unread work adds an attention dot to app chrome. */}
           {unreadCount > 0 && (
             <span
               data-testid="notification-bell-unread-dot"

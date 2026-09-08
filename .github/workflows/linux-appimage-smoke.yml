@@ -361,6 +361,10 @@ jobs:
                 echo "::error::libopenblas.so.0 is not bundled in the AppImage; OCR breaks on hosts without the system package"
                 exit 1
               fi
+              if [ ! -e squashfs-root/usr/lib/libgfortran.so.5 ]; then
+                echo "::error::libgfortran.so.5 is not bundled in the AppImage; the app fails startup on minimal Linux hosts"
+                exit 1
+              fi
               check_ldd squashfs-root/usr/lib/libopenblas.so.0 /tmp/openblas.ldd
               if grep -R "not found" /tmp/ffmpeg.ldd /tmp/ffprobe.ldd /tmp/tesseract.ldd /tmp/openblas.ldd 2>/dev/null; then
                 exit 1

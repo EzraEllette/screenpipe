@@ -18,7 +18,6 @@ import { acpAdapterInfo } from "@/lib/utils/preset-appearance";
 import { BrowserSidebar } from "@/components/browser-sidebar";
 import { toast } from "@/components/ui/use-toast";
 import type { AIPreset, JsonValue } from "@/lib/utils/tauri";
-import { pickPipePreset } from "@/lib/utils/pick-pipe-preset";
 // OpenAI SDK no longer used directly — all providers route through Pi agent
 import posthog from "posthog-js";
 import { useAcpWarmup } from "@/components/chat/standalone/hooks/use-acp-warmup";
@@ -35,6 +34,8 @@ import { useIsFullscreen } from "@/lib/hooks/use-is-fullscreen";
 import { useChatFilePreview } from "@/lib/hooks/use-chat-file-preview";
 import { useChatInspector } from "@/lib/hooks/use-chat-inspector";
 import { ChatInspectorPopover } from "@/components/chat/chat-inspector";
+import { ChatSplitPane } from "@/components/chat/chat-split-pane";
+import { ChatTabStrip } from "@/components/chat/chat-tab-strip";
 import { useSqlAutocomplete, useTagAutocomplete } from "@/lib/hooks/use-sql-autocomplete";
 import { loadConversationFile } from "@/lib/chat-storage";
 import {
@@ -44,9 +45,12 @@ import {
   isConversationHistorySyncPrompt,
   isInjectedTitleSourcePrompt,
   normalizeComposerMentionsForModel,
-  type ComposerCommandId,
   type ComposerSkillReference,
 } from "@/lib/chat-utils";
+import {
+  runComposerCommand,
+  type ComposerCommandId,
+} from "@/lib/composer-commands";
 import {
   useAutoSuggestions,
   type Suggestion,
@@ -66,6 +70,7 @@ import { ImageViewerDialog } from "@/components/chat/standalone/image-viewer-dia
 import { StandaloneChatHeader } from "@/components/chat/standalone/standalone-chat-header";
 import { ChatMainPane } from "@/components/chat/standalone/chat-main-pane";
 import { ChatComposer } from "@/components/chat/standalone/chat-composer";
+import { appendSelectedTextToComposer } from "@/components/chat/standalone/selected-text-actions";
 import { useChatScroll } from "@/components/chat/standalone/hooks/use-chat-scroll";
 import { useChatConnections } from "@/components/chat/standalone/hooks/use-chat-connections";
 import { useChatAttachments } from "@/components/chat/standalone/hooks/use-chat-attachments";
@@ -78,6 +83,7 @@ import { useChatMessageActions } from "@/components/chat/standalone/hooks/use-ch
 import { useChatExportMenu } from "@/components/chat/standalone/hooks/use-chat-export-menu";
 import { useChatSessionRuntime } from "@/components/chat/standalone/hooks/use-chat-session-runtime";
 import { usePiForegroundEvents } from "@/components/chat/standalone/hooks/use-pi-foreground-events";
+import { useTurnLiveness } from "@/components/chat/standalone/hooks/use-turn-liveness";
 import { usePiSendTransport } from "@/components/chat/standalone/hooks/use-pi-send-transport";
 import { useChatPanelEffects } from "@/components/chat/standalone/hooks/use-chat-panel-effects";
 import {
@@ -90,6 +96,7 @@ import { useChatTurnIntents } from "@/components/chat/standalone/hooks/use-chat-
 import { usePiSteeringRefs } from "@/components/chat/standalone/hooks/use-pi-steering-transport";
 import { useNextTurnAttachments } from "@/components/chat/standalone/hooks/use-next-turn-attachments";
 import { useChatComposerDraftSync } from "@/components/chat/standalone/hooks/use-chat-composer-draft-sync";
+import { useCodingWorkspace } from "@/components/chat/standalone/hooks/use-coding-workspace";
 import { usePipeWatchSession } from "@/components/chat/standalone/hooks/use-pipe-watch-session";
 import { useChatTemplateSettings } from "@/components/chat/standalone/hooks/use-chat-template-settings";
 import { useTryInChatEvent } from "@/components/chat/standalone/hooks/use-try-in-chat-event";
@@ -107,7 +114,15 @@ import {
   parseAgentActionRequest,
   stripAgentActionBlocks,
 } from "@/lib/chat/agent-action-card";
-import { useChatStore } from "@/lib/stores/chat-store";
+import {
+  ensureBlankChatSession,
+  isEphemeralSideConversation,
+  useChatStore,
+} from "@/lib/stores/chat-store";
+import {
+  createEphemeralSideConversationId,
+  filterEphemeralSideConversationPresets,
+} from "@/lib/chat/ephemeral-side-conversation";
 import { AGENT_TOPICS, type AgentEventEnvelope } from "@/lib/events/types";
 import { listenTyped, TAURI_EVENTS } from "@/lib/events/tauri-events";
 import { localFetch } from "@/lib/api";
@@ -138,12 +153,13 @@ const STATIC_MENTION_SUGGESTIONS: MentionSuggestion[] = [
 export function StandaloneChat({
   className,
   hideInlineHistory,
+  chatShortcutsEnabled = true,
   sidebarCollapsed,
   firstRunLearningEnabled = false,
 }: {
   className?: string;
   /**
-   * Makes this webview the single owner of the post-setup summary lifecycle.
+   * Presents the post-setup summary owned by the persistent main layout.
    * Home opts in; the separate Chat window stays read-only for that state.
    */
   firstRunLearningEnabled?: boolean;
@@ -153,6 +169,10 @@ export function StandaloneChat({
    *  chat at `/chat` leaves it false so users still have a history
    *  affordance in the floating window — that window has no AppSidebar. */
   hideInlineHistory?: boolean;
+  /** Main-window tabs stay mounted behind Timeline, Meetings, and other
+   * sections so background work can continue. This flag keeps tab-only
+   * shortcuts scoped to the visible chat surface while that layer is hidden. */
+  chatShortcutsEnabled?: boolean;
   /** When true, the app sidebar is collapsed — used to apply traffic-light
    *  padding on the chat header since the sidebar no longer covers them. */
   sidebarCollapsed?: boolean;
@@ -168,17 +188,6 @@ export function StandaloneChat({
   const availableAiPresets = React.useMemo(
     () => filterAcpPresets(settings.aiPresets, acpEnabled),
     [settings.aiPresets, acpEnabled],
-  );
-  const rolloutSettings = React.useMemo(
-    () => ({ ...settings, aiPresets: availableAiPresets }) as typeof settings,
-    [settings, availableAiPresets],
-  );
-  // Preset the first-run summary is written with. Sourced from the
-  // rollout-filtered list so it inherits the ACP gate, and passed down as a
-  // prop so the pane and banner below stay renderable without a provider.
-  const firstRunAiPreset = React.useMemo(
-    () => pickPipePreset(availableAiPresets as AIPreset[]),
-    [availableAiPresets],
   );
   const { isMac, isWindows, isLoading: isPlatformLoading } = usePlatform();
   const hardcodedConnectionTiles = useHardcodedTiles();
@@ -254,6 +263,8 @@ export function StandaloneChat({
     setChipScrollTop,
     clearConnectionChip,
   } = useChatComposerShell();
+  const [homeCardPromptPreview, setHomeCardPromptPreview] =
+    useState<string | null>(null);
   // Holds the exact text a contextual starter put in the composer, so the send
   // can tell "sent the starter as-is" from "reworked it into their own
   // question". The second is the outcome the experiment is actually testing —
@@ -261,6 +272,7 @@ export function StandaloneChat({
   const pendingContextualHomeSuggestionRef = useRef<string | null>(null);
   const fillContextualHomeSuggestion = useCallback(
     (text: string) => {
+      setHomeCardPromptPreview(null);
       pendingContextualHomeSuggestionRef.current = text;
       setInput(text);
       requestAnimationFrame(() => {
@@ -271,7 +283,11 @@ export function StandaloneChat({
     [inputRef, setInput],
   );
   useEffect(() => {
-    if (!input.trim()) pendingContextualHomeSuggestionRef.current = null;
+    if (!input.trim()) {
+      pendingContextualHomeSuggestionRef.current = null;
+      return;
+    }
+    setHomeCardPromptPreview(null);
   }, [input]);
   useTryInChatEvent({
     startNewRef: tryInChatStartNewRef,
@@ -279,11 +295,11 @@ export function StandaloneChat({
     setInput,
     inputRef,
   });
-  // Local buffer for regular (agent) sessions. Pipe-watch sessions source
-  // their messages from the chat store instead — see the `messages` derivation
-  // below, after `conversationId` is known.
+  // Local buffer for regular Screenpipe agent sessions. Read-only live
+  // sessions source messages from the chat store instead — see the `messages`
+  // derivation below, after `conversationId` is known.
   const [localMessages, setMessages] = useState<Message[]>([]);
-  // One dialog for every ACP sign-in — CLI login (Kimi, OpenCode) and
+  // One dialog for every ACP sign-in — CLI login (Cursor, Kimi, OpenCode) and
   // in-protocol auth-method selection alike. Single piece of state → deduped.
   const [acpSignIn, setAcpSignIn] = useState<AcpSignInRequest | null>(null);
   // A CLI retry is in flight: we re-attempted the connection and are waiting to
@@ -329,13 +345,21 @@ export function StandaloneChat({
   // chat before any message: the live session (if one exists) is updated by the
   // selector separately, and a not-yet-started session reads these defaults.
   const handleAcpConfigDefault = useCallback(
-    (change: { optionId?: string; value?: string; modeId?: string }) => {
+    (change: {
+      optionId?: string;
+      value?: string;
+      modeId?: string;
+      approvalMode?: "ask" | "allow-all";
+    }) => {
       const preset = activePresetRef.current;
       const agent = preset?.acpAgent;
       if (!preset || !agent) return;
       const nextAgent = { ...agent };
       if (change.modeId !== undefined) {
         nextAgent.modeId = change.modeId;
+      }
+      if (change.approvalMode !== undefined) {
+        nextAgent.approvalMode = change.approvalMode;
       }
       if (change.optionId !== undefined && change.value !== undefined) {
         nextAgent.config = { ...(agent.config ?? {}), [change.optionId]: change.value };
@@ -667,6 +691,27 @@ export function StandaloneChat({
   const [conversationId, setConversationId] = useState<string | null>(
     initialSessionIdRef.current,
   );
+  const isTemporarySideConversation = useChatStore((state) =>
+    conversationId
+      ? isEphemeralSideConversation(state.sessions[conversationId])
+      : false,
+  );
+  // ACP does not define an interoperable "do not retain this session" flag.
+  // Temporary chats therefore use native Pi presets only; Rust enforces the
+  // same boundary in case a stale renderer races this filtered preset list.
+  const chatAiPresets = React.useMemo(
+    () =>
+      isTemporarySideConversation
+        ? filterEphemeralSideConversationPresets(availableAiPresets)
+        : availableAiPresets,
+    [availableAiPresets, isTemporarySideConversation],
+  );
+  const rolloutSettings = React.useMemo(
+    () => ({ ...settings, aiPresets: chatAiPresets }) as typeof settings,
+    [settings, chatAiPresets],
+  );
+  const splitChatId = useChatStore((state) => state.splitChatId);
+  const splitChatPosition = useChatStore((state) => state.splitChatPosition);
 
   // Single source of truth for the active chat id (#4719). The panel mints
   // `initialSessionIdRef` and seeds `conversationId` / `piSessionIdRef` from
@@ -681,23 +726,31 @@ export function StandaloneChat({
   useEffect(() => {
     const store = useChatStore.getState();
     if (!store.currentId) {
+      ensureBlankChatSession(store, initialSessionIdRef.current);
       store.actions.setCurrent(initialSessionIdRef.current);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Pipe-watch sessions keep their messages in the chat store, not in this
-  // component's local state. Read them from the store directly and fall back to
-  // the local buffer for regular sessions, instead of an effect that mirrored
-  // the store into local state (an extra render + a frame of stale messages).
-  // Pipe-watch and regular sessions are mutually exclusive — the agent
-  // foreground handler early-returns for pipe-watch — so the two sources never
-  // feed the same session. Every `messages` reader below is unchanged.
-  const pipeWatchMessages = useChatStore((state) =>
-    conversationId && state.sessions[conversationId]?.kind === "pipe-watch"
-      ? state.sessions[conversationId]?.messages
-      : undefined,
-  );
+  // Live read-only sessions keep their messages in the chat store, not in this
+  // component's local agent buffer. Pipe watches are written by their event
+  // writer; imported Codex/Claude chats are written by the JSONL watcher. Read
+  // both directly so a provider append cannot wait on a second local-state
+  // adoption path before it appears in the open chat.
+  const storeBackedMessages = useChatStore((state) => {
+    if (!conversationId) return undefined;
+    const session = state.sessions[conversationId];
+    const isExternalAgent = session?.importedFrom?.source === "codex"
+      || session?.importedFrom?.source === "claude-code";
+    return session?.kind === "pipe-watch" || isExternalAgent
+      ? session?.messages
+      : undefined;
+  });
+  const isExternalAgentConversation = useChatStore((state) => {
+    if (!conversationId) return false;
+    const source = state.sessions[conversationId]?.importedFrom?.source;
+    return source === "codex" || source === "claude-code";
+  });
   const pipeRunArtifactSource = useChatStore((state) => {
     if (!conversationId) return null;
     const context = state.sessions[conversationId]?.pipeContext;
@@ -705,23 +758,28 @@ export function StandaloneChat({
       ? `pipe:${context.pipeName}:${context.executionId}`
       : null;
   });
-  const messages = (pipeWatchMessages ?? localMessages) as Message[];
+  const messages = (storeBackedMessages ?? localMessages) as Message[];
 
   const {
     consumePendingAttachments,
     stagePendingAttachments,
   } = useNextTurnAttachments(conversationId);
-  const { filePreview, openFilePreview, closeFilePreview } =
-    useChatFilePreview(conversationId);
+  const {
+    filePreview,
+    openFilePreview,
+    closeFilePreview,
+    selectFilePreview,
+    setFilePreviewPanelOpen,
+  } = useChatFilePreview(conversationId);
   const { inspectorOpen, setInspectorOpen, outputs: inspectorOutputs, sources: inspectorSources } =
     useChatInspector(messages, pipeRunArtifactSource);
   const [browserPanelState, setBrowserPanelState] = useState({
     hasUrl: false,
     open: false,
   });
-  const filePreviewOpen = filePreview?.visible === true && !!filePreview.path;
-  const sidePanelHasContent = filePreviewOpen || browserPanelState.hasUrl;
-  const sidePanelOpen = filePreviewOpen || browserPanelState.open;
+  const sidePanelHasContent =
+    (filePreview?.paths.length ?? 0) > 0 || browserPanelState.hasUrl;
+  const sidePanelOpen = browserPanelState.open;
   const inspectorHasContent =
     inspectorOutputs.length > 0 ||
     inspectorSources.length > 0;
@@ -735,18 +793,14 @@ export function StandaloneChat({
   }, [inspectorOpen, setInspectorOpen]);
 
   const toggleBrowserPanel = useCallback(() => {
-    if (filePreviewOpen) {
-      closeFilePreview();
-      return;
-    }
-    if (browserPanelState.hasUrl) {
+    if (sidePanelHasContent) {
       window.dispatchEvent(
         new CustomEvent("screenpipe:browser-sidebar-toggle", {
           detail: { action: "toggle" },
         }),
       );
     }
-  }, [browserPanelState.hasUrl, closeFilePreview, filePreviewOpen]);
+  }, [sidePanelHasContent]);
 
   const handlePanelStateChange = useCallback(
     (nextState: { hasUrl: boolean; open: boolean }) => {
@@ -761,6 +815,13 @@ export function StandaloneChat({
   );
 
   const currentQueueSessionId = conversationId ?? piSessionIdRef.current;
+  const {
+    noteEvent: noteTurnLivenessEvent,
+    status: turnLiveness,
+  } = useTurnLiveness({
+    active: isLoading || isStreaming,
+    sessionId: currentQueueSessionId,
+  });
   const {
     queuedActionPromptId,
     queuedScrollRef,
@@ -825,7 +886,6 @@ export function StandaloneChat({
     attachedDocs,
     pendingDocs,
     clearConnectionChip,
-    refreshConnectionState,
     prefillSource,
     setPrefillContext,
     setPrefillFrameId,
@@ -842,6 +902,7 @@ export function StandaloneChat({
     saveConversation,
     loadConversation,
     deleteConversation,
+    archiveConversation,
     renameConversation,
     startNewConversation,
     branchConversation,
@@ -911,16 +972,19 @@ export function StandaloneChat({
     setIsStreaming,
     setMessages,
     setConversationId,
+    openFilePreview,
   });
   useChatConversationRoutingEvents({
     loadConversation,
     startNewConversation,
     tryInChatStartNewRef,
     piSessionIdRef,
+    renderedMessagesRef: messagesRef,
     focusMessageById,
     openFilePreview,
   });
   useChatE2EGlobals({
+    openFilePreview,
     setMessages,
     setConversationId,
     piSessionIdRef,
@@ -928,10 +992,12 @@ export function StandaloneChat({
     piStreamingTextRef,
     piMessageIdRef,
     piContentBlocksRef,
+    piStartInFlightRef,
     forceQueueModeRef,
     sendDispatchInFlightRef,
     setIsLoading,
     setIsStreaming,
+    setPiStarting,
   });
   useChatWindowSyncEvents({
     aiPresets: settings?.aiPresets,
@@ -960,7 +1026,6 @@ export function StandaloneChat({
     isStreamingRef,
     messagesRef,
     handleAgentEventDataRef,
-    startNewConversationRef,
     forceQueueModeRef,
     sendDispatchInFlightRef,
   });
@@ -979,14 +1044,13 @@ export function StandaloneChat({
   } = usePiSessionLifecycle({
     activePreset,
     setActivePreset: handleSetActivePreset,
-    aiPresets: settings.aiPresets,
+    aiPresets: chatAiPresets,
     isSettingsLoaded,
     shouldFreezePresetSelection: Boolean(activePipeExecution),
     userToken: settings.user?.token,
     appItems,
     allConnectionItems,
     connections,
-    piStarting,
     piInfo,
     setPiInfo,
     isStreaming,
@@ -1005,7 +1069,7 @@ export function StandaloneChat({
   // first send. Must sit after usePiSessionLifecycle — it needs that hook's
   // buildProviderConfig.
   useAcpWarmup({
-    enabled: acpEnabled && isSettingsLoaded,
+    enabled: acpEnabled && isSettingsLoaded && !isTemporarySideConversation,
     activePreset,
     piInfo,
     piStartInFlightRef,
@@ -1041,7 +1105,14 @@ export function StandaloneChat({
     canChat &&
     !activePipeExecution &&
     !continuousPipeChat?.replyDisabledReason;
-  const composerDisabledReason = activePipeExecution
+  const codingWorkspace = useCodingWorkspace({
+    conversationId,
+    locked: messages.length > 0,
+    projectDirectory: piInfo?.projectDir,
+  });
+  const composerDisabledReason = codingWorkspace.isLoading
+    ? "preparing isolated worktree..."
+    : activePipeExecution
     ? `${activePipeExecution.name} is running. Reply after this run finishes.`
     : continuousPipeChat?.replyDisabledReason || disabledReason;
 
@@ -1092,6 +1163,7 @@ export function StandaloneChat({
     buildProviderConfig,
     canChat: canSendChatMessage,
     cancelStreamingMessageRender,
+    flushStreamingMessageRender,
     consumePendingAttachments,
     currentQueueSessionId,
     beginQueuedAction,
@@ -1123,6 +1195,7 @@ export function StandaloneChat({
     prefillContext,
     prefillFrameId,
     prefillSource,
+    prepareCodingWorkspace: codingWorkspace.prepareForPrompt,
     resolveComposerMentions,
     queuedPrompts,
     registerTurnIntent,
@@ -1191,27 +1264,44 @@ export function StandaloneChat({
   // `handleStop` closes over stable refs, so no cleanup is needed.
   if (typeof window !== "undefined") {
     (window as any).__e2eStopChat = handleStop;
+    (window as any).__e2ePersistActiveConversation = () =>
+      saveConversation(messagesRef.current, {
+        idOverride: piSessionIdRef.current,
+        refreshHistory: false,
+        syncActiveConversation: true,
+        turnState: { isLoading: false, isStreaming: false },
+      });
+    (window as any).__e2eReadChatSession = (id: string) => {
+      const session = useChatStore.getState().sessions[id];
+      if (!session) return null;
+      const sessionMessages = (session.messages ?? []) as Array<{
+        id?: string;
+        content?: unknown;
+      }>;
+      return {
+        id: session.id,
+        ephemeral: session.ephemeral === true,
+        sideConversation: session.sideConversation === true,
+        sideConversationParentId: session.sideConversationParentId ?? null,
+        draft: session.draft === true,
+        messageCount: session.messageCount,
+        messageIds: sessionMessages.map((message) => message.id),
+        messageContents: sessionMessages.map((message) => message.content),
+      };
+    };
   }
 
   // Render assignment, matching openMentionConversationRef above: every handler
   // a `/` command needs is defined by this point.
-  runComposerCommandRef.current = async (commandId: ComposerCommandId) => {
-    switch (commandId) {
-      case "new-chat":
-        await startNewConversationRef.current?.();
-        return;
-      case "stop":
-        await handleStop();
-        return;
-      case "inspector":
-        toggleInspector();
-        return;
-      case "pipes":
+  runComposerCommandRef.current = (commandId: ComposerCommandId) =>
+    runComposerCommand(commandId, {
+      startNewChat: () => startNewConversationRef.current?.(),
+      stopResponse: handleStop,
+      toggleInspector,
+      openScheduledTasks: async () => {
         await commands.showWindow({ Home: { page: "pipes" } });
-        return;
-    }
-  };
-
+      },
+    });
 
   const answerPiExtensionUiRequest = useCallback(async (
     requestId: string | undefined,
@@ -1631,7 +1721,7 @@ export function StandaloneChat({
       setAcpSignIn({ kind: "cli", ...info });
       setAcpSignInError(
         wasChecking
-          ? `still not signed in to ${info.agentName}. run the command below in a terminal, then retry.`
+          ? `still not signed in to ${info.agentName}. try signing in again.`
           : null,
       );
     },
@@ -1677,7 +1767,9 @@ export function StandaloneChat({
     setPiInfo,
     settings: rolloutSettings,
     syncThinkingLevelAfterStart,
+    turnIntentLedgerRef,
     turnIntentTextValuesMatch,
+    noteTurnLivenessEvent,
   });
 
   const messageHistory = React.useMemo(
@@ -1733,7 +1825,9 @@ export function StandaloneChat({
 
   const activeSourceFooterMessageId =
     isLoading || isStreaming
-      ? piMessageIdRef.current ?? currentStreamingMessageId ?? null
+      ? isExternalAgentConversation
+        ? currentStreamingMessageId ?? piMessageIdRef.current ?? null
+        : piMessageIdRef.current ?? currentStreamingMessageId ?? null
       : null;
 
   // Per-turn aggregation plan. Pipe sessions (pipe-run, pipe-watch) and any
@@ -1760,6 +1854,7 @@ export function StandaloneChat({
     setMessages,
     isLoading,
     isStreaming,
+    turnLiveness,
     activeSourceFooterMessageId,
     highlightedMessageId,
     citationPlan,
@@ -1806,13 +1901,11 @@ export function StandaloneChat({
     }
     setAcpSignInBusy(false);
   }, []);
-  // "i've signed in, retry": re-attempt the connection and report the outcome
-  // in the dialog. First a hard check that the CLI is even installed (a clear,
-  // actionable error if not). Then reconnect: acp_ready closes the dialog and
-  // resends the pending message; acp_external_auth_required re-fires as a red
-  // "still not signed in" error; a timeout guards the case where neither comes
-  // back. The dialog stays open throughout, so the user always sees what
-  // happened instead of it silently closing or spinning forever.
+  // Re-attempt the connection after the agent-owned login exits. First a hard
+  // check that the CLI is installed, then reconnect: acp_ready closes the
+  // dialog and resends the pending message; acp_external_auth_required re-fires
+  // as a red "still not signed in" error; a timeout guards the case where
+  // neither comes back.
   const handleAcpRetry = useCallback(() => {
     // Works for both the CLI-login card and the "use my login" row of the
     // method picker: re-attempt the connection after the user signed in.
@@ -1845,7 +1938,7 @@ export function StandaloneChat({
       acpSignInTimeoutRef.current = window.setTimeout(() => {
         if (!acpSignInBusyRef.current) return;
         clearAcpSignInProbe();
-        setAcpSignInError(`couldn't reach ${agentName}. make sure you ran the command, then retry.`);
+        setAcpSignInError(`couldn't reach ${agentName}. try signing in again.`);
       }, 25_000);
 
       // Trigger a fresh connection. A pending message rides along on success;
@@ -1860,6 +1953,31 @@ export function StandaloneChat({
       }
     })();
   }, [acpSignIn, clearAcpSignInProbe, lastUserMessageRef, piMessageIdRef, sendMessage, buildProviderConfig, restartCurrentPiSession]);
+  // External-login agents such as Cursor own their OAuth flow. Launch the
+  // reviewed catalog command hidden as the desktop user; the CLI opens the
+  // browser, stores its own credential, and exits. Then reconnect automatically
+  // instead of asking the user to copy a command and click retry.
+  const handleAcpCliSignIn = useCallback(() => {
+    if (acpSignIn?.kind !== "cli") return;
+    const { agentId, agentName } = acpSignIn;
+    setAcpSignInError(null);
+    setAcpSignInBusy(true);
+    acpSignInBusyRef.current = true;
+    void (async () => {
+      try {
+        const result = await commands.piAcpExternalLogin(agentId);
+        if (result.status === "error") throw new Error(result.error);
+        // The dialog may have been dismissed while the browser was open.
+        if (!acpSignInBusyRef.current) return;
+        handleAcpRetry();
+      } catch (error) {
+        if (!acpSignInBusyRef.current) return;
+        clearAcpSignInProbe();
+        const detail = error instanceof Error ? error.message : String(error);
+        setAcpSignInError(`couldn't open ${agentName}'s login: ${detail}`);
+      }
+    })();
+  }, [acpSignIn, clearAcpSignInProbe, handleAcpRetry]);
   // "switch to default": fall back to the default preset and resend there.
   // Safe to close immediately — the default provider won't re-trigger the
   // agent's CLI-login prompt, so there's no reopen to flicker against.
@@ -1935,10 +2053,167 @@ export function StandaloneChat({
     void commands.piAcpReauthenticate(currentQueueSessionId).catch(() => {});
   }, [currentQueueSessionId]);
 
+  const discardTemporarySideConversation = useCallback((id: string) => {
+    const store = useChatStore.getState();
+    if (!isEphemeralSideConversation(store.sessions[id])) return;
+    commands.piAbort(id).catch(() => {});
+    store.actions.drop(id);
+    store.actions.setSplitChat(null);
+  }, []);
+
+  const activateChatTab = useCallback(
+    async (id: string) => {
+      const store = useChatStore.getState();
+      const temporarySideId = isEphemeralSideConversation(
+        store.sessions[conversationId ?? ""],
+      )
+        ? conversationId
+        : isEphemeralSideConversation(store.sessions[store.splitChatId ?? ""])
+          ? store.splitChatId
+          : null;
+      // Navigating to a third chat closes the temporary two-pane workspace.
+      // Promoting either pane within the pair preserves it.
+      const targetBelongsToPair =
+        id === conversationId || id === store.splitChatId;
+      if (temporarySideId && !targetBelongsToPair) {
+        discardTemporarySideConversation(temporarySideId);
+      }
+      // Promoting the secondary pane swaps the former primary into its place,
+      // keeping both transcripts visible while the single composer changes
+      // ownership cleanly.
+      if (store.splitChatId === id && conversationId && conversationId !== id) {
+        store.actions.setSplitChat(conversationId);
+      }
+      store.actions.setCurrent(id);
+      await emit("chat-load-conversation", {
+        conversationId: id,
+        targetWindow: "home",
+      });
+    },
+    [conversationId, discardTemporarySideConversation],
+  );
+
+  const startDurableNewConversation = useCallback(async () => {
+    const store = useChatStore.getState();
+    const temporarySideId = isEphemeralSideConversation(
+      store.sessions[conversationId ?? ""],
+    )
+      ? conversationId
+      : isEphemeralSideConversation(store.sessions[store.splitChatId ?? ""])
+        ? store.splitChatId
+        : null;
+    if (temporarySideId) discardTemporarySideConversation(temporarySideId);
+    piStoppedIntentionallyRef.current = true;
+    await startNewConversation();
+  }, [
+    conversationId,
+    discardTemporarySideConversation,
+    piStoppedIntentionallyRef,
+    startNewConversation,
+  ]);
+
+  const pendingComposerFocusRef = useRef<{
+    value: string;
+    conversationId: string | null;
+  } | null>(null);
+  const [composerFocusRequest, setComposerFocusRequest] = useState(0);
+
+  useEffect(() => {
+    const request = pendingComposerFocusRef.current;
+    if (!request || request.conversationId !== conversationId) return;
+    const composer = inputRef.current;
+    if (!composer) return;
+    pendingComposerFocusRef.current = null;
+    composer.focus();
+    composer.setSelectionRange(request.value.length, request.value.length);
+  }, [composerFocusRequest, conversationId, inputRef]);
+
+  const focusComposerAtEnd = useCallback((
+    value: string,
+    targetConversationId: string | null = conversationId,
+  ) => {
+    pendingComposerFocusRef.current = {
+      value,
+      conversationId: targetConversationId,
+    };
+    setComposerFocusRequest((request) => request + 1);
+  }, [conversationId]);
+
+  const addSelectedTextToChat = useCallback((text: string) => {
+    const next = appendSelectedTextToComposer(inputValueRef.current, text);
+    setInput(next);
+    focusComposerAtEnd(next);
+  }, [focusComposerAtEnd, inputValueRef, setInput]);
+
+  const askSelectedTextInSideChat = useCallback(async (text: string) => {
+    if (activePresetRef.current?.provider === "acp") {
+      toast({
+        title: "temporary side chat is not available with coding agents",
+        description: "coding-agent sessions cannot guarantee ephemeral history",
+      });
+      return;
+    }
+    const sourceConversationId = conversationId;
+    if (!sourceConversationId) {
+      addSelectedTextToChat(text);
+      return;
+    }
+
+    const existingSplitId = useChatStore.getState().splitChatId;
+    if (
+      existingSplitId &&
+      isEphemeralSideConversation(
+        useChatStore.getState().sessions[existingSplitId],
+      )
+    ) {
+      discardTemporarySideConversation(existingSplitId);
+    }
+
+    const sideChatId = createEphemeralSideConversationId();
+    await startNewConversation(sideChatId, {
+      sideConversationParentId: sourceConversationId,
+    });
+
+    const next = appendSelectedTextToComposer("", text);
+    const store = useChatStore.getState();
+    store.actions.openChat(sourceConversationId);
+    store.actions.openChat(sideChatId);
+    // The active chat owns the sole live composer. Keep the source transcript
+    // on the left so that active composer is physically the side chat at right.
+    store.actions.setSplitChat(sourceConversationId, "left");
+    store.actions.setComposerDraft(sideChatId, {
+      input: next,
+      pastedImages: [],
+      attachedDocs: [],
+      pendingDocs: [],
+    });
+    setInput(next);
+    focusComposerAtEnd(next, sideChatId);
+  }, [
+    addSelectedTextToChat,
+    conversationId,
+    discardTemporarySideConversation,
+    focusComposerAtEnd,
+    setInput,
+    startNewConversation,
+  ]);
+
   return (
     <div ref={dropRootRef} className={cn("flex flex-col bg-background", className ?? "h-screen")} data-testid="section-home">
       <StandaloneChatHeader
         className={className}
+        tabStrip={
+          hideInlineHistory ? (
+            <ChatTabStrip
+              activeId={conversationId}
+              onActivate={activateChatTab}
+              onNewChat={startDurableNewConversation}
+              onClose={discardTemporarySideConversation}
+              renameConversation={renameConversation}
+              archiveConversation={archiveConversation}
+            />
+          ) : undefined
+        }
         conversationId={conversationId}
         messages={messages}
         pendingUserText={pendingSend?.text ?? null}
@@ -1946,35 +2221,47 @@ export function StandaloneChat({
         isMac={isMac}
         isFullscreen={isFullscreen}
         hideInlineHistory={hideInlineHistory}
-        hasRightActions={inspectorHasContent || sidePanelHasContent}
+        hasRightActions={
+          hideInlineHistory || inspectorHasContent || inspectorOpen || sidePanelHasContent
+        }
         showHistory={showHistory}
         settings={settings}
         reloadStore={reloadStore}
         setShowHistory={setShowHistory}
         renameConversation={renameConversation}
-        deleteConversation={deleteConversation}
+        archiveConversation={archiveConversation}
         startNewConversation={startNewConversation}
-        onNewChat={async () => {
-          piStoppedIntentionallyRef.current = true;
-          await startNewConversation();
-        }}
+        onNewChat={startDurableNewConversation}
         rightActions={
-          <div className="relative z-10 flex items-center gap-1">
-            {sidePanelHasContent ? (
+          <div className="relative z-20 flex items-center gap-1">
+            <ChatInspectorPopover
+              open={inspectorOpen}
+              onOpenChange={setInspectorOpen}
+              outputs={inspectorOutputs}
+              sources={inspectorSources}
+              onOpenFile={openFilePreview}
+            />
+            {hideInlineHistory ? (
               <Button
                 variant="ghost"
                 size="icon"
                 onMouseDown={(e) => e.stopPropagation()}
                 onClick={(e) => {
                   e.stopPropagation();
-                  toggleBrowserPanel();
+                  if (sidePanelHasContent) {
+                    toggleBrowserPanel();
+                  } else {
+                    window.dispatchEvent(
+                      new CustomEvent("screenpipe:browser-sidebar-new-tab"),
+                    );
+                  }
                 }}
                 className={cn(
                   "h-7 w-7",
                   sidePanelOpen && "bg-muted ring-2 ring-primary ring-offset-1 ring-offset-background",
                 )}
-                title="Toggle side panel"
-                aria-label="Toggle side panel"
+                title={sidePanelHasContent ? "Toggle side panel" : "Open browser tab"}
+                aria-label={sidePanelHasContent ? "Toggle side panel" : "Open browser tab"}
                 aria-pressed={sidePanelOpen}
               >
                 {sidePanelOpen ? (
@@ -1990,22 +2277,8 @@ export function StandaloneChat({
 
       <div className="flex-1 flex min-h-0" data-browser-panel-host>
       <div className="relative flex-1 flex flex-col min-w-0" data-firstrun-target="messages">
-      {inspectorHasContent ? (
-        <div className="absolute -top-8 right-2 z-30">
-          <ChatInspectorPopover
-            open={inspectorOpen}
-            onOpenChange={setInspectorOpen}
-            outputs={inspectorOutputs}
-            sources={inspectorSources}
-            onOpenFile={openFilePreview}
-          />
-        </div>
-      ) : null}
       <ChatMainPane
         firstRunLearningEnabled={firstRunLearningEnabled}
-        firstRunAiPreset={firstRunAiPreset}
-        firstRunUserToken={settings?.user?.token ?? null}
-        firstRunAiSettingsLoaded={isSettingsLoaded}
         hideInlineHistory={hideInlineHistory}
         showHistory={showHistory}
         onCloseHistory={() => setShowHistory(false)}
@@ -2041,10 +2314,11 @@ export function StandaloneChat({
           await commands.showWindow({ Home: { page: "pipes" } });
         }}
         summaryCardsProps={{
+          onPreviewPrompt: setHomeCardPromptPreview,
           onSendMessage: (message, displayLabel, entrySource, entryCard) => {
             pendingContextualHomeSuggestionRef.current = null;
-            // Control cards send their prompt on click without ever showing it,
-            // so the user authored nothing.
+            // Control cards may preview their prompt as placeholder text, but
+            // never place it in the editable value, so the user authored nothing.
             return sendMessage(message, displayLabel, undefined, {
               entrySource,
               entryCard,
@@ -2082,12 +2356,22 @@ export function StandaloneChat({
           onFillSuggestion: fillContextualHomeSuggestion,
           onRefresh: refreshVisibleSuggestions,
         }}
-        messageListProps={messageListProps}
-        isUserScrolledUp={isUserScrolledUp}
-        scrollToBottom={scrollToBottom}
+        messageListProps={{
+          ...messageListProps,
+          onAddSelectedTextToChat: addSelectedTextToChat,
+          onAskSelectedTextInSideChat:
+            isTemporarySideConversation || !activePreset || activePreset.provider === "acp"
+            ? undefined
+            : askSelectedTextInSideChat,
+        }}
       />
 
       <ChatComposer
+        jumpToLatest={{
+          hasMessages: messages.length > 0,
+          scrolledUp: isUserScrolledUp,
+          onJump: scrollToBottom,
+        }}
         prefill={{
           context: prefillContext,
           frameId: prefillFrameId,
@@ -2130,7 +2414,11 @@ export function StandaloneChat({
           inputRef,
           value: input,
           disabledReason: composerDisabledReason,
-          canChat: Boolean(canSendChatMessage),
+          placeholder:
+            isLoading || isStreaming
+              ? "Message will be queued..."
+              : homeCardPromptPreview ?? undefined,
+          canChat: Boolean(canSendChatMessage) && !codingWorkspace.isLoading,
           isLoading,
           isStreaming,
           isEmbedded,
@@ -2140,6 +2428,7 @@ export function StandaloneChat({
           chipPrefixWidth,
           chipScrollTop,
           onClearConnectionChip: () => setConnectionChip(null),
+          onValueChange: setInput,
           onChange: handleMentionInputChange,
           onCompositionStart: () => setIsComposing(true),
           onCompositionEnd: () => setIsComposing(false),
@@ -2205,6 +2494,14 @@ export function StandaloneChat({
           onAcpConfigDefault: handleAcpConfigDefault,
           onReauthenticate: handleReauthenticate,
         }}
+        codingWorkspace={{
+          workspace: codingWorkspace.workspace,
+          enabled: codingWorkspace.enabled,
+          isLoading: codingWorkspace.isLoading,
+          error: codingWorkspace.error,
+          disabled: messages.length > 0 && !codingWorkspace.workspace,
+          onToggle: codingWorkspace.toggleWorktree,
+        }}
         connectBanner={{
           show: showConnectBanner,
           suggestedConnectionTiles,
@@ -2218,18 +2515,33 @@ export function StandaloneChat({
       />
       </div> {/* End of chat column */}
 
+      {splitChatId && splitChatId !== conversationId ? (
+        <ChatSplitPane
+          sessionId={splitChatId}
+          side={splitChatPosition}
+          onPromote={activateChatTab}
+          onClose={() => useChatStore.getState().actions.setSplitChat(null)}
+        />
+      ) : null}
+
       {/* Agent-controlled embedded browser. Slides in from the right when
           the agent navigates (or when restoring a chat that has saved
           state). The actual page is rendered by a Tauri WebviewWindow
           positioned over the placeholder div inside this component. */}
       <BrowserSidebar
         conversationId={conversationId}
+        additionalReservedWidth={
+          splitChatId && splitChatId !== conversationId ? 320 : 0
+        }
         // Session id the agent process runs under (the value tagged as the
         // navigation `owner` via x-screenpipe-session). Lets the sidebar reveal
         // this chat's own agent navigations even if `conversationId` state lags.
         agentSessionId={piSessionIdRef.current}
         filePreview={filePreview}
         onReplaceFilePreviewPath={openFilePreview}
+        onCloseFilePreviewPath={closeFilePreview}
+        onSelectFilePreviewPath={selectFilePreview}
+        onSetPanelOpen={setFilePreviewPanelOpen}
         onPanelStateChange={handlePanelStateChange}
       />
       </div> {/* End of horizontal chat+browser split */}
@@ -2249,7 +2561,7 @@ export function StandaloneChat({
         error={acpSignInError}
         defaultPresetLabel={acpDefaultPresetLabel}
         onSwitchToDefault={handleAcpSwitchToDefault}
-        onRetry={handleAcpRetry}
+        onCliSignIn={handleAcpCliSignIn}
         onSelectMethod={handleAcpSignInMethod}
         onDismiss={handleAcpDismiss}
       />

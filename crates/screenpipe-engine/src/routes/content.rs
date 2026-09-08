@@ -724,6 +724,15 @@ pub(crate) async fn execute_raw_sql(
     State(state): State<Arc<AppState>>,
     JsonResponse(payload): JsonResponse<RawSqlQuery>,
 ) -> Result<JsonResponse<serde_json::Value>, (StatusCode, JsonResponse<serde_json::Value>)> {
+    if state.history_access.is_restricted() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            JsonResponse(json!({
+                "error": "raw SQL is unavailable while local history is limited to 24 hours",
+                "code": "history_access_limited"
+            })),
+        ));
+    }
     // Pre-execution validation: catch unbounded queries before they hit the DB
     if let Err(msg) = validate_raw_sql(&payload.query) {
         return Err((StatusCode::BAD_REQUEST, JsonResponse(json!({"error": msg}))));

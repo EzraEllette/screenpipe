@@ -23,6 +23,8 @@ import { applyResolvedModelLimits } from "@/lib/model-metadata";
 const DAILY_SUMMARY_PROJECT_DIR = "pi-daily-summary";
 const EMPTY_COMPLETION_PROMPT =
   "Your previous turn ended after tool execution without a final response. Using the tool results already in this session, return the requested final response now. Do not call tools again.";
+const RETRYABLE_RUNTIME_START_ERROR =
+  /Pi command queue (?:dropped|closed)|did not start responding within|Pi command queue not initialized|Pi not initialized|not running|has died|broken pipe/i;
 
 export type RunDailySummaryOptions = {
   date: Date;
@@ -33,6 +35,7 @@ export type RunDailySummaryOptions = {
   prompt?: string;
   systemPrompt?: string;
   sessionPrefix?: string;
+  recoverTransientRuntimeStart?: boolean;
 };
 
 export function buildDailySummaryProviderConfig(
@@ -118,19 +121,12 @@ function abortError(): Error {
   return error;
 }
 
-/** Run one isolated Pi turn and return only its final assistant response. */
-export async function runDailySummaryWithPi(
+async function runDailySummaryAttempt(
   options: RunDailySummaryOptions,
+  projectDir: string,
 ): Promise<string> {
-  if (options.signal?.aborted) throw abortError();
-  if (!options.preset.model?.trim())
-    throw new Error("No AI model is configured");
-
   const sessionPrefix = options.sessionPrefix?.trim() || "daily-summary";
   const sessionId = `${INTERNAL_TITLE_PREFIX}${sessionPrefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  await mountAgentEventBus();
-  const home = await homeDir();
-  const projectDir = await join(home, ".screenpipe", DAILY_SUMMARY_PROJECT_DIR);
 
   let settled = false;
   let lastAssistant = "";
@@ -141,6 +137,9 @@ export async function runDailySummaryWithPi(
     resolveResponse = resolve;
     rejectResponse = reject;
   });
+  // Abort or dispatch failure can settle this while native startup is still in
+  // flight. Observe it immediately; the awaited return below still propagates it.
+  void response.catch(() => {});
 
   const settle = (value: string) => {
     if (settled) return;
@@ -207,35 +206,76 @@ export async function runDailySummaryWithPi(
   const unregister = registerForeground(sessionId, handler);
 
   try {
-    const started = await commands.piStart(
-      sessionId,
-      projectDir,
-      options.userToken,
-      buildDailySummaryProviderConfig(
-        options.preset,
-        options.systemPrompt ?? DAILY_SUMMARY_AGENT_SYSTEM_PROMPT,
-      ),
+    const providerConfig = buildDailySummaryProviderConfig(
+      options.preset,
+      options.systemPrompt ?? DAILY_SUMMARY_AGENT_SYSTEM_PROMPT,
     );
-    if (started.status !== "ok" || !started.data.running) {
-      throw new Error(
-        started.status === "error" ? started.error : "AI did not start",
-      );
-    }
-    if (options.signal?.aborted) return await response;
-
-    const prompted = await commands.piPrompt(
-      sessionId,
-      options.prompt ??
-        buildDailySummaryAgentPrompt(options.date, options.range),
-      null,
-      null,
-    );
-    if (prompted.status !== "ok") throw new Error(prompted.error);
+    const prompt =
+      options.prompt ?? buildDailySummaryAgentPrompt(options.date, options.range);
+    const accepted = options.recoverTransientRuntimeStart
+      ? commands.piStartAndPrompt(
+          sessionId,
+          projectDir,
+          options.userToken,
+          providerConfig,
+          prompt,
+        )
+      : (async () => {
+          const started = await commands.piStart(
+            sessionId,
+            projectDir,
+            options.userToken,
+            providerConfig,
+          );
+          if (started.status !== "ok" || !started.data.running) {
+            return started.status === "error"
+              ? started
+              : ({ status: "error", error: "AI did not start" } as const);
+          }
+          return await commands.piPrompt(sessionId, prompt, null, null);
+        })();
+    void accepted
+      .then((result) => {
+        if (result.status === "error") fail(new Error(result.error));
+      })
+      .catch((reason: unknown) => {
+        fail(reason instanceof Error ? reason : new Error(String(reason)));
+      });
 
     return await response;
   } finally {
     options.signal?.removeEventListener("abort", handleAbort);
     unregister();
     void commands.piStop(sessionId);
+  }
+}
+
+/** Run one isolated Pi turn and return only its final assistant response. */
+export async function runDailySummaryWithPi(
+  options: RunDailySummaryOptions,
+): Promise<string> {
+  if (options.signal?.aborted) throw abortError();
+  if (!options.preset.model?.trim())
+    throw new Error("No AI model is configured");
+
+  await mountAgentEventBus();
+  const home = await homeDir();
+  const projectDir = await join(home, ".screenpipe", DAILY_SUMMARY_PROJECT_DIR);
+
+  try {
+    return await runDailySummaryAttempt(options, projectDir);
+  } catch (error) {
+    if (
+      options.signal?.aborted ||
+      !options.recoverTransientRuntimeStart ||
+      !(error instanceof Error) ||
+      !RETRYABLE_RUNTIME_START_ERROR.test(error.message)
+    ) {
+      throw error;
+    }
+    // The native prompt-start watchdog has already stopped a silent runtime.
+    // A dropped/closed queue likewise cannot accept more work. Use a fresh
+    // private session once instead of making the user manually retry.
+    return await runDailySummaryAttempt(options, projectDir);
   }
 }

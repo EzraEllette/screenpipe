@@ -94,6 +94,11 @@ final class TimelineLiveTextContainer: NSView {
         )
     }
 
+    /// The pointer lands on VisionKit's overlay, not here, so this only
+    /// covers clicks on the frame's margins. `TimelineWindow.sendEvent`
+    /// is what keeps the first selection gesture alive over the text.
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
     override func layout() {
         super.layout()
         let fitted = Self.aspectFitRect(imageSize: imageView.image?.size ?? .zero, inside: bounds)

@@ -17,12 +17,15 @@ type JsonRpcMessage = {
   error?: unknown;
 };
 
-type Scenario = "normal" | "malformed" | "exit" | "auth" | "mcp" | "tree" | "terminal" | "subagent" | "resume";
+type Scenario = "normal" | "malformed" | "exit" | "auth" | "mcp" | "tree" | "terminal" | "subagent" | "metadata" | "repeated-tools" | "resume" | "usage";
 
 const scenarioArg = process.argv.find((arg) => arg.startsWith("--scenario="));
 const scenario = (scenarioArg?.slice("--scenario=".length) ?? "normal") as Scenario;
 const sessionId = "mock-acp-session";
 const permissionRequestId = "mock-permission-1";
+/** Kept in sync with the context-usage spec's expected 26% reading. */
+const ACP_USAGE_USED_TOKENS = 52_000;
+const ACP_USAGE_CONTEXT_WINDOW = 200_000;
 const processMarkerPrefix = process.env.SCREENPIPE_MOCK_PROCESS_MARKER_PREFIX;
 const processMarkerToken = process.env.SCREENPIPE_MOCK_PROCESS_MARKER_TOKEN;
 const forbiddenCloudToken = process.env.SCREENPIPE_API_KEY;
@@ -304,6 +307,120 @@ function emitPromptPrelude(): void {
     content: { type: "text", text: "First streamed chunk. " },
     messageId: "mock-message-1",
   });
+}
+
+/** The protocol-standard context reading. Adapters that own their own prompt
+ *  assembly (Claude Code, Codex, Cursor) report only this used/size pair — no
+ *  per-category breakdown — so this is the whole contract desktop can render
+ *  for them. */
+function emitUsageFlow(requestId: JsonRpcId): void {
+  update({
+    sessionUpdate: "usage_update",
+    used: ACP_USAGE_USED_TOKENS,
+    size: ACP_USAGE_CONTEXT_WINDOW,
+  });
+  update({
+    sessionUpdate: "agent_message_chunk",
+    content: { type: "text", text: "Mock ACP usage turn complete." },
+    messageId: "mock-usage-final",
+  });
+  respond(requestId, { stopReason: "end_turn" });
+  activePromptRequestId = undefined;
+}
+
+function emitMetadataRefinementFlow(requestId: JsonRpcId): void {
+  update({
+    sessionUpdate: "tool_call",
+    toolCallId: "mock-refined",
+    title: "MCP: tool",
+    status: "in_progress",
+    rawInput: {},
+  });
+  update({
+    sessionUpdate: "tool_call_update",
+    toolCallId: "mock-refined",
+    title: "mcp__screenpipe__search-content",
+    kind: "search",
+    status: "completed",
+    rawInput: { query: "late ACP metadata" },
+    rawOutput: { error: "Tool execution error" },
+  });
+  update({
+    sessionUpdate: "tool_call",
+    toolCallId: "mock-provider-fallback",
+    title: "MCP: tool",
+    status: "in_progress",
+    rawInput: {},
+  });
+  update({
+    sessionUpdate: "tool_call_update",
+    toolCallId: "mock-provider-fallback",
+    status: "completed",
+    rawOutput: { success: true },
+  });
+  update({
+    sessionUpdate: "agent_message_chunk",
+    content: { type: "text", text: "Metadata refinement turn complete." },
+    messageId: "mock-metadata-final",
+  });
+  respond(requestId, { stopReason: "end_turn" });
+  activePromptRequestId = undefined;
+}
+
+/** Claude can split a broad history request into many adjacent recording
+ *  windows. Keep this intentionally large so the desktop test catches a
+ *  verbatim activity rail that grows one row per query. */
+async function emitRepeatedRecordingQueriesFlow(
+  requestId: JsonRpcId,
+  prompt: string,
+): Promise<void> {
+  const normalizedPrompt = prompt.toLowerCase();
+  const failedFinalQuery = normalizedPrompt.includes("failure");
+  const queryCount = normalizedPrompt.includes("short")
+    ? 2
+    : failedFinalQuery
+      ? 4
+      : 25;
+
+  for (let index = 0; index < queryCount; index++) {
+    const toolCallId = `mock-recording-query-${index + 1}`;
+    const isFailedQuery = failedFinalQuery && index === queryCount - 1;
+    update({
+      sessionUpdate: "tool_call",
+      toolCallId,
+      title: "query_recordings",
+      kind: "other",
+      status: "in_progress",
+      rawInput: {
+        start_time: `2026-08-${String(index + 1).padStart(2, "0")}T00:00:00Z`,
+        limit: 50,
+      },
+    });
+    update({
+      sessionUpdate: "tool_call_update",
+      toolCallId,
+      status: "completed",
+      rawOutput: isFailedQuery
+        ? { error: "Recording window was unavailable" }
+        : { rows: 1 },
+    });
+    // Real Claude queries arrive over a multi-minute turn. Give the desktop a
+    // render boundary between calls so this fixture exercises that event path
+    // instead of an artificial 50-notification stdout burst.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  // Keep the failure variant terminal and unrecovered so its final UI state
+  // proves the failed call remains separate. A later assistant answer would
+  // intentionally apply the chat's existing recovered-error presentation.
+  if (!failedFinalQuery) {
+    update({
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "Recording query batch complete." },
+      messageId: "mock-repeated-tools-final",
+    });
+  }
+  respond(requestId, { stopReason: "end_turn" });
+  activePromptRequestId = undefined;
 }
 
 /** Deterministic subagent turn matching the claude-agent-acp and codex-acp
@@ -591,7 +708,8 @@ async function handleRequest(message: JsonRpcMessage): Promise<void> {
         return;
       }
       activePromptRequestId = message.id;
-      activePromptIsCancellation = promptText(message.params).toLowerCase().includes("cancel");
+      const prompt = promptText(message.params);
+      activePromptIsCancellation = prompt.toLowerCase().includes("cancel");
       emitPromptPrelude();
       if (scenario === "terminal") {
         try {
@@ -610,6 +728,18 @@ async function handleRequest(message: JsonRpcMessage): Promise<void> {
       }
       if (scenario === "subagent") {
         emitSubagentFlow(message.id);
+        return;
+      }
+      if (scenario === "usage") {
+        emitUsageFlow(message.id);
+        return;
+      }
+      if (scenario === "metadata") {
+        emitMetadataRefinementFlow(message.id);
+        return;
+      }
+      if (scenario === "repeated-tools") {
+        await emitRepeatedRecordingQueriesFlow(message.id, prompt);
         return;
       }
       if (!activePromptIsCancellation) beginPermissionFlow();

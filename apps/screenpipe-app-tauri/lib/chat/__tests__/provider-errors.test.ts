@@ -84,6 +84,30 @@ describe("provider error copy", () => {
     expect(msg).toContain("ollama pull llama3.2");
   });
 
+  it("maps native Ollama tool-capability errors to actionable, non-retryable copy", () => {
+    const raw =
+      'Error: 400: {"message":"registry.ollama.ai/library/qwen2.5vl:3b does not support tools","type":"invalid_request_error","param":null,"code":null,"detail":"untrusted upstream suffix"}';
+
+    const presentation = buildProviderErrorPresentation(raw, {
+      provider: "native-ollama",
+      model: "qwen2.5vl:3b",
+    });
+
+    expect(presentation).toEqual({
+      kind: "provider",
+      message:
+        'Ollama model "qwen2.5vl:3b" does not support tools. Switch your AI preset to an Ollama model that supports tools.',
+      retryable: false,
+    });
+    expect(presentation?.message).not.toContain("untrusted upstream suffix");
+    expect(
+      buildProviderErrorPresentation(raw, {
+        provider: "custom",
+        model: "qwen2.5vl:3b",
+      }),
+    ).toBeNull();
+  });
+
   it("maps screenpipe cloud connection errors to a transient-outage message", () => {
     const msg = buildProviderErrorMessage("Connection error.", {
       provider: "screenpipe-cloud",
@@ -94,6 +118,20 @@ describe("provider error copy", () => {
     expect(msg?.toLowerCase()).toContain("try again");
     // does not blame the user's own machine/setup
     expect(msg?.toLowerCase()).not.toContain("ollama");
+  });
+
+  it("maps Bun socket-close errors to retryable connectivity copy", () => {
+    const raw =
+      "The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()";
+    const presentation = buildProviderErrorPresentation(raw, {
+      provider: "pi",
+      model: "auto",
+    });
+
+    expect(presentation).toMatchObject({ kind: "provider", retryable: true });
+    expect(presentation?.message).toContain("screenpipe cloud");
+    expect(presentation?.message.toLowerCase()).toContain("try again");
+    expect(presentation?.message).not.toContain("verbose: true");
   });
 
   it("maps the gateway TLS-handshake / send-request signatures the same way", () => {
@@ -108,6 +146,18 @@ describe("provider error copy", () => {
     }
   });
 
+  it("maps an expired TLS certificate to retryable cloud connectivity copy", () => {
+    const presentation = buildProviderErrorPresentation(
+      "Error: certificate has expired",
+      { provider: "screenpipe-cloud", model: "auto" },
+    );
+
+    expect(presentation).toMatchObject({ kind: "provider", retryable: true });
+    expect(presentation?.message).toContain("screenpipe cloud");
+    expect(presentation?.message.toLowerCase()).toContain("try again");
+    expect(presentation?.message).not.toContain("certificate has expired");
+  });
+
   it("maps the daily free-chat wall to tomorrow-or-BYOK copy", () => {
     const msg = buildProviderErrorMessage(
       '{"error":"free_chat_limit_exceeded","limit":2}',
@@ -119,6 +169,30 @@ describe("provider error copy", () => {
     expect(msg).toContain("Ollama");
     expect(msg).toContain("Claude");
     expect(msg).toContain("Codex");
+  });
+
+  it("reserves upgrade guidance for explicit hosted rate limits", () => {
+    for (const raw of ["rate-limited", "rate limit exceeded", "too many requests"]) {
+      const msg = buildProviderErrorMessage(raw, {
+        provider: "screenpipe-cloud",
+        model: "auto",
+      });
+
+      expect(msg).toContain("rate-limited");
+      expect(msg).toContain("upgrade");
+    }
+  });
+
+  it("maps hosted unavailability to outage copy without upgrade guidance", () => {
+    const msg = buildProviderErrorMessage("service temporarily unavailable", {
+      provider: "screenpipe-cloud",
+      model: "auto",
+    });
+
+    expect(msg).toContain("screenpipe cloud");
+    expect(msg).toContain("outage on our end");
+    expect(msg).not.toContain("rate-limited");
+    expect(msg).not.toContain("upgrade");
   });
 
   it("maps the per-message tool-loop cap separately", () => {
@@ -169,6 +243,23 @@ describe("provider error copy", () => {
     expect(msg).toContain("Test Connection");
   });
 
+  it("maps the opaque custom-provider 400 to safe preset guidance", () => {
+    expect(
+      buildProviderErrorMessage("400 status code (no body)", {
+        provider: "custom",
+        model: "gemini-2.5-flash",
+      }),
+    ).toBe(
+      "The custom AI provider rejected the request. Verify the endpoint, model, and API key in Settings → AI.",
+    );
+    expect(
+      buildProviderErrorMessage("400 status code (no body)", {
+        provider: "screenpipe-cloud",
+        model: "auto",
+      }),
+    ).toBeNull();
+  });
+
   it("maps the ChatGPT missing-account-id error to reconnect guidance", () => {
     // exact string thrown by pi's openai-codex-responses provider when the
     // OAuth access token lacks the chatgpt_account_id claim (Enterprise/
@@ -189,6 +280,19 @@ describe("provider error copy", () => {
   it("maps only the full Codex usage-limit signature to sanitized recovery guidance", () => {
     const expected =
       "The AI provider usage limit has been reached. Wait for it to reset, or switch your AI preset or provider.";
+    const acpExpected =
+      "Your Codex usage limit has been reached. Wait for it to reset, upgrade your ChatGPT plan, or switch your Screenpipe AI preset.";
+
+    expect(
+      buildProviderErrorMessage(
+        `ACP request failed Internal error: {
+          "message": "You've hit your usage limit. attacker suffix",
+          "codexErrorInfo": "usageLimitExceeded"
+        }`,
+        { provider: "acp", model: "codex-acp" },
+      ),
+    ).toBe(acpExpected);
+    expect(acpExpected).not.toContain("attacker suffix");
 
     expect(
       buildProviderErrorMessage(
@@ -202,6 +306,8 @@ describe("provider error copy", () => {
       "The usage limit has been reached.",
       "Codex error: usage limit has been reached.",
       "Codex error: the usage limit was reached.",
+      '{"codexErrorInfo":"usageLimit"}',
+      '{"codexError":"usageLimitExceeded"}',
     ]) {
       expect(
         buildProviderErrorMessage(raw, {

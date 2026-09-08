@@ -4,6 +4,7 @@
 
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { AIPreset } from "@/lib/utils/tauri";
 import { UpgradeQuotaBanner } from "./upgrade-quota-banner";
 
 const mocks = vi.hoisted(() => ({
@@ -14,6 +15,7 @@ const mocks = vi.hoisted(() => ({
   clearQuotaUpgrade: vi.fn(),
   openExternalUrl: vi.fn(),
   openBusinessUpgradeSurface: vi.fn(),
+  usageQueryEnabled: undefined as boolean | undefined,
 }));
 
 vi.mock("@/lib/hooks/use-settings", () => ({
@@ -29,7 +31,10 @@ vi.mock("@/lib/hooks/use-settings", () => ({
 }));
 
 vi.mock("@/lib/hooks/use-usage-status", () => ({
-  useUsageStatus: () => mocks.usageState,
+  useUsageStatusQuery: (enabled: boolean) => {
+    mocks.usageQueryEnabled = enabled;
+    return { usage: enabled ? mocks.usageState : null };
+  },
   formatResetTime: () => "5:00 PM",
   formatAllowanceReset: () => "Aug 17, 5:00 PM",
   formatUsagePercent: (percent: number) => `${percent}%`,
@@ -58,15 +63,20 @@ vi.mock("@/lib/upgrade-flow", () => ({
   openBusinessUpgradeSurface: mocks.openBusinessUpgradeSurface,
 }));
 
-function expectPhosphorPrimary(button: HTMLElement) {
+function expectNeutralPrimary(button: HTMLElement) {
   expect(button).toHaveClass(
-    "border-[#4A6B00]",
-    "bg-[#C7FF3E]",
-    "text-black",
-    "hover:border-black",
-    "hover:bg-black",
-    "hover:text-[#C7FF3E]",
+    "border-foreground",
+    "bg-foreground",
+    "text-background",
+    "hover:bg-background",
+    "hover:text-foreground",
   );
+}
+
+const hostedPreset = { provider: "screenpipe-cloud" } as AIPreset;
+
+function renderBanner(activePreset: AIPreset = hostedPreset) {
+  return render(<UpgradeQuotaBanner activePreset={activePreset} />);
 }
 
 describe("UpgradeQuotaBanner", () => {
@@ -83,6 +93,7 @@ describe("UpgradeQuotaBanner", () => {
     };
     mocks.gateState = false;
     mocks.seenEligibility = undefined;
+    mocks.usageQueryEnabled = undefined;
     mocks.blockedUpgrade = null;
     mocks.clearQuotaUpgrade.mockReset();
     mocks.openExternalUrl.mockReset();
@@ -92,9 +103,47 @@ describe("UpgradeQuotaBanner", () => {
   });
 
   it("does not render while hydrated eligibility gates are unresolved or false", () => {
-    render(<UpgradeQuotaBanner />);
+    renderBanner();
     expect(mocks.seenEligibility).toBe(true);
     expect(screen.queryByText(/out of premium AI/i)).toBeNull();
+  });
+
+  it.each([
+    ["Cursor ACP", { provider: "acp", acpAgent: { id: "cursor" } }],
+    [
+      "own-account Claude ACP",
+      {
+        provider: "acp",
+        acpAgent: { id: "claude-acp", useScreenpipeCloud: false },
+      },
+    ],
+    ["a custom provider", { provider: "custom" }],
+  ] as const)("stays hidden for %s", (_label, activePreset) => {
+    mocks.gateState = true;
+    mocks.blockedUpgrade = {
+      requiredPlan: "business_ultra",
+      upgradeUrl:
+        "https://screenpipe.com/account/billing?target_plan=pro_ultra&interval=month",
+      resetsAt: null,
+    };
+
+    renderBanner(activePreset as AIPreset);
+
+    expect(mocks.usageQueryEnabled).toBe(false);
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByRole("button", { name: /upgrade/i })).toBeNull();
+  });
+
+  it("shows for an ACP agent explicitly routed through Screenpipe Cloud", () => {
+    mocks.gateState = true;
+
+    renderBanner({
+      provider: "acp",
+      acpAgent: { id: "claude-acp", useScreenpipeCloud: true },
+    } as AIPreset);
+
+    expect(mocks.usageQueryEnabled).toBe(true);
+    expect(screen.getByRole("button", { name: "View Business" })).toBeTruthy();
   });
 
   it.each(["business_max", "business_ultra"])(
@@ -107,7 +156,7 @@ describe("UpgradeQuotaBanner", () => {
         upgrade_eligible: true,
       };
       mocks.gateState = true;
-      render(<UpgradeQuotaBanner />);
+      renderBanner();
       expect(screen.queryByText(/out of premium AI/i)).toBeNull();
       expect(screen.queryByRole("button", { name: "View Business" })).toBeNull();
     },
@@ -115,10 +164,10 @@ describe("UpgradeQuotaBanner", () => {
 
   it("renders for exhausted Basic/Lifetime eligibility and opens the native Business offer", async () => {
     mocks.gateState = true;
-    render(<UpgradeQuotaBanner />);
+    renderBanner();
 
     const upgrade = screen.getByRole("button", { name: "View Business" });
-    expectPhosphorPrimary(upgrade);
+    expectNeutralPrimary(upgrade);
     fireEvent.click(upgrade);
     await waitFor(() =>
       expect(mocks.openBusinessUpgradeSurface).toHaveBeenCalledWith(
@@ -157,7 +206,7 @@ describe("UpgradeQuotaBanner", () => {
     };
     mocks.gateState = false;
 
-    render(<UpgradeQuotaBanner />);
+    renderBanner();
 
     expect(screen.getByTestId("hosted-ai-allowance-banner")).toBeTruthy();
     expect(screen.getByText("Weekly AI limit reached")).toBeTruthy();
@@ -208,14 +257,14 @@ describe("UpgradeQuotaBanner", () => {
       },
     };
 
-    render(<UpgradeQuotaBanner />);
+    renderBanner();
 
     expect(screen.getByText("Frontier model limit reached")).toBeTruthy();
     expect(screen.queryByText("Weekly AI limit reached")).toBeNull();
     expect(screen.getByText(/Switch to Auto or upgrade/i)).toBeTruthy();
   });
 
-  it("does not promise an upgrade when the server offers no next plan", () => {
+  it("opens plan options without inventing a next-plan upgrade", async () => {
     mocks.usageState = {
       ...mocks.usageState,
       tier: "business_ultra",
@@ -239,11 +288,17 @@ describe("UpgradeQuotaBanner", () => {
       },
     };
 
-    render(<UpgradeQuotaBanner />);
+    renderBanner();
 
-    expect(screen.getByText(/Switch to Auto\./i)).toBeTruthy();
+    expect(screen.getByText(/Switch to Auto or view plans\./i)).toBeTruthy();
     expect(screen.queryByText(/Switch to Auto or upgrade/i)).toBeNull();
     expect(screen.queryByRole("button", { name: /upgrade/i })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "View plans" }));
+    await waitFor(() =>
+      expect(mocks.openBusinessUpgradeSurface).toHaveBeenCalledWith(
+        "cloudflare-ai-allowance-banner",
+      ),
+    );
   });
 
   it.each([
@@ -311,14 +366,14 @@ describe("UpgradeQuotaBanner", () => {
       };
       mocks.gateState = false;
 
-      const polled = render(<UpgradeQuotaBanner />);
+      const polled = renderBanner();
 
       expect(mocks.seenEligibility).toBe(true);
       expect(screen.getByTestId("hosted-ai-allowance-banner")).toBeTruthy();
       const polledUpgrade = screen.getByRole("button", {
         name: `Upgrade to ${planLabel}`,
       });
-      expectPhosphorPrimary(polledUpgrade);
+      expectNeutralPrimary(polledUpgrade);
       fireEvent.click(polledUpgrade);
       await waitFor(() =>
         expect(mocks.openExternalUrl).toHaveBeenCalledWith(upgradeUrl),
@@ -333,11 +388,11 @@ describe("UpgradeQuotaBanner", () => {
         resetsAt: null,
       };
 
-      render(<UpgradeQuotaBanner />);
+      renderBanner();
       const immediateUpgrade = screen.getByRole("button", {
         name: `Upgrade to ${planLabel}`,
       });
-      expectPhosphorPrimary(immediateUpgrade);
+      expectNeutralPrimary(immediateUpgrade);
       fireEvent.click(immediateUpgrade);
       await waitFor(() =>
         expect(mocks.openExternalUrl).toHaveBeenCalledWith(upgradeUrl),
@@ -361,7 +416,7 @@ describe("UpgradeQuotaBanner", () => {
       resetsAt: "2026-08-02T00:00:00.000Z",
     };
 
-    render(<UpgradeQuotaBanner />);
+    renderBanner();
     expect(screen.getByTestId("cost-limit-upgrade-banner")).toBeTruthy();
     expect(screen.getByText(/AI usage limit reached/i)).toBeTruthy();
     expect(
@@ -399,7 +454,7 @@ describe("UpgradeQuotaBanner", () => {
       },
     };
 
-    render(<UpgradeQuotaBanner />);
+    renderBanner();
 
     expect(screen.getByTestId("hosted-ai-cost-limit-banner")).toBeTruthy();
     // The blocking dialog is gone — the banner carries the recovery action.
@@ -421,7 +476,7 @@ describe("UpgradeQuotaBanner", () => {
       resetsAt: null,
     };
 
-    render(<UpgradeQuotaBanner />);
+    renderBanner();
     fireEvent.click(screen.getByRole("button", { name: "Upgrade to Basic" }));
 
     await waitFor(() =>
@@ -451,7 +506,7 @@ describe("UpgradeQuotaBanner", () => {
         resetsAt: null,
       };
 
-      render(<UpgradeQuotaBanner />);
+      renderBanner();
       fireEvent.click(
         screen.getByRole("button", { name: `Upgrade to ${planLabel}` }),
       );
@@ -472,7 +527,7 @@ describe("UpgradeQuotaBanner", () => {
       resetsAt: null,
     };
 
-    render(<UpgradeQuotaBanner />);
+    renderBanner();
 
     expect(screen.queryByText(/business_titan/i)).toBeNull();
     expect(screen.getByText(/upgrade to a higher plan/i)).toBeInTheDocument();
@@ -491,7 +546,7 @@ describe("UpgradeQuotaBanner", () => {
       upgradeUrl: "https://screenpi.pe/account/billing",
       resetsAt: null,
     };
-    render(<UpgradeQuotaBanner />);
+    renderBanner();
 
     fireEvent.click(
       screen.getByRole("button", { name: "dismiss AI usage notice" }),

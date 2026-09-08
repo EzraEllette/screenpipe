@@ -21,6 +21,8 @@ import {
   markLearningDone,
   markLearningEmpty,
   markLearningReady,
+  markLearningReadyShown,
+  markLearningSummaryOpened,
   markLearningWriting,
   normalizeEmptyReason,
   readLearningWindow,
@@ -131,6 +133,19 @@ describe("evidence gate", () => {
             { name: "Google Chrome", frame_count: 1 },
             { name: "Claude", frame_count: 1 },
           ],
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  it("resolves one sustained app from parsed data without screenshots", () => {
+    expect(
+      hasEnoughEvidence(
+        ok({
+          total_frames: 2,
+          total_active_minutes: 2,
+          parsed_context_count: 1,
+          apps: [{ name: "Slack", frame_count: 2 }],
         }),
       ),
     ).toBe(true);
@@ -378,6 +393,40 @@ describe("window lifecycle", () => {
     expect(readLearningWindow().chatId).toBe("chat-1");
   });
 
+  it("persists when the ready card was shown", () => {
+    beginLearningWindow();
+    markLearningReady("chat-1");
+
+    const shown = markLearningReadyShown("2026-08-19T16:00:00.000Z");
+
+    expect(shown.readyShownAt).toBe("2026-08-19T16:00:00.000Z");
+    expect(readLearningWindow().readyShownAt).toBe(
+      "2026-08-19T16:00:00.000Z",
+    );
+  });
+
+  it("keeps setup alive after the summary opens", () => {
+    beginLearningWindow();
+    markLearningReady("chat-1");
+    const opened = markLearningSummaryOpened("2026-08-19T17:00:00.000Z");
+
+    expect(opened.phase).toBe("ready");
+    expect(opened.chatId).toBe("chat-1");
+    expect(opened.summaryOpenedAt).toBe("2026-08-19T17:00:00.000Z");
+    expect(readLearningWindow().summaryOpenedAt).toBe(
+      "2026-08-19T17:00:00.000Z",
+    );
+  });
+
+  it("does not revive setup when a stale open arrives after dismissal", () => {
+    beginLearningWindow();
+    markLearningReady("chat-1");
+    markLearningDone();
+
+    expect(markLearningSummaryOpened().phase).toBe("done");
+    expect(readLearningWindow().summaryOpenedAt).toBeNull();
+  });
+
   it("clears in-progress state when dismissed", () => {
     beginLearningWindow();
     markLearningReady("chat-1");
@@ -386,13 +435,14 @@ describe("window lifecycle", () => {
     expect(done.chatId).toBeNull();
   });
 
-  it("settles a window that outlived its ceiling instead of resuming it", () => {
+  it("leaves an expired window for the native owner to settle", () => {
     const stale = new Date(
       Date.now() - LEARNING_WINDOW_CEILING_MS - 1_000,
     ).toISOString();
-    beginLearningWindow(stale);
-    // A reload after the ceiling must not show an expired countdown.
-    expect(readLearningWindow().phase).toBe("empty");
+    beginLearningWindow(stale, true);
+    const settled = readLearningWindow();
+    expect(settled.phase).toBe("learning");
+    expect(settled.showProgress).toBe(true);
   });
 
   it("never rehydrates captured apps, which would show stale evidence", () => {
@@ -532,9 +582,7 @@ describe("classifyEmptyReason", () => {
 });
 
 describe("writing phase", () => {
-  it("resumes a persisted writing phase as ready when the chat was seeded", () => {
-    // The process died after seedFirstRunSummaryChat but before markReady.
-    // The summary exists, so send the user to it rather than settling silently.
+  it("preserves writing until the native owner publishes ready", () => {
     beginLearningWindow(new Date().toISOString());
     markLearningWriting();
     const current = readLearningWindow();
@@ -543,17 +591,14 @@ describe("writing phase", () => {
       JSON.stringify({ ...current, phase: "writing", chatId: "chat-42" }),
     );
     const resumed = readLearningWindow();
-    expect(resumed.phase).toBe("ready");
+    expect(resumed.phase).toBe("writing");
     expect(resumed.chatId).toBe("chat-42");
   });
 
-  it("settles a persisted writing phase with no chat instead of restoring a spinner", () => {
-    // The model call died with the process and the seed claim is already
-    // spent, so nothing will resume the work. Restoring `writing` would show a
-    // spinner that can never finish.
+  it("preserves a persisted native writing phase across reloads", () => {
     beginLearningWindow(new Date().toISOString());
     markLearningWriting();
-    expect(readLearningWindow().phase).toBe("empty");
+    expect(readLearningWindow().phase).toBe("writing");
   });
 
   it("marks writing without disturbing the anchor", () => {
@@ -592,7 +637,7 @@ describe("progress visibility", () => {
   });
 });
 
-describe("a window that expired while nothing was mounted", () => {
+describe("a native window that expired while nothing was mounted", () => {
   const seedExpiredLearning = () => {
     window.localStorage.setItem(
       "screenpipe.first-run.learning-window.v1",
@@ -604,39 +649,30 @@ describe("a window that expired while nothing was mounted", () => {
         seededAt: null,
         chatId: null,
         emptyReason: null,
+        showProgress: true,
       }),
     );
   };
 
-  it("flags itself for reporting instead of settling silently", () => {
-    // The regression: this settle path emits nothing of its own, because the
-    // ceiling effect is gated on `phase === "learning"` and normalize has
-    // already left it. Without the flag the most common first-run outcome is
-    // invisible in analytics.
+  it("remains live until native state settles it", () => {
     seedExpiredLearning();
     const state = readLearningWindow();
-    expect(state.phase).toBe("empty");
-    // Still `unknown` on purpose: the hook re-derives the real engine reason
-    // from the pending flag, so rehydration must not invent a diagnostic
-    // state of its own.
-    expect(state.emptyReason).toBe("unknown");
-    expect(state.pendingEmptyReport).toBe(true);
+    expect(state.phase).toBe("learning");
+    expect(state.emptyReason).toBeNull();
+    expect(state.pendingEmptyReport).toBe(false);
+    expect(state.showProgress).toBe(true);
   });
 
-  it("flags the settle rather than inventing a new diagnostic reason", () => {
-    // A rehydrated window must reach the same copy a ceiling-settled one does.
-    // An "expired while closed" state replaced an actionable engine reason
-    // with a shrug and broke the existing first-run E2E, which asserts the
-    // copy names something the user can act on.
+  it("does not invent a webview diagnostic reason", () => {
     seedExpiredLearning();
     const state = readLearningWindow();
-    expect(state.pendingEmptyReport).toBe(true);
-    expect(state.emptyReason).toBe("unknown");
+    expect(state.pendingEmptyReport).toBe(false);
+    expect(state.emptyReason).toBeNull();
   });
 
   it("clears the flag exactly once and is safe to call on every mount", () => {
     seedExpiredLearning();
-    expect(readLearningWindow().pendingEmptyReport).toBe(true);
+    expect(readLearningWindow().pendingEmptyReport).toBe(false);
     expect(clearPendingEmptyReport().pendingEmptyReport).toBe(false);
     expect(clearPendingEmptyReport().pendingEmptyReport).toBe(false);
     expect(readLearningWindow().pendingEmptyReport).toBe(false);

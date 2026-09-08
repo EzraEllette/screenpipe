@@ -295,6 +295,13 @@ fn restart_after_database_fault() -> anyhow::Result<()> {
 #[tokio::main]
 #[tracing::instrument]
 async fn main() -> anyhow::Result<()> {
+    // ACP re-enters the same signed binary in private subprocess modes. Handle
+    // those before clap sees the private arguments or the recorder initializes.
+    if let Some(exit_code) = screenpipe_core::agents::acp::run_hidden_mode_without_observer().await
+    {
+        std::process::exit(exit_code);
+    }
+
     // dhat heap profiler — must be the first thing in main.
     // Writes dhat-heap.json on drop (Ctrl+C / graceful exit).
     #[cfg(feature = "heap-prof")]
@@ -1532,6 +1539,23 @@ async fn main() -> anyhow::Result<()> {
         std::sync::Arc<dyn screenpipe_core::agents::AgentExecutor>,
     > = std::collections::HashMap::new();
     agent_executors.insert("pi".to_string(), pi_executor.clone());
+    agent_executors.insert(
+        "acp".to_string(),
+        std::sync::Arc::new(screenpipe_core::agents::acp::AcpExecutor::new(
+            user_token.clone(),
+            screenpipe_core::agents::pi::SCREENPIPE_API_URL.to_string(),
+            config.port,
+            config.api_auth_key.clone(),
+        )),
+    );
+    let cloud_agent_executor = std::sync::Arc::new(
+        screenpipe_core::agents::cloud::CloudAgentExecutor::new(
+            config.port,
+            config.api_auth_key.clone(),
+        )
+        .with_secret_store(server.secret_store.clone()),
+    );
+    agent_executors.insert("cloud-agent".to_string(), cloud_agent_executor);
 
     // Create pipe store backed by the main SQLite DB
     let pipe_store: Option<std::sync::Arc<dyn screenpipe_core::pipes::PipeStore>> =
@@ -1576,20 +1600,6 @@ async fn main() -> anyhow::Result<()> {
             analytics::capture_event_nonblocking("pipe_scheduled_run", props);
         },
     ));
-    // Gate scheduled pipe runs on connection readiness — same predicate the
-    // manual /pipes/:id/run endpoint uses (pipes_api.rs). Avoids running
-    // pipes that are still in "setup mode" (declared connections not paired).
-    {
-        let secret_store_for_check = server.secret_store.clone();
-        let screenpipe_dir_for_check = local_data_dir.clone();
-        pipe_manager.set_connection_check(std::sync::Arc::new(move |required| {
-            let ss = secret_store_for_check.clone();
-            let dir = screenpipe_dir_for_check.clone();
-            Box::pin(async move {
-                screenpipe_connect::missing_pipe_connections(ss.as_deref(), &dir, &required).await
-            })
-        }));
-    }
     // Give scheduled runs the same Live View target authority the foreground
     // refresh button sends, so a Pipe feeding several dashboards refreshes all
     // of them instead of leaving the ones it skipped stale until a manual click.
@@ -1917,6 +1927,8 @@ async fn main() -> anyhow::Result<()> {
                 capture_trigger_tx,
                 linker_tx,
                 config.ignored_windows.clone(),
+                config.ignored_urls.clone(),
+                config.included_urls.clone(),
                 true, // CLI: show native TCC dialogs for accessibility + input monitoring
             )
             .await

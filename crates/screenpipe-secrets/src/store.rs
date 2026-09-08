@@ -251,6 +251,20 @@ impl SecretStore {
         )
         .report_secret_store_integrity("initialize", None, Some(key.is_some()))
         .context("failed to create secrets table")?;
+        observe_database_result(
+            database_error_hook.as_ref(),
+            sqlx::query(
+                "CREATE TABLE IF NOT EXISTS credential_refresh_leases (
+                    key TEXT PRIMARY KEY,
+                    owner TEXT NOT NULL,
+                    expires_at INTEGER NOT NULL
+                )",
+            )
+            .execute(&pool)
+            .await,
+        )
+        .report_secret_store_integrity("initialize_refresh_leases", None, Some(key.is_some()))
+        .context("failed to create credential refresh lease table")?;
 
         Ok(Self {
             pool,
@@ -492,6 +506,62 @@ impl SecretStore {
         .report_secret_store_integrity("set", Some(key), Some(self.key.is_some()))
         .context("failed to set secret")?;
 
+        Ok(())
+    }
+
+    /// Try to become the sole refresh owner for a rotating credential.
+    ///
+    /// The lease is stored beside the credential so independent app, CLI, and
+    /// pipe processes cannot redeem the same one-time refresh token. A crashed
+    /// owner is recoverable after `lease_seconds`.
+    pub async fn try_acquire_refresh_lease(
+        &self,
+        key: &str,
+        owner: &str,
+        lease_seconds: u64,
+    ) -> Result<bool> {
+        let (pool, write_lock) = self.operation_database().await?;
+        let _write_permit = acquire_write_permit(&write_lock).await?;
+        let lease_seconds = i64::try_from(lease_seconds).unwrap_or(i64::MAX);
+        let result = self
+            .observe(
+                sqlx::query(
+                    "INSERT INTO credential_refresh_leases (key, owner, expires_at)
+                     VALUES (?, ?, unixepoch() + ?)
+                     ON CONFLICT(key) DO UPDATE SET
+                        owner = excluded.owner,
+                        expires_at = excluded.expires_at
+                     WHERE credential_refresh_leases.expires_at <= unixepoch()
+                        OR credential_refresh_leases.owner = excluded.owner",
+                )
+                .bind(key)
+                .bind(owner)
+                .bind(lease_seconds)
+                .execute(&pool)
+                .await,
+            )
+            .report_secret_store_integrity(
+                "try_acquire_refresh_lease",
+                Some(key),
+                Some(self.key.is_some()),
+            )
+            .context("failed to acquire credential refresh lease")?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Release a refresh lease without disturbing a newer owner.
+    pub async fn release_refresh_lease(&self, key: &str, owner: &str) -> Result<()> {
+        let (pool, write_lock) = self.operation_database().await?;
+        let _write_permit = acquire_write_permit(&write_lock).await?;
+        self.observe(
+            sqlx::query("DELETE FROM credential_refresh_leases WHERE key = ? AND owner = ?")
+                .bind(key)
+                .bind(owner)
+                .execute(&pool)
+                .await,
+        )
+        .report_secret_store_integrity("release_refresh_lease", Some(key), Some(self.key.is_some()))
+        .context("failed to release credential refresh lease")?;
         Ok(())
     }
 
@@ -810,6 +880,50 @@ mod tests {
 
     #[tokio::test]
     #[serial]
+    async fn refresh_leases_use_verified_replacement_pool_after_access_fault() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("leases.sqlite");
+        let store = SecretStore::open(db.to_str().unwrap(), None).await.unwrap();
+        assert!(store
+            .try_acquire_refresh_lease("oauth:test", "owner-a", 60)
+            .await
+            .unwrap());
+        let old_lane = sqlite_write_lock(&db);
+        screenpipe_sqlite_coordinator::latch_sqlite_hard_fault(&db, 10);
+        // Release must diagnose/reopen even when it is the first operation
+        // on this long-lived store after the old writer generation retired.
+        store
+            .release_refresh_lease("oauth:test", "owner-a")
+            .await
+            .unwrap();
+        assert!(old_lane.is_closed());
+        assert!(store
+            .try_acquire_refresh_lease("oauth:test", "owner-b", 60)
+            .await
+            .unwrap());
+        screenpipe_sqlite_coordinator::latch_sqlite_hard_fault(&db, 13);
+        // Acquisition can also be the first operation after recovery, while
+        // the persisted lease continues excluding competing refresh owners.
+        assert!(!store
+            .try_acquire_refresh_lease("oauth:test", "owner-c", 60)
+            .await
+            .unwrap());
+        store
+            .release_refresh_lease("oauth:test", "owner-b")
+            .await
+            .unwrap();
+        assert!(store
+            .try_acquire_refresh_lease("oauth:test", "owner-c", 60)
+            .await
+            .unwrap());
+        assert!(!screenpipe_sqlite_coordinator::sqlite_quarantine_exists(
+            &db
+        ));
+        close_all_secret_pools().await;
+    }
+
+    #[tokio::test]
+    #[serial]
     async fn unavailable_secret_file_stays_retryable_then_same_store_resumes() {
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("secrets.sqlite");
@@ -867,6 +981,29 @@ mod tests {
         store.set("test:key", b"second").await.unwrap();
         let val = store.get("test:key").await.unwrap().unwrap();
         assert_eq!(val, b"second");
+    }
+
+    #[tokio::test]
+    async fn refresh_lease_allows_only_one_owner() {
+        let store = make_store(None).await;
+
+        assert!(store
+            .try_acquire_refresh_lease("oauth:chatgpt", "owner-a", 60)
+            .await
+            .unwrap());
+        assert!(!store
+            .try_acquire_refresh_lease("oauth:chatgpt", "owner-b", 60)
+            .await
+            .unwrap());
+
+        store
+            .release_refresh_lease("oauth:chatgpt", "owner-a")
+            .await
+            .unwrap();
+        assert!(store
+            .try_acquire_refresh_lease("oauth:chatgpt", "owner-b", 60)
+            .await
+            .unwrap());
     }
 
     #[tokio::test]

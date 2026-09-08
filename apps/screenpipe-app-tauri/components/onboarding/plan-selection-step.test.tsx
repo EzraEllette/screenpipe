@@ -27,6 +27,13 @@ const mocks = vi.hoisted(() => ({
       cloud_subscribed: true,
       has_payment_method: false,
       subscription_plan: "pro",
+    } as {
+      token: string;
+      cloud_subscribed?: boolean;
+      app_entitled?: boolean;
+      has_payment_method?: boolean;
+      entitlement_source?: string;
+      subscription_plan?: string;
     },
   },
 }));
@@ -79,6 +86,10 @@ describe("hosted onboarding checkout", () => {
   it("navigates the existing webview with a hidden POST and keeps secrets out of URLs", async () => {
     render(<PlanSelectionStep handleNextSlide={vi.fn()} />);
 
+    expect(submitSpy).not.toHaveBeenCalled();
+    fireEvent.click(
+      screen.getByRole("button", { name: "start 7-day Business trial" }),
+    );
     await waitFor(() => expect(submitSpy).toHaveBeenCalledOnce());
     const form = checkoutForm();
     expect(form.method).toBe("post");
@@ -99,6 +110,9 @@ describe("hosted onboarding checkout", () => {
 
   it("submits only once when the local controller rerenders", async () => {
     const view = render(<PlanSelectionStep handleNextSlide={vi.fn()} />);
+    fireEvent.click(
+      screen.getByRole("button", { name: "start 7-day Business trial" }),
+    );
     await waitFor(() => expect(submitSpy).toHaveBeenCalledOnce());
 
     view.rerender(<PlanSelectionStep handleNextSlide={vi.fn()} />);
@@ -178,6 +192,67 @@ describe("hosted onboarding checkout", () => {
     expect(next).not.toHaveBeenCalled();
   });
 
+  it("advances when a higher existing entitlement remains authoritative", async () => {
+    window.history.replaceState({}, "", "/onboarding?checkout=complete");
+    mocks.settings.user = {
+      token: "token-1",
+      app_entitled: true,
+      has_payment_method: false,
+      entitlement_source: "manual",
+      subscription_plan: "pro_ultra",
+    };
+    const next = vi.fn();
+
+    render(<PlanSelectionStep handleNextSlide={next} />);
+
+    await waitFor(() =>
+      expect(mocks.loadUser).toHaveBeenCalledWith("token-1", true),
+    );
+    await waitFor(() => expect(next).toHaveBeenCalledOnce());
+    expect(mocks.capture).toHaveBeenCalledWith(
+      "onboarding_plan_activated",
+      expect.objectContaining({
+        confirmation: "existing_entitlement",
+        plan: "pro_ultra",
+      }),
+    );
+  });
+
+  it("bounds confirmation polling and offers a verification retry", async () => {
+    vi.useFakeTimers();
+    window.history.replaceState({}, "", "/onboarding?checkout=complete");
+    const next = vi.fn();
+
+    render(<PlanSelectionStep handleNextSlide={next} />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(mocks.loadUser).toHaveBeenCalledWith("token-1", true);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(30_000);
+    });
+
+    expect(
+      screen.getByText("account confirmation is taking longer than expected"),
+    ).toBeInTheDocument();
+    expect(next).not.toHaveBeenCalled();
+    expect(mocks.capture).toHaveBeenCalledWith(
+      "onboarding_card_checkout_confirmation_timed_out",
+      { poll_attempts: 10 },
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "retry confirmation" }),
+    );
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(
+      mocks.loadUser.mock.calls.filter((call) => call[1] === true),
+    ).toHaveLength(2);
+  });
+
   it("does not auto-navigate after cancellation and retries in the same webview", async () => {
     window.history.replaceState({}, "", "/onboarding?checkout=cancelled");
     render(<PlanSelectionStep handleNextSlide={vi.fn()} />);
@@ -195,14 +270,33 @@ describe("hosted onboarding checkout", () => {
     ).toBe(buildLocalCheckoutReturnUrl(window.location.href));
   });
 
-  it("keeps checkout required after cancellation", async () => {
+  it("offers Free without a card after cancellation", async () => {
     window.history.replaceState({}, "", "/onboarding?checkout=cancelled");
     const next = vi.fn();
     render(<PlanSelectionStep handleNextSlide={next} />);
 
+    fireEvent.click(screen.getByTestId("onboarding-plan-free"));
+
+    expect(next).toHaveBeenCalledOnce();
+    expect(submitSpy).not.toHaveBeenCalled();
+    expect(mocks.capture).toHaveBeenCalledWith("onboarding_plan_activated", {
+      plan: "free",
+      confirmation: "free_no_card",
+    });
+  });
+
+  it("offers Free without opening checkout on the initial plan screen", () => {
+    const next = vi.fn();
+    render(<PlanSelectionStep handleNextSlide={next} />);
+
+    expect(screen.getByText("choose how to start")).toBeInTheDocument();
+    expect(screen.getByTestId("onboarding-plan-selection")).toBeInTheDocument();
     expect(
-      screen.queryByTestId("onboarding-plan-free"),
+      screen.queryByTestId("onboarding-card-capture"),
     ).not.toBeInTheDocument();
-    expect(next).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByTestId("onboarding-plan-free"));
+
+    expect(next).toHaveBeenCalledOnce();
+    expect(submitSpy).not.toHaveBeenCalled();
   });
 });

@@ -18,7 +18,10 @@ import { useSettings } from "@/lib/hooks/use-settings";
 import { ImageOff, ChevronLeft, ChevronRight, Copy, ImageIcon, Link2, MessageCircle, Type } from "lucide-react";
 import { usePipes } from "@/lib/hooks/use-pipes";
 import { toast } from "@/components/ui/use-toast";
-import { useFrameLoading } from "@/components/rewind/hooks/use-frame-loading";
+import {
+	type FrameLoadSuccessDetails,
+	useFrameLoading,
+} from "@/components/rewind/hooks/use-frame-loading";
 import { useLiveText } from "@/components/rewind/hooks/use-live-text";
 import { useFrameActions } from "@/components/rewind/hooks/use-frame-actions";
 import { commands } from "@/lib/utils/tauri";
@@ -85,6 +88,7 @@ interface CurrentFrameTimelineProps {
 	canNavigateNext?: boolean;
 	onFrameUnavailable?: () => void;
 	onFrameLoadError?: () => void;
+	onFrameLoadSuccess?: (details: FrameLoadSuccessDetails) => void;
 	onUrlsDetected?: (urls: DetectedUrl[]) => void;
 	/** all unique device_ids seen in this session (e.g. ["monitor_1", "monitor_4"]) */
 	allDeviceIds?: string[];
@@ -136,6 +140,7 @@ export const CurrentFrameTimeline: FC<CurrentFrameTimelineProps> = ({
 	canNavigateNext = true,
 	onFrameUnavailable,
 	onFrameLoadError,
+	onFrameLoadSuccess,
 	onUrlsDetected,
 	allDeviceIds,
 	searchNavFrame,
@@ -239,6 +244,7 @@ export const CurrentFrameTimeline: FC<CurrentFrameTimelineProps> = ({
 		onSearchNavComplete,
 		onFrameUnavailable,
 		onFrameLoadError,
+		onFrameLoadSuccess,
 		videoRef,
 		isPlaying,
 		playbackSpeed,

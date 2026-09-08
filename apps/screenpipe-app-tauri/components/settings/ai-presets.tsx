@@ -38,10 +38,19 @@ import { Input } from "../ui/input";
 import {
   ACP_ADAPTERS,
   generatePresetName,
+  primaryAcpAdapterChoices,
   presetImageClass,
   presetImageSrc,
 } from "@/lib/utils/preset-appearance";
-import { AcpAgentPicker } from "@/components/settings/acp-agent-picker";
+import {
+  AcpAgentPicker,
+  acpAgentForSelection,
+} from "@/components/settings/acp-agent-picker";
+import {
+  AIProviderChoices,
+  AIProviderCard,
+  type AIProviderCardProps,
+} from "@/components/settings/ai-provider-choices";
 import { ValidatedInput } from "../ui/validated-input";
 import { ValidatedTextarea } from "../ui/validated-textarea";
 import {
@@ -104,7 +113,7 @@ import {
 } from "../ui/command";
 import { Badge } from "../ui/badge";
 import { toast } from "../ui/use-toast";
-import { Card, CardContent } from "../ui/card";
+import { Card } from "../ui/card";
 import { AIProviderType } from "@/lib/hooks/use-settings";
 import { useManagedPolicy } from "@/lib/hooks/use-managed-policy";
 import { useTeam } from "@/lib/hooks/use-team";
@@ -143,6 +152,7 @@ import {
 import {
   filterAcpPresets,
   useAcpRolloutEnabled,
+  useSelectableAcpAdapters,
 } from "@/lib/acp-rollout";
 import {
   applyResolvedModelLimits,
@@ -182,17 +192,7 @@ const INITIAL_DIAGNOSTICS: DiagnosticResults = {
   chat: { status: "pending", message: "" },
 };
 
-export interface AIProviderCardProps {
-  type: "openai" | "openai-chatgpt" | "native-ollama" | "anthropic" | "custom" | "embedded" | "screenpipe-cloud" | "acp";
-  title: string;
-  description: string;
-  imageSrc: string;
-  selected: boolean;
-  onClick: () => void;
-  disabled?: boolean;
-  warningText?: string;
-  imageClassName?: string;
-}
+export { AIProviderCard, type AIProviderCardProps };
 
 export interface OllamaModel {
   name: string;
@@ -227,69 +227,14 @@ export interface AIModel {
   locked?: boolean;
 }
 
-export const AIProviderCard = ({
-  type,
-  title,
-  description,
-  imageSrc,
-  selected,
-  onClick,
-  disabled,
-  warningText,
-  imageClassName,
-}: AIProviderCardProps) => {
-  return (
-    <Card
-      onClick={disabled ? undefined : onClick}
-      onKeyDown={(event) => {
-        if (disabled || (event.key !== "Enter" && event.key !== " ")) return;
-        event.preventDefault();
-        onClick();
-      }}
-      role="button"
-      tabIndex={disabled ? -1 : 0}
-      aria-disabled={disabled || undefined}
-      aria-pressed={selected}
-      className={cn(
-        "flex py-3 px-4 rounded-lg hover:bg-accent transition-colors h-[110px] w-full cursor-pointer",
-        selected ? "border-black/60 border-[1.5px]" : "",
-        disabled && "opacity-50 cursor-not-allowed",
-      )}
-    >
-      <CardContent className="flex flex-col p-0 w-full">
-        <div className="flex items-center gap-2 mb-2">
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            src={imageSrc}
-            alt={title}
-            className={cn(
-              "rounded-lg shrink-0 size-8",
-              type === "native-ollama" &&
-                "outline outline-gray-300 outline-1 outline-offset-2",
-              imageClassName,
-            )}
-          />
-          <span className="text-lg font-medium truncate">{title}</span>
-        </div>
-        <p className="text-sm text-muted-foreground line-clamp-3">
-          {description}
-        </p>
-        {warningText && <Badge className="w-fit mt-2">{warningText}</Badge>}
-      </CardContent>
-    </Card>
-  );
-};
-
 const AISection = ({
   preset,
   setDialog,
   isDuplicating,
-  piAvailable,
 }: {
   preset?: AIPreset;
   setDialog: (value: boolean) => void;
   isDuplicating?: boolean;
-  piAvailable?: boolean;
 }) => {
   const { settings, updateSettings } = useSettings();
   const { isManagedDeployment, policy: enterprisePolicy } = useManagedPolicy();
@@ -328,6 +273,11 @@ const AISection = ({
   // ACP is team-only until PostHog hands out the rollout flag. Fails closed:
   // an undefined flag (offline, PostHog blocked, analytics opt-out) hides it.
   const acpEnabled = useAcpRolloutEnabled();
+  const acpAdapters = useSelectableAcpAdapters(settingsPreset?.acpAgent?.id);
+  const primaryAcpAdapters = primaryAcpAdapterChoices(acpAdapters);
+  const customAcpAdapter = acpAdapters.find((adapter) => adapter.id === "custom");
+  const showScreenpipeCloud =
+    !isManagedDeployment || aiPresetPolicy.allow_screenpipe_cloud;
 
   // A preset created while the flag was on must not keep the editor pinned to
   // a provider the user can no longer see once it is turned off.
@@ -647,6 +597,19 @@ const AISection = ({
       updateSettingsPreset({ acpAgent: agent, model: agent.id });
     },
     [updateSettingsPreset],
+  );
+
+  const selectAcpAgent = useCallback(
+    (id: string) => {
+      const agent = acpAgentForSelection(settingsPreset?.acpAgent, id);
+      updateSettingsPreset({
+        provider: "acp",
+        url: "",
+        model: agent.id,
+        acpAgent: agent,
+      });
+    },
+    [settingsPreset?.acpAgent, updateSettingsPreset],
   );
 
   // Live auto-naming: whenever the selection changes (provider, model, or
@@ -1356,72 +1319,18 @@ const AISection = ({
             AI provider
           </Label>
         </div>
-        <div className="grid grid-cols-2 gap-4 mb-4 mt-4">
-          <AIProviderCard
-            type="openai-chatgpt"
-            title="ChatGPT"
-            description="Sign in with your ChatGPT Plus/Pro subscription"
-            imageSrc="/images/openai.png"
-            selected={settingsPreset?.provider === "openai-chatgpt"}
-            onClick={() => handleAiProviderChange("openai-chatgpt")}
+        <div className="mb-4 mt-4">
+          <AIProviderChoices
+            selectedProvider={settingsPreset?.provider}
+            selectedAcpAgentId={settingsPreset?.acpAgent?.id}
+            showScreenpipeCloud={showScreenpipeCloud}
+            screenpipeDisabled={!settings.user?.token}
+            acpEnabled={acpEnabled}
+            primaryAcpAdapters={primaryAcpAdapters}
+            customAcpAdapter={customAcpAdapter}
+            onSelectProvider={handleAiProviderChange}
+            onSelectAcpAgent={selectAcpAgent}
           />
-
-          <AIProviderCard
-            type="anthropic"
-            title="Claude API"
-            description="Use your Anthropic API key"
-            imageSrc="/images/claude-ai.svg"
-            selected={(settingsPreset?.provider as string) === "anthropic"}
-            onClick={() => {
-              if ((settingsPreset?.provider as string) !== "anthropic") {
-                handleAiProviderChange("anthropic");
-              }
-            }}
-          />
-
-          <AIProviderCard
-            type="custom"
-            title="Custom"
-            description="Connect to your own AI provider or self-hosted models"
-            imageSrc="/images/custom.png"
-            selected={settingsPreset?.provider === "custom"}
-            onClick={() => handleAiProviderChange("custom")}
-          />
-
-          {acpEnabled && (
-            <AIProviderCard
-              type="acp"
-              title="Coding agent"
-              description="Use Pi, Codex, Claude Code, OpenCode, Cursor, or any ACP-compatible agent"
-              imageSrc="/images/acp.svg"
-              imageClassName="dark:invert"
-              selected={settingsPreset?.provider === "acp"}
-              onClick={() => handleAiProviderChange("acp")}
-            />
-          )}
-
-          <AIProviderCard
-            type="native-ollama"
-            title="Ollama"
-            description="Run AI models locally using your existing Ollama installation"
-            imageSrc="/images/ollama.png"
-            selected={settingsPreset?.provider === "native-ollama"}
-            onClick={() => handleAiProviderChange("native-ollama")}
-          />
-
-          {piAvailable && (!isManagedDeployment || aiPresetPolicy.allow_screenpipe_cloud) && (
-            <AIProviderCard
-              type="screenpipe-cloud"
-              title="Screenpipe Cloud"
-              description="AI coding agent powered by Screenpipe Cloud. Requires login."
-              imageSrc="/images/screenpipe.png"
-              selected={settingsPreset?.provider === "screenpipe-cloud"}
-              onClick={() => handleAiProviderChange("screenpipe-cloud")}
-              disabled={!settings.user?.token}
-              warningText={!settings.user?.token ? "Login required" : undefined}
-            />
-          )}
-
         </div>
       </div>
 
@@ -2240,7 +2149,14 @@ function SortablePresetCard({
             </TooltipProvider>
           )}
           {!readOnly && onDelete && (
-            <Button variant="ghost" size="sm" className="text-[11px] h-6 px-2 text-destructive hover:text-destructive ml-auto" onClick={(e) => { e.stopPropagation(); onDelete(); }} disabled={isLoading}>
+            <Button
+              aria-label={`Delete ${preset.id}`}
+              variant="ghost"
+              size="sm"
+              className="text-[11px] h-6 px-2 text-destructive hover:text-destructive ml-auto"
+              onClick={(e) => { e.stopPropagation(); onDelete(); }}
+              disabled={isLoading}
+            >
               <Trash2 className="w-3 h-3" />
             </Button>
           )}
@@ -2270,7 +2186,6 @@ export const AIPresets = () => {
     [settings.aiPresets, isManagedDeployment, aiPresetPolicy]
   );
   const canManageEmployeePresets = !isManagedDeployment || aiPresetPolicy.allow_employee_custom_presets;
-  const [piAvailable, setPiAvailable] = useState(false);
   const [chatgptTokenValid, setChatgptTokenValid] = useState<boolean | null>(null);
   const team = useTeam();
   const isTeamAdmin = !!team.team && team.role === "admin";
@@ -2306,26 +2221,6 @@ export const AIPresets = () => {
     [settings.aiPresets, updateSettings]
   );
 
-  // Check Pi availability (installed at app startup by Rust background thread)
-  useEffect(() => {
-    const checkPi = async () => {
-      const result = await commands.piCheck();
-      if (result.status === "ok" && result.data.available) {
-        setPiAvailable(true);
-      }
-    };
-    if (isManagedDeployment) {
-      setPiAvailable(aiPresetPolicy.allow_screenpipe_cloud);
-      return;
-    }
-    if (!isManagedDeployment) {
-      checkPi();
-    }
-    // Re-check periodically in case background install finishes
-    const interval = isManagedDeployment ? null : setInterval(checkPi, 5000);
-    return () => { if (interval) clearInterval(interval); };
-  }, [isManagedDeployment, aiPresetPolicy.allow_screenpipe_cloud]);
-
   useEffect(() => {
   const hasChatGptPreset = settings.aiPresets?.some(
     (p) => p.provider === "openai-chatgpt"
@@ -2354,14 +2249,12 @@ useEffect(() => {
         setDialog={setCreatePresentDialog}
         preset={selectedPreset}
         isDuplicating={isDuplicating}
-        piAvailable={piAvailable}
       />
     );
 
   const removePreset = async (id: string) => {
     setIsLoading(true);
     try {
-      // Prevent deletion of screenpipe-cloud preset for Pro subscribers
       const presetToRemove = settings.aiPresets.find((preset) => preset.id === id);
       if (
         isManagedDeployment &&
@@ -2374,16 +2267,13 @@ useEffect(() => {
         });
         return;
       }
-      if (presetToRemove?.provider === "screenpipe-cloud" && settings.user?.cloud_subscribed) {
-        const cloudPresets = settings.aiPresets.filter((p) => p.provider === "screenpipe-cloud");
-        if (cloudPresets.length <= 1) {
-          toast({
-            title: "Cannot delete cloud preset",
-            description: "This preset is included with your Business subscription",
-            variant: "destructive",
-          });
-          return;
-        }
+      if (settings.aiPresets.length <= 1) {
+        toast({
+          title: "Cannot delete preset",
+          description: "At least one AI preset is required",
+          variant: "destructive",
+        });
+        return;
       }
 
       const wasDefault = settings.aiPresets.find(
@@ -2583,13 +2473,11 @@ useEffect(() => {
         >
           <div className="w-full grid grid-cols-1 md:grid-cols-2 gap-3">
             {(() => {
-              const cloudPresetCount = (settings.aiPresets || []).filter((p) => p.provider === "screenpipe-cloud").length;
+              const isOnlyPreset = settings.aiPresets.length <= 1;
               return visiblePresets.map((preset) => {
                 const readOnly =
                   isManagedDeployment &&
                   (!aiPresetPolicy.allow_employee_custom_presets || isEnterpriseManagedPreset(preset));
-                const isLastCloudPreset =
-                  preset.provider === "screenpipe-cloud" && settings.user?.cloud_subscribed && cloudPresetCount <= 1;
                 return (
                   <SortablePresetCard
                     key={preset.id}
@@ -2606,7 +2494,7 @@ useEffect(() => {
                     }}
                     onDuplicate={() => duplicatePreset(preset.id)}
                     onSetDefault={() => setPresetToSetDefault(preset.id)}
-                    onDelete={isLastCloudPreset ? undefined : () => setPresetToDelete(preset.id)}
+                    onDelete={isOnlyPreset ? undefined : () => setPresetToDelete(preset.id)}
                     onShareToTeam={isTeamAdmin ? () => sharePresetToTeam(preset) : undefined}
                     isLoading={isLoading}
                     isTeamAdmin={isTeamAdmin}

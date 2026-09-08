@@ -8,18 +8,22 @@
 //! Captures happen only on meaningful user events: app switch, window focus,
 //! click, typing pause, scroll stop, clipboard, and periodic idle fallback.
 
-use crate::capture_exclusions::{probe_excluded_sck_window_ids, storage_excluded_sck_window_ids};
+use crate::capture_exclusions::{
+    exclusion_sources, probe_excluded_sck_window_ids, storage_excluded_sck_window_ids,
+};
 use crate::hot_frame_cache::{HotFrame, HotFrameCache};
 use crate::power::PowerProfile;
-use crate::semantic_worker::{SemanticProjectionJob, SemanticProjectionSender};
+use crate::semantic_worker::{SemanticCaptureGap, SemanticProjectionJob, SemanticProjectionSender};
 use crate::visual_probe::bounded_visual_probe;
 use anyhow::Result;
 use chrono::Utc;
 use screenpipe_a11y::tree::TreeWalkerConfig;
 use screenpipe_a11y::ActivityFeed;
 use screenpipe_capture::ocr_gate::OcrGate;
-use screenpipe_capture::paired_capture::{paired_capture, CaptureContext, PairedCaptureResult};
-use screenpipe_capture::TreeWalkerWorker;
+use screenpipe_capture::paired_capture::{
+    detach_tree_from_pixels, paired_capture, CaptureContext, PairedCaptureResult,
+};
+use screenpipe_capture::{TreeWalkerWorker, TreeWalkerWorkerOutcome};
 use screenpipe_core::window_pattern::{self, WindowPattern};
 use screenpipe_db::DatabaseManager;
 use screenpipe_screen::capture_screenshot_by_window::WindowFilters;
@@ -44,9 +48,15 @@ use tracing::{debug, error, info, warn};
 const CAPTURE_OPERATION_TIMEOUT: Duration = Duration::from_secs(20);
 #[cfg(not(target_os = "macos"))]
 const CAPTURE_OPERATION_TIMEOUT: Duration = Duration::from_secs(15);
-const TREE_WALK_WORKER_TIMEOUT: Duration = Duration::from_secs(12);
+const TREE_WALK_WORKER_TIMEOUT_GRACE: Duration = Duration::from_millis(750);
 const WARM_VISUAL_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 const WARM_FOCUS_BACKSTOP_INTERVAL: Duration = Duration::from_secs(1);
+
+fn tree_walk_worker_timeout(config: &TreeWalkerConfig) -> Duration {
+    config
+        .effective_walk_timeout()
+        .saturating_add(TREE_WALK_WORKER_TIMEOUT_GRACE)
+}
 
 /// Debug-only one-shot fault state for the exact production symptom where all
 /// monitor tasks remain alive but stop issuing capture heartbeats:
@@ -1094,10 +1104,11 @@ pub(crate) async fn event_driven_capture_loop(
         snapshot_writer: &snapshot_writer,
         tree_walker_config: &tree_walker_config,
         tree_walker: &tree_walker,
-        window_filters: WindowFilters::new(
+        window_filters: WindowFilters::with_url_rules(
             &tree_walker_config.ignored_windows,
             &tree_walker_config.included_windows,
             &tree_walker_config.ignored_urls,
+            &tree_walker_config.included_urls,
         ),
         ignored_patterns: WindowPattern::parse_list(&tree_walker_config.ignored_windows),
         use_pii_removal,
@@ -1786,7 +1797,11 @@ pub(crate) async fn event_driven_capture_loop(
                 &monitor_liveness,
                 screenpipe_screen::CaptureLoopStage::ExclusionProbe,
             );
-            let fresh_ids = probe_excluded_sck_window_ids(&capture_params.window_filters).await;
+            let fresh_ids = probe_excluded_sck_window_ids(
+                &capture_params.window_filters,
+                exclusion_sources(capture_params.tree_walker_config),
+            )
+            .await;
             if fresh_ids != cached_excluded_ids {
                 cached_excluded_ids = fresh_ids;
             }
@@ -1888,10 +1903,7 @@ pub(crate) async fn event_driven_capture_loop(
                 // Pre-capture DRM gate: check BEFORE any SCK call.
                 // Uses AX APIs only — prevents even a single leaked frame.
                 {
-                    let trigger_app = match &trigger {
-                        CaptureTrigger::AppSwitch { app_name, .. } => Some(app_name.as_str()),
-                        _ => None,
-                    };
+                    let trigger_app = drm_trigger_app_name(&trigger);
                     if crate::drm_detector::pre_capture_drm_check(pause_on_drm_content, trigger_app)
                     {
                         debug!(
@@ -2313,11 +2325,103 @@ struct LightweightFocusedMetadata {
     window_name: Option<String>,
 }
 
+fn mask_image_to_focused_window(
+    image: &image::DynamicImage,
+    bounds: screenpipe_capture::paired_capture::FocusedWindowBounds,
+) -> Option<image::DynamicImage> {
+    use image::GenericImageView;
+
+    let (frame_width, frame_height) = image.dimensions();
+    let x = bounds.x.max(0) as u32;
+    let y = bounds.y.max(0) as u32;
+    let right =
+        (i64::from(bounds.x) + i64::from(bounds.width)).clamp(0, i64::from(frame_width)) as u32;
+    let bottom =
+        (i64::from(bounds.y) + i64::from(bounds.height)).clamp(0, i64::from(frame_height)) as u32;
+    if right <= x || bottom <= y {
+        return None;
+    }
+
+    let cropped = image.crop_imm(x, y, right - x, bottom - y).to_rgba8();
+    let mut masked =
+        image::RgbaImage::from_pixel(frame_width, frame_height, image::Rgba([0, 0, 0, 255]));
+    image::imageops::replace(&mut masked, &cropped, i64::from(x), i64::from(y));
+    Some(image::DynamicImage::ImageRgba8(masked))
+}
+
+#[cfg(target_os = "macos")]
+fn get_focused_pid_fresh() -> Option<i32> {
+    screenpipe_a11y::platform::macos::get_focused_pid_fresh()
+}
+
+#[cfg(target_os = "windows")]
+fn get_focused_pid_fresh() -> Option<i32> {
+    screenpipe_a11y::platform::windows::get_focused_pid_fresh()
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn get_focused_pid_fresh() -> Option<i32> {
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn app_name_for_pid(pid: i32) -> Option<String> {
+    use cidre::{ns, objc};
+
+    objc::ar_pool(|| {
+        ns::RunningApp::with_pid(pid)
+            .and_then(|app| app.localized_name())
+            .map(|name| name.to_string())
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn app_name_for_pid(pid: i32) -> Option<String> {
+    screenpipe_a11y::platform::windows::app_name_for_pid(pid)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn app_name_for_pid(_pid: i32) -> Option<String> {
+    None
+}
+
 fn normalize_metadata_value(value: Option<&str>) -> Option<String> {
     value
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
+}
+
+fn should_query_lightweight_focus(trigger: &CaptureTrigger) -> bool {
+    match trigger {
+        CaptureTrigger::AppSwitch { app_name, .. } => app_name.trim().is_empty(),
+        _ => true,
+    }
+}
+
+fn drm_trigger_app_name(trigger: &CaptureTrigger) -> Option<&str> {
+    match trigger {
+        CaptureTrigger::AppSwitch { app_name, .. } => {
+            Some(app_name.trim()).filter(|name| !name.is_empty())
+        }
+        _ => None,
+    }
+}
+
+fn capture_gate_app_name(
+    trigger: &CaptureTrigger,
+    lightweight_metadata: Option<&LightweightFocusedMetadata>,
+) -> Option<String> {
+    match trigger {
+        CaptureTrigger::AppSwitch { app_name, .. } => {
+            normalize_metadata_value(Some(app_name.as_str()))
+        }
+        _ => None,
+    }
+    .or_else(|| {
+        lightweight_metadata
+            .and_then(|metadata| normalize_metadata_value(metadata.app_name.as_deref()))
+    })
 }
 
 fn resolve_capture_metadata(
@@ -2383,32 +2487,42 @@ fn resolve_capture_metadata_with_policy(
         CaptureTrigger::AppSwitch {
             app_name: trigger_app_name,
             ..
-        } if !trigger_app_name.is_empty() => {
-            if app_name.as_deref() != Some(trigger_app_name.as_str()) {
-                debug!(
-                    "focused app mismatch on app_switch: trigger='{}', tree={:?}; using trigger value and dropping stale window context",
-                    trigger_app_name, app_name
-                );
-                // App-switch events typically do not carry the new window
-                // title. Keeping the previous tree's title, URL, or document
-                // path would create a metadata pair that never existed.
-                window_name = None;
-                browser_url = None;
-                document_path = None;
+        } => {
+            if let Some(name) = normalize_metadata_value(Some(trigger_app_name.as_str())) {
+                if app_name.as_deref() != Some(name.as_str()) {
+                    debug!(
+                        "focused app mismatch on app_switch: trigger='{}', tree={:?}; using trigger value and dropping stale window context",
+                        trigger_app_name, app_name
+                    );
+                    // App-switch events typically do not carry the new window
+                    // title. Keeping the previous tree's title, URL, or document
+                    // path would create a metadata pair that never existed.
+                    window_name = None;
+                    browser_url = None;
+                    document_path = None;
+                }
+                app_name = Some(name);
             }
-            app_name = Some(trigger_app_name.clone());
         }
         CaptureTrigger::WindowFocus {
             window_name: trigger_window_name,
             ..
-        } if !trigger_window_name.is_empty() => {
-            if window_name.as_deref() != Some(trigger_window_name.as_str()) {
-                debug!(
-                    "focused window mismatch on window_focus: trigger='{}', tree={:?}; using trigger value",
-                    trigger_window_name, window_name
-                );
+        } => {
+            if let Some(name) = normalize_metadata_value(Some(trigger_window_name.as_str())) {
+                if window_name.as_deref() != Some(name.as_str()) {
+                    debug!(
+                        "focused window mismatch on window_focus: trigger='{}', tree={:?}; using trigger value and dropping stale URL context",
+                        trigger_window_name, window_name
+                    );
+                    // The trigger can outrun an AX walk during a browser tab or
+                    // window switch. Never attach the previous surface's URL or
+                    // document to the newly focused title; an active URL
+                    // allowlist will fail this capture closed.
+                    browser_url = None;
+                    document_path = None;
+                }
+                window_name = Some(name);
             }
-            window_name = Some(trigger_window_name.clone());
         }
         _ => {}
     }
@@ -2777,7 +2891,11 @@ async fn do_capture(
     let storage_exclusions = if screenshot_disabled {
         Some(Vec::new())
     } else {
-        storage_excluded_sck_window_ids(&params.window_filters).await
+        storage_excluded_sck_window_ids(
+            &params.window_filters,
+            exclusion_sources(params.tree_walker_config),
+        )
+        .await
     };
     let skip_pixels_for_unknown_exclusions = storage_exclusions.is_none();
     if skip_pixels_for_unknown_exclusions {
@@ -2813,6 +2931,13 @@ async fn do_capture(
             capture_dur, params.monitor_id
         );
         image
+    };
+    // This scalar is the screenshot's app identity. Read it immediately after
+    // ScreenCaptureKit returns so no process object travels with the pixels.
+    let screenshot_focus_pid = if monitor_hosts_focus && !screenshot_disabled {
+        get_focused_pid_fresh()
+    } else {
+        None
     };
 
     // Skip frames that are unusable for indexing.  Two cases:
@@ -2859,9 +2984,8 @@ async fn do_capture(
     // we do a lightweight platform query. This ensures the walk budget applies
     // to ALL captures, not just app switches.
     let lightweight_focused_metadata = if monitor_hosts_focus {
-        match trigger {
-            CaptureTrigger::AppSwitch { .. } => None,
-            _ => match tokio::time::timeout(
+        if should_query_lightweight_focus(trigger) {
+            match tokio::time::timeout(
                 Duration::from_secs(1),
                 tokio::task::spawn_blocking(get_focused_metadata_lightweight),
             )
@@ -2876,18 +3000,15 @@ async fn do_capture(
                     debug!("focused metadata lookup timed out");
                     None
                 }
-            },
+            }
+        } else {
+            None
         }
     } else {
         None
     };
     let trigger_app = if monitor_hosts_focus {
-        match trigger {
-            CaptureTrigger::AppSwitch { app_name, .. } => Some(app_name.clone()),
-            _ => lightweight_focused_metadata
-                .as_ref()
-                .and_then(|metadata| metadata.app_name.clone()),
-        }
+        capture_gate_app_name(trigger, lightweight_focused_metadata.as_ref())
     } else {
         None
     };
@@ -2954,12 +3075,32 @@ async fn do_capture(
     // that window's tree, identity, and dedup hash. Non-focused monitors use
     // the screenshot/OCR path below instead.
     let tree_walk_result = if monitor_hosts_focus {
-        Some(
-            params
-                .tree_walker
-                .walk_with_timeout(config, TREE_WALK_WORKER_TIMEOUT)
-                .await?,
-        )
+        let worker_timeout = tree_walk_worker_timeout(&config);
+        match params
+            .tree_walker
+            .walk_with_timeout(config, worker_timeout)
+            .await?
+        {
+            TreeWalkerWorkerOutcome::Completed(result) => Some(result),
+            TreeWalkerWorkerOutcome::TimedOut { restarted } => {
+                if let Some(app) = trigger_app.as_deref() {
+                    walk_budget.record_worker_timeout(app);
+                }
+                crate::ui_recorder::record_tree_walk(
+                    crate::ui_recorder::TreeWalkOutcome::WorkerTimeout { restarted },
+                );
+                None
+            }
+            TreeWalkerWorkerOutcome::Saturated => {
+                if let Some(app) = trigger_app.as_deref() {
+                    walk_budget.record_worker_timeout(app);
+                }
+                crate::ui_recorder::record_tree_walk(
+                    crate::ui_recorder::TreeWalkOutcome::WorkerSaturated,
+                );
+                None
+            }
+        }
     } else {
         None
     };
@@ -3040,7 +3181,7 @@ async fn do_capture(
         Some(TreeWalkResult::Skipped(_)) | None => {}
     }
 
-    let tree_snapshot = match tree_walk_result {
+    let mut tree_snapshot = match tree_walk_result {
         Some(TreeWalkResult::Found(snap)) => Some(snap),
         Some(TreeWalkResult::Skipped(reason)) => {
             debug!(
@@ -3056,6 +3197,25 @@ async fn do_capture(
         }
         Some(TreeWalkResult::NotFound) | None => None,
     };
+    let ax_focus_pid = if tree_snapshot.is_some() && !screenshot_disabled {
+        get_focused_pid_fresh()
+    } else {
+        None
+    };
+    let ax_screenshot_coherent = match (screenshot_focus_pid, ax_focus_pid) {
+        (Some(screenshot_pid), Some(ax_pid)) => screenshot_pid == ax_pid,
+        _ => true,
+    };
+    if tree_snapshot.is_some() && !ax_screenshot_coherent {
+        debug!(
+            screenshot_pid = screenshot_focus_pid,
+            ax_pid = ax_focus_pid,
+            "focused process changed across screenshot/AX capture; preserving AX as non-pixel-aligned"
+        );
+        if let Some(snapshot) = tree_snapshot.as_mut() {
+            detach_tree_from_pixels(snapshot);
+        }
+    }
 
     // Safety net: when the tree walk returned NotFound (AX failure, budget skip,
     // etc.) the Skipped(UserIgnored) path didn't fire.  If the focused app still
@@ -3088,7 +3248,7 @@ async fn do_capture(
     // Never dedup Idle/Manual triggers, bypass entirely during HD sessions, and
     // force a write every 30s even if the hash matches — see `dedup_applies`.
     let dedup_eligible = dedup_applies(trigger, hd_active, in_meeting, last_db_write.elapsed());
-    if dedup_eligible {
+    if dedup_eligible && ax_screenshot_coherent {
         if let Some(ref snap) = tree_snapshot {
             if !snap.text_content.is_empty() {
                 let new_hash = snap.content_hash as i64;
@@ -3115,11 +3275,20 @@ async fn do_capture(
     // Use tree metadata by default, but for focus-change triggers prefer the
     // event payload when the tree lags or reports the wrong frontmost target.
     let (app_name_owned, window_name_owned, browser_url_owned, document_path_owned) =
-        resolve_capture_metadata(
-            tree_snapshot.as_ref(),
-            trigger,
-            lightweight_focused_metadata.as_ref(),
-        );
+        if ax_screenshot_coherent {
+            resolve_capture_metadata(
+                tree_snapshot.as_ref(),
+                trigger,
+                lightweight_focused_metadata.as_ref(),
+            )
+        } else {
+            (
+                screenshot_focus_pid.and_then(app_name_for_pid),
+                None,
+                None,
+                None,
+            )
+        };
 
     // Skip lock screen / screensaver — these waste disk and pollute timeline.
     // Also update the global SCREEN_IS_LOCKED flag so subsequent loop iterations
@@ -3190,6 +3359,27 @@ async fn do_capture(
         });
     }
 
+    // Final URL gate after metadata resolution. This protects the OCR fallback
+    // and every other path that can continue after a missing tree. A non-empty
+    // allowlist requires a fresh, coherent, matching HTTP(S) browser URL;
+    // native apps, internal pages, tab-race mismatches, and missing URLs fail
+    // closed before pixels, OCR, accessibility, or semantic data are stored.
+    if !params
+        .window_filters
+        .should_capture_url(browser_url_owned.as_deref())
+    {
+        debug!(
+            "skipping capture: resolved browser URL did not pass policy on monitor {}",
+            params.monitor_id
+        );
+        return Ok(CaptureOutput {
+            result: None,
+            image,
+            elements_deduped: false,
+            corrupt: None,
+        });
+    }
+
     // DRM content detection: check if the focused app/URL is a streaming service.
     // When detected, set the global pause flag so ALL monitors stop capture
     // and the monitor watcher releases all SCK handles.
@@ -3220,6 +3410,7 @@ async fn do_capture(
         let (frame_w, frame_h) = image.dimensions();
         tree_snapshot
             .as_ref()
+            .filter(|_| ax_screenshot_coherent)
             .filter(|snap| {
                 app_name_owned
                     .as_deref()
@@ -3234,6 +3425,28 @@ async fn do_capture(
                     height: (b.height * frame_h as f64).round().max(0.0) as u32,
                 },
             )
+    };
+
+    // URL allowlisting is browser-window capture, not permission to persist
+    // every other visible app on the monitor. Black out pixels outside the
+    // positively identified focused browser window. If the platform cannot
+    // provide trustworthy bounds, keep the allowed accessibility snapshot but
+    // suppress pixels and OCR for this frame rather than widening capture.
+    let mut allowlist_pixels_unverified = false;
+    let image = if params.window_filters.has_url_allowlist()
+        && !screenshot_disabled
+        && !skip_pixels_for_unknown_exclusions
+    {
+        match focused_window_bounds.and_then(|bounds| mask_image_to_focused_window(&image, bounds))
+        {
+            Some(masked) => masked,
+            None => {
+                allowlist_pixels_unverified = true;
+                image::DynamicImage::new_rgba8(1, 1)
+            }
+        }
+    } else {
+        image
     };
 
     let ctx = CaptureContext {
@@ -3255,22 +3468,35 @@ async fn do_capture(
         // A frame whose pixels were skipped for unknown exclusion state is
         // persisted exactly like a screenshot-disabled frame: text pipeline
         // only, no snapshot written for the 1x1 placeholder.
-        screenshot_disabled: screenshot_disabled || skip_pixels_for_unknown_exclusions,
+        screenshot_disabled: screenshot_disabled
+            || skip_pixels_for_unknown_exclusions
+            || allowlist_pixels_unverified,
         in_meeting,
         monitor_hosts_focus,
+        ax_screenshot_coherent,
         focused_window_bounds,
     };
 
     let result = paired_capture(&ctx, tree_snapshot.as_ref(), Some(ocr_gate)).await?;
-    if let (Some(sender), Some(snapshot)) = (params.semantic_tx, tree_snapshot) {
-        sender.submit(SemanticProjectionJob::from_capture(
-            result.frame_id,
-            result.captured_at,
-            result.app_name.clone(),
-            result.browser_url.clone(),
-            snapshot,
-            params.use_pii_removal,
-        ));
+    if let Some(sender) = params.semantic_tx {
+        match tree_snapshot {
+            Some(snapshot) if ax_screenshot_coherent => {
+                let _ = sender.submit(SemanticProjectionJob::from_capture(
+                    result.frame_id,
+                    result.captured_at,
+                    result.app_name.clone(),
+                    result.browser_url.clone(),
+                    snapshot,
+                    params.use_pii_removal,
+                ));
+            }
+            Some(_) => {
+                sender.record_capture_gap(result.frame_id, SemanticCaptureGap::FocusIncoherent);
+            }
+            None => {
+                sender.record_capture_gap(result.frame_id, SemanticCaptureGap::TreeMissing);
+            }
+        }
     }
     let deduped = elements_ref_frame_id.is_some();
     // Extract image from Arc for comparer reuse. Arc::try_unwrap succeeds
@@ -3618,6 +3844,48 @@ fn is_frame_corrupt(image: &image::DynamicImage) -> bool {
 mod tests {
     use super::*;
 
+    #[test]
+    fn url_allowlist_masks_everything_outside_focused_window() {
+        use image::{GenericImageView, Pixel};
+
+        let source = image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            4,
+            3,
+            image::Rgba([10, 20, 30, 255]),
+        ));
+        let masked = mask_image_to_focused_window(
+            &source,
+            screenpipe_capture::paired_capture::FocusedWindowBounds {
+                x: 1,
+                y: 1,
+                width: 2,
+                height: 1,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(masked.dimensions(), (4, 3));
+        assert_eq!(masked.get_pixel(0, 0).to_rgba().0, [0, 0, 0, 255]);
+        assert_eq!(masked.get_pixel(1, 1).to_rgba().0, [10, 20, 30, 255]);
+        assert_eq!(masked.get_pixel(2, 1).to_rgba().0, [10, 20, 30, 255]);
+        assert_eq!(masked.get_pixel(3, 1).to_rgba().0, [0, 0, 0, 255]);
+    }
+
+    #[test]
+    fn url_allowlist_rejects_invalid_focused_window_bounds() {
+        let source = image::DynamicImage::new_rgba8(4, 3);
+        assert!(mask_image_to_focused_window(
+            &source,
+            screenpipe_capture::paired_capture::FocusedWindowBounds {
+                x: 9,
+                y: 9,
+                width: 1,
+                height: 1,
+            },
+        )
+        .is_none());
+    }
+
     fn ocr_metrics_result(
         ocr_cache_hit: bool,
         ocr_duration_ms: Option<u64>,
@@ -3796,6 +4064,78 @@ mod tests {
     }
 
     #[test]
+    fn blank_app_switch_queries_lightweight_focus() {
+        for app_name in ["", "   ", "\t", "\n"] {
+            let trigger = CaptureTrigger::AppSwitch {
+                app_name: app_name.into(),
+                target: None,
+            };
+
+            assert!(
+                should_query_lightweight_focus(&trigger),
+                "blank app switch {app_name:?} must recover focused metadata"
+            );
+        }
+    }
+
+    #[test]
+    fn named_app_switch_keeps_fast_paths() {
+        let trigger = CaptureTrigger::AppSwitch {
+            app_name: " Finder ".into(),
+            target: None,
+        };
+
+        assert!(!should_query_lightweight_focus(&trigger));
+        assert_eq!(drm_trigger_app_name(&trigger), Some("Finder"));
+        assert_eq!(
+            capture_gate_app_name(&trigger, None).as_deref(),
+            Some("Finder")
+        );
+    }
+
+    #[test]
+    fn blank_app_switch_uses_recovered_app_for_pre_walk_gates() {
+        let metadata = LightweightFocusedMetadata {
+            app_name: Some(" Telegram ".into()),
+            window_name: Some("Lucern Clinic".into()),
+        };
+
+        for app_name in ["", "   ", "\t", "\n"] {
+            let trigger = CaptureTrigger::AppSwitch {
+                app_name: app_name.into(),
+                target: None,
+            };
+
+            let gate_app = capture_gate_app_name(&trigger, Some(&metadata));
+            let (recorded_app, _, _, _) = resolve_capture_metadata(None, &trigger, Some(&metadata));
+
+            assert_eq!(gate_app.as_deref(), Some("Telegram"));
+            assert_eq!(gate_app, recorded_app);
+            assert_eq!(drm_trigger_app_name(&trigger), None);
+        }
+    }
+
+    #[test]
+    fn blank_app_switch_uses_recovered_metadata_without_tree() {
+        let metadata = LightweightFocusedMetadata {
+            app_name: Some("Telegram".into()),
+            window_name: Some("Lucern Clinic".into()),
+        };
+
+        for trigger_app in ["", "   ", "\t", "\n"] {
+            let trigger = CaptureTrigger::AppSwitch {
+                app_name: trigger_app.into(),
+                target: None,
+            };
+            let (app_name, window_name, _, _) =
+                resolve_capture_metadata(None, &trigger, Some(&metadata));
+
+            assert_eq!(app_name.as_deref(), Some("Telegram"));
+            assert_eq!(window_name.as_deref(), Some("Lucern Clinic"));
+        }
+    }
+
+    #[test]
     fn resolve_capture_metadata_uses_lightweight_metadata_when_tree_values_are_blank() {
         let snapshot = screenpipe_a11y::tree::TreeSnapshot {
             app_name: "  ".into(),
@@ -3957,6 +4297,75 @@ mod tests {
 
         assert_eq!(app_name.as_deref(), Some("Telegram"));
         assert_eq!(window_name.as_deref(), Some("Fresh Title"));
+    }
+
+    #[test]
+    fn resolve_capture_metadata_normalizes_window_focus_trigger_title() {
+        let metadata = LightweightFocusedMetadata {
+            app_name: Some("Telegram".into()),
+            window_name: Some("Recovered Title".into()),
+        };
+
+        for trigger_window in ["", "   ", "\t", "\n"] {
+            let (_, window_name, _, _) = resolve_capture_metadata(
+                None,
+                &CaptureTrigger::WindowFocus {
+                    window_name: trigger_window.into(),
+                    target: None,
+                },
+                Some(&metadata),
+            );
+
+            assert_eq!(window_name.as_deref(), Some("Recovered Title"));
+        }
+
+        let (_, window_name, _, _) = resolve_capture_metadata(
+            None,
+            &CaptureTrigger::WindowFocus {
+                window_name: " Fresh Title ".into(),
+                target: None,
+            },
+            Some(&metadata),
+        );
+        assert_eq!(window_name.as_deref(), Some("Fresh Title"));
+    }
+
+    #[test]
+    fn url_allowlist_drops_stale_url_on_window_focus_race() {
+        let snapshot = screenpipe_a11y::tree::TreeSnapshot {
+            app_name: "Google Chrome".into(),
+            app_id: None,
+            executable: None,
+            app_version: None,
+            window_name: "Old tab".into(),
+            text_content: "old tab text".into(),
+            nodes: Vec::new(),
+            semantic_nodes: Vec::new(),
+            browser_url: Some("https://allowed.example/old".into()),
+            document_path: Some("/old".into()),
+            timestamp: Utc::now(),
+            node_count: 0,
+            walk_duration: Duration::from_millis(1),
+            content_hash: 0,
+            simhash: 0,
+            truncated: false,
+            truncation_reason: screenpipe_a11y::tree::TruncationReason::None,
+            max_depth_reached: 0,
+            window_bounds: None,
+        };
+
+        let (_, window_name, browser_url, document_path) = resolve_capture_metadata(
+            Some(&snapshot),
+            &CaptureTrigger::WindowFocus {
+                window_name: "New tab".into(),
+                target: None,
+            },
+            None,
+        );
+
+        assert_eq!(window_name.as_deref(), Some("New tab"));
+        assert_eq!(browser_url, None);
+        assert_eq!(document_path, None);
     }
 
     #[test]
