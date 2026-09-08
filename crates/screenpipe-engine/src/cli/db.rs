@@ -2331,10 +2331,21 @@ mod recovery_tests {
         let writer = Connection::open(&seed).unwrap();
         writer
             .execute_batch(
-                "PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; \
+                "PRAGMA page_size=4096; PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; \
              CREATE TABLE records (id INTEGER PRIMARY KEY, value TEXT); \
+             CREATE TABLE indexed_records (id INTEGER PRIMARY KEY, value TEXT); \
+             CREATE INDEX damaged_index ON indexed_records(value); \
+             WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<200) \
+             INSERT INTO indexed_records SELECT x, printf('value-%04d',x) FROM n; \
              PRAGMA wal_checkpoint(TRUNCATE); \
              INSERT INTO records VALUES (1, 'only-in-wal');",
+            )
+            .unwrap();
+        let index_root: i64 = writer
+            .query_row(
+                "SELECT rootpage FROM sqlite_schema WHERE name='damaged_index'",
+                [],
+                |row| row.get(0),
             )
             .unwrap();
         let data_dir = dir.path().join("data");
@@ -2342,13 +2353,29 @@ mod recovery_tests {
         let live = data_dir.join("db.sqlite");
         let mut originals = Vec::new();
         for suffix in ["", "-wal", "-shm"] {
-            let bytes = fs::read(dir.path().join(format!("seed.sqlite{suffix}"))).unwrap();
+            let mut bytes = fs::read(dir.path().join(format!("seed.sqlite{suffix}"))).unwrap();
+            if suffix.is_empty() {
+                let start = ((index_root - 1) * 4096 + 100) as usize;
+                bytes[start..start + 512].fill(0xff);
+            }
             fs::write(data_dir.join(format!("db.sqlite{suffix}")), &bytes).unwrap();
-            originals.push((suffix, bytes));
         }
         drop(writer);
         let identity = screenpipe_db::sqlite_file_identity(&live).unwrap();
-        screenpipe_db::persist_sqlite_quarantine(&live, Some(11), "WAL recovery test").unwrap();
+        // A legacy error code alone must not rebuild a healthy database. Prove
+        // real index damage while the WAL-only recording row remains intact.
+        let token = screenpipe_db::begin_sqlite_verification(&live).unwrap();
+        let damage = match screenpipe_db::inspect_database_health(&live).await {
+            Err(screenpipe_db::DatabaseHealthError::Corrupt(detail)) => detail,
+            result => panic!("expected verified index damage, got {result:?}"),
+        };
+        screenpipe_db::quarantine_verified_sqlite_generation(token, Some(11), damage).unwrap();
+        for suffix in ["", "-wal", "-shm"] {
+            originals.push((
+                suffix,
+                fs::read(data_dir.join(format!("db.sqlite{suffix}"))).unwrap(),
+            ));
+        }
         recover_offline(&data_dir)
             .await
             .expect("recover and install WAL generation");
