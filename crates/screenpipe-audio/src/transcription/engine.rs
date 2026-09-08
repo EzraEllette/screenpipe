@@ -473,11 +473,8 @@ impl TranscriptionEngine {
 
                 info!("whisper model available: {:?}", quantized_path);
 
-                let Some(context) = load_whisper_context_with_cpu_fallback(
-                    quantized_path,
-                    config.clone(),
-                )
-                .await?
+                let Some(context) =
+                    load_whisper_context_with_cpu_fallback(quantized_path, config.clone()).await?
                 else {
                     return Ok(Self::Disabled);
                 };
