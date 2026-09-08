@@ -1042,6 +1042,7 @@ mod from_wav_tests {
     use super::*;
     use std::time::Duration;
 
+    #[cfg(not(all(target_os = "linux", feature = "pulseaudio")))]
     #[test]
     fn detects_windows_mic_access_denied_without_hiding_other_failures() {
         assert!(is_mic_access_denied(&anyhow!(
@@ -1050,6 +1051,7 @@ mod from_wav_tests {
         assert!(!is_mic_access_denied(&anyhow!("device not found")));
     }
 
+    #[cfg(not(all(target_os = "linux", feature = "pulseaudio")))]
     #[test]
     fn access_denied_remedy_is_emitted_once_per_device() {
         let device = "unit-test-mic-access-denied";
