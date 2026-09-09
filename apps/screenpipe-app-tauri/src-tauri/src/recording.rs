@@ -344,6 +344,7 @@ pub struct RecordingState {
     /// recording" that keeps the server up. `last_spawn_epoch` can't carry this
     /// — it's reset to 0 on a failed spawn too, and never sees the tray toggle.
     pub wants_recording: Arc<AtomicBool>,
+    pub(crate) deferred_account_start: crate::startup_auth::DeferredAccountStart,
     /// Recently active meeting to revive when capture is immediately restarted.
     pub(crate) interrupted_meeting: Arc<Mutex<Option<InterruptedMeeting>>>,
     /// App-scoped cloud-auth token (Clerk JWT). Outlives the Server (which
@@ -382,6 +383,9 @@ impl RecordingState {
     /// `stop_screenpipe` clear it. (Capture has two on-paths and two off-paths;
     /// missing any one is how a tray-stopped capture got resurrected.)
     pub fn set_capture_intent(&self, on: bool) {
+        // An explicit start owns the lifecycle now; an explicit stop must not
+        // be undone by a later background account refresh.
+        self.deferred_account_start.cancel();
         self.wants_recording.store(on, Ordering::SeqCst);
     }
 
@@ -981,6 +985,39 @@ pub async fn spawn_screenpipe(
         return Ok(());
     };
     spawn_screenpipe_inner(&state, app).await
+}
+
+/// Account verification can complete on either side of the native startup
+/// check, without the frontend ever rendering an access gate. Reconcile both
+/// events against current settings and the same native access policy.
+pub(crate) fn resume_deferred_account_start(app: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let state = app.state::<RecordingState>();
+        // Wait before claiming the deferred start so a busy lifecycle cannot
+        // discard recovery. An explicit start/stop or sign-out cancels it.
+        let _lifecycle_guard = state.server_lifecycle.lock().await;
+        if crate::process_exit::QUIT_REQUESTED.load(Ordering::SeqCst) {
+            return;
+        }
+        let Some(settings) = SettingsStore::get(&app).ok().flatten() else {
+            return;
+        };
+        let access_allowed = state.cloud_token.load().as_ref().is_some()
+            && server_access_allowed(&app, &settings);
+        let capture_allowed = recording_access_allowed(&app, &settings);
+        if !state
+            .deferred_account_start
+            .take_if_allowed(access_allowed, || {
+                state.wants_recording.store(capture_allowed, Ordering::SeqCst);
+            })
+        {
+            return;
+        }
+        info!("Account access verified; resuming deferred server auto-start");
+        if let Err(error) = spawn_screenpipe_inner(&state, app.clone()).await {
+            error!("Failed to resume server after account verification: {}", error);
+        }
+    });
 }
 
 /// Automatic retry preserves capture intent; unlike the user command it must
@@ -1726,7 +1763,103 @@ mod local_api_auth_tests {
 #[cfg(test)]
 mod recording_access_tests {
     use super::{recording_access_policy, server_access_policy};
-    use crate::startup_auth::AuthenticationStatus;
+    use crate::startup_auth::{AuthenticationStatus, DeferredAccountStart};
+    use crate::store::{LocalPlanPolicy, SettingsStore};
+
+    #[test]
+    fn account_refresh_recovers_deferred_start_without_a_frontend_gate() {
+        let pending = DeferredAccountStart::default();
+        let mut settings = SettingsStore::default();
+        settings.user.id = Some("subscribed-user".into());
+        settings.user.subscription_plan = Some("pro".into());
+        settings.user.app_entitled = Some(true);
+        let access = |settings: &SettingsStore| {
+            server_access_policy(
+                false,
+                false,
+                settings.local_plan_policy() != LocalPlanPolicy::Unknown,
+                false,
+                false,
+            )
+        };
+
+        // Boot has a signed-in paid account but no verified cached evidence.
+        assert!(!access(&settings));
+        pending.defer();
+        assert!(!pending.take_if_allowed(access(&settings), || {}));
+
+        // /api/user refresh supplies verified evidence before any UI gate
+        // mounts. Recovery must not require a frontend stop or gate transition.
+        settings.user.entitlement = Some(serde_json::json!({
+            "plan": "pro",
+            "active": true,
+            "source": "subscription",
+            "checked_at": chrono::Utc::now().to_rfc3339(),
+            "features": { "app": true }
+        }));
+        assert!(access(&settings));
+        assert!(pending.take_if_allowed(access(&settings), || {}));
+        assert!(!pending.take_if_allowed(access(&settings), || {}));
+    }
+
+    #[test]
+    fn account_refresh_does_not_start_an_unrequested_or_cancelled_engine() {
+        let pending = DeferredAccountStart::default();
+        assert!(!pending.take_if_allowed(true, || {}));
+        pending.defer();
+        pending.cancel(); // explicit capture stop or sign-out
+        assert!(!pending.take_if_allowed(true, || {}));
+    }
+
+    #[test]
+    fn account_refresh_before_native_deferral_is_reconciled_at_deferral() {
+        let pending = DeferredAccountStart::default();
+        // A refresh before the native gate has nothing to resume yet.
+        assert!(!pending.take_if_allowed(true, || {}));
+        pending.defer();
+        // Native deferral also checks current access, not its old snapshot.
+        assert!(pending.take_if_allowed(true, || {}));
+        assert!(!pending.take_if_allowed(true, || {}));
+    }
+
+    #[test]
+    fn concurrent_account_refreshes_claim_only_one_deferred_start() {
+        let pending = std::sync::Arc::new(DeferredAccountStart::default());
+        pending.defer();
+        let workers: Vec<_> = (0..8)
+            .map(|_| {
+                let pending = pending.clone();
+                std::thread::spawn(move || pending.take_if_allowed(true, || {}))
+            })
+            .collect();
+        let starts = workers
+            .into_iter()
+            .map(|worker| usize::from(worker.join().unwrap()))
+            .sum::<usize>();
+        assert_eq!(starts, 1);
+    }
+
+    #[test]
+    fn explicit_stop_wins_over_an_in_flight_account_resume() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let pending = DeferredAccountStart::default();
+        let wants_recording = AtomicBool::new(false);
+        pending.defer();
+        let (stop_requested, stop_request) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            pending.take_if_allowed(true, || {
+                scope.spawn(|| {
+                    stop_requested.send(()).unwrap();
+                    pending.cancel();
+                    wants_recording.store(false, Ordering::SeqCst);
+                });
+                stop_request.recv().unwrap();
+                wants_recording.store(true, Ordering::SeqCst);
+            });
+        });
+        assert!(!wants_recording.load(Ordering::SeqCst));
+        assert!(!pending.take_if_allowed(true, || panic!("stop was lost")));
+    }
 
     #[test]
     fn verified_free_consumer_can_record_without_a_paid_entitlement() {

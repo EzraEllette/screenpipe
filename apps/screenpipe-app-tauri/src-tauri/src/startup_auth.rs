@@ -4,10 +4,38 @@
 
 use serde::Serialize;
 use specta::Type;
+use std::sync::Mutex;
 use tauri::Manager;
 use tracing::info;
 
 use crate::store::SettingsStore;
+
+/// Native startup may wait for account data that a webview refreshes before
+/// rendering its gate. Remember that start independently of the gate's UI.
+#[derive(Default)]
+pub(crate) struct DeferredAccountStart(Mutex<bool>);
+
+impl DeferredAccountStart {
+    pub(crate) fn defer(&self) {
+        *self.0.lock().expect("deferred account start lock poisoned") = true;
+    }
+
+    pub(crate) fn cancel(&self) {
+        *self.0.lock().expect("deferred account start lock poisoned") = false;
+    }
+
+    pub(crate) fn take_if_allowed(&self, access_allowed: bool, start: impl FnOnce()) -> bool {
+        let mut pending = self.0.lock().expect("deferred account start lock poisoned");
+        if !access_allowed || !*pending {
+            return false;
+        }
+        *pending = false;
+        // Publish capture intent while cancellation is excluded. A concurrent
+        // explicit stop must clear intent after this, never be overwritten.
+        start();
+        true
+    }
+}
 
 /// Authentication is resolved exactly once before the application runtime is
 /// initialized. Keep this separate from entitlement: an authenticated account

@@ -945,6 +945,7 @@ async fn main() {
         is_starting_capture: Arc::new(AtomicBool::new(false)),
         last_spawn_epoch: Arc::new(AtomicU64::new(0)),
         wants_recording: Arc::new(AtomicBool::new(false)),
+        deferred_account_start: Default::default(),
         interrupted_meeting: Arc::new(tokio::sync::Mutex::new(None)),
         cloud_token: Arc::new(arc_swap::ArcSwap::new(Arc::new(initial_cloud_token))),
         history_access: screenpipe_engine::history_access::HistoryAccessPolicy::unrestricted(),
@@ -1866,9 +1867,15 @@ async fn main() {
                 let store_clone = store.clone();
                 let data_dir_clone = data_dir.clone();
                 if !crate::recording::server_access_allowed(&app_handle, &store_clone) {
+                    app_handle
+                        .state::<RecordingState>()
+                        .deferred_account_start
+                        .defer();
                     info!("Skipping server auto-start: screenpipe account access required");
                     crate::health::set_recording_status(crate::health::RecordingStatus::Paused);
                     let _ = app_handle.emit("app-entitlement-required", ());
+                    // A webview may already have refreshed the startup snapshot.
+                    crate::recording::resume_deferred_account_start(app_handle.clone());
                     break 'start_server;
                 }
                 let recording_state = app_handle.state::<RecordingState>();
