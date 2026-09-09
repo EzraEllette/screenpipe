@@ -1164,6 +1164,7 @@ pub async fn set_cloud_token(
     // fallible secret-store write so the on-disk copies never outlive the
     // session even if persistence below fails.
     if should_clear_pi_auth {
+        state.deferred_account_start.cancel();
         if let Err(e) = crate::pi::clear_screenpipe_auth_token_files() {
             warn!("failed to clear pi screenpipe auth token: {}", e);
         }
@@ -1205,10 +1206,16 @@ pub async fn set_cloud_token(
     // Err so the frontend won't strip the last plaintext copy of a token it
     // couldn't durably save (the caller ignores the Result for session purposes;
     // only the save-and-strip path checks it).
-    crate::auth_token::store_cloud_token(normalized.as_deref())
+    let persistence_result = crate::auth_token::store_cloud_token(normalized.as_deref())
         .await
-        .map_err(|e| format!("failed to persist cloud token to secret store: {e}"))?;
-    Ok(())
+        .map_err(|e| format!("failed to persist cloud token to secret store: {e}"));
+    if !should_clear_pi_auth {
+        // `loadUser` calls this after saving verified account data. Both
+        // in-process token caches are now updated, even if persistence failed.
+        // Resume native startup without relying on a frontend gate transition.
+        crate::recording::resume_deferred_account_start(app.clone());
+    }
+    persistence_result
 }
 
 /// Persist the user's enterprise admin status, team API token, and the org's

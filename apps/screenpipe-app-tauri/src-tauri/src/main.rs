@@ -945,6 +945,7 @@ async fn main() {
         is_starting_capture: Arc::new(AtomicBool::new(false)),
         last_spawn_epoch: Arc::new(AtomicU64::new(0)),
         wants_recording: Arc::new(AtomicBool::new(false)),
+        deferred_account_start: Default::default(),
         interrupted_meeting: Arc::new(tokio::sync::Mutex::new(None)),
         cloud_token: Arc::new(arc_swap::ArcSwap::new(Arc::new(initial_cloud_token))),
         history_access: screenpipe_engine::history_access::HistoryAccessPolicy::unrestricted(),
@@ -1417,7 +1418,6 @@ async fn main() {
             // an empty plugin handle and save defaults over the ciphertext.
             // Note: StoreBuilder handles file creation internally — pre-creating
             // store.bin here caused TOCTOU race conditions ("File exists" os error 17).
-            #[allow(unused_mut)] // E2E seeds mutate the store in feature builds.
             let mut store = store::init_store(&app.handle()).map_err(|e| {
                 error!("Failed to init settings store; aborting startup: {}", e);
                 // A log line is invisible to the user: without this the app just
@@ -1433,15 +1433,14 @@ async fn main() {
             #[cfg(feature = "e2e")]
             e2e::seeds::apply_settings(app.handle(), &mut store);
 
-            app.manage(store.clone());
-
             // Resolve authentication at the first point its settings
             // prerequisite is available, before beginning any application
             // runtime. Consumer and Enterprise builds deliberately share these
             // two sequential steps; only the credential check inside the
             // resolver varies by build. `SCREENPIPE_SKIP_ONBOARDING` returns
             // `NotRequired` without invoking either checker.
-            startup_auth::bootstrap(&app_handle, &store);
+            startup_auth::bootstrap(&app_handle, &mut store);
+            app.manage(store.clone());
 
             crate::recording::refresh_history_access_policy(
                 &app.state::<RecordingState>().history_access,
@@ -1866,9 +1865,15 @@ async fn main() {
                 let store_clone = store.clone();
                 let data_dir_clone = data_dir.clone();
                 if !crate::recording::server_access_allowed(&app_handle, &store_clone) {
+                    app_handle
+                        .state::<RecordingState>()
+                        .deferred_account_start
+                        .defer();
                     info!("Skipping server auto-start: screenpipe account access required");
                     crate::health::set_recording_status(crate::health::RecordingStatus::Paused);
                     let _ = app_handle.emit("app-entitlement-required", ());
+                    // A webview may already have refreshed the startup snapshot.
+                    crate::recording::resume_deferred_account_start(app_handle.clone());
                     break 'start_server;
                 }
                 let recording_state = app_handle.state::<RecordingState>();

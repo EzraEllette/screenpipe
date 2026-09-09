@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "suite": "screenpipe-app-coding-agent-regressions",
-  "dataset_version": "2026-09-08.1",
+  "dataset_version": "2026-09-09.1",
   "suite_type": "regression",
   "owner": "screenpipe engineering",
   "policy": {
@@ -1144,6 +1144,52 @@
           }
         ],
         "command": "cd apps/screenpipe-app-tauri && NODE_OPTIONS=--localstorage-file=.eval-localstorage bun x vitest run --config vitest.config.ts components/settings/referral-card.test.tsx lib/auth-guard.test.tsx"
+      }
+    },
+    {
+      "id": "ai-gateway-input-limit-classification",
+      "name": "Recognize current provider input and tool-call limits",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "739090783bb1116dca26621522e8034134e65028",
+        "pull_request": "https://github.com/screenpipe/screenpipe/pull/6945"
+      },
+      "base_ref": "655dfc3ad50fedfa9ba9561ebdf3a1467bc55517",
+      "oracle_ref": "739090783bb1116dca26621522e8034134e65028",
+      "oracle_paths": [
+        "packages/ai-gateway/src/handlers/chat.ts"
+      ],
+      "gate": "advisory",
+      "trigger_paths": [
+        "packages/ai-gateway/src/handlers/chat.ts",
+        "packages/ai-gateway/src/test/chat-fallback.unit.test.ts"
+      ],
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "ai-gateway",
+        "input-limit",
+        "tool-call",
+        "error-classification",
+        "false-positive"
+      ],
+      "prompt": "The gateway fails to recognize provider errors saying input tokens exceed the configured limit or a request exceeds the available context size. It also misses an excess-length tool-call array, leaving the caller without useful payload guidance. Recognize these input-size and tool-call-limit failures on their supported client-error statuses, and provide actionable tool-call guidance without leaking the raw nested error. Preserve older input-limit phrasings, image and empty-message guidance, transient status handling, terminal safety outcomes, and bounded ordered fallback attempts. Do not classify unrelated schemas, non-tool arrays, thin messages, authentication errors, or server failures as these client payload problems.",
+      "agent_timeout_seconds": 900,
+      "grader_dependency_links": [
+        {
+          "source_path": "packages/ai-gateway/node_modules",
+          "destination_path": "packages/ai-gateway/node_modules"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 300,
+        "fixtures": [
+          {
+            "local_path": "graders/ai-gateway-input-limits.test.ts",
+            "destination_path": "packages/ai-gateway/src/test/eval-input-limits.test.ts"
+          }
+        ],
+        "command": "cd packages/ai-gateway && bun test src/test/eval-input-limits.test.ts --timeout=10000"
       }
     }
   ]
