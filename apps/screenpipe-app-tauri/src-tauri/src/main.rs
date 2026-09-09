@@ -1418,7 +1418,6 @@ async fn main() {
             // an empty plugin handle and save defaults over the ciphertext.
             // Note: StoreBuilder handles file creation internally — pre-creating
             // store.bin here caused TOCTOU race conditions ("File exists" os error 17).
-            #[allow(unused_mut)] // E2E seeds mutate the store in feature builds.
             let mut store = store::init_store(&app.handle()).map_err(|e| {
                 error!("Failed to init settings store; aborting startup: {}", e);
                 // A log line is invisible to the user: without this the app just
@@ -1434,15 +1433,14 @@ async fn main() {
             #[cfg(feature = "e2e")]
             e2e::seeds::apply_settings(app.handle(), &mut store);
 
-            app.manage(store.clone());
-
             // Resolve authentication at the first point its settings
             // prerequisite is available, before beginning any application
             // runtime. Consumer and Enterprise builds deliberately share these
             // two sequential steps; only the credential check inside the
             // resolver varies by build. `SCREENPIPE_SKIP_ONBOARDING` returns
             // `NotRequired` without invoking either checker.
-            startup_auth::bootstrap(&app_handle, &store);
+            startup_auth::bootstrap(&app_handle, &mut store);
+            app.manage(store.clone());
 
             crate::recording::refresh_history_access_policy(
                 &app.state::<RecordingState>().history_access,

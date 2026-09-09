@@ -2575,6 +2575,23 @@ impl SettingsStore {
         Ok(())
     }
 
+    /// Startup refresh replaces account evidence before any gate or webview
+    /// consumes it. Preserve other settings and response fields used by the UI.
+    pub(crate) fn replace_startup_user(
+        &mut self,
+        app: &AppHandle,
+        user: Value,
+    ) -> Result<(), String> {
+        self.user = serde_json::from_value(user.clone()).map_err(|e| e.to_string())?;
+        let store = get_store(app, None).map_err(|e| e.to_string())?;
+        let mut settings = store.get("settings").ok_or("settings unavailable")?;
+        settings["user"] = user;
+        store.set("settings", settings);
+        save_store_with_permission_repair(app, store.as_ref())?;
+        reencrypt_store_file(app);
+        Ok(())
+    }
+
     /// Update only identity, preserving the latest settings and rejecting a
     /// concurrent identity change. The server association and cursor must already
     /// be durable before the enterprise uploader calls this.
