@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "suite": "screenpipe-app-coding-agent-regressions",
-  "dataset_version": "2026-09-09.1",
+  "dataset_version": "2026-09-10.1",
   "suite_type": "regression",
   "owner": "screenpipe engineering",
   "policy": {
@@ -1190,6 +1190,54 @@
           }
         ],
         "command": "cd packages/ai-gateway && bun test src/test/eval-input-limits.test.ts --timeout=10000"
+      }
+    },
+    {
+      "id": "sqlite-operational-fault-not-corruption",
+      "name": "Keep SQLite operational faults distinct from corruption verdicts",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "968141d50e944a625230e3df60f243eb4be5f9d5",
+        "pull_request": "https://github.com/screenpipe/screenpipe/pull/6967"
+      },
+      "base_ref": "db8bd7ee23c02cbfc0eed2f4b9d99c70fd4cfc2d",
+      "oracle_ref": "968141d50e944a625230e3df60f243eb4be5f9d5",
+      "oracle_paths": [
+        "crates/screenpipe-sqlite-coordinator/src/lib.rs",
+        "crates/screenpipe-sqlite-coordinator/src/quarantine.rs",
+        "crates/screenpipe-sqlite-coordinator/src/verification.rs"
+      ],
+      "gate": "advisory",
+      "trigger_paths": [
+        "crates/screenpipe-sqlite-coordinator/src/**",
+        "crates/screenpipe-db/src/db/**"
+      ],
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "sqlite",
+        "data-integrity",
+        "availability",
+        "quarantine",
+        "false-positive"
+      ],
+      "prompt": "A single SQLite I/O failure or full-disk result currently creates corruption quarantine even when database damage has not been verified, unnecessarily routing a healthy database toward repair. Fix this boundary in the shared SQLite coordinator: retire the failed writer generation and retain a durable admission barrier, but do not declare corruption from an operational result alone. Preserve the original database bytes and physical identity. Pending faults must still block writes after process restart; repeated faults or recreating a writer gate must not reopen the failed generation. Preserve the first recorded fault, existing quarantine and malformed-metadata safety, ordinary contention and pool-pressure handling, and independent admission for unrelated databases. Keep the existing public fault-entry and coordination interfaces usable. This task covers incident classification and safe admission, not automatic repair or the complete recording-recovery lifecycle.",
+      "agent_timeout_seconds": 1800,
+      "grader_dependency_links": [
+        {
+          "source_path": "target",
+          "destination_path": "target"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 600,
+        "fixtures": [
+          {
+            "local_path": "graders/sqlite-operational-fault.rs",
+            "destination_path": "crates/screenpipe-sqlite-coordinator/tests/eval_operational_fault.rs"
+          }
+        ],
+        "command": "cargo test -p screenpipe-sqlite-coordinator --locked --test eval_operational_fault -- --test-threads=1"
       }
     }
   ]
