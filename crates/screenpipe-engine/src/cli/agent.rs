@@ -632,38 +632,70 @@ pub fn reconcile_detected_desktop_in(
     api_url: &str,
     opted_out: &BTreeSet<String>,
 ) -> DesktopAgentSetupReport {
-    let detected = detected_desktop_agents_in(home);
-    let mut report = DesktopAgentSetupReport {
-        detected: detected.len(),
-        ..DesktopAgentSetupReport::default()
-    };
+    DesktopAgentReconciler::default().reconcile(home, bun_path, api_key, api_url, opted_out)
+}
 
-    for agent in detected {
-        if opted_out.contains(agent.id) {
-            report.opted_out += 1;
-            continue;
-        }
-        let launch = desktop_launch_config(bun_path, api_key, api_url, agent);
-        let skills_are_ready = match agent.skills_target {
-            Some(target) => layout_in(target, home)
-                .map(|layout| desktop_skills_current(&layout))
-                .unwrap_or(false),
-            None => true,
+/// Remembers successful setup only for this app session. Each new instance
+/// checks the real configs again, so startup repairs missing/stale integrations.
+/// Later polls only stat known app paths and configure newly detected or failed
+/// targets; connected apps incur no config/skill reads or writes.
+#[derive(Default)]
+pub struct DesktopAgentReconciler {
+    connected: BTreeSet<&'static str>,
+}
+
+impl DesktopAgentReconciler {
+    pub fn reconcile(
+        &mut self,
+        home: &Path,
+        bun_path: &Path,
+        api_key: Option<&str>,
+        api_url: &str,
+        opted_out: &BTreeSet<String>,
+    ) -> DesktopAgentSetupReport {
+        let detected = detected_desktop_agents_in(home);
+        self.connected
+            .retain(|id| !opted_out.contains(*id) && detected.iter().any(|agent| agent.id == *id));
+        let mut report = DesktopAgentSetupReport {
+            detected: detected.len(),
+            ..DesktopAgentSetupReport::default()
         };
-        let mcp_is_ready = layout_in(agent.mcp_target, home)
-            .map(|layout| desktop_mcp_ready(&layout, &launch))
-            .unwrap_or(false);
-        if skills_are_ready && mcp_is_ready {
-            report.already_connected += 1;
-            continue;
-        }
-        match setup_desktop_agent_in(agent, home, &launch) {
-            Ok(()) => report.connected += 1,
-            Err(error) => report.failures.push(format!("{}: {error:#}", agent.name)),
-        }
-    }
 
-    report
+        for agent in detected {
+            if opted_out.contains(agent.id) {
+                report.opted_out += 1;
+                continue;
+            }
+            if self.connected.contains(agent.id) {
+                report.already_connected += 1;
+                continue;
+            }
+            let launch = desktop_launch_config(bun_path, api_key, api_url, agent);
+            let skills_are_ready = match agent.skills_target {
+                Some(target) => layout_in(target, home)
+                    .map(|layout| desktop_skills_current(&layout))
+                    .unwrap_or(false),
+                None => true,
+            };
+            let mcp_is_ready = layout_in(agent.mcp_target, home)
+                .map(|layout| desktop_mcp_ready(&layout, &launch))
+                .unwrap_or(false);
+            if skills_are_ready && mcp_is_ready {
+                self.connected.insert(agent.id);
+                report.already_connected += 1;
+                continue;
+            }
+            match setup_desktop_agent_in(agent, home, &launch) {
+                Ok(()) => {
+                    self.connected.insert(agent.id);
+                    report.connected += 1;
+                }
+                Err(error) => report.failures.push(format!("{}: {error:#}", agent.name)),
+            }
+        }
+
+        report
+    }
 }
 
 pub fn setup_all_detected_desktop_in(
@@ -2058,6 +2090,160 @@ mod tests {
         )
         .unwrap();
         assert!(is_agent_setup_in("runner", home));
+    }
+
+    #[test]
+    fn test_desktop_poll_discovers_later_installs_and_retries_failures() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let bun = home.join("bun");
+        let mut reconciler = DesktopAgentReconciler::default();
+        let opted_out = BTreeSet::new();
+        assert_eq!(
+            reconciler
+                .reconcile(home, &bun, None, "http://localhost:3030", &opted_out)
+                .detected,
+            0
+        );
+
+        std::fs::create_dir_all(home.join(".cursor")).unwrap();
+        std::fs::write(home.join(".cursor/mcp.json"), "invalid{").unwrap();
+        std::fs::create_dir_all(home.join(".runner")).unwrap();
+        let first = reconciler.reconcile(home, &bun, None, "http://localhost:3030", &opted_out);
+        assert_eq!(first.connected, 1);
+        assert_eq!(first.failures.len(), 1);
+        assert!(!home.join(".cursor/skills/screenpipe-api/SKILL.md").exists());
+
+        std::fs::write(home.join(".cursor/mcp.json"), r#"{"theme":"dark"}"#).unwrap();
+        let retry = reconciler.reconcile(home, &bun, None, "http://localhost:3030", &opted_out);
+        assert_eq!(retry.connected, 1);
+        assert_eq!(retry.already_connected, 1);
+        assert!(retry.failures.is_empty());
+        assert!(home
+            .join(".cursor/skills/screenpipe-api/SKILL.md")
+            .is_file());
+        let config: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(home.join(".cursor/mcp.json")).unwrap())
+                .unwrap();
+        assert_eq!(config["theme"], "dark");
+        assert_eq!(
+            config["mcpServers"]["screenpipe"]["command"],
+            bun.to_string_lossy().as_ref()
+        );
+    }
+
+    #[test]
+    fn test_desktop_poll_caches_success_but_startup_repairs_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let bun = home.join("bun");
+        let mut reconciler = DesktopAgentReconciler::default();
+        let opted_out = BTreeSet::new();
+        std::fs::create_dir_all(home.join(".codex")).unwrap();
+        assert_eq!(
+            reconciler
+                .reconcile(home, &bun, None, "http://localhost:3030", &opted_out)
+                .connected,
+            1
+        );
+
+        let config = home.join(".codex/config.toml");
+        let skill = home.join(".codex/skills/screenpipe-api/SKILL.md");
+        let config_modified = std::fs::metadata(&config).unwrap().modified().unwrap();
+        let skill_modified = std::fs::metadata(&skill).unwrap().modified().unwrap();
+        let started = std::time::Instant::now();
+        for _ in 0..1000 {
+            let idle = reconciler.reconcile(home, &bun, None, "http://localhost:3030", &opted_out);
+            assert_eq!(idle.already_connected, 1);
+            assert_eq!(idle.connected, 0);
+            assert!(idle.failures.is_empty());
+        }
+        eprintln!("1000 idle AI app checks: {:?} total", started.elapsed());
+        assert_eq!(
+            std::fs::metadata(&config).unwrap().modified().unwrap(),
+            config_modified
+        );
+        assert_eq!(
+            std::fs::metadata(&skill).unwrap().modified().unwrap(),
+            skill_modified
+        );
+
+        // A cached target isn't parsed/repaired again until the next startup.
+        std::fs::write(&config, "model = \"kept\"\n").unwrap();
+        std::fs::remove_file(&skill).unwrap();
+        assert_eq!(
+            reconciler
+                .reconcile(home, &bun, None, "http://localhost:3030", &opted_out)
+                .already_connected,
+            1
+        );
+        assert!(!skill.exists());
+        assert_eq!(
+            std::fs::read_to_string(&config).unwrap(),
+            "model = \"kept\"\n"
+        );
+        let startup =
+            reconcile_detected_desktop_in(home, &bun, None, "http://localhost:3030", &opted_out);
+        assert_eq!(startup.connected, 1);
+        assert!(startup.failures.is_empty());
+        assert!(skill.is_file());
+        assert!(std::fs::read_to_string(&config)
+            .unwrap()
+            .contains("model = \"kept\""));
+    }
+
+    #[test]
+    fn test_desktop_poll_respects_disconnect_and_detects_reinstallation() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let bun = home.join("bun");
+        let mut reconciler = DesktopAgentReconciler::default();
+        let mut opted_out = BTreeSet::new();
+        let cursor = home.join(".cursor");
+        std::fs::create_dir_all(&cursor).unwrap();
+        assert_eq!(
+            reconciler
+                .reconcile(home, &bun, None, "http://localhost:3030", &opted_out)
+                .connected,
+            1
+        );
+
+        opted_out.insert("cursor".into());
+        std::fs::remove_file(cursor.join("mcp.json")).unwrap();
+        assert_eq!(
+            reconciler
+                .reconcile(home, &bun, None, "http://localhost:3030", &opted_out)
+                .opted_out,
+            1
+        );
+        assert_eq!(
+            reconcile_detected_desktop_in(home, &bun, None, "http://localhost:3030", &opted_out)
+                .opted_out,
+            1
+        );
+        assert!(!cursor.join("mcp.json").exists());
+
+        opted_out.clear();
+        assert_eq!(
+            reconciler
+                .reconcile(home, &bun, None, "http://localhost:3030", &opted_out)
+                .connected,
+            1
+        );
+        std::fs::remove_dir_all(&cursor).unwrap();
+        assert_eq!(
+            reconciler
+                .reconcile(home, &bun, None, "http://localhost:3030", &opted_out)
+                .detected,
+            0
+        );
+        std::fs::create_dir_all(&cursor).unwrap();
+        assert_eq!(
+            reconciler
+                .reconcile(home, &bun, None, "http://localhost:3030", &opted_out)
+                .connected,
+            1
+        );
     }
 
     #[test]
