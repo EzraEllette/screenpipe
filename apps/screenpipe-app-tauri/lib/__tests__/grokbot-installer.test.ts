@@ -3,6 +3,7 @@
 
 import { describe, expect, it, vi } from "vitest";
 import { createCipheriv, pbkdf2Sync } from "node:crypto";
+import { SCREENPIPE_API_SKILL_MD } from "../generated/screenpipe-skills";
 import { activeDescriptor, decryptMacDescriptor, decryptWindowsDescriptor, validateGateway, skillSpec, reconcileSkill, appDataPath, GATEWAY_MAX_AGE_MS } from "../grokbot-installer.mjs";
 
 const input = { home: "/home/test", bun: "/Applications/screenpipe/bun", dataDir: "/data/custom profile", port: 3137, skill: "API reference\n" };
@@ -23,6 +24,12 @@ function fixture(initial: any[] = [], ignoreWrites = false) {
 }
 
 describe("Grok Bot automatic skill installation", () => {
+  it("attributes REST retrievals in the installed canonical skill to Grok Bot", () => {
+    const installed = skillSpec({ ...input, skill: SCREENPIPE_API_SKILL_MD }, "Test Mac");
+    expect(installed.body).toContain('"X-Screenpipe-Client: api"');
+    expect(installed.body).toContain('"X-Screenpipe-Agent: grokbot"');
+    expect(installed.body).not.toContain("X-Screenpipe-Agent: unknown");
+  });
   it("installs into the shared store on a fresh setup, verifies it, and is idempotent", async () => {
     const f = fixture([{ id: "other", source: "workflow", name: "Unrelated skill" }]);
     expect((await reconcileSkill(f.call, spec, "connect")).connected).toBe(true);

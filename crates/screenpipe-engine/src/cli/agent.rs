@@ -11,9 +11,11 @@
 //! SKILL.md + MCP entry point at that host instead of localhost. With no flags
 //! it wires a co-located agent to the local engine on `http://localhost:3030`.
 
+use crate::qualified_value::AgentClient;
 use anyhow::{Context, Result};
 use colored::Colorize;
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, BTreeSet},
     io::{self, IsTerminal, Write},
     path::{Path, PathBuf},
@@ -26,6 +28,19 @@ const API_SKILL_MD: &str =
     include_str!("../../../screenpipe-core/assets/skills/screenpipe-api/SKILL.md");
 const CLI_SKILL_MD: &str =
     include_str!("../../../screenpipe-core/assets/skills/screenpipe-cli/SKILL.md");
+
+fn bundled_skills(client: AgentClient) -> [(&'static str, Cow<'static, str>); 2] {
+    [
+        (
+            "screenpipe-api",
+            Cow::Owned(API_SKILL_MD.replace(
+                "X-Screenpipe-Agent: unknown",
+                &format!("X-Screenpipe-Agent: {}", client.as_str()),
+            )),
+        ),
+        ("screenpipe-cli", Cow::Borrowed(CLI_SKILL_MD)),
+    ]
+}
 
 #[derive(clap::Subcommand, Debug)]
 pub enum AgentCommand {
@@ -365,6 +380,7 @@ fn write_prompted_targets(data_dir: &Path, agents: &[DetectedAgent]) -> Result<(
 /// Where a given agent keeps its skills + MCP config. Paths mirror the in-app
 /// OpenClaw/Hermes cards exactly so CLI and GUI setups agree.
 struct AgentLayout {
+    client: AgentClient,
     name: &'static str,
     /// `None` for MCP-only agents (Claude Desktop, Runner, and Windsurf).
     skills_dir: Option<PathBuf>,
@@ -450,15 +466,12 @@ fn skills_ready(layout: &AgentLayout) -> bool {
 
 fn desktop_skills_current(layout: &AgentLayout) -> bool {
     layout.skills_dir.as_ref().is_none_or(|skills_dir| {
-        [
-            ("screenpipe-api", API_SKILL_MD),
-            ("screenpipe-cli", CLI_SKILL_MD),
-        ]
-        .iter()
-        .all(|(name, markdown)| {
-            std::fs::read_to_string(skills_dir.join(name).join("SKILL.md"))
-                .is_ok_and(|body| body == *markdown)
-        })
+        bundled_skills(layout.client)
+            .into_iter()
+            .all(|(name, markdown)| {
+                std::fs::read_to_string(skills_dir.join(name).join("SKILL.md"))
+                    .is_ok_and(|body| body == markdown.as_ref())
+            })
     })
 }
 
@@ -466,15 +479,12 @@ fn refresh_desktop_skills(layout: &AgentLayout) -> Result<()> {
     let Some(skills_dir) = &layout.skills_dir else {
         return Ok(());
     };
-    for (name, markdown) in [
-        ("screenpipe-api", API_SKILL_MD),
-        ("screenpipe-cli", CLI_SKILL_MD),
-    ] {
+    for (name, markdown) in bundled_skills(layout.client) {
         let path = skills_dir.join(name).join("SKILL.md");
-        if std::fs::read_to_string(&path).is_ok_and(|body| body == markdown) {
+        if std::fs::read_to_string(&path).is_ok_and(|body| body == markdown.as_ref()) {
             continue;
         }
-        write_skill(skills_dir, name, markdown, "http://localhost:3030")?;
+        write_skill(skills_dir, name, &markdown, "http://localhost:3030")?;
     }
     Ok(())
 }
@@ -562,10 +572,7 @@ fn install_missing_desktop_skills(layout: &AgentLayout) -> Result<Vec<DesktopSki
         return Ok(Vec::new());
     };
     let mut changes = Vec::new();
-    for (name, markdown) in [
-        ("screenpipe-api", API_SKILL_MD),
-        ("screenpipe-cli", CLI_SKILL_MD),
-    ] {
+    for (name, markdown) in bundled_skills(layout.client) {
         let dir = skills_dir.join(name);
         if dir.join("SKILL.md").is_file() {
             continue;
@@ -574,7 +581,7 @@ fn install_missing_desktop_skills(layout: &AgentLayout) -> Result<Vec<DesktopSki
             dir: dir.clone(),
             dir_existed: dir.exists(),
         });
-        if let Err(error) = write_skill(skills_dir, name, markdown, "http://localhost:3030") {
+        if let Err(error) = write_skill(skills_dir, name, &markdown, "http://localhost:3030") {
             rollback_desktop_skill_changes(&changes);
             return Err(error);
         }
@@ -724,35 +731,41 @@ fn layout(target: &str) -> Result<AgentLayout> {
 }
 
 fn layout_in(target: &str, h: &Path) -> Result<AgentLayout> {
+    let client = AgentClient::from_name(target);
     Ok(match target {
         // OpenClaw's real layout (verified against a live install + docs):
         // root is ~/.openclaw, skills under ~/.openclaw/skills, MCP servers
         // under mcpServers in ~/.openclaw/openclaw.json.
         "openclaw" => AgentLayout {
+            client,
             name: "OpenClaw",
             skills_dir: Some(h.join(".openclaw/skills")),
             mcp_path: h.join(".openclaw/openclaw.json"),
             mcp_format: McpFormat::Json,
         },
         "hermes" => AgentLayout {
+            client,
             name: "Hermes",
             skills_dir: Some(h.join(".hermes/skills")),
             mcp_path: h.join(".hermes/config.yaml"),
             mcp_format: McpFormat::Yaml,
         },
         "claude-code" => AgentLayout {
+            client,
             name: "Claude Code",
             skills_dir: Some(h.join(".claude/skills")),
             mcp_path: h.join(".claude.json"),
             mcp_format: McpFormat::Json,
         },
         "claude-desktop" => AgentLayout {
+            client,
             name: "Claude Desktop",
             skills_dir: None, // desktop app is MCP-only
             mcp_path: claude_desktop_config(h)?,
             mcp_format: McpFormat::Json,
         },
         "codex" => AgentLayout {
+            client,
             name: "Codex",
             skills_dir: Some(h.join(".codex/skills")),
             mcp_path: h.join(".codex/config.toml"),
@@ -761,6 +774,7 @@ fn layout_in(target: &str, h: &Path) -> Result<AgentLayout> {
         // https://github.com/google-gemini/gemini-cli/blob/main/docs/reference/configuration.md
         // https://github.com/google-gemini/gemini-cli/blob/main/docs/cli/skills.md
         "gemini" => AgentLayout {
+            client,
             name: "Gemini CLI",
             skills_dir: Some(h.join(".gemini/skills")),
             mcp_path: h.join(".gemini/settings.json"),
@@ -770,6 +784,7 @@ fn layout_in(target: &str, h: &Path) -> Result<AgentLayout> {
         // and, for compat, ~/.claude/skills + ~/.codex/skills) — see
         // https://cursor.com/docs/skills
         "cursor" => AgentLayout {
+            client,
             name: "Cursor",
             skills_dir: Some(h.join(".cursor/skills")),
             mcp_path: h.join(".cursor/mcp.json"),
@@ -779,12 +794,14 @@ fn layout_in(target: &str, h: &Path) -> Result<AgentLayout> {
         // Runner reads global MCP servers from ~/.runner/mcp.json and requires
         // local subprocess entries to declare type: "stdio".
         "runner" => AgentLayout {
+            client,
             name: "Runner",
             skills_dir: None,
             mcp_path: h.join(".runner/mcp.json"),
             mcp_format: McpFormat::Json,
         },
         "windsurf" => AgentLayout {
+            client,
             name: "Windsurf",
             skills_dir: None,
             mcp_path: h.join(".codeium/windsurf/mcp_config.json"),
@@ -991,10 +1008,10 @@ fn install_skills_in(target: &str, api_url: &str, home: &Path) -> Result<Vec<Pat
         return Ok(Vec::new());
     };
 
-    Ok(vec![
-        write_skill(skills_dir, "screenpipe-api", API_SKILL_MD, api_url)?,
-        write_skill(skills_dir, "screenpipe-cli", CLI_SKILL_MD, api_url)?,
-    ])
+    bundled_skills(l.client)
+        .into_iter()
+        .map(|(name, markdown)| write_skill(skills_dir, name, &markdown, api_url))
+        .collect()
 }
 
 /// Remove the two built-in screenpipe skills from an external agent.
@@ -1520,6 +1537,31 @@ mod tests {
         let md = "use http://localhost:3030/search";
         let out = md.replace("localhost:3030", host_port("http://10.0.0.5:3030"));
         assert_eq!(out, "use http://10.0.0.5:3030/search");
+    }
+
+    #[test]
+    fn test_installed_skills_attribute_each_supported_app_and_remain_current() {
+        let home = tempfile::tempdir().unwrap();
+        for (target, expected) in [
+            ("claude-code", "claude"),
+            ("codex", "codex"),
+            ("cursor", "cursor"),
+            ("gemini", "gemini"),
+            ("openclaw", "openclaw"),
+            ("hermes", "hermes"),
+        ] {
+            let paths = install_skills_in(target, "http://localhost:3030", home.path()).unwrap();
+            let body = std::fs::read_to_string(&paths[0]).unwrap();
+            assert!(body.contains(&format!("X-Screenpipe-Agent: {expected}")));
+            assert!(!body.contains("X-Screenpipe-Agent: unknown"));
+            assert!(desktop_skills_current(
+                &layout_in(target, home.path()).unwrap()
+            ));
+        }
+        let paths = install_skills_in("codex", "http://10.0.0.5:3030", home.path()).unwrap();
+        let body = std::fs::read_to_string(&paths[0]).unwrap();
+        assert!(body.contains("X-Screenpipe-Agent: codex"));
+        assert!(body.contains("${SCREENPIPE_LOCAL_API_URL:-http://10.0.0.5:3030}/search"));
     }
 
     #[test]
@@ -2433,7 +2475,7 @@ mod tests {
         assert!(home.join(".codex/skills/screenpipe-cli/SKILL.md").is_file());
         let refreshed_skill =
             std::fs::read_to_string(home.join(".codex/skills/screenpipe-api/SKILL.md")).unwrap();
-        assert_eq!(refreshed_skill, API_SKILL_MD);
+        assert_eq!(refreshed_skill, bundled_skills(AgentClient::Codex)[0].1);
         assert!(!refreshed_skill
             .contains("you must add this header to every source file you create or edit"));
     }

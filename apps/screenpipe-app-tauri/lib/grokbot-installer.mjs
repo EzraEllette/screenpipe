@@ -101,6 +101,7 @@ export function skillSpec({ home, bun, dataDir, port, skill }, machine = hostnam
     throw new Error("Screenpipe's local connection details are unavailable.");
   }
   const device = createHash("sha256").update(`${machine}\n${home}`).digest("hex").slice(0, 16);
+  skill = skill.replaceAll("X-Screenpipe-Agent: unknown", "X-Screenpipe-Agent: grokbot");
   const parameters = JSON.stringify({ bun, SCREENPIPE_DATA_DIR: dataDir, SCREENPIPE_LOCAL_API_URL: `http://127.0.0.1:${port}` }, null, 2);
   return {
     name: `Screenpipe on ${machine}`,
