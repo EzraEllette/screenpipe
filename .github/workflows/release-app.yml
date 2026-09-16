@@ -558,9 +558,26 @@ jobs:
       - name: Install frontend dependencies without symlinks (Windows)
         if: matrix.os_type == 'windows'
         working-directory: ${{ github.workspace }}/apps/screenpipe-app-tauri
-        # Local file dependencies otherwise use symlinks, which the Windows
-        # service account cannot create. Copying also works across cache drives.
-        run: bun install --frozen-lockfile --backend=copyfile
+        shell: pwsh
+        # Bun still uses a symlink for file: packages even with copyfile.
+        # A directory junction works for the unprivileged runner service.
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $source = (Resolve-Path '../../packages/workflows-ui').Path
+          $destination = Join-Path (Get-Location) 'node_modules/@screenpipe/workflows-ui'
+          if (Test-Path -LiteralPath $destination) {
+            $item = Get-Item -LiteralPath $destination -Force
+            if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+              cmd /c rmdir "$destination"
+              if ($LASTEXITCODE -ne 0) { throw 'failed to remove stale local package link' }
+            } else {
+              Remove-Item -LiteralPath $destination -Recurse -Force
+            }
+          }
+          New-Item -ItemType Directory -Force -Path (Split-Path $destination) | Out-Null
+          New-Item -ItemType Junction -Path $destination -Value $source | Out-Null
+          bun install --frozen-lockfile --backend=copyfile
+          if ($LASTEXITCODE -ne 0) { throw 'frontend dependency installation failed' }
 
       - name: Set up MSVC
         if: matrix.os_type == 'windows'
