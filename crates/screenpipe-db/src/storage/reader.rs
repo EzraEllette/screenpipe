@@ -623,7 +623,19 @@ mod tests {
         db.execute_raw_sql_write("DELETE FROM frames WHERE id=1")
             .await
             .unwrap();
-        assert_eq!(db.reclaim_frame_payloads().await.unwrap(), 1);
+        // Reclamation is nonblocking and can defer while SQLite finishes
+        // resetting a cancelled statement, even after the file pin drains.
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                match db.reclaim_frame_payloads().await.unwrap() {
+                    1 => break,
+                    0 => tokio::task::yield_now().await,
+                    count => panic!("unexpected reclaimed file count: {count}"),
+                }
+            }
+        })
+        .await
+        .expect("cancelled read prevented file reclamation");
         db.close().await;
     }
 }
