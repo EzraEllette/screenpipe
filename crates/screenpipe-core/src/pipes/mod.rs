@@ -88,6 +88,26 @@ const AUTOMATE_MY_WORK_LEGACY_PROMPT_HASHES: &[&str] = &[
 ];
 const BUNDLED_BUILTIN_PIPES: &[(&str, &str)] = &[
     (
+        "workflow-activity",
+        include_str!("../../assets/pipes/workflow-activity/pipe.md"),
+    ),
+    (
+        "workflow-patterns",
+        include_str!("../../assets/pipes/workflow-patterns/pipe.md"),
+    ),
+    (
+        "workflow-procedures",
+        include_str!("../../assets/pipes/workflow-procedures/pipe.md"),
+    ),
+    (
+        "workflow-timing",
+        include_str!("../../assets/pipes/workflow-timing/pipe.md"),
+    ),
+    (
+        "workflow-discovery",
+        include_str!("../../assets/pipes/workflow-discovery/pipe.md"),
+    ),
+    (
         "skill-learning",
         include_str!("../../assets/pipes/skill-learning/pipe.md"),
     ),
@@ -2464,6 +2484,15 @@ pub(crate) fn has_quota_exhausted_token(text: &str) -> bool {
 /// Parse structured error types from a single output string.
 fn parse_error_type(stderr: &str) -> (Option<String>, Option<String>) {
     let lower = stderr.to_lowercase();
+    for (code, message) in [
+        ("workflow_business_required", "Automatic workflow discovery requires Business."),
+        ("workflow_allowance_paused", "Workflow updates paused to preserve AI allowance. Manage usage to check capacity and reset times."),
+        ("workflow_usage_unavailable", "Could not check AI allowance. Reconnect and try again."),
+        ("workflow_sign_in_required", "Sign in again to resume workflow updates."),
+        ("workflow_dependency_paused", "Enable the workflow task dependencies in Scheduled tasks to continue."),
+    ] {
+        if lower.contains(code) { return (Some(code.to_string()), Some(message.to_string())); }
+    }
     if let Some(parsed) = parse_structured_llm_error(stderr) {
         return parsed;
     }
@@ -2601,6 +2630,15 @@ fn classify_llm_error_value(value: &serde_json::Value) -> Option<(Option<String>
     .join(" ")
     .to_lowercase();
 
+    if code.as_deref() == Some("missing_output") {
+        return Some((
+            Some("missing_output".to_string()),
+            Some(
+                message
+                    .unwrap_or_else(|| "automation did not save its required output".to_string()),
+            ),
+        ));
+    }
     if has_safety_refusal_token(&combined) {
         return Some((
             Some("safety_refusal".to_string()),
@@ -2799,7 +2837,10 @@ async fn setup_pipe_permissions(
 
         // Write permissions JSON for the extension to read
         let perms_path = pipe_dir.join(".screenpipe-permissions.json");
-        match serde_json::to_string(&perms) {
+        match serde_json::to_value(&perms).and_then(|mut value| {
+            value["api_base"] = serde_json::json!(format!("http://127.0.0.1:{api_port}"));
+            serde_json::to_string(&value)
+        }) {
             Ok(json) => {
                 if let Err(e) = std::fs::write(&perms_path, &json) {
                     warn!("failed to write permissions file: {}", e);
@@ -8947,6 +8988,40 @@ mod tests {
     use chrono::{TimeZone, Timelike};
     use std::path::Path;
     use std::sync::atomic::Ordering;
+
+    #[test]
+    fn oversized_agent_history_preserves_terminal_success_and_error() {
+        for reason in ["stop", "error"] {
+            let mut output = crate::agents::pi::BoundedOutput::default();
+            output.push_line(r#"{"type":"agent_start"}"#);
+            let event = serde_json::json!({"type":"agent_end","messages":[
+                {"role":"toolResult","content":[{"type":"text","text":"x".repeat(300_000)}]},
+                {"role":"assistant","stopReason":reason,"content":[{"type":"text","text":"Saved the update."}]}
+            ]});
+            output.push_line(&event.to_string());
+            output.push_line(r#"{"type":"agent_settled"}"#);
+            let stored = filter_ndjson_stdout(&output.into_string());
+            assert!(stored.len() < 10_000);
+            assert_eq!(stdout_has_verified_pipe_result(&stored), reason == "stop");
+        }
+    }
+
+    #[test]
+    fn missing_save_receipt_fails_despite_normal_assistant_text() {
+        let stdout = r#"{"type":"agent_end","messages":[{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"No changes saved."}]}]}"#;
+        let stderr = r#"{"error":{"code":"missing_output","message":"The agent could not save a supported update."}}"#;
+        let result = classify_pipe_process_result(false, false, stderr, stdout);
+        assert_eq!(result.status, "failed");
+        assert_eq!(result.error_type.as_deref(), Some("missing_output"));
+        assert_eq!(
+            result.error_message.as_deref(),
+            Some("The agent could not save a supported update.")
+        );
+        assert_eq!(
+            classify_pipe_process_result(false, true, stderr, stdout).status,
+            "cancelled"
+        );
+    }
 
     #[test]
     fn skill_learning_is_opt_in_and_bounded() {

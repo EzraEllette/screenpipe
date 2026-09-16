@@ -138,6 +138,11 @@ mod update_restart;
 mod updates;
 mod voice_training;
 mod window;
+// Reuse the workflow engine from the parent PR; recorder ownership stays here.
+#[path = "../../../screenpipe-workflows-tauri/src-tauri/src/workflows_runtime.rs"]
+mod workflows_runtime;
+#[path = "../../../screenpipe-workflows-tauri/src-tauri/src/workflows_media.rs"]
+mod workflows_media;
 mod windows_ca_bundle;
 #[cfg(target_os = "windows")]
 mod windows_crash_dump;
@@ -1236,7 +1241,9 @@ async fn main() {
                 }
                 if !app_ui_hidden {
                     app_submenu_builder = app_submenu_builder
-                        .item(&MenuItemBuilder::with_id("settings", "Settings...")
+                        // Tauri menu listeners are global, including tray menus.
+                        // Keep this id distinct so Settings opens exactly once.
+                        .item(&MenuItemBuilder::with_id("app_settings", "Settings...")
                             .accelerator("CmdOrCtrl+,")
                             .build(app)?)
                         .separator();
@@ -1284,7 +1291,7 @@ async fn main() {
                 app.set_menu(menu)?;
                 app.on_menu_event(|app_handle, event| {
                     match event.id().as_ref() {
-                        "settings" => {
+                        "app_settings" => {
                             // Defer off event stack (same as tray: runs from tao::send_event).
                             let app_for_closure = app_handle.clone();
                             let _ = app_handle.run_on_main_thread(move || {
@@ -2101,6 +2108,7 @@ async fn main() {
                                 Some(owned_browser),
                                 cloud_token_arc.clone(),
                                 history_access.clone(),
+                                app_for_owned.path().app_local_data_dir().ok().map(|dir| dir.join("workflows")),
                             )
                             .await
                             {

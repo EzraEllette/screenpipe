@@ -1127,6 +1127,17 @@ impl PiExecutor {
         let ext_path = ext_dir.join("self-improvement.ts");
         std::fs::write(&ext_path, ext_content)?;
         debug!("self-improvement extension installed at {:?}", ext_path);
+        if crate::workflows::pipeline::task_at(project_dir).is_some() {
+            std::fs::write(
+                ext_dir.join("workflow-memory.ts"),
+                include_str!("../../assets/extensions/workflow-memory.ts"),
+            )?;
+            std::fs::write(
+                ext_dir.join("workflow-catalog.ts"),
+                include_str!("../../assets/extensions/workflow-catalog.ts"),
+            )?;
+        }
+
         if project_dir.file_name().and_then(|name| name.to_str()) == Some("skill-learning")
             && project_dir.join("pipe.md").is_file()
         {
@@ -2100,6 +2111,21 @@ impl AgentExecutor for PiExecutor {
         // Provider resolution:
         // 1. Explicit provider from pipe frontmatter → use it
         // 2. No provider specified → screenpipe cloud (default)
+        if crate::workflows::pipeline::task_at(working_dir).is_some() {
+            crate::workflows::pipeline::check_admission(
+                &self.api_url,
+                self.current_user_token().as_deref(),
+            )
+            .await?;
+            if !crate::workflows::pipeline::has_pending_input(working_dir).await? {
+                return Ok(AgentOutput {
+                    stdout: "No new workflow input; saved results kept.".into(),
+                    stderr: String::new(),
+                    success: true,
+                    pid: None,
+                });
+            }
+        }
         let resolved_provider = provider.unwrap_or("screenpipe").to_string();
 
         let (resolved_model, fell_back_from) = self
@@ -2218,6 +2244,21 @@ impl AgentExecutor for PiExecutor {
         session_owner: Option<&str>,
         _executor_config: Option<&serde_json::Value>,
     ) -> Result<AgentOutput> {
+        if crate::workflows::pipeline::task_at(working_dir).is_some() {
+            crate::workflows::pipeline::check_admission(
+                &self.api_url,
+                self.current_user_token().as_deref(),
+            )
+            .await?;
+            if !crate::workflows::pipeline::has_pending_input(working_dir).await? {
+                return Ok(AgentOutput {
+                    stdout: "No new workflow input; saved results kept.".into(),
+                    stderr: String::new(),
+                    success: true,
+                    pid: None,
+                });
+            }
+        }
         let resolved_provider = provider.unwrap_or("screenpipe").to_string();
         let (resolved_model, fell_back_from) = self
             .resolve_screenpipe_model(model, &resolved_provider)
@@ -2976,9 +3017,9 @@ const BOUNDED_OUTPUT_TAIL: usize = 192 * 1024;
 ///
 /// The agent's stdout was accumulated into an unbounded `String` for the whole
 /// run, so a long agent turn with large tool results held all of it resident.
-/// Nothing parses this buffer — the JSON events are decoded per line as they
-/// arrive and this is only the stored record — so eliding the middle costs no
-/// behavior.
+/// Live JSON events are decoded before buffering. The scheduler also checks
+/// the stored final event, so an oversized agent_end keeps its final assistant
+/// outcome without retaining a second copy of the entire tool history.
 ///
 /// Both ends are kept deliberately: the head carries the run's setup and the
 /// tail carries the result or the error, which are the two things anyone
@@ -2992,6 +3033,8 @@ pub struct BoundedOutput {
 
 impl BoundedOutput {
     pub fn push_line(&mut self, line: &str) {
+        let compact = compact_oversized_agent_end(line);
+        let line = compact.as_deref().unwrap_or(line);
         // `self.tail.is_empty()` closes the head for good once anything has
         // spilled. Without it a short line still fits the head's leftover
         // capacity after longer lines have already gone to the tail, and the
@@ -3026,6 +3069,49 @@ impl BoundedOutput {
             self.head, self.dropped, self.tail
         )
     }
+}
+
+// Pi repeats the complete run history (including images) in agent_end. Keep
+// its terminal outcome small enough to survive the same bounded stdout buffer.
+fn compact_oversized_agent_end(line: &str) -> Option<String> {
+    if line.len() <= BOUNDED_OUTPUT_TAIL || !line.contains("agent_end") {
+        return None;
+    }
+    let event: serde_json::Value = serde_json::from_str(line).ok()?;
+    if event["type"] != "agent_end" {
+        return None;
+    }
+    let last = event["messages"]
+        .as_array()?
+        .iter()
+        .rev()
+        .find(|m| m["role"] == "assistant")?;
+    let reason = last["stopReason"].as_str()?;
+    if !matches!(reason, "stop" | "error" | "aborted" | "length") {
+        return None;
+    }
+    let text: String = last["content"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|b| b["type"] == "text")
+        .filter_map(|b| b["text"].as_str())
+        .flat_map(str::chars)
+        .take(8192)
+        .collect();
+    let error: String = last["errorMessage"]
+        .as_str()
+        .unwrap_or("")
+        .chars()
+        .take(2048)
+        .collect();
+    Some(
+        serde_json::json!({"type":"agent_end","messages":[{
+            "role":"assistant","stopReason":reason,"errorMessage":error,
+            "content":[{"type":"text","text":text}]
+        }]})
+        .to_string(),
+    )
 }
 
 /// Last `max` bytes of a captured process stream, lossy-decoded and
