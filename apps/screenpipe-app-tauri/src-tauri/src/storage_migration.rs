@@ -6,7 +6,7 @@ use screenpipe_db::storage::{migration_report, MigrationProgress, StorageDescrip
 use serde::{Deserialize, Serialize};
 use std::{
     path::{Path, PathBuf},
-    sync::{LazyLock, Mutex},
+    sync::{Arc, LazyLock, Mutex},
     time::Instant,
 };
 use tauri::{Emitter, Manager, State};
@@ -685,20 +685,37 @@ pub async fn start_storage_migration(
     start_storage_migration_inner(app, recording, root, false).await
 }
 
+async fn acquire_migration_lifecycle(
+    lifecycle: Arc<tokio::sync::Mutex<()>>,
+    background: bool,
+) -> Option<tokio::sync::OwnedMutexGuard<()>> {
+    if background {
+        // Policy checks must not queue automatic work behind a restart or an
+        // explicit migration. A later check will inspect the resulting state.
+        lifecycle.try_lock_owned().ok()
+    } else {
+        // The user's retry remains requested while startup/recovery owns the
+        // database. Take exclusive ownership when it finishes, without polling
+        // or interrupting the current writer.
+        Some(lifecycle.lock_owned().await)
+    }
+}
+
 async fn start_storage_migration_inner(
     app: tauri::AppHandle,
     recording: State<'_, RecordingState>,
     root: String,
     background: bool,
 ) -> Result<(), String> {
+    require_selected_root(&app, &root)?;
+    let Some(lifecycle) =
+        acquire_migration_lifecycle(recording.server_lifecycle.clone(), background).await
+    else {
+        return Ok(());
+    };
+    // Settings and storage may have changed while the request waited. Never
+    // migrate a different directory using the earlier confirmation.
     let root = require_selected_root(&app, &root)?;
-    let lifecycle = recording
-        .server_lifecycle
-        .clone()
-        .try_lock_owned()
-        .map_err(|_| {
-            "Screenpipe is already restarting or changing storage. Try again when it finishes."
-        })?;
     let status = storage_migration_status(&app, &recording, false).await?;
     if background {
         if let Some(error) = &status.error {
@@ -725,6 +742,15 @@ async fn start_storage_migration_inner(
             return Ok(());
         }
     } else if !status.can_migrate {
+        if status.completed
+            && status.using_new_storage
+            && !status.pending
+            && status.error.is_none()
+            && status.blocked_reason.is_none()
+        {
+            // Another migration may have completed while this click waited.
+            return Ok(());
+        }
         return Err(status
             .blocked_reason
             .unwrap_or_else(|| "Migration is unavailable in the current storage state.".into()));
@@ -990,6 +1016,56 @@ pub async fn delete_original_storage_database(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn explicit_retry_waits_for_restart_then_owns_storage_before_later_restarts() {
+        let lifecycle = Arc::new(tokio::sync::Mutex::new(()));
+        let restart = lifecycle.lock().await;
+        let retry = acquire_migration_lifecycle(lifecycle.clone(), false);
+        tokio::pin!(retry);
+        // Poll once to enqueue the click while startup/recovery still owns DB.
+        tokio::select! {
+            biased;
+            _ = &mut retry => panic!("retry must wait for the current restart"),
+            _ = std::future::ready(()) => {}
+        }
+        let later_restart = lifecycle.lock();
+        tokio::pin!(later_restart);
+        tokio::select! {
+            biased;
+            _ = &mut later_restart => panic!("restart must not overlap storage work"),
+            _ = std::future::ready(()) => {}
+        }
+        drop(restart);
+        let migration = tokio::time::timeout(std::time::Duration::from_secs(1), retry)
+            .await
+            .expect("one click must proceed when startup finishes")
+            .unwrap();
+        assert!(lifecycle.try_lock().is_err());
+        drop(migration);
+        let _restart = tokio::time::timeout(std::time::Duration::from_secs(1), later_restart)
+            .await
+            .expect("later restarts must proceed after migration releases storage");
+    }
+
+    #[tokio::test]
+    async fn background_migration_skips_busy_storage_without_queueing_a_retry() {
+        let lifecycle = Arc::new(tokio::sync::Mutex::new(()));
+        let restart = lifecycle.lock().await;
+        assert!(tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            acquire_migration_lifecycle(lifecycle.clone(), true),
+        )
+        .await
+        .expect("background checks must not wait for startup")
+        .is_none());
+        drop(restart);
+        assert!(
+            lifecycle.try_lock().is_ok(),
+            "no automatic retry was queued"
+        );
+        assert!(acquire_migration_lifecycle(lifecycle, true).await.is_some());
+    }
 
     #[test]
     fn completed_migration_does_not_prompt_during_server_startup_or_restart() {
