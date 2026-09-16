@@ -1742,7 +1742,7 @@ mod wal_maintenance_tests {
     }
 
     #[tokio::test]
-    async fn raw_sql_retries_after_a_concurrent_storage_commit() {
+    async fn raw_sql_preserves_snapshot_during_a_concurrent_storage_commit() {
         let dir = tempfile::tempdir().unwrap();
         let mut config = DbConfig::for_tier(DeviceTier::Low);
         config.read_pool_max = 1;
@@ -1755,29 +1755,74 @@ mod wal_maintenance_tests {
             .await
             .unwrap();
 
-        // Pause SQLite after the read token is taken, inside the SELECT itself.
+        // Pause inside statement execution after the snapshot is taken. The
+        // read wrapper owns SQLite's progress handler for cancellation, so a
+        // test progress handler would be replaced before SELECT executes.
+        struct Pause {
+            started: Arc<tokio::sync::Notify>,
+            resumed: std::sync::mpsc::Receiver<()>,
+            paused: bool,
+        }
+        unsafe extern "C" fn wait_for_commit(
+            ctx: *mut libsqlite3_sys::sqlite3_context,
+            _: std::ffi::c_int,
+            _: *mut *mut libsqlite3_sys::sqlite3_value,
+        ) {
+            // SAFETY: this connection owns the boxed Pause until its function
+            // destructor runs; SQLite serializes calls on the connection.
+            let state = unsafe { &mut *libsqlite3_sys::sqlite3_user_data(ctx).cast::<Pause>() };
+            if !state.paused {
+                state.paused = true;
+                state.started.notify_one();
+                if state.resumed.recv_timeout(Duration::from_secs(5)).is_err() {
+                    unsafe {
+                        libsqlite3_sys::sqlite3_result_error(
+                            ctx,
+                            c"commit was not resumed".as_ptr(),
+                            -1,
+                        )
+                    };
+                    return;
+                }
+            }
+            unsafe { libsqlite3_sys::sqlite3_result_int(ctx, 0) };
+        }
+        unsafe extern "C" fn destroy_pause(ptr: *mut std::ffi::c_void) {
+            // SAFETY: SQLite invokes this once for the context it owns.
+            unsafe { drop(Box::from_raw(ptr.cast::<Pause>())) };
+        }
         let started = Arc::new(tokio::sync::Notify::new());
-        let signal = Arc::clone(&started);
         let (resume, resumed) = std::sync::mpsc::channel();
-        let mut paused = false;
         {
             let mut connection = db.pool.acquire().await.unwrap();
-            connection
-                .lock_handle()
-                .await
-                .unwrap()
-                .set_progress_handler(1_000, move || {
-                    if !paused {
-                        paused = true;
-                        signal.notify_one();
-                        return resumed.recv_timeout(Duration::from_secs(5)).is_ok();
-                    }
-                    true
-                });
+            let mut handle = connection.lock_handle().await.unwrap();
+            let context = Box::into_raw(Box::new(Pause {
+                started: Arc::clone(&started),
+                resumed,
+                paused: false,
+            }));
+            // SAFETY: the handle is exclusive and ownership of context passes
+            // to SQLite, including cleanup if registration fails.
+            let code = unsafe {
+                libsqlite3_sys::sqlite3_create_function_v2(
+                    handle.as_raw_handle().as_ptr(),
+                    c"test_wait_for_commit".as_ptr(),
+                    0,
+                    libsqlite3_sys::SQLITE_UTF8,
+                    context.cast(),
+                    Some(wait_for_commit),
+                    None,
+                    None,
+                    Some(destroy_pause),
+                )
+            };
+            assert_eq!(code, libsqlite3_sys::SQLITE_OK);
         }
         let reader = Arc::clone(&db);
         let reading = tokio::spawn(async move {
-            reader.query_raw_sql("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<2000) SELECT (SELECT MAX(id) FROM frames) AS id,SUM(x) AS total FROM n").await
+            reader
+                .query_raw_sql("SELECT MAX(id) + test_wait_for_commit() AS id FROM frames")
+                .await
         });
         tokio::time::timeout(Duration::from_secs(5), started.notified())
             .await
@@ -1791,15 +1836,15 @@ mod wal_maintenance_tests {
             .unwrap()
             .unwrap()
             .unwrap();
-        assert_eq!(result, serde_json::json!([{"id":2,"total":2001000}]));
-        db.pool
-            .acquire()
-            .await
-            .unwrap()
-            .lock_handle()
-            .await
-            .unwrap()
-            .remove_progress_handler();
+        // Ordinary writes do not revoke an in-flight snapshot. A later query
+        // must see the committed write, without mixing revisions in this one.
+        assert_eq!(result, serde_json::json!([{"id":1}]));
+        assert_eq!(
+            db.query_raw_sql("SELECT MAX(id) AS id FROM frames")
+                .await
+                .unwrap(),
+            serde_json::json!([{"id":2}]),
+        );
         db.close().await;
     }
 
