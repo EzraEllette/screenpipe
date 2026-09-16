@@ -551,8 +551,16 @@ jobs:
           bash .github/scripts/linux/verify-pipewire-runtime-packages.sh
 
       - name: Install frontend dependencies
+        if: matrix.os_type != 'windows'
         working-directory: ${{ github.workspace }}/apps/screenpipe-app-tauri
-        run: bun install
+        run: bun install --frozen-lockfile
+
+      - name: Install frontend dependencies without symlinks (Windows)
+        if: matrix.os_type == 'windows'
+        working-directory: ${{ github.workspace }}/apps/screenpipe-app-tauri
+        # Local file dependencies otherwise use symlinks, which the Windows
+        # service account cannot create. Copying also works across cache drives.
+        run: bun install --frozen-lockfile --backend=copyfile
 
       - name: Set up MSVC
         if: matrix.os_type == 'windows'
