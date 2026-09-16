@@ -610,6 +610,16 @@ mod tests {
         task.abort();
         assert!(task.await.unwrap_err().is_cancelled());
         drop(blocker);
+        // Cancelling the snapshot starts asynchronous rollback and pool return.
+        // Wait for its lease to drain before asserting reclamation, rather than
+        // racing the cleanup task under a busy test runner.
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while storage.leases.try_write().is_err() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cancelled snapshot retained its file lease");
         db.execute_raw_sql_write("DELETE FROM frames WHERE id=1")
             .await
             .unwrap();

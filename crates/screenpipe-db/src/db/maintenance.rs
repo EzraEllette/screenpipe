@@ -1745,7 +1745,7 @@ mod wal_maintenance_tests {
     async fn raw_sql_preserves_snapshot_during_a_concurrent_storage_commit() {
         let dir = tempfile::tempdir().unwrap();
         let mut config = DbConfig::for_tier(DeviceTier::Low);
-        config.read_pool_max = 1;
+        config.read_pool_max = 2;
         let db = Arc::new(
             DatabaseManager::new_hybrid(dir.path(), config, Default::default())
                 .await
@@ -1760,8 +1760,7 @@ mod wal_maintenance_tests {
         // test progress handler would be replaced before SELECT executes.
         struct Pause {
             started: Arc<tokio::sync::Notify>,
-            resumed: std::sync::mpsc::Receiver<()>,
-            paused: bool,
+            resumed: std::sync::Mutex<Option<std::sync::mpsc::Receiver<()>>>,
         }
         unsafe extern "C" fn wait_for_commit(
             ctx: *mut libsqlite3_sys::sqlite3_context,
@@ -1770,11 +1769,15 @@ mod wal_maintenance_tests {
         ) {
             // SAFETY: this connection owns the boxed Pause until its function
             // destructor runs; SQLite serializes calls on the connection.
-            let state = unsafe { &mut *libsqlite3_sys::sqlite3_user_data(ctx).cast::<Pause>() };
-            if !state.paused {
-                state.paused = true;
+            let state = unsafe { &*libsqlite3_sys::sqlite3_user_data(ctx).cast::<Arc<Pause>>() };
+            let resumed = state
+                .resumed
+                .lock()
+                .ok()
+                .and_then(|mut receiver| receiver.take());
+            if let Some(resumed) = resumed {
                 state.started.notify_one();
-                if state.resumed.recv_timeout(Duration::from_secs(5)).is_err() {
+                if resumed.recv_timeout(Duration::from_secs(5)).is_err() {
                     unsafe {
                         libsqlite3_sys::sqlite3_result_error(
                             ctx,
@@ -1789,18 +1792,24 @@ mod wal_maintenance_tests {
         }
         unsafe extern "C" fn destroy_pause(ptr: *mut std::ffi::c_void) {
             // SAFETY: SQLite invokes this once for the context it owns.
-            unsafe { drop(Box::from_raw(ptr.cast::<Pause>())) };
+            unsafe { drop(Box::from_raw(ptr.cast::<Arc<Pause>>())) };
         }
         let started = Arc::new(tokio::sync::Notify::new());
         let (resume, resumed) = std::sync::mpsc::channel();
-        {
-            let mut connection = db.pool.acquire().await.unwrap();
+        let pause = Arc::new(Pause {
+            started: Arc::clone(&started),
+            resumed: std::sync::Mutex::new(Some(resumed)),
+        });
+        // Hybrid reads reserve at least two pool slots. Register on every
+        // connection, holding them all until installation is complete; the
+        // validation and snapshot queries may borrow different connections.
+        let mut connections = Vec::new();
+        for _ in 0..db.pool.options().get_max_connections() {
+            connections.push(db.pool.acquire().await.unwrap());
+        }
+        for connection in &mut connections {
             let mut handle = connection.lock_handle().await.unwrap();
-            let context = Box::into_raw(Box::new(Pause {
-                started: Arc::clone(&started),
-                resumed,
-                paused: false,
-            }));
+            let context = Box::into_raw(Box::new(Arc::clone(&pause)));
             // SAFETY: the handle is exclusive and ownership of context passes
             // to SQLite, including cleanup if registration fails.
             let code = unsafe {
@@ -1818,15 +1827,21 @@ mod wal_maintenance_tests {
             };
             assert_eq!(code, libsqlite3_sys::SQLITE_OK);
         }
+        drop(connections);
         let reader = Arc::clone(&db);
-        let reading = tokio::spawn(async move {
+        let mut reading = tokio::spawn(async move {
             reader
                 .query_raw_sql("SELECT MAX(id) + test_wait_for_commit() AS id FROM frames")
                 .await
         });
-        tokio::time::timeout(Duration::from_secs(5), started.notified())
-            .await
-            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::select! {
+                _ = started.notified() => {},
+                result = &mut reading => panic!("query exited before the pause: {result:?}"),
+            }
+        })
+        .await
+        .expect("query did not reach the pause");
         db.execute_raw_sql_write("INSERT INTO frames(id,timestamp) VALUES(2,'2026-09-13')")
             .await
             .unwrap();
