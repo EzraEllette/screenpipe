@@ -520,6 +520,7 @@ impl DatabaseManager {
                     construction?;
                 }
                 crate::storage::schema::verify(&mut conn, &storage.descriptor).await?;
+                crate::storage::schema::upgrade_resident_frames(&mut conn).await?;
                 crate::storage::read_schema::upgrade(&mut conn, storage).await?;
                 storage.verify_catalog(&db_manager.pool).await?;
             }
