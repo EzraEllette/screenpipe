@@ -164,14 +164,10 @@ async fn run(
                 continue;
             }
             let last: Option<i64> = sqlx::query_scalar("SELECT max(frame_id) FROM frame_payloads").fetch_one(&pool).await?;
-            let range = if archive {
-                let columns = super::import::columns(&pool, "frames").await?;
-                let columns: Vec<_> = columns.into_iter().filter(|c| !c.starts_with("payload_")).collect();
-                let rows = super::import::batch(&pool, "frames", &columns, last, &storage.descriptor.budget).await?;
-                rows.first().zip(rows.last()).map(|(first,last)| (first.get::<i64,_>(0),last.get::<i64,_>(0)))
-            } else {
-                resident_range(&pool, "frames", last, storage.descriptor.budget.file_bytes).await?
-            };
+            // Staging is SQL-to-SQL. Only read IDs and lengths here so even a
+            // legacy frame larger than the decoder budget stays in SQLite.
+            let range = resident_range(&pool, "frames", last, storage.descriptor.budget.file_bytes,
+                archive.then_some(storage.descriptor.budget.file_rows)).await?;
             let Some((first, last)) = range else { break };
             let permit = writer.lock().await?;
             let mut conn = permit.pool().acquire().await?;
@@ -198,7 +194,7 @@ async fn run(
                 let range = if archive {
                     rows.first().zip(rows.last()).map(|(first,last)| (first.get::<i64,_>(0),last.get::<i64,_>(0)))
                 } else {
-                    resident_range(&pool, "_bulk_elements_source", None, storage.descriptor.budget.file_bytes).await?
+                    resident_range(&pool, "_bulk_elements_source", None, storage.descriptor.budget.file_bytes, None).await?
                 };
                 let Some((first, last)) = range else { break };
                 let permit = writer.lock().await?;
@@ -289,14 +285,16 @@ async fn resident_range(
     table: &str,
     after: Option<i64>,
     budget_bytes: usize,
+    row_limit: Option<usize>,
 ) -> Result<Option<(i64, i64)>, sqlx::Error> {
     let lower = after.map_or_else(|| "1".to_owned(), |id| format!("id>{id}"));
     let size = super::import::columns(pool, table).await?.iter().map(|name| {
         let quoted = format!("\"{}\"", name.replace('"', "\"\""));
         format!("CASE WHEN typeof({quoted}) IN ('integer','real') THEN 8 ELSE COALESCE(length(CAST({quoted} AS BLOB)),0) END")
     }).collect::<Vec<_>>().join("+");
+    let row_limit = row_limit.unwrap_or(128);
     let rows: Vec<(i64, i64)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT id,{size} FROM {table} WHERE {lower} ORDER BY id LIMIT 128"
+        "SELECT id,{size} FROM {table} WHERE {lower} ORDER BY id LIMIT {row_limit}"
     )))
     .fetch_all(pool)
     .await?;

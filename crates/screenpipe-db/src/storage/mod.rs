@@ -105,6 +105,15 @@ impl Default for StorageBudget {
 }
 
 impl StorageBudget {
+    /// Oversized legacy frames are resident history, not work for the sealer.
+    pub(super) fn staged_frame_bytes(&self, bytes: usize) -> usize {
+        if bytes <= self.record_bytes {
+            bytes
+        } else {
+            0
+        }
+    }
+
     pub fn validate(&self) -> Result<(), sqlx::Error> {
         if self.row_group_rows == 0
             || self.file_rows < self.row_group_rows
