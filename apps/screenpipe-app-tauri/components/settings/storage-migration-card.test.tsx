@@ -85,6 +85,20 @@ describe("storage migration", () => {
     expect(await screen.findByText("The original database has been deleted.")).toBeTruthy();
   });
 
+  it("keeps completed storage usable when the original cannot be deleted safely", async () => {
+    migrated({ can_delete_source: false });
+    mount();
+    expect(await screen.findByText("Your recordings use the new compressed storage.")).toBeTruthy();
+    expect(screen.getByText("The original database is kept for safety. Your migrated history remains available.")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "delete original database" })).toBeDisabled();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByRole("button", { name: "finish switching" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "migrate storage" })).toBeNull();
+    expect(onBusyChange).toHaveBeenLastCalledWith(false);
+    expect(commands.startStorageMigration).not.toHaveBeenCalled();
+    expect(commands.deleteOriginalStorageDatabase).not.toHaveBeenCalled();
+  });
+
   it("shows interrupted migration and offers resume and cancellation without deletion", async () => {
     Object.assign(status, { pending: true, can_cancel: true, error: "Verification failed; original kept." });
     mount();

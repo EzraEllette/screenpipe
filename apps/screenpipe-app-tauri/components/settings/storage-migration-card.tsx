@@ -113,7 +113,7 @@ export function StorageMigrationCard({ dataDirectory, onBusyChange }: {
             {status.bytes_saved != null && <p>Space saved: {bytes(status.bytes_saved)}</p>}
             <p className="text-muted-foreground">
               {status.in_place ? "Your existing database is now the smaller index. Space was recovered during migration." : Number(status.source_bytes) > 0
-                ? `Original database kept: ${bytes(status.source_bytes)}. It contains your history up to migration; new recordings go to the new storage.`
+                ? `Original database kept: ${bytes(status.source_bytes)}. New recordings go to the compressed storage.`
                 : "The original database has been deleted."}
             </p>
           </div>
@@ -143,6 +143,9 @@ export function StorageMigrationCard({ dataDirectory, onBusyChange }: {
               delete original database
             </Button>
             {!status.using_new_storage && <p className="text-xs text-muted-foreground">Available after Screenpipe is running on the new storage.</p>}
+            {status.using_new_storage && !status.can_delete_source && !busy && !status.pending && !failure && !status.blocked_reason && (
+              <p className="text-xs text-muted-foreground">The original database is kept for safety. Your migrated history remains available.</p>
+            )}
           </div>
         )}
 

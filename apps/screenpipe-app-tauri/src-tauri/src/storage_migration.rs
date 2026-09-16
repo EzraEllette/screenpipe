@@ -609,7 +609,12 @@ async fn storage_migration_status(
                     if completed && using_new_storage == Some(true) {
                         match server.db.retained_migration_source_bytes() {
                             Ok(bytes) => can_delete_source = bytes.is_some(),
-                            Err(error) => blocked_reason = Some(error.to_string()),
+                            // This guard only decides whether the old copy can be
+                            // deleted. It cannot invalidate a completed migration.
+                            Err(error) => tracing::debug!(
+                                %error,
+                                "original database cleanup unavailable; migrated storage remains active"
+                            ),
                         }
                     }
                 }

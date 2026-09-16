@@ -127,6 +127,23 @@ describe("automatic storage migration prompt", () => {
     expect(commands.startStorageMigration).not.toHaveBeenCalled();
   });
 
+  it("does not interrupt completed migrations when the original is kept for safety", async () => {
+    Object.assign(status, {
+      completed: true, using_new_storage: true, can_migrate: false,
+      can_delete_source: false, generation: "migrated-generation",
+    });
+    for (const session of ["app-launch-1", "app-launch-2"]) {
+      status.app_session_id = session;
+      const app = render(<StorageMigrationPrompt activity={idle} />);
+      await waitFor(() => expect(commands.getStorageMigrationStatus).toHaveBeenCalled());
+      expect(screen.queryByRole("alertdialog")).toBeNull();
+      app.unmount();
+      commands.getStorageMigrationStatus.mockClear();
+    }
+    expect(commands.startStorageMigration).not.toHaveBeenCalled();
+    expect(commands.deleteOriginalStorageDatabase).not.toHaveBeenCalled();
+  });
+
   it.each(["failure", "interruption"])("requires an explicit retry after %s across app launches", async (reason) => {
     Object.assign(status, {
       pending: true, in_place: true,
