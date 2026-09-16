@@ -25,6 +25,100 @@ async fn fixture(root: &std::path::Path) {
 }
 
 #[tokio::test]
+async fn migration_diagnostics_identify_the_record_that_exceeds_the_budget() {
+    use screenpipe_db::storage::diagnostics;
+    use std::time::Duration;
+    let root = tempfile::tempdir().unwrap();
+    let db = DatabaseManager::new(
+        root.path().join("db.sqlite").to_str().unwrap(),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    let mut tx = db.begin_immediate_with_retry().await.unwrap();
+    sqlx::query("INSERT INTO frames(id,timestamp) VALUES(1,'2026-09-16')")
+        .execute(&mut **tx.conn())
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO elements(id,frame_id,source,role,properties) VALUES(7,1,'accessibility','AXText',?)")
+        .bind("p".repeat(2048)).execute(&mut **tx.conn()).await.unwrap();
+    tx.commit().await.unwrap();
+    db.close().await;
+    let mut options = MigrationOptions::default();
+    options.budget.record_bytes = 1024;
+    options.budget.file_bytes = 1024;
+    let error = migrate(root.path(), Default::default(), options)
+        .await
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("element record exceeds sealing budget"));
+    let snapshot = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if let Some(snapshot) = diagnostics::recent(root.path())
+                .unwrap()
+                .into_iter()
+                .find(|s| s.status == "failed")
+            {
+                break snapshot;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        snapshot.failure_stage.as_deref(),
+        Some("reading_elements_to_seal")
+    );
+    assert_eq!(snapshot.table.as_deref(), Some("elements"));
+    assert_eq!((snapshot.first_id, snapshot.last_id), (Some(7), Some(7)));
+    assert!(snapshot.batch_bytes.unwrap() > 1024);
+    assert_eq!(snapshot.error.as_deref(), Some(error.to_string().as_str()));
+    assert!(!root.path().join("storage-migration-complete.json").exists());
+}
+
+#[tokio::test]
+async fn migration_diagnostics_preserve_table_totals_and_verified_completion() {
+    use screenpipe_db::storage::diagnostics;
+    use std::time::Duration;
+    let root = tempfile::tempdir().unwrap();
+    fixture(root.path()).await;
+    let report = migrate(root.path(), Default::default(), Default::default())
+        .await
+        .unwrap();
+    let snapshot = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if let Some(snapshot) = diagnostics::recent(root.path())
+                .unwrap()
+                .into_iter()
+                .find(|s| s.status == "completed")
+            {
+                break snapshot;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(snapshot.kind, "conversion");
+    assert_eq!(snapshot.stage, "saving_completion_receipt");
+    assert_eq!(snapshot.table_records["frames"], report.frames);
+    assert_eq!(snapshot.table_records["elements"], 48);
+    assert_eq!(snapshot.completed_records, Some(96));
+    assert_eq!(snapshot.total_records, Some(96));
+    assert!(snapshot.error.is_none());
+    assert!(root
+        .path()
+        .join("storage-migration-complete.json")
+        .is_file());
+    assert!(!root.path().join("storage-migration.json").exists());
+    let json = serde_json::to_string(&snapshot).unwrap();
+    assert!(!json.contains("searchable element"));
+    assert!(!json.contains("capture detail"));
+}
+
+#[tokio::test]
 #[ignore = "migration throughput benchmark; generates an isolated recording history"]
 async fn migration_throughput() {
     use std::{sync::Mutex, time::Instant};

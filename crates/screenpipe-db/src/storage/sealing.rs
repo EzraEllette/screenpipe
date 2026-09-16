@@ -229,9 +229,12 @@ impl HybridStorage {
         pool: &SqlitePool,
         writer: &SqliteWritePool,
     ) -> Result<usize, sqlx::Error> {
+        super::diagnostics::stage("waiting_for_frame_sealer");
         let _job = self.file_job.lock().await;
         // Existing oversized frames remain readable through the staged SQLite
         // path. Filter before LIMIT so they cannot starve later sealable frames.
+        super::diagnostics::batch("frames", None, None, None, None);
+        super::diagnostics::stage("selecting_staged_frames");
         let candidates = sqlx::query("SELECT p.frame_id,p.bytes FROM frame_payloads p CROSS JOIN storage_metadata m WHERE p.state='staged' AND p.bytes<=? AND p.policy=m.policy AND (p.completed_surfaces & m.required_surfaces)=m.required_surfaces ORDER BY p.frame_id LIMIT ?")
             .bind(self.descriptor.budget.record_bytes as i64)
             .bind(self.descriptor.budget.file_rows as i64).fetch_all(pool).await?;
@@ -248,6 +251,14 @@ impl HybridStorage {
         if ids.is_empty() {
             return self.seal_bulk(pool, writer).await;
         }
+        super::diagnostics::batch(
+            "frames",
+            ids.first().copied(),
+            ids.last().copied(),
+            Some(ids.len() as u64),
+            Some(bytes as u64),
+        );
+        super::diagnostics::stage("reading_frame_payloads");
         let payloads: Vec<_> = self
             .read(pool, &ids, Projection::All)
             .await?
@@ -286,6 +297,7 @@ impl HybridStorage {
         let search = base.join("search.parquet");
         let detail = base.join("detail.parquet");
         {
+            super::diagnostics::stage("reserving_frame_archive");
             let permit = writer.lock().await?;
             sqlx::query("INSERT INTO payload_files(id,search_path,detail_path,schema_version,state,row_count) VALUES(?,?,?,?,'encoding',?)")
                 .bind(&id).bind(search.to_string_lossy().as_ref()).bind(detail.to_string_lossy().as_ref()).bind(codec::SCHEMA_VERSION as i64).bind(rows.len() as i64).execute(permit.pool()).await?;
@@ -297,11 +309,13 @@ impl HybridStorage {
         let detail_file = checked_path(&self.root, &detail)?;
         let encode_rows = rows.clone();
         let budget = self.descriptor.budget.clone();
+        super::diagnostics::stage("waiting_for_frame_encoder");
         let decoder = Arc::clone(&self.decoder)
             .acquire_owned()
             .await
             .map_err(|_| sqlx::Error::PoolClosed)?;
         let job_lease = Arc::clone(&self.leases).read_owned().await;
+        super::diagnostics::stage("encoding_and_verifying_frames");
         let (search_hash, detail_hash) = tokio::task::spawn_blocking(move || {
             let _job_lease = job_lease;
             let _decoder = decoder;
@@ -326,6 +340,7 @@ impl HybridStorage {
         })
         .await
         .map_err(storage_error)??;
+        super::diagnostics::stage("syncing_frame_archive");
         let mut ancestor = directory.as_path();
         loop {
             sync_directory(ancestor)?;
@@ -337,6 +352,7 @@ impl HybridStorage {
                 .ok_or_else(|| storage_error("invalid payload directory"))?;
         }
         super::faults::checkpoint("seal_files_synced");
+        super::diagnostics::stage("publishing_frame_archive");
         let permit = writer.lock().await?;
         let mut tx = permit.pool().begin().await?;
         let current: (String, i64) =
@@ -392,6 +408,7 @@ impl HybridStorage {
                 .bind(old).bind(old).execute(&mut *tx).await?;
         }
         super::faults::checkpoint("seal_before_commit");
+        super::diagnostics::stage("committing_frame_archive");
         tx.commit().await?;
         super::faults::checkpoint("seal_committed");
         Ok(rows.len())
