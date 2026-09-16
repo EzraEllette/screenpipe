@@ -37,6 +37,7 @@ pub(super) async fn construction_checkpoint(
     }
     // Let finishing cursors drain within the connection's busy timeout. FULL
     // copies committed frames without requesting a WAL restart under the pools.
+    super::diagnostics::stage("checkpointing_wal");
     let row = sqlx::query("PRAGMA wal_checkpoint(FULL)")
         .fetch_one(&mut *conn)
         .await?;

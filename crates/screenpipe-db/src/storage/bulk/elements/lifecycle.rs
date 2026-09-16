@@ -49,6 +49,8 @@ pub(crate) async fn seal(
     pool: &SqlitePool,
     writer: &SqliteWritePool,
 ) -> Result<usize, sqlx::Error> {
+    crate::storage::diagnostics::batch("elements", None, None, None, None);
+    crate::storage::diagnostics::stage("selecting_staged_elements");
     let id: Option<i64> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
         "SELECT id FROM _bulk_element_rows WHERE _archive_deleted=0 AND ({}) ORDER BY id LIMIT 1",
         TABLE.eligible
@@ -80,6 +82,14 @@ async fn encode(
         .join(format!("{}.parquet", uuid::Uuid::new_v4()));
     let path = storage.payload_path(&relative)?;
     std::fs::create_dir_all(path.parent().unwrap())?;
+    crate::storage::diagnostics::batch(
+        "elements",
+        rows.first().map(|r| r.id),
+        rows.last().map(|r| r.id),
+        Some(rows.len() as u64),
+        Some(rows.iter().map(|r| r.bytes() as u64).sum()),
+    );
+    crate::storage::diagnostics::stage("reserving_element_archive");
     let id = {
         let permit = writer.lock().await?;
         sqlx::query(
@@ -107,10 +117,12 @@ async fn encode(
     };
     let budget = storage.descriptor.budget.clone();
     let file = path.clone();
+    crate::storage::diagnostics::stage("waiting_for_element_encoder");
     let decoder = Arc::clone(&storage.decoder)
         .acquire_owned()
         .await
         .map_err(|_| sqlx::Error::PoolClosed)?;
+    crate::storage::diagnostics::stage("encoding_and_verifying_elements");
     let hash = tokio::task::spawn_blocking(move || {
         let _decoder = decoder;
         let hash = codec::write(&file, &TABLE, &rows)?;
@@ -121,6 +133,7 @@ async fn encode(
     })
     .await
     .map_err(storage_error)??;
+    crate::storage::diagnostics::stage("syncing_element_archive");
     let mut directory = path.parent().unwrap();
     loop {
         sync_directory(directory)?;
@@ -198,6 +211,14 @@ async fn rewrite(
     loop {
         let lower = after.map_or_else(|| "1".to_owned(), |id| format!("id>{id}"));
         let sql=format!("SELECT id,_archive_generation,{} FROM elements WHERE id BETWEEN ? AND ? AND {lower} AND ({}) ORDER BY id{limit}",names(),TABLE.eligible);
+        crate::storage::diagnostics::batch(
+            "elements",
+            Some(after.unwrap_or(first)),
+            Some(last),
+            None,
+            None,
+        );
+        crate::storage::diagnostics::stage("reading_elements_to_seal");
         let mut stream = sqlx::query(sqlx::AssertSqlSafe(sql))
             .bind(first)
             .bind(last)
@@ -207,6 +228,13 @@ async fn rewrite(
         while let Some(row) = stream.try_next().await? {
             let row = record(&row)?;
             if row.bytes() > storage.descriptor.budget.record_bytes {
+                crate::storage::diagnostics::batch(
+                    "elements",
+                    Some(row.id),
+                    Some(row.id),
+                    Some(1),
+                    Some(row.bytes() as u64),
+                );
                 return Err(storage_error("element record exceeds sealing budget"));
             }
             if !rows.is_empty()
@@ -233,6 +261,7 @@ async fn rewrite(
     } else {
         return Ok(0);
     };
+    crate::storage::diagnostics::stage("publishing_element_archive");
     let permit = writer.lock().await?;
     let mut tx = permit.pool().begin().await?;
     let current: i64 = sqlx::query_scalar("SELECT version FROM _bulk_element_state")
@@ -298,6 +327,7 @@ async fn rewrite(
         .execute(&mut *tx)
         .await?;
     crate::storage::faults::checkpoint("bulk_before_commit");
+    crate::storage::diagnostics::stage("committing_element_archive");
     tx.commit().await?;
     crate::storage::faults::checkpoint("bulk_committed");
     let count = files.iter().map(|f| f.rows).sum();

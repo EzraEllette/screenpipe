@@ -796,11 +796,16 @@ async fn start_storage_migration_inner(
     tauri::async_runtime::spawn(async move {
         let _lifecycle = lifecycle;
         let _awake = awake;
-        let mut result = async {
+        let telemetry_app = app.clone();
+        let migration = async {
+            screenpipe_db::storage::diagnostics::app_version(
+                app.package_info().version.to_string(),
+            );
             let recording = app.state::<RecordingState>();
             // A completed legacy migration may retain its original source.
             // Verify and clean it up without pausing capture.
             if !background || !status.can_delete_source {
+                screenpipe_db::storage::diagnostics::stage("pausing_recording");
                 crate::recording::stop_screenpipe_inner(&recording).await?;
                 if !status.completed || status.pending {
                     screenpipe_db::storage::migrate_with_progress(
@@ -823,9 +828,11 @@ async fn start_storage_migration_inner(
                         available_bytes: None,
                     },
                 );
+                screenpipe_db::storage::diagnostics::stage("starting_migrated_engine");
                 crate::recording::spawn_screenpipe_inner(&recording, app.clone()).await?;
             }
             require_selected_root(&app, &root.display().to_string())?;
+            screenpipe_db::storage::diagnostics::stage("verifying_running_storage");
             verify_running(&app, &root).await?;
             let descriptor = StorageDescriptor::read(&root)
                 .map_err(|e| e.to_string())?
@@ -860,7 +867,13 @@ async fn start_storage_migration_inner(
             }
             clear_migration_error(&root)?;
             Ok::<_, String>(())
-        }
+        };
+        let mut result = screenpipe_db::storage::diagnostics::observe(
+            &root,
+            "conversion",
+            move |event, snapshot| track_migration_diagnostic(&telemetry_app, event, snapshot),
+            migration,
+        )
         .await;
         if let Err(error) = &result {
             report_migration_failure(&app, &root, error);
@@ -878,6 +891,35 @@ async fn start_storage_migration_inner(
         finish_operation(&app, &root, &result);
     });
     Ok(())
+}
+
+fn track_migration_diagnostic(
+    app: &tauri::AppHandle,
+    event: &str,
+    snapshot: &screenpipe_db::storage::diagnostics::Snapshot,
+) {
+    let event = match event {
+        "started" => "storage_migration_started",
+        "stalled" => "storage_migration_stalled",
+        "failed" | "interrupted" => "storage_migration_failed",
+        // Completion continues to require the existing verified receipt event.
+        _ => return,
+    };
+    let Some(analytics) = app.try_state::<Arc<crate::analytics::AnalyticsManager>>() else {
+        return;
+    };
+    let mut properties = serde_json::to_value(snapshot).unwrap_or_default();
+    // Keep the bounded error locally for feedback redaction. Exception strings
+    // can contain paths; remote counters/stages never include those strings.
+    if let Some(properties) = properties.as_object_mut() {
+        properties.remove("error");
+    }
+    let analytics = Arc::clone(&analytics);
+    tauri::async_runtime::spawn(async move {
+        if let Err(error) = analytics.send_event(event, Some(properties)).await {
+            tracing::warn!(%error, event, "migration diagnostic telemetry failed");
+        }
+    });
 }
 
 fn report_migration_failure(app: &tauri::AppHandle, root: &Path, error: &str) {

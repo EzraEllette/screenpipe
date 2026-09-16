@@ -43,6 +43,8 @@ pub(super) async fn batch(
             super::bulk::FILE_ROWS
         }
     );
+    super::diagnostics::batch(table, after, None, None, None);
+    super::diagnostics::stage("reading_resident_batch");
     let mut stream = sqlx::query(sqlx::AssertSqlSafe(sql))
         .bind(after.unwrap_or(i64::MIN))
         .fetch(source);
@@ -62,6 +64,13 @@ pub(super) async fn batch(
             };
         }
         if size > budget.decode_bytes / 2 {
+            super::diagnostics::batch(
+                table,
+                Some(row.get(0)),
+                Some(row.get(0)),
+                Some(1),
+                Some(size as u64),
+            );
             return Err(storage_error(format!(
                 "migration record in {table} exceeds decode budget"
             )));
@@ -72,6 +81,13 @@ pub(super) async fn batch(
         bytes += size;
         rows.push(row);
     }
+    super::diagnostics::batch(
+        table,
+        rows.first().map(|r| r.get(0)),
+        rows.last().map(|r| r.get(0)),
+        Some(rows.len() as u64),
+        Some(bytes as u64),
+    );
     Ok(rows)
 }
 

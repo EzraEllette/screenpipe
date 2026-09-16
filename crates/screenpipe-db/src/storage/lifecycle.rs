@@ -199,6 +199,8 @@ pub async fn recover_interrupted_migration_with_progress(
     config: DbConfig,
     progress: impl Fn(MigrationProgress) + Send + Sync,
 ) -> Result<(), sqlx::Error> {
+    // Ordinary startups must not create a diagnostic attempt that displaces
+    // the preceding conversion failure from the bounded feedback history.
     if !root.join("storage-migration.json").exists() {
         return Ok(());
     }
@@ -208,6 +210,20 @@ pub async fn recover_interrupted_migration_with_progress(
     if migration_recording_ready(root)? {
         return Ok(());
     }
+    super::diagnostics::observe(
+        root,
+        "recovery",
+        |_, _| {},
+        recover_observed(root, config, progress),
+    )
+    .await
+}
+
+async fn recover_observed(
+    root: &Path,
+    config: DbConfig,
+    progress: impl Fn(MigrationProgress) + Send + Sync,
+) -> Result<(), sqlx::Error> {
     let root = root.canonicalize()?;
     let lock = std::fs::OpenOptions::new()
         .read(true)
@@ -343,6 +359,21 @@ pub async fn migrate_with_progress(
     options: MigrationOptions,
     progress: impl Fn(MigrationProgress) + Send + Sync,
 ) -> Result<MigrationReport, sqlx::Error> {
+    super::diagnostics::observe(
+        root,
+        "conversion",
+        |_, _| {},
+        migrate_observed(root, config, options, progress),
+    )
+    .await
+}
+
+async fn migrate_observed(
+    root: &Path,
+    config: DbConfig,
+    options: MigrationOptions,
+    progress: impl Fn(MigrationProgress) + Send + Sync,
+) -> Result<MigrationReport, sqlx::Error> {
     // Old unpublished conversions still own a complete original. Retire only
     // their verified disposable candidate before choosing the new strategy.
     if root.join("storage-migration.json").exists() && read_journal(root)?.format == 1 {
@@ -382,6 +413,7 @@ pub async fn migrate_with_progress(
             ));
         }
         super::reclaim::probe(&root)?;
+        super::diagnostics::stage("opening_source");
         let source = DatabaseManager::new_with_storage(
             source_path
                 .to_str()
@@ -412,6 +444,10 @@ pub async fn migrate_with_progress(
             frozen.rollback().await?;
             Ok::<_,sqlx::Error>((receipts,searches))
         }.await;
+        if let Err(error) = &original {
+            super::diagnostics::failure(error);
+        }
+        super::diagnostics::stage("closing_source");
         source.close().await;
         drop(source);
         let (receipts, searches) = original?;
@@ -460,7 +496,10 @@ pub async fn migrate_with_progress(
         super::faults::checkpoint("migration_before_rename");
         journal
     };
+    super::diagnostics::tables(&journal.source);
     if journal.phase == Phase::Paused {
+        progress(MigrationProgress::phase("checking history before retry"));
+        super::diagnostics::stage("opening_retry_history");
         // Recording may have appended, edited, or retained history since the
         // failure. The explicit retry verifies that current logical dataset,
         // keeping all already committed archive files and their generations.
@@ -482,6 +521,7 @@ pub async fn migrate_with_progress(
         )
         .await?;
         let refreshed = async {
+            super::diagnostics::stage("retry_parity");
             let receipts = table_receipts(&db, Some(&journal.source)).await?;
             let mut searches = Vec::new();
             for (term, _) in &journal.search_receipts {
@@ -494,9 +534,14 @@ pub async fn migrate_with_progress(
             Ok::<_, sqlx::Error>((receipts, searches))
         }
         .await;
+        if let Err(error) = &refreshed {
+            super::diagnostics::failure(error);
+        }
+        super::diagnostics::stage("closing_retry_history");
         db.close().await;
         let (receipts, searches) = refreshed?;
         journal.source = receipts;
+        super::diagnostics::tables(&journal.source);
         journal.search_receipts = searches;
         journal.snapshot = source_identity(&root)?;
         journal.report = None;
@@ -556,6 +601,7 @@ pub async fn migrate_with_progress(
     }
     if journal.phase == Phase::Ready {
         progress(MigrationProgress::phase("checking storage and search"));
+        super::diagnostics::stage("opening_verification_history");
         let db = DatabaseManager::new_with_storage(
             index.to_str().unwrap(),
             config.clone(),
@@ -569,12 +615,14 @@ pub async fn migrate_with_progress(
         .await?;
         let verification = async {
             verify_integrity(&db.pool).await?;
+            super::diagnostics::stage("verifying_archives");
             db.verify_storage().await?;
             if table_receipts(&db, Some(&journal.source)).await? != journal.source {
                 return Err(storage_error(
                     "migration logical data differs; converted data has been kept for diagnosis",
                 ));
             }
+            super::diagnostics::stage("verifying_search");
             for (term, expected) in &journal.search_receipts {
                 let actual: Vec<i64> = sqlx::query_scalar(MIGRATION_SEARCH)
                     .bind(term)
@@ -587,6 +635,10 @@ pub async fn migrate_with_progress(
             Ok::<_, sqlx::Error>(())
         }
         .await;
+        if let Err(error) = &verification {
+            super::diagnostics::failure(error);
+        }
+        super::diagnostics::stage("closing_verification_history");
         db.close().await;
         verification?;
         journal.report = Some(MigrationReport {
@@ -607,11 +659,13 @@ pub async fn migrate_with_progress(
         });
         durable_json(&journal_path, &journal)?;
         super::faults::checkpoint("migration_ready");
+        super::diagnostics::stage("activating_storage");
         durable_json(&root.join("storage.json"), &journal.descriptor)?;
         super::faults::checkpoint("migration_activated");
         journal.phase = Phase::Active;
         durable_json(&journal_path, &journal)?;
     }
+    super::diagnostics::stage("reopening_migrated_storage");
     let reopened = DatabaseManager::new_with_storage(
         index.to_str().unwrap(),
         config,
@@ -626,11 +680,13 @@ pub async fn migrate_with_progress(
     let check = sqlx::query("SELECT id FROM frames LIMIT 1")
         .fetch_optional(&reopened.pool)
         .await;
+    super::diagnostics::stage("closing_reopen_probe");
     reopened.close().await;
     check?;
     let report = journal
         .report
         .ok_or_else(|| storage_error("migration report is missing"))?;
+    super::diagnostics::stage("saving_completion_receipt");
     durable_json(&root.join("storage-migration-complete.json"), &report)?;
     super::faults::checkpoint("migration_completed");
     std::fs::remove_file(journal_path)?;
@@ -888,6 +944,7 @@ pub async fn cancel_migration(root: &Path, config: DbConfig) -> Result<(), sqlx:
 }
 
 pub(super) async fn verify_integrity(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+    super::diagnostics::stage("sqlite_integrity_check");
     let checks: Vec<String> = sqlx::query_scalar("PRAGMA integrity_check")
         .fetch_all(pool)
         .await?;
@@ -1028,6 +1085,8 @@ pub(super) async fn table_receipts(
     };
     let mut result = Vec::new();
     for table in tables {
+        super::diagnostics::batch(&table, None, None, None, None);
+        super::diagnostics::stage("reading_parity_schema");
         let mut columns: Vec<String> =
             sqlx::query_scalar("SELECT name FROM pragma_table_info(?) ORDER BY cid")
                 .bind(&table)
@@ -1068,6 +1127,8 @@ pub(super) async fn table_receipts(
                 quote(&table),
                 if first {">="} else {">"}
             );
+            super::diagnostics::batch(&table, Some(last), None, Some(count), None);
+            super::diagnostics::stage("reading_parity_rows");
             let rows = sqlx::query(sqlx::AssertSqlSafe(sql))
                 .bind(last)
                 .fetch_all(&db.pool)
@@ -1076,6 +1137,7 @@ pub(super) async fn table_receipts(
                 break;
             }
             first = false;
+            super::diagnostics::stage("hashing_parity_rows");
             let payloads = if table == "frames" && db.storage.is_some() {
                 let ids: Vec<i64> = rows.iter().map(|r| r.get("id")).collect();
                 db.frame_payloads(&ids, Projection::All).await?

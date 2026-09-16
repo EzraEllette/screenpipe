@@ -80,6 +80,7 @@ async fn run(
     if !archive {
         progress(MigrationProgress::phase("checking interrupted storage"));
     }
+    super::diagnostics::stage("checking_index_before_open");
     crate::recovery::verify_database_before_reopen(&index).await?;
     crate::db::register_sqlite_extensions()?;
     // Do not close this fd while SQLite holds its process-wide Unix locks.
@@ -126,6 +127,7 @@ async fn run(
                 schema::finish_step(&mut tx,"original-triggers").await?;
                 tx.commit().await?;
             }
+            super::diagnostics::stage("building_migration_schema");
             schema::bootstrap_in_place(&mut conn, &storage.descriptor).await?;
             super::read_schema::upgrade(&mut conn, &storage).await?;
             if !schema::converted_step(&mut conn, "suspend-original-triggers").await? {
@@ -163,15 +165,21 @@ async fn run(
                 report(&storage, &pool, original_allocated, total_records, progress, &mut last_report, reclaimed).await?;
                 continue;
             }
+            super::diagnostics::batch("frames", None, None, None, None);
+            super::diagnostics::stage("selecting_resident_frames");
             let last: Option<i64> = sqlx::query_scalar("SELECT max(frame_id) FROM frame_payloads").fetch_one(&pool).await?;
             // Staging is SQL-to-SQL. Only read IDs and lengths here so even a
             // legacy frame larger than the decoder budget stays in SQLite.
             let range = resident_range(&pool, "frames", last, storage.descriptor.budget.file_bytes,
                 archive.then_some(storage.descriptor.budget.file_rows)).await?;
             let Some((first, last)) = range else { break };
+            super::diagnostics::batch("frames", Some(first), Some(last), None, None);
+            super::diagnostics::stage("waiting_for_frame_writer");
             let permit = writer.lock().await?;
+            super::diagnostics::stage("waiting_for_frame_connection");
             let mut conn = permit.pool().acquire().await?;
             let mut tx = conn.begin().await?;
+            super::diagnostics::stage("staging_frame_payloads");
             schema::stage_frames(&mut tx, first, last).await?;
             tx.commit().await?;
             schema::construction_checkpoint(&mut conn).await?;
@@ -197,9 +205,13 @@ async fn run(
                     resident_range(&pool, "_bulk_elements_source", None, storage.descriptor.budget.file_bytes, None).await?
                 };
                 let Some((first, last)) = range else { break };
+                super::diagnostics::batch("elements", Some(first), Some(last), Some(rows.len() as u64), None);
+                super::diagnostics::stage("waiting_for_element_writer");
                 let permit = writer.lock().await?;
+                super::diagnostics::stage("waiting_for_element_connection");
                 let mut conn = permit.pool().acquire().await?;
                 let mut tx = conn.begin().await?;
+                super::diagnostics::stage("staging_element_rows");
                 if archive {
                     super::import::insert(&mut tx, "elements", &columns, &rows, true).await?;
                 } else {
@@ -210,7 +222,9 @@ async fn run(
                         .bind(first).bind(last).execute(&mut *tx).await?;
                     bulk::elements::import_batch(&mut tx, first, last).await?;
                 }
+                super::diagnostics::stage("deleting_staged_source_elements");
                 sqlx::query("DELETE FROM _bulk_elements_source WHERE id BETWEEN ? AND ?").bind(first).bind(last).execute(&mut *tx).await?;
+                super::diagnostics::stage("committing_element_staging");
                 tx.commit().await?;
                 schema::construction_checkpoint(&mut conn).await?;
                 super::faults::checkpoint("migration_batch_staged");
@@ -219,6 +233,7 @@ async fn run(
                 if archive { reclaim(&storage, &writer, file, &mut reclamation, false).await?; }
             }
             let permit = writer.lock().await?;
+            super::diagnostics::stage("dropping_empty_element_source");
             sqlx::query("DROP TABLE _bulk_elements_source").execute(permit.pool()).await?;
         }
         if !archive { progress(MigrationProgress::phase("restoring history search indexes")); }
@@ -247,6 +262,7 @@ async fn run(
         {
             let permit = writer.lock().await?;
             let mut conn = permit.pool().acquire().await?;
+            super::diagnostics::stage("building_final_indexes");
             bulk::finish_indexes(&mut conn).await?;
             let mut tx=conn.begin().await?;
             let original: Vec<String> = sqlx::query_scalar("SELECT sql FROM _storage_conversion_triggers WHERE restore=1").fetch_all(&mut *tx).await?;
@@ -262,16 +278,19 @@ async fn run(
         }
         if archive {
             reclaim(&storage, &writer, file, &mut reclamation, true).await?;
+            super::diagnostics::counts(total_records, total_records);
             progress(MigrationProgress { message: "conversion complete", completed_records: Some(total_records), total_records: Some(total_records),
                 bytes_saved: Some(original_allocated.saturating_sub(super::reclaim::footprint(&storage.root)?)), available_bytes: Some(fs2::available_space(&storage.root)?) });
         }
         Ok(())
     }.await;
     if let Err(ref error) = result {
+        super::diagnostics::failure(error);
         if let Some(code) = crate::sqlite_error::sqlite_hard_fault_code(error) {
             screenpipe_sqlite_coordinator::latch_sqlite_hard_fault(&index, code);
         }
     }
+    super::diagnostics::stage("closing_conversion_pool");
     pool.close().await;
     drop(owner.file.take());
     drop(owner.lease.take());
@@ -318,7 +337,9 @@ async fn reclaim(
     reclamation: &mut super::reclaim::Reclaimer,
     force: bool,
 ) -> Result<bool, sqlx::Error> {
+    super::diagnostics::stage("waiting_for_reclamation_writer");
     let permit = writer.lock().await?;
+    super::diagnostics::stage("waiting_for_reclamation_connection");
     let mut conn = permit.pool().acquire().await?;
     let reclaimed = reclamation
         .run(
@@ -440,6 +461,7 @@ async fn report(
     {
         return Ok(());
     }
+    super::diagnostics::stage("counting_converted_records");
     let frames: i64 =
         sqlx::query_scalar("SELECT count(*) FROM frame_payloads WHERE state='sealed'")
             .fetch_one(pool)
@@ -448,6 +470,8 @@ async fn report(
         sqlx::query_scalar("SELECT COALESCE(sum(rows),0) FROM _bulk_files WHERE state='published'")
             .fetch_one(pool)
             .await?;
+    super::diagnostics::counts((frames + bulk) as u64, total);
+    super::diagnostics::stage("measuring_reclaimed_space");
     progress(MigrationProgress {
         message: "converting and freeing disk space",
         completed_records: Some((frames + bulk) as u64),

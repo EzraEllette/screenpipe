@@ -9,6 +9,7 @@ mod bindings;
 pub(crate) mod bulk;
 mod codec;
 mod command;
+pub mod diagnostics;
 mod faults;
 mod import;
 mod in_place;

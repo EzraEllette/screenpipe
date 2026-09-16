@@ -202,6 +202,7 @@ pub(super) async fn free_leaves(
             "checkpointed SQLite freelist header is invalid",
         ));
     }
+    super::diagnostics::stage("scanning_free_pages");
     let mut leaves = vec![0_u8; bitmap_bytes];
     let mut seen = vec![0_u8; bitmap_bytes];
     let mut count = 0;
@@ -236,6 +237,7 @@ pub(super) async fn free_leaves(
     }
     // 64 KiB also covers NTFS sparse deallocation units. Only wholly free
     // aligned extents are touched, including on databases with smaller pages.
+    super::diagnostics::stage("reclaiming_disk_extents");
     let alignment = 65536_u64;
     let mut first = None;
     for index in 0..=pages as usize {
@@ -251,6 +253,7 @@ pub(super) async fn free_leaves(
             }
         }
     }
+    super::diagnostics::stage("syncing_reclaimed_database");
     file.sync_all()?;
     Ok(())
 }
