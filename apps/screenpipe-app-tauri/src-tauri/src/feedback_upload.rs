@@ -26,7 +26,7 @@ use uuid::Uuid;
 
 const COMPLETED_EVENT: &str = "feedback-upload-completed";
 const MAX_LOG_FILES: usize = 5;
-const MAX_LOG_BYTES: u64 = 100 * 1024;
+const MAX_LOG_BYTES: u64 = 1024 * 1024;
 const MAX_ATTACHMENT_BYTES: usize = 50 * 1024 * 1024;
 const API_TIMEOUT: Duration = Duration::from_secs(30);
 const LOG_READ_TIMEOUT: Duration = Duration::from_secs(60);
