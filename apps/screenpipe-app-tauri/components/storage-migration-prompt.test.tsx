@@ -1,7 +1,7 @@
 // screenpipe — AI that knows everything you've seen, said, or heard
 // https://screenpipe.com
 
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { StorageMigrationActivity, StorageMigrationStatus } from "@/lib/utils/tauri";
 
@@ -154,6 +154,27 @@ describe("automatic storage migration prompt", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("Could not prevent sleep");
     fireEvent.click(screen.getByRole("button", { name: "try again" }));
     await waitFor(() => expect(commands.startStorageMigration).toHaveBeenCalledTimes(2));
+  });
+
+  it("keeps one explicit retry pending until the native restart releases storage", async () => {
+    Object.assign(status, { pending: true, in_place: true, error: "The previous storage migration did not finish." });
+    let finishRestart!: () => void;
+    commands.startStorageMigration.mockImplementationOnce(() => new Promise((resolve) => {
+      finishRestart = () => resolve({ status: "ok", data: null });
+    }));
+    const app = render(<StorageMigrationPrompt activity={idle} />);
+    fireEvent.click(await screen.findByRole("button", { name: "try again" }));
+    const starting = screen.getByRole("button", { name: "starting…" });
+    expect(starting).toBeDisabled();
+    expect(screen.getByRole("button", { name: "do later" })).toBeDisabled();
+    fireEvent.click(starting);
+    expect(commands.startStorageMigration).toHaveBeenCalledOnce();
+    expect(commands.startStorageMigration).toHaveBeenCalledWith("/fixture");
+
+    await act(async () => finishRestart());
+    app.rerender(<StorageMigrationPrompt activity={{ ...idle, busy: true, message: "pausing recording" }} />);
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    expect(commands.startStorageMigration).toHaveBeenCalledOnce();
   });
 
   it("offers recovery for an interrupted migration", async () => {
