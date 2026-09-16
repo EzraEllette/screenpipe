@@ -23,6 +23,7 @@ export interface LocalGatewayHarnessOptions {
 	privateCostControls?: Partial<Record<PrivateControlName, string | undefined>>;
 	providerReply?: string;
 	cloudflareSpendRules?: boolean;
+	ttsStatus?: number;
 }
 
 export interface LocalGatewayOutboundRequest {
@@ -186,6 +187,7 @@ export class LocalGatewayHarness {
 				port: options.port ?? 0,
 				bindings: {
 					...jsonBindings(options.privateCostControls),
+					...(options.ttsStatus !== undefined ? { TTS_ENABLED: 'true', ELEVENLABS_VOICE_ID: 'fictionalVoice123', ELEVENLABS_USD_PER_CHARACTER: '0.0001' } : {}),
 					OPENAI_API_KEY: 'screenpipe-local-e2e-only',
 					AI_GATEWAY_SERVICE_TOKEN: LOCAL_GATEWAY_SERVICE_TOKEN,
 					MODEL_GATING_ENABLED: 'true',
@@ -219,7 +221,8 @@ export class LocalGatewayHarness {
 					const gatewayAnalytics = cloudflareSpendRules &&
 						request.method === 'POST' &&
 						request.url === 'https://api.cloudflare.com/client/v4/graphql';
-					const expected = gatewayProvider || gatewaySettings || gatewayAnalytics;
+					const narration = options.ttsStatus !== undefined && request.method === 'POST' && request.url === `${cloudflareGatewayRoot}/elevenlabs/v1/text-to-speech/fictionalVoice123?output_format=mp3_44100_128`;
+					const expected = narration || gatewayProvider || gatewaySettings || gatewayAnalytics;
 					harness.outboundRequests.push({
 						url: request.url,
 						method: request.method,
@@ -230,6 +233,7 @@ export class LocalGatewayHarness {
 					if (!expected) {
 						return new Response('unexpected local E2E outbound request', { status: 599 });
 					}
+					if (narration) return new Response(options.ttsStatus === 200 ? 'synthetic audio' : 'private provider error', { status: options.ttsStatus, headers: { 'content-type': options.ttsStatus === 200 ? 'audio/mpeg' : 'application/json' } });
 					if (gatewaySettings) {
 						const baseRule = {
 							enabled: true,
