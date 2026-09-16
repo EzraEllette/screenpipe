@@ -54,6 +54,8 @@ pub fn admission(usage: &Value) -> Result<(), (&'static str, &'static str)> {
             "Could not verify workflow access. Reconnect and try again.",
         ));
     }
+    // Match the gateway's privileged allowance label as well as paid billing tiers.
+    // check_admission obtains this value from the authenticated gateway response.
     if !matches!(
         plan,
         "business"
@@ -64,6 +66,7 @@ pub fn admission(usage: &Value) -> Result<(), (&'static str, &'static str)> {
             | "pro_ultra"
             | "team"
             | "enterprise"
+            | "super_admin"
     ) {
         return Err(("workflow_business_required", "Automatic workflow discovery requires Business. Your saved workflows are still available."));
     }
@@ -247,6 +250,39 @@ mod tests {
         assert!(has_pending_input(&task).await.unwrap());
         assert_eq!(server.received_requests().await.unwrap().len(), 1);
     }
+    #[test]
+    fn privileged_gateway_plan_retains_all_admission_checks() {
+        for plan in ["business_ultra", "super_admin"] {
+            let mut usage =
+                json!({"hosted_ai":{"plan":plan},"remaining":100,"cost_limit_reached":false});
+            assert!(admission(&usage).is_ok(), "{plan}");
+            usage["cost_limit_reached"] = json!(true);
+            assert_eq!(
+                admission(&usage).unwrap_err().0,
+                "workflow_allowance_paused"
+            );
+            usage["cost_limit_reached"] = Value::Null;
+            assert_eq!(
+                admission(&usage).unwrap_err().0,
+                "workflow_usage_unavailable"
+            );
+            usage["cost_limit_reached"] = json!(false);
+            usage["background_pipe_advisory"] = json!({"reason":"background_pipe_allowance_low"});
+            assert_eq!(
+                admission(&usage).unwrap_err().0,
+                "workflow_allowance_paused"
+            );
+        }
+        for plan in ["free", "basic", "internal"] {
+            let usage =
+                json!({"hosted_ai":{"plan":plan},"remaining":100,"cost_limit_reached":false});
+            assert_eq!(
+                admission(&usage).unwrap_err().0,
+                "workflow_business_required"
+            );
+        }
+    }
+
     #[test]
     fn gates_background_work_without_interpreting_unknown_as_empty() {
         let mut u =

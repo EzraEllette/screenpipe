@@ -17,3 +17,15 @@ it("honors low-balance policy even when notification cooldown suppresses the toa
 it("does not promise a daily reset for an unknown cost allowance window", () => {
   expect(workflowAccess(usage({cost_limit_reached:true,resets_at:"2026-10-01T00:00:00Z"}))).toMatchObject({state:"paused",resetAt:undefined});
 });
+
+it.each(["business_ultra", "super_admin"])("accepts gateway plan %s without bypassing allowance checks", (plan) => {
+  const snapshot = { hosted_ai: { plan } };
+  expect(workflowAccess(usage(snapshot)).state).toBe("ready");
+  expect(workflowAccess(usage({ ...snapshot, cost_limit_reached: true })).state).toBe("paused");
+  expect(workflowAccess(usage({ ...snapshot, cost_limit_reached: null })).state).toBe("unavailable");
+  expect(workflowAccess(usage({ ...snapshot, remaining: 0 })).state).toBe("paused");
+  expect(workflowAccess(usage({ ...snapshot, background_pipe_advisory: { reason: "background_pipe_allowance_low" } })).state).toBe("paused");
+});
+it.each(["free", "basic", "internal"])("does not grant workflows to %s", (plan) => {
+  expect(workflowAccess(usage({ hosted_ai: { plan } })).state).toBe("upgrade");
+});
