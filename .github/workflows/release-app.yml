@@ -559,8 +559,10 @@ jobs:
         if: matrix.os_type == 'windows'
         working-directory: ${{ github.workspace }}/apps/screenpipe-app-tauri
         shell: pwsh
-        # Bun still uses a symlink for file: packages even with copyfile.
-        # A directory junction works for the unprivileged runner service.
+        # Bun forces per-file symlinks for ../ folder dependencies on Windows,
+        # even with copyfile (oven-sh/bun#13379). Stage the exact checked-out
+        # source inside the app so its normal copy backend is used. Keep the
+        # locked dependency graph; only the local package location changes.
         run: |
           $ErrorActionPreference = 'Stop'
           $source = (Resolve-Path '../../packages/workflows-ui').Path
@@ -574,8 +576,16 @@ jobs:
               Remove-Item -LiteralPath $destination -Recurse -Force
             }
           }
-          New-Item -ItemType Directory -Force -Path (Split-Path $destination) | Out-Null
-          New-Item -ItemType Junction -Path $destination -Value $source | Out-Null
+          $staged = Join-Path (Get-Location) '.release-workflows-ui'
+          New-Item -ItemType Directory -Force -Path $staged | Out-Null
+          Copy-Item -LiteralPath "$source/package.json" -Destination $staged -Force
+          Copy-Item -LiteralPath "$source/src" -Destination $staged -Recurse -Force
+          foreach ($file in @('package.json', 'bun.lock')) {
+            $path = Join-Path (Get-Location) $file
+            $text = [IO.File]::ReadAllText($path)
+            if (-not $text.Contains('file:../../packages/workflows-ui')) { throw "local dependency missing from $file" }
+            [IO.File]::WriteAllText($path, $text.Replace('file:../../packages/workflows-ui', 'file:./.release-workflows-ui'))
+          }
           bun install --frozen-lockfile --backend=copyfile
           if ($LASTEXITCODE -ne 0) { throw 'frontend dependency installation failed' }
 

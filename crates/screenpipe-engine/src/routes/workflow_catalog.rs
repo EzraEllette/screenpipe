@@ -39,6 +39,28 @@ pub(super) fn allowed(state: &AppState, perms: &OptionalPipePerms) -> Result<(),
     Ok(())
 }
 
+#[derive(Deserialize, OaSchema)]
+pub(crate) struct RolloutRequest {
+    enabled: bool,
+}
+
+#[oasgen]
+pub(crate) async fn rollout(
+    perms: OptionalPipePerms,
+    Json(request): Json<RolloutRequest>,
+) -> Result<Json<Value>, ApiError> {
+    // Pipe capabilities cannot grant themselves rollout access. This route
+    // shares the local API's owner authentication, without source-history reads.
+    if perms.0.is_some() {
+        return Err(error(
+            StatusCode::FORBIDDEN,
+            "Only the desktop can update workflow rollout access.",
+        ));
+    }
+    screenpipe_core::workflows::pipeline::set_rollout_enabled(request.enabled);
+    Ok(Json(json!({"enabled": request.enabled})))
+}
+
 #[oasgen]
 pub(crate) async fn catalog(
     State(state): State<Arc<AppState>>,
@@ -476,6 +498,28 @@ pub(crate) async fn correct(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn pipe_cannot_grant_itself_rollout_access() {
+        use screenpipe_core::pipes::permissions::PipePermissions;
+        let perms = PipePermissions {
+            pipe_name: "workflow-activity".into(),
+            allow_rules: vec![],
+            deny_rules: vec![],
+            use_default_allowlist: true,
+            time_range: None,
+            days: None,
+            pipe_token: None,
+            pipe_dir: None,
+            privacy_filter: false,
+        };
+        let result = rollout(
+            OptionalPipePerms(Some(Arc::new(perms))),
+            Json(RolloutRequest { enabled: true }),
+        )
+        .await;
+        assert_eq!(result.unwrap_err().0, StatusCode::FORBIDDEN);
+    }
+
     #[test]
     fn feedback_refinement_is_scoped_and_revision_checked() {
         let original = json!({"id":"wf-a","revision":2,"description":"Old","timing":{"average":10},"stages":[{"name":"Recorded"}]});

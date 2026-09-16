@@ -37,6 +37,7 @@ import { readOnboardingCheckoutStatus } from "@/lib/onboarding-checkout-navigati
 import { StartupAuthenticationContext } from "@/components/app-entitlement-gate";
 import { shouldRestoreOnboardingLogin } from "@/lib/onboarding-auth-restore";
 
+import { useWorkflowsRolloutEnabled } from "@/lib/workflows/rollout";
 import { FirstTaskChoice } from "@/components/workflows/first-task-choice";
 import { saveProductMode } from "@/lib/workflows/entry-preference";
 import { desktopWorkflowsPlatform } from "@/lib/workflows/desktop-platform";
@@ -443,6 +444,7 @@ export default function OnboardingPage() {
   // excludes it from progress and saved-step restoration as well.
   const canAdvanceIntoPlanSelection =
     shouldShowPlanSelection && Boolean(user?.token);
+  const workflowsRolloutEnabled = useWorkflowsRolloutEnabled();
   const visibleOrder = useMemo(
     () =>
       SLIDE_ORDER.filter(
@@ -458,9 +460,9 @@ export default function OnboardingPage() {
           // Managed deployments may authenticate with only a license key, so
           // consumer Gmail/Calendar authorization is not available there.
           (s !== "recommended-setup" || !isManagedDeployment) &&
-          (s !== "first-task" || (!isManagedDeployment && !usesSummaryFirstTrial)),
+          (s !== "first-task" || (workflowsRolloutEnabled && !isManagedDeployment && !usesSummaryFirstTrial)),
       ),
-    [isManagedDeployment, shouldShowPlanSelection, timelineChoiceVisible, usesSummaryFirstTrial],
+    [isManagedDeployment, shouldShowPlanSelection, timelineChoiceVisible, usesSummaryFirstTrial, workflowsRolloutEnabled],
   );
   // Read by the hydration-gated restore effect below. Assigned during render,
   // per the ref-mirror rule in CLAUDE.md.
@@ -931,7 +933,7 @@ export default function OnboardingPage() {
           {currentSlide === "plan" && (
             <PlanSelectionStep handleNextSlide={handleNextSlide} />
           )}
-          {currentSlide === "first-task" && <FirstTaskChoice onComplete={async (mode, goal) => {
+          {currentSlide === "first-task" && workflowsRolloutEnabled && <FirstTaskChoice onComplete={async (mode, goal) => {
             if (mode === "workflows" && goal) {
               const existing = await desktopWorkflowsPlatform.loadWorkProfile?.();
               await desktopWorkflowsPlatform.saveWorkProfile?.({

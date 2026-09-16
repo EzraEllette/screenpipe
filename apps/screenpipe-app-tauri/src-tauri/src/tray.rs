@@ -62,10 +62,7 @@ struct TrayMenuData {
 /// Gather all data needed by `create_dynamic_menu` on the current (non-main)
 /// thread so the main-thread closure does zero I/O.
 fn prefetch_tray_menu_data(app: &AppHandle) -> TrayMenuData {
-    let onboarding = OnboardingStore::get(app)
-        .ok()
-        .flatten()
-        .unwrap_or_default();
+    let onboarding = OnboardingStore::get(app).ok().flatten().unwrap_or_default();
     let onboarding_completed = onboarding.is_completed;
     let trial_activation_locked =
         !crate::should_skip_onboarding() && onboarding.blocks_trial_activation_app();
@@ -140,11 +137,12 @@ fn prefetch_tray_menu_data(app: &AppHandle) -> TrayMenuData {
         false
     };
 
-    let workflows_mode = app
-        .store("workflows-entry.bin")
-        .ok()
-        .and_then(|store| store.get("mode"))
-        .is_some_and(|mode| mode.as_str() == Some("workflows"));
+    let workflows_mode = screenpipe_core::workflows::pipeline::rollout_enabled()
+        && app
+            .store("workflows-entry.bin")
+            .ok()
+            .and_then(|store| store.get("mode"))
+            .is_some_and(|mode| mode.as_str() == Some("workflows"));
 
     TrayMenuData {
         workflows_mode,
@@ -1258,8 +1256,8 @@ fn create_dynamic_menu(
                 .item(&MenuItemBuilder::with_id("settings", "Settings...").build(app)?)
                 .item(&PredefinedMenuItem::separator(app)?);
         }
-        menu_builder = menu_builder
-            .item(&MenuItemBuilder::with_id("quit", "Quit screenpipe").build(app)?);
+        menu_builder =
+            menu_builder.item(&MenuItemBuilder::with_id("quit", "Quit screenpipe").build(app)?);
 
         return menu_builder.build().map_err(Into::into);
     }
@@ -2527,8 +2525,14 @@ mod tests {
     #[test]
     fn product_mode_change_refreshes_tray_without_recording_change() {
         let mut current = MenuState::default();
-        let workflows = MenuState { workflows_mode: true, ..current.clone() };
-        assert!(replace_menu_state_if_changed(&mut current, workflows.clone()));
+        let workflows = MenuState {
+            workflows_mode: true,
+            ..current.clone()
+        };
+        assert!(replace_menu_state_if_changed(
+            &mut current,
+            workflows.clone()
+        ));
         assert!(!menu_state_needs_update(&current, &workflows));
         assert!(menu_state_needs_update(&current, &MenuState::default()));
     }

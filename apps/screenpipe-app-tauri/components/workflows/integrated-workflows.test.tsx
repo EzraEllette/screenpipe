@@ -67,3 +67,5 @@ it("opens the existing sharing review from the selected workflow in the main app
   expect(screen.queryByRole("dialog", { name: "Sharing review" })).not.toBeInTheDocument();
   expect(screen.getByRole("heading", { name: "Research synthesis" })).toBeVisible();
 });
+
+vi.mock("@/lib/workflows/rollout", () => ({ useWorkflowsRolloutEnabled: () => true, requireWorkflowsRollout: vi.fn() }));

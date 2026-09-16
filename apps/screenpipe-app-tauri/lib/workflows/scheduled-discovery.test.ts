@@ -107,3 +107,5 @@ describe("workflow scheduled-task adapter", () => {
     await expect(saveWorkflowFeedback({ ...workflow, id: "deleted" }, "Use Attio.")).rejects.toThrow("Workflow no longer exists");
   });
 });
+
+vi.mock("@/lib/workflows/rollout", () => ({ useWorkflowsRolloutEnabled: () => true, requireWorkflowsRollout: vi.fn() }));

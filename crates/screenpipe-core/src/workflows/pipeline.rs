@@ -6,6 +6,24 @@
 use serde_json::{json, Value};
 use std::path::Path;
 
+// The desktop's authenticated PostHog bridge supplies the rollout decision.
+// Never persist this grant: a restarted engine waits for a fresh decision.
+static ROLLOUT_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub fn set_rollout_enabled(enabled: bool) {
+    ROLLOUT_ENABLED.store(enabled, std::sync::atomic::Ordering::SeqCst);
+}
+pub fn rollout_enabled() -> bool {
+    ROLLOUT_ENABLED.load(std::sync::atomic::Ordering::SeqCst)
+}
+fn require_rollout(enabled: bool) -> anyhow::Result<()> {
+    if !enabled {
+        anyhow::bail!(
+            "workflow_rollout_disabled: Workflows is not available for this account yet."
+        );
+    }
+    Ok(())
+}
+
 pub const TASKS: [&str; 5] = [
     "workflow-activity",
     "workflow-patterns",
@@ -135,6 +153,7 @@ pub async fn has_pending_input(path: &Path) -> anyhow::Result<bool> {
 }
 
 pub async fn check_admission(api_url: &str, token: Option<&str>) -> anyhow::Result<()> {
+    require_rollout(rollout_enabled())?;
     let token = token.filter(|s| !s.is_empty()).ok_or_else(|| {
         anyhow::anyhow!("workflow_sign_in_required: Sign in to enable workflow updates.")
     })?;
@@ -164,6 +183,14 @@ pub async fn check_admission(api_url: &str, token: Option<&str>) -> anyhow::Resu
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn rollout_is_explicit_and_fail_closed() {
+        assert!(super::require_rollout(false)
+            .unwrap_err()
+            .to_string()
+            .contains("workflow_rollout_disabled"));
+        assert!(super::require_rollout(true).is_ok());
+    }
     use super::*;
     #[tokio::test]
     async fn unchanged_input_advances_a_verified_receipt_without_a_model() {

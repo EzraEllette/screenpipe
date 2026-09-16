@@ -2485,6 +2485,7 @@ pub(crate) fn has_quota_exhausted_token(text: &str) -> bool {
 fn parse_error_type(stderr: &str) -> (Option<String>, Option<String>) {
     let lower = stderr.to_lowercase();
     for (code, message) in [
+        ("workflow_rollout_disabled", "Workflows is not available for this account yet."),
         ("workflow_business_required", "Automatic workflow discovery requires Business."),
         ("workflow_allowance_paused", "Workflow updates paused to preserve AI allowance. Manage usage to check capacity and reset times."),
         ("workflow_usage_unavailable", "Could not check AI allowance. Reconnect and try again."),

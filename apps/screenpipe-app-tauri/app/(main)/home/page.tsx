@@ -134,6 +134,7 @@ import { SidebarFooter } from "@/components/sidebar-footer";
 import { WorkflowsHelpDialog } from "@/components/workflows/workflows-help-dialog";
 import { navigationProductMode } from "@/lib/workflows/navigation";
 import { IntegratedWorkflows } from "@/components/workflows/integrated-workflows";
+import { useWorkflowsRolloutEnabled } from "@/lib/workflows/rollout";
 import { readProductMode, saveProductMode } from "@/lib/workflows/entry-preference";
 
 type MainSection = "home" | "timeline" | "activity" | "brain" | "pipes" | "connections" | "meetings" | "help";
@@ -166,14 +167,16 @@ const isSettingsRoute = (value: string) => resolveSettingsSection(value) !== nul
 
 function HomeContent() {
   const router = useRouter();
+  const workflowsRolloutEnabled = useWorkflowsRolloutEnabled();
   const [requestedMode, setRequestedMode] = useQueryState("mode", { defaultValue: "screenpipe", history: "push" });
   const [workflowsVisited, setWorkflowsVisited] = useState(false);
   const modeInteraction = useRef(false);
   const changeMode = useCallback((next: ProductMode) => {
+    if (next === "workflows" && !workflowsRolloutEnabled) return;
     modeInteraction.current = true;
     void setRequestedMode(next);
     void saveProductMode(next).catch(() => {});
-  }, [setRequestedMode]);
+  }, [setRequestedMode, workflowsRolloutEnabled]);
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const destinationMode = navigationProductMode(params);
@@ -327,7 +330,7 @@ function HomeContent() {
   }, [updateSettings]);
 
   const { isSectionHidden, isSettingLocked, isManagedDeployment, isManagedDeploymentResolved } = useManagedPolicy();
-  const workflowsAvailable = isManagedDeploymentResolved && !isManagedDeployment && !trialActivationLocked;
+  const workflowsAvailable = workflowsRolloutEnabled && isManagedDeploymentResolved && !isManagedDeployment && !trialActivationLocked;
   const workflowsActive = workflowsAvailable && requestedMode === "workflows";
   useEffect(() => { if (workflowsActive) setWorkflowsVisited(true); }, [workflowsActive]);
   const runningPipes = useRunningPipes();

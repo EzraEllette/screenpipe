@@ -1,6 +1,7 @@
 // screenpipe — AI that knows everything you've seen, said, or heard
 // https://screenpipe.com
 
+import { requireWorkflowsRollout } from "./rollout";
 import { localFetch } from "@/lib/api";
 import type { WorkflowAnalysis, WorkflowAnalysisJob, WorkflowMap } from "@screenpipe/workflows-ui";
 
@@ -17,6 +18,7 @@ async function request(path: string, body?: unknown) {
 
 // Installing the disabled template must never opt the user into background AI.
 export async function ensureWorkflowTask() {
+  requireWorkflowsRollout();
   for (const task of WORKFLOW_TASKS) await request(`/pipes/bundled/${task}/install`, {});
 }
 
@@ -122,6 +124,7 @@ export async function getWorkflowJob(id: string): Promise<WorkflowAnalysisJob> {
 }
 
 export async function startWorkflowJob(): Promise<WorkflowAnalysisJob> {
+  requireWorkflowsRollout();
   const setup = await loadWorkflowTaskSetup();
   if (!setup.enabled) throw new Error("Enable workflow tasks before updating. Open Workflows again to review setup.");
   const tasks = await latestTasks();

@@ -4,6 +4,7 @@
 
 import { Check, ChevronDown, MessageSquare, Workflow } from "lucide-react";
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem } from "@/components/ui/dropdown-menu";
+import { useWorkflowsRolloutEnabled } from "@/lib/workflows/rollout";
 import { cn } from "@/lib/utils";
 
 export type ProductMode = "screenpipe" | "workflows";
@@ -12,6 +13,8 @@ export function ProductSwitcher({ mode, onChange, compact = false }: {
   onChange: (mode: ProductMode) => void;
   compact?: boolean;
 }) {
+  const enabled = useWorkflowsRolloutEnabled();
+  if (!enabled) return null;
   return <DropdownMenu>
     <DropdownMenuTrigger asChild>
       <button type="button" aria-label="Switch workspace" className={cn("flex items-center gap-2 rounded-md px-3 py-2 text-inherit hover:bg-foreground/5 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring", compact ? "text-sm" : "w-full text-lg font-semibold")}>
