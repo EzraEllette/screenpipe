@@ -37,6 +37,11 @@ import { readOnboardingCheckoutStatus } from "@/lib/onboarding-checkout-navigati
 import { StartupAuthenticationContext } from "@/components/app-entitlement-gate";
 import { shouldRestoreOnboardingLogin } from "@/lib/onboarding-auth-restore";
 
+import { useWorkflowsRolloutEnabled } from "@/lib/workflows/rollout";
+import { FirstTaskChoice } from "@/components/workflows/first-task-choice";
+import { saveProductMode } from "@/lib/workflows/entry-preference";
+import { desktopWorkflowsPlatform } from "@/lib/workflows/desktop-platform";
+
 type SlideKey =
   | "login"
   | "acquisition"
@@ -44,7 +49,8 @@ type SlideKey =
   | "timeline"
   | "engine"
   | "plan"
-  | "recommended-setup";
+  | "recommended-setup"
+  | "first-task";
 
 // One size for the whole flow. Per-slide sizes made the window jump on every
 // step, worst on "plan", which widened to 760 even though the content column is
@@ -221,6 +227,7 @@ const SLIDE_ORDER: SlideKey[] = [
   "engine",
   "plan",
   "recommended-setup",
+  "first-task",
 ];
 
 // endowed progress: the bar first renders on permissions with login already
@@ -437,6 +444,7 @@ export default function OnboardingPage() {
   // excludes it from progress and saved-step restoration as well.
   const canAdvanceIntoPlanSelection =
     shouldShowPlanSelection && Boolean(user?.token);
+  const workflowsRolloutEnabled = useWorkflowsRolloutEnabled();
   const visibleOrder = useMemo(
     () =>
       SLIDE_ORDER.filter(
@@ -451,9 +459,10 @@ export default function OnboardingPage() {
           (s !== "plan" || shouldShowPlanSelection) &&
           // Managed deployments may authenticate with only a license key, so
           // consumer Gmail/Calendar authorization is not available there.
-          (s !== "recommended-setup" || !isManagedDeployment),
+          (s !== "recommended-setup" || !isManagedDeployment) &&
+          (s !== "first-task" || (workflowsRolloutEnabled && !isManagedDeployment && !usesSummaryFirstTrial)),
       ),
-    [isManagedDeployment, shouldShowPlanSelection, timelineChoiceVisible],
+    [isManagedDeployment, shouldShowPlanSelection, timelineChoiceVisible, usesSummaryFirstTrial, workflowsRolloutEnabled],
   );
   // Read by the hydration-gated restore effect below. Assigned during render,
   // per the ref-mirror rule in CLAUDE.md.
@@ -506,6 +515,7 @@ export default function OnboardingPage() {
           engine: "engine",
           plan: "plan",
           "recommended-setup": "recommended-setup",
+          "first-task": "first-task",
           // Native Rust now connects detected AI tools in the background, and
           // the goal/dashboard slide is gone: setup no longer asks the user to
           // declare intent before anything has been observed. Saved installs
@@ -745,6 +755,7 @@ export default function OnboardingPage() {
         clearTrialActivationAssignment();
       } catch (error) {
         console.error("failed to finish onboarding:", error);
+        if (currentSlide === "first-task") throw error;
       } finally {
         // A transient store/IPC failure must not permanently consume the
         // user's click. The automatic retry above handles the common case;
@@ -922,6 +933,21 @@ export default function OnboardingPage() {
           {currentSlide === "plan" && (
             <PlanSelectionStep handleNextSlide={handleNextSlide} />
           )}
+          {currentSlide === "first-task" && workflowsRolloutEnabled && <FirstTaskChoice onComplete={async (mode, goal) => {
+            if (mode === "workflows" && goal) {
+              const existing = await desktopWorkflowsPlatform.loadWorkProfile?.();
+              await desktopWorkflowsPlatform.saveWorkProfile?.({
+                scope: "personal", summary: "", kpis: [], hourlyValue: null,
+                vocabulary: "", guidance: "", visibility: "device-only", ...existing,
+                priorities: existing?.priorities
+                  ? existing.priorities.split("\n").some(line => line.trim() === goal)
+                    ? existing.priorities : `${existing.priorities}\n${goal}`
+                  : goal,
+              });
+            }
+            await saveProductMode(mode);
+            await handleNextSlide();
+          }} />}
           {currentSlide === "recommended-setup" && (
             <FinalSetupStep
               userToken={user?.token}

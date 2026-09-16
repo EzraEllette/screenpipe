@@ -120,9 +120,6 @@ impl DatabaseManager {
         let Some(storage) = &self.storage else {
             return Err(storage_error("replacement requires hybrid storage"));
         };
-        if payload.bytes() > storage.descriptor.budget.record_bytes {
-            return Err(storage_error("record budget exceeded"));
-        }
         let mut tx = self.begin_immediate_with_retry().await?;
         let row = sqlx::query("SELECT p.generation,p.state,p.file_id,p.bytes,m.policy,m.staging_bytes,m.staging_limit FROM frame_payloads p CROSS JOIN storage_metadata m WHERE p.frame_id=?")
             .bind(payload.id).fetch_optional(&mut **tx.conn()).await?;
@@ -136,12 +133,26 @@ impl DatabaseManager {
             tx.rollback().await?;
             return Ok(false);
         }
+        // Retained legacy frames can still be redacted or have detail removed.
+        // New oversized payloads remain subject to normal capture admission.
+        if payload.bytes() > storage.descriptor.budget.record_bytes
+            && payload.bytes() > row.get::<i64, _>("bytes") as usize
+        {
+            return Err(storage_error("record budget exceeded"));
+        }
         let prior_bytes = if row.get::<&str, _>("state") == "staged" {
-            row.get::<i64, _>("bytes")
+            storage
+                .descriptor
+                .budget
+                .staged_frame_bytes(row.get::<i64, _>("bytes") as usize) as i64
         } else {
             0
         };
-        let next_bytes = row.get::<i64, _>("staging_bytes") - prior_bytes + payload.bytes() as i64;
+        let next_bytes = row.get::<i64, _>("staging_bytes") - prior_bytes
+            + storage
+                .descriptor
+                .budget
+                .staged_frame_bytes(payload.bytes()) as i64;
         if next_bytes > row.get::<i64, _>("staging_limit") {
             return Err(storage_error("staging budget reached"));
         }
@@ -219,15 +230,15 @@ impl HybridStorage {
         writer: &SqliteWritePool,
     ) -> Result<usize, sqlx::Error> {
         let _job = self.file_job.lock().await;
-        let candidates = sqlx::query("SELECT p.frame_id,p.bytes FROM frame_payloads p CROSS JOIN storage_metadata m WHERE p.state='staged' AND p.policy=m.policy AND (p.completed_surfaces & m.required_surfaces)=m.required_surfaces ORDER BY p.frame_id LIMIT ?")
+        // Existing oversized frames remain readable through the staged SQLite
+        // path. Filter before LIMIT so they cannot starve later sealable frames.
+        let candidates = sqlx::query("SELECT p.frame_id,p.bytes FROM frame_payloads p CROSS JOIN storage_metadata m WHERE p.state='staged' AND p.bytes<=? AND p.policy=m.policy AND (p.completed_surfaces & m.required_surfaces)=m.required_surfaces ORDER BY p.frame_id LIMIT ?")
+            .bind(self.descriptor.budget.record_bytes as i64)
             .bind(self.descriptor.budget.file_rows as i64).fetch_all(pool).await?;
         let mut ids = Vec::new();
         let mut bytes = 0;
         for row in candidates {
             let size = row.get::<i64, _>("bytes") as usize;
-            if size > self.descriptor.budget.record_bytes {
-                return Err(storage_error("record exceeds sealing budget"));
-            }
             if !ids.is_empty() && bytes + size > self.descriptor.budget.file_bytes {
                 break;
             }

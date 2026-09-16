@@ -60,8 +60,11 @@ pub(super) async fn convert(
 /// Restore the resident schema and search indexes without encoding payloads,
 /// reclaiming files, or completing the migration. Ordinary recording can then
 /// use committed Parquet plus resident SQLite until an explicit migration retry.
-pub(super) async fn recover_recording(storage: Arc<HybridStorage>) -> Result<(), sqlx::Error> {
-    run(storage, 0, 0, &|_| {}, false).await
+pub(super) async fn recover_recording(
+    storage: Arc<HybridStorage>,
+    progress: &(impl Fn(MigrationProgress) + Send + Sync),
+) -> Result<(), sqlx::Error> {
+    run(storage, 0, 0, progress, false).await
 }
 
 async fn run(
@@ -74,6 +77,9 @@ async fn run(
     let index = storage.root.join(&storage.descriptor.index);
     let lease = screenpipe_sqlite_coordinator::acquire_sqlite_manager_lease(&index)
         .map_err(storage_error)?;
+    if !archive {
+        progress(MigrationProgress::phase("checking interrupted storage"));
+    }
     crate::recovery::verify_database_before_reopen(&index).await?;
     crate::db::register_sqlite_extensions()?;
     // Do not close this fd while SQLite holds its process-wide Unix locks.
@@ -102,8 +108,11 @@ async fn run(
         pool.clone(),
         screenpipe_sqlite_coordinator::sqlite_write_lock(&index),
     );
+    let mut reclamation = super::reclaim::Reclaimer::default();
+    let mut last_report = None;
     let result = async {
         if archive { reserve(&storage)?; }
+        else { progress(MigrationProgress::phase("restoring the recording database")); }
         {
             let permit = writer.lock().await?;
             let mut conn = permit.pool().acquire().await?;
@@ -143,25 +152,22 @@ async fn run(
         if archive {
             storage.reclaim_once(&pool, &writer).await?;
             storage.reclaim_bulk(&pool, &writer).await?;
-            reclaim(&storage, &writer, file).await?;
-            report(&storage, &pool, original_allocated, total_records, progress).await?;
+            let reclaimed = reclaim(&storage, &writer, file, &mut reclamation, true).await?;
+            report(&storage, &pool, original_allocated, total_records, progress, &mut last_report, reclaimed).await?;
         }
+        if !archive { progress(MigrationProgress::phase("restoring saved screen records")); }
         loop {
             if archive { reserve(&storage)?; }
             if archive && storage.seal_once(&pool, &writer).await? != 0 {
-                reclaim(&storage, &writer, file).await?;
-                report(&storage, &pool, original_allocated, total_records, progress).await?;
+                let reclaimed = reclaim(&storage, &writer, file, &mut reclamation, false).await?;
+                report(&storage, &pool, original_allocated, total_records, progress, &mut last_report, reclaimed).await?;
                 continue;
             }
             let last: Option<i64> = sqlx::query_scalar("SELECT max(frame_id) FROM frame_payloads").fetch_one(&pool).await?;
-            let range = if archive {
-                let columns = super::import::columns(&pool, "frames").await?;
-                let columns: Vec<_> = columns.into_iter().filter(|c| !c.starts_with("payload_")).collect();
-                let rows = super::import::batch(&pool, "frames", &columns, last, &storage.descriptor.budget).await?;
-                rows.first().zip(rows.last()).map(|(first,last)| (first.get::<i64,_>(0),last.get::<i64,_>(0)))
-            } else {
-                resident_range(&pool, "frames", last, storage.descriptor.budget.file_bytes).await?
-            };
+            // Staging is SQL-to-SQL. Only read IDs and lengths here so even a
+            // legacy frame larger than the decoder budget stays in SQLite.
+            let range = resident_range(&pool, "frames", last, storage.descriptor.budget.file_bytes,
+                archive.then_some(storage.descriptor.budget.file_rows)).await?;
             let Some((first, last)) = range else { break };
             let permit = writer.lock().await?;
             let mut conn = permit.pool().acquire().await?;
@@ -173,12 +179,13 @@ async fn run(
         }
         let source_exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='_bulk_elements_source')").fetch_one(&pool).await?;
         if source_exists {
+            if !archive { progress(MigrationProgress::phase("restoring saved accessibility records")); }
             let columns = super::import::columns(&pool, "_bulk_elements_source").await?;
             loop {
                 if archive { reserve(&storage)?; }
                 if archive && bulk::elements::seal(&storage, &pool, &writer).await? != 0 {
-                    reclaim(&storage, &writer, file).await?;
-                    report(&storage, &pool, original_allocated, total_records, progress).await?;
+                    let reclaimed = reclaim(&storage, &writer, file, &mut reclamation, false).await?;
+                    report(&storage, &pool, original_allocated, total_records, progress, &mut last_report, reclaimed).await?;
                     continue;
                 }
                 let rows = if archive {
@@ -187,7 +194,7 @@ async fn run(
                 let range = if archive {
                     rows.first().zip(rows.last()).map(|(first,last)| (first.get::<i64,_>(0),last.get::<i64,_>(0)))
                 } else {
-                    resident_range(&pool, "_bulk_elements_source", None, storage.descriptor.budget.file_bytes).await?
+                    resident_range(&pool, "_bulk_elements_source", None, storage.descriptor.budget.file_bytes, None).await?
                 };
                 let Some((first, last)) = range else { break };
                 let permit = writer.lock().await?;
@@ -209,11 +216,12 @@ async fn run(
                 super::faults::checkpoint("migration_batch_staged");
                 drop(conn);
                 drop(permit);
-                if archive { reclaim(&storage, &writer, file).await?; }
+                if archive { reclaim(&storage, &writer, file, &mut reclamation, false).await?; }
             }
             let permit = writer.lock().await?;
             sqlx::query("DROP TABLE _bulk_elements_source").execute(permit.pool()).await?;
         }
+        if !archive { progress(MigrationProgress::phase("restoring history search indexes")); }
         for table in bulk::TABLES.iter().filter(|t| t.name != "elements") {
             while archive {
                 reserve(&storage)?;
@@ -230,11 +238,12 @@ async fn run(
                     tx.commit().await?;
                 }
                 storage.publish_bulk(&pool, &writer, table, rows, None).await?;
-                reclaim(&storage, &writer, file).await?;
-                report(&storage, &pool, original_allocated, total_records, progress).await?;
+                let reclaimed = reclaim(&storage, &writer, file, &mut reclamation, false).await?;
+                report(&storage, &pool, original_allocated, total_records, progress, &mut last_report, reclaimed).await?;
             }
-            backfill_resident_fts(&storage, &pool, &writer, table, file, archive).await?;
+            backfill_resident_fts(&storage, &pool, &writer, table, file, &mut reclamation, archive).await?;
         }
+        if !archive { progress(MigrationProgress::phase("finishing recording recovery")); }
         {
             let permit = writer.lock().await?;
             let mut conn = permit.pool().acquire().await?;
@@ -252,7 +261,7 @@ async fn run(
             tx.commit().await?;
         }
         if archive {
-            reclaim(&storage, &writer, file).await?;
+            reclaim(&storage, &writer, file, &mut reclamation, true).await?;
             progress(MigrationProgress { message: "conversion complete", completed_records: Some(total_records), total_records: Some(total_records),
                 bytes_saved: Some(original_allocated.saturating_sub(super::reclaim::footprint(&storage.root)?)), available_bytes: Some(fs2::available_space(&storage.root)?) });
         }
@@ -276,14 +285,16 @@ async fn resident_range(
     table: &str,
     after: Option<i64>,
     budget_bytes: usize,
+    row_limit: Option<usize>,
 ) -> Result<Option<(i64, i64)>, sqlx::Error> {
     let lower = after.map_or_else(|| "1".to_owned(), |id| format!("id>{id}"));
     let size = super::import::columns(pool, table).await?.iter().map(|name| {
         let quoted = format!("\"{}\"", name.replace('"', "\"\""));
         format!("CASE WHEN typeof({quoted}) IN ('integer','real') THEN 8 ELSE COALESCE(length(CAST({quoted} AS BLOB)),0) END")
     }).collect::<Vec<_>>().join("+");
+    let row_limit = row_limit.unwrap_or(128);
     let rows: Vec<(i64, i64)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT id,{size} FROM {table} WHERE {lower} ORDER BY id LIMIT 128"
+        "SELECT id,{size} FROM {table} WHERE {lower} ORDER BY id LIMIT {row_limit}"
     )))
     .fetch_all(pool)
     .await?;
@@ -304,12 +315,22 @@ async fn reclaim(
     storage: &HybridStorage,
     writer: &SqliteWritePool,
     file: &mut std::fs::File,
-) -> Result<(), sqlx::Error> {
+    reclamation: &mut super::reclaim::Reclaimer,
+    force: bool,
+) -> Result<bool, sqlx::Error> {
     let permit = writer.lock().await?;
     let mut conn = permit.pool().acquire().await?;
-    super::reclaim::free_leaves(&mut conn, file, storage.descriptor.budget.decode_bytes).await?;
+    let reclaimed = reclamation
+        .run(
+            &mut conn,
+            file,
+            &storage.root,
+            &storage.descriptor.budget,
+            force,
+        )
+        .await?;
     super::faults::checkpoint("migration_batch_sealed");
-    Ok(())
+    Ok(reclaimed)
 }
 
 // Privacy-ineligible records remain resident. Their search entries still need
@@ -320,6 +341,7 @@ async fn backfill_resident_fts(
     writer: &SqliteWritePool,
     table: &bulk::Table,
     file: &mut std::fs::File,
+    reclamation: &mut super::reclaim::Reclaimer,
     archive: bool,
 ) -> Result<(), sqlx::Error> {
     use futures::TryStreamExt;
@@ -385,7 +407,14 @@ async fn backfill_resident_fts(
         sqlx::query("INSERT INTO _storage_conversion_steps(step,last_id) VALUES(?,?) ON CONFLICT(step) DO UPDATE SET last_id=excluded.last_id").bind(&step).bind(last).execute(&mut *tx).await?;
         tx.commit().await?;
         if archive {
-            super::reclaim::free_leaves(&mut conn, file, storage.descriptor.budget.decode_bytes)
+            reclamation
+                .run(
+                    &mut conn,
+                    file,
+                    &storage.root,
+                    &storage.descriptor.budget,
+                    false,
+                )
                 .await?;
         } else {
             schema::construction_checkpoint(&mut conn).await?;
@@ -400,7 +429,17 @@ async fn report(
     original: u64,
     total: u64,
     progress: &(impl Fn(MigrationProgress) + Send + Sync),
+    last_report: &mut Option<std::time::Instant>,
+    reclaimed: bool,
 ) -> Result<(), sqlx::Error> {
+    // Measuring savings inventories every archive file. Bound that work by
+    // time, and refresh immediately after a physical reclamation pass. The
+    // final completion report always measures exact totals.
+    if !reclaimed
+        && last_report.is_some_and(|last| last.elapsed() < std::time::Duration::from_secs(1))
+    {
+        return Ok(());
+    }
     let frames: i64 =
         sqlx::query_scalar("SELECT count(*) FROM frame_payloads WHERE state='sealed'")
             .fetch_one(pool)
@@ -416,5 +455,6 @@ async fn report(
         bytes_saved: Some(original.saturating_sub(super::reclaim::footprint(&storage.root)?)),
         available_bytes: Some(fs2::available_space(&storage.root)?),
     });
+    *last_report = Some(std::time::Instant::now());
     Ok(())
 }

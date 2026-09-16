@@ -308,6 +308,7 @@ impl ServerCore {
         // PiExecutor, the Tauri command writer) share one storage cell.
         cloud_token_handle: std::sync::Arc<arc_swap::ArcSwap<Option<String>>>,
         history_access: screenpipe_engine::history_access::HistoryAccessPolicy,
+        workflow_catalog_dir: Option<std::path::PathBuf>,
     ) -> Result<Self, String> {
         info!("Starting server core on port {}", config.port);
         crate::health::set_boot_phase("starting", Some("starting server"));
@@ -459,6 +460,11 @@ impl ServerCore {
         };
         info!("Database initialized at {}", db_path);
 
+        // A pending update may interrupt database recovery, but must exclude
+        // native model initialization until the old process exits. Retain the
+        // read guard through all remaining startup work, including errors.
+        let _native_startup = crate::update_restart::RESTART_SAFETY.native_startup().await;
+
         // --- Audio devices + manager (built but NOT started) ---
         let audio_devices = if config.disable_audio {
             Vec::new()
@@ -579,6 +585,7 @@ impl ServerCore {
             config.use_pii_removal,
             config.video_quality.clone(),
         );
+        server.workflow_catalog_dir = workflow_catalog_dir;
         server.vision_metrics = vision_metrics.clone();
         server.audio_metrics = audio_manager.metrics.clone();
         server.hot_frame_cache = Some(hot_frame_cache.clone());
