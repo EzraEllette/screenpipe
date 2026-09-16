@@ -986,7 +986,10 @@ impl SCServer {
             )
             .get("/elements", search_elements)
             .get("/frames/:frame_id/elements", get_frame_elements)
-            .post("/workflows/rollout", crate::routes::workflow_catalog::rollout)
+            .post(
+                "/workflows/rollout",
+                crate::routes::workflow_catalog::rollout,
+            )
             .get(
                 "/workflows/catalog",
                 crate::routes::workflow_catalog::catalog,
