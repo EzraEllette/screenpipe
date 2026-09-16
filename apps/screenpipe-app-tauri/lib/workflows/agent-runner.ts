@@ -8,14 +8,15 @@ import { advanceMeetingChatStream, emptyStreamState } from "@/components/meeting
 import { INTERNAL_TITLE_PREFIX } from "@/lib/utils/internal-session";
 import type { WorkflowsAssistantPlatform } from "@screenpipe/workflows-ui";
 
-export async function runWorkflowAgent({ name, prompt, config, signal, onProgress, onEvent, allowEmpty = false }: {
-  name: "assistant" | "context";
+export async function runWorkflowAgent({ name, prompt, config, signal, onProgress, onEvent, allowEmpty = false, timeoutMs = 180000 }: {
+  name: "assistant" | "context" | "guide";
   prompt: string;
   config: PiProviderConfig;
   signal: AbortSignal;
   onProgress?: Parameters<WorkflowsAssistantPlatform["ask"]>[0]["onProgress"];
   onEvent?: (event: AgentInnerEvent) => void;
   allowEmpty?: boolean;
+  timeoutMs?: number;
 }) {
     const sessionId = `${INTERNAL_TITLE_PREFIX}workflow-${name}-${crypto.randomUUID()}`;
     let stream = emptyStreamState();
@@ -34,7 +35,7 @@ export async function runWorkflowAgent({ name, prompt, config, signal, onProgres
     try {
       const startup = (async () => {
       assertActive();
-      timer = setTimeout(() => fail(new Error("This is taking longer than expected. Try a narrower question.")), 180000);
+      timer = setTimeout(() => fail(new Error("This is taking longer than expected. Try a narrower question.")), timeoutMs);
       onProgress?.({ text: "", activity: "starting" });
       await mountAgentEventBus(); assertActive();
       const base = await commands.getScreenpipeBaseDir(); assertActive();
