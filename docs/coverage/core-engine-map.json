@@ -1347,6 +1347,33 @@
       "confidence": "partial",
       "kind": "unit",
       "notes": "Windows UIA/accessibility parsing and privacy matching; some UIA tests are ignored where they require a live desktop."
+    },
+    {
+      "id": "engine-workflows",
+      "label": "Workflow catalog, pipeline, and evidence contracts",
+      "crate": "screenpipe-engine",
+      "files": [
+        "src/routes/workflow_catalog.rs",
+        "src/routes/workflow_pipeline.rs",
+        "src/routes/workflows.rs",
+        "tests/workflow_catalog_contract_test.rs"
+      ],
+      "platforms": [
+        "windows",
+        "macos",
+        "linux"
+      ],
+      "layers": [
+        "local-api",
+        "storage"
+      ],
+      "flows": [
+        "local-api-search"
+      ],
+      "criticality": "high",
+      "confidence": "partial",
+      "kind": "mixed",
+      "notes": "Catalog identity and persistence, revision-scoped feedback, workflow evidence and pipeline contracts, and denial of agent-granted rollout access. Does not assert live cloud discovery quality."
     }
   ]
 }
