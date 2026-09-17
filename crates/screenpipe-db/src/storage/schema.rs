@@ -234,7 +234,7 @@ UPDATE frames SET payload_full_text_length=length(COALESCE(full_text,'')),
     payload_detail_present=accessibility_tree_json IS NOT NULL OR text_json IS NOT NULL;
 "#;
 
-const BYTES: &str = "COALESCE(length(CAST(NEW.full_text AS BLOB)),0)+COALESCE(length(CAST(NEW.accessibility_text AS BLOB)),0)+COALESCE(length(CAST(NEW.accessibility_tree_json AS BLOB)),0)+COALESCE(length(CAST(NEW.text_json AS BLOB)),0)";
+pub(super) const BYTES: &str = "COALESCE(length(CAST(NEW.full_text AS BLOB)),0)+COALESCE(length(CAST(NEW.accessibility_text AS BLOB)),0)+COALESCE(length(CAST(NEW.accessibility_tree_json AS BLOB)),0)+COALESCE(length(CAST(NEW.text_json AS BLOB)),0)";
 const EMPTY_SURFACES: &str = "(CASE WHEN COALESCE(NEW.full_text,'')='' THEN 1 ELSE 0 END | CASE WHEN COALESCE(NEW.accessibility_text,'')='' THEN 2 ELSE 0 END | CASE WHEN COALESCE(NEW.accessibility_tree_json,'')='' THEN 4 ELSE 0 END | CASE WHEN COALESCE(NEW.text_json,'')='' THEN 8 ELSE 0 END | CASE WHEN COALESCE(NEW.window_name,'')='' THEN 16 ELSE 0 END | CASE WHEN COALESCE(NEW.browser_url,'')='' THEN 32 ELSE 0 END)";
 
 fn triggers() -> String {

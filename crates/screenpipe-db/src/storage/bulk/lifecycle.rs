@@ -48,31 +48,16 @@ impl HybridStorage {
         };
         // Keep the pending index as the outer loop so LIMIT bounds work before
         // materializing IDs from a large history.
-        let candidates=sqlx::query(sqlx::AssertSqlSafe(format!("SELECT v.id,({bytes}) AS bytes FROM main.{t} pending CROSS JOIN (SELECT * FROM {view} WHERE {eligible}) v ON v.id=pending.id WHERE {condition} ORDER BY pending.id LIMIT {FILE_ROWS}",bytes=table.all_bytes("v."),view=table.view(),t=table.name,eligible=table.eligible))).fetch_all(pool).await?;
+        let candidates=sqlx::query(sqlx::AssertSqlSafe(format!("SELECT v.id,({bytes}) AS bytes FROM main.{t} pending CROSS JOIN (SELECT * FROM {view} WHERE {eligible}) v ON v.id=pending.id WHERE {condition} AND ({bytes})<=? ORDER BY pending.id LIMIT {FILE_ROWS}",bytes=table.all_bytes("v."),view=table.view(),t=table.name,eligible=table.eligible))).bind(self.descriptor.budget.record_bytes as i64).fetch_all(pool).await?;
         let mut ids = Vec::new();
         let mut bytes = 0;
         for candidate in candidates {
             let size = candidate.try_get::<i64, _>("bytes")? as usize;
-            if size > self.descriptor.budget.record_bytes {
-                let id = candidate.try_get::<i64, _>("id")?;
-                crate::storage::diagnostics::batch(
-                    table.name,
-                    Some(id),
-                    Some(id),
-                    Some(1),
-                    Some(size as u64),
-                );
-                return Err(storage_error("bulk record exceeds sealing budget"));
-            }
-            if file.is_none() && !ids.is_empty() && bytes + size > self.descriptor.budget.file_bytes
-            {
+            if !ids.is_empty() && bytes + size > self.descriptor.budget.file_bytes {
                 break;
             }
             ids.push(candidate.try_get::<i64, _>("id")?);
             bytes += size;
-            if bytes > self.descriptor.budget.decode_bytes / 2 {
-                return Err(storage_error("bulk batch exceeds sealing budget"));
-            }
         }
         if ids.is_empty() {
             return Ok(Vec::new());

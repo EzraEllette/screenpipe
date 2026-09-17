@@ -427,10 +427,6 @@ async fn migrate_observed(
         let original = async {
             let frozen = source.begin_immediate_with_retry().await?;
             verify_integrity(&source.pool).await?;
-            let pages: i64 = sqlx::query_scalar("PRAGMA page_count").fetch_one(&source.pool).await?;
-            if (pages as usize).div_ceil(8) > options.budget.decode_bytes / 2 {
-                return Err(storage_error("freelist map exceeds migration memory budget; database unchanged"));
-            }
             let receipts = table_receipts(&source, None).await?;
             let terms: Vec<String> = sqlx::query_scalar("SELECT full_text FROM frames WHERE full_text IS NOT NULL AND id IN ((SELECT min(id) FROM frames),(SELECT max(id) FROM frames))").fetch_all(&source.pool).await?;
             let mut searches = Vec::new();
@@ -1074,6 +1070,56 @@ pub(super) async fn logical_tables(db: &DatabaseManager) -> Result<Vec<String>, 
         .fetch_all(&db.pool).await
 }
 
+// Verification consumes history incrementally; the public response limit must
+// never decide whether that history can migrate. Resident frames are hashed
+// from SQLite, and only sealed frames need hydration through the payload reader.
+async fn verification_frame_batch(
+    db: &DatabaseManager,
+    after: Option<i64>,
+) -> Result<Option<(i64, Vec<i64>)>, sqlx::Error> {
+    let comparison = if after.is_some() { ">" } else { ">=" };
+    let (size, state, join, limit) = if let Some(storage) = &db.storage {
+        (
+            "p.bytes".to_owned(),
+            "p.state='sealed'",
+            "LEFT JOIN frame_payloads p ON p.frame_id=f.id",
+            storage
+                .descriptor
+                .budget
+                .file_bytes
+                .min(storage.descriptor.budget.response_bytes),
+        )
+    } else {
+        (
+            super::schema::BYTES.replace("NEW.", "f."),
+            "0",
+            "",
+            StorageBudget::default().file_bytes,
+        )
+    };
+    let rows: Vec<(i64, i64, bool)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT f.id,{size},{state} FROM frames f {join} WHERE f.id{comparison}? ORDER BY f.id LIMIT 128"
+    )))
+    .bind(after.unwrap_or(i64::MIN))
+    .fetch_all(&db.pool)
+    .await?;
+    let mut last = None;
+    let mut ids = Vec::new();
+    let mut bytes = 0usize;
+    for (id, size, sealed) in rows {
+        let size = usize::try_from(size).map_err(storage_error)?;
+        if last.is_some() && bytes.saturating_add(size) > limit {
+            break;
+        }
+        last = Some(id);
+        bytes = bytes.saturating_add(size);
+        if sealed {
+            ids.push(id);
+        }
+    }
+    Ok(last.map(|last| (last, ids)))
+}
+
 pub(super) async fn table_receipts(
     db: &DatabaseManager,
     source: Option<&[TableParity]>,
@@ -1117,8 +1163,17 @@ pub(super) async fn table_receipts(
         let mut last = i64::MIN;
         let mut first = true;
         loop {
+            let (through, sealed) = if table == "frames" {
+                let Some(batch) = verification_frame_batch(db, (!first).then_some(last)).await?
+                else {
+                    break;
+                };
+                batch
+            } else {
+                (i64::MAX, Vec::new())
+            };
             let sql = format!(
-                "SELECT {key} AS __storage_rowid,{} FROM {} WHERE {key}{}? ORDER BY {key} LIMIT 128",
+                "SELECT {key} AS __storage_rowid,{} FROM {} WHERE {key}{}? AND {key}<=? ORDER BY {key} LIMIT 128",
                 columns
                     .iter()
                     .map(|c| quote(c))
@@ -1131,6 +1186,7 @@ pub(super) async fn table_receipts(
             super::diagnostics::stage("reading_parity_rows");
             let rows = sqlx::query(sqlx::AssertSqlSafe(sql))
                 .bind(last)
+                .bind(through)
                 .fetch_all(&db.pool)
                 .await?;
             if rows.is_empty() {
@@ -1138,9 +1194,8 @@ pub(super) async fn table_receipts(
             }
             first = false;
             super::diagnostics::stage("hashing_parity_rows");
-            let payloads = if table == "frames" && db.storage.is_some() {
-                let ids: Vec<i64> = rows.iter().map(|r| r.get("id")).collect();
-                db.frame_payloads(&ids, Projection::All).await?
+            let payloads = if !sealed.is_empty() {
+                db.frame_payloads(&sealed, Projection::All).await?
             } else {
                 Default::default()
             };
@@ -1272,17 +1327,9 @@ impl DatabaseManager {
         if let Some(storage) = &self.storage {
             storage.verify_catalog(&self.pool).await?;
             storage.verify_bulk(&self.pool).await?;
-            let mut after = i64::MIN;
-            loop {
-                let ids: Vec<i64> =
-                    sqlx::query_scalar("SELECT id FROM frames WHERE id>? ORDER BY id LIMIT 128")
-                        .bind(after)
-                        .fetch_all(&self.pool)
-                        .await?;
-                let Some(last) = ids.last() else {
-                    break;
-                };
-                after = *last;
+            let mut after = None;
+            while let Some((last, ids)) = verification_frame_batch(self, after).await? {
+                after = Some(last);
                 self.frame_payloads(&ids, Projection::All).await?;
             }
         }

@@ -25,57 +25,163 @@ async fn fixture(root: &std::path::Path) {
 }
 
 #[tokio::test]
-async fn migration_diagnostics_identify_the_record_that_exceeds_the_budget() {
-    use screenpipe_db::storage::diagnostics;
-    use std::time::Duration;
+async fn oversized_legacy_bulk_records_do_not_block_migration_or_recording() {
     let root = tempfile::tempdir().unwrap();
-    let db = DatabaseManager::new(
-        root.path().join("db.sqlite").to_str().unwrap(),
-        Default::default(),
+    let path = root.path().join("db.sqlite");
+    let db = DatabaseManager::new(path.to_str().unwrap(), Default::default())
+        .await
+        .unwrap();
+    db.execute_raw_sql_write("INSERT INTO frames(id,timestamp,full_text) VALUES(1,'2026-09-16','history'); INSERT INTO audio_chunks(id,file_path) VALUES(1,'test.wav');").await.unwrap();
+    db.execute_raw_sql_write(
+        "INSERT INTO meetings(id,meeting_start,meeting_app) VALUES(1,'2026-09-16','test')",
     )
     .await
     .unwrap();
+    let other_payloads = [
+        ("ui_events", "text_content", "INSERT INTO ui_events(id,timestamp,event_type,text_content) VALUES(?1,'2026-09-16','text',?2)"),
+        ("semantic_items", "body", "INSERT INTO semantic_items(id,entity_fingerprint,version_fingerprint,kind,item_key,identity_quality,title,body,metadata_json) VALUES(?1,randomblob(32),randomblob(32),'document','doc-'||?1,'stable','title',?2,'{}')"),
+        ("pipe_executions", "stdout", "INSERT INTO pipe_executions(id,pipe_name,status,finished_at,stdout) VALUES(?1,'test','completed','2026-09-16',?2)"),
+        ("meeting_transcript_segments", "transcript", "INSERT INTO meeting_transcript_segments(id,meeting_id,provider,item_id,transcript,captured_at) VALUES(?1,1,'test','item-'||?1,?2,'2026-09-16')"),
+        ("outputs", "preview", "INSERT INTO outputs(id,source,title,output_path,preview) VALUES(?1,'test','output','test-'||?1,?2)"),
+    ];
+    let large = "oversized searchable 東京 ".repeat(256);
     let mut tx = db.begin_immediate_with_retry().await.unwrap();
-    sqlx::query("INSERT INTO frames(id,timestamp) VALUES(1,'2026-09-16')")
+    for id in 1..=4 {
+        let text = if id == 2 || id == 4 {
+            large.as_str()
+        } else {
+            "ordinary searchable"
+        };
+        sqlx::query("INSERT INTO elements(id,frame_id,source,role,text,properties) VALUES(?,1,'accessibility','AXText',?,?)")
+            .bind(id).bind(text).bind(text).execute(&mut **tx.conn()).await.unwrap();
+        sqlx::query("INSERT INTO audio_transcriptions(id,audio_chunk_id,offset_index,timestamp,transcription,device) VALUES(?,1,?,'2026-09-16',?,'test')")
+            .bind(id).bind(id).bind(format!("{text} {id}")).execute(&mut **tx.conn()).await.unwrap();
+    }
+    for (_, _, sql) in other_payloads {
+        for id in 1..=4 {
+            let text = if id == 2 || id == 4 {
+                large.as_str()
+            } else {
+                "ordinary searchable"
+            };
+            sqlx::query(sql)
+                .bind(id)
+                .bind(text)
+                .execute(&mut **tx.conn())
+                .await
+                .unwrap();
+        }
+    }
+    for table in ["elements", "audio_transcriptions", "ui_events"] {
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "UPDATE {table} SET redacted_at=1 WHERE id<4"
+        )))
         .execute(&mut **tx.conn())
         .await
         .unwrap();
-    sqlx::query("INSERT INTO elements(id,frame_id,source,role,properties) VALUES(7,1,'accessibility','AXText',?)")
-        .bind("p".repeat(2048)).execute(&mut **tx.conn()).await.unwrap();
+    }
     tx.commit().await.unwrap();
     db.close().await;
     let mut options = MigrationOptions::default();
+    options.privacy.identity = "migration-regression-policy".into();
+    options.privacy.required_surfaces = 1;
     options.budget.record_bytes = 1024;
     options.budget.file_bytes = 1024;
-    let error = migrate(root.path(), Default::default(), options)
+    options.budget.decode_bytes = 2048;
+    options.budget.response_bytes = 1024;
+    options.budget.staging_bytes = 1024;
+    migrate(root.path(), Default::default(), options)
         .await
-        .unwrap_err();
-    assert!(error
-        .to_string()
-        .contains("element record exceeds sealing budget"));
-    let snapshot = tokio::time::timeout(Duration::from_secs(3), async {
-        loop {
-            if let Some(snapshot) = diagnostics::recent(root.path())
-                .unwrap()
-                .into_iter()
-                .find(|s| s.status == "failed")
-            {
-                break snapshot;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap();
+        .unwrap();
+    let db = DatabaseManager::new(path.to_str().unwrap(), Default::default())
+        .await
+        .unwrap();
+    db.verify_storage().await.unwrap();
+    for id in [2, 4] {
+        let text: String = sqlx::query_scalar("SELECT text FROM elements WHERE id=?")
+            .bind(id)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+        assert_eq!(text, large);
+        let text: String =
+            sqlx::query_scalar("SELECT transcription FROM audio_transcriptions WHERE id=?")
+                .bind(id)
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+        assert_eq!(text, format!("{large} {id}"));
+    }
     assert_eq!(
-        snapshot.failure_stage.as_deref(),
-        Some("reading_elements_to_seal")
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM _bulk_element_rows WHERE _archive_deleted=0"
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        2
     );
-    assert_eq!(snapshot.table.as_deref(), Some("elements"));
-    assert_eq!((snapshot.first_id, snapshot.last_id), (Some(7), Some(7)));
-    assert!(snapshot.batch_bytes.unwrap() > 1024);
-    assert_eq!(snapshot.error.as_deref(), Some(error.to_string().as_str()));
-    assert!(!root.path().join("storage-migration-complete.json").exists());
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM main.audio_transcriptions WHERE _archive_file IS NOT NULL"
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        2
+    );
+    for (table, column, _) in other_payloads {
+        for id in [2, 4] {
+            let actual: String = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                "SELECT {column} FROM {table} WHERE id=?"
+            )))
+            .bind(id)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+            assert_eq!(actual, large);
+        }
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(format!(
+                "SELECT count(*) FROM main.{table} WHERE _archive_file IS NOT NULL"
+            )))
+            .fetch_one(&db.pool)
+            .await
+            .unwrap(),
+            2
+        );
+    }
+    for table in [
+        "elements",
+        "audio_transcriptions",
+        "ui_events",
+        "semantic_items",
+    ] {
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(format!(
+                "SELECT count(*) FROM {table}_fts WHERE {table}_fts MATCH 'oversized'"
+            )))
+            .fetch_one(&db.pool)
+            .await
+            .unwrap(),
+            2
+        );
+    }
+    db.execute_raw_sql_write("INSERT INTO frames(id,timestamp,full_text) VALUES(2,'2026-09-16','new recording'); INSERT INTO elements(id,frame_id,source,role,text) VALUES(5,2,'accessibility','AXText','new recording');").await.unwrap();
+    while db.seal_payloads().await.unwrap() != 0 {}
+    db.close().await;
+    let db = DatabaseManager::new(path.to_str().unwrap(), Default::default())
+        .await
+        .unwrap();
+    db.verify_storage().await.unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT text FROM elements WHERE id=5")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap(),
+        "new recording"
+    );
+    db.close().await;
 }
 
 #[tokio::test]
@@ -975,6 +1081,67 @@ async fn recording_recovery_is_durable_when_interrupted_before_or_after_activati
         .unwrap();
         db.verify_storage().await.unwrap();
         db.execute_raw_sql_write("INSERT INTO frames(id,timestamp,full_text) VALUES(49,'2026-09-14T12:00:00Z','recording after interrupted recovery')").await.unwrap();
+        db.close().await;
+    }
+}
+
+#[tokio::test]
+async fn migration_verification_does_not_use_the_response_payload_budget() {
+    for retain_oversized in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("db.sqlite");
+        let db = DatabaseManager::new(path.to_str().unwrap(), Default::default())
+            .await
+            .unwrap();
+        let ordinary = "detail 東京\0".repeat(40);
+        let oversized = ordinary.repeat(4);
+        let mut tx = db.begin_immediate_with_retry().await.unwrap();
+        for id in 1..=132 {
+            let detail = if retain_oversized && id == 1 {
+                &oversized
+            } else {
+                &ordinary
+            };
+            sqlx::query("INSERT INTO frames(id,timestamp,full_text,accessibility_tree_json) VALUES(?,'2026-09-16T12:00:00Z','history',?)")
+                .bind(id).bind(detail).execute(&mut **tx.conn()).await.unwrap();
+        }
+        tx.commit().await.unwrap();
+        db.close().await;
+        let mut options = MigrationOptions::default();
+        options.budget.row_group_rows = 1;
+        options.budget.file_rows = 1;
+        options.budget.file_bytes = 1024;
+        options.budget.record_bytes = 1024;
+        options.budget.response_bytes = 1024;
+        assert!(ordinary.len() < options.budget.record_bytes);
+        assert!(oversized.len() > options.budget.response_bytes);
+        let report = migrate(root.path(), Default::default(), options)
+            .await
+            .unwrap();
+        assert_eq!(report.frames, 132);
+        let db = DatabaseManager::new(path.to_str().unwrap(), Default::default())
+            .await
+            .unwrap();
+        db.verify_storage().await.unwrap();
+        assert!(db
+            .frame_payloads(&[2, 3], Projection::All)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("response payload budget exceeded"));
+        if retain_oversized {
+            let (state, detail): (String, String) = sqlx::query_as("SELECT p.state,f.accessibility_tree_json FROM frames f JOIN frame_payloads p ON p.frame_id=f.id WHERE f.id=1")
+                .fetch_one(&db.pool).await.unwrap();
+            assert_eq!(state, "staged");
+            assert_eq!(detail, oversized);
+        }
+        assert_eq!(
+            db.frame_payloads(&[132], Projection::All).await.unwrap()[&132]
+                .accessibility_tree_json
+                .as_deref(),
+            Some(ordinary.as_str())
+        );
+        db.execute_raw_sql_write("INSERT INTO frames(id,timestamp,full_text) VALUES(133,'2026-09-16T12:01:00Z','recording after verification')").await.unwrap();
         db.close().await;
     }
 }

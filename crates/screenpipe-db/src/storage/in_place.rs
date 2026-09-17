@@ -140,13 +140,13 @@ async fn run(
                 schema::finish_step(&mut tx,"suspend-original-triggers").await?;
                 tx.commit().await?;
             }
+            if schema::converted_step(&mut conn,"conversion-complete").await? { return Ok(()); }
             // A paused migration records resident payloads like the original
             // SQLite store. Its disabled sealer must not impose a staging cap
             // that eventually stops recording. Explicit completion restores it.
             sqlx::query("UPDATE storage_metadata SET staging_limit=?")
                 .bind(if archive { storage.descriptor.budget.staging_bytes as i64 } else { i64::MAX })
                 .execute(&mut *conn).await?;
-            if schema::converted_step(&mut conn,"conversion-complete").await? { return Ok(()); }
             schema::construction_checkpoint(&mut conn).await?;
         }
         // Encoding reservations left by an interrupted attempt are handled by
@@ -196,32 +196,22 @@ async fn run(
                     report(&storage, &pool, original_allocated, total_records, progress, &mut last_report, reclaimed).await?;
                     continue;
                 }
-                let rows = if archive {
-                    super::import::batch(&pool, "_bulk_elements_source", &columns, None, &storage.descriptor.budget).await?
-                } else { Vec::new() };
-                let range = if archive {
-                    rows.first().zip(rows.last()).map(|(first,last)| (first.get::<i64,_>(0),last.get::<i64,_>(0)))
-                } else {
-                    resident_range(&pool, "_bulk_elements_source", None, storage.descriptor.budget.file_bytes, None).await?
-                };
+                // Move existing records inside SQLite, including records larger
+                // than any encoder/decoder batch. Sealing can leave them resident.
+                let range = resident_range(&pool, "_bulk_elements_source", None,
+                    storage.descriptor.budget.file_bytes, archive.then_some(bulk::FILE_ROWS)).await?;
                 let Some((first, last)) = range else { break };
-                super::diagnostics::batch("elements", Some(first), Some(last), Some(rows.len() as u64), None);
+                super::diagnostics::batch("elements", Some(first), Some(last), None, None);
                 super::diagnostics::stage("waiting_for_element_writer");
                 let permit = writer.lock().await?;
                 super::diagnostics::stage("waiting_for_element_connection");
                 let mut conn = permit.pool().acquire().await?;
                 let mut tx = conn.begin().await?;
                 super::diagnostics::stage("staging_element_rows");
-                if archive {
-                    super::import::insert(&mut tx, "elements", &columns, &rows, true).await?;
-                } else {
-                    // SQL-to-SQL batches also recover pre-existing records that
-                    // exceed the archive record budget, without decoding them.
-                    let names = columns.iter().map(|c| format!("\"{}\"", c.replace('"', "\"\""))).collect::<Vec<_>>().join(",");
-                    sqlx::query(sqlx::AssertSqlSafe(format!("INSERT INTO _bulk_element_rows({names},_archive_generation) SELECT {names},1 FROM _bulk_elements_source WHERE id BETWEEN ? AND ?")))
-                        .bind(first).bind(last).execute(&mut *tx).await?;
-                    bulk::elements::import_batch(&mut tx, first, last).await?;
-                }
+                let names = columns.iter().map(|c| format!("\"{}\"", c.replace('"', "\"\""))).collect::<Vec<_>>().join(",");
+                sqlx::query(sqlx::AssertSqlSafe(format!("INSERT INTO _bulk_element_rows({names},_archive_generation) SELECT {names},1 FROM _bulk_elements_source WHERE id BETWEEN ? AND ?")))
+                    .bind(first).bind(last).execute(&mut *tx).await?;
+                bulk::elements::import_batch(&mut tx, first, last).await?;
                 super::diagnostics::stage("deleting_staged_source_elements");
                 sqlx::query("DELETE FROM _bulk_elements_source WHERE id BETWEEN ? AND ?").bind(first).bind(last).execute(&mut *tx).await?;
                 super::diagnostics::stage("committing_element_staging");
@@ -268,6 +258,11 @@ async fn run(
             let original: Vec<String> = sqlx::query_scalar("SELECT sql FROM _storage_conversion_triggers WHERE restore=1").fetch_all(&mut *tx).await?;
             for sql in original { sqlx::raw_sql(sqlx::AssertSqlSafe(sql)).execute(&mut *tx).await?; }
             if archive {
+                // Existing resident history occupies disk, not the capture work
+                // queue. Preserve a full configured staging allowance above it.
+                sqlx::query("UPDATE storage_metadata SET staging_limit=staging_bytes+?")
+                    .bind(storage.descriptor.budget.staging_bytes as i64)
+                    .execute(&mut *tx).await?;
                 schema::finish_step(&mut tx,"conversion-complete").await?;
             } else {
                 // Restored application triggers must be suspended again only
@@ -395,7 +390,7 @@ async fn backfill_resident_fts(
                 .fetch_optional(pool)
                 .await?
                 .flatten();
-        let sql = format!("SELECT id,{size} FROM {t} WHERE _archive_file IS NULL AND NOT ({eligible}) AND id {comparison} ? ORDER BY id LIMIT {rows}",t=table.name,eligible=if archive { table.eligible } else { "0" },comparison=if after.is_some(){">"}else{">="},rows=bulk::FILE_ROWS);
+        let sql = format!("SELECT id,{size} FROM {t} WHERE _archive_file IS NULL AND id {comparison} ? ORDER BY id LIMIT {rows}",t=table.name,comparison=if after.is_some(){">"}else{">="},rows=bulk::FILE_ROWS);
         let mut stream = sqlx::query(sqlx::AssertSqlSafe(sql))
             .bind(after.unwrap_or(i64::MIN))
             .fetch(pool);
@@ -403,11 +398,6 @@ async fn backfill_resident_fts(
         let mut bytes = 0_usize;
         while let Some(row) = stream.try_next().await? {
             let size = row.get::<i64, _>(1) as usize;
-            if archive && size > storage.descriptor.budget.record_bytes {
-                return Err(storage_error(
-                    "resident search record exceeds migration budget",
-                ));
-            }
             if !ids.is_empty() && bytes + size > storage.descriptor.budget.file_bytes {
                 break;
             }

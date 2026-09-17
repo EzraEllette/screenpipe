@@ -53,7 +53,7 @@ pub(crate) async fn seal(
     crate::storage::diagnostics::stage("selecting_staged_elements");
     let id: Option<i64> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
         "SELECT id FROM _bulk_element_rows WHERE _archive_deleted=0 AND ({}) ORDER BY id LIMIT 1",
-        TABLE.eligible
+        TABLE.sealable()
     )))
     .fetch_optional(pool)
     .await?;
@@ -178,10 +178,10 @@ async fn rewrite(
         sqlx::query_as("SELECT policy,required_surfaces FROM storage_metadata")
             .fetch_one(pool)
             .await?;
-    let (first, last, limit) = if let Some((first, last, _)) = range {
+    let (first, last) = if let Some((first, last, _)) = range {
         let blocked: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
             "SELECT EXISTS(SELECT 1 FROM elements WHERE id BETWEEN ? AND ? AND NOT ({}))",
-            TABLE.eligible
+            TABLE.sealable()
         )))
         .bind(first)
         .bind(last)
@@ -190,18 +190,14 @@ async fn rewrite(
         if blocked {
             return Ok(0);
         }
-        (first, last, String::new())
+        (first, last)
     } else {
         let next: Option<i64> =
             sqlx::query_scalar("SELECT min(first_id) FROM _bulk_element_ranges WHERE first_id>?")
                 .bind(id)
                 .fetch_one(pool)
                 .await?;
-        (
-            id,
-            next.map_or(i64::MAX, |n| n - 1),
-            format!(" LIMIT {FILE_ROWS}"),
-        )
+        (id, next.map_or(i64::MAX, |n| n - 1))
     };
     // Release each read cursor before encoding takes the writer. Offline
     // migration has one connection; a recovered resident range can exceed one
@@ -210,43 +206,41 @@ async fn rewrite(
     let mut files = Vec::new();
     loop {
         let lower = after.map_or_else(|| "1".to_owned(), |id| format!("id>{id}"));
-        let sql=format!("SELECT id,_archive_generation,{} FROM elements WHERE id BETWEEN ? AND ? AND {lower} AND ({}) ORDER BY id{limit}",names(),TABLE.eligible);
-        crate::storage::diagnostics::batch(
-            "elements",
-            Some(after.unwrap_or(first)),
-            Some(last),
-            None,
-            None,
-        );
-        crate::storage::diagnostics::stage("reading_elements_to_seal");
-        let mut stream = sqlx::query(sqlx::AssertSqlSafe(sql))
-            .bind(first)
-            .bind(last)
-            .fetch(pool);
-        let mut rows = Vec::new();
-        let mut bytes = 0;
-        while let Some(row) = stream.try_next().await? {
-            let row = record(&row)?;
-            if row.bytes() > storage.descriptor.budget.record_bytes {
-                crate::storage::diagnostics::batch(
-                    "elements",
-                    Some(row.id),
-                    Some(row.id),
-                    Some(1),
-                    Some(row.bytes() as u64),
-                );
-                return Err(storage_error("element record exceeds sealing budget"));
-            }
-            if !rows.is_empty()
-                && (rows.len() == FILE_ROWS
-                    || bytes + row.bytes() > storage.descriptor.budget.file_bytes)
+        crate::storage::diagnostics::stage("selecting_element_batch");
+        let candidates: Vec<(i64, i64)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "SELECT id,{} FROM elements WHERE id BETWEEN ? AND ? AND {lower} AND ({}) ORDER BY id LIMIT {FILE_ROWS}",
+            TABLE.all_bytes(""), TABLE.eligible
+        )))
+        .bind(first).bind(last).fetch_all(pool).await?;
+        let mut ids = Vec::new();
+        let mut bytes = 0usize;
+        for (id, size) in candidates {
+            let size = usize::try_from(size).map_err(storage_error)?;
+            // End the range before a retained record so future rewrites never
+            // need to decode that record or remove its SQLite contents.
+            if size > storage.descriptor.budget.record_bytes
+                || (!ids.is_empty()
+                    && bytes.saturating_add(size) > storage.descriptor.budget.file_bytes)
             {
                 break;
             }
-            bytes += row.bytes();
-            rows.push(row);
+            ids.push(id);
+            bytes += size;
         }
-        drop(stream);
+        crate::storage::diagnostics::batch(
+            "elements",
+            ids.first().copied(),
+            ids.last().copied(),
+            Some(ids.len() as u64),
+            Some(bytes as u64),
+        );
+        crate::storage::diagnostics::stage("reading_elements_to_seal");
+        let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SELECT id,_archive_generation,{} FROM elements WHERE id IN (SELECT value FROM json_each(?)) ORDER BY id", names()
+        )))
+        .bind(serde_json::to_string(&ids).map_err(storage_error)?)
+        .fetch_all(pool).await?
+        .iter().map(record).collect::<Result<Vec<_>, _>>()?;
         let Some(last_row) = rows.last() else { break };
         after = Some(last_row.id);
         files.push(encode(storage, writer, rows).await?);
@@ -284,7 +278,7 @@ async fn rewrite(
     let selection = if range.is_some() {
         "1".into()
     } else {
-        format!("_archive_deleted=1 OR ({})", TABLE.eligible)
+        format!("_archive_deleted=1 OR ({})", TABLE.sealable())
     };
     let freed:i64=sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT COALESCE(SUM({}),0) FROM _bulk_element_rows WHERE id BETWEEN ? AND ? AND ({selection})",TABLE.all_bytes("")))).bind(first).bind(last).fetch_one(&mut *tx).await?;
     sqlx::query(sqlx::AssertSqlSafe(format!(
