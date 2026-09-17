@@ -409,7 +409,7 @@ function AppShell({
   }), [assistant?.platform, pageAssistant]);
   const [assistantDocked, setAssistantDocked] = useState(false);
   const [assistantOpen, setAssistantOpen] = useState(false);
-  const [assistantMode, setAssistantMode] = useState<AssistantState["mode"]>("sidebar");
+  const [assistantMode, setAssistantMode] = useState<AssistantState["mode"] | null>(null);
   const assistantToggleLabel = assistantOpen ? "Collapse right sidebar" : "Open right sidebar";
   const [navigationCollapsed, setNavigationCollapsed] = useState(false);
   const shortcuts = useSidebarShortcuts();
@@ -514,7 +514,7 @@ function AppShell({
         </nav>}
         <main className={styles.main}>{children}</main>
       </section>
-      {assistant && <WorkflowAssistant composerAccessory={composerAccessory} active={active} platform={assistantPlatform!} context={pageAssistant?.context ?? assistant.context} onDockChange={setAssistantDocked} onWidthChange={setAssistantWidth} onOpenChange={setAssistantOpen} onModeChange={setAssistantMode} headerToggle={!pageAssistant} />}
+      {assistant && <WorkflowAssistant composerAccessory={composerAccessory} active={active} platform={assistantPlatform!} context={pageAssistant?.context ?? assistant.context} onDockChange={setAssistantDocked} onWidthChange={setAssistantWidth} onOpenChange={setAssistantOpen} onModeChange={setAssistantMode} headerToggle />}
     </div></PageAssistantContext.Provider>
   );
 }

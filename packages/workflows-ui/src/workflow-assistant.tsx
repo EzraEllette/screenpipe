@@ -25,7 +25,7 @@ export function WorkflowAssistant({ platform, context, onDockChange, onWidthChan
 }) {
   const shortcuts = useSidebarShortcuts();
   const [open, setOpen] = useState(false);
-  const [state, setState] = useState<AssistantState>(() => ({ ...emptyAssistantState(), mode: headerToggle ? "sidebar" : "floating" }));
+  const [state, setState] = useState<AssistantState>(emptyAssistantState);
   const useHeaderToggle = headerToggle && state.mode === "sidebar";
   const launcherLabel = headerToggle ? "Open chat" : "Ask Screenpipe";
   const stateRef = useRef(state);
@@ -95,7 +95,7 @@ export function WorkflowAssistant({ platform, context, onDockChange, onWidthChan
     finally { loadInFlight.current = false; }
   }, [platform]);
 
-  useEffect(() => { if (open && !loadedRef.current && !loadError) void restore(); }, [open, restore, loadError]);
+  useEffect(() => { if (active && !loadedRef.current && !loadError) void restore(); }, [active, restore, loadError]);
   useEffect(() => {
     if (context.purpose !== "sop") { selectedSop.current = null; return; }
     if (!loaded || busy || selectedSop.current === context.key) return;
@@ -110,7 +110,7 @@ export function WorkflowAssistant({ platform, context, onDockChange, onWidthChan
   useEffect(() => { onDockChange(open && state.mode === "sidebar"); }, [open, state.mode, onDockChange]);
   useEffect(() => { onWidthChange?.(width); }, [width, onWidthChange]);
   useEffect(() => { onOpenChange?.(open); }, [open, onOpenChange]);
-  useEffect(() => { onModeChange?.(state.mode); }, [state.mode, onModeChange]);
+  useEffect(() => { if (loaded || loadError) onModeChange?.(state.mode); }, [state.mode, loaded, loadError, onModeChange]);
   useEffect(() => { if (open && loaded) (historyOpen ? historyInput.current : input.current)?.focus(); }, [open, loaded, historyOpen]);
   useEffect(() => {
     if (displayOpen) displayMenu.current?.querySelector<HTMLButtonElement>('[aria-checked="true"]')?.focus();
@@ -295,7 +295,7 @@ export function WorkflowAssistant({ platform, context, onDockChange, onWidthChan
   }
 
   return <>
-    {!open && !useHeaderToggle && <button ref={launcher} className={styles.launcher} onClick={() => setOpen(true)} title={`${launcherLabel} (${shortcuts.right.keys.join(" ")})`} aria-keyshortcuts={shortcuts.right.aria} aria-label={launcherLabel} aria-expanded={false}>
+    {!open && (loaded || loadError) && !useHeaderToggle && <button ref={launcher} className={styles.launcher} onClick={() => setOpen(true)} title={`${launcherLabel} (${shortcuts.right.keys.join(" ")})`} aria-keyshortcuts={shortcuts.right.aria} aria-label={launcherLabel} aria-expanded={false}>
       <MessageCircle size={20} strokeWidth={1.65} /><span>{launcherLabel}<kbd>{shortcuts.right.keys.join(" ")}</kbd></span>{busy && <i aria-label="Answer in progress" />}
     </button>}
     <aside id="workflows-assistant" ref={panel} hidden={!open} className={[styles.panel, state.mode === "sidebar" ? styles.docked : styles.floating].join(" ")}
