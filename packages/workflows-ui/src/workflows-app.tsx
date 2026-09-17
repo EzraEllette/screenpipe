@@ -957,7 +957,7 @@ function WorkflowDetail({ workflow, navigate, platform, workProfile, saveCorrect
                   </li>)}</ol> : <p>Step not yet verified.</p>}
                   {!!stage.openQuestions?.length && <details className={styles.procedureQuestions}><summary>Unresolved details</summary><ul>{stage.openQuestions.map((question) => <li key={question}>{question}</li>)}</ul></details>}
                 </section>
-                {stage.screenshot && <div className={styles.stageScreenshot}>
+                {stage.screenshot?.visualVerified && <div className={styles.stageScreenshot}>
                   <>
                     <div className={styles.screenshotFrame}><img src={stage.screenshot.dataUrl} alt={`Captured screen evidence for ${stage.name}`} draggable={false} data-lm-disable="true" /></div>
                     <div><Camera size={12} /><span>{formatEvidenceTimestamp(stage.screenshot.timestamp)} · {stage.screenshot.app} · {screenshotMatchLabel(stage.screenshot.matchDistanceSeconds)}</span><CapturedMomentButton frameId={stage.screenshot.frameId} timestamp={stage.screenshot.timestamp} open={platform.openCapturedMoment} /></div>

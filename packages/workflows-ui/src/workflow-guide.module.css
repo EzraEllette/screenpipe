@@ -225,16 +225,27 @@ label.result {
   display: block;
   margin-top: 18px;
 }
-.noImage {
+.imageReview {
+  border: 1px solid var(--line, #dfe1d9);
+  border-radius: 8px;
+  overflow: hidden;
+  margin: 20px 0;
+}
+.imageReviewHeader {
   display: flex;
-  gap: 9px;
+  flex-wrap: wrap;
+  gap: 12px;
   align-items: center;
-  min-height: 60px;
-  border: 1px dashed var(--line, #dfe1d9);
-  border-radius: 7px;
+  justify-content: space-between;
   padding: 12px 16px;
-  font-size: 12px;
   color: var(--muted, #777b70);
+  font-size: 13px;
+}
+.imageReview img {
+  border: 0;
+  border-top: 1px solid var(--line, #dfe1d9);
+  border-bottom: 1px solid var(--line, #dfe1d9);
+  border-radius: 0;
 }
 .guide input:not([type="checkbox"]),
 .guide textarea {
