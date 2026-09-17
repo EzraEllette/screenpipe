@@ -1764,7 +1764,7 @@ Rules:
             max_tokens: 4096,
         };
 
-        // Rust persists store.bin before the frontend mounts. All-null values
+        // Rust persists store.bin before the frontend mounts. Null values
         // identify a genuinely new install that may inherit remote defaults;
         // legacy stores lack this object and are migrated from their current
         // effective values. The persisted policy also lets Rust enforce every
@@ -1773,7 +1773,7 @@ Rules:
             (
                 "remoteControlPreferences".to_string(),
                 json!({
-                    "semanticContext": null,
+                    "semanticContext": true,
                     "coreAudioSystemAudio": null,
                     "smartRecording": null,
                     "filterMusic": null,
@@ -1787,7 +1787,7 @@ Rules:
                     "schemaVersion": 1,
                     "boolean": {
                         "semanticContext": {
-                            "defaultEnabled": false,
+                            "defaultEnabled": true,
                             "forceDisabled": false,
                         },
                         "coreAudioSystemAudio": {
@@ -1821,6 +1821,7 @@ Rules:
         Self {
             // App-specific defaults override RecordingSettings::default() where needed
             recording: screenpipe_config::RecordingSettings {
+                enable_semantic_context: true,
                 audio_transcription_engine: "whisper-large-v3-turbo-quantized".to_string(),
                 monitor_ids: vec!["default".to_string()],
                 audio_devices: vec!["default".to_string()],
@@ -2085,6 +2086,9 @@ impl SettingsStore {
 
     pub fn to_recording_settings(&self) -> screenpipe_config::RecordingSettings {
         let mut settings = self.recording.clone();
+        // App context is built in, even for old stores with the toggle off.
+        // The remote emergency shutoff below still takes precedence.
+        settings.enable_semantic_context = true;
         // Override user_id with the Clerk JWT token from the auth user object.
         // This token is used as the Bearer credential for screenpipe cloud
         // (transcription proxy, Pi agent, etc.), not as a database ID.
@@ -4881,6 +4885,28 @@ mod tests {
         assert_eq!(settings.user.token, None);
         assert_eq!(settings.embedded_llm.enabled, false);
         assert_eq!(settings.ai_presets.len(), 0);
+    }
+
+    #[test]
+    fn structured_context_is_automatic_before_frontend_startup() {
+        let mut store = SettingsStore::default();
+        assert!(store.recording.enable_semantic_context);
+        assert!(store.to_recording_settings().enable_semantic_context);
+        store.recording.enable_semantic_context = false;
+        store.extra.insert(
+            "remoteControlPreferences".into(),
+            json!({"semanticContext": false}),
+        );
+        assert!(store.to_recording_settings().enable_semantic_context);
+        store.extra.insert(
+            "remoteControlPolicy".into(),
+            json!({"schemaVersion": 1, "boolean": {
+                "semanticContext": {"defaultEnabled": false, "forceDisabled": true}
+            }}),
+        );
+        assert!(!store.to_recording_settings().enable_semantic_context);
+        store.extra.remove("remoteControlPolicy");
+        assert!(store.to_recording_settings().enable_semantic_context);
     }
 
     #[test]

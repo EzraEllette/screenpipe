@@ -12,17 +12,11 @@ import { useInterval } from "@/lib/hooks/use-interval";
 import { useSettingsIndexDriftCheck, type SettingsField } from "./settings-search";
 import { CaptureFrequencyPreview, AudioCaptureModePreview } from "./setting-previews";
 import {
-  SEMANTIC_CONTEXT_MODE_COPY,
-  type SemanticContextMode,
-} from "@/lib/semantic-context-mode";
-import {
   getAecModeSettings,
   getRemoteAecModePolicy,
-  getRemoteBooleanPolicy,
   normalizeAecModeForPlatform,
   normalizeDesktopRemotePreferences,
   resolveAecModeRemoteValue,
-  resolveBooleanRemoteValue,
   type AecMode,
 } from "@/lib/desktop-remote-control";
 import {
@@ -50,8 +44,6 @@ export const audioSearchIndex: SettingsField[] = [
 /** Search fields for the Screen destination. */
 export const screenSearchIndex: SettingsField[] = [
   { label: "Screen context capture", keywords: ["screen", "video", "accessibility"] },
-  { label: "Structured app context", keywords: ["semantic", "ai", "messages", "email", "tasks", "code"], conditional: true },
-  { label: "Use it for", keywords: ["memory", "computer use", "automation", "agent", "skills"], conditional: true },
   { label: "Screen recording", keywords: ["screenshot", "pixels", "ocr", "jpeg", "capture"] },
   { label: "Use all monitors", keywords: ["monitor", "display"], conditional: true },
   // conditional: monitor picker only renders when "Use all monitors" is off — paired right under that toggle.
@@ -2083,11 +2075,6 @@ export function RecordingSettings({ section }: { section: RecordingSettingsSecti
     settings.aecMode ?? "off",
     currentPlatform,
   );
-  const remoteControlPreferences = normalizeDesktopRemotePreferences(settings);
-  const semanticContextRemotePolicy = getRemoteBooleanPolicy(
-    settings,
-    "semanticContext",
-  );
   const smartRecordingRemotePolicy = getRemoteBooleanPolicy(
     settings,
     "smartRecording",
@@ -3793,97 +3780,6 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
             </div>
           </CardContent>
         </Card>
-
-        {!settings.disableVision && (
-          <Card className="border-border bg-card">
-            <CardContent className="px-3 py-2.5">
-              <div className="space-y-3">
-                <div className="flex items-center justify-between gap-3">
-                  <div className="flex items-center space-x-2.5 min-w-0">
-                    <AppWindowMac className="h-4 w-4 text-muted-foreground shrink-0" />
-                    <div className="min-w-0">
-                      <h3 className="text-sm font-medium text-foreground flex items-center gap-1.5">
-                        Structured app context
-                        <Badge variant="secondary" aria-label="Experimental" className="px-1.5 py-0 text-[10px] font-medium">
-                          Experimental
-                        </Badge>
-                      </h3>
-                      <p className="text-xs text-muted-foreground">
-                        Turn what Screenpipe already captures into a clearer view for AI. Nothing is recorded twice.
-                      </p>
-                    </div>
-                  </div>
-                  {semanticContextRemotePolicy.forceDisabled ? (
-                    <Switch id="enableSemanticContext" checked={false} disabled />
-                  ) : (
-                    <ManagedSwitch
-                      settingKey="enableSemanticContext"
-                      id="enableSemanticContext"
-                      checked={Boolean(settings.enableSemanticContext ?? false)}
-                      onCheckedChange={(checked) =>
-                        handleSettingsChange(
-                          {
-                            remoteControlPreferences: {
-                              ...remoteControlPreferences,
-                              semanticContext: checked,
-                            },
-                            enableSemanticContext: resolveBooleanRemoteValue(
-                              checked,
-                              semanticContextRemotePolicy,
-                            ),
-                          },
-                          true,
-                        )
-                      }
-                    />
-                  )}
-                </div>
-
-                {semanticContextRemotePolicy.forceDisabled && (
-                  <p className="border-t border-border pt-3 text-xs text-muted-foreground">
-                    Temporarily disabled by the remote safety control. Your
-                    preference is preserved.
-                  </p>
-                )}
-
-                {settings.enableSemanticContext &&
-                  !semanticContextRemotePolicy.forceDisabled && (
-                  <LockedSetting settingKey="semanticContextMode">
-                    <div className="flex flex-col gap-3 border-t border-border pt-3 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
-                      <div className="min-w-0">
-                        <label htmlFor="semanticContextMode" className="text-xs font-medium text-foreground">
-                          Use it for
-                        </label>
-                        <p className="text-xs text-muted-foreground mt-0.5">
-                          {
-                            SEMANTIC_CONTEXT_MODE_COPY[
-                              (settings.semanticContextMode ?? "memory") as SemanticContextMode
-                            ].description
-                          }
-                        </p>
-                      </div>
-                      <Select
-                        value={settings.semanticContextMode ?? "memory"}
-                        onValueChange={(value: SemanticContextMode) =>
-                          handleSettingsChange({ semanticContextMode: value }, true)
-                        }
-                      >
-                        <SelectTrigger id="semanticContextMode" className="h-8 w-full shrink-0 text-xs sm:w-[220px]">
-                          <SelectValue className="min-w-0 flex-1 truncate text-left" />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="memory">{SEMANTIC_CONTEXT_MODE_COPY.memory.label}</SelectItem>
-                          <SelectItem value="computerUse">{SEMANTIC_CONTEXT_MODE_COPY.computerUse.label}</SelectItem>
-                          <SelectItem value="both">{SEMANTIC_CONTEXT_MODE_COPY.both.label}</SelectItem>
-                        </SelectContent>
-                      </Select>
-                    </div>
-                  </LockedSetting>
-                  )}
-              </div>
-            </CardContent>
-          </Card>
-        )}
 
         {!settings.disableVision && (
           <Card className="border-border bg-card">
