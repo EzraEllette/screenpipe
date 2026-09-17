@@ -342,7 +342,7 @@ describe("SOP assistant and web editor", () => {
         }}
       />,
     );
-    fireEvent.click(await screen.findByText("Open web editor"));
+    fireEvent.click(await screen.findByRole("button", { name: "Open web editor", exact: true }));
     expect(openWeb).not.toHaveBeenCalled();
     expect(screen.queryByText("Create a short video")).not.toBeInTheDocument();
     fireEvent.click(screen.getByText("Continue to web editor"));

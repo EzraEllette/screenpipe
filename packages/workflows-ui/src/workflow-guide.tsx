@@ -179,7 +179,24 @@ export function WorkflowGuide({
           Back to workflow
         </button>
         <div>
-          <span role="status">{saved}</span>
+          <span role="status" className={styles.saveStatus} title={saved}>
+            {saved.startsWith("Could not") ? (
+              saved
+            ) : (
+              <>
+                {saved === "Saving…" ? (
+                  <Loader2
+                    size={16}
+                    className={styles.spin}
+                    aria-hidden="true"
+                  />
+                ) : saved ? (
+                  <Check size={16} aria-hidden="true" />
+                ) : null}
+                <span className={styles.srOnly}>{saved}</span>
+              </>
+            )}
+          </span>
           {saved.startsWith("Could not") && (
             <button
               onClick={() => latest.current && void persist(latest.current)}
@@ -191,29 +208,41 @@ export function WorkflowGuide({
             <>
               {platform.openWeb && (
                 <button
-                  className={styles.primary}
+                  className={styles.iconButton}
+                  aria-label="Open web editor"
+                  title="Open web editor"
                   onClick={() => {
                     setWebReview(true);
                     setWebError("");
                   }}
                 >
-                  <ExternalLink size={15} />
-                  Open web editor
+                  <ExternalLink size={18} aria-hidden="true" />
                 </button>
               )}
-              <button onClick={() => setEditing(!editing)}>
-                {editing ? <Check size={15} /> : <Pencil size={15} />}
-                {editing ? "Done editing" : "Edit SOP"}
+              <button
+                className={styles.iconButton}
+                aria-label={editing ? "Done editing" : "Edit SOP"}
+                title={editing ? "Done editing" : "Edit SOP"}
+                aria-pressed={editing}
+                onClick={() => setEditing(!editing)}
+              >
+                {editing ? (
+                  <Check size={18} aria-hidden="true" />
+                ) : (
+                  <Pencil size={18} aria-hidden="true" />
+                )}
               </button>
               <button
+                className={styles.iconButton}
+                aria-label="Export SOP"
+                title="Export SOP"
                 onClick={() => {
                   setImages(false);
                   setExportError("");
                   dialog.current?.showModal();
                 }}
               >
-                <Download size={15} />
-                Export SOP
+                <Download size={18} aria-hidden="true" />
               </button>
             </>
           )}
