@@ -43,3 +43,9 @@ Call workflow_stage_commit with your items and coverage. The tool carries the
 correct revisions and checkpoint automatically. A valid empty items array is useful.
 Finish with one factual sentence after the save receipt. Keep intermediate
 results concise; the final review task publishes the user-facing catalog.
+
+Keep a candidate for each professional episode that improves an existing job,
+even if this batch has only one new occurrence. Prior catalog evidence counts
+when matching a recurring job; recurrence need not be rediscovered in every batch.
+Do not discard useful procedure evidence merely because timing or screenshots
+are unavailable. Carry stable candidateId/workflowId and source references forward.

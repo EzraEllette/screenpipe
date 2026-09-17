@@ -1,7 +1,7 @@
 // screenpipe — AI that knows everything you've seen, said, or heard
 // https://screenpipe.com
 import { afterEach, expect, it, vi } from "vitest";
-import workflowCatalog from "@screenpipe-ext/workflow-catalog";
+import workflowCatalog, { validateStageHandoff } from "@screenpipe-ext/workflow-catalog";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,17 +9,17 @@ const directories: string[] = [];
 const priorExitCode = process.exitCode;
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); process.exitCode = priorExitCode; for (const dir of directories.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 const stopped = { messages: [{ role: "assistant", stopReason: "stop" }] };
-async function harness() {
+async function harness(stage = 4, items: any[] = []) {
   const events: Record<string, (event?: any, ctx?: any) => Promise<any>> = {};
   const tools: Record<string, any> = {};
   const pi = { on: (name: string, run: any) => { events[name] = run; }, registerTool: (tool: any) => { tools[tool.name] = tool; }, setActiveTools: vi.fn(), sendMessage: vi.fn() };
   workflowCatalog(pi as any);
   const parent = mkdtempSync(join(tmpdir(), "workflow-save-test-"));
   directories.push(parent);
-  const cwd = join(parent, "workflow-discovery"); mkdirSync(cwd);
+  const cwd = join(parent, ["workflow-activity", "workflow-patterns", "workflow-procedures", "workflow-timing", "workflow-discovery"][stage]); mkdirSync(cwd);
   writeFileSync(join(cwd, ".screenpipe-permissions.json"), JSON.stringify({ pipe_token: "fixture", api_base: "http://127.0.0.1:3030" }));
   await events.session_start({}, { cwd });
-  const context = { revision: 3, now: "2026-09-15T12:00:00Z", ready: true, inputRevision: 2, checkedThrough: "2026-09-15T12:00:00Z" };
+  const context = { stage, input: {items, coverage: []}, revision: 3, now: "2026-09-15T12:00:00Z", ready: true, inputRevision: 2, checkedThrough: "2026-09-15T12:00:00Z" };
   const fetch = vi.fn().mockImplementation(async () => Response.json(context));
   vi.stubGlobal("fetch", fetch);
   await tools.workflow_context.execute("context", {});
@@ -111,4 +111,35 @@ it("allows a missing capture to be omitted without blocking a supported update",
   await expect(h.tools.workflow_inspect_frame.execute("inspect",{frame_id:7})).rejects.toThrow("Capture was deleted");
   h.fetch.mockResolvedValueOnce(Response.json({revision:4,checkedThrough:h.context.now}));
   await expect(h.commit()).resolves.toBeDefined();
+});
+
+it("preserves every candidate through timing, even when one occurrence cannot be measured", () => {
+  const known = {candidateId: "invoice", workflowId: "wf-invoice", concreteSteps: ["Save receipt"], sources: [{timestamp:"2026-09-16T10:00:00Z",app:"Receipts",quote:"Receipt saved"}]};
+  const unknown = {candidateId: "follow-up", workflowId: "wf-follow-up", concreteSteps: ["Draft follow-up"]};
+  const pipeline = {stage:3,input:{items:[known,unknown]}};
+  const measured = {...known,timingRuns:[{start:{timestamp:"2026-09-16T09:58:00Z",app:"Receipts",quote:"Start receipt"},end:known.sources[0],summary:"Save one receipt"}]};
+  expect(() => validateStageHandoff(pipeline,[measured])).toThrow("dropped");
+  expect(() => validateStageHandoff(pipeline,[{candidateId:"recent-meeting",timingRuns:[],timingNote:"Start unknown"}])).toThrow("upstream");
+  expect(() => validateStageHandoff(pipeline,[known,unknown])).toThrow("timingRuns");
+  expect(() => validateStageHandoff(pipeline,[measured,{...unknown,timingRuns:[],timingNote:"No completed outcome captured"}])).not.toThrow();
+});
+it("rejects identity changes and duplicates in procedure enrichment", () => {
+  const input = {candidateId:"receipt",workflowId:"wf-receipt"};
+  const pipeline = {stage:2,input:{items:[input]}};
+  expect(() => validateStageHandoff(pipeline,[{...input,workflowId:"wf-meeting"}])).toThrow("workflow IDs");
+  expect(() => validateStageHandoff(pipeline,[input,input])).toThrow("one item");
+  expect(() => validateStageHandoff(pipeline,[{...input,exclusionReason:"Only an unread request"}])).not.toThrow();
+});
+
+it("rejects lost handoff data before writing and preserves the backend checkpoint receipt", async () => {
+  const candidate = {candidateId:"receipt",workflowId:"wf-receipt",stages:[{name:"Save receipt"}]};
+  const h = await harness(3,[candidate]);
+  await expect(h.tools.workflow_stage_commit.execute("save",{items:[],coverage:[]})).rejects.toThrow("dropped");
+  expect(h.fetch).toHaveBeenCalledTimes(2);
+  const items = [{...candidate,timingRuns:[],timingNote:"Start not captured"}];
+  h.fetch.mockResolvedValueOnce(Response.json({revision:4,checkedThrough:"2026-09-14T12:00:00Z"}));
+  await expect(h.tools.workflow_stage_commit.execute("save",{items,coverage:[]})).rejects.toThrow("save receipt");
+  h.fetch.mockResolvedValueOnce(Response.json({revision:4,checkedThrough:h.context.checkedThrough}));
+  await expect(h.tools.workflow_stage_commit.execute("save",{items,coverage:[]})).resolves.toBeDefined();
+  expect(JSON.parse(h.fetch.mock.calls.at(-1)?.[1].body).items[0]).toMatchObject(candidate);
 });

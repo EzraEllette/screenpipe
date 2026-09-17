@@ -104,3 +104,16 @@ the source and fix or omit that claim; do not route around validation. A revisio
 conflict means someone edited the catalog: read it again and preserve their edit.
 Finish with one short factual sentence describing the committed changes. Use the
 existing task history for failures; never claim a save without a tool receipt.
+
+Review every upstream candidate independently. A missing timing run, absent
+screenshot or rejected candidate must not discard other supported improvements.
+Existing workflows can receive better evidenced steps from a single new
+occurrence; do not require the current batch alone to reprove all recurrence.
+Use upstream workflowId as the catalog id. Translate supported procedures into
+stages with source-linked procedure entries; preserve earlier valid steps and
+timingRuns. Unsupported suggestions belong outside the published procedure.
+Before an empty commit, check whether any candidate adds a supported step,
+correction, source or timing run to an existing workflow. Repair rejected fields
+using the original evidence rather than discarding all candidates at once.
+After saving report the receipt's actual created/updated counts and checkedThrough.
+A successful empty commit means "No changes saved", not that all history is current.

@@ -55,11 +55,13 @@ export async function loadScheduledCatalog(): Promise<WorkflowAnalysis | null> {
 }
 
 function job(execution: any): WorkflowAnalysisJob {
-  const status = execution.status === "completed" ? "complete"
+  const interrupted = execution.error_type === "interrupted" || execution.status === "interrupted";
+  const status = interrupted ? "incomplete" : execution.status === "completed" ? "complete"
     : ["failed", "cancelled", "interrupted", "timed_out"].includes(execution.status) ? "failed"
     : execution.status === "running" ? "processing" : "queued";
   return { id: String(execution.id), status, startedAt: execution.started_at,
-    message: execution.status === "cancelled" ? "Update stopped. Your saved workflows are still available."
+    message: interrupted ? "Screenpipe restarted during the update. Resume to continue from saved progress."
+      : execution.status === "cancelled" ? "Update stopped. Your saved workflows are still available."
       : String(`${execution.error_type || ""} ${execution.error_message || ""}`).includes("workflow_allowance_paused") ? "Workflow updates paused to preserve AI allowance. Manage usage to increase capacity or check reset times."
       : String(`${execution.error_type || ""} ${execution.error_message || ""}`).includes("workflow_business_required") ? "Automatic workflow discovery requires Business. Your saved workflows are still available."
       : String(`${execution.error_type || ""} ${execution.error_message || ""}`).includes("workflow_usage_unavailable") ? "Could not check AI allowance. Reconnect and try again."

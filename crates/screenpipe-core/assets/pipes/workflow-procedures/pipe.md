@@ -43,3 +43,14 @@ Call workflow_stage_commit with your items and coverage. The tool carries the
 correct revisions and checkpoint automatically. A valid empty items array is useful.
 Finish with one factual sentence after the save receipt. Keep intermediate
 results concise; the final review task publishes the user-facing catalog.
+
+Work through every item in pipeline.input.items. Preserve its candidateId and
+workflowId. Return the full supported procedure for each, retaining existing
+source references and occurrences. Do not replace the input with a new scan of
+recent activity. For a rejected candidate retain its identity and a concise
+exclusionReason so final review can account for it. If upstream is empty and a
+review was requested, refine relevant existing catalog workflows using their
+existing IDs and corrections; otherwise save an empty stage without a new scan.
+Write each concrete step with its exact supporting timestamp, app and quote,
+using the catalog's stages/procedure format where possible. A bare list of action
+suggestions cannot establish that the user actually performed those steps.

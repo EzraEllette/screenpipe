@@ -138,3 +138,8 @@ describe("workflow scheduled-task adapter", () => {
 });
 
 vi.mock("@/lib/workflows/rollout", () => ({ useWorkflowsRolloutEnabled: () => true, requireWorkflowsRollout: vi.fn() }));
+
+it("offers resume for a restart interruption, including executions stored as failed", async () => {
+  fetchMock.mockResolvedValueOnce(response({data:{id:51,status:"failed",error_type:"interrupted",error_message:"interrupted by system restart"}}));
+  expect(await getWorkflowJob("51")).toMatchObject({status:"incomplete",message:expect.stringContaining("Screenpipe restarted")});
+});

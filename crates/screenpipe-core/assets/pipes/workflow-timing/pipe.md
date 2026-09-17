@@ -49,3 +49,18 @@ Call workflow_stage_commit with your items and coverage. The tool carries the
 correct revisions and checkpoint automatically. Keep the enriched procedures in items, including those with unknown timing.
 Finish with one factual sentence after the save receipt. Keep intermediate
 results concise; the final review task publishes the user-facing catalog.
+
+Return every upstream candidate with the same candidateId and workflowId and
+its full supported procedure, sources and occurrences. Timing is an enrichment,
+not a second discovery pass or a filter for which procedures survive. Investigate
+the supplied occurrences with explicit source time windows, not a default "last
+hour" search. Keep this batch's checkedThrough; later activity belongs to a later
+activity task. Never substitute a recent meeting for a different upstream job.
+Add timingRuns using the exact shape:
+[{"start":{"timestamp":"ISO timestamp","app":"app","quote":"verbatim source"},
+"end":{"timestamp":"ISO timestamp","app":"app","quote":"verbatim source"},
+"summary":"Which occurrence these boundaries establish"}].
+When a start, completed outcome or continuity cannot be verified, keep the
+candidate with timingRuns: [] and a short timingNote identifying the missing
+boundary. Preserve its useful procedure improvements for final review. Never
+invent a duration to make the card look complete.
