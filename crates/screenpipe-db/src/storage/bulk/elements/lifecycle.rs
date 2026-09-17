@@ -19,6 +19,7 @@ struct Encoded {
     first: i64,
     last: i64,
     rows: usize,
+    generations: Vec<(i64, i64)>,
 }
 
 fn record(row: &sqlx::sqlite::SqliteRow) -> Result<Record, sqlx::Error> {
@@ -51,17 +52,41 @@ pub(crate) async fn seal(
 ) -> Result<usize, sqlx::Error> {
     crate::storage::diagnostics::batch("elements", None, None, None, None);
     crate::storage::diagnostics::stage("selecting_staged_elements");
-    let id: Option<i64> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
-        "SELECT id FROM _bulk_element_rows WHERE _archive_deleted=0 AND ({}) ORDER BY id LIMIT 1",
+    // A dirty archive must be rewritten as a whole. If privacy processing
+    // blocks that range, continue after it instead of starving newer work.
+    let mut after = None;
+    loop {
+        let lower = after.map_or_else(|| "1".to_owned(), |id| format!("id>{id}"));
+        let id: Option<i64> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "SELECT id FROM _bulk_element_rows WHERE _archive_deleted=0 AND {lower} AND ({}) ORDER BY id LIMIT 1",
+            TABLE.sealable()
+        )))
+        .fetch_optional(pool)
+        .await?;
+        let Some(id) = id else { return Ok(0) };
+        let range: Option<(i64, i64, i64)> = sqlx::query_as("SELECT first_id,last_id,file_id FROM _bulk_element_ranges WHERE first_id=(SELECT max(first_id) FROM _bulk_element_ranges WHERE first_id<=?1) AND last_id>=?1")
+            .bind(id).fetch_optional(pool).await?;
+        if let Some((first, last, _)) = range {
+            if range_blocked(pool, first, last).await? {
+                after = Some(last);
+                continue;
+            }
+        }
+        // A concurrent edit invalidating publication is retried next tick,
+        // rather than spinning over a stream of newly arriving records.
+        return rewrite(storage, pool, writer, id, range).await;
+    }
+}
+
+async fn range_blocked(pool: &SqlitePool, first: i64, last: i64) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT EXISTS(SELECT 1 FROM elements WHERE id BETWEEN ? AND ? AND NOT ({}))",
         TABLE.sealable()
     )))
-    .fetch_optional(pool)
-    .await?;
-    let Some(id) = id else {
-        return Ok(0);
-    };
-    let range:Option<(i64,i64,i64)>=sqlx::query_as("SELECT first_id,last_id,file_id FROM _bulk_element_ranges WHERE first_id=(SELECT max(first_id) FROM _bulk_element_ranges WHERE first_id<=?1) AND last_id>=?1").bind(id).fetch_optional(pool).await?;
-    rewrite(storage, pool, writer, id, range).await
+    .bind(first)
+    .bind(last)
+    .fetch_one(pool)
+    .await
 }
 
 async fn encode(
@@ -114,6 +139,7 @@ async fn encode(
         first: rows.first().unwrap().id,
         last: rows.last().unwrap().id,
         rows: rows.len(),
+        generations: rows.iter().map(|row| (row.id, row.generation)).collect(),
     };
     let budget = storage.descriptor.budget.clone();
     let file = path.clone();
@@ -179,15 +205,7 @@ async fn rewrite(
             .fetch_one(pool)
             .await?;
     let (first, last) = if let Some((first, last, _)) = range {
-        let blocked: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
-            "SELECT EXISTS(SELECT 1 FROM elements WHERE id BETWEEN ? AND ? AND NOT ({}))",
-            TABLE.sealable()
-        )))
-        .bind(first)
-        .bind(last)
-        .fetch_one(pool)
-        .await?;
-        if blocked {
+        if range_blocked(pool, first, last).await? {
             return Ok(0);
         }
         (first, last)
@@ -256,6 +274,13 @@ async fn rewrite(
         return Ok(0);
     };
     crate::storage::diagnostics::stage("publishing_element_archive");
+    #[cfg(test)]
+    {
+        let hook = storage.bulk.element_publish_hook.lock().unwrap().clone();
+        if let Some(hook) = hook {
+            tokio::task::spawn_blocking(move || hook()).await.unwrap();
+        }
+    }
     let permit = writer.lock().await?;
     let mut tx = permit.pool().begin().await?;
     let current: i64 = sqlx::query_scalar("SELECT version FROM _bulk_element_state")
@@ -265,7 +290,14 @@ async fn rewrite(
         sqlx::query_as("SELECT policy,required_surfaces FROM storage_metadata")
             .fetch_one(&mut *tx)
             .await?;
-    if current != version || current_policy != policy {
+    // New captures change the table-wide version while this batch encodes.
+    // Only mutations inside the range being published can invalidate it.
+    // Retain the O(1) check when nothing changed; otherwise compare resident
+    // generations, including tombstones and newly eligible gap inserts.
+    let valid = current_policy == policy
+        && (current == version
+            || resident_range_unchanged(&mut tx, first, last, &files, range.is_some()).await?);
+    if !valid {
         for file in files {
             sqlx::query("UPDATE _bulk_files SET state='retired' WHERE id=?")
                 .bind(file.id)
@@ -327,6 +359,42 @@ async fn rewrite(
     let count = files.iter().map(|f| f.rows).sum();
     tracing::info!(rows = count, files = files.len(), "sealed element records");
     Ok(count)
+}
+
+async fn resident_range_unchanged(
+    conn: &mut sqlx::SqliteConnection,
+    first: i64,
+    last: i64,
+    files: &[Encoded],
+    whole_range: bool,
+) -> Result<bool, sqlx::Error> {
+    let mut rows = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "SELECT id,_archive_generation,_archive_deleted,({}) AS sealable FROM _bulk_element_rows WHERE id BETWEEN ? AND ? ORDER BY id",
+        TABLE.sealable()
+    )))
+    .bind(first).bind(last).fetch(&mut *conn);
+    while let Some(row) = rows.try_next().await? {
+        let id: i64 = row.try_get("id")?;
+        let generation: i64 = row.try_get("_archive_generation")?;
+        let deleted: bool = row.try_get("_archive_deleted")?;
+        let sealable: bool = row.try_get("sealable")?;
+        let file = files.partition_point(|file| file.last < id);
+        let encoded = files.get(file).and_then(|file| {
+            file.generations
+                .binary_search_by_key(&id, |(id, _)| *id)
+                .ok()
+                .map(|index| file.generations[index].1)
+        });
+        match encoded {
+            Some(expected) if deleted || !sealable || generation != expected => return Ok(false),
+            // A newly eligible record in a gap must not be deleted without
+            // being encoded. Unchanged private gaps and old tombstones stay
+            // governed by the existing publication selection.
+            None if !deleted && (whole_range || sealable) => return Ok(false),
+            _ => {}
+        }
+    }
+    Ok(true)
 }
 
 pub(crate) async fn reclaim(
