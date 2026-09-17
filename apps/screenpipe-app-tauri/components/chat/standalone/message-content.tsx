@@ -1846,8 +1846,13 @@ export function MessageContent({
     const interruptedSummary = message.interruptedByQuit && hasToolWorkGroup
       ? "interrupted — app closed mid-task"
       : undefined;
-    const workSummaryOverride = stoppedSummary || interruptedSummary;
-    const recoveredWithAnswer = !isGenerating && displayGroups.some(
+    const failedSummary = !isGenerating && isErrorMessage ? "Failed" : undefined;
+    const workSummaryOverride = stoppedSummary || interruptedSummary || failedSummary;
+    const errorText = isErrorMessage ? message.content.replace(/^Error:\s*/, "") : "";
+    const hasVisibleError = displayGroups.some(
+      (group) => group.type === "text" && group.text.replace(/^Error:\s*/, "") === errorText,
+    );
+    const recoveredWithAnswer = !isGenerating && !isErrorMessage && displayGroups.some(
       (group) => group.type === "text" && group.phase === "final_answer",
     );
     return (
@@ -1977,6 +1982,11 @@ export function MessageContent({
         })}
         <RichResultCards results={richResults} onOpen={onOpenRichResult} />
         {sourceFooter}
+        {errorText && !hasVisibleError && (
+          <div role="alert">
+            <MarkdownBlock {...markdownOptions} text={errorText} isUser={false} />
+          </div>
+        )}
         {retryCta}
       </div>
     );
