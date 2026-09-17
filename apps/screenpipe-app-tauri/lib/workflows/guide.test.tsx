@@ -19,7 +19,7 @@ import { WorkflowGuide } from "../../../../packages/workflows-ui/src/workflow-gu
 import { fixtureWorkflowAnalysis } from "../../../../packages/workflows-ui/src/fixture-platform";
 import { sanitizeWorkflowAnalysis } from "../../../../packages/workflows-ui/src/catalog";
 import { PageAssistantContext, type PageAssistant } from "../../../../packages/workflows-ui/src/page-assistant";
-import { WorkflowAssistant } from "../../../../packages/workflows-ui/src/workflow-assistant";
+import { WorkflowAssistant } from "@screenpipe/workflows-ui";
 import { emptyAssistantState } from "../../../../packages/workflows-ui/src/assistant";
 import type { WorkflowsPlatform } from "../../../../packages/workflows-ui/src/platform";
 function GuideChat({ edit, save = vi.fn(), previousFeedback = false }: { edit: NonNullable<WorkflowsPlatform["guides"]>["edit"]; save?: ReturnType<typeof vi.fn>; previousFeedback?: boolean }) {
