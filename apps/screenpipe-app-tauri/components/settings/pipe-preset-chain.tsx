@@ -145,7 +145,7 @@ export function PipePresetChain({
                   }
                   controlledPresetId={presetId}
                   containerClassName="min-w-0 flex-1"
-                  triggerClassName="rounded-none"
+                  triggerClassName="rounded-md"
                   triggerAriaLabel={`${rowLabel(index)} model`}
                   onControlledSelect={(selectedPreset) =>
                     updateRow(index, selectedPreset?.id ?? null)

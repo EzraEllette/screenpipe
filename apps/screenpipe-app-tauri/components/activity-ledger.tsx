@@ -1079,7 +1079,7 @@ function ArtifactPreviewTooltip({
         side="top"
         collisionPadding={16}
         aria-label={`${artifactName} activity preview`}
-        className="w-80 rounded-none border-border bg-popover p-0 shadow-lg shadow-black/10"
+        className="w-80 rounded-lg border-border bg-popover p-0 shadow-lg shadow-black/10"
         data-testid="activity-artifact-preview"
       >
         <div className="relative aspect-video w-full overflow-hidden border-b border-border bg-muted">
@@ -1963,7 +1963,7 @@ Re-query Screenpipe only inside the cited time range and use the cited frames an
                 }}
               >
                 <SelectTrigger
-                  className="h-9 w-auto min-w-0 shrink-0 justify-center gap-1.5 rounded-none px-2 text-xs [&>svg:last-child]:hidden"
+                  className="h-9 w-auto min-w-0 shrink-0 justify-center gap-1.5 rounded-md px-2 text-xs [&>svg:last-child]:hidden"
                   data-testid="activity-range"
                   aria-label={`Time range: ${RANGE_COPY[preset]}`}
                   title={`Time range: ${RANGE_COPY[preset]}`}
@@ -2003,7 +2003,7 @@ Re-query Screenpipe only inside the cited time range and use the cited frames an
                   variant="outline"
                   disabled
                   aria-label="AI preset"
-                  className="h-9 w-[190px] max-w-[36vw] justify-start rounded-none text-xs"
+                  className="h-9 w-[190px] max-w-[36vw] justify-start rounded-md text-xs"
                 >
                   {reviewPreset.model || "auto"}
                 </Button>
@@ -2039,7 +2039,7 @@ Re-query Screenpipe only inside the cited time range and use the cited frames an
                 <PopoverTrigger asChild>
                   <Button
                     variant="outline"
-                    className="h-9 justify-start rounded-none border-border bg-background px-3 font-mono text-xs font-normal normal-case tracking-normal"
+                    className="h-9 justify-start rounded-md border-border bg-background px-3 font-mono text-xs font-normal normal-case tracking-normal"
                     aria-label="Choose custom date range"
                   >
                     <CalendarDays className="mr-2 h-3.5 w-3.5" />
@@ -2048,7 +2048,7 @@ Re-query Screenpipe only inside the cited time range and use the cited frames an
                 </PopoverTrigger>
                 <PopoverContent
                   align="end"
-                  className="w-auto rounded-none border-border p-0 shadow-lg shadow-black/5"
+                  className="w-auto rounded-lg border-border p-0 shadow-lg shadow-black/5"
                 >
                   <Calendar
                     mode="range"

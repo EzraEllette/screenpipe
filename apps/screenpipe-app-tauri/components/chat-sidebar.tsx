@@ -2325,7 +2325,7 @@ export function CollapsedChatSidebarButton({
         side="right"
         align="start"
         sideOffset={8}
-        className="w-64 p-0 rounded-none shadow-none"
+        className="w-64 p-0 rounded-lg shadow-none"
       >
         {isLoadingChats ? (
           <div className="py-1" aria-busy="true" data-testid="collapsed-chat-sidebar-skeleton">
@@ -2933,8 +2933,8 @@ function RowMenuItems({
 }) {
   const P = ROW_MENU_PARTS[variant];
   const { isMac } = usePlatform();
-  const itemCls = "text-[11px] h-[30px] px-2 gap-2 rounded-none focus:bg-muted/30";
-  const groupItemCls = "min-w-0 text-[11px] h-[30px] px-2 rounded-none whitespace-nowrap focus:bg-muted/30";
+  const itemCls = "text-[11px] h-[30px] px-2 gap-2 rounded-sm focus:bg-muted/30";
+  const groupItemCls = "min-w-0 text-[11px] h-[30px] px-2 rounded-sm whitespace-nowrap focus:bg-muted/30";
   const shortcutCls = "text-[10px] tracking-normal text-muted-foreground/55";
   return (
     <>
@@ -3342,7 +3342,7 @@ export function SidebarChatRow({
               side="bottom"
               sideOffset={4}
               collisionPadding={8}
-              className="w-[156px] p-1 rounded-none border border-border bg-background shadow-none"
+              className="w-[156px] p-1 rounded-lg border border-border bg-background shadow-none"
               onClick={(e) => e.stopPropagation()}
               onPointerDown={(e) => e.stopPropagation()}
               onKeyDown={handleRowMenuShortcut}

@@ -117,7 +117,7 @@ export function ImportChatsDialog({
 
   return (
     <Dialog open={open} onOpenChange={(next) => !importing && onOpenChange(next)}>
-      <DialogContent className="rounded-none border border-border sm:max-w-[480px]">
+      <DialogContent className="rounded-lg border border-border sm:max-w-[480px]">
         <DialogHeader>
           <DialogTitle className="lowercase">import chats</DialogTitle>
           <DialogDescription>
@@ -174,7 +174,7 @@ export function ImportChatsDialog({
           <Button
             type="button"
             variant="outline"
-            className="rounded-none uppercase tracking-wide"
+            className="rounded-md uppercase tracking-wide"
             disabled={importing}
             onClick={() => onOpenChange(false)}
           >
@@ -182,7 +182,7 @@ export function ImportChatsDialog({
           </Button>
           <Button
             type="button"
-            className="rounded-none gap-2 uppercase tracking-wide"
+            className="rounded-md gap-2 uppercase tracking-wide"
             disabled={loading || importing || selectedCandidates.length === 0}
             onClick={() => void runImport()}
           >

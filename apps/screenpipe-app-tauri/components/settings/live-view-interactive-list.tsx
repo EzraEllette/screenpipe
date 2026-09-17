@@ -114,7 +114,7 @@ export function InteractiveLiveViewListItem({
           size="sm"
           data-testid={`live-view-item-${itemId}-reopen`}
           aria-label={`reopen ${title}`}
-          className="h-7 rounded-none px-2 text-[11px]"
+          className="h-7 rounded-md px-2 text-[11px]"
           disabled={!onAction || saving !== null}
           onClick={() => void act({ action: "reopen" })}
         >

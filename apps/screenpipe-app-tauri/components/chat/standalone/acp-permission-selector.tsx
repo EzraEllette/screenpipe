@@ -358,7 +358,7 @@ export function AcpPermissionSelector({
           variant="ghost"
           size="sm"
           className={cn(
-            "h-7 max-w-[150px] shrink-0 gap-1.5 rounded-none px-2 text-xs",
+            "h-7 max-w-[150px] shrink-0 gap-1.5 rounded-md px-2 text-xs",
             selected.warning
               ? "text-amber-600 hover:bg-amber-500/10 hover:text-amber-700 dark:text-amber-400 dark:hover:text-amber-300"
               : "text-muted-foreground hover:bg-muted/50 hover:text-foreground",
@@ -379,7 +379,7 @@ export function AcpPermissionSelector({
         align="start"
         side="top"
         sideOffset={6}
-        className="w-[360px] space-y-1 rounded-none p-2"
+        className="w-[360px] space-y-1 rounded-lg p-2"
         data-testid="acp-permission-popover"
         onOpenAutoFocus={(event) => {
           event.preventDefault();

@@ -90,7 +90,7 @@ export function UsageLimitsPanel({
               type="button"
               variant="ghost"
               size="sm"
-              className="-mr-2 h-7 shrink-0 gap-1.5 rounded-none px-2 text-xs lowercase"
+              className="-mr-2 h-7 shrink-0 gap-1.5 rounded-md px-2 text-xs lowercase"
               disabled={isRefreshing}
               onClick={onRefresh}
             >

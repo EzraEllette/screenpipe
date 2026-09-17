@@ -241,7 +241,7 @@ export function LiveViewAiComposer({
               data-testid="live-view-ai-upgrade"
               type="button"
               size="sm"
-              className="h-10 shrink-0 rounded-none px-3 text-xs"
+              className="h-10 shrink-0 rounded-md px-3 text-xs"
               onClick={() =>
                 void openBusinessUpgradeSurface("live-view-ai-composer")
               }
@@ -253,7 +253,7 @@ export function LiveViewAiComposer({
               data-testid="live-view-ai-generate"
               type="button"
               size="icon"
-              className="h-10 w-10 shrink-0 rounded-none"
+              className="h-10 w-10 shrink-0 rounded-md"
               aria-label={actionLabel}
               title={actionLabel}
               disabled={busy ? !onCancel : !canSubmit}
@@ -287,7 +287,7 @@ export function LiveViewAiComposer({
             showModelOnly
             showLoginCta
             containerClassName="w-auto min-w-36"
-            triggerClassName="h-8 rounded-none"
+            triggerClassName="h-8 rounded-md"
           />
           {prompt.trim() && (
             <span
@@ -310,7 +310,7 @@ export function LiveViewAiComposer({
               showModelOnly
               showLoginCta
               containerClassName="w-auto min-w-36"
-              triggerClassName="h-8 rounded-none"
+              triggerClassName="h-8 rounded-md"
             />
             {prompt.trim() && (
               <span
@@ -326,7 +326,7 @@ export function LiveViewAiComposer({
               data-testid="live-view-ai-upgrade"
               type="button"
               size="sm"
-              className="h-8 rounded-none"
+              className="h-8 rounded-md"
               onClick={() =>
                 void openBusinessUpgradeSurface("live-view-ai-composer")
               }
@@ -338,7 +338,7 @@ export function LiveViewAiComposer({
               data-testid="live-view-ai-generate"
               type="button"
               size="sm"
-              className="h-8 rounded-none"
+              className="h-8 rounded-md"
               disabled={busy ? !onCancel : !canSubmit}
               onClick={busy ? onCancel : () => void submit()}
             >

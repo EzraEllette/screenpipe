@@ -202,7 +202,7 @@ export function AttendeesPill({ value, count, onChange }: AttendeesPillProps) {
         </button>
       </PopoverTrigger>
       <PopoverContent
-        className="w-80 p-0 z-[9999] border border-border rounded-none shadow-none"
+        className="w-80 p-0 z-[9999] border border-border rounded-lg shadow-none"
         align="start"
       >
         {/* Pinned search / add input */}

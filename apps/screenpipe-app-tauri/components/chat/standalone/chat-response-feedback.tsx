@@ -128,7 +128,7 @@ export function ChatResponseFeedback({
           </button>
         </PopoverTrigger>
         <PopoverContent
-          className="ph-no-capture w-64 rounded-none p-3"
+          className="ph-no-capture w-64 rounded-lg p-3"
           align="end"
           side="top"
         >

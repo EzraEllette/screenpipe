@@ -311,7 +311,7 @@ function LiveViewBlockNode({ id, data }: NodeProps<LiveViewFlowNode>) {
               variant={
                 data.proposal.status === "accepted" ? "default" : "ghost"
               }
-              className="h-6 w-6 rounded-none"
+              className="h-6 w-6 rounded-md"
               aria-label={`accept change to ${slot.title}`}
               onClick={(event) => {
                 event.stopPropagation();
@@ -327,7 +327,7 @@ function LiveViewBlockNode({ id, data }: NodeProps<LiveViewFlowNode>) {
               variant={
                 data.proposal.status === "rejected" ? "destructive" : "ghost"
               }
-              className="h-6 w-6 rounded-none"
+              className="h-6 w-6 rounded-md"
               aria-label={`reject change to ${slot.title}`}
               onClick={(event) => {
                 event.stopPropagation();
@@ -1596,7 +1596,7 @@ export function LiveViewCanvas({
               data-testid="canvas-tools-close"
               aria-label="close canvas tools"
               title="close canvas tools"
-              className="h-8 w-8 shrink-0 rounded-none"
+              className="h-8 w-8 shrink-0 rounded-md"
               onClick={() => {
                 setToolsOpen(false);
                 surfaceRef.current?.focus({ preventScroll: true });
@@ -1620,7 +1620,7 @@ export function LiveViewCanvas({
                   aria-label={option.label}
                   aria-pressed={tool === option.value}
                   title={option.label}
-                  className={`h-8 w-8 shrink-0 rounded-none ${
+                  className={`h-8 w-8 shrink-0 rounded-md ${
                     tool === option.value
                       ? "bg-foreground text-background hover:bg-foreground hover:text-background"
                       : ""
@@ -1647,7 +1647,7 @@ export function LiveViewCanvas({
               size="icon"
               aria-label="zoom out"
               title="zoom out (-)"
-              className="h-8 w-8 shrink-0 rounded-none"
+              className="h-8 w-8 shrink-0 rounded-md"
               onClick={() => zoomCanvas(1 / 1.2)}
             >
               <ZoomOut className="h-3 w-3" aria-hidden="true" />
@@ -1670,7 +1670,7 @@ export function LiveViewCanvas({
               size="icon"
               aria-label="zoom in"
               title="zoom in (+)"
-              className="h-8 w-8 shrink-0 rounded-none"
+              className="h-8 w-8 shrink-0 rounded-md"
               onClick={() => zoomCanvas(1.2)}
             >
               <ZoomIn className="h-3 w-3" aria-hidden="true" />
@@ -1682,7 +1682,7 @@ export function LiveViewCanvas({
               size="icon"
               aria-label="fit canvas"
               title="fit canvas"
-              className="h-8 w-8 shrink-0 rounded-none"
+              className="h-8 w-8 shrink-0 rounded-md"
               onClick={fitCanvas}
             >
               <Maximize2 className="h-3 w-3" aria-hidden="true" />
@@ -1694,7 +1694,7 @@ export function LiveViewCanvas({
               size="icon"
               aria-label="arrange canvas"
               title="arrange canvas"
-              className="h-8 w-8 shrink-0 rounded-none"
+              className="h-8 w-8 shrink-0 rounded-md"
               onClick={arrangeCanvas}
             >
               <LayoutGrid className="h-3.5 w-3.5" aria-hidden="true" />
@@ -1707,7 +1707,7 @@ export function LiveViewCanvas({
               size="icon"
               aria-label="delete selected canvas item"
               title="delete selected canvas item"
-              className="h-8 w-8 shrink-0 rounded-none"
+              className="h-8 w-8 shrink-0 rounded-md"
               disabled={!selectedCanDelete}
               onClick={removeSelection}
             >

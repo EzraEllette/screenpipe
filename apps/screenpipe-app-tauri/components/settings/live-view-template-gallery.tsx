@@ -146,7 +146,7 @@ export function LiveViewTemplateGallery({
                   data-testid={`preview-live-view-template-${kit.id}`}
                   variant="outline"
                   size="sm"
-                  className="rounded-none"
+                  className="rounded-md"
                   onClick={() => onPreview(kit)}
                 >
                   preview

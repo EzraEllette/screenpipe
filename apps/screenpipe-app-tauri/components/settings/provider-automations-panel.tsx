@@ -607,7 +607,7 @@ export function ProviderAutomationsPanel({
                         </DropdownMenuTrigger>
                         <DropdownMenuContent
                           align="end"
-                          className="w-48 rounded-none"
+                          className="w-48 rounded-lg"
                         >
                           <DropdownMenuItem
                             className="text-destructive focus:text-destructive"
@@ -659,7 +659,7 @@ export function ProviderAutomationsPanel({
         open={Boolean(taskToDelete)}
         onOpenChange={(open) => !open && setTaskToDelete(null)}
       >
-        <AlertDialogContent className="rounded-none">
+        <AlertDialogContent className="rounded-lg">
           <AlertDialogHeader>
             <AlertDialogTitle>
               delete {taskToDelete?.name ?? "this schedule"}?

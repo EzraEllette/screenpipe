@@ -1598,7 +1598,7 @@ export function BrainSection() {
       </DropdownMenuTrigger>
       <DropdownMenuContent
         align="start"
-        className="w-56 rounded-none"
+        className="w-56 rounded-lg"
         data-testid="brain-view-menu"
       >
         {brainViewOptions.map(({ value, label, count, Icon }) => (
@@ -2682,7 +2682,7 @@ export function BrainSection() {
                     {artifactRequestState.status === "error" && (
                       <Button
                         size="sm"
-                        className="h-8 rounded-none text-[10px] uppercase tracking-wide"
+                        className="h-8 rounded-md text-[10px] uppercase tracking-wide"
                         data-testid="brain-artifact-request-retry"
                         onClick={() =>
                           void openRequestedArtifact(
@@ -2698,7 +2698,7 @@ export function BrainSection() {
                       <Button
                         size="sm"
                         variant="outline"
-                        className="h-8 rounded-none text-[10px] uppercase tracking-wide"
+                        className="h-8 rounded-md text-[10px] uppercase tracking-wide"
                         data-testid="brain-artifact-request-viewer"
                         onClick={() =>
                           void commands.openViewerWindow(
@@ -2712,7 +2712,7 @@ export function BrainSection() {
                     <Button
                       size="sm"
                       variant="ghost"
-                      className="h-8 rounded-none text-[10px] uppercase tracking-wide"
+                      className="h-8 rounded-md text-[10px] uppercase tracking-wide"
                       data-testid="brain-artifact-request-dismiss"
                       onClick={() => {
                         artifactRequestSequenceRef.current += 1;

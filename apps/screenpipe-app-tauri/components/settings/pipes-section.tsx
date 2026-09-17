@@ -660,7 +660,7 @@ function PipeConnectionPicker({
       </PopoverTrigger>
       <PopoverContent
         align="start"
-        className="w-[360px] max-w-[calc(100vw-2rem)] rounded-none border-border p-0 shadow-none"
+        className="w-[360px] max-w-[calc(100vw-2rem)] rounded-lg border-border p-0 shadow-none"
         onOpenAutoFocus={(event) => event.preventDefault()}
       >
         <div className="border-b border-border p-2">
@@ -671,7 +671,7 @@ function PipeConnectionPicker({
               value={query}
               onChange={(event) => setQuery(event.target.value)}
               placeholder="search connections..."
-              className="h-8 rounded-none pl-8 text-xs"
+              className="h-8 rounded-md pl-8 text-xs"
               spellCheck={false}
             />
           </div>
@@ -3087,7 +3087,7 @@ export function PipesSection() {
                       {/* Missing connections badge */}
                       {hasMissingConnections && (
                         <button
-                          className="text-[10px] text-destructive border border-destructive/40 px-1.5 py-0.5 shrink-0 hover:bg-destructive/10 transition-colors font-mono"
+                          className="text-[10px] text-destructive border border-destructive/40 rounded-sm px-1.5 py-0.5 shrink-0 hover:bg-destructive/10 transition-colors font-mono"
                           onClick={(e) => {
                             e.stopPropagation();
                             setConnectionModal({ pipeName: pipe.config.name, connections: pipe.config.connections ?? [] });
@@ -3111,7 +3111,7 @@ export function PipesSection() {
                           <Button
                             variant="outline"
                             size="sm"
-                            className="h-9 gap-2 rounded-none px-3 font-mono text-xs uppercase"
+                            className="h-9 gap-2 rounded-md px-3 font-mono text-xs uppercase"
                             onClick={() => stopPipe(pipe.config.name)}
                             disabled={stoppingPipe === pipe.config.name}
                             title="stop scheduled task"
@@ -3129,7 +3129,7 @@ export function PipesSection() {
                             variant={hasMissingConnections ? "outline" : "default"}
                             size="sm"
                             className={cn(
-                              "h-9 gap-2 rounded-none px-3 font-mono text-xs uppercase",
+                              "h-9 gap-2 rounded-md px-3 font-mono text-xs uppercase",
                               hasMissingConnections && "text-destructive",
                             )}
                             onClick={() => {

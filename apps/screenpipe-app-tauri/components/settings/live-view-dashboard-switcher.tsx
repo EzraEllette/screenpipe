@@ -111,7 +111,7 @@ export function LiveViewDashboardSwitcher({
                 type="button"
                 variant="outline"
                 size="icon"
-                className="h-9 w-9 shrink-0 rounded-none"
+                className="h-9 w-9 shrink-0 rounded-md"
                 aria-label="dashboard actions"
                 title="dashboard actions"
                 disabled={busy}
@@ -119,7 +119,7 @@ export function LiveViewDashboardSwitcher({
                 <MoreHorizontal className="h-3.5 w-3.5" />
               </Button>
             </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="w-44 rounded-none">
+            <DropdownMenuContent align="end" className="w-44 rounded-lg">
               <DropdownMenuItem
                 data-testid="overview-new-dashboard"
                 disabled={views.length >= MAX_DASHBOARDS}
@@ -211,7 +211,7 @@ export function LiveViewDashboardSwitcher({
       </Dialog>
 
       <AlertDialog open={deleteOpen} onOpenChange={setDeleteOpen}>
-        <AlertDialogContent className="rounded-none">
+        <AlertDialogContent className="rounded-lg">
           <AlertDialogHeader>
             <AlertDialogTitle>Delete “{current.title}”?</AlertDialogTitle>
             <AlertDialogDescription>

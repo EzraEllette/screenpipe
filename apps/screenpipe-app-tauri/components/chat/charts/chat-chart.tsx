@@ -80,10 +80,10 @@ function ChartActions({
       </DropdownMenuTrigger>
       <DropdownMenuContent
         align="end"
-        className="w-48 rounded-none border-border shadow-lg shadow-black/5"
+        className="w-48 rounded-lg border-border shadow-lg shadow-black/5"
       >
         <DropdownMenuItem
-          className="gap-2 rounded-none font-mono text-xs lowercase"
+          className="gap-2 rounded-sm font-mono text-xs lowercase"
           onSelect={() =>
             void onSendPrompt(
               buildChartLiveViewPrompt(spec),

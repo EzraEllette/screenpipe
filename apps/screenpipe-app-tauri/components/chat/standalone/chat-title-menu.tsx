@@ -188,7 +188,7 @@ export function ChatTitleMenu({
           </button>
         </PopoverTrigger>
         <PopoverContent
-          className="w-48 rounded-none border border-border bg-background p-1 shadow-sm"
+          className="w-48 rounded-lg border border-border bg-background p-1 shadow-sm"
           align="start"
           side="bottom"
           onMouseDown={(e) => e.stopPropagation()}

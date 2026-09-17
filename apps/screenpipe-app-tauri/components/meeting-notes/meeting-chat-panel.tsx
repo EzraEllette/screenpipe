@@ -316,7 +316,7 @@ export function MeetingChatPanel({
           data-testid="meeting-chat-close"
           aria-label="close chat"
           onClick={onClose}
-          className="h-6 w-6 rounded-none"
+          className="h-6 w-6 rounded-md"
         >
           <X className="h-3 w-3" />
         </Button>

@@ -229,7 +229,7 @@ export function LiveViewLayoutEditor({
             type="button"
             variant="outline"
             size="sm"
-            className="h-9 rounded-none px-3"
+            className="h-9 rounded-md px-3"
             onClick={addSlot}
           >
             <Plus className="mr-1.5 h-3.5 w-3.5" /> add Block
@@ -238,7 +238,7 @@ export function LiveViewLayoutEditor({
             type="button"
             variant="ghost"
             size="sm"
-            className="h-9 rounded-none px-3"
+            className="h-9 rounded-md px-3"
             disabled={saving}
             onClick={onCancel}
           >
@@ -248,7 +248,7 @@ export function LiveViewLayoutEditor({
             data-testid="overview-save"
             type="button"
             size="sm"
-            className="col-span-2 h-9 rounded-none px-4 sm:col-span-1"
+            className="col-span-2 h-9 rounded-md px-4 sm:col-span-1"
             disabled={saving || !canSave}
             onClick={onSave}
           >
@@ -283,7 +283,7 @@ export function LiveViewLayoutEditor({
             onChange={(event) =>
               onChange({ ...draft, title: event.target.value })
             }
-            className="h-9 rounded-none"
+            className="h-9 rounded-md"
             maxLength={120}
           />
         </label>
@@ -331,7 +331,7 @@ export function LiveViewLayoutEditor({
               variant="ghost"
               size="icon"
               aria-label="close Block settings"
-              className="h-8 w-8 rounded-none"
+              className="h-8 w-8 rounded-md"
               onClick={() => setSelectedSlotId(null)}
             >
               <X className="h-3.5 w-3.5" />
@@ -346,7 +346,7 @@ export function LiveViewLayoutEditor({
                 data-testid={`overview-block-title-${selectedSlot.id}`}
                 value={selectedSlot.title}
                 maxLength={120}
-                className="h-9 rounded-none text-xs"
+                className="h-9 rounded-md text-xs"
                 onChange={(event) =>
                   updateSlot(selectedSlot.id, (slot) => ({
                     ...slot,

@@ -353,7 +353,7 @@ export function MeetingSummarySurface({
                       </DropdownMenuTrigger>
                       <DropdownMenuContent
                         align="start"
-                        className="w-72 rounded-none"
+                        className="w-72 rounded-lg"
                       >
                         <div className="border-b border-border px-2 py-2">
                           <p className="font-mono text-[9px] uppercase tracking-[0.12em] text-muted-foreground">
@@ -367,7 +367,7 @@ export function MeetingSummarySurface({
                           <DropdownMenuItem
                             key={option.id}
                             onSelect={option.onSelect}
-                            className="rounded-none"
+                            className="rounded-sm"
                           >
                             <span className="flex min-w-0 flex-1 items-center gap-2">
                               <span className="min-w-0 flex-1">
@@ -387,7 +387,7 @@ export function MeetingSummarySurface({
                         <DropdownMenuSeparator />
                         <DropdownMenuItem
                           onSelect={attention.model.onManage}
-                          className="rounded-none font-mono text-[10px] uppercase tracking-[0.1em]"
+                          className="rounded-sm font-mono text-[10px] uppercase tracking-[0.1em]"
                         >
                           manage models &amp; keys
                         </DropdownMenuItem>

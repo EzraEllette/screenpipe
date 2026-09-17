@@ -41,13 +41,13 @@ interface PickerProps {
   onSaveSchedule: (cfg: ScheduleConfig | null) => void;
 }
 
-// ── shared brand-aligned classes (DESIGN.md: sharp corners, grayscale only) ───
+// ── shared brand-aligned classes (DESIGN.md: compact controls, grayscale only) ───
 
-const INPUT = "w-full h-9 text-xs font-mono bg-background border rounded-none px-2 outline-none focus:border-foreground transition-colors";
+const INPUT = "w-full h-9 text-xs font-mono bg-background border rounded-md px-2 outline-none focus:border-foreground transition-colors";
 const BTN_PRIMARY =
-  "h-9 px-4 text-[11px] font-medium uppercase tracking-wide border border-foreground bg-foreground text-background hover:bg-background hover:text-foreground disabled:opacity-40 disabled:hover:bg-foreground disabled:hover:text-background rounded-none transition-colors";
+  "h-9 px-4 text-[11px] font-medium uppercase tracking-wide border border-foreground bg-foreground text-background hover:bg-background hover:text-foreground disabled:opacity-40 disabled:hover:bg-foreground disabled:hover:text-background rounded-md transition-colors";
 const BTN_SECONDARY =
-  "h-9 px-3 text-[11px] font-medium uppercase tracking-wide border border-foreground bg-background text-foreground hover:bg-foreground hover:text-background rounded-none transition-colors inline-flex items-center gap-1.5";
+  "h-9 px-3 text-[11px] font-medium uppercase tracking-wide border border-foreground bg-background text-foreground hover:bg-foreground hover:text-background rounded-md transition-colors inline-flex items-center gap-1.5";
 const LABEL = "text-[10px] uppercase tracking-wide text-muted-foreground font-medium";
 
 // ── left-rail catalog ────────────────────────────────────────────────────────
@@ -179,7 +179,7 @@ export function PipeTriggerPicker(props: PickerProps) {
   const remove = (kind: "events" | "custom" | "sources", i: number) =>
     persistTrigger({ ...trigger, [kind]: (trigger?.[kind] ?? []).filter((_, j) => j !== i) });
 
-  const chip = "text-xs bg-muted/50 border rounded-none px-3 py-1.5 flex-1 font-mono truncate";
+  const chip = "text-xs bg-muted/50 border rounded-sm px-3 py-1.5 flex-1 font-mono truncate";
   const xBtn = "text-muted-foreground/0 group-hover/item:text-muted-foreground hover:!text-foreground transition-all text-sm leading-none px-1";
 
   return (
@@ -209,14 +209,14 @@ export function PipeTriggerPicker(props: PickerProps) {
         ))}
         <button
           onClick={() => setOpen(true)}
-          className="w-full h-8 text-[11px] uppercase tracking-wide border rounded-none px-2 flex items-center gap-1.5 text-muted-foreground hover:bg-foreground hover:text-background hover:border-foreground transition-colors"
+          className="w-full h-8 text-[11px] uppercase tracking-wide border rounded-md px-2 flex items-center gap-1.5 text-muted-foreground hover:bg-foreground hover:text-background hover:border-foreground transition-colors"
         >
           <Plus className="h-3.5 w-3.5" /> add trigger
         </button>
       </div>
 
       <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent className="max-w-3xl p-0 overflow-hidden gap-0 rounded-none">
+        <DialogContent className="max-w-3xl p-0 overflow-hidden gap-0 rounded-lg">
           <TriggerModal
             {...props}
             onClose={() => setOpen(false)}
@@ -280,7 +280,7 @@ function TriggerModal({
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               placeholder="search triggers…"
-              className="w-full h-8 text-xs font-mono bg-muted/40 border rounded-none pl-8 pr-2 outline-none focus:border-foreground transition-colors"
+              className="w-full h-8 text-xs font-mono bg-muted/40 border rounded-md pl-8 pr-2 outline-none focus:border-foreground transition-colors"
             />
           </div>
         </div>
@@ -295,7 +295,7 @@ function TriggerModal({
                   <button
                     key={o.id}
                     onClick={() => setSelected(o.id)}
-                    className={`w-full flex items-center gap-2.5 px-2 py-1.5 rounded-none text-left transition-colors ${
+                    className={`w-full flex items-center gap-2.5 px-2 py-1.5 rounded-sm text-left transition-colors ${
                       selected === o.id ? "bg-accent" : "hover:bg-accent/60"
                     }`}
                   >
@@ -591,7 +591,7 @@ const APP_META: Record<string, { name: string; blurb: string; examples: string[]
 function ConnectCard({ app, connecting, onConnect }: { app: string; connecting: boolean; onConnect: () => void }) {
   const m = APP_META[app];
   return (
-    <div className="border rounded-none p-4">
+    <div className="border rounded-lg p-4">
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
           <div className="flex items-center gap-2">
@@ -607,7 +607,7 @@ function ConnectCard({ app, connecting, onConnect }: { app: string; connecting: 
         {m.examples.length > 0 && (
           <div className="flex flex-col items-end gap-1.5 shrink-0">
             {m.examples.map((e) => (
-              <span key={e} className="text-[11px] border rounded-none px-2.5 py-1 text-muted-foreground font-mono">{e}</span>
+              <span key={e} className="text-[11px] border rounded-sm px-2.5 py-1 text-muted-foreground font-mono">{e}</span>
             ))}
           </div>
         )}
@@ -647,7 +647,7 @@ function SlackPicker({ instance, onAdd }: { instance?: string; onAdd: (s: Trigge
     <div>
       <label className={LABEL}>select a channel</label>
       <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="search channels…" className={`${INPUT} mt-1 mb-2`} />
-      <div className="border rounded-none max-h-[220px] overflow-y-auto">
+      <div className="border rounded-lg max-h-[220px] overflow-y-auto">
         {channels === null ? (
           <div className="flex items-center gap-2 text-xs text-muted-foreground px-3 py-4"><Loader2 className="h-3.5 w-3.5 animate-spin" /> loading channels…</div>
         ) : err ? (
@@ -708,7 +708,7 @@ function NotionPicker({ instance, onAdd }: { instance?: string; onAdd: (s: Trigg
     <div>
       <label className={LABEL}>select a data source</label>
       <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="search databases…" className={`${INPUT} mt-1 mb-2`} />
-      <div className="border rounded-none max-h-[220px] overflow-y-auto">
+      <div className="border rounded-lg max-h-[220px] overflow-y-auto">
         <button onClick={() => setPicked(null)} className={`${row} border-b ${picked === null ? "bg-accent" : "hover:bg-accent/60"}`}>
           <IntegrationIcon icon="notion" className="w-3.5 h-3.5 flex items-center justify-center" fallbackClassName="h-3.5 w-3.5 text-muted-foreground" />
           <span className="flex-1">any page in your workspace</span>
@@ -839,7 +839,7 @@ function GithubPicker({ instance, kind, onAdd }: { instance?: string; kind: stri
       </p>
       <label className={LABEL}>repository</label>
       <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="search repositories…" className={`${INPUT} mt-1 mb-2`} />
-      <div className="border rounded-none max-h-[220px] overflow-y-auto">
+      <div className="border rounded-lg max-h-[220px] overflow-y-auto">
         {repos === null ? (
           <div className="flex items-center gap-2 text-xs text-muted-foreground px-3 py-4"><Loader2 className="h-3.5 w-3.5 animate-spin" /> loading repositories…</div>
         ) : err ? (
@@ -919,7 +919,7 @@ function LinearPicker({ kind, onAdd }: { kind: string; onAdd: (s: TriggerSource)
       <p className="text-xs text-muted-foreground mb-3">{description}</p>
       <label className={LABEL}>team</label>
       <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="search teams…" className={`${INPUT} mt-1 mb-2`} />
-      <div className="border rounded-none max-h-[220px] overflow-y-auto">
+      <div className="border rounded-lg max-h-[220px] overflow-y-auto">
         {teams === null ? (
           <div className="flex items-center gap-2 text-xs text-muted-foreground px-3 py-4"><Loader2 className="h-3.5 w-3.5 animate-spin" /> loading teams…</div>
         ) : err ? (

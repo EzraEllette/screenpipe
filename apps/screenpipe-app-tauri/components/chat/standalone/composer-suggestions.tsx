@@ -93,7 +93,7 @@ export function ComposerSuggestions({
           </button>
         </PopoverTrigger>
         <PopoverContent
-          className="ph-no-capture w-64 rounded-none border-border/50 p-0.5 shadow-lg shadow-black/5"
+          className="ph-no-capture w-64 rounded-lg border-border/50 p-0.5 shadow-lg shadow-black/5"
           align="start"
           side="top"
           sideOffset={6}

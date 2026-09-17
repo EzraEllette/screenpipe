@@ -2710,7 +2710,7 @@ export function BrainOverview({
         <Button
           variant="outline"
           size="sm"
-          className="rounded-none"
+          className="rounded-md"
           onClick={() => void load()}
         >
           retry
@@ -2826,7 +2826,7 @@ export function BrainOverview({
               <Button
                 variant="ghost"
                 size="sm"
-                className="rounded-none"
+                className="rounded-md"
                 disabled={saving}
                 onClick={() => {
                   setDraft(null);
@@ -2841,7 +2841,7 @@ export function BrainOverview({
                 <Button
                   variant="outline"
                   size="sm"
-                  className="rounded-none"
+                  className="rounded-md"
                   disabled={saving}
                   onClick={() => {
                     setAiPreview(false);
@@ -2860,7 +2860,7 @@ export function BrainOverview({
                 }
                 size="sm"
                 variant={replacingDashboard ? "destructive" : "default"}
-                className="rounded-none"
+                className="rounded-md"
                 disabled={
                   saving ||
                   !draft.title.trim() ||
@@ -2905,7 +2905,7 @@ export function BrainOverview({
                   data-testid="overview-preview-name"
                   value={draft.title}
                   maxLength={120}
-                  className="mt-2 h-9 rounded-none"
+                  className="mt-2 h-9 rounded-md"
                   onChange={(event) =>
                     setDraft({ ...draft, title: event.target.value })
                   }
@@ -3025,7 +3025,7 @@ export function BrainOverview({
           open={replaceConfirmationOpen}
           onOpenChange={setReplaceConfirmationOpen}
         >
-          <AlertDialogContent className="rounded-none">
+          <AlertDialogContent className="rounded-lg">
             <AlertDialogHeader>
               <AlertDialogTitle>Replace “{view?.title}”?</AlertDialogTitle>
               <AlertDialogDescription>
@@ -3181,7 +3181,7 @@ export function BrainOverview({
                 data-testid="overview-undo"
                 variant="outline"
                 size="icon"
-                className="h-9 w-9 shrink-0 rounded-none"
+                className="h-9 w-9 shrink-0 rounded-md"
                 aria-label="undo last Live View change"
                 title={`Undo last Live View change (${isMac ? "⌘Z" : "Ctrl+Z"})`}
                 disabled={saving}
@@ -3224,7 +3224,7 @@ export function BrainOverview({
                 data-testid="overview-refresh-data"
                 variant="outline"
                 size="icon"
-                className="h-9 w-9 shrink-0 rounded-none"
+                className="h-9 w-9 shrink-0 rounded-md"
                 aria-label={refreshIsActive ? "loading data" : "refresh data"}
                 title={refreshIsActive ? "loading data" : "refresh data"}
                 disabled={dashboardBusy}
@@ -3242,7 +3242,7 @@ export function BrainOverview({
                 data-testid="overview-send"
                 variant="outline"
                 size="sm"
-                className="h-9 flex-1 rounded-none px-3 sm:flex-none"
+                className="h-9 flex-1 rounded-md px-3 sm:flex-none"
                 disabled={dashboardBusy}
                 onClick={() => setShareOpen(true)}
               >
@@ -3287,7 +3287,7 @@ export function BrainOverview({
                 data-testid="overview-warning-refresh"
                 variant="outline"
                 size="sm"
-                className="h-7 shrink-0 rounded-none px-2 text-[11px]"
+                className="h-7 shrink-0 rounded-md px-2 text-[11px]"
                 disabled={dashboardBusy}
                 onClick={() => void refreshConnectedPipes(view)}
               >
@@ -3336,7 +3336,7 @@ export function BrainOverview({
               aria-label="close templates"
               variant="ghost"
               size="icon"
-              className="absolute right-2 top-2 h-8 w-8 rounded-none"
+              className="absolute right-2 top-2 h-8 w-8 rounded-md"
               onClick={() => setTemplateGalleryOpen(false)}
             >
               <X className="h-3.5 w-3.5" />
@@ -3376,7 +3376,7 @@ export function BrainOverview({
                 data-testid="live-view-ai-accept-all"
                 size="sm"
                 variant="ghost"
-                className="h-7 rounded-none px-2"
+                className="h-7 rounded-md px-2"
                 disabled={saving}
                 title="Accept and save every proposed change"
                 onClick={() => void acceptAllAiProposals()}
@@ -3387,7 +3387,7 @@ export function BrainOverview({
                 data-testid="live-view-ai-reject-all"
                 size="sm"
                 variant="ghost"
-                className="h-7 rounded-none px-2"
+                className="h-7 rounded-md px-2"
                 disabled={saving}
                 title="Reject and discard every proposed change"
                 onClick={discardAiProposals}
@@ -3397,7 +3397,7 @@ export function BrainOverview({
               <Button
                 data-testid="live-view-ai-apply-accepted"
                 size="sm"
-                className="h-7 rounded-none px-2"
+                className="h-7 rounded-md px-2"
                 disabled={
                   saving ||
                   aiBlockProposals.some(
@@ -3412,7 +3412,7 @@ export function BrainOverview({
                 data-testid="live-view-ai-discard"
                 size="icon"
                 variant="ghost"
-                className="h-7 w-7 rounded-none"
+                className="h-7 w-7 rounded-md"
                 aria-label="discard all AI changes"
                 onClick={discardAiProposals}
               >

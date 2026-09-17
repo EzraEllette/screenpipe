@@ -128,7 +128,7 @@ export function LiveViewOnboardingActivation({
           data-testid="onboarding-live-view-reviewed"
           variant="outline"
           size="sm"
-          className="rounded-none"
+          className="rounded-md"
           onClick={onComplete}
         >
           I reviewed it
@@ -217,7 +217,7 @@ export function LiveViewOnboardingActivation({
           <Button
             data-testid="onboarding-live-view-retry"
             size="sm"
-            className="rounded-none"
+            className="rounded-md"
             disabled={retrying}
             onClick={onRetry}
           >
@@ -230,7 +230,7 @@ export function LiveViewOnboardingActivation({
           <Button
             data-testid="onboarding-live-view-fix-capture"
             size="sm"
-            className="rounded-none"
+            className="rounded-md"
             onClick={onFixCapture}
           >
             fix capture
@@ -240,7 +240,7 @@ export function LiveViewOnboardingActivation({
             data-testid="onboarding-live-view-refresh"
             size="sm"
             variant="outline"
-            className="rounded-none"
+            className="rounded-md"
             disabled={refreshing || !pipesReady}
             onClick={onRefresh}
           >

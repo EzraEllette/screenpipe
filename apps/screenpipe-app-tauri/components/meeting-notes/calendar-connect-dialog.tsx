@@ -282,7 +282,7 @@ function NativeCalendarConnect({
           )}
           {connected ? "connected" : "not connected"}
         </div>
-        <Button onClick={connect} disabled={busy} className="rounded-none">
+        <Button onClick={connect} disabled={busy} className="rounded-md">
           {busy ? (
             <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />
           ) : (
@@ -335,7 +335,7 @@ function GoogleCalendarConnect({
         Connect your Google Calendar directly. ScreenPipe uses read-only access
         for meeting detection and note metadata.
       </p>
-      <Button onClick={connect} disabled={busy} className="w-full rounded-none">
+      <Button onClick={connect} disabled={busy} className="w-full rounded-md">
         {busy ? (
           <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />
         ) : (
@@ -419,19 +419,19 @@ function IcsCalendarConnect({
             setStatusText(null);
           }}
           placeholder="https:// or webcal:// URL"
-          className="rounded-none"
+          className="rounded-md"
         />
         <Input
           value={name}
           onChange={(event) => setName(event.target.value)}
           placeholder="name, optional"
-          className="rounded-none"
+          className="rounded-md"
         />
       </div>
       <Button
         onClick={addFeed}
         disabled={busy || !url.trim()}
-        className="w-full rounded-none"
+        className="w-full rounded-md"
       >
         {busy ? (
           <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />

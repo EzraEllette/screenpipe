@@ -44,7 +44,7 @@ export function LiveViewCreateDashboardDialog({
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogContent
         data-testid="live-view-create-dashboard-dialog"
-        className="gap-0 rounded-none p-0 sm:max-w-2xl"
+        className="gap-0 rounded-lg p-0 sm:max-w-2xl"
         onEscapeKeyDown={(event) => {
           if (busy) event.preventDefault();
         }}
@@ -84,7 +84,7 @@ export function LiveViewCreateDashboardDialog({
             type="button"
             variant="ghost"
             size="sm"
-            className="h-8 rounded-none"
+            className="h-8 rounded-md"
             disabled={busy}
             onClick={onCreateBlank}
           >

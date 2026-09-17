@@ -476,7 +476,7 @@ export function LiveViewCard({
             size="icon"
             aria-label={`mark ${slot.title} useful`}
             aria-pressed={feedback === "up"}
-            className={`h-7 w-7 rounded-none ${
+            className={`h-7 w-7 rounded-md ${
               feedback === "up" ? "bg-foreground text-background" : ""
             }`}
             disabled={!slot.value || busy}
@@ -502,7 +502,7 @@ export function LiveViewCard({
                 size="icon"
                 aria-label={`mark ${slot.title} not useful`}
                 aria-pressed={feedback === "down"}
-                className={`h-7 w-7 rounded-none ${
+                className={`h-7 w-7 rounded-md ${
                   feedback === "down" ? "bg-foreground text-background" : ""
                 }`}
                 disabled={!slot.value || busy}
@@ -517,7 +517,7 @@ export function LiveViewCard({
             <PopoverContent
               align="end"
               sideOffset={6}
-              className="w-72 rounded-none p-3"
+              className="w-72 rounded-lg p-3"
             >
               <form
                 className="space-y-2"
@@ -537,7 +537,7 @@ export function LiveViewCard({
                   value={feedbackNote}
                   onChange={(event) => setFeedbackNote(event.target.value)}
                   placeholder="e.g. exclude meetings"
-                  className="h-8 rounded-none text-xs"
+                  className="h-8 rounded-md text-xs"
                   maxLength={500}
                 />
                 <div className="flex items-center justify-between gap-2">
@@ -546,7 +546,7 @@ export function LiveViewCard({
                       type="button"
                       variant="ghost"
                       size="sm"
-                      className="h-7 rounded-none text-xs"
+                      className="h-7 rounded-md text-xs"
                       disabled={feedbackSaving !== null}
                       onClick={() => void saveFeedback(null)}
                     >
@@ -558,7 +558,7 @@ export function LiveViewCard({
                   <Button
                     type="submit"
                     size="sm"
-                    className="h-7 rounded-none text-xs"
+                    className="h-7 rounded-md text-xs"
                     disabled={feedbackSaving !== null}
                   >
                     {feedbackSaving === "down" && (
@@ -576,7 +576,7 @@ export function LiveViewCard({
             size="icon"
             aria-label={`regenerate ${slot.title}`}
             title="regenerate this section"
-            className="h-7 w-7 rounded-none"
+            className="h-7 w-7 rounded-md"
             disabled={!slot.binding || busy}
             onClick={onRegenerate}
           >
@@ -594,7 +594,7 @@ export function LiveViewCard({
                 size="icon"
                 aria-label={`edit ${slot.title} with AI`}
                 title="edit this section with AI"
-                className="h-7 w-7 rounded-none"
+                className="h-7 w-7 rounded-md"
                 disabled={busy}
               >
                 {aiEditing ? (
@@ -607,7 +607,7 @@ export function LiveViewCard({
             <PopoverContent
               align="end"
               sideOffset={6}
-              className="w-72 rounded-none p-3"
+              className="w-72 rounded-lg p-3"
             >
               <form onSubmit={submitAiEdit} className="space-y-2">
                 <div>
@@ -621,14 +621,14 @@ export function LiveViewCard({
                   value={aiPrompt}
                   onChange={(event) => setAiPrompt(event.target.value)}
                   placeholder="e.g. group by project instead"
-                  className="h-8 rounded-none text-xs"
+                  className="h-8 rounded-md text-xs"
                   maxLength={500}
                 />
                 <div className="flex justify-end">
                   <Button
                     type="submit"
                     size="sm"
-                    className="h-7 rounded-none text-xs"
+                    className="h-7 rounded-md text-xs"
                     disabled={!aiPrompt.trim() || aiEditing}
                   >
                     {aiEditing && (

@@ -106,7 +106,7 @@ export function ModelPicker({
             aria-describedby={statusText ? statusId : undefined}
             disabled={disabled}
             className={cn(
-              "h-8 w-full justify-between rounded-none px-3 font-mono text-sm font-normal normal-case tracking-normal",
+              "h-8 w-full justify-between rounded-md px-3 font-mono text-sm font-normal normal-case tracking-normal",
               !value && "text-muted-foreground",
             )}
           >
@@ -122,7 +122,7 @@ export function ModelPicker({
         </PopoverTrigger>
         <PopoverContent
           align="start"
-          className="w-[--radix-popover-trigger-width] rounded-none p-0"
+          className="w-[--radix-popover-trigger-width] rounded-lg p-0"
         >
           <Command label="search models" className="rounded-none font-mono">
             <CommandInput
@@ -158,7 +158,7 @@ export function ModelPicker({
                         <CommandItem
                           key={model}
                           value={model}
-                          className="rounded-none"
+                          className="rounded-sm"
                           onSelect={() => selectModel(model)}
                         >
                           <Check
@@ -178,7 +178,7 @@ export function ModelPicker({
                 <CommandGroup heading="manual entry">
                   <CommandItem
                     value={`manual ${search.trim()}`}
-                    className="rounded-none"
+                    className="rounded-sm"
                     onSelect={() => selectModel(search.trim())}
                   >
                     use “{search.trim()}”

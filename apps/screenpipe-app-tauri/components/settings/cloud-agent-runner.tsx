@@ -96,7 +96,7 @@ function CodebaseField({
         placeholder={definition.codebasePlaceholder}
         aria-label="codebase"
         data-testid="cloud-agent-codebase-select"
-        className="h-9 min-w-0 rounded-none text-xs"
+        className="h-9 min-w-0 rounded-md text-xs"
       />
       <datalist id={`cloud-agent-codebases-${provider}`}>
         {options.map((option) => (
@@ -109,7 +109,7 @@ function CodebaseField({
         type="button"
         variant="ghost"
         size="icon"
-        className="h-9 w-9 shrink-0 rounded-none"
+        className="h-9 w-9 shrink-0 rounded-md"
         onClick={() => void openUrl(definition.manageUrl)}
         aria-label={`manage ${definition.label} codebases`}
       >
@@ -318,7 +318,7 @@ export function CloudAgentRunner({
             disabled={saving}
           >
             <SelectTrigger
-              className="h-9 rounded-none text-xs"
+              className="h-9 rounded-md text-xs"
               data-testid="cloud-agent-provider-select"
             >
               <SelectValue />
@@ -360,7 +360,7 @@ export function CloudAgentRunner({
                   <Button
                     type="button"
                     size="sm"
-                    className="h-8 rounded-none text-xs"
+                    className="h-8 rounded-md text-xs"
                     onClick={() =>
                       needsCodebase
                         ? codebaseInputRef.current?.focus()
@@ -386,7 +386,7 @@ export function CloudAgentRunner({
                   type="button"
                   variant="ghost"
                   size="icon"
-                  className="h-8 w-8 rounded-none"
+                  className="h-8 w-8 rounded-md"
                   onClick={() => setSettingsOpen(true)}
                   aria-label={`${definition.label} settings`}
                 >
@@ -444,7 +444,7 @@ export function CloudAgentRunner({
                   }
                 >
                   <SelectTrigger
-                    className="h-9 rounded-none text-xs"
+                    className="h-9 rounded-md text-xs"
                     data-testid="cursor-existing-agent-select"
                   >
                     <SelectValue />
@@ -483,7 +483,7 @@ export function CloudAgentRunner({
                   }
                 >
                   <SelectTrigger
-                    className="h-9 min-w-0 flex-1 rounded-none text-xs"
+                    className="h-9 min-w-0 flex-1 rounded-md text-xs"
                     data-testid="cloud-agent-memory-select"
                   >
                     <SelectValue>{contextLabel}</SelectValue>
@@ -499,7 +499,7 @@ export function CloudAgentRunner({
                   type="button"
                   variant="ghost"
                   size="icon"
-                  className="h-9 w-9 rounded-none"
+                  className="h-9 w-9 rounded-md"
                   onClick={() => setMemoryOpen(true)}
                   aria-label="review shared context"
                 >
@@ -550,7 +550,7 @@ export function CloudAgentRunner({
                   <Button
                     type="button"
                     size="sm"
-                    className="h-8 rounded-none text-xs"
+                    className="h-8 rounded-md text-xs"
                     onClick={() => void connectProvider()}
                     disabled={connecting}
                   >
@@ -579,7 +579,7 @@ export function CloudAgentRunner({
                     }
                     onBlur={() => void persist("cloud-agent", draft)}
                     placeholder="leave blank to start a new conversation"
-                    className="h-9 rounded-none text-xs"
+                    className="h-9 rounded-md text-xs"
                   />
                   <p className="text-[11px] text-muted-foreground">
                     To continue one, paste its session ID here.
@@ -614,7 +614,7 @@ export function CloudAgentRunner({
                             ? "saved in encrypted storage"
                             : "paste API key"
                         }
-                        className="h-9 rounded-none pl-8 text-xs"
+                        className="h-9 rounded-md pl-8 text-xs"
                         autoComplete="off"
                       />
                     </div>
@@ -622,7 +622,7 @@ export function CloudAgentRunner({
                       type="button"
                       variant="outline"
                       size="sm"
-                      className="h-9 rounded-none"
+                      className="h-9 rounded-md"
                       disabled={!cursorKey.trim() || saving}
                       onClick={() => void saveCursorKey()}
                     >
@@ -661,7 +661,7 @@ export function CloudAgentRunner({
                     }
                     onBlur={() => void persist("cloud-agent", draft)}
                     placeholder="main"
-                    className="h-9 rounded-none text-xs"
+                    className="h-9 rounded-md text-xs"
                   />
                 </div>
               )}
@@ -672,7 +672,7 @@ export function CloudAgentRunner({
               <Button
                 type="button"
                 variant="outline"
-                className="rounded-none"
+                className="rounded-md"
                 onClick={() => setSettingsOpen(false)}
               >
                 done
@@ -711,7 +711,7 @@ export function CloudAgentRunner({
                     patchDraft({ context_lookback_hours: Number(value) })
                   }
                 >
-                  <SelectTrigger className="h-9 rounded-none text-xs">
+                  <SelectTrigger className="h-9 rounded-md text-xs">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -732,7 +732,7 @@ export function CloudAgentRunner({
               <Button
                 type="button"
                 variant="outline"
-                className="rounded-none"
+                className="rounded-md"
                 onClick={() => setMemoryOpen(false)}
               >
                 done
