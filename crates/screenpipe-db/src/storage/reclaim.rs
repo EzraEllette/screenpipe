@@ -181,10 +181,18 @@ pub(super) async fn free_leaves(
         return Ok(());
     }
     let bitmap_bytes = (pages as usize).div_ceil(8);
-    if pages <= 0 || bitmap_bytes > memory_limit / 2 {
-        return Err(storage_error(
-            "freelist map exceeds migration memory budget",
-        ));
+    if pages <= 0 {
+        return Err(storage_error("invalid SQLite page count"));
+    }
+    if bitmap_bytes > memory_limit / 2 {
+        // Reclamation is an optimization. Keep these valid free pages in
+        // SQLite when its validation map would exceed the working budget.
+        tracing::debug!(
+            bitmap_bytes,
+            memory_limit,
+            "deferring SQLite space reclamation"
+        );
+        return Ok(());
     }
     let mut header = [0_u8; 100];
     file.seek(SeekFrom::Start(0))?;
@@ -447,11 +455,11 @@ mod tests {
             .unwrap();
         let length = file.metadata().unwrap().len();
         let before = allocated(&path).unwrap();
-        assert!(free_leaves(&mut conn, &mut file, 0).await.is_err());
+        free_leaves(&mut conn, &mut file, 0).await.unwrap();
         assert_eq!(
             allocated(&path).unwrap(),
             before,
-            "rejected scan must not punch anything"
+            "deferred scan must not punch anything"
         );
         free_leaves(&mut conn, &mut file, 1024 * 1024)
             .await

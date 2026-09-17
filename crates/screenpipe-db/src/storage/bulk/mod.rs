@@ -110,6 +110,15 @@ pub(super) static TABLES: &[Table] = &[
 ];
 
 impl Table {
+    // An encoder bound selects work; it cannot reject valid resident history.
+    fn sealable(&self) -> String {
+        format!(
+            "({}) AND ({})<=(SELECT record_limit FROM storage_metadata)",
+            self.eligible,
+            self.all_bytes("")
+        )
+    }
+
     fn mask(&self) -> i64 {
         (1 << self.columns.len()) - 1
     }
