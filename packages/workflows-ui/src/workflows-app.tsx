@@ -6,6 +6,7 @@
 import { matchesSidebarShortcut, useSidebarShortcuts } from "./sidebar-shortcuts";
 import { WorkflowGuide } from "./workflow-guide";
 import { WorkflowAssistant } from "./workflow-assistant";
+import { PageAssistantContext, type PageAssistant } from "./page-assistant";
 import { WorkflowRunProgress } from "./workflow-run-progress";
 import { workflowTiming } from "./timing";
 import { CapturedMomentButton, WorkflowReplay } from "./workflow-replay";
@@ -398,6 +399,14 @@ function AppShell({
   assistant?: { platform: NonNullable<WorkflowsAppProps["platform"]["assistant"]>; context: AssistantContext };
   children: React.ReactNode;
 }) {
+  const [pageAssistant, setPageAssistant] = useState<PageAssistant | null>(null);
+  const assistantPlatform = useMemo(() => assistant && ({
+    ...assistant.platform,
+    ask: (request: Parameters<typeof assistant.platform.ask>[0]) =>
+      pageAssistant && request.context?.key === pageAssistant.context.key
+        ? pageAssistant.ask(request)
+        : assistant.platform.ask(request),
+  }), [assistant?.platform, pageAssistant]);
   const [assistantDocked, setAssistantDocked] = useState(false);
   const [assistantOpen, setAssistantOpen] = useState(false);
   const [assistantMode, setAssistantMode] = useState<AssistantState["mode"]>("sidebar");
@@ -450,7 +459,7 @@ function AppShell({
   </button>;
 
   return (
-    <div data-native-window={nativeMacWindow} data-fullscreen={fullscreen} className={`ph-no-capture ph-mask ${styles.app} ${embedded ? styles.appEmbedded : ""} ${assistantDocked ? styles.appDocked : ""} ${navigationCollapsed ? styles.navigationCollapsed : ""}`} style={{ "--assistant-width": assistantWidth + "px" } as React.CSSProperties}>
+    <PageAssistantContext.Provider value={setPageAssistant}><div data-native-window={nativeMacWindow} data-fullscreen={fullscreen} className={`ph-no-capture ph-mask ${styles.app} ${embedded ? styles.appEmbedded : ""} ${assistantDocked ? styles.appDocked : ""} ${navigationCollapsed ? styles.navigationCollapsed : ""}`} style={{ "--assistant-width": assistantWidth + "px" } as React.CSSProperties}>
       {nativeMacWindow && navigationToggle}
       <aside id="workflows-navigation" className={styles.sidebar} hidden={navigationCollapsed} aria-label="Navigation sidebar">
         {navigationBrand ? <div className={styles.integratedBrand}>{navigationBrand}</div> : <div className={styles.brand} data-tauri-drag-region onMouseDown={(event) => handleWindowDrag(event, startWindowDrag)}>
@@ -505,8 +514,8 @@ function AppShell({
         </nav>}
         <main className={styles.main}>{children}</main>
       </section>
-      {assistant && <WorkflowAssistant composerAccessory={composerAccessory} active={active} platform={assistant.platform} context={assistant.context} onDockChange={setAssistantDocked} onWidthChange={setAssistantWidth} onOpenChange={setAssistantOpen} onModeChange={setAssistantMode} headerToggle />}
-    </div>
+      {assistant && <WorkflowAssistant composerAccessory={composerAccessory} active={active} platform={assistantPlatform!} context={pageAssistant?.context ?? assistant.context} onDockChange={setAssistantDocked} onWidthChange={setAssistantWidth} onOpenChange={setAssistantOpen} onModeChange={setAssistantMode} headerToggle={!pageAssistant} />}
+    </div></PageAssistantContext.Provider>
   );
 }
 

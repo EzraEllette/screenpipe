@@ -435,33 +435,3 @@ label.result {
     margin: 40px auto;
   }
 }
-.assistantPanel {
-  margin: 24px 0;
-  padding: 20px;
-  background: var(--panel, #fff);
-  border: 1px solid var(--line, #dfe1d9);
-  border-radius: 10px;
-}
-.guideComposer {
-  display: flex;
-  gap: 8px;
-  margin-bottom: 14px;
-}
-.guideComposer input {
-  flex: 1;
-  min-width: 0;
-  padding: 10px;
-  border: 0;
-  background: transparent;
-  color: inherit;
-  font: inherit;
-}
-.assistantProgress {
-  display: flex;
-  gap: 10px;
-  align-items: center;
-  margin-top: 16px;
-}
-.assistantProgress span {
-  flex: 1;
-}
