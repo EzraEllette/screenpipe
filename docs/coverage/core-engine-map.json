@@ -688,6 +688,7 @@
         "tests/semantic_storage_test.rs",
         "tests/suggestions_frames_table_test.rs",
         "tests/timeline_frameless_audio_test.rs",
+        "tests/timeline_parquet_test.rs",
         "tests/timeline_performance_test.rs"
       ],
       "platforms": [
