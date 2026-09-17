@@ -340,7 +340,10 @@ export default function RootLayout({
             React #419 (hydration recovery) → #185 (infinite loop during
             recovery render) on every first launch after auto-update. */}
         <Providers>
-          <StorageMigrationGate offerMigration={pathname === "/home"} />
+          {/* Utility windows must not open a second migration dialog. */}
+          {!isOverlay && pathname !== "/notification-panel" && (
+            <StorageMigrationGate offerMigration={pathname === "/home"} />
+          )}
           {/* DeeplinkHandler is mounted in Providers (outside the entitlement
               gate) so the screenpipe:// login callback is always caught, even
               while the "sign in required" screen is showing. */}
