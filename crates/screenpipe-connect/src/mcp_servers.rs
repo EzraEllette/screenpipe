@@ -347,7 +347,7 @@ async fn save_file(screenpipe_dir: &Path, file: &McpServersFile) -> Result<()> {
             use std::io::Write as _;
             let mut f = std::fs::File::create(&tmp2)?;
             f.write_all(json.as_bytes())?;
-            f.sync_all()?;
+            screenpipe_fs::sync_all(&f)?;
         }
         std::fs::rename(&tmp2, &path2)?;
         Ok(())
