@@ -46,8 +46,17 @@ The agent receives only the task and archived broken tree. It does not receive t
 
 Results are written under `evals/coding-agent/results/` unless `--results-dir` is supplied. Use `--keep` only for debugging a failed trial.
 
-Agent-process and harness failures are reported as `error` and excluded from
+Agent-process, grader-process and harness failures are reported as `error` and excluded from
 the success denominator. They are never silently converted into model failures.
+Grader timeouts and terminating signals cannot establish a failing baseline:
+`--verify` requires a behavioral `fail` followed by an oracle `pass`.
+Ordinary nonzero grader exits are still treated as behavioral failures, so
+inspect grader logs to distinguish assertion failures from setup failures.
+
+Run the synthetic runner controls with `bun test ./evals/coding-agent/run.test.ts`.
+They cover baseline/reference timeouts and signals, a genuine failing baseline,
+an already-passing baseline, and exclusion of process errors from scored trials.
+The controls use temporary local Git fixtures and invoke no model or provider.
 
 The same runner can score another checkout and manifest with `--repo` and
 `--manifest`; the website corpus uses this so both repositories share exactly

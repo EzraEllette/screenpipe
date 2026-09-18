@@ -370,8 +370,9 @@ function runTrial(evalCase, mode, trial, options, runDir) {
     writeFileSync(join(trialDir, "grader.stdout.log"), grader.stdout);
     writeFileSync(join(trialDir, "grader.stderr.log"), grader.stderr);
     const agentOk = !["agent", "regrade"].includes(mode) || (agent.status === 0 && !agent.error);
-    const passed = agentOk && grader.status === 0;
-    const outcome = !agentOk ? "error" : passed ? "pass" : "fail";
+    const graderErrored = Boolean(grader.error || grader.signal || grader.status === null);
+    const passed = agentOk && !graderErrored && grader.status === 0;
+    const outcome = !agentOk || graderErrored ? "error" : passed ? "pass" : "fail";
     const result = {
       case_id: evalCase.id,
       trial,
@@ -382,6 +383,8 @@ function runTrial(evalCase, mode, trial, options, runDir) {
       agent_exit: agent.status,
       agent_usage: extractAgentUsage(agent.stdout),
       grader_exit: grader.status,
+      grader_signal: grader.signal,
+      grader_error: grader.error,
       changed_files: candidate.changedFiles,
       workspace: options.keep ? workspace : undefined,
     };
@@ -487,7 +490,7 @@ function main() {
     for (const evalCase of cases) {
       const baseline = runTrial(evalCase, "baseline", 1, options, join(runDir, "baseline"));
       const oracle = runTrial(evalCase, "oracle", 1, options, join(runDir, "oracle"));
-      const valid = !baseline.passed && oracle.passed && !baseline.harness_error && !oracle.harness_error;
+      const valid = baseline.outcome === "fail" && oracle.outcome === "pass";
       verification.push({ case_id: evalCase.id, valid, baseline, oracle });
       console.log(`${evalCase.id}: broken=${baseline.passed ? "PASS" : "FAIL"} oracle=${oracle.passed ? "PASS" : "FAIL"}`);
     }
