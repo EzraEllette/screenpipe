@@ -627,6 +627,92 @@ async fn privacy_pending_payloads_remain_resident_and_searchable() {
 }
 
 #[tokio::test]
+async fn sparse_privacy_backlog_completes_migration_and_preserves_recording() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("db.sqlite");
+    let db = DatabaseManager::new(path.to_str().unwrap(), Default::default())
+        .await
+        .unwrap();
+    let count = 100_000_i64;
+    db.execute_raw_sql_write("INSERT INTO frames(id,timestamp,full_text) VALUES(1,'2026-09-18T12:00:00Z','pending frame privacy')").await.unwrap();
+    let mut tx = db.begin_immediate_with_retry().await.unwrap();
+    sqlx::query("WITH RECURSIVE n(id) AS (VALUES(1) UNION ALL SELECT id+1 FROM n WHERE id<?) INSERT INTO elements(id,frame_id,source,role,text,redacted_at) SELECT id,1,'accessibility','AXText','pending element history '||id,CASE WHEN id=? THEN 1 ELSE NULL END FROM n")
+        .bind(count).bind(count / 2).execute(&mut **tx.conn()).await.unwrap();
+    tx.commit().await.unwrap();
+    db.close().await;
+    let mut options = MigrationOptions::default();
+    options.privacy.identity = "sparse-privacy-migration".into();
+    options.privacy.required_surfaces = 1;
+    let report = migrate(root.path(), Default::default(), options)
+        .await
+        .unwrap();
+    assert_eq!(
+        report
+            .tables
+            .iter()
+            .find(|t| t.table == "elements")
+            .unwrap()
+            .rows,
+        count as u64
+    );
+    assert!(root
+        .path()
+        .join("storage-migration-complete.json")
+        .is_file());
+    assert!(!root.path().join("storage-migration.json").exists());
+
+    let db = DatabaseManager::new(path.to_str().unwrap(), Default::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM _bulk_element_rows")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap(),
+        count - 1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT sum(rows) FROM _bulk_files WHERE table_name='elements' AND state='published'"
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM elements_fts WHERE elements_fts MATCH 'history'"
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        count
+    );
+    db.verify_storage().await.unwrap();
+    db.execute_raw_sql_write("INSERT INTO frames(id,timestamp,full_text) VALUES(2,'2026-09-18T13:00:00Z','new durable capture'); INSERT INTO elements(id,frame_id,source,role,text) VALUES(100001,2,'accessibility','AXText','new capture element')").await.unwrap();
+    db.close().await;
+    let reopened = DatabaseManager::new(path.to_str().unwrap(), Default::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM elements")
+            .fetch_one(&reopened.pool)
+            .await
+            .unwrap(),
+        count + 1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT text FROM elements WHERE id=100001")
+            .fetch_one(&reopened.pool)
+            .await
+            .unwrap(),
+        "new capture element"
+    );
+    reopened.close().await;
+}
+
+#[tokio::test]
 #[ignore = "requires a marked disposable filesystem without hole punching"]
 async fn unsupported_volume_fails_before_conversion() {
     let volume = std::path::PathBuf::from(std::env::var("SCREENPIPE_UNSUPPORTED_VOLUME").unwrap());
