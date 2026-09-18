@@ -311,6 +311,10 @@ async fn collect_migration_diagnostics(app: &AppHandle) -> String {
     let Some(root) = root else {
         return "[Storage directory unavailable]".into();
     };
+    collect_migration_diagnostics_from_root(root).await
+}
+
+async fn collect_migration_diagnostics_from_root(root: std::path::PathBuf) -> String {
     match timeout(
         DIAGNOSTIC_PROBE_TIMEOUT,
         tokio::task::spawn_blocking(move || screenpipe_db::storage::diagnostics::recent(&root)),
@@ -736,6 +740,108 @@ mod tests {
             video_path: None,
             video_ext: None,
         }
+    }
+
+    #[tokio::test]
+    async fn migration_conflict_reaches_support_after_log_rotation_and_redaction() {
+        use screenpipe_db::{storage, DatabaseManager};
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("db.sqlite");
+        let db = DatabaseManager::new(source.to_str().unwrap(), Default::default())
+            .await
+            .unwrap();
+        db.execute_raw_sql_write(
+            "INSERT INTO frames(id,timestamp,full_text) VALUES(1,'2026-09-18','private history')",
+        )
+        .await
+        .unwrap();
+        db.close().await;
+        let report = storage::migrate(root.path(), Default::default(), Default::default())
+            .await
+            .unwrap();
+        let descriptor = storage::StorageDescriptor::read(root.path())
+            .unwrap()
+            .unwrap();
+        let extra = root.path().join("extra.sqlite");
+        let db = DatabaseManager::new(extra.to_str().unwrap(), Default::default())
+            .await
+            .unwrap();
+        db.execute_raw_sql_write("INSERT INTO frames(id,timestamp,full_text) VALUES(2,'2026-09-18','additional private history')").await.unwrap();
+        db.close().await;
+        std::fs::rename(extra, &source).unwrap();
+        std::fs::write(
+            root.path().join("storage-migration.json"),
+            serde_json::to_vec(&json!({
+                "format": 2, "phase": "paused", "descriptor": descriptor,
+                "source": report.tables, "snapshot": null, "report": null
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let error = storage::migrate(root.path(), Default::default(), Default::default())
+            .await
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("source contains recorded history"));
+        timeout(Duration::from_secs(3), async {
+            loop {
+                if storage::diagnostics::recent(root.path())
+                    .unwrap_or_default()
+                    .iter()
+                    .any(|snapshot| snapshot.status == "failed")
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        // A later support submission has no original rolling log in memory or on disk.
+        let diagnostics = collect_migration_diagnostics_from_root(root.path().to_owned()).await;
+        let raw =
+            format!("[no log files found]\n\n=== Storage Migration Diagnostics ===\n{diagnostics}");
+        let redacted = crate::feedback_redact::redact_pii_for_feedback(raw, "{}".into())
+            .await
+            .unwrap();
+        assert!(redacted.contains("source contains recorded history"));
+        assert!(redacted.contains("validating_migration_source"));
+        assert!(redacted.contains("\"source_exists\": true"));
+        assert!(redacted.contains("\"index_exists\": true"));
+        assert!(!redacted.contains("private history"));
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/logs"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {
+                "signedUrl": format!("{}/upload/log", server.uri()), "path": "logs/report.log"
+            }})))
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/upload/log"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/logs/confirm"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {"id": 42}})))
+            .mount(&server)
+            .await;
+        upload_report(
+            &Client::new(),
+            &server.uri(),
+            &request(),
+            redacted.clone(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let requests = server.received_requests().await.unwrap();
+        let upload = requests.iter().find(|r| r.method == "PUT").unwrap();
+        assert_eq!(upload.body, redacted.as_bytes());
     }
 
     #[test]
