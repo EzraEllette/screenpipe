@@ -10,13 +10,8 @@ import { fileURLToPath } from "node:url";
 
 import { openAcpSettingsEditor, openHomeWindow, waitForAppReady, t } from "../helpers/test-utils.js";
 import { invokeOrThrow } from "../helpers/tauri.js";
+import { capturedEvents, installAgentEventCapture, type AgentEnvelope } from "../helpers/agent-events.js";
 import { saveScreenshot } from "../helpers/screenshot-utils.js";
-
-type AgentEnvelope = {
-  source?: string;
-  sessionId?: string;
-  event?: Record<string, any>;
-};
 
 type PromptState = {
   done: boolean;
@@ -106,43 +101,6 @@ function acpProviderConfig(
     systemPrompt: "ACP E2E system context",
     ...(resumeSessionId ? { resumeSessionId } : {}),
   };
-}
-
-async function installAgentEventCapture(): Promise<void> {
-  const installed = (await browser.executeAsync((done: (value: boolean) => void) => {
-    if ((window as any).__e2eAcpAgentEventCaptureInstalled) {
-      done(true);
-      return;
-    }
-    (window as any).__e2eAcpAgentEvents = Array.isArray((window as any).__e2eAcpAgentEvents)
-      ? (window as any).__e2eAcpAgentEvents
-      : [];
-    const listen = (window as any).__TAURI__?.event?.listen as
-      | ((name: string, cb: (event: { payload?: AgentEnvelope }) => void) => Promise<unknown>)
-      | undefined;
-    if (!listen) {
-      done(false);
-      return;
-    }
-    void listen("agent_event", (event) => {
-      (window as any).__e2eAcpAgentEvents.push(event.payload);
-    })
-      .then(() => {
-        (window as any).__e2eAcpAgentEventCaptureInstalled = true;
-        done(true);
-      })
-      .catch(() => done(false));
-  })) as boolean;
-  expect(installed).toBe(true);
-}
-
-async function capturedEvents(sessionId: string): Promise<AgentEnvelope[]> {
-  return (await browser.execute((id: string) => {
-    const events = Array.isArray((window as any).__e2eAcpAgentEvents)
-      ? (window as any).__e2eAcpAgentEvents
-      : [];
-    return events.filter((event: AgentEnvelope) => event?.sessionId === id);
-  }, sessionId)) as AgentEnvelope[];
 }
 
 async function resetCapturedState(): Promise<void> {
