@@ -1068,7 +1068,7 @@ describe("ACP backend", function () {
     const failureRows = await failureWidget.$$('[data-testid="tool-activity-item"]');
     expect(failureRows).toHaveLength(2);
     expect(await failureRows[0].getText()).toContain("3 queries");
-    expect(await failureRows[1].getText()).toContain("failed");
+    expect(await failureRows[1].getText()).toContain("Failed");
     const failureScreenshot = await saveScreenshot("acp-repeated-tools-failure");
     expect(existsSync(failureScreenshot)).toBe(true);
 
