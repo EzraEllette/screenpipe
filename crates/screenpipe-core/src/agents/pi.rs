@@ -817,6 +817,10 @@ impl PiExecutor {
         let skills: &[(&str, &str)] = &[
             ("screenpipe-api", api_skill.as_str()),
             (
+                "screenpipe-workflow-maintenance",
+                include_str!("../../assets/skills/screenpipe-workflow-maintenance/SKILL.md"),
+            ),
+            (
                 "screenpipe-cli",
                 include_str!("../../assets/skills/screenpipe-cli/SKILL.md"),
             ),
@@ -893,8 +897,9 @@ impl PiExecutor {
     /// [`Self::USER_SKILL_MARKER`], be deleted by a later sync. The desktop
     /// importer already rejects these names; this guards any folder that reaches
     /// the store another way.
-    const BASELINE_SKILL_NAMES: [&'static str; 5] = [
+    const BASELINE_SKILL_NAMES: [&'static str; 6] = [
         "screenpipe-api",
+        "screenpipe-workflow-maintenance",
         "screenpipe-cli",
         "screenpipe-chats",
         "screenpipe-team",
@@ -1038,6 +1043,11 @@ impl PiExecutor {
                 "screenpipe-api",
                 api_skill.as_str(),
                 Box::new(|_| true), // always installed — unified API skill
+            ),
+            (
+                "screenpipe-workflow-maintenance",
+                include_str!("../../assets/skills/screenpipe-workflow-maintenance/SKILL.md"),
+                Box::new(|_| true), // guidance only; existing API permissions still apply
             ),
             (
                 "screenpipe-cli",
@@ -2663,7 +2673,45 @@ pub fn pi_config_dir() -> Result<PathBuf> {
         _ => crate::paths::default_screenpipe_data_dir().join("pi-config"),
     };
     seed_pi_config_from_global(&dir);
+    ensure_pi_compaction_default(&dir)?;
     Ok(dir)
+}
+
+/// Pi's 20k recent-history default leaves too little room for the system prompt,
+/// skill instructions and a summary on 32k models. Use its standard setting for
+/// both chat and Pipes. Explicit user settings (including disabled compaction)
+/// remain authoritative; no model selection or summarization logic lives here.
+fn ensure_pi_compaction_default(config_dir: &Path) -> Result<()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = LOCK
+        .lock()
+        .map_err(|_| anyhow!("pi settings lock poisoned"))?;
+    let path = config_dir.join("settings.json");
+    let mut settings: serde_json::Value = match std::fs::read_to_string(&path) {
+        Ok(raw) => match serde_json::from_str(&raw) {
+            Ok(value) => value,
+            // Leave malformed/user-owned configuration intact for Pi to report.
+            Err(_) => return Ok(()),
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => json!({}),
+        Err(error) => return Err(error.into()),
+    };
+    let Some(object) = settings.as_object_mut() else {
+        return Ok(());
+    };
+    let compaction = object.entry("compaction").or_insert_with(|| json!({}));
+    let Some(compaction) = compaction.as_object_mut() else {
+        return Ok(());
+    };
+    if compaction.contains_key("keepRecentTokens") {
+        return Ok(());
+    }
+    compaction.insert("keepRecentTokens".into(), json!(8192));
+    std::fs::create_dir_all(config_dir)?;
+    let mut temporary = tempfile::NamedTempFile::new_in(config_dir)?;
+    serde_json::to_writer_pretty(temporary.as_file_mut(), &settings)?;
+    temporary.persist(path)?;
+    Ok(())
 }
 
 fn pi_package_source_matches(source: &str, package_name: &str) -> bool {
@@ -4655,6 +4703,33 @@ mod tests {
     }
 
     #[test]
+    fn workflow_maintenance_skill_installs_in_chat_and_restricted_pipes() {
+        let chat = tempfile::tempdir().unwrap();
+        let pipe = tempfile::tempdir().unwrap();
+        PiExecutor::ensure_screenpipe_skill(chat.path()).unwrap();
+        let config: crate::pipes::PipeConfig = serde_yaml::from_str(
+            "name: test\npermissions:\n  allow: [Api(GET /workflows/context)]\n",
+        )
+        .unwrap();
+        PiExecutor::ensure_screenpipe_skill_filtered(pipe.path(), &config).unwrap();
+        let expected = include_str!("../../assets/skills/screenpipe-workflow-maintenance/SKILL.md");
+        assert!(
+            expected.len() < 5000,
+            "maintenance guide must fit small-context models"
+        );
+        for root in [chat.path(), pipe.path()] {
+            assert_eq!(
+                std::fs::read_to_string(
+                    root.join(".pi/skills/screenpipe-workflow-maintenance/SKILL.md")
+                )
+                .unwrap(),
+                expected
+            );
+        }
+        assert!(PiExecutor::BASELINE_SKILL_NAMES.contains(&"screenpipe-workflow-maintenance"));
+    }
+
+    #[test]
     fn managed_pipe_guidance_only_ships_in_enterprise_team_skill() {
         let consumer_skill = include_str!("../../assets/skills/screenpipe-cli/SKILL.md");
         let enterprise_skill = include_str!("../../assets/skills/screenpipe-team/SKILL.md");
@@ -5407,6 +5482,54 @@ mod tests {
             "invalid bytes should become replacement chars"
         );
         assert_eq!(lines[1], "OK");
+    }
+
+    #[test]
+    fn pi_compaction_default_preserves_user_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(
+            &path,
+            r#"{"theme":"dark","compaction":{"enabled":false,"reserveTokens":12000}}"#,
+        )
+        .unwrap();
+        ensure_pi_compaction_default(dir.path()).unwrap();
+        let settings: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(settings["theme"], "dark");
+        assert_eq!(
+            settings["compaction"],
+            json!({"enabled":false,"reserveTokens":12000,"keepRecentTokens":8192})
+        );
+        let original = std::fs::read(&path).unwrap();
+        ensure_pi_compaction_default(dir.path()).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn pi_compaction_default_does_not_replace_explicit_or_invalid_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        for original in [
+            r#"{"compaction":{"keepRecentTokens":24000}}"#,
+            "invalid",
+            "[]",
+            r#"{"compaction":null}"#,
+        ] {
+            std::fs::write(&path, original).unwrap();
+            ensure_pi_compaction_default(dir.path()).unwrap();
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        }
+    }
+
+    #[test]
+    fn pi_compaction_default_initializes_fresh_config() {
+        let dir = tempfile::tempdir().unwrap();
+        ensure_pi_compaction_default(dir.path()).unwrap();
+        let settings: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.path().join("settings.json")).unwrap())
+                .unwrap();
+        assert_eq!(settings, json!({"compaction":{"keepRecentTokens":8192}}));
     }
 
     /// First-run seed copies config + screenpipe-owned sessions from the
