@@ -301,7 +301,15 @@ impl DatabaseManager {
                 .acquire_owned()
                 .await
                 .map_err(|_| SqlxError::PoolClosed)?;
-            let mut conn = connect_options
+            // A legacy WAL file on SMB needs a private WAL index while the
+            // sole bootstrap connection checkpoints it into rollback mode.
+            // Close that exclusive owner before admitting the normal pools.
+            let bootstrap_options = if network_volume {
+                connect_options.clone().pragma("locking_mode", "EXCLUSIVE")
+            } else {
+                connect_options.clone()
+            };
+            let mut conn = bootstrap_options
                 .connect()
                 .await
                 .map_err(|error| quarantine_startup_error(database_file, error))?;

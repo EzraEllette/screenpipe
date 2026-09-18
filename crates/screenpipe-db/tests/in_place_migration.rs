@@ -628,6 +628,111 @@ async fn privacy_pending_payloads_remain_resident_and_searchable() {
 
 #[tokio::test]
 #[ignore = "requires a marked disposable filesystem without hole punching"]
+#[cfg(target_os = "macos")]
+async fn network_wal_verification_and_reopen_preserve_committed_rows() {
+    use sqlx::Connection;
+    const CHILD: &str = "SCREENPIPE_NAS_WAL_CHILD";
+    if let Ok(path) = std::env::var(CHILD) {
+        // Reproduce an old owner that exited with committed WAL on the share.
+        let mut conn = sqlx::SqliteConnection::connect_with(
+            &sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(path)
+                .create_if_missing(false)
+                .pragma("locking_mode", "EXCLUSIVE")
+                .pragma("journal_mode", "WAL")
+                .pragma("synchronous", "FULL")
+                .pragma("wal_autocheckpoint", "0"),
+        )
+        .await
+        .unwrap();
+        sqlx::raw_sql("CREATE TABLE nas_wal(value TEXT); INSERT INTO nas_wal VALUES('acknowledged before crash')")
+            .execute(&mut conn).await.unwrap();
+        std::process::exit(86);
+    }
+    let volume = std::path::PathBuf::from(std::env::var("SCREENPIPE_UNSUPPORTED_VOLUME").unwrap());
+    assert!(volume.join(".screenpipe-disposable-volume").is_file());
+    let root = tempfile::tempdir_in(volume).unwrap();
+    let path = root.path().join("db.sqlite");
+    let db = DatabaseManager::new(path.to_str().unwrap(), Default::default())
+        .await
+        .unwrap();
+    db.close().await;
+    let crashed = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--ignored",
+            "--exact",
+            "network_wal_verification_and_reopen_preserve_committed_rows",
+        ])
+        .env(CHILD, &path)
+        .output()
+        .unwrap();
+    assert_eq!(
+        crashed.status.code(),
+        Some(86),
+        "{}",
+        String::from_utf8_lossy(&crashed.stderr)
+    );
+    let wal = root.path().join("db.sqlite-wal");
+    let before = std::fs::read(&path).unwrap();
+    let before_wal = std::fs::read(&wal).unwrap();
+    assert!(!before_wal.is_empty());
+    screenpipe_sqlite_coordinator::inspect_database_health(&path)
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        before,
+        "verification must not rewrite the source"
+    );
+    assert_eq!(
+        std::fs::read(&wal).unwrap(),
+        before_wal,
+        "verification must not checkpoint or remove WAL"
+    );
+    screenpipe_sqlite_coordinator::persist_sqlite_verification_pending(
+        &path,
+        Some(3850),
+        "previous NAS locking failure",
+    )
+    .unwrap();
+    let db = DatabaseManager::new(path.to_str().unwrap(), Default::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT value FROM nas_wal")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap(),
+        "acknowledged before crash"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("PRAGMA journal_mode")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap(),
+        "delete"
+    );
+    assert!(!screenpipe_sqlite_coordinator::sqlite_verification_pending_exists(&path));
+    db.execute_raw_sql_write("INSERT INTO nas_wal VALUES('recorded after recovery')")
+        .await
+        .unwrap();
+    db.close().await;
+    let db = DatabaseManager::new(path.to_str().unwrap(), Default::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM nas_wal")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap(),
+        2
+    );
+    db.close().await;
+    println!("NAS WAL: verification preserved database and committed WAL bytes; pending incident recovered; acknowledged and new rows survive restart in rollback mode");
+}
+
+#[tokio::test]
+#[ignore = "requires a marked disposable filesystem without hole punching"]
 async fn non_sparse_volume_migrates_and_keeps_recording_after_restart() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter("screenpipe_db::storage=info")
