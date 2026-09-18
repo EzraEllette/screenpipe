@@ -33,6 +33,7 @@
     "**/*.test.{ts,tsx}"
   ],
   "ignoreDependencies": [
+    "undici",
     "ts-node",
     "mocha",
     "@wdio/cli",
