@@ -94,8 +94,8 @@ jobs:
     # macos-15-intel is the current — and per actions/runner-images#13027,
     # final — hosted x86_64 macOS image, supported into 2027.
     runs-on: macos-15-intel
-    # A cold app build took 93 minutes in run 35364456617. Leave time for the
-    # native test binaries, launch checks, and cache upload on this runner.
+    # Run 35364456617 reached app build completion after 93 minutes. Leave
+    # time for native test binaries, launch checks, and cache upload.
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
