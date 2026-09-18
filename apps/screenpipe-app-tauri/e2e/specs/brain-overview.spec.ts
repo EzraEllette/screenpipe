@@ -1578,10 +1578,10 @@ describe("Brain Live Views", function () {
     await setCssWindowSize(1440, 900);
 
     const timeRange = await waitForTestId("overview-time-range", 10_000);
-    // Freshness reads "Updated <newest> · oldest <oldest> · N waiting" since
-    // #6003 gave bound tasks a cadence. Assert the prefix, not a relative time.
+    // #6474 distinguishes source checks from the age of the underlying data.
+    // Keep the source-check assertion independent of the relative timestamp.
     expect((await timeRange.getAttribute("title"))?.toLowerCase()).toContain(
-      "updated ",
+      "sources checked ",
     );
     expect(await $("[data-testid='overview-data-status']").isExisting()).toBe(
       false,
@@ -1868,7 +1868,7 @@ Refresh the assigned Live View output targets from source-backed activity.
     );
     expect(
       (await timeRangeFreshness.getAttribute("title"))?.toLowerCase(),
-    ).toContain("updated ");
+    ).toContain("sources checked ");
     for (const size of SUPPORTED_WINDOW_SIZES) {
       await setCssWindowSize(size.width, size.height);
       await browser.pause(150);
