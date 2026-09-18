@@ -475,6 +475,9 @@ describe("unified recents sidebar", function () {
     await saveScreenshot("chat-agent-activity-sidebar-light");
 
     cleanup();
+    // Earlier specs leave chats in this shared app. Keep this visual fixture
+    // ahead of them so the eight-row recents cap contains the seeded chats.
+    const fixtureTimeOffset = 24 * 60 * 60_000;
     const mixedTitles = [
       "Ship Windows capture recovery",
       "Summarize enterprise interviews",
@@ -496,7 +499,7 @@ describe("unified recents sidebar", function () {
         `${FIXTURE_PREFIX}mixed-${index}`,
         title,
         index % 2 === 0 ? "codex" : "claude-code",
-        -index * 4 * 60_000,
+        fixtureTimeOffset - index * 4 * 60_000,
         index < 2,
         (["cursor", "screenpipe", "github-copilot", "terminal"] as const)[index % 4],
       );
@@ -514,7 +517,7 @@ describe("unified recents sidebar", function () {
       `${FIXTURE_PREFIX}codex-heavy-pinned`,
       "Customer voice synthesis",
       "claude-code",
-      60_000,
+      fixtureTimeOffset + 60_000,
       true,
     );
     const codexTitles = [
@@ -540,7 +543,7 @@ describe("unified recents sidebar", function () {
         `${FIXTURE_PREFIX}codex-heavy-${index}`,
         title,
         "codex",
-        -index * 7 * 60_000,
+        fixtureTimeOffset - index * 7 * 60_000,
         false,
         (["cursor", "terminal", "screenpipe"] as const)[index % 3],
       );
