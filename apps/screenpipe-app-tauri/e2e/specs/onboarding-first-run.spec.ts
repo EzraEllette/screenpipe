@@ -29,10 +29,8 @@ import { join } from "node:path";
 import { E2E_DATA_DIR, E2E_SEED_FLAGS } from "../helpers/app-launcher.js";
 import { saveScreenshot } from "../helpers/screenshot-utils.js";
 import {
-  closeWindow,
   invokeOrThrow,
   showWindow,
-  waitForWindowClosed,
   waitForWindowHandle,
   waitForWindowUrl,
 } from "../helpers/tauri.js";
@@ -66,21 +64,14 @@ const waitForBodyText = async (needle: string, timeout = 10_000) => {
 
 /** Remount the page so its saved-step restore runs after settings hydrate. */
 const remountOnboarding = async () => {
-  if (process.platform !== "win32") {
-    if ((await browser.getWindowHandles()).includes("onboarding")) {
-      await closeWindow("Onboarding");
-    }
-    await waitForWindowClosed("onboarding", t(15_000));
-  }
   await showWindow("Onboarding");
   await waitForWindowHandle("onboarding", t(20_000));
   await browser.switchToWindow("onboarding");
-  if (process.platform === "win32") {
-    // tauri-plugin-webdriver 0.2.1 registers its async handler once per label.
-    // Replacing WebView2 under the same label loses that handler; reload the
-    // document in the existing webview to keep native IPC observable.
-    await browser.refresh();
-  }
+  // Recreating a driver-managed window label can lose native IPC bindings
+  // (WebView2 async handlers on Windows, protocol routing on WKWebView).
+  // Reloading gives settings and saved-step restoration a fresh React mount
+  // while retaining the native webview and its test-driver connection.
+  await browser.refresh();
   await waitForWindowUrl("/onboarding", undefined, t(20_000));
 };
 
