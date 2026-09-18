@@ -396,4 +396,34 @@ mod tests {
             );
         }
     }
+
+    #[tokio::test]
+    async fn meeting_scan_failure_survives_rotation_collection_and_redaction() {
+        // Emitted by the engine's missing-browser regression; that test also
+        // checks this fixture against the real warning, so it cannot drift.
+        let diagnostic = include_str!(
+            "../../../../crates/screenpipe-engine/tests/fixtures/slack-missing-browser-diagnostic.txt"
+        );
+        let dir = tempdir().unwrap();
+        let current = dir.path().join("screenpipe.2026-09-18.log");
+        tokio::fs::write(&current, diagnostic).await.unwrap();
+        tokio::fs::rename(&current, dir.path().join("screenpipe.2026-09-18.1.log"))
+            .await
+            .unwrap();
+        tokio::fs::write(
+            &current,
+            "INFO recording resumed after restart\nINFO contact=private-person@example.com\n",
+        )
+        .await
+        .unwrap();
+
+        let files = crate::log_files::collect_log_files(&[dir.path().to_path_buf()]).await;
+        let report = redact_files(&owned_log_files(files)).await.unwrap();
+        assert!(report.contains("screenpipe.2026-09-18.1.log"));
+        assert!(report.contains("could not resolve the browser UI process"));
+        assert!(report.contains("meeting start withheld"));
+        assert!(report.contains("platform=Slack Huddle"));
+        assert!(report.contains("recording resumed after restart"));
+        assert!(!report.contains("private-person@example.com"));
+    }
 }
