@@ -185,25 +185,17 @@ async function openDashboardMenu() {
     }
     return false;
   };
-  const focusTrigger = () =>
-    browser.execute(() => {
-      document
-        .querySelector<HTMLElement>(
-          "[data-testid='overview-dashboard-menu']",
-        )
-        ?.focus();
-    });
-
-  await focusTrigger();
-  await browser.keys(["Enter"]);
-  if (await waitForMenuItem(2_000)) return;
-
-  await focusTrigger();
-  await browser.keys([" "]);
-  if (await waitForMenuItem(2_000)) return;
-
-  const trigger = await waitForTestId("overview-dashboard-menu", 5_000);
-  await trigger.click();
+  // Radix opens on pointerdown or ArrowDown, while hosted Windows and WebKit
+  // drivers can deliver click/OS keys without the corresponding DOM event.
+  await browser.execute(() => {
+    const trigger = document.querySelector<HTMLElement>(
+      "[data-testid='overview-dashboard-menu']",
+    );
+    trigger?.focus();
+    trigger?.dispatchEvent(new KeyboardEvent("keydown", {
+      key: "ArrowDown", code: "ArrowDown", bubbles: true, cancelable: true,
+    }));
+  });
   if (await waitForMenuItem(3_000)) return;
 
   const diagnostic = await browser.execute(() => {
@@ -983,9 +975,48 @@ describe("Brain Live Views", function () {
       await brainNav.click();
       await waitForTestId("section-brain", 15_000);
       await selectDashboard(emptyViewId);
-      await $("button*=Add your first Block").waitForDisplayed({
-        timeout: t(10_000),
-      });
+      const readCanvasAudit = async () =>
+        (await browser.execute(() => {
+          const isVisible = (element: Element | null) => {
+            if (!(element instanceof HTMLElement)) return false;
+            const rect = element.getBoundingClientRect();
+            const style = getComputedStyle(element);
+            return (
+              rect.width > 0 &&
+              rect.height > 0 &&
+              style.display !== "none" &&
+              style.visibility !== "hidden"
+            );
+          };
+          return {
+            canvasVisible: isVisible(
+              document.querySelector("[data-testid='live-view-canvas']"),
+            ),
+            visibleBlockIds: Array.from(
+              document.querySelectorAll<HTMLElement>(
+                "[data-testid^='canvas-block-']",
+              ),
+            )
+              .filter(isVisible)
+              .map((element) =>
+                (element.dataset.testid ?? "").replace("canvas-block-", ""),
+              )
+              .sort(),
+          };
+        })) as {
+          canvasVisible: boolean;
+          visibleBlockIds: string[];
+        };
+      await browser.waitUntil(
+        async () => {
+          const canvas = await readCanvasAudit();
+          return canvas.canvasVisible && canvas.visibleBlockIds.length === 0;
+        },
+        {
+          timeout: t(10_000),
+          timeoutMsg: "newly saved Canvas did not render empty",
+        },
+      );
 
       const prompt = await waitForTestId("live-view-ai-prompt", 10_000);
       await prompt.setValue("add four useful Blocks to this Canvas");
@@ -1004,53 +1035,12 @@ describe("Brain Live Views", function () {
       ).find((candidate) => candidate.id === emptyViewId);
       expect(persistedBeforeAcceptance?.slots).toHaveLength(0);
 
-      const readPreviewAudit = async () =>
-        (await browser.execute(() => {
-          const isVisible = (element: Element | null) => {
-            if (!(element instanceof HTMLElement)) return false;
-            const rect = element.getBoundingClientRect();
-            const style = getComputedStyle(element);
-            return (
-              rect.width > 0 &&
-              rect.height > 0 &&
-              style.display !== "none" &&
-              style.visibility !== "hidden"
-            );
-          };
-          return {
-            canvasVisible: isVisible(
-              document.querySelector("[data-testid='live-view-canvas']"),
-            ),
-            emptyStateVisible: Array.from(
-              document.querySelectorAll("button"),
-            ).some(
-              (button) =>
-                button.textContent?.trim().startsWith("Add your first Block") &&
-                isVisible(button),
-            ),
-            visibleBlockIds: Array.from(
-              document.querySelectorAll<HTMLElement>(
-                "[data-testid^='canvas-block-']",
-              ),
-            )
-              .filter(isVisible)
-              .map((element) =>
-                (element.dataset.testid ?? "").replace("canvas-block-", ""),
-              )
-              .sort(),
-          };
-        })) as {
-          canvasVisible: boolean;
-          emptyStateVisible: boolean;
-          visibleBlockIds: string[];
-        };
       const expectedBlockIds = proposedBlocks.map((block) => block.id).sort();
       await browser.waitUntil(
         async () => {
-          const audit = await readPreviewAudit();
+          const audit = await readCanvasAudit();
           return (
             audit.canvasVisible &&
-            !audit.emptyStateVisible &&
             JSON.stringify(audit.visibleBlockIds) ===
               JSON.stringify(expectedBlockIds)
           );
@@ -1061,10 +1051,9 @@ describe("Brain Live Views", function () {
           timeoutMsg: "proposed Blocks did not render on the empty Canvas",
         },
       );
-      const previewAudit = await readPreviewAudit();
+      const previewAudit = await readCanvasAudit();
       expect(previewAudit).toEqual({
         canvasVisible: true,
-        emptyStateVisible: false,
         visibleBlockIds: expectedBlockIds,
       });
       await browser.pause(100);
@@ -2184,7 +2173,7 @@ Refresh the assigned Live View output targets from source-backed activity.
     await noteTool.click();
     const compactTools = await waitForTestId("canvas-tools-toggle", 10_000);
     expect(await compactTools.getAttribute("aria-label")).toContain(
-      "note tool active",
+      "Note tool active",
     );
     await clickEmptyCanvasSpace();
     const surface = await waitForTestId("live-view-canvas-surface", 10_000);

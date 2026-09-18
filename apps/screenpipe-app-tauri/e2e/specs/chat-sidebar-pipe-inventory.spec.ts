@@ -29,6 +29,7 @@ import { E2E_DATA_DIR } from "../helpers/app-launcher.js";
 import {
   openHomeWindow,
   reloadAndWaitForHome,
+  setViewportSize,
   t,
   waitForAppReady,
 } from "../helpers/test-utils.js";
@@ -456,13 +457,7 @@ describe("chat sidebar pipe inventory", function () {
     // The conversation inventory must own its vertical scroll once Automations
     // is expanded at the minimum supported window height. It must never
     // stretch the app or push the fixed Settings footer out of reach.
-    const devicePixelRatio = (await browser.execute(
-      () => window.devicePixelRatio || 1,
-    )) as number;
-    await browser.setWindowSize(
-      Math.round(800 * devicePixelRatio),
-      Math.round(600 * devicePixelRatio),
-    );
+    await setViewportSize(800, 600);
     await browser.pause(250);
     const scrollMetrics = await browser.execute(() => {
       const element = document.querySelector<HTMLElement>(
@@ -591,7 +586,7 @@ describe("chat sidebar pipe inventory", function () {
       async () => await browser.execute((id: string) => {
         const row = document.querySelector(`[data-testid="chat-row-${id}"]`);
         const pinnedHeader = document.querySelector(
-          '[data-testid="sidebar-section-pinned"]',
+          '[data-testid="sidebar-section-Pinned"]',
         );
         const pinnedSection = pinnedHeader?.parentElement?.parentElement;
         return row !== null && pinnedSection?.contains(row) === true;

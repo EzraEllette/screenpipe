@@ -241,15 +241,25 @@ describe("Hosted AI usage-limit upgrade recovery", function () {
         if (!button) return null;
         const computed = getComputedStyle(button);
         return {
+          dark: document.documentElement.classList.contains("dark"),
           backgroundColor: computed.backgroundColor,
           borderColor: computed.borderTopColor,
           color: computed.color,
         };
       }, ctaLabel);
       expect(style).toEqual({
-        backgroundColor: "rgb(245, 245, 245)",
-        borderColor: "rgb(245, 245, 245)",
-        color: "rgb(10, 10, 10)",
+        dark: style?.dark,
+        ...(style?.dark
+          ? {
+              backgroundColor: "rgb(245, 245, 245)",
+              borderColor: "rgb(245, 245, 245)",
+              color: "rgb(10, 10, 10)",
+            }
+          : {
+              backgroundColor: "rgb(10, 10, 10)",
+              borderColor: "rgb(10, 10, 10)",
+              color: "rgb(246, 246, 243)",
+            }),
       });
 
       const screenshot = await saveScreenshot(upgradeCase.screenshot);

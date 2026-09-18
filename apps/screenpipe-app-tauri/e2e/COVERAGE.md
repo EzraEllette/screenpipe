@@ -11,8 +11,8 @@ and layer declared in the manifest, weighted by confidence and criticality.
 - Manifest: `e2e/coverage-map.json`
 - Specs directory: `e2e/specs`
 - Mapped specs: 140
-- Declared test blocks: 405
-- Weighted coverage points: 326.1
+- Declared test blocks: 401
+- Weighted coverage points: 320.6
 
 Confidence weights: strong=1.0, partial=0.7, conditional=0.4, smoke=0.3.
 Criticality weights: high=1.0, medium=0.7, low=0.4.
@@ -23,9 +23,9 @@ can execute more runtime cases than this number shows.
 
 | Platform | Specs | Declared tests | Weighted points | Layers | Features | Critical score |
 | --- | --- | --- | --- | --- | --- | --- |
-| windows | 107 | 343 | 286.1 | 15 | 122 | 85% |
-| macos | 136 | 367 | 295.9 | 17 | 132 | 88% |
-| linux | 95 | 301 | 255.5 | 14 | 119 | 80% |
+| windows | 107 | 339 | 280.6 | 15 | 122 | 85% |
+| macos | 136 | 363 | 290.4 | 17 | 132 | 88% |
+| linux | 95 | 297 | 250.0 | 14 | 119 | 80% |
 
 ## Runtime Results
 
@@ -45,11 +45,11 @@ pass/fail/skip counts.
 | entitlement | - | 1 specs / 1 tests / 1.0 pts | - |
 | local-api | 29 specs / 121 tests / 102.0 pts | 39 specs / 118 tests / 101.5 pts | 24 specs / 89 tests / 80.2 pts |
 | notifications | 4 specs / 26 tests / 17.3 pts | 3 specs / 5 tests / 3.4 pts | 2 specs / 4 tests / 3.1 pts |
-| onboarding | 9 specs / 39 tests / 34.8 pts | 11 specs / 43 tests / 38.2 pts | 9 specs / 39 tests / 34.8 pts |
+| onboarding | 9 specs / 35 tests / 29.3 pts | 11 specs / 39 tests / 32.7 pts | 9 specs / 35 tests / 29.3 pts |
 | os-integration | 7 specs / 32 tests / 26.9 pts | 15 specs / 30 tests / 18.4 pts | 2 specs / 15 tests / 10.8 pts |
 | performance | 3 specs / 46 tests / 46.0 pts | 5 specs / 37 tests / 32.8 pts | 2 specs / 31 tests / 31.0 pts |
 | pipes | 6 specs / 20 tests / 20.0 pts | 8 specs / 26 tests / 26.0 pts | 6 specs / 20 tests / 20.0 pts |
-| real-ui-e2e | 80 specs / 240 tests / 203.9 pts | 97 specs / 258 tests / 218.9 pts | 74 specs / 216 tests / 189.9 pts |
+| real-ui-e2e | 80 specs / 236 tests / 198.4 pts | 97 specs / 254 tests / 213.4 pts | 74 specs / 212 tests / 184.4 pts |
 | settings | 15 specs / 42 tests / 39.0 pts | 17 specs / 36 tests / 31.7 pts | 14 specs / 33 tests / 30.0 pts |
 | storage-privacy | 10 specs / 44 tests / 35.3 pts | 10 specs / 29 tests / 28.1 pts | 7 specs / 22 tests / 21.1 pts |
 | tauri-command | 23 specs / 64 tests / 50.9 pts | 35 specs / 87 tests / 69.3 pts | 22 specs / 65 tests / 51.8 pts |
@@ -151,7 +151,7 @@ pass/fail/skip counts.
 | chat-selected-text-side-chat.spec.ts | windows, macos, linux | chat-ai, real-ui-e2e | chat, selected-text-actions, side-chat | high | strong | real-user-flow | 7 | Selecting rendered assistant text exposes the current-chat and temporary side-chat actions. Add to chat keeps the active conversation; ask in side chat creates an editable unsent composer on the right while its source remains visible on the left. Sent side-chat content stays absent from Recents and disk, nested side chats are unavailable, replacement removes the old temporary session, and close restores the source without an orphan pane. |
 | chat-settings-background-stream.spec.ts | windows, macos, linux | chat-ai, settings, real-ui-e2e | chat, chat-streaming, settings | high | strong | real-user-flow | 1 | Opening the standalone Settings route mid-stream must not abort the chat: a long synthetic stream keeps running while the user round-trips to Settings, remains live in Recents, and restores the full response (early + final tokens) after the row is clicked. |
 | chat-sidebar-groups.spec.ts | windows, macos, linux | chat-ai, real-ui-e2e | chat, chat-sidebar-groups | medium | strong | real-user-flow | 9 | Pipe auto-grouping (collapse, badge, expand/collapse, localStorage persistence) and manual sidebar groups (move-to-group, section headers, remove-from-group cleanup). 8 tests. |
-| chat-sidebar-navigation.spec.ts | windows, macos, linux | chat-ai, real-ui-e2e | chat, chat-navigation, chat-sidebar | high | strong | real-user-flow | 4 | Native Home WebView coverage for one active conversation, atomic sidebar-to-panel navigation, clean new-chat drafts, semantic unread state, removal of the duplicate tab strip, and a title-scoped Pin/Rename/Archive menu. |
+| chat-sidebar-navigation.spec.ts | windows, macos, linux | chat-ai, real-ui-e2e | chat, chat-navigation, chat-sidebar | high | strong | real-user-flow | 4 | Native Home WebView coverage for one active conversation, atomic sidebar-to-panel navigation, clean new-chat drafts, semantic unread state, one selected workspace tab matching the sidebar and transcript, and a tab-scoped Pin/Rename/Archive menu. |
 | chat-sidebar-pipe-inventory.spec.ts | windows, macos, linux | chat-ai, pipes, real-ui-e2e | chat, pipes, chat-sidebar-groups | high | strong | mixed | 2 | The long chat inventory scrolls independently; a collapsed Automations section loads nothing, expanding it lists a compact execution-backed activity page, expanding an automation lazily loads its newest 10 executions, older runs paginate on demand, and a pinned automation remains archived after reload. |
 | chat-sidebar-repeated-prompt.spec.ts | windows, macos, linux | chat-ai, real-ui-e2e | chat, chat-sidebar-dedupe | high | strong | real-user-flow | 1 | Two distinct chats sent with the same opening prompt stay visible in the left sidebar. |
 | chat-sidebar-stub-dedup.spec.ts | windows, macos, linux | chat-ai | chat, chat-sidebar-dedupe | medium | partial | synthetic | 1 | Listener-order regression for metadata-only sidebar stubs gaining dedup keys. |
@@ -172,12 +172,12 @@ pass/fail/skip counts.
 | first-run-agent-handoff.spec.ts | windows, macos, linux | onboarding, real-ui-e2e | onboarding, first-run-learning, mcp-registration | high | partial | real-user-flow | 4 | Agent handoff beside the first-run summary: the summary stays primary and clickable whether or not an agent is offered, an offered target is never nameless or unclickable, the filesystem probe cannot break the ready banner or the summary click-through, opening the result collapses into the compact setup dock, and the paste instruction appears only after the handoff runs. Waits for the async probe before concluding absence. Does not assert WHICH agent: detectAiTools resolves the real home in the webview (SCREENPIPE_E2E_AI_TOOLS_HOME is Rust-only), so selection is host-dependent and is covered in lib/first-run/agent-handoff.test.ts and use-agent-handoff.test.ts. |
 | first-run-ai-summary.spec.ts | macos | onboarding, chat-ai, local-api, real-ui-e2e, tauri-command | onboarding, first-run-learning, chat, notifications | high | strong | real-user-flow | 3 | Opt-in hosted-AI lane for the post-setup summary: the real app starts its own Pi session through the Rust command and the production Worker under Miniflare. It proves a low-tier parsed-only fixture with one sustained app and no Timeline dependency reaches the model, accessibility evidence is used when parsed context is unavailable, and two transient activity-engine failures recover without a deterministic fallback. The seeded chat must hold the model's text and never the deterministic opener. Once ready, the real app must persist one content-free /notify entry whose primary deep link returns to the locally resolved summary and marks it opened. |
 | first-run-guide.spec.ts | windows, macos, linux | onboarding, chat-ai, real-ui-e2e | onboarding, chat, first-run-guide | high | strong | real-user-flow | 3 | Replayed first-run guide verifies the composer remains focused and clickable above its scrim, fails open when stacking defeats the lift, and remembers decline across reloads. |
-| first-run-learning-window.spec.ts | windows, macos, linux | onboarding, real-ui-e2e | onboarding, first-run-learning, shortcuts | high | strong | real-user-flow | 9 | Post-setup summary on Home under the authenticated seed: immediate runs show a live countdown, an interrupted first attempt gets exactly one quiet recovery, exhausted empty engine results settle with their diagnostic reason preserved, silent states stay silent across reloads, late returns retry in the background, ready summaries remain actionable, a verified shown Chat-shortcut outcome completes the contextual practice lesson while a hidden outcome stays recoverable, and idle/done never render. |
+| first-run-learning-window.spec.ts | windows, macos, linux | onboarding, real-ui-e2e | onboarding, first-run-learning, shortcuts | high | partial | real-user-flow | 5 | Seeds the durable native summary record and verifies the Home projection: live countdown, writing identity across renderer reload, empty-result dismissal, ready chat opening without a user turn, and real setup completion arming a new native job. Native generation and retry are outside this fixture; see first-run-ai-summary.spec.ts. |
 | first-run-reset-learning-window.spec.ts | windows, macos, linux | onboarding, real-ui-e2e, tauri-command | onboarding, first-run-learning, settings-persistence | high | strong | real-user-flow | 2 | Home is the single first-summary lifecycle owner: reset events clear the mounted Home state, while the separate Chat webview neither renders nor claims a second learning window from the shared onboarding completion. |
 | focus-server.spec.ts | windows, macos, linux | local-api, window-lifecycle, tauri-command | window-lifecycle, focus-server, deeplink | medium | partial | api | 2 | Focus server opens windows and forwards deeplink args. |
 | hd-recording-pipeline.spec.ts | macos | capture-ocr, local-api, performance | capture-ocr, hd-recording, timeline | high | conditional | api | 1 | Opt-in macOS HD capture and OCR indexing. |
 | help-discord-link.spec.ts | windows, macos, linux | real-ui-e2e | help | low | smoke | real-user-flow | 2 | Help section Discord invite link. |
-| history-swipe-navigation.spec.ts | windows, macos | real-ui-e2e, window-lifecycle, tauri-command | home-navigation, window-lifecycle | medium | partial | real-user-flow | 2 | Reads back the real WKWebView/WebView2 history-swipe setting, verifies top-level UI sections are browser-history entries, proves Back to app consumes Settings so the next back action restores the prior Home state, and captures every destination plus the production back/forward gesture-arrow design. Physical OS trackpad input remains manual. |
+| history-swipe-navigation.spec.ts | windows, macos | real-ui-e2e, window-lifecycle, tauri-command | home-navigation, window-lifecycle | medium | partial | real-user-flow | 2 | Reads back the real WKWebView/WebView2 history-swipe setting, verifies top-level UI sections are browser-history entries, proves Back to app consumes Settings so the next back action restores the prior Home state, and verifies native swipes remain disabled with no edge indicator after reload, preserving the intentional behavior in #6590. Physical OS trackpad input remains manual. |
 | home-window.spec.ts | windows, macos, linux | real-ui-e2e, window-lifecycle | app-launch, home-navigation, sidebar-collapse, timeline, settings-recording, pipes | high | strong | real-user-flow | 2 | Clicks through Home, Pipes, Timeline, Help, and Settings; verifies collapsed sidebar chrome hides recording status and restores it on expand. |
 | html-artifact-render.spec.ts | windows, macos, linux | real-ui-e2e | brain, artifacts, html-sandbox | high | strong | real-user-flow | 1 | Registers an HTML artifact, opens it in Brain, and asserts it renders inside a sandboxed allow-scripts iframe (CSP default-src 'none') whose global <style> never leaks into the host app DOM (regression: rehype-raw repainting the whole window). |
 | live-view-item-actions.spec.ts | windows, macos, linux | real-ui-e2e, local-api, pipes | brain-overview, live-view-item-actions, artifacts, pipes | high | strong | real-user-flow | 1 | Installs the generic Commitments and Accounting Live View kits, shows Done, Later, and Not right without hover, persists snooze, correction, resolve, dismiss, and reopen decisions through the local API, verifies receipts survive reload, and captures real product screenshots. |

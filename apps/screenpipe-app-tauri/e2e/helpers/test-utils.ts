@@ -13,6 +13,12 @@ export function t(ms: number): number {
   return ms * CI_TIMEOUT_MULTIPLIER;
 }
 
+/** Native driver dimensions are physical pixels; fixtures describe CSS space. */
+export async function setViewportSize(width: number, height: number): Promise<void> {
+  const scale = await browser.execute(() => window.devicePixelRatio || 1);
+  await browser.setWindowSize(Math.round(width * scale), Math.round(height * scale));
+}
+
 /**
  * Check if audio devices are available by hitting the health endpoint.
  * Returns false on CI runners that lack audio hardware.
@@ -61,8 +67,9 @@ export async function waitForAppReady(): Promise<void> {
  * home-page wait in `finishOpenHomeWindow`.
  */
 export async function reloadAndWaitForHome(timeoutMs = t(30000)): Promise<void> {
-  // The reload itself can race the execution-context teardown — ignore.
-  await browser.execute(() => window.location.reload()).catch(() => {});
+  // Wait for navigation before polling: executing location.reload() can return
+  // while the old Home DOM still exists, producing a false ready signal.
+  await browser.refresh();
   await browser.waitUntil(
     async () => {
       try {

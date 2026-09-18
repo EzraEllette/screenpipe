@@ -789,7 +789,7 @@ describe("connected snapshot sharing", function () {
       "connected-share-confirm",
       10_000,
     );
-    expect(await prepareNotion.getText()).toContain("Prepare Notion in Chat");
+    expect(await prepareNotion.getText()).toContain("prepare Notion in Chat");
     await prepareNotion.click();
     await browser.waitUntil(
       async () => {

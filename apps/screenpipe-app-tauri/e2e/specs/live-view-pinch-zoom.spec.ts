@@ -213,6 +213,9 @@ async function canvasCenter(): Promise<{
   local: { x: number; y: number };
 }> {
   const surface = await waitForTestId("live-view-canvas-surface", 10_000);
+  // Enter from outside the canvas: WebKitGTK may keep the last pointer position
+  // across specs and omit pointerenter when moveTo targets that same position.
+  await browser.action("pointer").move({ duration: 0, x: 1, y: 1 }).perform();
   await surface.moveTo();
   return (await browser.execute(() => {
     const element = document.querySelector<HTMLElement>(
