@@ -1,6 +1,8 @@
 // screenpipe — AI that knows everything you've seen, said, or heard
 // https://screenpipe.com
 
+import { workflowModelPreference } from "./model-choice";
+import { WORKFLOW_MODELS } from "@screenpipe/workflows-ui";
 import { commands, type PiProviderConfig } from "@/lib/utils/tauri";
 import { mountAgentEventBus, registerForeground, onTerminated, onEvicted } from "@/lib/events/bus";
 import type { AgentInnerEvent } from "@/lib/events/types";
@@ -50,7 +52,9 @@ export async function runWorkflowAgent({ name, prompt, config, signal, onProgres
         if (settled || envelope.sessionId !== sessionId || envelope.source !== "pi") return;
         try { onEvent?.(envelope.event); } catch (error) { fail(error instanceof Error ? error : new Error(String(error))); return; }
         if (envelope.event.type === "message_start" && envelope.event.message?.role === "assistant") stream = emptyStreamState();
-        stream = advanceMeetingChatStream(stream, envelope);
+        // Reuse stream folding, not the meeting rail's narrower tool policy.
+        stream = advanceMeetingChatStream(stream, envelope, (toolName) =>
+          !toolName || config.allowedTools?.includes(toolName) === true);
         if (stream.error) { fail(new Error(stream.error)); return; }
         if (envelope.event.type === "message_end" && envelope.event.message?.stopReason === "error") { fail(new Error(envelope.event.message.errorMessage || "Couldn’t finish the answer.")); return; }
         onProgress?.({ text: stream.text, activity: envelope.event.type?.startsWith("tool_execution") ? "searching" : stream.text ? "writing" : "starting" });
@@ -61,6 +65,8 @@ export async function runWorkflowAgent({ name, prompt, config, signal, onProgres
       }));
       unregister.push(onTerminated((event) => { if (event.sessionId === sessionId) fail(new Error("The conversation was interrupted. Try again.")); }));
       unregister.push(onEvicted((event) => { if (event.sessionId === sessionId) fail(new Error("The conversation was interrupted. Try again.")); }));
+      const choice = await workflowModelPreference.load(); assertActive();
+      config = { ...config, provider: "screenpipe-cloud", model: WORKFLOW_MODELS[choice].model, url: "", apiKey: null, acpAgent: null, backend: null, maxContextChars: null };
       const started = await commands.piStart(sessionId, `${base.data}/pi-workflows-${name}`, userToken, config);
       assertActive();
       if (started.status === "error" || !started.data.running) throw new Error(started.status === "error" ? started.error : "Couldn’t start the assistant.");

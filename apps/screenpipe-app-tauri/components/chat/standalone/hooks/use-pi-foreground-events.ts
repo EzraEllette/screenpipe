@@ -1183,13 +1183,9 @@ export function usePiForegroundEvents({
             const agentEndProviderError = agentEndError
               ? buildProviderErrorPresentation(agentEndError, getActivePreset())
               : null;
-            if (agentEndProviderError?.kind === "safety_refusal") {
-              // A provider can emit partial text before its terminal refusal.
-              // Keep the refusal note visible instead of finalizing that partial
-              // text as though the turn completed successfully.
-              content = agentEndProviderError.message;
-            // Surface credits_exhausted / rate limit / connection errors from agent_end
-            } else if (agentEndError && !content) {
+            // Progress text is not a successful answer. Preserve terminal
+            // failures even when the model narrated its work before using tools.
+            if (agentEndError) {
               const errStr = agentEndError;
               const quotaErrorType = classifyQuotaError(errStr);
               if (isInvalidatedAuthTokenError(errStr)) {
@@ -1204,8 +1200,9 @@ export function usePiForegroundEvents({
               } else if (errStr.includes("model_not_allowed")) {
                 content = buildModelNotAllowedMessage(errStr);
               } else {
-                content = buildProviderErrorPresentation(errStr, getActivePreset())?.message || errStr;
+                content = agentEndProviderError?.message || errStr;
               }
+              content = content.startsWith("Error:") ? content : `Error: ${content}`;
             }
 
             // Snapshot refs BEFORE setMessages — React's batching may defer the
@@ -1223,6 +1220,7 @@ export function usePiForegroundEvents({
               );
             const isQualifiedChatResult =
               !wasStoppedByUser &&
+              !agentEndError &&
               !piLastErrorRef.current &&
               hasNonEmptyChatResult;
 
@@ -1241,7 +1239,7 @@ export function usePiForegroundEvents({
                 existing?.content?.includes("safety policy") ||
                 existing?.content?.includes("chat is too long") ||
                 existing?.content?.startsWith("Error:");
-              if (isErrorMessage) {
+              if (isErrorMessage && !agentEndError) {
                 return prev;
               }
               // Don't overwrite if we have no new content and existing isn't "Processing..."
@@ -1287,7 +1285,7 @@ export function usePiForegroundEvents({
               }
               // Add text as a content block if no text block exists yet
               const hasTextBlock = contentBlocks.some((b) => b.type === "text");
-              if (!streamedText && content && !hasTextBlock) {
+              if (!streamedText && content && !hasTextBlock && !agentEndError) {
                 contentBlocks.push({ type: "text", text: content });
               }
               const nextMessages = prev.map((m) => m.id === msgId
@@ -1295,6 +1293,9 @@ export function usePiForegroundEvents({
                     ...m,
                     content,
                     contentBlocks,
+                    retryPrompt: agentEndProviderError?.retryable
+                      ? lastUserMessageRef.current || undefined
+                      : undefined,
                     ...(wasStoppedByUser
                       ? {
                           workDurationMs: Math.max(1, Date.now() - m.timestamp),

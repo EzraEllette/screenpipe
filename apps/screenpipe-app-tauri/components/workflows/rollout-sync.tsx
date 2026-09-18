@@ -2,20 +2,17 @@
 // https://screenpipe.com
 "use client";
 import { useEffect } from "react";
-import { localFetch } from "@/lib/api";
-import { useWorkflowsRolloutEnabled } from "@/lib/workflows/rollout";
+import { useFeatureFlagEnabled } from "posthog-js/react";
+import { syncWorkflowsRollout, WORKFLOWS_FLAG } from "@/lib/workflows/rollout";
 
-// The engine starts closed on every restart. Sync in Chat too, so changing
-// workspaces doesn't stop explicitly enabled tasks. No task is enabled here.
+// Unresolved flags are not revocations. Any mounted window with a resolved
+// flag can restore the engine grant after a restart, including when home is closed.
 export function WorkflowsRolloutSync() {
-  const enabled = useWorkflowsRolloutEnabled();
+  const enabled = useFeatureFlagEnabled(WORKFLOWS_FLAG);
   useEffect(() => {
-    if (process.env.NEXT_PUBLIC_SCREENPIPE_WEB_DEV === "mock") return;
+    if (typeof enabled !== "boolean" || process.env.NEXT_PUBLIC_SCREENPIPE_WEB_DEV === "mock") return;
     const controller = new AbortController();
-    const sync = () => void localFetch("/workflows/rollout", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ enabled }), signal: controller.signal,
-    }).catch(() => {});
+    const sync = () => void syncWorkflowsRollout(enabled, controller.signal).catch(() => {});
     sync();
     const retry = setInterval(sync, 30_000);
     return () => { clearInterval(retry); controller.abort(); };

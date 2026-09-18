@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
   handlers: new Map<string, (e: AgentEventEnvelope) => void>(),
   start: vi.fn(), prompt: vi.fn(), stop: vi.fn(), save: vi.fn(), token: vi.fn(),
 }));
+vi.mock("./model-choice", () => ({ workflowModelPreference: { load: vi.fn(async () => "intelligent") } }));
 vi.mock("./disk-storage", () => ({ loadAssistantFromDisk: vi.fn(), saveAssistantToDisk: mocks.save }));
 vi.mock("@/lib/events/bus", () => ({
   mountAgentEventBus: vi.fn(),
@@ -18,32 +19,46 @@ vi.mock("@/lib/utils/tauri", () => ({ commands: {
   getScreenpipeBaseDir: async () => ({ status: "ok", data: "/isolated/profile" }),
   getCloudToken: mocks.token, piStart: mocks.start, piPrompt: mocks.prompt, piStop: mocks.stop,
 } }));
+import { workflowModelPreference } from "./model-choice";
+import { WORKFLOW_MODELS } from "@screenpipe/workflows-ui";
 import { ASSISTANT_TOOLS, assistantProviderConfig, buildAssistantPrompt, desktopAssistant } from "./assistant";
 import { CONTEXT_TOOLS, fillWorkContext } from "./context";
 import { fixturePersonalWorkProfile } from "@screenpipe/workflows-ui/fixture";
 
 describe("workflow assistant agent transport", () => {
-  beforeEach(() => { vi.clearAllMocks(); mocks.handlers.clear(); mocks.token.mockResolvedValue("test-token"); mocks.start.mockResolvedValue({ status: "ok", data: { running: true } }); mocks.stop.mockResolvedValue({ status: "ok" }); });
-  it("uses the existing harness, exact session routing, read-only tools and real deltas", async () => {
+  beforeEach(() => { vi.clearAllMocks(); vi.mocked(workflowModelPreference.load).mockResolvedValue("intelligent"); mocks.handlers.clear(); mocks.token.mockResolvedValue("test-token"); mocks.start.mockResolvedValue({ status: "ok", data: { running: true } }); mocks.stop.mockResolvedValue({ status: "ok" }); });
+  it.each(["intelligent", "private"] as const)("uses the existing harness, exact session routing, shared skill/API tools and real deltas", async (mode) => {
+    vi.mocked(workflowModelPreference.load).mockResolvedValue(mode);
     mocks.prompt.mockImplementation(async (id: string) => {
       const emit = (event: AgentEventEnvelope["event"], sessionId = id) => mocks.handlers.get(id)?.({ sessionId, source: "pi", event });
       emit({ assistantMessageEvent: { type: "text_delta", delta: "Wrong session" } }, "another-chat");
-      emit({ type: "tool_execution_start", toolName: "search-content" });
+      emit({ type: "tool_execution_start", toolName: "bash" });
       emit({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "Found a moment." } });
       emit({ type: "agent_end" });
       return { status: "ok" };
     });
     const progress = vi.fn();
     await expect(desktopAssistant.ask({ question: "Find yesterday’s review", context: null, history: [], signal: new AbortController().signal, onProgress: progress })).resolves.toBe("Found a moment.");
-    expect(mocks.start).toHaveBeenCalledWith(expect.stringContaining("workflow-assistant"), "/isolated/profile/pi-workflows-assistant", "test-token", assistantProviderConfig);
-    expect(ASSISTANT_TOOLS).toEqual(["search-content", "list-meetings", "get-meeting", "frame-context"]);
+    expect(mocks.start).toHaveBeenCalledWith(expect.stringContaining("workflow-assistant"), "/isolated/profile/pi-workflows-assistant", "test-token", expect.objectContaining({ ...assistantProviderConfig, model: WORKFLOW_MODELS[mode].model }));
+    expect(ASSISTANT_TOOLS).toContain("read");
+    expect(ASSISTANT_TOOLS).toContain("bash");
+    expect(ASSISTANT_TOOLS).not.toContain("search-content");
     expect(progress).toHaveBeenCalledWith({ text: "", activity: "searching" });
     expect(mocks.stop).toHaveBeenCalled(); expect(mocks.handlers.size).toBe(0);
+  });
+  it("still rejects tools outside this run's configured scope", async () => {
+    mocks.prompt.mockImplementation(async (id: string) => {
+      mocks.handlers.get(id)?.({ sessionId: id, source: "pi", event: { type: "tool_execution_start", toolName: "write" } });
+      return { status: "ok" };
+    });
+    await expect(desktopAssistant.ask({ question: "Find yesterday", context: null, history: [], signal: new AbortController().signal, onProgress: vi.fn() })).rejects.toThrow("unexpected tool");
+    expect(mocks.stop).toHaveBeenCalled();
   });
   it("authenticates Context tool calls with the current account on every run", async () => {
     mocks.token.mockResolvedValueOnce("first-account-token").mockResolvedValueOnce("refreshed-account-token");
     mocks.prompt.mockImplementation(async (id: string) => {
       const emit = (event: AgentEventEnvelope["event"]) => mocks.handlers.get(id)?.({ sessionId: id, source: "pi", event });
+      emit({ type: "tool_execution_start", toolName: "fill_work_context" });
       emit({ type: "tool_execution_end", toolName: "fill_work_context", result: { content: [{ type: "text", text: JSON.stringify({ field: "summary", value: "I own support operations." }) }] } });
       emit({ type: "agent_end" });
       return { status: "ok" };
@@ -73,7 +88,7 @@ describe("workflow assistant agent transport", () => {
     });
     const context = { key: "feedback:wf-a", title: "Research", purpose: "feedback" as const };
     await desktopAssistant.ask({ question: "The final step is wrong", context, history: [], signal: new AbortController().signal, onProgress: vi.fn() });
-    expect(mocks.start).toHaveBeenCalledWith(expect.stringContaining("workflow-assistant"), "/isolated/profile/pi-workflows-assistant", "test-token", expect.objectContaining({ ...assistantProviderConfig, allowedTools: [...ASSISTANT_TOOLS, "screenpipe_list_connections", "sp_mcp_list_tools", "sp_mcp_read"] }));
+    expect(mocks.start).toHaveBeenCalledWith(expect.stringContaining("workflow-assistant"), "/isolated/profile/pi-workflows-assistant", "test-token", expect.objectContaining({ ...assistantProviderConfig, allowedTools: ASSISTANT_TOOLS }));
     const prompt = buildAssistantPrompt("The final step is wrong", context, []);
     expect(prompt).toContain("Do not claim to update installed skills or start a new task");
     expect(prompt).toContain("Ask exactly 3 short, numbered, workflow-specific questions");
@@ -108,6 +123,15 @@ describe("workflow assistant agent transport", () => {
     ready({ status: "ok", data: { running: true } });
     await vi.waitFor(() => expect(mocks.stop.mock.calls.length).toBeGreaterThanOrEqual(3));
     expect(mocks.prompt).not.toHaveBeenCalled();
+  });
+  it("uses normal recap guidance and searches history beyond the attached catalog", () => {
+    const prompt = buildAssistantPrompt("What did I work on yesterday?", { key: "catalog", title: "Your workflows" }, []);
+    expect(prompt).toContain("activity-summary first");
+    expect(prompt).toContain("user's local calendar day");
+    expect(prompt).toContain("Read the screenpipe-api skill before API calls");
+    expect(prompt).toContain("authenticated API instructions through bash");
+    expect(prompt).toContain("additional context, not the only available data source");
+    expect(prompt).toContain("report the actual error");
   });
   it("guards prompt evidence boundaries, estimates and page attachment semantics", () => {
     const prompt = buildAssistantPrompt("How long?", null, [{ id: "old", role: "user", text: "Previous question", at: "2026-09-07", context: { key: "old", title: "Old workflow" } }]);

@@ -15,6 +15,7 @@ edition.workspace = true
 storage-fault-injection = []
 
 [dependencies]
+screenpipe-fs = { path = "../screenpipe-fs" }
 uuid = { workspace = true }
 chrono = { workspace = true }
 image = { workspace = true }

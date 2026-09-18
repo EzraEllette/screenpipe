@@ -1638,7 +1638,6 @@ function HomeContent() {
           </AppSidebar>
           )}
           </TooltipProvider>
-          {!workflowsActive && sidebarCollapsed && workflowsAvailable && <div className="fixed left-3 top-10 z-40"><ProductSwitcher mode="screenpipe" compact onChange={changeMode} /></div>}
 
           {/* Content.
               min-w-0 matters: without it this flex item refuses to shrink

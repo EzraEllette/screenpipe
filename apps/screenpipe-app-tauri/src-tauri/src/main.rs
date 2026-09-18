@@ -138,10 +138,7 @@ mod update_restart;
 mod updates;
 mod voice_training;
 mod window;
-// Reuse the workflow engine from the parent PR; recorder ownership stays here.
-#[path = "../../../screenpipe-workflows-tauri/src-tauri/src/workflows_runtime.rs"]
 mod workflows_runtime;
-#[path = "../../../screenpipe-workflows-tauri/src-tauri/src/workflows_media.rs"]
 mod workflows_media;
 mod windows_ca_bundle;
 #[cfg(target_os = "windows")]
@@ -2062,6 +2059,7 @@ async fn main() {
                             );
 
                             // Phase 1: Start server core
+                            let (runtime_lifetime, runtime_finished) = tokio::sync::oneshot::channel();
                             let server = match server_core::ServerCore::start(
                                 &config,
                                 on_pipe_output,
@@ -2070,6 +2068,7 @@ async fn main() {
                                 cloud_token_arc.clone(),
                                 history_access.clone(),
                                 app_for_owned.path().app_local_data_dir().ok().map(|dir| dir.join("workflows")),
+                                runtime_lifetime,
                             )
                             .await
                             {
@@ -2156,15 +2155,10 @@ async fn main() {
                                 .store(false, std::sync::atomic::Ordering::SeqCst);
                             drop(lifecycle_guard);
 
-                            // Keep runtime alive as long as server exists
-                            loop {
-                                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                                let guard = server_arc.lock().await;
-                                if guard.is_none() {
-                                    info!("Server removed from state, shutting down server thread");
-                                    break;
-                                }
-                            }
+                            // The core owns the sender until shutdown drops it,
+                            // independently of the shared server slot.
+                            let _ = runtime_finished.await;
+                            info!("Server core released, shutting down server thread");
                         });
                     });
                 if let Err(error) = server_thread {
@@ -2414,7 +2408,7 @@ async fn main() {
             // Enterprise accounts out while allowing Screenpipe's own org.
             data_sync::spawn(&app_handle);
 
-            // Standard builds: account-bound, explicit opt-in support logs.
+            // Standard builds: authenticated, default-enabled support logs.
             // Enterprise builds compile this as a no-op because their managed
             // license-authenticated collector above is mandatory.
             remote_support_logs::spawn(&app_handle);

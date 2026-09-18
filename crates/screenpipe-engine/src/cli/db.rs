@@ -330,7 +330,15 @@ fn pid_alive(pid: u32) -> bool {
     // This lock also protects desktop startup on Windows, where an external
     // `kill` executable is not available. Check the owner on every platform.
     let mut system = System::new();
-    system.refresh_process(Pid::from_u32(pid))
+    let pid = Pid::from_u32(pid);
+    let found = system.refresh_process(pid);
+    // sysinfo 0.29's first Windows refresh only opens a process handle. An
+    // exited process can still be opened while another handle (e.g. Child) is
+    // alive. Refresh the existing entry to check GetExitCodeProcess as well.
+    #[cfg(windows)]
+    return found && system.refresh_process(pid);
+    #[cfg(not(windows))]
+    found
 }
 
 // ── runtime checks ─────────────────────────────────────────────────────
@@ -2229,6 +2237,8 @@ mod recovery_tests {
             dir.path().join(LOCK_FILE).exists(),
             "force quit leaves the lock file"
         );
+        // Retain Child's Windows handle: a terminated process object may still
+        // exist, but it must not keep the startup lock owned by a live process.
         assert!(!pid_alive(child.id()));
 
         let _guard = prepare_database_startup(dir.path()).await.unwrap();

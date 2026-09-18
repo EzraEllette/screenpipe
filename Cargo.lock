@@ -8667,6 +8667,7 @@ dependencies = [
  "screenpipe-core",
  "screenpipe-db",
  "screenpipe-events",
+ "screenpipe-fs",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -8774,6 +8775,7 @@ dependencies = [
  "russh-sftp",
  "rustls-native-certs",
  "screenpipe-core",
+ "screenpipe-fs",
  "screenpipe-secrets",
  "screenpipe-vault",
  "serde",
@@ -8827,6 +8829,7 @@ dependencies = [
  "reqwest 0.13.3",
  "screenpipe-cpu-features",
  "screenpipe-events",
+ "screenpipe-fs",
  "screenpipe-secrets",
  "screenpipe-sync",
  "screenpipe-vault",
@@ -8870,6 +8873,7 @@ dependencies = [
  "rusqlite",
  "screenpipe-config",
  "screenpipe-core",
+ "screenpipe-fs",
  "screenpipe-resource",
  "screenpipe-secrets",
  "screenpipe-semantic",
@@ -8937,6 +8941,7 @@ dependencies = [
  "screenpipe-core",
  "screenpipe-db",
  "screenpipe-events",
+ "screenpipe-fs",
  "screenpipe-redact",
  "screenpipe-resource",
  "screenpipe-screen",
@@ -8990,6 +8995,14 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tracing",
+]
+
+[[package]]
+name = "screenpipe-fs"
+version = "0.4.50"
+dependencies = [
+ "libc",
+ "tempfile",
 ]
 
 [[package]]
@@ -9068,6 +9081,7 @@ dependencies = [
  "regex",
  "reqwest 0.13.3",
  "screenpipe-db",
+ "screenpipe-fs",
  "screenpipe-resource",
  "screenpipe-rfdetr-mlx",
  "screenpipe-sqlite-coordinator",
@@ -9135,6 +9149,7 @@ dependencies = [
  "screenpipe-connect",
  "screenpipe-core",
  "screenpipe-db",
+ "screenpipe-fs",
  "serde",
  "serde_json",
  "strsim 0.10.0",
@@ -9193,6 +9208,7 @@ version = "0.4.50"
 dependencies = [
  "fs2",
  "libsqlite3-sys",
+ "screenpipe-fs",
  "serde",
  "serde_json",
  "sqlx",

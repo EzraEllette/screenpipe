@@ -40,7 +40,11 @@ pub fn task_at(path: &Path) -> Option<&str> {
         .filter(|n| stage(n).is_some() && path.join("pipe.md").is_file())
 }
 
+#[cfg(test)]
 pub fn admission(usage: &Value) -> Result<(), (&'static str, &'static str)> {
+    admission_for_model(usage, "auto")
+}
+fn admission_for_model(usage: &Value, model: &str) -> Result<(), (&'static str, &'static str)> {
     let plan = usage
         .pointer("/hosted_ai/plan")
         .and_then(Value::as_str)
@@ -70,6 +74,11 @@ pub fn admission(usage: &Value) -> Result<(), (&'static str, &'static str)> {
     ) {
         return Err(("workflow_business_required", "Automatic workflow discovery requires Business. Your saved workflows are still available."));
     }
+    // Owned-GPU inference has no paid-provider allowance debit. Authentication,
+    // Business entitlement and gateway capacity limits still apply.
+    if model == super::model_choice::PRIVATE_MODEL {
+        return Ok(());
+    }
     if usage["cost_limit_reached"] == true || usage["remaining"].as_f64().is_some_and(|n| n <= 0.0)
     {
         return Err(("workflow_allowance_paused", "Workflow updates paused because the AI allowance is exhausted. Manage usage to see available capacity and reset times."));
@@ -93,6 +102,16 @@ pub async fn has_pending_input(path: &Path) -> anyhow::Result<bool> {
     let Some(task) = task_at(path) else {
         return Ok(true);
     };
+    let value = read_input(path, task).await?;
+    if let Some(reason) = value["blockedReason"].as_str() {
+        anyhow::bail!("workflow_dependency_paused: {reason}");
+    }
+    value["ready"]
+        .as_bool()
+        .ok_or_else(|| anyhow::anyhow!("Workflow input status unavailable"))
+}
+
+async fn read_input(path: &Path, task: &str) -> anyhow::Result<Value> {
     let permissions: Value =
         serde_json::from_slice(&std::fs::read(path.join(".screenpipe-permissions.json"))?)?;
     let base = permissions["api_base"]
@@ -111,51 +130,60 @@ pub async fn has_pending_input(path: &Path) -> anyhow::Result<bool> {
         .send()
         .await?
         .error_for_status()?;
-    let value: Value = response.json().await?;
-    if let Some(reason) = value["blockedReason"].as_str() {
-        anyhow::bail!("workflow_dependency_paused: {reason}");
-    }
-    if value["ready"] == true
-        && stage(task).is_some_and(|index| index > 0)
-        && value["reviewRequested"] != true
-        && (value["input"]["unchanged"] == true
-            || value["input"]["items"]
-                .as_array()
-                .is_some_and(Vec::is_empty))
-    {
-        // Deterministic no-change propagation. Keep prior enrichment and advance
-        // only its coverage, without asking a model to restate identical input.
-        let final_stage = task == TASKS[4];
-        let body = if final_stage {
-            json!({"expected_revision":value["catalogRevision"],"pipeline_revision":value["inputRevision"],"checked_through":value["checkedThrough"],"workflows":[]})
-        } else {
-            json!({"task":task,"expected_revision":value["revision"],"input_revision":value["inputRevision"],"checked_through":value["checkedThrough"],
-                "items":value["previous"]["items"].as_array().cloned().unwrap_or_default(),"coverage":value["input"]["coverage"].as_array().cloned().unwrap_or_default()})
-        };
-        let route = if final_stage { "catalog" } else { "pipeline" };
-        let receipt: Value = reqwest::Client::new()
-            .post(format!("{base}/workflows/{route}"))
-            .bearer_auth(permissions["pipe_token"].as_str().unwrap_or_default())
-            .json(&body)
-            .timeout(std::time::Duration::from_secs(30))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        if receipt["checkedThrough"] != value["checkedThrough"]
-            || receipt["revision"].as_u64().is_none()
-        {
-            anyhow::bail!("missing_output: No valid no-change receipt");
-        }
-        return Ok(false);
-    }
-    value["ready"]
-        .as_bool()
-        .ok_or_else(|| anyhow::anyhow!("Workflow input status unavailable"))
+    Ok(response.json().await?)
 }
 
-pub async fn check_admission(api_url: &str, token: Option<&str>) -> anyhow::Result<()> {
+/// Task completion is a durable write, not an assistant's claim that it saved.
+/// Uses persisted revisions only; all investigation stays in the normal agent.
+#[derive(Clone, Copy)]
+pub struct SaveState {
+    revision: u64,
+    input_revision: u64,
+    applied_input_revision: u64,
+}
+
+pub async fn save_state(path: &Path) -> anyhow::Result<Option<SaveState>> {
+    let Some(task) = task_at(path) else {
+        return Ok(None);
+    };
+    let value = read_input(path, task).await?;
+    let (revision, applied) = if task == TASKS[4] {
+        (
+            value["catalogRevision"]
+                .as_u64()
+                .ok_or_else(|| anyhow::anyhow!("Catalog revision unavailable"))?,
+            value["catalogPipelineRevision"].as_u64().unwrap_or(0),
+        )
+    } else {
+        (
+            value["previous"]["revision"].as_u64().unwrap_or(0),
+            value["previous"]["inputRevision"].as_u64().unwrap_or(0),
+        )
+    };
+    Ok(Some(SaveState {
+        revision,
+        input_revision: value["inputRevision"].as_u64().unwrap_or(0),
+        applied_input_revision: applied,
+    }))
+}
+
+pub async fn verify_saved(path: &Path, before: Option<SaveState>) -> anyhow::Result<()> {
+    if let Some(before) = before {
+        if !save_state(path).await?.is_some_and(|after| {
+            after.revision > before.revision
+                && after.applied_input_revision >= before.input_revision
+        }) {
+            anyhow::bail!("missing_output: The task finished without saving a workflow update.");
+        }
+    }
+    Ok(())
+}
+
+pub async fn check_admission(
+    api_url: &str,
+    token: Option<&str>,
+    model: &str,
+) -> anyhow::Result<()> {
     require_rollout(rollout_enabled())?;
     let token = token.filter(|s| !s.is_empty()).ok_or_else(|| {
         anyhow::anyhow!("workflow_sign_in_required: Sign in to enable workflow updates.")
@@ -179,7 +207,7 @@ pub async fn check_admission(api_url: &str, token: Option<&str>) -> anyhow::Resu
         .json()
         .await
         .map_err(|_| anyhow::anyhow!("workflow_usage_unavailable: Invalid allowance response."))?;
-    admission(&value).map_err(|(code, message)| {
+    admission_for_model(&value, model).map_err(|(code, message)| {
         anyhow::anyhow!("{}", json!({"error":{"code":code,"message":message}}))
     })
 }
@@ -196,7 +224,7 @@ mod tests {
     }
     use super::*;
     #[tokio::test]
-    async fn unchanged_input_advances_a_verified_receipt_without_a_model() {
+    async fn unchanged_input_is_left_to_the_agent() {
         use wiremock::{
             matchers::{body_partial_json, method, path},
             Mock, MockServer, ResponseTemplate,
@@ -223,11 +251,71 @@ mod tests {
                 ResponseTemplate::new(200)
                     .set_body_json(json!({"revision":9,"checkedThrough":"2026-09-15T00:00:00Z"})),
             )
-            .expect(1)
+            .expect(0)
             .mount(&server)
             .await;
-        assert!(!has_pending_input(&task).await.unwrap());
+        assert!(has_pending_input(&task).await.unwrap());
+        assert!(verify_saved(
+            &task,
+            Some(SaveState {
+                revision: 0,
+                input_revision: 8,
+                applied_input_revision: 0
+            })
+        )
+        .await
+        .is_err());
     }
+    #[tokio::test]
+    async fn completion_requires_consuming_the_input_not_an_unrelated_catalog_edit() {
+        use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        let root = tempfile::tempdir().unwrap();
+        let task = root.path().join(TASKS[4]);
+        std::fs::create_dir(&task).unwrap();
+        std::fs::write(task.join("pipe.md"), "fixture").unwrap();
+        std::fs::write(
+            task.join(".screenpipe-permissions.json"),
+            serde_json::to_vec(&json!({"api_base":server.uri(),"pipe_token":"fixture"})).unwrap(),
+        )
+        .unwrap();
+        for (revision, applied, success) in [(4, 2, false), (5, 2, false), (5, 3, true)] {
+            server.reset().await;
+            Mock::given(method("GET")).respond_with(ResponseTemplate::new(200)
+                .set_body_json(json!({"catalogRevision":revision,"catalogPipelineRevision":applied,"inputRevision":3})))
+                .mount(&server).await;
+            assert_eq!(
+                verify_saved(
+                    &task,
+                    Some(SaveState {
+                        revision: 4,
+                        input_revision: 3,
+                        applied_input_revision: 2
+                    })
+                )
+                .await
+                .is_ok(),
+                success
+            );
+        }
+        server.reset().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&server)
+            .await;
+        assert!(verify_saved(
+            &task,
+            Some(SaveState {
+                revision: 4,
+                input_revision: 3,
+                applied_input_revision: 2
+            })
+        )
+        .await
+        .is_err());
+        assert!(verify_saved(root.path(), None).await.is_ok());
+    }
+
     #[tokio::test]
     async fn requested_review_does_not_skip_the_agent() {
         use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
@@ -249,6 +337,18 @@ mod tests {
             .await;
         assert!(has_pending_input(&task).await.unwrap());
         assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+    #[test]
+    fn private_model_ignores_paid_allowance_but_requires_business() {
+        let mut usage =
+            json!({"hosted_ai":{"plan":"business"},"remaining":0,"cost_limit_reached":true});
+        assert!(admission_for_model(&usage, super::super::model_choice::PRIVATE_MODEL).is_ok());
+        assert!(admission(&usage).is_err());
+        usage["hosted_ai"]["plan"] = json!("free");
+        assert!(admission_for_model(&usage, super::super::model_choice::PRIVATE_MODEL).is_err());
+        assert!(
+            admission_for_model(&Value::Null, super::super::model_choice::PRIVATE_MODEL).is_err()
+        );
     }
     #[test]
     fn privileged_gateway_plan_retains_all_admission_checks() {

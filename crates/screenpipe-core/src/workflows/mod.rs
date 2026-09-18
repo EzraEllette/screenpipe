@@ -2,6 +2,7 @@
 // https://screenpipe.com
 
 //! Evidence validation shared by desktop discovery and scheduled catalog updates.
+pub mod model_choice;
 pub mod pipeline;
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};

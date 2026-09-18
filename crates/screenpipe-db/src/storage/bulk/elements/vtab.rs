@@ -262,6 +262,7 @@ unsafe impl<'v> VTab<'v> for Elements {
             pending: VecDeque::new(),
             pending_sql: String::new(),
             pending_args: Vec::new(),
+            pending_seek_args: Vec::new(),
             pending_after: None,
             pending_done: false,
             descending: false,
@@ -540,6 +541,7 @@ struct Cursor {
     pending: VecDeque<(Record, bool)>,
     pending_sql: String,
     pending_args: Vec<SqlValue>,
+    pending_seek_args: Vec<usize>,
     pending_after: Option<i64>,
     pending_done: bool,
     descending: bool,
@@ -567,6 +569,13 @@ impl Cursor {
         });
         let mut args = self.pending_args.clone();
         if let Some(id) = self.pending_after {
+            // This row already satisfied every bound in the scan direction.
+            // Advance those bounds too: SQLite may seek using an original
+            // >=/<= parameter instead of the appended strict cursor predicate,
+            // otherwise rescanning the growing prefix on every 128-row page.
+            for &index in &self.pending_seek_args {
+                args[index] = SqlValue::Integer(id);
+            }
             args.push(SqlValue::Integer(id));
         }
         let sql = format!(
@@ -716,6 +725,7 @@ unsafe impl VTabCursor for Cursor {
         self.pending.clear();
         self.pending_after = None;
         self.pending_done = false;
+        self.pending_seek_args.clear();
         self.files_after = None;
         self.files_done = false;
         self.archive = None;
@@ -768,6 +778,12 @@ unsafe impl VTabCursor for Cursor {
                 range_args.push(value.clone());
             } else if matches!(op, ">" | ">=") {
                 range_args.extend([value.clone(), value.clone()]);
+            }
+            if matches!(
+                (self.descending, op),
+                (false, ">" | ">=") | (true, "<" | "<=")
+            ) {
+                self.pending_seek_args.push(pending_args.len());
             }
             pending.push(format!("id{op}?"));
             pending_args.push(value);
