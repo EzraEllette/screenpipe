@@ -67,14 +67,18 @@ export async function waitForAppReady(): Promise<void> {
  * home-page wait in `finishOpenHomeWindow`.
  */
 export async function reloadAndWaitForHome(timeoutMs = t(30000)): Promise<void> {
-  // Wait for navigation before polling: executing location.reload() can return
-  // while the old Home DOM still exists, producing a false ready signal.
+  // The native driver's refresh() only requests location.reload(). Its return
+  // does not prove navigation finished, so reject readiness from the old page.
+  await browser.execute(() => {
+    (window as any).__screenpipeE2EReloadPending = true;
+  });
   await browser.refresh();
   await browser.waitUntil(
     async () => {
       try {
         return (await browser.execute(
-          () => !!document.querySelector('[data-testid="home-page"]')
+          () => !(window as any).__screenpipeE2EReloadPending &&
+            !!document.querySelector('[data-testid="home-page"]')
         )) as boolean;
       } catch {
         // Transient during the reload (session/context not ready) — retry.
