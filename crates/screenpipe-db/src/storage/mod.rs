@@ -354,13 +354,13 @@ pub(crate) fn sync_file(path: &Path) -> Result<(), sqlx::Error> {
     // completed file was written by SQLite or copied through another handle.
     #[cfg(windows)]
     options.write(true);
-    options.open(path)?.sync_all()?;
+    screenpipe_fs::sync_all(&options.open(path)?)?;
     Ok(())
 }
 
 pub(crate) fn sync_directory(path: &Path) -> Result<(), sqlx::Error> {
     #[cfg(unix)]
-    std::fs::File::open(path)?.sync_all()?;
+    screenpipe_fs::sync_all(&std::fs::File::open(path)?)?;
     #[cfg(windows)]
     {
         use std::os::windows::fs::OpenOptionsExt;
@@ -382,7 +382,7 @@ pub(crate) fn durable_json<T: Serialize>(path: &Path, value: &T) -> Result<(), s
     let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
     serde_json::to_writer(&mut temporary, value).map_err(storage_error)?;
     temporary.write_all(b"\n")?;
-    temporary.as_file().sync_all()?;
+    screenpipe_fs::sync_all(temporary.as_file())?;
     temporary
         .persist(path)
         .map_err(|e| sqlx::Error::Io(e.error))?;

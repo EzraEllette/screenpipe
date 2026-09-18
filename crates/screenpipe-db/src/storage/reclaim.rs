@@ -50,22 +50,31 @@ pub(super) fn footprint(root: &Path) -> Result<u64, sqlx::Error> {
 
 /// Probe an owned scratch file on the exact destination volume, before touching
 /// the database. A successful syscall alone does not prove blocks were freed.
-pub(super) fn probe(root: &Path) -> Result<(), sqlx::Error> {
+pub(super) fn probe(root: &Path) -> Result<bool, sqlx::Error> {
+    probe_with(root, punch)
+}
+
+fn probe_with(
+    root: &Path,
+    punch: impl FnOnce(&File, u64, u64) -> Result<(), sqlx::Error>,
+) -> Result<bool, sqlx::Error> {
     let mut file = tempfile::NamedTempFile::new_in(root)?;
     let bytes = vec![0x5a; 1024 * 1024];
     file.write_all(&bytes)?;
-    file.as_file().sync_all()?;
+    screenpipe_fs::sync_all(file.as_file())?;
     let before = allocated(file.path())?;
-    punch(file.as_file(), 0, bytes.len() as u64).map_err(|e| {
-        storage_error(format!(
-            "filesystem reclamation unavailable; migration has not started: {e}"
-        ))
-    })?;
-    file.as_file().sync_all()?;
+    match punch(file.as_file(), 0, bytes.len() as u64) {
+        Ok(()) => {}
+        Err(sqlx::Error::Io(error)) if unsupported(&error) => {
+            tracing::info!("filesystem does not support sparse reclamation; keeping reusable SQLite free pages and enforcing migration disk reserve");
+            return Ok(false);
+        }
+        Err(error) => return Err(error),
+    }
+    screenpipe_fs::sync_all(file.as_file())?;
     if allocated(file.path())? >= before {
-        return Err(storage_error(
-            "this filesystem does not release sparse file blocks; migration has not started",
-        ));
+        tracing::info!("filesystem does not report sparse space savings; keeping reusable SQLite free pages and enforcing migration disk reserve");
+        return Ok(false);
     }
     file.seek(SeekFrom::Start(0))?;
     let mut actual = vec![1; bytes.len()];
@@ -73,7 +82,20 @@ pub(super) fn probe(root: &Path) -> Result<(), sqlx::Error> {
     if actual.iter().any(|b| *b != 0) {
         return Err(storage_error("filesystem reclamation probe failed"));
     }
-    Ok(())
+    Ok(true)
+}
+
+fn unsupported(error: &std::io::Error) -> bool {
+    if error.kind() == std::io::ErrorKind::Unsupported {
+        return true;
+    }
+    // Darwin ENOTSUP is Uncategorized in Rust, unlike Linux EOPNOTSUPP.
+    #[cfg(unix)]
+    return error.raw_os_error().is_some_and(|code| {
+        code == libc::ENOTSUP || code == libc::EOPNOTSUPP || code == libc::ENOSYS
+    });
+    #[cfg(windows)]
+    return matches!(error.raw_os_error(), Some(1 | 50)); // INVALID_FUNCTION / NOT_SUPPORTED
 }
 
 #[cfg(target_os = "macos")]
@@ -262,7 +284,7 @@ pub(super) async fn free_leaves(
         }
     }
     super::diagnostics::stage("syncing_reclaimed_database");
-    file.sync_all()?;
+    screenpipe_fs::sync_all(file)?;
     Ok(())
 }
 
@@ -275,9 +297,17 @@ pub(super) async fn free_leaves(
 #[derive(Default)]
 pub(super) struct Reclaimer {
     next_free_pages: i64,
+    disabled: bool,
 }
 
 impl Reclaimer {
+    pub(super) fn new(root: &Path) -> Result<Self, sqlx::Error> {
+        Ok(Self {
+            disabled: !probe(root)?,
+            ..Self::default()
+        })
+    }
+
     pub(super) async fn run(
         &mut self,
         conn: &mut SqliteConnection,
@@ -289,6 +319,9 @@ impl Reclaimer {
         // Check space after flushing: checkpointing can reallocate holes that
         // SQLite reused, even when the free-page total did not change.
         super::schema::construction_checkpoint(conn).await?;
+        if self.disabled {
+            return Ok(false);
+        }
         let free: i64 = sqlx::query_scalar("PRAGMA freelist_count")
             .fetch_one(&mut *conn)
             .await?;
@@ -316,6 +349,28 @@ impl Reclaimer {
 mod tests {
     use super::*;
     use sqlx::Connection;
+
+    #[test]
+    fn unsupported_reclamation_is_optional_but_io_errors_are_not() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(!probe_with(root.path(), |_, _, _| {
+            Err(std::io::Error::from(std::io::ErrorKind::Unsupported).into())
+        })
+        .unwrap());
+        assert!(probe_with(root.path(), |_, _, _| {
+            Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied).into())
+        })
+        .is_err());
+        assert!(!probe_with(root.path(), |_, _, _| Ok(())).unwrap());
+        #[cfg(unix)]
+        {
+            assert!(!probe_with(root.path(), |_, _, _| {
+                Err(std::io::Error::from_raw_os_error(libc::ENOTSUP).into())
+            })
+            .unwrap());
+            assert!(!unsupported(&std::io::Error::from_raw_os_error(libc::EIO)));
+        }
+    }
 
     async fn reclamation_workload(
         batches: i64,

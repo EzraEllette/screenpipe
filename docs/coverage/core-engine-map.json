@@ -61,6 +61,15 @@
       "sourceRoots": [
         "src"
       ]
+    },
+    {
+      "crate": "screenpipe-fs",
+      "testRoots": [
+        "tests"
+      ],
+      "sourceRoots": [
+        "src"
+      ]
     }
   ],
   "criticalFlows": [
@@ -1378,6 +1387,33 @@
       "confidence": "partial",
       "kind": "mixed",
       "notes": "Catalog identity and persistence, revision-scoped feedback, workflow evidence and pipeline contracts, and denial of agent-granted rollout access. Does not assert live cloud discovery quality."
+    },
+    {
+      "id": "filesystem-durable-sync",
+      "label": "Local and network filesystem durability",
+      "crate": "screenpipe-fs",
+      "files": [
+        "src/lib.rs"
+      ],
+      "platforms": [
+        "macos",
+        "linux",
+        "windows"
+      ],
+      "layers": [
+        "database",
+        "vision-capture",
+        "audio"
+      ],
+      "flows": [
+        "capture-ocr-pipeline",
+        "audio-record-transcribe",
+        "engine-health-lifecycle"
+      ],
+      "criticality": "high",
+      "confidence": "strong",
+      "kind": "unit",
+      "notes": "Durable flushes preserve local full-sync behavior, fall back to fsync only for macOS ENOTSUP, and propagate real I/O or fallback failures. Real SMB migration and continued recording are covered by the marked-volume integration test."
     }
   ]
 }

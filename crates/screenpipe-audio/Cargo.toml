@@ -17,6 +17,7 @@ edition = { workspace = true }
 which = { workspace = true }
 
 [dependencies]
+screenpipe-fs = { path = "../screenpipe-fs" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 oasgen = { workspace = true }

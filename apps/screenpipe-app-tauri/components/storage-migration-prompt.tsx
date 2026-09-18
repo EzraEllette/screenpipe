@@ -14,7 +14,7 @@ export function StorageMigrationDescription() {
   return <>
     <span className="mt-3 block">Screenpipe will pause recording and history access while it converts and verifies your history, then restore your recording preference.</span>
     <span className="mt-3 block">Keep the app open. Your computer will stay awake. Progress and elapsed time will be shown; the time needed depends on your database and computer.</span>
-    <span className="mt-3 block">Space is recovered as each batch is verified. Your existing database becomes the smaller index. If migration is interrupted, Screenpipe must restore storage before recording can resume. You can retry migration afterward.</span>
+    <span className="mt-3 block">Your existing database becomes the index for your upgraded history. Space is recovered as each batch is verified where the drive supports it; some network drives keep freed space for reuse. If migration is interrupted, Screenpipe must restore storage before recording can resume. You can retry migration afterward.</span>
   </>;
 }
 
@@ -105,14 +105,14 @@ export function StorageMigrationPrompt({ activity }: { activity: StorageMigratio
           <AlertDialogTitle>{success ? "Storage migration complete" : failure ? "Migration needs attention" : status?.pending ? "Finish migrating your history" : "Upgrade your history storage"}</AlertDialogTitle>
           <AlertDialogDescription>
             {success ? activity.message : <>
-              {!failure && "Your history is in the older storage format. Upgrade it to reduce database size and keep it searchable. "}
+              {!failure && "Your history is in the older storage format. Upgrade it to store history more efficiently and keep it searchable. "}
               <StorageMigrationDescription />
             </>}
           </AlertDialogDescription>
         </AlertDialogHeader>
         {success && <div className="space-y-2 text-sm text-muted-foreground">
           <p>Completed in {migrationElapsed(activity.elapsed_seconds)}.</p>
-          <p>{status?.in_place ? "Your existing database is now the smaller index. Space was recovered during migration." : "Your original database is kept as a recovery copy. You can delete it separately in Settings → Storage after reviewing your history."}</p>
+          <p>{status?.in_place ? "Your existing database is now the index for your upgraded history." : "Your original database is kept as a recovery copy. You can delete it separately in Settings → Storage after reviewing your history."}</p>
           {status?.bytes_saved != null && <p>Space saved: {migrationBytes(status.bytes_saved)}</p>}
         </div>}
         {failure && <p className="text-sm text-destructive" role="alert">{failure}</p>}
