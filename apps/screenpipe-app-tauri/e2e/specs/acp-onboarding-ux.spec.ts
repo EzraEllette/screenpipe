@@ -5,7 +5,7 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { openHomeWindow, waitForAppReady, t } from "../helpers/test-utils.js";
+import { openAcpSettingsEditor, openHomeWindow, waitForAppReady, t } from "../helpers/test-utils.js";
 import { invokeOrThrow } from "../helpers/tauri.js";
 
 /**
@@ -107,14 +107,7 @@ describe("ACP onboarding UX", () => {
   });
 
   it("shows the ownership split beside the agent picker", async () => {
-    await openHomeWindow();
-
-    const codingAgentCard = await $('//*[normalize-space()="Coding agent"]');
-    await codingAgentCard.waitForExist({ timeout: t(15_000) });
-    await codingAgentCard.click();
-
-    const picker = await $("#acpAgent");
-    await picker.waitForExist({ timeout: t(10_000) });
+    await openAcpSettingsEditor();
 
     const boundaries = await $('[data-testid="acp-boundaries"]');
     await boundaries.waitForExist({ timeout: t(10_000) });
@@ -126,6 +119,7 @@ describe("ACP onboarding UX", () => {
     expect(text).toContain("not passed to");
     // Ownership must be attributed on both sides, not just disclaimed.
     expect(text).toContain("screenpipe");
+    expect(text).toContain("codex");
     // Generic copy is what made the previous one-liner useless.
     expect(text).not.toContain("the agent");
   });

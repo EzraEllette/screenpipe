@@ -210,6 +210,28 @@ export async function openHomeWindow(): Promise<void> {
   await finishOpenHomeWindow();
 }
 
+/** Open the full agent editor, where account ownership and all agents appear. */
+export async function openAcpSettingsEditor(): Promise<void> {
+  await openHomeWindow();
+  const navSettings = await $('[data-testid="nav-settings"]');
+  await navSettings.waitForExist({ timeout: t(10_000) });
+  await navSettings.click();
+  const navAi = await $('[data-testid="settings-nav-ai"]');
+  await navAi.waitForExist({ timeout: t(10_000) });
+  await navAi.click();
+
+  const createPreset = await $('button*=Create Preset');
+  const createFirstPreset = await $('button*=Create Your First Preset');
+  const createButton = (await createPreset.isExisting()) ? createPreset : createFirstPreset;
+  await createButton.waitForExist({ timeout: t(10_000) });
+  await createButton.click();
+
+  const codexCard = await $('[role="button"][aria-label="Codex"]');
+  await codexCard.waitForExist({ timeout: t(10_000) });
+  await codexCard.click();
+  await $("#acpAgent").waitForExist({ timeout: t(10_000) });
+}
+
 /**
  * Wait for element with data-testid to exist in DOM.
  * Matches tauri-plugin-webdriver reference: waitForTestId / waitForElement.

@@ -8,7 +8,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-import { openHomeWindow, waitForAppReady, t } from "../helpers/test-utils.js";
+import { openAcpSettingsEditor, openHomeWindow, waitForAppReady, t } from "../helpers/test-utils.js";
 import { invokeOrThrow } from "../helpers/tauri.js";
 import { saveScreenshot } from "../helpers/screenshot-utils.js";
 
@@ -261,7 +261,7 @@ async function answerAgentAction(
         (candidate) => {
           // Sign-in method buttons nest a title and a description span, so
           // their textContent is "<title><description>". Match the label as a
-          // prefix so those and single-line buttons ("not now") both resolve.
+                // prefix so those and single-line buttons ("Not now") both resolve.
           const text = candidate.textContent?.trim() ?? "";
           return text === input.label || text.startsWith(input.label);
         },
@@ -281,7 +281,7 @@ async function answerAgentAction(
         (candidate) => {
           // Sign-in method buttons nest a title and a description span, so
           // their textContent is "<title><description>". Match the label as a
-          // prefix so those and single-line buttons ("not now") both resolve.
+                // prefix so those and single-line buttons ("Not now") both resolve.
           const text = candidate.textContent?.trim() ?? "";
           return text === input.label || text.startsWith(input.label);
         },
@@ -569,26 +569,7 @@ describe("ACP backend", function () {
   });
 
   it("offers curated and custom ACP agents through settings", async () => {
-    await openHomeWindow();
-    const navSettings = await $('[data-testid="nav-settings"]');
-    await navSettings.waitForExist({ timeout: t(10_000) });
-    await navSettings.click();
-    const navAi = await $('[data-testid="settings-nav-ai"]');
-    await navAi.waitForExist({ timeout: t(10_000) });
-    await navAi.click();
-
-    const createPreset = await $('button*=Create Preset');
-    const createFirstPreset = await $('button*=Create Your First Preset');
-    const createButton = (await createPreset.isExisting()) ? createPreset : createFirstPreset;
-    await createButton.waitForExist({ timeout: t(10_000) });
-    await createButton.click();
-
-    const codingAgentCard = await $('//*[normalize-space()="Coding agent"]');
-    await codingAgentCard.waitForExist({ timeout: t(10_000) });
-    await codingAgentCard.click();
-
-    const selector = await $("#acpAgent");
-    await selector.waitForExist({ timeout: t(10_000) });
+    await openAcpSettingsEditor();
     const options = (await browser.execute(() =>
       Array.from(document.querySelectorAll<HTMLElement>("#acpAgent [data-acp-agent-option]"))
         .map((option) => ({
@@ -599,22 +580,19 @@ describe("ACP backend", function () {
       label?: string;
     }>;
     const values = options.map((option) => option.value);
-    // The whole picker comes from the static catalog (lib/acp/agents.json) in
-    // file order, with the custom entry appended last (acpAdapterInfo falls
-    // back to it).
+    // Enabled agents follow the core catalog order, with the custom command
+    // appended last. Disabled OpenCode and Kimi entries remain unavailable.
     expect(values).toEqual([
       "pi-acp",
       "codex-acp",
       "claude-acp",
-      "opencode",
       "cursor",
       "github-copilot-cli",
-      "kimi",
       "custom",
     ]);
-    expect(options.map((option) => option.label)).toContain("Another ACP agent");
-    const body = (await browser.execute(() => document.body.innerText)) as string;
-    expect(body).toContain("Your existing sign-in and agent settings stay in that app.");
+    expect(options.map((option) => option.label)).toContain("Agent command");
+    const boundaries = await $('[data-testid="acp-boundaries"]');
+    expect(await boundaries.getText()).toContain("You sign in to Codex itself.");
   });
 
   it("uses the official Rust ACP SDK for stream, plan, tool, permission, and cancel", async () => {
@@ -669,7 +647,7 @@ describe("ACP backend", function () {
     // ("allow once"), and getText() reflects CSS text-transform on top of that,
     // so compare case-insensitively rather than pinning a casing.
     expect((await permissionCard.getText()).toLowerCase()).toContain("allow once");
-    await answerAgentAction("permission", "allow once");
+    await answerAgentAction("permission", "Allow once");
 
     const settled = await waitForPromptDone();
     expect(settled.error).toBeUndefined();
@@ -738,7 +716,7 @@ describe("ACP backend", function () {
       (envelope) => envelope.event?.type === "extension_ui_request",
     );
     expect(new Set(permissionEvents.map((envelope) => envelope.event?.id)).size).toBe(2);
-    await answerAgentAction("permission", "allow once");
+    await answerAgentAction("permission", "Allow once");
     expect((await waitForPromptDone()).error).toBeUndefined();
     await waitForEventCounts(
       normalSession,
@@ -1267,7 +1245,7 @@ describe("ACP backend", function () {
       { timeout: t(15_000), interval: 100, timeoutMsg: "cancel auth choice was not surfaced" },
     );
 
-    await answerAgentAction("auth", "not now");
+    await answerAgentAction("auth", "Not now");
     await browser.waitUntil(async () => (await startState()).done, {
       timeout: t(20_000),
       interval: 100,
