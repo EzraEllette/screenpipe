@@ -455,7 +455,11 @@ async function restartPiAfterInstallSettles(
   for (let attempt = 1; attempt <= 4; attempt += 1) {
     try {
       await piConversation.restartPi();
-      await piConversation.waitForRuntimeReady(label);
+      // Raw Pi RPC can stay silent until its first command, especially on
+      // Windows. Prove readiness with the local model request itself.
+      await piConversation.prompt("reply with ready", `${label} preflight`);
+      await piConversation.waitForRequestCount(1, `${label} preflight`, 20_000);
+      await piConversation.clearCaptures();
       return;
     } catch (error) {
       lastError = error;
@@ -684,7 +688,7 @@ async function readCanvasBlockCenterOffset(testId: string) {
 }
 
 describe("Brain Live Views", function () {
-  this.timeout(120_000);
+  this.timeout(t(120_000));
 
   it("keeps the delete-last-dashboard template journey scrollable and reviewable", async () => {
     await waitForAppReady();
@@ -696,9 +700,6 @@ describe("Brain Live Views", function () {
     await piConversation.initialize();
     await piConversation.configureAppPreset();
     await restartPiAfterInstallSettles(piConversation, "Template model");
-    await piConversation.prompt("reply with ready", "Template model preflight");
-    await piConversation.waitForRequestCount(1, "Template model preflight");
-    await piConversation.clearCaptures();
     piConversation.setResponseDelay(350);
     // The builder reads the schema-validated screenpipe_live_view_propose tool
     // arguments, not assistant text, so the model has to actually call the tool.
@@ -944,12 +945,6 @@ describe("Brain Live Views", function () {
     await piConversation.initialize();
     await piConversation.configureAppPreset();
     await restartPiAfterInstallSettles(piConversation, "Empty Canvas model");
-    await piConversation.prompt(
-      "reply with ready",
-      "Empty Canvas model preflight",
-    );
-    await piConversation.waitForRequestCount(1, "Empty Canvas model preflight");
-    await piConversation.clearCaptures();
     piConversation.setResponseDelay(350);
     piConversation.setToolCallSequence([
       {
@@ -1108,9 +1103,6 @@ describe("Brain Live Views", function () {
     // Prove the bundled Pi runtime and local model endpoint are ready before
     // exercising the dynamically-created private Canvas session.
     await restartPiAfterInstallSettles(piConversation, "Canvas model");
-    await piConversation.prompt("reply with ready", "Canvas model preflight");
-    await piConversation.waitForRequestCount(1, "Canvas model preflight");
-    await piConversation.clearCaptures();
     piConversation.setResponseDelay(500);
     piConversation.setToolCallSequence([
       {

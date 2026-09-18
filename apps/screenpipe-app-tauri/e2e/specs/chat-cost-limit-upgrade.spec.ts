@@ -5,11 +5,12 @@
 /**
  * Real-app regression for the hosted-AI usage-limit recovery path.
  *
- * A local OpenAI-compatible provider returns the exact structured 429 contracts
- * used by the gateway across the self-serve plan ladder. Each request travels
- * through Pi and the real foreground event bus, proving desktop renders a
- * concise failure message and a neutral primary recovery action without
+ * The UI selects Screenpipe Cloud while a prestarted Pi session substitutes a
+ * local OpenAI-compatible transport returning the gateway's structured 429
+ * contracts. Each request travels through Pi and the real foreground event bus,
+ * proving desktop renders a concise failure message and neutral recovery action without
  * waiting for `remaining` to hit zero or for the proactive PostHog upsell gate.
+ * Gateway routing and policy are covered separately by chat-local-ai-gateway.
  */
 
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
@@ -175,7 +176,9 @@ describe("Hosted AI usage-limit upgrade recovery", function () {
       throw error;
     }
     await piConversation.initialize();
-    await piConversation.configureAppPreset();
+    // The banner is intentionally hidden for custom/BYOK presets. Select the
+    // hosted UI premise before substituting the session's local transport.
+    await piConversation.configureAppPreset("screenpipe-cloud");
     // Start this exact conversation through the local provider explicitly.
     // Relying on the foreground hook's auto-start races the initial default
     // preset snapshot on a cold app boot.
