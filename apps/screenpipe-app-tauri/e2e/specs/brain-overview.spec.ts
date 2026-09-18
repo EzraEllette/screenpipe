@@ -755,7 +755,7 @@ describe("Brain Live Views", function () {
       const deleteClicked = await browser.execute(() => {
         const item = Array.from(
           document.querySelectorAll<HTMLElement>("[role='menuitem']"),
-        ).find((candidate) => candidate.textContent?.trim() === "delete");
+        ).find((candidate) => candidate.textContent?.trim() === "Delete");
         item?.click();
         return Boolean(item);
       });
@@ -861,7 +861,7 @@ describe("Brain Live Views", function () {
       expect(await $("[data-testid='overview-apply-ai']").getText()).toContain(
         "create dashboard",
       );
-      expect(await $("button=add your first Block").isExisting()).toBe(false);
+      expect(await $("button=Add your first Block").isExisting()).toBe(false);
       const reviewScreenshot = await saveScreenshot(
         "brain-template-generated-review",
       );
@@ -988,7 +988,7 @@ describe("Brain Live Views", function () {
       await brainNav.click();
       await waitForTestId("section-brain", 15_000);
       await selectDashboard(emptyViewId);
-      await $("button=add your first Block").waitForDisplayed({
+      await $("button=Add your first Block").waitForDisplayed({
         timeout: t(10_000),
       });
 
@@ -1030,7 +1030,7 @@ describe("Brain Live Views", function () {
               document.querySelectorAll("button"),
             ).some(
               (button) =>
-                button.textContent?.trim() === "add your first Block" &&
+                button.textContent?.trim() === "Add your first Block" &&
                 isVisible(button),
             ),
             visibleBlockIds: Array.from(
@@ -2016,7 +2016,7 @@ Refresh the assigned Live View output targets from source-backed activity.
       expect(layout!.clippedControls).toEqual([]);
     }
     await setCssWindowSize(1440, 900);
-    const collapseSidebar = await $("[aria-label='collapse sidebar']");
+    const collapseSidebar = await $("[aria-label='Collapse sidebar']");
     if (await collapseSidebar.isExisting()) {
       await collapseSidebar.click();
     }
@@ -2059,7 +2059,7 @@ Refresh the assigned Live View output targets from source-backed activity.
     const refresh = await waitForTestId("overview-refresh-data", 10_000);
     await refresh.click();
     await browser.waitUntil(
-      async () => (await refresh.getAttribute("aria-label")) === "loading data",
+      async () => (await refresh.getAttribute("aria-label")) === "Loading data",
       { timeout: t(10_000) },
     );
     expect(await dashboardSelector.isEnabled()).toBe(true);
@@ -2095,7 +2095,7 @@ Refresh the assigned Live View output targets from source-backed activity.
     );
     expect(existsSync(fixedEditorScreenshot)).toBe(true);
 
-    const cancelFixedEditor = await $("button=cancel");
+    const cancelFixedEditor = await $("button=Cancel");
     await cancelFixedEditor.click();
     await selectDashboard(SELECTABLE_VIEW_ID);
 
@@ -2399,7 +2399,7 @@ Refresh the assigned Live View output targets from source-backed activity.
       expect(existsSync(canvasScreenshot)).toBe(true);
     }
 
-    const expandSidebar = await $("[aria-label='expand sidebar']");
+    const expandSidebar = await $("[aria-label='Expand sidebar']");
     if (await expandSidebar.isExisting()) {
       await expandSidebar.click();
     }

@@ -166,9 +166,9 @@ async function finishOpenHomeWindow(): Promise<void> {
   // nav-pipes / nav-timeline / nav-settings would fail with "element still not
   // existing". Re-expand here so each spec starts from a known-expanded state.
   // The toggle is the only chrome left when collapsed; aria-label flips to
-  // "expand sidebar" in that state, so its presence is the collapse signal.
+  // "Expand sidebar" in that state, so its presence is the collapse signal.
   try {
-    const expandBtn = await $('[aria-label="expand sidebar"]');
+    const expandBtn = await $('[aria-label="Expand sidebar"]');
     if (await expandBtn.isExisting()) {
       await expandBtn.click();
       await browser.pause(t(500));

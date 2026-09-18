@@ -423,7 +423,7 @@ describe("Windows user journey", function () {
     const homeSection = await $('[data-testid="section-home"]');
     await homeSection.waitForExist({ timeout: t(20_000) });
 
-    await clickFirstDisplayed('button[aria-label="search"]');
+    await clickFirstDisplayed('button[aria-label="Search"]');
     await waitForWindowHandle("search", t(20_000));
 
     await browser.switchToWindow("search");

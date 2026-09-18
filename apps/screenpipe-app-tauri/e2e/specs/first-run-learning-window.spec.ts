@@ -313,7 +313,7 @@ const learningState = (over: Record<string, unknown> = {}) => ({
     const bodyText = (await browser.execute(
       () => document.body.textContent ?? "",
     )) as string;
-    expect(bodyText).toContain("screenpipe is ready");
+    expect(bodyText).toContain("Screenpipe is ready");
     expect(
       await browser.execute(
         () => !!document.querySelector('[data-testid="first-run-next-steps"]'),

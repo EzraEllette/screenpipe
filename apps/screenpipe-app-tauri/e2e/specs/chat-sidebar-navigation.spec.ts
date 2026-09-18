@@ -226,7 +226,7 @@ describe("Home sidebar has one coherent active chat", function () {
         (await browser.execute((id: string) =>
           Boolean(
             document.querySelector(
-              `[data-testid="chat-row-${id}"] [aria-label="unread"]`,
+              `[data-testid="chat-row-${id}"] [aria-label="Unread"]`,
             ),
           ),
         CHAT_B)) as boolean,
@@ -303,7 +303,7 @@ describe("Home sidebar has one coherent active chat", function () {
     expect(state.foregroundId).not.toBeNull();
     const title = state.title;
 
-    const trigger = await $(`[aria-label="chat options for ${title}"]`);
+    const trigger = await $(`[aria-label="Chat options for ${title}"]`);
     await trigger.waitForDisplayed({ timeout: t(5_000) });
     await trigger.click();
 
