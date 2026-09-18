@@ -861,7 +861,7 @@ describe("Brain Live Views", function () {
       expect(await $("[data-testid='overview-apply-ai']").getText()).toContain(
         "create dashboard",
       );
-      expect(await $("button=Add your first Block").isExisting()).toBe(false);
+      expect(await $("button*=Add your first Block").isExisting()).toBe(false);
       const reviewScreenshot = await saveScreenshot(
         "brain-template-generated-review",
       );
@@ -988,7 +988,7 @@ describe("Brain Live Views", function () {
       await brainNav.click();
       await waitForTestId("section-brain", 15_000);
       await selectDashboard(emptyViewId);
-      await $("button=Add your first Block").waitForDisplayed({
+      await $("button*=Add your first Block").waitForDisplayed({
         timeout: t(10_000),
       });
 
@@ -1030,7 +1030,7 @@ describe("Brain Live Views", function () {
               document.querySelectorAll("button"),
             ).some(
               (button) =>
-                button.textContent?.trim() === "Add your first Block" &&
+                button.textContent?.trim().startsWith("Add your first Block") &&
                 isVisible(button),
             ),
             visibleBlockIds: Array.from(
