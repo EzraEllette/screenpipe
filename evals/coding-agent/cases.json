@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "suite": "screenpipe-app-coding-agent-regressions",
-  "dataset_version": "2026-09-18.1",
+  "dataset_version": "2026-09-18.2",
   "suite_type": "regression",
   "owner": "screenpipe engineering",
   "policy": {
@@ -1357,6 +1357,38 @@
           }
         ],
         "command": "\"${BUN_BIN:-bun}\" test ./evals/coding-agent/graders/app-entitlement-plan-consistency.test.ts"
+      }
+    },
+    {
+      "id": "ai-gateway-verified-identity",
+      "name": "Require verified account ownership before authenticated gateway tiers",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "252b96c168e79a6e377f307cf1e54423d17e0db8"
+      },
+      "base_ref": "041f111810b334ac3667006907f1dc5b511273df",
+      "oracle_ref": "252b96c168e79a6e377f307cf1e54423d17e0db8",
+      "oracle_paths": [
+        "packages/ai-gateway/src/utils/auth.ts"
+      ],
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "security",
+        "identity",
+        "entitlement"
+      ],
+      "prompt": "The gateway can treat a public database UUID or Clerk user ID supplied as a Bearer or Token credential as an authenticated account, even when no token verifier established ownership. Repair the authentication boundary so those public identifiers cannot grant logged-in or subscribed tiers or trigger account/subscription lookups. Preserve anonymous access and device identity for absent, invalid, or unproven credentials; preserve verified Clerk and successfully validated legacy website tokens at their proper logged-in/subscribed tier and canonical identity. A verifier result requires a nonempty string subject; a legacy website HTTP 200 alone is not proof of success and requires success=true with a user identity. Missing, rejected and unavailable verification must not manufacture an identity. Use synthetic credentials only. This task concerns validateAuth behavior; no particular helper structure is required.",
+      "agent_timeout_seconds": 900,
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/gateway-verified-identity.test.js",
+            "destination_path": "evals/coding-agent/graders/gateway-verified-identity.test.js"
+          }
+        ],
+        "command": "\"${BUN_BIN:-bun}\" test evals/coding-agent/graders/gateway-verified-identity.test.js"
       }
     }
   ]

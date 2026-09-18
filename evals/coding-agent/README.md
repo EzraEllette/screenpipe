@@ -9,7 +9,7 @@ This is an agent eval suite, not a unit-test suite. Every case contains:
 - saved prompt, transcript, candidate patch, grader output, runtime fingerprint, and result;
 - repeated-trial reporting with success rate, `pass@k`, and `pass^k`.
 
-The current app corpus contains 43 git-mined regressions. See
+The current app corpus contains 44 git-mined regressions. See
 [DESIGN.md](./DESIGN.md) for the Anthropic guidance, source contract, and
 history-mining workflow. The companion website manifest uses this same harness.
 
@@ -75,3 +75,23 @@ Do not turn capability scores into a release gate after one run. Establish match
 The app-provider-outage-vs-limit case uses standalone Bun tests without installed package dependencies. `BUN_BIN` may select an explicit Bun binary. It checks provider presentation semantics, not live model availability.
 
 The app-entitlement-plan-consistency case uses a fixed clock and standalone Bun tests to verify historical account normalization and downstream plan policy. Its URL configuration port is synthetic; it does not test gate rendering, billing connectivity, telemetry or recording.
+
+The ai-gateway-verified-identity case invokes the historical `validateAuth`
+boundary with synthetic Clerk verification and website/database response ports.
+It rejects public account identifiers as credentials, malformed verifier subjects
+and unsuccessful legacy responses while preserving legitimate authenticated and
+anonymous behavior. Only `auth.ts` from the fixing commit is applied as the
+oracle; the same commit's route and native-settings changes are outside this
+case. No JWT cryptography, live account, billing, or full gateway route behavior
+is exercised.
+
+Calibrate the identity grader with:
+
+```bash
+bun test evals/coding-agent/calibrate-gateway-identity.test.js
+```
+
+The five controls require the historical contrast, accept equivalent helper
+renaming, reject an identifier-trusting fast path, and reject blanket anonymous
+fallback. These are grader controls, not model trials. The July 10 historical
+case does not require machine-service-token support introduced afterward.
