@@ -1705,8 +1705,7 @@
       ],
       "features": [
         "onboarding",
-        "first-run-learning",
-        "shortcuts"
+        "first-run-learning"
       ],
       "criticality": "high",
       "confidence": "partial",
