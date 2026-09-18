@@ -1120,6 +1120,41 @@ impl PiExecutor {
         Ok(())
     }
 
+    /// Normal tools and MCP must use the scheduled Pipe's scoped recorder access.
+    /// Interactive chats without a permissions file keep their existing auth.
+    fn configure_local_api(&self, cmd: &mut tokio::process::Command, dir: &Path) -> Result<()> {
+        let permissions = dir.join(".screenpipe-permissions.json");
+        let key = if permissions.exists() {
+            let value: serde_json::Value = serde_json::from_slice(&std::fs::read(permissions)?)?;
+            let base = value["api_base"]
+                .as_str()
+                .ok_or_else(|| anyhow!("Pipe recorder address unavailable"))?;
+            let url = reqwest::Url::parse(base)?;
+            if url.scheme() != "http"
+                || !matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "[::1]"))
+            {
+                anyhow::bail!("Pipe requires its local recorder");
+            }
+            let token = value["pipe_token"]
+                .as_str()
+                .filter(|key| !key.is_empty())
+                .ok_or_else(|| anyhow!("Pipe recorder token unavailable"))?;
+            cmd.env("SCREENPIPE_LOCAL_API_URL", base);
+            cmd.env(
+                "SCREENPIPE_PORT",
+                url.port_or_known_default().unwrap_or(3030).to_string(),
+            );
+            Some(token.to_owned())
+        } else {
+            self.api_auth_key.clone()
+        };
+        if let Some(key) = key {
+            cmd.env("SCREENPIPE_LOCAL_API_KEY", &key);
+            cmd.env("SCREENPIPE_API_AUTH_KEY", key); // deprecated alias
+        }
+        Ok(())
+    }
+
     /// Install the shared self-improvement extension for native Pi sessions.
     /// It exposes the same profile and skill-management contract ACP agents
     /// receive from the bundled screenpipe-tools MCP server.
@@ -1135,11 +1170,10 @@ impl PiExecutor {
         if legacy_memory.exists() {
             std::fs::remove_file(legacy_memory)?;
         }
-        if crate::workflows::pipeline::task_at(project_dir).is_some() {
-            std::fs::write(
-                ext_dir.join("workflow-catalog.ts"),
-                include_str!("../../assets/extensions/workflow-catalog.ts"),
-            )?;
+        // Remove the retired workflow tool layer in existing installations too.
+        let legacy_catalog = ext_dir.join("workflow-catalog.ts");
+        if legacy_catalog.exists() {
+            std::fs::remove_file(legacy_catalog)?;
         }
 
         if project_dir.file_name().and_then(|name| name.to_str()) == Some("skill-learning")
@@ -1805,10 +1839,7 @@ impl PiExecutor {
         // pipe.md files that hardcoded the old name (e.g. an older
         // meeting-summary install on disk that install_builtin_pipes won't
         // overwrite). TODO(remove next release): drop SCREENPIPE_API_AUTH_KEY.
-        if let Some(ref key) = self.api_auth_key {
-            cmd.env("SCREENPIPE_LOCAL_API_KEY", key);
-            cmd.env("SCREENPIPE_API_AUTH_KEY", key); // deprecated alias
-        }
+        self.configure_local_api(&mut cmd, working_dir)?;
 
         // Auto-auth the agent's `curl localhost:3030/...` calls via a bash
         // shim sourced from $BASH_ENV on every subshell. See bash_env.rs.
@@ -1958,10 +1989,7 @@ impl PiExecutor {
         }
 
         // See spawn_pi above — TODO(remove next release): drop the deprecated alias.
-        if let Some(ref key) = self.api_auth_key {
-            cmd.env("SCREENPIPE_LOCAL_API_KEY", key);
-            cmd.env("SCREENPIPE_API_AUTH_KEY", key); // deprecated alias
-        }
+        self.configure_local_api(&mut cmd, working_dir)?;
 
         if let Some(ids) = mcp_server_allowlist {
             cmd.env("SCREENPIPE_MCP_SERVER_ALLOWLIST", ids.join(","));
@@ -2175,6 +2203,7 @@ impl AgentExecutor for PiExecutor {
                 });
             }
         }
+        let workflow_save_state = crate::workflows::pipeline::save_state(working_dir).await?;
         let resolved_provider = provider.unwrap_or("screenpipe").to_string();
 
         let (resolved_model, fell_back_from) = self
@@ -2223,7 +2252,7 @@ impl AgentExecutor for PiExecutor {
             resolved_provider, resolved_model
         );
 
-        let output = self
+        let mut output = self
             .spawn_pi(
                 &pi_path,
                 prompt,
@@ -2259,7 +2288,7 @@ impl AgentExecutor for PiExecutor {
                 provider_url,
             )
             .await?;
-            return self
+            output = self
                 .spawn_pi(
                     &pi_path,
                     prompt,
@@ -2271,9 +2300,22 @@ impl AgentExecutor for PiExecutor {
                     continue_session,
                     None,
                 )
-                .await;
+                .await?;
         }
 
+        if output.success {
+            if let Err(error) =
+                crate::workflows::pipeline::verify_saved(working_dir, workflow_save_state).await
+            {
+                output.success = false;
+                output.stderr.push_str(
+                    &serde_json::json!({"error": {
+                        "code": "missing_output", "message": error.to_string()
+                    }})
+                    .to_string(),
+                );
+            }
+        }
         Ok(output)
     }
 
@@ -2327,6 +2369,7 @@ impl AgentExecutor for PiExecutor {
                 });
             }
         }
+        let workflow_save_state = crate::workflows::pipeline::save_state(working_dir).await?;
         let resolved_provider = provider.unwrap_or("screenpipe").to_string();
         let (resolved_model, fell_back_from) = self
             .resolve_screenpipe_model(model, &resolved_provider)
@@ -2472,6 +2515,19 @@ impl AgentExecutor for PiExecutor {
         })
         .await?;
 
+        if output.success {
+            if let Err(error) =
+                crate::workflows::pipeline::verify_saved(working_dir, workflow_save_state).await
+            {
+                output.success = false;
+                output.stderr.push_str(
+                    &serde_json::json!({"error": {
+                        "code": "missing_output", "message": error.to_string()
+                    }})
+                    .to_string(),
+                );
+            }
+        }
         Ok(output)
     }
 
@@ -4782,17 +4838,64 @@ mod tests {
     }
 
     #[test]
-    fn workflow_extension_removes_legacy_memory_without_removing_shared_tools() {
+    fn workflow_normal_tools_use_scoped_auth_and_the_configured_recorder_port() {
+        let dir = tempfile::tempdir().unwrap();
+        let executor = PiExecutor::new(None).with_api_auth_key(Some("interactive-fixture".into()));
+        let mut chat = tokio::process::Command::new("unused");
+        executor.configure_local_api(&mut chat, dir.path()).unwrap();
+        let env: std::collections::HashMap<_, _> = chat.as_std().get_envs().collect();
+        assert_eq!(
+            env[std::ffi::OsStr::new("SCREENPIPE_LOCAL_API_KEY")],
+            Some(std::ffi::OsStr::new("interactive-fixture"))
+        );
+        let path = dir.path().join(".screenpipe-permissions.json");
+        std::fs::write(
+            &path,
+            r#"{"api_base":"http://127.0.0.1:4040","pipe_token":"sp_pipe_fixture"}"#,
+        )
+        .unwrap();
+        let mut pipe = tokio::process::Command::new("unused");
+        executor.configure_local_api(&mut pipe, dir.path()).unwrap();
+        let env: std::collections::HashMap<_, _> = pipe.as_std().get_envs().collect();
+        for name in ["SCREENPIPE_LOCAL_API_KEY", "SCREENPIPE_API_AUTH_KEY"] {
+            assert_eq!(
+                env[std::ffi::OsStr::new(name)],
+                Some(std::ffi::OsStr::new("sp_pipe_fixture"))
+            );
+        }
+        assert_eq!(
+            env[std::ffi::OsStr::new("SCREENPIPE_LOCAL_API_URL")],
+            Some(std::ffi::OsStr::new("http://127.0.0.1:4040"))
+        );
+        assert_eq!(
+            env[std::ffi::OsStr::new("SCREENPIPE_PORT")],
+            Some(std::ffi::OsStr::new("4040"))
+        );
+        for invalid in [
+            r#"{"api_base":"http://127.0.0.1:4040"}"#,
+            r#"{"api_base":"https://example.com","pipe_token":"sp_pipe_fixture"}"#,
+            "broken",
+        ] {
+            std::fs::write(&path, invalid).unwrap();
+            assert!(executor
+                .configure_local_api(&mut tokio::process::Command::new("unused"), dir.path())
+                .is_err());
+        }
+    }
+
+    #[test]
+    fn workflow_cleanup_preserves_shared_tools() {
         let root = tempfile::tempdir().expect("tempdir");
         let dir = root.path().join("workflow-activity");
         let extensions = dir.join(".pi/extensions");
         std::fs::create_dir_all(&extensions).unwrap();
         std::fs::write(dir.join("pipe.md"), "test task").unwrap();
         std::fs::write(extensions.join("workflow-memory.ts"), "legacy override").unwrap();
+        std::fs::write(extensions.join("workflow-catalog.ts"), "legacy override").unwrap();
         std::fs::write(extensions.join("mcp-bridge.ts"), "shared bridge").unwrap();
         PiExecutor::ensure_self_improvement_extension(&dir).unwrap();
         assert!(!extensions.join("workflow-memory.ts").exists());
-        assert!(extensions.join("workflow-catalog.ts").exists());
+        assert!(!extensions.join("workflow-catalog.ts").exists());
         assert!(extensions.join("self-improvement.ts").exists());
         assert_eq!(
             std::fs::read_to_string(extensions.join("mcp-bridge.ts")).unwrap(),
