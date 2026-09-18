@@ -11,6 +11,7 @@ export * from "./model";
 export * from "./timing";
 export * from "./navigation";
 export * from "./platform";
+export * from "./model-choice";
 export * from "./assistant";
 
 export * from "./context-tool";
@@ -20,3 +21,5 @@ export { WorkflowRunProgress } from "./workflow-run-progress";
 export * from "./guide";
 
 export { guideMarkdown } from "./guide";
+
+export * from "./confidential-verification";
