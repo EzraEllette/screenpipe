@@ -257,6 +257,10 @@ async fn collect_log_text(app: &AppHandle) -> String {
         }
     };
 
+    collect_log_text_from_files(files).await
+}
+
+async fn collect_log_text_from_files(files: Vec<crate::log_files::LogFile>) -> String {
     let mut logs = stream::iter(files.into_iter().take(MAX_LOG_FILES).enumerate().map(
         |(index, file)| async move {
             let content = match timeout(
@@ -275,7 +279,7 @@ async fn collect_log_text(app: &AppHandle) -> String {
                     "[Error reading file: timed out]".to_string()
                 }
             };
-            (index, file.name, content)
+            (index, file, content)
         },
     ))
     .buffer_unordered(MAX_LOG_FILES)
@@ -284,7 +288,7 @@ async fn collect_log_text(app: &AppHandle) -> String {
     logs.sort_unstable_by_key(|(index, _, _)| *index);
 
     logs.into_iter()
-        .map(|(_, name, content)| format!("\n\n=== {name} ===\n{content}"))
+        .map(|(_, file, content)| format!("\n{}{content}", file.bundle_header()))
         .collect()
 }
 
@@ -839,6 +843,35 @@ mod tests {
         let server = MockServer::start().await;
         let mut input = request();
         input.video_ext = Some("mp4".to_string());
+        let dir = tempfile::tempdir().unwrap();
+        screenpipe_engine::crash_log::write_panic_log(
+            dir.path(),
+            "[2026-09-18 19:19:44.000] PANIC on thread 'capture': encoder failed; recording stopped\nBacktrace:\n0: capture_frame\npassword=hunter2",
+        );
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(dir.path().join("last-panic.log"))
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1789759184))
+            .unwrap();
+        screenpipe_engine::crash_log::rotate_panic_log(dir.path());
+        assert!(!dir.path().join("last-panic.log").exists());
+        for day in 1..=MAX_LOG_FILES + 1 {
+            tokio::fs::write(
+                dir.path()
+                    .join(format!("screenpipe-app.2026-09-{day:02}.log")),
+                "recording resumed\n",
+            )
+            .await
+            .unwrap();
+        }
+        let files = crate::log_files::collect_log_files(&[dir.path().to_path_buf()]).await;
+        let logs = collect_log_text_from_files(files).await;
+        // Exercise the deterministic redaction shared by manual feedback and
+        // unattended logs, without contacting the optional enrichment service.
+        let redacted_logs = crate::feedback_redact::redact_diagnostics_locally(logs)
+            .await
+            .unwrap();
 
         Mock::given(method("POST"))
             .and(path("/api/logs"))
@@ -862,7 +895,7 @@ mod tests {
         Mock::given(method("PUT"))
             .and(path("/upload/log"))
             .and(header("Content-Type", "text/plain"))
-            .and(body_bytes(b"safe logs"))
+            .and(body_bytes(redacted_logs.as_bytes()))
             .respond_with(ResponseTemplate::new(200))
             .mount(&server)
             .await;
@@ -904,7 +937,7 @@ mod tests {
             &Client::new(),
             &server.uri(),
             &input,
-            "safe logs".to_string(),
+            redacted_logs,
             Some(AttachmentBytes {
                 bytes: Bytes::from_static(b"image"),
                 content_type: "image/jpeg",
@@ -922,7 +955,20 @@ mod tests {
         assert_eq!(receipt.follow_up.as_deref(), Some("email"));
         assert!(receipt.screenshot_uploaded);
         assert!(receipt.video_uploaded);
-        assert_eq!(server.received_requests().await.unwrap().len(), 5);
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 5);
+        let uploaded = requests
+            .iter()
+            .find(|request| request.url.path() == "/upload/log")
+            .unwrap();
+        let report = std::str::from_utf8(&uploaded.body).unwrap();
+        assert!(report.contains("=== last-panic.log.prev ==="));
+        assert!(report.contains("File modified at: 2026-09-18T19:19:44Z"));
+        assert!(report.contains("[2026-09-18 19:19:44.000]"));
+        assert!(report.contains("encoder failed; recording stopped"));
+        assert!(report.contains("Backtrace:\n0: capture_frame"));
+        assert!(report.contains("recording resumed"));
+        assert!(!report.contains("hunter2"));
     }
 
     #[tokio::test]
