@@ -84,6 +84,9 @@ pub struct ServerCore {
     /// The HTTP serve task. Resolves only once every connection task has
     /// finished; `shutdown()` awaits it (bounded) after signaling above.
     http_task: Option<tokio::task::JoinHandle<()>>,
+    /// Keeps this generation's runtime alive through shutdown, even after the
+    /// core is removed from RecordingState. Dropped last, after all resources.
+    _runtime_lifetime: tokio::sync::oneshot::Sender<()>,
 }
 
 /// Bind attempts before giving up on the HTTP port. Together with
@@ -309,6 +312,7 @@ impl ServerCore {
         cloud_token_handle: std::sync::Arc<arc_swap::ArcSwap<Option<String>>>,
         history_access: screenpipe_engine::history_access::HistoryAccessPolicy,
         workflow_catalog_dir: Option<std::path::PathBuf>,
+        runtime_lifetime: tokio::sync::oneshot::Sender<()>,
     ) -> Result<Self, String> {
         info!("Starting server core on port {}", config.port);
         crate::health::set_boot_phase("starting", Some("starting server"));
@@ -1442,10 +1446,11 @@ impl ServerCore {
             owned_tasks,
             http_shutdown,
             http_task: Some(http_task),
+            _runtime_lifetime: runtime_lifetime,
         })
     }
 
-    /// Shut down the server core. Called only on app quit.
+    /// Shut down the server core before quit, restart, or storage migration.
     pub async fn shutdown(mut self) {
         info!("Shutting down server core");
         screenpipe_connect::mdns::shutdown();
