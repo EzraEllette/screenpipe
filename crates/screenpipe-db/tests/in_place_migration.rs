@@ -629,6 +629,10 @@ async fn privacy_pending_payloads_remain_resident_and_searchable() {
 #[tokio::test]
 #[ignore = "requires a marked disposable filesystem without hole punching"]
 async fn non_sparse_volume_migrates_and_keeps_recording_after_restart() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("screenpipe_db::storage=info")
+        .with_ansi(false)
+        .try_init();
     let volume = std::path::PathBuf::from(std::env::var("SCREENPIPE_UNSUPPORTED_VOLUME").unwrap());
     assert!(volume.join(".screenpipe-disposable-volume").is_file());
     assert!(fs2::total_space(&volume).unwrap() <= 512 * 1024 * 1024);

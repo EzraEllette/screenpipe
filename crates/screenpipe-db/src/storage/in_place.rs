@@ -85,11 +85,21 @@ async fn run(
     crate::db::register_sqlite_extensions()?;
     // Do not close this fd while SQLite holds its process-wide Unix locks.
     let file = OpenOptions::new().read(true).write(true).open(&index)?;
+    #[cfg(target_os = "macos")]
+    let network_volume = screenpipe_fs::is_network_volume(&storage.root)?;
+    #[cfg(not(target_os = "macos"))]
+    let network_volume = false;
     let options = sqlx::sqlite::SqliteConnectOptions::new()
         .filename(&index)
         .create_if_missing(false)
         .foreign_keys(false)
-        .pragma("journal_mode", "WAL")
+        // Keep the same network-compatible journal through verification and
+        // restart. A private EXCLUSIVE WAL cannot be reopened by the normal
+        // network VFS, which has no shared-memory methods.
+        .pragma(
+            "journal_mode",
+            if network_volume { "DELETE" } else { "WAL" },
+        )
         .pragma("locking_mode", "EXCLUSIVE")
         .pragma("synchronous", "FULL")
         .pragma("temp_store", "FILE")
