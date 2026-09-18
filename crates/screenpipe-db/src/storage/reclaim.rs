@@ -65,7 +65,7 @@ fn probe_with(
     let before = allocated(file.path())?;
     match punch(file.as_file(), 0, bytes.len() as u64) {
         Ok(()) => {}
-        Err(sqlx::Error::Io(error)) if error.kind() == std::io::ErrorKind::Unsupported => {
+        Err(sqlx::Error::Io(error)) if unsupported(&error) => {
             tracing::info!("filesystem does not support sparse reclamation; keeping reusable SQLite free pages and enforcing migration disk reserve");
             return Ok(false);
         }
@@ -83,6 +83,19 @@ fn probe_with(
         return Err(storage_error("filesystem reclamation probe failed"));
     }
     Ok(true)
+}
+
+fn unsupported(error: &std::io::Error) -> bool {
+    if error.kind() == std::io::ErrorKind::Unsupported {
+        return true;
+    }
+    // Darwin ENOTSUP is Uncategorized in Rust, unlike Linux EOPNOTSUPP.
+    #[cfg(unix)]
+    return error.raw_os_error().is_some_and(|code| {
+        code == libc::ENOTSUP || code == libc::EOPNOTSUPP || code == libc::ENOSYS
+    });
+    #[cfg(windows)]
+    return matches!(error.raw_os_error(), Some(1 | 50)); // INVALID_FUNCTION / NOT_SUPPORTED
 }
 
 #[cfg(target_os = "macos")]
@@ -349,6 +362,14 @@ mod tests {
         })
         .is_err());
         assert!(!probe_with(root.path(), |_, _, _| Ok(())).unwrap());
+        #[cfg(unix)]
+        {
+            assert!(!probe_with(root.path(), |_, _, _| {
+                Err(std::io::Error::from_raw_os_error(libc::ENOTSUP).into())
+            })
+            .unwrap());
+            assert!(!unsupported(&std::io::Error::from_raw_os_error(libc::EIO)));
+        }
     }
 
     async fn reclamation_workload(
