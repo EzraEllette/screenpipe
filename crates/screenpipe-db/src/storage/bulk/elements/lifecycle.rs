@@ -224,6 +224,15 @@ async fn rewrite(
     let mut files = Vec::new();
     loop {
         let lower = after.map_or_else(|| "1".to_owned(), |id| format!("id>{id}"));
+        // Report the query bounds before awaiting it; actual batch sizes and
+        // row IDs are only available once selection returns.
+        crate::storage::diagnostics::batch(
+            "elements",
+            Some(after.map_or(first, |id: i64| id.saturating_add(1))),
+            Some(last),
+            None,
+            None,
+        );
         crate::storage::diagnostics::stage("selecting_element_batch");
         let candidates: Vec<(i64, i64)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
             "SELECT id,{} FROM elements WHERE id BETWEEN ? AND ? AND {lower} AND ({}) ORDER BY id LIMIT {FILE_ROWS}",

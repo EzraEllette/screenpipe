@@ -909,17 +909,25 @@ fn track_migration_diagnostic(
         return;
     };
     let mut properties = serde_json::to_value(snapshot).unwrap_or_default();
-    // Keep the bounded error locally for feedback redaction. Exception strings
-    // can contain paths; remote counters/stages never include those strings.
-    if let Some(properties) = properties.as_object_mut() {
-        properties.remove("error");
-    }
     let analytics = Arc::clone(&analytics);
     tauri::async_runtime::spawn(async move {
+        redact_migration_diagnostic_error(&mut properties);
         if let Err(error) = analytics.send_event(event, Some(properties)).await {
             tracing::warn!(%error, event, "migration diagnostic telemetry failed");
         }
     });
+}
+
+fn redact_migration_diagnostic_error(properties: &mut serde_json::Value) {
+    if let Some(error) = properties.get_mut("error") {
+        if let Some(message) = error.as_str() {
+            // Keep diagnostic context while scrubbing recognizable secrets/PII
+            // locally. The snapshot already bounds the error to 512 characters.
+            *error = screenpipe_redact::adapters::regex::redact_one(message)
+                .redacted
+                .into();
+        }
+    }
 }
 
 fn report_migration_failure(app: &tauri::AppHandle, root: &Path, error: &str) {
@@ -1063,6 +1071,33 @@ pub async fn delete_original_storage_database(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn migration_diagnostics_keep_useful_errors_and_scrub_sensitive_values() {
+        let mut properties = serde_json::json!({
+            "attempt_id": "attempt-42",
+            "stage": "selecting_element_batch",
+            "first_id": 1_400_786,
+            "last_id": 158_475_583,
+            "completed_records": 1_400_785,
+            "error": "SQLite error (code: 5): database is locked; account=operator@example.com api_key=deadbeef",
+        });
+        let original = properties.clone();
+        redact_migration_diagnostic_error(&mut properties);
+        let error = properties["error"]
+            .as_str()
+            .expect("error must be reported");
+        assert!(error.contains("SQLite error (code: 5): database is locked"));
+        assert!(!error.contains("operator@example.com"));
+        assert!(!error.contains("deadbeef"));
+        properties["error"] = original["error"].clone();
+        assert_eq!(properties, original, "diagnostic context must be preserved");
+
+        // A stalled query need not have returned an error yet.
+        properties["error"] = serde_json::Value::Null;
+        redact_migration_diagnostic_error(&mut properties);
+        assert!(properties["error"].is_null());
+    }
 
     #[tokio::test]
     async fn explicit_retry_waits_for_restart_then_owns_storage_before_later_restarts() {
