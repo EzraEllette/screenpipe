@@ -11265,6 +11265,7 @@ dependencies = [
  "screenpipe-db",
  "screenpipe-engine",
  "screenpipe-events",
+ "screenpipe-fs",
  "screenpipe-overlay-win",
  "screenpipe-redact",
  "screenpipe-screen",
@@ -11375,6 +11376,7 @@ dependencies = [
  "screenpipe-core",
  "screenpipe-db",
  "screenpipe-events",
+ "screenpipe-fs",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -11457,6 +11459,7 @@ dependencies = [
  "russh-sftp",
  "rustls-native-certs",
  "screenpipe-core",
+ "screenpipe-fs",
  "screenpipe-secrets",
  "screenpipe-vault",
  "serde",
@@ -11507,6 +11510,7 @@ dependencies = [
  "reqwest 0.13.4",
  "screenpipe-cpu-features",
  "screenpipe-events",
+ "screenpipe-fs",
  "screenpipe-secrets",
  "screenpipe-sync",
  "screenpipe-vault",
@@ -11548,6 +11552,7 @@ dependencies = [
  "regex",
  "rusqlite",
  "screenpipe-config",
+ "screenpipe-fs",
  "screenpipe-resource",
  "screenpipe-semantic",
  "screenpipe-sqlite-coordinator",
@@ -11608,6 +11613,7 @@ dependencies = [
  "screenpipe-core",
  "screenpipe-db",
  "screenpipe-events",
+ "screenpipe-fs",
  "screenpipe-redact",
  "screenpipe-resource",
  "screenpipe-screen",
@@ -11657,6 +11663,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "screenpipe-fs"
+version = "0.4.50"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "screenpipe-overlay-win"
 version = "0.4.50"
 dependencies = [
@@ -11703,6 +11716,7 @@ dependencies = [
  "regex",
  "reqwest 0.13.4",
  "screenpipe-db",
+ "screenpipe-fs",
  "screenpipe-resource",
  "screenpipe-rfdetr-mlx",
  "screenpipe-sqlite-coordinator",
@@ -11766,6 +11780,7 @@ dependencies = [
  "screenpipe-connect",
  "screenpipe-core",
  "screenpipe-db",
+ "screenpipe-fs",
  "serde",
  "serde_json",
  "tokio",
@@ -11812,6 +11827,7 @@ version = "0.4.50"
 dependencies = [
  "fs2",
  "libsqlite3-sys",
+ "screenpipe-fs",
  "serde",
  "serde_json",
  "sqlx",

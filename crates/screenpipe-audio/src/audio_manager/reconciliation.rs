@@ -166,10 +166,7 @@ fn stage_merged_audio(
 ) -> anyhow::Result<PathBuf> {
     let path = merged_audio_temp_path(primary_path);
     write_audio_to_file(samples, sample_rate, &path, false)?;
-    std::fs::OpenOptions::new()
-        .write(true)
-        .open(&path)?
-        .sync_all()?;
+    screenpipe_fs::sync_all(&std::fs::OpenOptions::new().write(true).open(&path)?)?;
     sync_parent(&path)?;
     Ok(path)
 }
@@ -177,7 +174,7 @@ fn stage_merged_audio(
 fn sync_parent(path: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     if let Some(parent) = path.parent() {
-        std::fs::File::open(parent)?.sync_all()?;
+        screenpipe_fs::sync_all(&std::fs::File::open(parent)?)?;
     }
     Ok(())
 }
@@ -768,7 +765,7 @@ fn write_pending(data_dir: &Path, pending: &PendingTranscription) -> std::io::Re
         .create_new(true)
         .open(&tmp_path)?;
     file.write_all(json.as_bytes())?;
-    file.sync_all()?;
+    screenpipe_fs::sync_all(&file)?;
     std::fs::rename(&tmp_path, &path)?;
     sync_parent(&path)?;
     debug!(

@@ -628,40 +628,91 @@ async fn privacy_pending_payloads_remain_resident_and_searchable() {
 
 #[tokio::test]
 #[ignore = "requires a marked disposable filesystem without hole punching"]
-async fn unsupported_volume_fails_before_conversion() {
+async fn non_sparse_volume_migrates_and_keeps_recording_after_restart() {
     let volume = std::path::PathBuf::from(std::env::var("SCREENPIPE_UNSUPPORTED_VOLUME").unwrap());
     assert!(volume.join(".screenpipe-disposable-volume").is_file());
     assert!(fs2::total_space(&volume).unwrap() <= 512 * 1024 * 1024);
     let root = tempfile::tempdir_in(volume).unwrap();
     fixture(root.path()).await;
+    let path = root.path().join("db.sqlite");
     let mut options = MigrationOptions::default();
     options.budget.disk_reserve_bytes = 0;
     options.budget.file_bytes = 1024 * 1024;
     options.budget.record_bytes = 1024 * 1024;
-    let error = migrate(root.path(), Default::default(), options)
+    let report = migrate(root.path(), Default::default(), options)
         .await
-        .unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("filesystem reclamation unavailable"),
-        "{error}"
-    );
-    assert!(root.path().join("db.sqlite").is_file());
+        .unwrap();
+    assert_eq!(report.frames, 48);
+    assert!(root
+        .path()
+        .join("storage-migration-complete.json")
+        .is_file());
     assert!(!root.path().join("storage-migration.json").exists());
-    let db = DatabaseManager::new(
-        root.path().join("db.sqlite").to_str().unwrap(),
-        Default::default(),
-    )
-    .await
-    .unwrap();
+    let db = DatabaseManager::new(path.to_str().unwrap(), Default::default())
+        .await
+        .unwrap();
+    db.verify_storage().await.unwrap();
+    db.execute_raw_sql_write("INSERT INTO frames(id,timestamp,full_text,accessibility_tree_json) VALUES(49,'2026-09-18T12:00:00Z','nasafter recording','new detail'); INSERT INTO elements(id,frame_id,source,role,text) VALUES(49,49,'accessibility','AXText','nasafter element'); INSERT INTO audio_chunks(id,file_path) VALUES(1,'nas-audio.mp4'); INSERT INTO audio_transcriptions(id,audio_chunk_id,offset_index,timestamp,transcription,device) VALUES(1,1,0,'2026-09-18T12:00:00Z','nasafter transcript','test');").await.unwrap();
+    while db.seal_payloads().await.unwrap() != 0 {}
+    db.close().await;
+    let db = DatabaseManager::new(path.to_str().unwrap(), Default::default())
+        .await
+        .unwrap();
+    db.verify_storage().await.unwrap();
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM frames")
             .fetch_one(&db.pool)
             .await
             .unwrap(),
-        48
+        49
     );
+    let payloads = db
+        .frame_payloads(&[1, 48, 49], Projection::All)
+        .await
+        .unwrap();
+    for id in [1, 48] {
+        assert_eq!(
+            payloads[&id].accessibility_tree_json.as_deref(),
+            Some("capture detail ".repeat(32768).as_str())
+        );
+    }
+    assert_eq!(
+        payloads[&49].full_text.as_deref(),
+        Some("nasafter recording")
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT text FROM elements WHERE id=49")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap(),
+        "nasafter element"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT transcription FROM audio_transcriptions WHERE id=1"
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        "nasafter transcript"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM frames_fts WHERE frames_fts MATCH 'nasafter'"
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("PRAGMA integrity_check")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap(),
+        "ok"
+    );
+    println!("non-sparse migration: {} historical frames verified; receipt present; journal removed; new frame, element and transcript sealed, searchable and intact after restart; source_bytes={} index_bytes={} parquet_bytes={}", report.frames, report.source_bytes, report.index_bytes, report.payload_bytes);
     db.close().await;
 }
 

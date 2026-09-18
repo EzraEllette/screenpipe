@@ -109,7 +109,13 @@ async fn run(
         pool.clone(),
         screenpipe_sqlite_coordinator::sqlite_write_lock(&index),
     );
-    let mut reclamation = super::reclaim::Reclaimer::default();
+    // Re-probe on each explicit attempt: a resumed migration can be on a
+    // filesystem that cannot punch holes. Its batch reserve still applies.
+    let mut reclamation = if archive {
+        super::reclaim::Reclaimer::new(&storage.root)?
+    } else {
+        super::reclaim::Reclaimer::default()
+    };
     let mut last_report = None;
     let result = async {
         if archive { reserve(&storage)?; }

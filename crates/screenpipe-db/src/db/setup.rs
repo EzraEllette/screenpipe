@@ -247,6 +247,11 @@ impl DatabaseManager {
             .busy_timeout(Duration::from_secs(5))
             .pragma("cache_size", format!("-{}", config.cache_size_kb))
             .pragma("mmap_size", config.mmap_size.to_string());
+        #[cfg(target_os = "macos")]
+        let network_volume = !is_in_memory
+            && screenpipe_fs::is_network_volume(database_file.parent().unwrap_or(database_file))?;
+        #[cfg(not(target_os = "macos"))]
+        let network_volume = false;
         // macOS delivers an uncatchable SIGBUS when APFS invalidates a page in
         // SQLite's file-backed WAL index after the `-shm` file was shortened.
         // `unix-excl` does NOT move that index into process memory: in the
@@ -265,7 +270,7 @@ impl DatabaseManager {
         // was wrong, and `db.sqlite-shm` existing on disk is normal, not
         // evidence that some other opener touched the database.
         #[cfg(target_os = "macos")]
-        if !is_in_memory {
+        if !is_in_memory && !network_volume {
             connect_options = connect_options.vfs("unix-excl");
             info!(
                 "macOS capture database using unix-excl VFS with a process-exclusive database lock"
@@ -274,7 +279,13 @@ impl DatabaseManager {
         for (pragma, value) in screenpipe_config::WAL_SAFETY_PRAGMAS {
             connect_options = connect_options.pragma(pragma, value);
         }
-        if storage.is_some() {
+        // macOS SMB rejects POSIX byte locks, and WAL needs shared memory that
+        // network filesystems cannot coordinate across hosts. Use SQLite's
+        // filesystem-aware default VFS with rollback journaling instead. The
+        // existing manager lease and single writer still own this database.
+        let journal_mode = if network_volume { "DELETE" } else { "WAL" };
+        connect_options = connect_options.pragma("journal_mode", journal_mode);
+        if storage.is_some() || network_volume {
             connect_options = connect_options.pragma("synchronous", "FULL");
         }
 
@@ -294,10 +305,12 @@ impl DatabaseManager {
                 .connect()
                 .await
                 .map_err(|error| quarantine_startup_error(database_file, error))?;
-            sqlx::query("PRAGMA journal_mode=WAL")
-                .execute(&mut conn)
-                .await
-                .map_err(|error| quarantine_startup_error(database_file, error))?;
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "PRAGMA journal_mode={journal_mode}"
+            )))
+            .execute(&mut conn)
+            .await
+            .map_err(|error| quarantine_startup_error(database_file, error))?;
             conn.close()
                 .await
                 .map_err(|error| quarantine_startup_error(database_file, error))?;

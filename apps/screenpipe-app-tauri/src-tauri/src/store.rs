@@ -314,7 +314,7 @@ pub(crate) fn durable_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         }
         let mut f = opts.open(&tmp)?;
         f.write_all(bytes)?;
-        f.sync_all()?; // contents + metadata to stable storage before the rename
+        screenpipe_fs::sync_all(&f)?; // contents + metadata to stable storage before the rename
     }
     replace_store_temp(&tmp, path)?;
     // fsync the directory so the rename itself survives a crash. Best-effort:
@@ -323,7 +323,7 @@ pub(crate) fn durable_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     #[cfg(unix)]
     if let Some(dir) = path.parent() {
         if let Ok(d) = std::fs::File::open(dir) {
-            let _ = d.sync_all();
+            let _ = screenpipe_fs::sync_all(&d);
         }
     }
     Ok(())
