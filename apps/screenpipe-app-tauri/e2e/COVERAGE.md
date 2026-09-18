@@ -11,8 +11,8 @@ and layer declared in the manifest, weighted by confidence and criticality.
 - Manifest: `e2e/coverage-map.json`
 - Specs directory: `e2e/specs`
 - Mapped specs: 140
-- Declared test blocks: 404
-- Weighted coverage points: 325.1
+- Declared test blocks: 405
+- Weighted coverage points: 326.1
 
 Confidence weights: strong=1.0, partial=0.7, conditional=0.4, smoke=0.3.
 Criticality weights: high=1.0, medium=0.7, low=0.4.
@@ -23,9 +23,9 @@ can execute more runtime cases than this number shows.
 
 | Platform | Specs | Declared tests | Weighted points | Layers | Features | Critical score |
 | --- | --- | --- | --- | --- | --- | --- |
-| windows | 107 | 342 | 285.1 | 15 | 122 | 85% |
-| macos | 136 | 366 | 294.9 | 17 | 132 | 88% |
-| linux | 95 | 300 | 254.5 | 14 | 119 | 80% |
+| windows | 107 | 343 | 286.1 | 15 | 122 | 85% |
+| macos | 136 | 367 | 295.9 | 17 | 132 | 88% |
+| linux | 95 | 301 | 255.5 | 14 | 119 | 80% |
 
 ## Runtime Results
 
@@ -43,11 +43,11 @@ pass/fail/skip counts.
 | capture-ocr | 2 specs / 16 tests / 6.4 pts | 9 specs / 13 tests / 5.8 pts | 1 specs / 3 tests / 1.2 pts |
 | chat-ai | 37 specs / 87 tests / 71.3 pts | 51 specs / 116 tests / 90.8 pts | 35 specs / 86 tests / 70.8 pts |
 | entitlement | - | 1 specs / 1 tests / 1.0 pts | - |
-| local-api | 29 specs / 120 tests / 101.0 pts | 39 specs / 117 tests / 100.5 pts | 24 specs / 88 tests / 79.2 pts |
+| local-api | 29 specs / 121 tests / 102.0 pts | 39 specs / 118 tests / 101.5 pts | 24 specs / 89 tests / 80.2 pts |
 | notifications | 4 specs / 26 tests / 17.3 pts | 3 specs / 5 tests / 3.4 pts | 2 specs / 4 tests / 3.1 pts |
 | onboarding | 9 specs / 39 tests / 34.8 pts | 11 specs / 43 tests / 38.2 pts | 9 specs / 39 tests / 34.8 pts |
 | os-integration | 7 specs / 32 tests / 26.9 pts | 15 specs / 30 tests / 18.4 pts | 2 specs / 15 tests / 10.8 pts |
-| performance | 3 specs / 45 tests / 45.0 pts | 5 specs / 36 tests / 31.8 pts | 2 specs / 30 tests / 30.0 pts |
+| performance | 3 specs / 46 tests / 46.0 pts | 5 specs / 37 tests / 32.8 pts | 2 specs / 31 tests / 31.0 pts |
 | pipes | 6 specs / 20 tests / 20.0 pts | 8 specs / 26 tests / 26.0 pts | 6 specs / 20 tests / 20.0 pts |
 | real-ui-e2e | 80 specs / 240 tests / 203.9 pts | 97 specs / 258 tests / 218.9 pts | 74 specs / 216 tests / 189.9 pts |
 | settings | 15 specs / 42 tests / 39.0 pts | 17 specs / 36 tests / 31.7 pts | 14 specs / 33 tests / 30.0 pts |
@@ -110,7 +110,7 @@ pass/fail/skip counts.
 | acp-backend.spec.ts | windows, macos, linux | chat-ai, tauri-command, os-integration | chat, acp-backend, agent-streaming, agent-permissions, agent-cancellation, agent-terminal, agent-tool-metadata, agent-tool-compaction, mcp-registration, process-supervision | high | partial | mixed | 14 | Official Rust ACP SDK runtime and inline UI E2E with a deterministic stdio agent: initialization, session close, streaming, background permissions, cancellation, localized auth/cancel, malformed stdout, exact adapter/descendant reaping, terminal lifecycle/output draining, late tool metadata/error propagation with a provider fallback, progressive compaction of repeated Claude tool calls with drill-down access, and a real authenticated local API MCP health call. Curated third-party adapters remain manual smoke coverage. |
 | acp-onboarding-ux.spec.ts | windows, macos, linux | chat-ai, real-ui-e2e, tauri-command | chat, acp-backend, acp-onboarding, acp-auth | high | partial | real-user-flow | 2 | Selecting an ACP agent connects it with nothing sent (sign-in surfaces before the first send, not after a cold install), and the settings picker states who owns sign-in/models/API keys next to the agent list. |
 | api-key-cold-spawn.spec.ts | windows, macos, linux | local-api, tauri-command | local-api-auth, app-launch | medium | partial | command | 3 | Cold-spawn local API config regression coverage. |
-| api-search-stress.spec.ts | windows, macos, linux | local-api, performance | local-api-auth, local-api-search, health, audio-device-health, local-api-load | high | strong | api | 29 | Broad readonly API, auth, search, and load coverage. |
+| api-search-stress.spec.ts | windows, macos, linux | local-api, performance | local-api-auth, local-api-search, health, audio-device-health, local-api-load | high | strong | api | 30 | Broad readonly API, auth, search, and load coverage. |
 | api.spec.ts | windows, macos, linux | local-api | health, audio-device-health, connections, local-api-auth | high | partial | api | 7 | Smoke coverage for local HTTP API shape and auth behavior. |
 | app-lifecycle.spec.ts | windows, macos, linux | real-ui-e2e, window-lifecycle | app-launch, home-navigation, webview-stability, route-churn, browser-storage | high | strong | mixed | 14 | Home webview, routing, reload, focus, resize, and storage stability. |
 | artifacts-api.spec.ts | windows, macos, linux | local-api | local-api-auth, artifacts | medium | strong | api | 7 | CRUD coverage for artifact registration, validation, unified listing, upsert, and delete. |
