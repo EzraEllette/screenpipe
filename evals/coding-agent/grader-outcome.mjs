@@ -19,6 +19,15 @@ export function classifyGraderError(grader) {
       /Failed Suites [1-9]/.test(stderr) &&
       (/^Error: Failed to load url /m.test(stderr) ||
        /^Error: Cannot find module ['"][^\n]+['"] imported from ['"][^\n]+['"]\.\s*$/m.test(stderr))) return "vitest_collection_error";
+  // A beforeAll build failure can register tests but skip every affected test.
+  // Passing neighboring suites do not turn a compile failure into an assertion.
+  // Preserve executed failures and assertion headers, including quoted diagnostics.
+  const buildHookSummary = summary?.match(/^(?:(?:\d+ (?:passed|skipped))(?: \| )?)+ \(\d+\)$/);
+  if (buildHookSummary && /[1-9]\d* skipped/.test(summary) &&
+      /^\s*Test Files\s+.*[1-9]\d* failed/m.test(stdout) && /Failed Suites [1-9]/.test(stderr) &&
+      /^Error: Command failed: [^\n]*\bbun(?:\.exe)? (?:build|run build)\b/m.test(stderr) &&
+      /^error: Could not resolve: ["'][^\n]+["']\s*$/m.test(stderr) &&
+      !/^AssertionError(?: \[[^\]]+\])?:/m.test(stderr)) return "vitest_bun_build_setup_error";
   // Vite can reject PostCSS startup before printing a test-count summary.
   // Require the specific missing-plugin diagnostic and startup banner; an
   // executed-test summary or assertion header must keep its behavioral result.

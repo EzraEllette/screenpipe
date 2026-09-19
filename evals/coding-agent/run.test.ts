@@ -28,6 +28,14 @@ test("process and setup failures cannot prove a regression or count as scored fa
     git("commit", "-qam", "Synthetic reference state");
     const fix = git("rev-parse", "HEAD");
     const controls = [
+      { id: "baseline-vitest-bun-build", baseline: "error", oracle: "pass", valid: false },
+      { id: "reference-vitest-bun-build", baseline: "fail", oracle: "error", valid: false },
+      { id: "baseline-vitest-bun-build-with-pass", baseline: "error", oracle: "pass", valid: false },
+      { id: "vitest-build-quoted-assertion", baseline: "fail", oracle: "pass", valid: true },
+      { id: "vitest-build-hook-assertion", baseline: "fail", oracle: "pass", valid: true },
+      { id: "node-build-quoted-assertion", baseline: "fail", oracle: "pass", valid: true },
+      { id: "both-pass-build-diagnostic", baseline: "pass", oracle: "pass", valid: false },
+      { id: "unknown-build-command", baseline: "fail", oracle: "pass", valid: true },
       { id: "baseline-rust-compile", baseline: "error", oracle: "pass", valid: false },
       { id: "reference-rust-compile", baseline: "fail", oracle: "error", valid: false },
       { id: "baseline-cargo-compile", baseline: "error", oracle: "pass", valid: false },
@@ -71,7 +79,15 @@ import assert from "node:assert/strict";
 const broken = readFileSync("state.txt", "utf8") === "broken";
 const id = process.env.SCREENPIPE_EVAL_CASE_ID;
 const affected = id.startsWith("baseline-") ? broken : !broken;
-if ((id.endsWith("-rust-compile") && affected) || ((id === "baseline-cargo-compile" || id === "baseline-rust-passed-before-compile") && broken) ||
+if ((id.endsWith("vitest-bun-build") && affected) || (id === "baseline-vitest-bun-build-with-pass" && broken) ||
+    (["vitest-build-quoted-assertion", "vitest-build-hook-assertion", "node-build-quoted-assertion", "unknown-build-command"].includes(id) && broken) || id === "both-pass-build-diagnostic") {
+  const summary = id === "vitest-build-quoted-assertion" ? "1 failed (1)" : id === "baseline-vitest-bun-build-with-pass" ? "1 passed | 1 skipped (2)" : "1 skipped (1)";
+  process.stdout.write(" RUN v4.0.18 /synthetic\\n Test Files 1 failed (1)\\n Tests " + summary + "\\n");
+  process.stderr.write(" Failed Suites 1\\nError: Command failed: " + (id === "unknown-build-command" ? "other-compiler" : "bun build") + " entry.ts\\nerror: Could not resolve: \\"./missing-input\\"\\n");
+  if (id === "vitest-build-quoted-assertion" || id === "vitest-build-hook-assertion") process.stderr.write("AssertionError: intended synthetic behavior failed\\n");
+  if (id === "node-build-quoted-assertion") assert.fail("synthetic assertion after quoted build output");
+  process.exit(id === "both-pass-build-diagnostic" ? 0 : 1);
+} else if ((id.endsWith("-rust-compile") && affected) || ((id === "baseline-cargo-compile" || id === "baseline-rust-passed-before-compile") && broken) ||
     ((id === "rust-assertion-with-quoted-compile" || id === "node-assertion-with-quoted-compile" || id === "rust-panic-with-quoted-compile") && broken) || id === "both-pass-compile-diagnostic") {
   process.stderr.write("error[E0425]: cannot find value synthetic_fixture in this scope\\n");
   process.stderr.write(id === "baseline-cargo-compile" ? "error: could not compile \`synthetic-fixture\` (lib test) due to 1 previous error\\n" : "error: aborting due to 1 previous error\\n");
@@ -133,7 +149,7 @@ else if (id === "baseline-syntax" && affected) {
   assert.fail("\\nError [ERR_MODULE_NOT_FOUND]: quoted diagnostic\\nSyntaxError: quoted diagnostic\\n    at quotedFixture");
 } else if (id === "both-pass-diagnostic-words") {
   console.error("Cannot find module; SyntaxError; command not found are fixture words");
-} else if ((id === "reference-vitest-alias" || id === "reference-vitest-postcss" || id === "reference-rust-compile") && broken) assert.fail("synthetic broken behavior");
+} else if ((id === "reference-vitest-alias" || id === "reference-vitest-postcss" || id === "reference-rust-compile" || id === "reference-vitest-bun-build") && broken) assert.fail("synthetic broken behavior");
 else process.exit(id === "intended-failure" && broken ? 1 : 0);
 `);
     const manifest = join(repo, "cases.json");
@@ -172,7 +188,7 @@ else process.exit(id === "intended-failure" && broken ? 1 : 0);
         if (control.id.endsWith("timeout")) expect(errored.grader_error).toContain("ETIMEDOUT");
       }
     }
-    const scored = invoke("scoring", "--mode", "baseline", "--case", "baseline-signal,baseline-missing-module,baseline-rust-compile");
+    const scored = invoke("scoring", "--mode", "baseline", "--case", "baseline-signal,baseline-missing-module,baseline-rust-compile,baseline-vitest-bun-build");
     expect(scored.error).toBeUndefined();
     expect(scored.status).toBe(0);
     const summary = JSON.parse(readFileSync(join(repo, "scoring/summary.json"), "utf8"));

@@ -66,7 +66,7 @@ change, caused it. Report error counts and inspect candidate-caused errors befor
 comparing model success rates. No isolation or model-quality claim follows.
 
 Run the synthetic runner controls with `bun test ./evals/coding-agent/run.test.ts`.
-Thirty-five end-to-end controls cover baseline/reference timeouts and signals,
+Forty-three end-to-end controls cover baseline/reference timeouts and signals,
 missing ESM/CommonJS modules, Node/Bun syntax and Bun import errors, Vitest
 collection failures (including alias imports), missing PostCSS-plugin startup
 failures, Rust/Cargo compilation failures and assertions quoting compiler output,
@@ -217,3 +217,15 @@ The fixture tests sequential saved-file changes and real local process/protocol
 behavior. It does not verify concurrent file writes, native desktop persistence,
 external enterprise gateways, token cryptography or the harness's filesystem
 isolation. Dependencies are exposed only during grading, after the trajectory.
+
+
+Vitest can register tests and then skip them because a `beforeAll` Bun build
+failed. A bounded missing-input compiler diagnostic, failed suite and skipped
+summary with no test failures is now `vitest_bun_build_setup_error`; passing
+neighboring tests do not turn the build failure into regression evidence.
+Assertions quoting compiler diagnostics and successful commands retain their
+outcomes. The runner controls cover both baseline/reference build-hook failure,
+neighboring passes, quoted assertion diagnostics and error exclusion from scores.
+An actual Bun compiler/Vitest setup failure previously certified a false valid
+contrast; it now becomes an error and invalid verification. This is bounded
+recognition, not general compiler attribution or proof of execution isolation.
