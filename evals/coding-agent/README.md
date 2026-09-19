@@ -65,9 +65,10 @@ change, caused it. Report error counts and inspect candidate-caused errors befor
 comparing model success rates. No isolation or model-quality claim follows.
 
 Run the synthetic runner controls with `bun test ./evals/coding-agent/run.test.ts`.
-Twenty-two end-to-end controls cover baseline/reference timeouts and signals,
+Twenty-seven end-to-end controls cover baseline/reference timeouts and signals,
 missing ESM/CommonJS modules, Node/Bun syntax and Bun import errors, Vitest
-collection failures (including alias imports) and quoted diagnostics followed by real assertions, unavailable
+collection failures (including alias imports), missing PostCSS-plugin startup
+failures, quoted diagnostics followed by real assertions, unavailable
 or non-executable commands, genuine failures, assertions quoting diagnostic words or complete diagnostic blocks,
 already-passing baselines and exclusion of known setup/process errors from scores.
 The controls use temporary local Git fixtures and invoke no model or provider.
@@ -148,3 +149,12 @@ real settings-store serialization, validation, native capture or current-head
 integration. The adapter retains the existing category-switch UI contract;
 module relocation or a different UI/IO abstraction can require recalibration.
 No dependency link or model call is needed for historical verification.
+
+Vite can reject a missing PostCSS plugin before reporting any test-count summary.
+The runner recognizes the bounded combination of a Vitest startup banner,
+unhandled rejection, PostCSS load failure, missing-plugin diagnostic and config
+path as `vitest_postcss_setup_error`. Executed-test summaries, assertion headers
+and successful exits retain their previous results. This does not classify all
+PostCSS/compiler errors or prove whether the candidate caused a setup failure.
+The 27 synthetic CLI controls include both baseline/reference startup failure,
+quoted diagnostics with and without a Vitest test summary, and successful output.

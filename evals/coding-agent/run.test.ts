@@ -34,6 +34,11 @@ test("process and setup failures cannot prove a regression or count as scored fa
       { id: "reference-timeout", baseline: "pass", oracle: "error", valid: false },
       { id: "baseline-signal", baseline: "error", oracle: "pass", valid: false },
       { id: "reference-signal", baseline: "pass", oracle: "error", valid: false },
+      { id: "baseline-vitest-postcss", baseline: "error", oracle: "pass", valid: false },
+      { id: "reference-vitest-postcss", baseline: "fail", oracle: "error", valid: false },
+      { id: "vitest-assertion-with-quoted-postcss", baseline: "fail", oracle: "pass", valid: true },
+      { id: "node-assertion-with-quoted-postcss", baseline: "fail", oracle: "pass", valid: true },
+      { id: "both-pass-postcss-diagnostic", baseline: "pass", oracle: "pass", valid: false },
       { id: "baseline-vitest-alias", baseline: "error", oracle: "pass", valid: false },
       { id: "reference-vitest-alias", baseline: "fail", oracle: "error", valid: false },
       { id: "vitest-assertion-with-quoted-alias-error", baseline: "fail", oracle: "pass", valid: true },
@@ -60,6 +65,13 @@ const id = process.env.SCREENPIPE_EVAL_CASE_ID;
 const affected = id.startsWith("baseline-") ? broken : !broken;
 if (id.endsWith("-timeout") && affected) setInterval(() => {}, 1000);
 else if (id.endsWith("-signal") && affected) process.kill(process.pid, "SIGTERM");
+else if ((id.endsWith("vitest-postcss") && affected) || ((id === "vitest-assertion-with-quoted-postcss" || id === "node-assertion-with-quoted-postcss") && broken) || id === "both-pass-postcss-diagnostic") {
+  process.stdout.write(" RUN v2.1.9 /synthetic\\n");
+  process.stderr.write("Unhandled Rejection\\nFailed to load PostCSS config: Failed to load PostCSS config (searchPath: /synthetic): [Error] Loading PostCSS Plugin failed: Cannot find module 'synthetic-css-plugin'\\nRequire stack:\\n- /synthetic/postcss.config.js\\n");
+  if (id === "vitest-assertion-with-quoted-postcss") process.stdout.write("Test Files 1 failed (1)\\nTests 1 failed (1)\\n");
+  if (id === "node-assertion-with-quoted-postcss") assert.fail("synthetic behavior assertion after quoted startup text");
+  process.exit(id === "both-pass-postcss-diagnostic" ? 0 : 1);
+}
 else if (id.endsWith("vitest-alias") && affected) {
   process.stdout.write("Test Files 1 failed (1)\\nTests no tests\\n");
   process.stderr.write("Failed Suites 1\\nError: Cannot find module '@/lib/synthetic-missing' imported from '/synthetic/fixture.test.ts'.\\n");
@@ -100,7 +112,7 @@ else if (id === "baseline-syntax" && affected) {
   assert.fail("\\nError [ERR_MODULE_NOT_FOUND]: quoted diagnostic\\nSyntaxError: quoted diagnostic\\n    at quotedFixture");
 } else if (id === "both-pass-diagnostic-words") {
   console.error("Cannot find module; SyntaxError; command not found are fixture words");
-} else if (id === "reference-vitest-alias" && broken) assert.fail("synthetic broken behavior");
+} else if ((id === "reference-vitest-alias" || id === "reference-vitest-postcss") && broken) assert.fail("synthetic broken behavior");
 else process.exit(id === "intended-failure" && broken ? 1 : 0);
 `);
     const manifest = join(repo, "cases.json");

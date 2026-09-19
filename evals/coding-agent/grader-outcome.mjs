@@ -19,6 +19,15 @@ export function classifyGraderError(grader) {
       /Failed Suites [1-9]/.test(stderr) &&
       (/^Error: Failed to load url /m.test(stderr) ||
        /^Error: Cannot find module ['"][^\n]+['"] imported from ['"][^\n]+['"]\.\s*$/m.test(stderr))) return "vitest_collection_error";
+  // Vite can reject PostCSS startup before printing a test-count summary.
+  // Require the specific missing-plugin diagnostic and startup banner; an
+  // executed-test summary or assertion header must keep its behavioral result.
+  if ((summary === undefined || summary === "no tests") &&
+      /^\s*RUN\s+v\d+\./m.test(stdout) && /Unhandled Rejection/.test(stderr) &&
+      /^Failed to load PostCSS config:/m.test(stderr) &&
+      /Loading PostCSS Plugin failed: Cannot find module ['"][^\n]+['"]/.test(stderr) &&
+      /[/\\]postcss\.config\.[cm]?[jt]s/.test(stderr) &&
+      !/^AssertionError(?: \[[^\]]+\])?:/m.test(stderr)) return "vitest_postcss_setup_error";
   // Only the first thrown-error header classifies a Node failure. Assertion
   // messages may quote complete setup diagnostics on later lines.
   const header = stderr.match(/^([A-Za-z]*Error)(?: \[([A-Z_0-9]+)\])?:[^\n]*/m);
