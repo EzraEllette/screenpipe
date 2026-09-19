@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "suite": "screenpipe-app-coding-agent-regressions",
-  "dataset_version": "2026-09-19.2",
+  "dataset_version": "2026-09-19.3",
   "suite_type": "regression",
   "owner": "screenpipe engineering",
   "policy": {
@@ -1444,6 +1444,45 @@
           }
         ],
         "command": "\"${BUN_BIN:-bun}\" test evals/coding-agent/graders/gateway-billing-capacity.test.js"
+      }
+    },
+    {
+      "id": "mcp-team-credential-reload",
+      "name": "Reload enterprise credentials in the running MCP server",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "909c9360a4379896df49507140017e9989d41428"
+      },
+      "base_ref": "e681fc3f44f44fc377c771988814db00021b2e84",
+      "oracle_ref": "909c9360a4379896df49507140017e9989d41428",
+      "oracle_paths": [
+        "packages/screenpipe-mcp/src/index.ts",
+        "packages/screenpipe-mcp/src/team-config.ts"
+      ],
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "mcp",
+        "enterprise",
+        "identity"
+      ],
+      "prompt": "The desktop can save a replacement enterprise token or team gateway while its MCP server keeps running, but team requests continue using stale credentials. Make the next team-tool request and tool listing reflect the current saved configuration without restarting the process, including credentials saved for the first time. Keep token and gateway from the same configuration snapshot. Clearing, deleting or corrupting the saved configuration must hide unavailable team tools and reject their calls before any team request; restoring valid settings must recover. Preserve local tools and explicit environment-token overrides, and preserve gateway precedence: command-line override, environment override, saved gateway, then hosted default. An expired explicit token must stay authoritative and give recovery guidance identifying the environment override and enterprise.json settings without exposing the credential. Verify observable requests and results through the running MCP process using synthetic tokens and local test servers.",
+      "agent_timeout_seconds": 1200,
+      "grader_dependency_links": [
+        {
+          "source_path": "packages/screenpipe-mcp/node_modules",
+          "destination_path": "packages/screenpipe-mcp/node_modules"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 180,
+        "fixtures": [
+          {
+            "local_path": "graders/mcp-team-reload.fixture.ts",
+            "destination_path": "packages/screenpipe-mcp/src/eval-team-auth.test.ts"
+          }
+        ],
+        "command": "cd packages/screenpipe-mcp && SCREENPIPE_DISABLE_TELEMETRY=1 \"${BUN_BIN:-bun}\" run test -- src/eval-team-auth.test.ts"
       }
     }
   ]

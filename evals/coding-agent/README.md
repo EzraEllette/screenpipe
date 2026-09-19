@@ -9,7 +9,7 @@ This is an agent eval suite, not a unit-test suite. Every case contains:
 - saved prompt, transcript, candidate patch, grader output, runtime fingerprint, and result;
 - repeated-trial reporting with success rate, `pass@k`, and `pass^k`.
 
-The current app corpus contains 45 git-mined regressions. See
+The current app corpus contains 46 git-mined regressions. See
 [DESIGN.md](./DESIGN.md) for the Anthropic guidance, source contract, and
 history-mining workflow. The companion website manifest uses this same harness.
 
@@ -194,3 +194,26 @@ This is input provenance, not a complete reproducibility or isolation guarantee.
 Dependency directories, compilers, external services, ambient environment and
 sandbox enforcement are not attested by these hashes. Do not use a matching
 fingerprint alone to claim matched agent trials or unchanged product behavior.
+
+
+## Running MCP enterprise credentials
+
+`mcp-team-credential-reload` builds and starts the real historical MCP server,
+connects a real SDK stdio client, and observes synthetic loopback HTTP requests
+while changing a temporary enterprise settings file. Seven scenarios cover token
+replacement, matching gateway rotation, first-time configuration, clear/delete/
+malformed recovery, override precedence, expired-token guidance without secret
+exposure, and preservation of local tool listings. Telemetry is disabled and
+local API credentials are synthetic. Only the two production source changes
+are applied by the oracle; builds are created inside each grading workspace.
+
+Run `bun test evals/coding-agent/calibrate-mcp-team-reload.test.js` with the MCP
+package dependencies installed. Eight controls retain the parent/reference
+contrast, reject an unused-helper fix, cached settings, stale gateway pairing
+and blanket denial, accept equivalent naming, and distinguish a missing-source
+build failure. These are deterministic corpus/grader tests, not model trials.
+
+The fixture tests sequential saved-file changes and real local process/protocol
+behavior. It does not verify concurrent file writes, native desktop persistence,
+external enterprise gateways, token cryptography or the harness's filesystem
+isolation. Dependencies are exposed only during grading, after the trajectory.
