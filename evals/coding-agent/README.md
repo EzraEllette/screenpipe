@@ -168,3 +168,29 @@ plan truth, identity binding and cache admission. It does not test live billing,
 cryptographic verification, provider settlement or cross-service deployment.
 Run `bun test evals/coding-agent/calibrate-billing-capacity.test.js` to check
 correct, broken, equivalent and bypass implementations of the grader contract.
+
+## Execution provenance
+
+Each graded trial records SHA-256 hashes of the exact fixture bytes materialized
+into the workspace, their destinations and executable flags, resolved Git source
+commits where applicable, and the grader command hash and timeout. It also records
+the startup bytes of `run.mjs` and `grader-outcome.mjs`, independently of the repo
+being evaluated. These records are retained in verification results too.
+
+`evaluation_fingerprint` identifies the case definition, resolved base, hidden
+grader and harness inputs. The report combines selected case fingerprints with
+the manifest and runtime fingerprints. It remains stable across output-directory
+changes and equivalent runner relocation; changed grader or harness bytes change
+it. `dataset_fingerprint` continues to mean the manifest bytes alone. If setup
+prevents collecting a trial's grader provenance, the report marks
+`provenance_complete: false` and leaves its evaluation fingerprint null.
+
+Run `bun test evals/coding-agent/fingerprints.test.ts` for actual caller controls
+covering changed local/Git grader inputs, moved refs, imported classifier and
+runner changes, repeated runs, relocation, selection and setup failure. These
+use synthetic repositories without model calls.
+
+This is input provenance, not a complete reproducibility or isolation guarantee.
+Dependency directories, compilers, external services, ambient environment and
+sandbox enforcement are not attested by these hashes. Do not use a matching
+fingerprint alone to claim matched agent trials or unchanged product behavior.
