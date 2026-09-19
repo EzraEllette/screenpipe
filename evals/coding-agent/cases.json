@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "suite": "screenpipe-app-coding-agent-regressions",
-  "dataset_version": "2026-09-19.3",
+  "dataset_version": "2026-09-19.4",
   "suite_type": "regression",
   "owner": "screenpipe engineering",
   "policy": {
@@ -1483,6 +1483,38 @@
           }
         ],
         "command": "cd packages/screenpipe-mcp && SCREENPIPE_DISABLE_TELEMETRY=1 \"${BUN_BIN:-bun}\" run test -- src/eval-team-auth.test.ts"
+      }
+    },
+    {
+      "id": "grok-installer-explicit-consent",
+      "name": "Require explicit action before the Grok installer reads credentials",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "b6b18e4fa628e53bbf7eccef974faf04a07a95cc"
+      },
+      "base_ref": "b247eb3c674af026fe28c628a098e9f8c748c8a5",
+      "oracle_ref": "b6b18e4fa628e53bbf7eccef974faf04a07a95cc",
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/lib/grokbot-installer.mjs"
+      ],
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "privacy",
+        "credentials",
+        "consent"
+      ],
+      "prompt": "The Grok installer credential bridge currently accepts passive status requests and reads another application's credential files. Require an explicit connect or disconnect action before discovering the application files, reading protected credentials or contacting its gateway. Reject status and all other unsupported actions before those effects, whether or not the app is installed. Preserve explicit connect and disconnect: use the existing saved gateway credential only for its authorized gateway requests, verify installation, retry without creating duplicate skills, remove only this device's owned skill on disconnect, and preserve unrelated user workflows. Explicit requests with no installed app should report not detected/disconnected without credential or network access. Credential-command and network failures must not disclose credentials in returned errors. Verify the actual JavaScript installer entry point using synthetic files and provider/OS ports. Native status-cache behavior, UI consent and Windows credential handling are outside this task.",
+      "agent_timeout_seconds": 1200,
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/grok-installer-consent.test.js",
+            "destination_path": "evals/coding-agent/graders/grok-installer-consent.test.js"
+          }
+        ],
+        "command": "\"${BUN_BIN:-bun}\" test evals/coding-agent/graders/grok-installer-consent.test.js"
       }
     }
   ]

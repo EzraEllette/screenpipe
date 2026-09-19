@@ -9,7 +9,7 @@ This is an agent eval suite, not a unit-test suite. Every case contains:
 - saved prompt, transcript, candidate patch, grader output, runtime fingerprint, and result;
 - repeated-trial reporting with success rate, `pass@k`, and `pass^k`.
 
-The current app corpus contains 46 git-mined regressions. See
+The current app corpus contains 47 git-mined regressions. See
 [DESIGN.md](./DESIGN.md) for the Anthropic guidance, source contract, and
 history-mining workflow. The companion website manifest uses this same harness.
 
@@ -229,3 +229,18 @@ neighboring passes, quoted assertion diagnostics and error exclusion from scores
 An actual Bun compiler/Vitest setup failure previously certified a false valid
 contrast; it now becomes an error and invalid verification. This is bounded
 recognition, not general compiler attribution or proof of execution isolation.
+
+
+The `grok-installer-explicit-consent` case executes the real JavaScript installer
+entry point against synthetic encrypted files, the actual decryption routine,
+a mocked OS credential command and an in-memory gateway. Fifteen outcomes reject
+passive/unsupported actions before file discovery and preserve explicit connect,
+idempotent retry, disconnect, unrelated workflows, absent-app handling and safe
+errors. Only the installer file from the historical fix is applied as oracle.
+
+Run `bun test evals/coding-agent/calibrate-grok-consent.test.js` for calibrated
+parent/reference, equivalent implementation, late refusal, status bypass,
+blanket denial, skipped installation/removal and missing-source controls.
+This standalone adapter requires macOS; it does not call Keychain or a provider.
+It does not verify the native credential-free status cache, browser-cookie
+consent, Windows DPAPI, UI interaction or enforced agent isolation.
