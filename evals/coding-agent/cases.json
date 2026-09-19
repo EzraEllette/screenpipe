@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "suite": "screenpipe-app-coding-agent-regressions",
-  "dataset_version": "2026-09-19.5",
+  "dataset_version": "2026-09-19.6",
   "suite_type": "regression",
   "owner": "screenpipe engineering",
   "policy": {
@@ -1547,6 +1547,41 @@
           }
         ],
         "command": "\"${BUN_BIN:-bun}\" test evals/coding-agent/graders/private-reasoning-budget.test.ts"
+      }
+    },
+    {
+      "id": "app-preset-deletion-save-recovery",
+      "name": "Reassign preset dependencies before committing deletion",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "923294f6848b0aaf5800aee3b33b1f07a9eb9c3f"
+      },
+      "base_ref": "18661dfab746eb2d1f37e224ef8c4f91841473ff",
+      "oracle_ref": "923294f6848b0aaf5800aee3b33b1f07a9eb9c3f",
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/lib/hooks/use-settings.tsx",
+        "apps/screenpipe-app-tauri/lib/ai-preset-deletion.ts",
+        "apps/screenpipe-app-tauri/lib/chat-storage.ts"
+      ],
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "settings",
+        "automation",
+        "persistence",
+        "retry"
+      ],
+      "prompt": "Deleting an AI preset leaves scheduled tasks and saved conversations referring to a preset that no longer exists. Fix the actual settings update path so affected task chains, saved conversations including hidden explicit task destinations, legacy conversation settings, activity settings, open chat selections and the active selection move to a surviving default before deletion is committed. Preserve unrelated presets, wildcard/default task references, conversation content and timestamps, and a newer conversation selection made after dependency discovery. Deduplicate rewritten task chains. Discovery, task-write or conversation-write failures must reject deletion, retain the original durable preset and support retry after partial dependency success without rewriting already-repaired task references. A failed final settings save must not announce committed changes or update active/open selections. Model edits and reordering must not trigger dependency work; empty preset lists must be refused. Concurrent queued unrelated settings updates must preserve both changes. No particular helper name or extraction is required. UI rendering, native filesystem guarantees and retry after a failed final store save are outside this task.",
+      "agent_timeout_seconds": 1200,
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/preset-save-recovery.test.js",
+            "destination_path": "evals/coding-agent/graders/preset-save-recovery.test.js"
+          }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && \"${BUN_BIN:-bun}\" test ../../evals/coding-agent/graders/preset-save-recovery.test.js"
       }
     }
   ]

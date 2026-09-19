@@ -9,7 +9,7 @@ This is an agent eval suite, not a unit-test suite. Every case contains:
 - saved prompt, transcript, candidate patch, grader output, runtime fingerprint, and result;
 - repeated-trial reporting with success rate, `pass@k`, and `pass^k`.
 
-The current app corpus contains 48 git-mined regressions. See
+The current app corpus contains 49 git-mined regressions. See
 [DESIGN.md](./DESIGN.md) for the Anthropic guidance, source contract, and
 history-mining workflow. The companion website manifest uses this same harness.
 
@@ -259,3 +259,20 @@ budget changes, verification/auth-cache bypass, no-op and missing-source
 controls. No dependencies, actual encryption, attestation, model calls, native
 app or provider access are exercised; this is request construction, not proof
 of sampler enforcement, response quality or agent isolation.
+
+## Preset deletion through settings persistence
+
+`app-preset-deletion-save-recovery` calls the real settings provider update,
+settings write queue, dependency reassignment and conversation persistence.
+Thirteen outcomes exercise task/chat write failure and retry, partial progress,
+hidden destinations, newer selections after discovery, preserved content and
+unrelated references, queued updates, and final settings-save failure. The
+historical parent has nine behavioral failures and four preserved passes.
+
+Run `bun test evals/coding-agent/calibrate-preset-save.test.js` for the hidden
+grader controls. The standalone suite uses synthetic native filesystem/store,
+HTTP, event and UI state ports; React binding is simulated without running mount
+effects. It does not prove rendered UI rollback, native filesystem durability,
+cross-process races, or recovery after the final store save fails. No installed
+packages or native build is needed. Source setup errors cannot establish the
+regression. Actual model trials and enforced trial isolation remain separate.
