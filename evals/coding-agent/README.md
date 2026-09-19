@@ -123,3 +123,28 @@ complete source review or verified regressions. See [DESIGN.md](./DESIGN.md).
 `bun test evals/coding-agent/mine-history.test.ts` runs four synthetic controls
 covering old and merged fixes, per-parent merge paths, complete bounded paging,
 root/non-fix exclusions, explicit date filtering and invalid inputs.
+
+## Privacy category ownership caller coverage
+
+`app-privacy-category-rule-ownership` executes the historical PrivacySection,
+ContentFiltersCard and category-switch modules, then inspects writes at the
+settings IO boundary across repeated interactions with fresh component state.
+Fifteen outcomes cover manual domain/app exclusions, owned-filter cleanup,
+other-category and include-rule preservation, repeated disable and legacy state.
+The original helper-only fixture accepted an incomplete patch whose UI still
+deleted the user's domain; the replacement rejects that bypass.
+
+Run `bun test evals/coding-agent/calibrate-privacy-ownership.test.js` for eleven
+controls: parent/reference, helper-only patch, missing persistence/reload/card
+forwarding, equivalent callback/component and ownership-field renaming, no-op,
+removed categories and missing-source setup failure. These are deterministic
+grader controls, not agent trials.
+
+The complete source modules are compiled with Bun and executed with synthetic
+React hooks/host elements, identity sanitization and settings IO. Unrelated
+native, telemetry, discovery and visual ports are substituted; native/provider
+actions fail closed. This is not React reconciliation, DOM/browser interaction,
+real settings-store serialization, validation, native capture or current-head
+integration. The adapter retains the existing category-switch UI contract;
+module relocation or a different UI/IO abstraction can require recalibration.
+No dependency link or model call is needed for historical verification.

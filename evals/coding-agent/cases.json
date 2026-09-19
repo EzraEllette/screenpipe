@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "suite": "screenpipe-app-coding-agent-regressions",
-  "dataset_version": "2026-09-18.2",
+  "dataset_version": "2026-09-19.1",
   "suite_type": "regression",
   "owner": "screenpipe engineering",
   "policy": {
@@ -482,24 +482,44 @@
     {
       "id": "app-privacy-category-rule-ownership",
       "name": "Never delete user-owned privacy rules with a category",
-      "source": { "kind": "git_regression", "fix_commit": "4450aaa82d" },
-      "base_ref": "4450aaa82d^",
-      "oracle_ref": "4450aaa82d",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "4450aaa82d30d262a5375520a734f1dff143e81d"
+      },
+      "base_ref": "9ebcd29c6ada189922c02e4ab65f1a08e228e1a1",
+      "oracle_ref": "4450aaa82d30d262a5375520a734f1dff143e81d",
       "gate": "advisory",
-      "trigger_paths": ["apps/screenpipe-app-tauri/lib/settings/capture-categories.ts"],
-      "tags": ["regression", "escaped-failure", "privacy", "settings", "data-loss"],
-      "prompt": "Disabling a privacy capture category deletes an identical exclusion rule or domain the user created manually. Track category ownership so disabling removes only entries that category actually created, preserves hand-written and other-category entries, and still cleans up all owned filters. Keep a safe compatibility path for legacy state with no provenance.",
-      "agent_timeout_seconds": 900,
-      "dependency_links": [
-        { "source_path": "apps/screenpipe-app-tauri/node_modules", "destination_path": "apps/screenpipe-app-tauri/node_modules" }
+      "trigger_paths": [
+        "apps/screenpipe-app-tauri/components/settings/privacy-section.tsx",
+        "apps/screenpipe-app-tauri/components/settings/capture-filters/content-filters-card.tsx",
+        "apps/screenpipe-app-tauri/lib/settings/capture-categories.ts",
+        "apps/screenpipe-app-tauri/lib/hooks/use-settings.tsx"
       ],
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "privacy",
+        "settings",
+        "data-loss"
+      ],
+      "prompt": "Disabling a privacy capture category deletes an identical exclusion rule or domain the user created manually. Fix the actual Settings > Privacy category switches so enabling then disabling preserves hand-written exclusions and other categories, including after closing and reopening settings. Persist whatever ownership information the UI needs. Still add the category filters when enabled, clean up all filters it created when disabled, preserve unrelated include rules, and tolerate repeated disable. Keep a safe compatibility path so legacy enabled categories without provenance can still be disabled. No particular helper, callback or ownership field name is required. Preserve the existing category choices and privacy controls.",
+      "agent_timeout_seconds": 900,
       "grader": {
         "timeout_seconds": 300,
         "fixtures": [
-          { "source_path": "apps/screenpipe-app-tauri/lib/settings/__tests__/capture-categories.test.ts" }
+          {
+            "local_path": "graders/app-privacy-ownership.test.js",
+            "destination_path": "evals/coding-agent/graders/app-privacy-ownership.test.js"
+          }
         ],
-        "command": "cd apps/screenpipe-app-tauri && bun x vitest run --config vitest.config.ts lib/settings/__tests__/capture-categories.test.ts"
-      }
+        "command": "\"${BUN_BIN:-bun}\" test evals/coding-agent/graders/app-privacy-ownership.test.js"
+      },
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/components/settings/privacy-section.tsx",
+        "apps/screenpipe-app-tauri/components/settings/capture-filters/content-filters-card.tsx",
+        "apps/screenpipe-app-tauri/lib/settings/capture-categories.ts",
+        "apps/screenpipe-app-tauri/lib/hooks/use-settings.tsx"
+      ]
     },
     {
       "id": "app-acp-explicit-full-access-boundary",
