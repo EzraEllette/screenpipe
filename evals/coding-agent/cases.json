@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "suite": "screenpipe-app-coding-agent-regressions",
-  "dataset_version": "2026-09-19.1",
+  "dataset_version": "2026-09-19.2",
   "suite_type": "regression",
   "owner": "screenpipe engineering",
   "policy": {
@@ -1409,6 +1409,41 @@
           }
         ],
         "command": "\"${BUN_BIN:-bun}\" test evals/coding-agent/graders/gateway-verified-identity.test.js"
+      }
+    },
+    {
+      "id": "ai-gateway-billing-capacity-compatibility",
+      "name": "Resolve canonical billing capacity without widening access",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "d9ff95802e6566a7b3ea3242800aef59cacb9aa0",
+        "pull_request": "https://github.com/screenpipe/screenpipe/pull/5779"
+      },
+      "base_ref": "8b455607ffbaef204a6f6a0a62e973bac6211e48",
+      "oracle_ref": "d9ff95802e6566a7b3ea3242800aef59cacb9aa0",
+      "oracle_paths": [
+        "packages/ai-gateway/src/utils/auth.ts"
+      ],
+      "gate": "advisory",
+      "tags": [
+        "regression",
+        "ai-gateway",
+        "billing",
+        "entitlement",
+        "compatibility",
+        "identity"
+      ],
+      "prompt": "Customers with Max or Ultra billing plans receive ordinary Business capacity when the website returns the older compatible pro/Business access labels. Repair validateAuth so canonical billing_plan refines a matching, active app entitlement to the purchased capacity. Preserve normalized aliases and legacy responses with no billing_plan, ordinary Basic/Business access and explicit app/cloud denial. Billing data must not independently establish access: reject null, empty, unknown, free, malformed or incompatible billing values as unknown plan truth, and require matching subscription/entitlement plans plus app_entitled, entitlement.active and features.app. Keep broad cloud subscription access separate from capacity, and do not issue a power usage tier without subscribed access. Bind plan truth to the verified Clerk subject; mismatched identity and unsuccessful or unavailable website responses must not transfer capacity. Retry unknown or mismatched plan responses on the next request; retain caching of valid paid plan truth. Preserve anonymous access without credentials and the dedicated service credential. Exercise synthetic credentials only; no live billing operations and no prescribed helper structure.",
+      "agent_timeout_seconds": 900,
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/gateway-billing-capacity.test.js",
+            "destination_path": "evals/coding-agent/graders/gateway-billing-capacity.test.js"
+          }
+        ],
+        "command": "\"${BUN_BIN:-bun}\" test evals/coding-agent/graders/gateway-billing-capacity.test.js"
       }
     }
   ]

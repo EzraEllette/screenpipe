@@ -9,7 +9,7 @@ This is an agent eval suite, not a unit-test suite. Every case contains:
 - saved prompt, transcript, candidate patch, grader output, runtime fingerprint, and result;
 - repeated-trial reporting with success rate, `pass@k`, and `pass^k`.
 
-The current app corpus contains 44 git-mined regressions. See
+The current app corpus contains 45 git-mined regressions. See
 [DESIGN.md](./DESIGN.md) for the Anthropic guidance, source contract, and
 history-mining workflow. The companion website manifest uses this same harness.
 
@@ -158,3 +158,11 @@ and successful exits retain their previous results. This does not classify all
 PostCSS/compiler errors or prove whether the candidate caused a setup failure.
 The 27 synthetic CLI controls include both baseline/reference startup failure,
 quoted diagnostics with and without a Vitest test summary, and successful output.
+
+The ai-gateway-billing-capacity-compatibility case exercises actual gateway auth
+with synthetic Clerk and website ports and the real entitlement cache. It covers
+canonical Max/Ultra capacity, older access labels, malformed or contradictory
+plan truth, identity binding and cache admission. It does not test live billing,
+cryptographic verification, provider settlement or cross-service deployment.
+Run `bun test evals/coding-agent/calibrate-billing-capacity.test.js` to check
+correct, broken, equivalent and bypass implementations of the grader contract.
