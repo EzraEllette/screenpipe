@@ -8,11 +8,11 @@ confidence, and criticality.
 - Manifest: `docs/coverage/core-engine-map.json`
 - Tracked crates: screenpipe-engine, screenpipe-db, screenpipe-sqlite-coordinator, screenpipe-audio, screenpipe-screen, screenpipe-a11y, screenpipe-fs
 - Mapped suites: 34
-- Mapped Rust files: 362
-- Active test blocks: 3556
-- Ignored/manual test blocks: 149
-- Declared test blocks: 3705
-- Weighted coverage points: 2940.3
+- Mapped Rust files: 363
+- Active test blocks: 3559
+- Ignored/manual test blocks: 150
+- Declared test blocks: 3709
+- Weighted coverage points: 2943.3
 
 Confidence weights: strong=1.0, partial=0.7, conditional=0.4, smoke=0.3.
 Criticality weights: high=1.0, medium=0.7, low=0.4.
@@ -23,9 +23,9 @@ are explicitly enabled in a runtime lane.
 
 | Platform | Suites | Active tests | Ignored tests | Weighted points | Layers | Flows | Critical score |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| windows | 31 | 3413 | 143 | 2875.2 | 21 | 11 | 100% |
-| macos | 31 | 3475 | 123 | 2889.2 | 22 | 11 | 100% |
-| linux | 27 | 3035 | 115 | 2526.5 | 20 | 11 | 100% |
+| windows | 31 | 3416 | 144 | 2878.2 | 21 | 11 | 100% |
+| macos | 31 | 3478 | 124 | 2892.2 | 22 | 11 | 100% |
+| linux | 27 | 3038 | 116 | 2529.5 | 20 | 11 | 100% |
 
 ## Crate Summary
 
@@ -73,7 +73,7 @@ bun run coverage:core -- --llvm-cov-summary ../../docs/coverage/core-llvm-cov-su
 | meeting | 6 suites / 1636 active / 21 ignored / 1336.9 pts | 6 suites / 1636 active / 21 ignored / 1336.9 pts | 4 suites / 1291 active / 17 ignored / 1014.4 pts |
 | ocr | 4 suites / 125 active / 7 ignored / 119.0 pts | 4 suites / 129 active / 7 ignored / 124.5 pts | 3 suites / 120 active / 6 ignored / 115.5 pts |
 | os-integration | 1 suites / 6 active / 0 ignored / 1.7 pts | 1 suites / 6 active / 0 ignored / 1.7 pts | - |
-| performance | 13 suites / 1567 active / 75 ignored / 1386.6 pts | 14 suites / 1674 active / 79 ignored / 1429.4 pts | 13 suites / 1567 active / 75 ignored / 1386.6 pts |
+| performance | 13 suites / 1570 active / 76 ignored / 1389.6 pts | 14 suites / 1677 active / 80 ignored / 1432.4 pts | 13 suites / 1570 active / 76 ignored / 1389.6 pts |
 | pipes | 1 suites / 511 active / 3 ignored / 357.7 pts | 1 suites / 511 active / 3 ignored / 357.7 pts | 1 suites / 511 active / 3 ignored / 357.7 pts |
 | privacy | 5 suites / 942 active / 37 ignored / 763.8 pts | 5 suites / 1000 active / 17 ignored / 772.3 pts | 5 suites / 920 active / 14 ignored / 742.7 pts |
 | real-app | - | 1 suites / 107 active / 4 ignored / 42.8 pts | - |
