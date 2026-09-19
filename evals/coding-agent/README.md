@@ -51,7 +51,8 @@ the success denominator. They are never silently converted into model failures.
 Grader timeouts and terminating signals cannot establish a failing baseline:
 `--verify` requires a behavioral `fail` followed by an oracle `pass`.
 Known command-unavailable exits (126/127), Bun unhandled test-load errors, and
-Node missing-module/syntax diagnostics are also reported as `error`, with a
+Node missing-module/syntax diagnostics and Vitest URL-load collection failures
+with zero tests are also reported as `error`, with a
 `grader_error_kind` in the result. A missing import followed by an oracle pass
 therefore cannot certify a regression. Plain failed assertions and successful
 commands containing diagnostic words retain their previous outcomes.
@@ -64,8 +65,9 @@ change, caused it. Report error counts and inspect candidate-caused errors befor
 comparing model success rates. No isolation or model-quality claim follows.
 
 Run the synthetic runner controls with `bun test ./evals/coding-agent/run.test.ts`.
-Seventeen end-to-end controls cover baseline/reference timeouts and signals,
-missing ESM/CommonJS modules, Node/Bun syntax and Bun import errors, unavailable
+Nineteen end-to-end controls cover baseline/reference timeouts and signals,
+missing ESM/CommonJS modules, Node/Bun syntax and Bun import errors, Vitest
+collection failures and quoted diagnostics followed by real assertions, unavailable
 or non-executable commands, genuine failures, assertions quoting diagnostic words or complete diagnostic blocks,
 already-passing baselines and exclusion of known setup/process errors from scores.
 The controls use temporary local Git fixtures and invoke no model or provider.

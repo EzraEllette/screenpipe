@@ -34,6 +34,8 @@ test("process and setup failures cannot prove a regression or count as scored fa
       { id: "reference-timeout", baseline: "pass", oracle: "error", valid: false },
       { id: "baseline-signal", baseline: "error", oracle: "pass", valid: false },
       { id: "reference-signal", baseline: "pass", oracle: "error", valid: false },
+      { id: "baseline-vitest-load", baseline: "error", oracle: "pass", valid: false },
+      { id: "vitest-assertion-with-quoted-load-error", baseline: "fail", oracle: "pass", valid: true },
       { id: "baseline-missing-module", baseline: "error", oracle: "pass", valid: false },
       { id: "reference-missing-module", baseline: "pass", oracle: "error", valid: false },
       { id: "baseline-syntax", baseline: "error", oracle: "pass", valid: false },
@@ -55,7 +57,15 @@ const id = process.env.SCREENPIPE_EVAL_CASE_ID;
 const affected = id.startsWith("baseline-") ? broken : !broken;
 if (id.endsWith("-timeout") && affected) setInterval(() => {}, 1000);
 else if (id.endsWith("-signal") && affected) process.kill(process.pid, "SIGTERM");
-else if (id.endsWith("-missing-module") && affected) await import("./absent-synthetic-module.mjs");
+else if (id === "baseline-vitest-load" && affected) {
+  process.stdout.write("\\n RUN v2.1.9 /synthetic\\n Test Files  1 failed (1)\\n      Tests  no tests\\n");
+  process.stderr.write("Failed Suites 1\\nError: Failed to load url ./missing-fixture (resolved id: ./missing-fixture). Does the file exist?\\n");
+  process.exit(1);
+} else if (id === "vitest-assertion-with-quoted-load-error" && broken) {
+  process.stdout.write("Test Files  1 failed (1)\\nTests no tests\\nTest Files  1 failed (1)\\nTests 1 failed (1)\\n");
+  process.stderr.write("Failed Suites 1\\nError: Failed to load url ./quoted-fixture\\nAssertionError: actual did not equal expected\\n");
+  process.exit(1);
+} else if (id.endsWith("-missing-module") && affected) await import("./absent-synthetic-module.mjs");
 else if (id === "baseline-syntax" && affected) {
   writeFileSync("invalid.mjs", "export const value = ;");
   await import("./invalid.mjs");
