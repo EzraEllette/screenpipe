@@ -712,12 +712,13 @@ fn meeting_summary_evidence_steps() -> Option<&'static str> {
 /// the shipped pipeline prompts from #7020, #7045, #7071, #7095 and the handoff repairs.
 fn migrate_staged_workflow_prompt(name: &str, original: &str) -> Option<String> {
     let shipped_hashes: &[&str] = match name {
-        "workflow-discovery" => &["9e7b057416c5e119", "57b754f5d27ad27d"],
+        "workflow-discovery" => &["9e7b057416c5e119", "57b754f5d27ad27d", "3cb46a10a341de9b"],
         "workflow-activity" => &[
             "f5adb347d838aff7",
             "f4afd94ec5e0270a",
             "5c54891aced4f9d2",
             "d4f98410d29b8f0c",
+            "54efbeee72f32fb7",
         ],
         "workflow-patterns" => &["a31c48cdb79f4b6d", "f9b67dd914738d05", "09e892b7e53bc79b"],
         "workflow-procedures" => &["5d59624801ae318f", "e0337eafa55e446a", "20950f99d0200c6a"],
@@ -870,6 +871,9 @@ mod tests {
     #[test]
     fn all_staged_workflow_prompts_upgrade_without_changing_user_configuration() {
         let fixtures = [
+            ("workflow-activity", include_str!("../../assets/pipes/legacy-workflow-prompts/before-shared-runtime-workflow-activity.md")),
+            ("workflow-discovery", include_str!("../../assets/pipes/legacy-workflow-prompts/before-resolved-exclusions-workflow-discovery.md")),
+            ("workflow-activity", include_str!("../../assets/pipes/legacy-workflow-prompts/before-bounded-activity-workflow-activity.md")),
             ("workflow-activity", include_str!("../../assets/pipes/legacy-workflow-prompts/before-context-api-workflow-activity.md")),
             ("workflow-discovery", include_str!("../../assets/pipes/legacy-workflow-prompts/before-bounded-review-workflow-discovery.md")),
             ("workflow-timing", include_str!("../../assets/pipes/legacy-workflow-prompts/before-bounded-review-workflow-timing.md")),
