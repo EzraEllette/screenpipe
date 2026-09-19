@@ -125,7 +125,11 @@ fn e2e_force_focus_cold(monitor_id: u32) -> bool {
 fn e2e_warm_pause_profile(monitor: Arc<SafeMonitor>) -> Option<watch::Receiver<PowerProfile>> {
     let enabled = std::env::var("SCREENPIPE_E2E_SEED")
         .ok()
-        .is_some_and(|seeds| seeds.split(',').any(|seed| seed.trim() == "focus-warm-pause"));
+        .is_some_and(|seeds| {
+            seeds
+                .split(',')
+                .any(|seed| seed.trim() == "focus-warm-pause")
+        });
     if !enabled {
         return None;
     }
@@ -133,8 +137,8 @@ fn e2e_warm_pause_profile(monitor: Arc<SafeMonitor>) -> Option<watch::Receiver<P
     let (tx, rx) = watch::channel(PowerProfile::performance());
     tokio::spawn(async move {
         use std::io::Write;
-        let path = std::path::Path::new(&dir)
-            .join(format!("e2e-warm-pause-{}.jsonl", monitor.id()));
+        let path =
+            std::path::Path::new(&dir).join(format!("e2e-warm-pause-{}.jsonl", monitor.id()));
         let Ok(mut receipt) = std::fs::File::create(path) else {
             return;
         };
@@ -151,11 +155,15 @@ fn e2e_warm_pause_profile(monitor: Arc<SafeMonitor>) -> Option<watch::Receiver<P
                 info!("e2e: focus-warm-pause resuming capture");
                 let _ = tx.send(PowerProfile::performance());
             }
-            let _ = writeln!(receipt, "{}", serde_json::json!({
-                "second": second,
-                "phase": phase,
-                "stream_sequence": monitor.last_capture_seq(),
-            }));
+            let _ = writeln!(
+                receipt,
+                "{}",
+                serde_json::json!({
+                    "second": second,
+                    "phase": phase,
+                    "stream_sequence": monitor.last_capture_seq(),
+                })
+            );
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
     });
@@ -1309,6 +1317,63 @@ pub(crate) async fn event_driven_capture_loop(
         #[cfg(debug_assertions)]
         e2e_park_capture_loop_once(&vision_metrics, monitor_id).await;
 
+        // Pause before focus gating: Warm probes can reopen an OS stream even
+        // when they skip normal capture. Lock, power, DRM, and schedule pauses
+        // must stop both the reader and WindowServer / replayd frame production.
+        record_loop_stage(
+            &vision_metrics,
+            &monitor_liveness,
+            screenpipe_screen::CaptureLoopStage::PauseGate,
+        );
+        let in_pause_state = crate::sleep_monitor::screen_is_locked()
+            || power_profile_rx
+                .as_ref()
+                .map(|rx| rx.borrow().capture_paused)
+                .unwrap_or(false)
+            || crate::drm_detector::drm_content_paused()
+            || crate::schedule_monitor::schedule_paused();
+
+        if in_pause_state {
+            if should_release_on_pause_entry(was_in_pause_state, in_pause_state) {
+                info!(
+                    "monitor {}: entering pause state (locked={}, power_paused={}, drm={}, schedule={}); releasing capture stream before focus probes",
+                    monitor_id,
+                    crate::sleep_monitor::screen_is_locked(),
+                    power_profile_rx
+                        .as_ref()
+                        .map(|rx| rx.borrow().capture_paused)
+                        .unwrap_or(false),
+                    crate::drm_detector::drm_content_paused(),
+                    crate::schedule_monitor::schedule_paused(),
+                );
+                monitor.release_capture_stream();
+            }
+            was_in_pause_state = true;
+            // Drain triggers that piled up while paused so the linker
+            // doesn't hold their corr_ids for the full 60s TTL. The
+            // recorder keeps emitting events through every pause state
+            // (a11y observer is independent of capture), so without this
+            // drain a multi-minute pause overflows the broadcast buffer
+            // and the dropped ids show up as misleading "stale entries"
+            // WARNs later.
+            let drained = drain_pending_corr_ids(&mut trigger_rx);
+            if !drained.is_empty() {
+                report_triggers_dropped(
+                    linker_tx.as_ref(),
+                    drained,
+                    crate::frame_linker::DropReason::Paused,
+                );
+            }
+            tokio::time::sleep(poll_interval).await;
+            continue;
+        } else if was_in_pause_state {
+            info!(
+                "monitor {}: exiting pause state, capture resumes",
+                monitor_id
+            );
+            was_in_pause_state = false;
+        }
+
         // Focus-aware gating — always on. Skips or pauses capture on
         // non-focused monitors. If focus resolution fails on this platform
         // (Linux Wayland, permission denied, etc.) the controller's
@@ -1467,67 +1532,6 @@ pub(crate) async fn event_driven_capture_loop(
                     continue;
                 }
             }
-        }
-
-        // Unified pause-state gate: when the screen is locked, the power
-        // profile says FullPause, DRM is on screen, or we're outside the
-        // user's capture schedule, we both skip downstream work AND release
-        // the OS-level capture handle. Otherwise WindowServer / replayd keep
-        // composing + delivering frames at the stream's frame interval into a
-        // sleeping reader for the entire pause window — the exact cost the
-        // user expected `capture_paused` to eliminate.
-        record_loop_stage(
-            &vision_metrics,
-            &monitor_liveness,
-            screenpipe_screen::CaptureLoopStage::PauseGate,
-        );
-        let in_pause_state = crate::sleep_monitor::screen_is_locked()
-            || power_profile_rx
-                .as_ref()
-                .map(|rx| rx.borrow().capture_paused)
-                .unwrap_or(false)
-            || crate::drm_detector::drm_content_paused()
-            || crate::schedule_monitor::schedule_paused();
-
-        if in_pause_state {
-            if should_release_on_pause_entry(was_in_pause_state, in_pause_state) {
-                info!(
-                    "monitor {}: entering pause state (locked={}, power_paused={}, drm={}, schedule={}); releasing capture stream",
-                    monitor_id,
-                    crate::sleep_monitor::screen_is_locked(),
-                    power_profile_rx
-                        .as_ref()
-                        .map(|rx| rx.borrow().capture_paused)
-                        .unwrap_or(false),
-                    crate::drm_detector::drm_content_paused(),
-                    crate::schedule_monitor::schedule_paused(),
-                );
-                monitor.release_capture_stream();
-            }
-            was_in_pause_state = true;
-            // Drain triggers that piled up while paused so the linker
-            // doesn't hold their corr_ids for the full 60s TTL. The
-            // recorder keeps emitting events through every pause state
-            // (a11y observer is independent of capture), so without this
-            // drain a multi-minute pause overflows the broadcast buffer
-            // and the dropped ids show up as misleading "stale entries"
-            // WARNs later.
-            let drained = drain_pending_corr_ids(&mut trigger_rx);
-            if !drained.is_empty() {
-                report_triggers_dropped(
-                    linker_tx.as_ref(),
-                    drained,
-                    crate::frame_linker::DropReason::Paused,
-                );
-            }
-            tokio::time::sleep(poll_interval).await;
-            continue;
-        } else if was_in_pause_state {
-            info!(
-                "monitor {}: exiting pause state, capture resumes",
-                monitor_id
-            );
-            was_in_pause_state = false;
         }
 
         // After unlock or wake, invalidate persistent SCStream handles so
