@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "suite": "screenpipe-app-coding-agent-regressions",
-  "dataset_version": "2026-09-19.6",
+  "dataset_version": "2026-09-19.7",
   "suite_type": "regression",
   "owner": "screenpipe engineering",
   "policy": {
@@ -1582,6 +1582,47 @@
           }
         ],
         "command": "cd apps/screenpipe-app-tauri && \"${BUN_BIN:-bun}\" test ../../evals/coding-agent/graders/preset-save-recovery.test.js"
+      }
+    },
+    {
+      "id": "app-onboarding-fresh-assignment-login",
+      "name": "Resolve absent fresh flags and retain login completion across assignment",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "b2a2b1a8c33cdba993c81d063065b86856f94acb",
+        "pull_request": "https://github.com/screenpipe/screenpipe/pull/6921"
+      },
+      "base_ref": "590f6e55f57e161d7e66e550bd39bb9e86384481",
+      "oracle_ref": "b2a2b1a8c33cdba993c81d063065b86856f94acb",
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/app/onboarding/page.tsx",
+        "apps/screenpipe-app-tauri/components/onboarding/login-gate.tsx"
+      ],
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "onboarding",
+        "auth",
+        "trial",
+        "recovery"
+      ],
+      "prompt": "A fresh desktop login can lose its completion event when experiment assignment temporarily replaces the login screen, and a successful fresh flag response that omits the disabled experiment leaves setup waiting until timeout. Resolve an absent flag from the final authenticated identity immediately to the persisted control route without reporting assignment failure. Record onboarding_login_completed exactly once for a real signed-out to signed-in transition, both with and without assignment, even if the login screen unmounts; settings hydration, an already-authenticated resume, repeated callbacks, and advancing without a new auth transition must not count as another login. Preserve final-identity freshness against cached and earlier in-flight flag responses, explicit loading-error fallback, a pinned route after checkout navigation, and summary-first enrollment for eligible fresh installs with no plan label. Preserve the paid-account fresh-install bypass, never enroll upgraded existing installs after reset, and do not start the standard funnel for managed or resumed onboarding. Keep enrollment telemetry free of email. Exercise the real React page and login screen with synthetic provider/native ports; do not contact live services or change billing, native publication, or recording behavior. No particular internal state variable or telemetry-owner component is required.",
+      "agent_timeout_seconds": 1200,
+      "grader_dependency_links": [
+        {
+          "source_path": "apps/screenpipe-app-tauri/node_modules",
+          "destination_path": "apps/screenpipe-app-tauri/node_modules"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 120,
+        "fixtures": [
+          {
+            "source_ref": "b2a2b1a8c33cdba993c81d063065b86856f94acb",
+            "source_path": "apps/screenpipe-app-tauri/app/onboarding/page.test.tsx"
+          }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && NODE_OPTIONS=--localstorage-file=.eval-localstorage bun x vitest run --config vitest.config.ts app/onboarding/page.test.tsx -t 'continues immediately when fresh authenticated flags|records a fresh login once|does not count an authenticated settings hydration|records one fresh login without|does not expose the control checkout|falls back explicitly to control|restores the pinned route|assigns a fresh-install treatment user|uses a paid account only|never enrolls an upgraded free install|does not start the standard funnel for managed|does not start a new funnel when standard onboarding resumes|leaves login completion analytics' --maxWorkers=1 --minWorkers=1"
       }
     }
   ]

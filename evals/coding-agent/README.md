@@ -9,9 +9,30 @@ This is an agent eval suite, not a unit-test suite. Every case contains:
 - saved prompt, transcript, candidate patch, grader output, runtime fingerprint, and result;
 - repeated-trial reporting with success rate, `pass@k`, and `pass^k`.
 
-The current app corpus contains 49 git-mined regressions. See
+The current app corpus contains 50 git-mined regressions. See
 [DESIGN.md](./DESIGN.md) for the Anthropic guidance, source contract, and
 history-mining workflow. The companion website manifest uses this same harness.
+
+`app-onboarding-fresh-assignment-login` selects thirteen historical React outcome
+tests for disabled/absent experiment flags, final-identity assignment, pinned
+routes, fresh-login completion across login-screen unmounts, hydration/resume
+exclusion and preserved treatment/control eligibility. The actual page and, for
+the login-transition cases, real login gate run against synthetic settings,
+managed-policy, analytics and native-command ports. Other slides are test doubles.
+The parent fails two intended outcomes and preserves eleven; the reference and
+the matching thirteen tests in current product source pass. Unselected product
+tests are explicitly skipped, not counted as verified outcomes.
+
+Run `bun test evals/coding-agent/calibrate-onboarding-assignment.test.js` with the
+desktop's JavaScript test dependencies installed. Controls reject an unused
+correct page, stale callback acceptance, duplicate or lost completion, hydration
+miscounting, blanket control assignment and false error telemetry, while accepting
+equivalent state naming and distinguishing missing-source setup errors. Only the
+page and login gate are applied by the historical oracle. Dependencies are linked
+only when grading begins; this does not establish execution isolation. No live
+login, PostHog delivery, checkout, recorder or native build is exercised, and no
+model trial is implied. Newer workflow/auth-restore behavior remains outside the
+historical case.
 
 The MCP config symlink case grades Settings-side IO with synthetic files and
 real links on a symlink-capable host. Its platform path-resolution port is
