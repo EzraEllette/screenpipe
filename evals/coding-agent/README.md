@@ -9,7 +9,7 @@ This is an agent eval suite, not a unit-test suite. Every case contains:
 - saved prompt, transcript, candidate patch, grader output, runtime fingerprint, and result;
 - repeated-trial reporting with success rate, `pass@k`, and `pass^k`.
 
-The current app corpus contains 47 git-mined regressions. See
+The current app corpus contains 48 git-mined regressions. See
 [DESIGN.md](./DESIGN.md) for the Anthropic guidance, source contract, and
 history-mining workflow. The companion website manifest uses this same harness.
 
@@ -244,3 +244,18 @@ blanket denial, skipped installation/removal and missing-source controls.
 This standalone adapter requires macOS; it does not call Keychain or a provider.
 It does not verify the native credential-free status cache, browser-cookie
 consent, Windows DPAPI, UI interaction or enforced agent isolation.
+
+
+`app-private-reasoning-budget` executes the actual Private GLM request adapter
+and protocol normalizer with a synthetic verified-client port. Twenty-two
+outcomes cover effort translation, bounded reasoning, reserved answer/tool
+output, output-limit precedence, body-override refusal and preserved auth, cache
+rotation, request destination, cancellation and verification-failure boundaries.
+Only the transport file from the historical fix is applied as the oracle.
+
+Run `bun test evals/coding-agent/calibrate-private-reasoning.test.js` for
+parent/reference, equivalent local naming, missing output reserve, blanket
+budget changes, verification/auth-cache bypass, no-op and missing-source
+controls. No dependencies, actual encryption, attestation, model calls, native
+app or provider access are exercised; this is request construction, not proof
+of sampler enforcement, response quality or agent isolation.

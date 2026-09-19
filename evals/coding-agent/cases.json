@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "suite": "screenpipe-app-coding-agent-regressions",
-  "dataset_version": "2026-09-19.4",
+  "dataset_version": "2026-09-19.5",
   "suite_type": "regression",
   "owner": "screenpipe engineering",
   "policy": {
@@ -1515,6 +1515,38 @@
           }
         ],
         "command": "\"${BUN_BIN:-bun}\" test evals/coding-agent/graders/grok-installer-consent.test.js"
+      }
+    },
+    {
+      "id": "app-private-reasoning-budget",
+      "name": "Bound Private model reasoning while reserving answer and tool output",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "6666ed74c051bb536d255fb4520702ae520f9c3d"
+      },
+      "base_ref": "5e6d3712c4034c67e600a184dcde5b6e19e16ec2",
+      "oracle_ref": "6666ed74c051bb536d255fb4520702ae520f9c3d",
+      "oracle_paths": [
+        "crates/screenpipe-core/assets/extensions/lib/tinfoil-transport.ts"
+      ],
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "private-ai",
+        "transport",
+        "resource-bounds"
+      ],
+      "prompt": "Private requests can consume their generation allowance on reasoning or lose the reasoning delimiter. Fix the real GLM request transport to enable the delimiter and translate ordinary reasoning settings into supported low/high/max values: high maps to high, xhigh/max map to max, all other values map to low. Bound reasoning per response at 512/2048/4096 tokens for low/high/max, while reserving 1024 tokens for answer or tool output and never producing a negative budget. Use max_completion_tokens before max_tokens and an 8192 default when neither is supplied; preserve supplied output limits. Body-supplied template or reasoning-budget overrides must not evade this policy. Preserve the existing verified-client boundary: verify before sending, no plaintext fallback, only the configured HTTPS endpoint/model/POST, propagate cancellation, forward the current authorization and content, refuse redirects, reuse a client for unchanged credentials and isolate its cache after credential rotation. Exercise the actual adapter with a synthetic verified-client port. Actual encryption, attestation cryptography and live model output are outside this task.",
+      "agent_timeout_seconds": 1200,
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/private-reasoning-budget.test.ts",
+            "destination_path": "evals/coding-agent/graders/private-reasoning-budget.test.ts"
+          }
+        ],
+        "command": "\"${BUN_BIN:-bun}\" test evals/coding-agent/graders/private-reasoning-budget.test.ts"
       }
     }
   ]
