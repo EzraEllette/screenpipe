@@ -117,6 +117,51 @@ fn e2e_force_focus_cold(monitor_id: u32) -> bool {
     enabled
 }
 
+/// Exercise the real Warm capture path and OS stream without a second display.
+/// Only the focus and power inputs are injected; capture, release, and resume
+/// all run through the production loop. The receipt records the native stream
+/// sequence, including `None` after release, for the full-app regression.
+#[cfg(all(debug_assertions, target_os = "macos"))]
+fn e2e_warm_pause_profile(monitor: Arc<SafeMonitor>) -> Option<watch::Receiver<PowerProfile>> {
+    let enabled = std::env::var("SCREENPIPE_E2E_SEED")
+        .ok()
+        .is_some_and(|seeds| seeds.split(',').any(|seed| seed.trim() == "focus-warm-pause"));
+    if !enabled {
+        return None;
+    }
+    let dir = std::env::var("SCREENPIPE_DATA_DIR").ok()?;
+    let (tx, rx) = watch::channel(PowerProfile::performance());
+    tokio::spawn(async move {
+        use std::io::Write;
+        let path = std::path::Path::new(&dir)
+            .join(format!("e2e-warm-pause-{}.jsonl", monitor.id()));
+        let Ok(mut receipt) = std::fs::File::create(path) else {
+            return;
+        };
+        for second in 0..90 {
+            let phase = match second {
+                0..20 => "warm",
+                20..60 => "paused",
+                _ => "resumed",
+            };
+            if second == 20 {
+                info!("e2e: focus-warm-pause entering FullPause");
+                let _ = tx.send(PowerProfile::full_pause());
+            } else if second == 60 {
+                info!("e2e: focus-warm-pause resuming capture");
+                let _ = tx.send(PowerProfile::performance());
+            }
+            let _ = writeln!(receipt, "{}", serde_json::json!({
+                "second": second,
+                "phase": phase,
+                "stream_sequence": monitor.last_capture_seq(),
+            }));
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    });
+    Some(rx)
+}
+
 /// Park every initial monitor loop after the pipeline has proved it can both
 /// attempt and reach a healthy terminal outcome (persist, dedup, or an explicit
 /// corrupt-frame skip). The tasks stay cancellable so VisionManager::stop can
@@ -1236,6 +1281,14 @@ pub(crate) async fn event_driven_capture_loop(
     // pausing for battery / lock-screen / DRM reasons.
     let mut was_in_pause_state = false;
 
+    #[cfg(all(debug_assertions, target_os = "macos"))]
+    let e2e_warm_pause = if let Some(rx) = e2e_warm_pause_profile(monitor.clone()) {
+        power_profile_rx = Some(rx);
+        true
+    } else {
+        false
+    };
+
     loop {
         if stop_signal.load(Ordering::Relaxed) {
             info!("event-driven capture stopping for monitor {}", monitor_id);
@@ -1281,6 +1334,10 @@ pub(crate) async fn event_driven_capture_loop(
             #[cfg(debug_assertions)]
             if e2e_force_focus_cold(monitor_id) {
                 capture_state = CaptureState::Cold;
+            }
+            #[cfg(all(debug_assertions, target_os = "macos"))]
+            if e2e_warm_pause {
+                capture_state = CaptureState::Warm;
             }
 
             // Fires exactly once per focus-away transition, not every Cold
