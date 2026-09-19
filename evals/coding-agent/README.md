@@ -50,7 +50,8 @@ Agent-process, grader-process and harness failures are reported as `error` and e
 the success denominator. They are never silently converted into model failures.
 Grader timeouts and terminating signals cannot establish a failing baseline:
 `--verify` requires a behavioral `fail` followed by an oracle `pass`.
-Known command-unavailable exits (126/127), Bun unhandled test-load errors, and
+Known command-unavailable exits (126/127), Rust compiler failures before test execution,
+Bun unhandled test-load errors, and
 Node missing-module/syntax diagnostics and Vitest URL-load or imported-module collection failures
 with zero tests are also reported as `error`, with a
 `grader_error_kind` in the result. A missing import followed by an oracle pass
@@ -65,11 +66,12 @@ change, caused it. Report error counts and inspect candidate-caused errors befor
 comparing model success rates. No isolation or model-quality claim follows.
 
 Run the synthetic runner controls with `bun test ./evals/coding-agent/run.test.ts`.
-Twenty-seven end-to-end controls cover baseline/reference timeouts and signals,
+Thirty-five end-to-end controls cover baseline/reference timeouts and signals,
 missing ESM/CommonJS modules, Node/Bun syntax and Bun import errors, Vitest
 collection failures (including alias imports), missing PostCSS-plugin startup
-failures, quoted diagnostics followed by real assertions, unavailable
-or non-executable commands, genuine failures, assertions quoting diagnostic words or complete diagnostic blocks,
+failures, Rust/Cargo compilation failures and assertions quoting compiler output,
+quoted diagnostics followed by real assertions, unavailable or non-executable
+commands, genuine failures, assertions quoting diagnostic words or complete diagnostic blocks,
 already-passing baselines and exclusion of known setup/process errors from scores.
 The controls use temporary local Git fixtures and invoke no model or provider.
 

@@ -28,6 +28,14 @@ test("process and setup failures cannot prove a regression or count as scored fa
     git("commit", "-qam", "Synthetic reference state");
     const fix = git("rev-parse", "HEAD");
     const controls = [
+      { id: "baseline-rust-compile", baseline: "error", oracle: "pass", valid: false },
+      { id: "reference-rust-compile", baseline: "fail", oracle: "error", valid: false },
+      { id: "baseline-cargo-compile", baseline: "error", oracle: "pass", valid: false },
+      { id: "rust-assertion-with-quoted-compile", baseline: "fail", oracle: "pass", valid: true },
+      { id: "node-assertion-with-quoted-compile", baseline: "fail", oracle: "pass", valid: true },
+      { id: "rust-panic-with-quoted-compile", baseline: "fail", oracle: "pass", valid: true },
+      { id: "baseline-rust-passed-before-compile", baseline: "error", oracle: "pass", valid: false },
+      { id: "both-pass-compile-diagnostic", baseline: "pass", oracle: "pass", valid: false },
       { id: "baseline-timeout", baseline: "error", oracle: "pass", valid: false },
       { id: "intended-failure", baseline: "fail", oracle: "pass", valid: true },
       { id: "both-pass", baseline: "pass", oracle: "pass", valid: false },
@@ -63,7 +71,20 @@ import assert from "node:assert/strict";
 const broken = readFileSync("state.txt", "utf8") === "broken";
 const id = process.env.SCREENPIPE_EVAL_CASE_ID;
 const affected = id.startsWith("baseline-") ? broken : !broken;
-if (id.endsWith("-timeout") && affected) setInterval(() => {}, 1000);
+if ((id.endsWith("-rust-compile") && affected) || ((id === "baseline-cargo-compile" || id === "baseline-rust-passed-before-compile") && broken) ||
+    ((id === "rust-assertion-with-quoted-compile" || id === "node-assertion-with-quoted-compile" || id === "rust-panic-with-quoted-compile") && broken) || id === "both-pass-compile-diagnostic") {
+  process.stderr.write("error[E0425]: cannot find value synthetic_fixture in this scope\\n");
+  process.stderr.write(id === "baseline-cargo-compile" ? "error: could not compile \`synthetic-fixture\` (lib test) due to 1 previous error\\n" : "error: aborting due to 1 previous error\\n");
+  if (id === "rust-assertion-with-quoted-compile") {
+    process.stdout.write("running 1 test\\ntest synthetic ... FAILED\\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\\n");
+    process.stderr.write("thread 'synthetic' panicked at main.rs:2: assertion failed\\n");
+  }
+  if (id === "baseline-rust-passed-before-compile") process.stdout.write("test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\\n");
+  if (id === "rust-panic-with-quoted-compile") process.stderr.write("thread 'synthetic' panicked at main.rs:2: assertion failed\\n");
+  if (id === "node-assertion-with-quoted-compile") assert.fail("synthetic behavior assertion after quoted compiler text");
+  process.exit(id === "both-pass-compile-diagnostic" ? 0 : 1);
+}
+else if (id.endsWith("-timeout") && affected) setInterval(() => {}, 1000);
 else if (id.endsWith("-signal") && affected) process.kill(process.pid, "SIGTERM");
 else if ((id.endsWith("vitest-postcss") && affected) || ((id === "vitest-assertion-with-quoted-postcss" || id === "node-assertion-with-quoted-postcss") && broken) || id === "both-pass-postcss-diagnostic") {
   process.stdout.write(" RUN v2.1.9 /synthetic\\n");
@@ -112,7 +133,7 @@ else if (id === "baseline-syntax" && affected) {
   assert.fail("\\nError [ERR_MODULE_NOT_FOUND]: quoted diagnostic\\nSyntaxError: quoted diagnostic\\n    at quotedFixture");
 } else if (id === "both-pass-diagnostic-words") {
   console.error("Cannot find module; SyntaxError; command not found are fixture words");
-} else if ((id === "reference-vitest-alias" || id === "reference-vitest-postcss") && broken) assert.fail("synthetic broken behavior");
+} else if ((id === "reference-vitest-alias" || id === "reference-vitest-postcss" || id === "reference-rust-compile") && broken) assert.fail("synthetic broken behavior");
 else process.exit(id === "intended-failure" && broken ? 1 : 0);
 `);
     const manifest = join(repo, "cases.json");
@@ -151,7 +172,7 @@ else process.exit(id === "intended-failure" && broken ? 1 : 0);
         if (control.id.endsWith("timeout")) expect(errored.grader_error).toContain("ETIMEDOUT");
       }
     }
-    const scored = invoke("scoring", "--mode", "baseline", "--case", "baseline-signal,baseline-missing-module");
+    const scored = invoke("scoring", "--mode", "baseline", "--case", "baseline-signal,baseline-missing-module,baseline-rust-compile");
     expect(scored.error).toBeUndefined();
     expect(scored.status).toBe(0);
     const summary = JSON.parse(readFileSync(join(repo, "scoring/summary.json"), "utf8"));

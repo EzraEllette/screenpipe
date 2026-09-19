@@ -28,6 +28,18 @@ export function classifyGraderError(grader) {
       /Loading PostCSS Plugin failed: Cannot find module ['"][^\n]+['"]/.test(stderr) &&
       /[/\\]postcss\.config\.[cm]?[jt]s/.test(stderr) &&
       !/^AssertionError(?: \[[^\]]+\])?:/m.test(stderr)) return "vitest_postcss_setup_error";
+  // Rust compilation ends before its test executable can run. Require both
+  // a compiler diagnostic and a terminating compiler summary, and preserve
+  // executed test/panic/assertion outcomes even if they quote those lines.
+  const rustTestsFailed = /^test result: FAILED\. \d+ passed; [1-9]\d* failed;/m.test(stdout);
+  const assertionHeader = /^AssertionError(?: \[[^\]]+\])?:/m.test(stderr) ||
+    /^thread ['"][^\n]+['"] panicked at /m.test(stderr);
+  if (!rustTestsFailed && !assertionHeader &&
+      /^error(?:\[E\d{4}\])?: (?!aborting due to |could not compile )/m.test(stderr) &&
+      (/^error: aborting due to \d+ previous errors?\s*$/m.test(stderr) ||
+       /^error: could not compile [`'"][^\n]+[`'"](?: \([^\n]*\))? due to \d+ previous errors?/m.test(stderr))) {
+    return "rust_compile_error";
+  }
   // Only the first thrown-error header classifies a Node failure. Assertion
   // messages may quote complete setup diagnostics on later lines.
   const header = stderr.match(/^([A-Za-z]*Error)(?: \[([A-Z_0-9]+)\])?:[^\n]*/m);
