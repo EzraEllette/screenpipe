@@ -548,3 +548,19 @@ legacy/stable identity resets; this adds no-write, ordinary-reset, compatibility
 and later-identity checks. React lifecycle is stubbed; reloads are explicit.
 This does not prove native identity generation, actual disk durability, record
 collision prevention, model performance or enforced trial isolation.
+
+## Storage migration rollout review
+
+Use [the migration rollout review](MIGRATION-ROLLOUT-REVIEW.md) when evaluating
+storage-format changes or managed background migrations. The source-inspected
+case distinguishes ordinary user opt-in from the native hidden-UI automatic
+path introduced in #7023. A historical fix that intentionally enables broader
+migration is not automatically a safe product contract for a new eval.
+
+Run `bun test evals/coding-agent/migration-rollout-review.test.js`. Sixteen
+review scenarios cover separate migration authority, native cohort/stop controls,
+managed policy changes, recording/pause preservation, disk/history/storage
+boundaries, retries, recovery, retention and data-compatible rollback. The
+28 passing controls calibrate a structured review grader; they are not native
+migration tests or model trials. Existing coding manifests and the shared runner
+are unchanged. The current native rollout-policy gap is recorded, not repaired.
