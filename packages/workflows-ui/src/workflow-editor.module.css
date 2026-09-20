@@ -70,8 +70,6 @@
   color: var(--muted);
 }
 .toolbar {
-  position: relative;
-  z-index: 3;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -96,11 +94,6 @@
 .toolbar span {
   color: var(--muted);
   font-size: 12px;
-}
-.toolbar .save {
-  padding: 7px 12px;
-  background: var(--ink);
-  color: var(--panel);
 }
 .intro {
   margin: 0 0 18px;
@@ -233,7 +226,7 @@
   }
 }
 @container workflow-editor (max-width: 560px) {
-  .toolbar { top: -16px; gap: 8px; }
+  .toolbar { gap: 8px; }
   .toolbar > div:first-child { flex-direction: column; align-items: flex-start; gap: 3px; }
   .toolbar span { font-size: 11px; }
   .intro .title { font-size: 25px; }

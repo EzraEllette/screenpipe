@@ -135,6 +135,7 @@ require("node:fs").mkdirSync(out, { recursive: true });
     await page.screenshot({ path: out + "/inline-workflow.png" });
     for (const width of [1050, 720, 390]) {
       await page.setViewportSize({ width, height: 1000 });
+      if (width < 680) await button("Collapse left sidebar").click();
       await check(`fields and controls fit at ${width}px`, async () => {
         await page.waitForTimeout(100);
         const bad = await page.locator("main textarea, main button").evaluateAll(es => es.filter(e => e.getBoundingClientRect().width && (e.getBoundingClientRect().right > innerWidth + 1 || (e.tagName === "TEXTAREA" && e.scrollHeight > e.clientHeight + 3))).map(e => e.getAttribute("aria-label") || e.textContent));
