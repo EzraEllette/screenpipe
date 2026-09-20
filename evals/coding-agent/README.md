@@ -9,7 +9,7 @@ This is an agent eval suite, not a unit-test suite. Every case contains:
 - saved prompt, transcript, candidate patch, grader output, runtime fingerprint, and result;
 - repeated-trial reporting with success rate, `pass@k`, and `pass^k`.
 
-The current app corpus contains 51 git-mined regressions. See
+The current app corpus contains 52 git-mined regressions. See
 [DESIGN.md](./DESIGN.md) for the Anthropic guidance, source contract, and
 history-mining workflow. The companion website manifest uses this same harness.
 
@@ -310,3 +310,27 @@ streaming, boundary, identity-loss and preserved-client controls. A different
 valid head/tail allocation is accepted. The SDK transport and telemetry are
 synthetic; there is no live inference, token-budget sufficiency, encrypted
 transport, gateway authentication, native persistence, model or isolation claim.
+
+
+## GLM response-to-tool conversion
+
+`ai-gateway-glm-tool-call-boundary` exercises actual GLM completion and streaming
+providers with synthetic SDK responses. Forty-two outcomes cover known XML/JSON
+calls, typed arguments, multiple unique IDs, fragmented streams, ordinary text,
+unknown names, malformed arguments, absent tools, existing native calls and
+other OpenAI providers. The broken parent fails fifteen conversions and preserves
+twenty-seven neighbors; the reference and current selected source pass all
+forty-two outcomes (374 assertions).
+
+Run `bun test evals/coding-agent/calibrate-glm-tool-calls.test.js` for fourteen
+controls. These reject unused correct providers, completion/streaming bypasses,
+unknown-name conversion, duplicate IDs, lost argument types, missing converted
+finish reasons and blanket refusal. Equivalent parser naming and additional
+valid finish metadata on unconverted completions are accepted. Missing provider
+source is a setup error. No installed dependencies are required.
+
+The SDK and telemetry ports are synthetic; GLM/OpenAI provider dispatch and
+current shared protocol are real. This does not execute tools or establish live
+model behavior, full schema validation, every malformed XML form, prompt-injection
+resistance, native permission checks, encrypted transport or agent isolation.
+These are corpus and grader checks, not model trials.

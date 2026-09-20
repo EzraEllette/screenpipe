@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "suite": "screenpipe-app-coding-agent-regressions",
-  "dataset_version": "2026-09-20.1",
+  "dataset_version": "2026-09-20.2",
   "suite_type": "regression",
   "owner": "screenpipe engineering",
   "policy": {
@@ -1656,6 +1656,38 @@
           }
         ],
         "command": "\"${BUN_BIN:-bun}\" test evals/coding-agent/graders/ai-gateway-glm-tool-history.test.js"
+      }
+    },
+    {
+      "id": "ai-gateway-glm-tool-call-boundary",
+      "name": "Convert recognized GLM tool responses without treating ordinary text as actions",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "da9ca5d1be7ef669cf7edec1d5fba7b99afc6de6"
+      },
+      "base_ref": "50a503a51e0b6f6a529aa2f4751df36ba4a756a7",
+      "oracle_ref": "da9ca5d1be7ef669cf7edec1d5fba7b99afc6de6",
+      "oracle_paths": [
+        "packages/ai-gateway/src/providers/screenpipe-glm.ts"
+      ],
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "tool-calls",
+        "streaming",
+        "gateway"
+      ],
+      "prompt": "GLM returns native function-call text that Pi cannot execute. Repair the actual GLM completion and streaming provider paths so schema-known leading calls become OpenAI tool calls with nonempty distinct IDs, correct function names and argument objects, no duplicated raw call text, and a tool_calls finish reason. Support tagged XML values (string, number, boolean and object types, preserving string leading zeros and Unicode), XML containing JSON arguments, flat JSON call objects, nested function objects with JSON-string arguments, and multiple XML calls. Streaming must work across one-character and seven-character content fragments and retain a single completion terminator. Forward the caller’s declared tools and tool choice and preserve input objects. Unknown tool names, prefixed explanatory prose, malformed JSON and array/null arguments remain unchanged ordinary text; no tools means no conversion. Preserve already-native tool-call IDs/arguments and other OpenAI providers. Use synthetic provider transport, without live calls or executing tools. No particular parser/helper name or ID format is required.",
+      "agent_timeout_seconds": 1200,
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/glm-tool-call-boundary.test.js",
+            "destination_path": "evals/coding-agent/graders/glm-tool-call-boundary.test.js"
+          }
+        ],
+        "command": "\"${BUN_BIN:-bun}\" test evals/coding-agent/graders/glm-tool-call-boundary.test.js"
       }
     }
   ]
