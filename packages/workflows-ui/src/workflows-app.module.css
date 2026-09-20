@@ -16,7 +16,7 @@
   min-height: 0;
   overflow: hidden;
   display: grid;
-  grid-template-columns: 222px minmax(0, 1fr);
+  grid-template-columns: var(--navigation-width, 240px) minmax(0, 1fr);
   background: var(--paper);
   color: var(--ink);
   font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -117,7 +117,7 @@
 }
 
 @media (min-width: 960px) {
-  .app.appDocked { grid-template-columns: 176px minmax(0, 1fr) min(var(--assistant-width, 420px), calc(100vw - 536px)); }
+  .app.appDocked { grid-template-columns: var(--navigation-width, 240px) minmax(0, 1fr) min(var(--assistant-width, 420px), calc(100vw - var(--navigation-width, 240px) - 360px)); }
   .appDocked.appEmbedded { grid-template-columns: minmax(0, 1fr) var(--assistant-width, 420px); }
   .appDocked .main { padding-left: 26px; padding-right: 26px; }
   .appDocked .topbar { gap: 10px; padding-left: 18px; padding-right: 18px; }
@@ -734,7 +734,7 @@
 .profileAdvanced textarea { min-height: 105px; margin-top: 1px; }
 
 @media (max-width: 1050px) {
-  .app { grid-template-columns: 190px minmax(0,1fr); }
+  .app { grid-template-columns: var(--navigation-width, 240px) minmax(0,1fr); }
   .hero { grid-template-columns: 1fr; gap: 26px; }
   .heroProof { max-width: 330px; }
   .timeMap > button { grid-template-columns: minmax(230px,1fr) minmax(180px,.9fr) 22px; }
@@ -879,7 +879,7 @@
   .app.appDocked.navigationCollapsed { grid-template-columns: minmax(0, 1fr) min(var(--assistant-width, 420px), calc(100vw - 360px)); }
 }
 @media (max-width: 680px) {
-  .app:not(.appEmbedded) .sidebar:not([hidden]) { display: flex; position: absolute; top: 59px; left: 0; width: 222px; height: calc(100vh - 59px); box-shadow: 4px 0 12px #0000000d; }
+  .app:not(.appEmbedded) .sidebar:not([hidden]) { display: flex; position: absolute; top: 59px; left: 0; width: var(--navigation-width, 240px); height: calc(100vh - 59px); box-shadow: 4px 0 12px #0000000d; }
   .topbar { gap: 6px; }
   .topbar > .pill { display: none; }
 }
@@ -979,3 +979,7 @@
 @keyframes runSpin { to { transform: rotate(360deg); } }
 @media (max-width: 640px) { .runToggle { max-width: min(270px, calc(100vw - 140px)); } .runActivity { left: 0; right: auto; } }
 @media (prefers-reduced-motion: reduce) { .runSpinner { animation: none; } }
+
+.navigationResize { position: absolute; top: 0; bottom: 0; right: -3px; width: 6px; z-index: 20; cursor: col-resize; touch-action: none; user-select: none; outline: none; }
+.navigationResize::after { content: ""; position: absolute; top: 0; bottom: 0; left: 2px; width: 2px; background: transparent; }
+.navigationResize:hover::after, .navigationResize:focus-visible::after, .navigationResizing::after { background: var(--muted); }
