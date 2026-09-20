@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "suite": "screenpipe-app-coding-agent-regressions",
-  "dataset_version": "2026-09-20.8",
+  "dataset_version": "2026-09-20.9",
   "suite_type": "regression",
   "owner": "screenpipe engineering",
   "policy": {
@@ -1884,6 +1884,38 @@
           }
         ],
         "command": "cd packages/screenpipe-mcp && SCREENPIPE_DISABLE_TELEMETRY=1 \"${BUN_BIN:-bun}\" run test -- src/eval-db-boundary.test.ts"
+      }
+    },
+    {
+      "id": "ai-gateway-image-cache-boundary",
+      "name": "Keep image payloads free of text-only prompt cache markers",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "8696fbe7851f82f1bc1164929e860021790e928c"
+      },
+      "base_ref": "89ca135f648990b52655d5e21f3d334bb72ae3cc",
+      "oracle_ref": "8696fbe7851f82f1bc1164929e860021790e928c",
+      "oracle_paths": [
+        "packages/ai-gateway/src/providers/openai.ts"
+      ],
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "ai-gateway",
+        "media",
+        "provider-compatibility"
+      ],
+      "prompt": "Explicit GPT-5.6 prompt caching can attach text-only cache breakpoint fields to image payloads and cause provider rejection. Fix the actual OpenAI provider request path for both streaming and non-streaming calls. Keep image data, detail and order intact through existing image_url, native image and base64-image normalization; do not add cache fields to image blocks or drop images to avoid rejection. Keep an instruction breakpoint and mark the last nonempty text in eligible multipart history, including text that precedes trailing images; image-only history should stay unchanged without a history marker. Preserve the final-text boundary, disabled history caching and older models without explicit cache fields. Successful provider content must still reach the caller. Verify sent request snapshots and returned responses with a synthetic SDK; do not make real model calls. Audio/file/refusal normalization is outside this task.",
+      "agent_timeout_seconds": 1200,
+      "grader": {
+        "timeout_seconds": 90,
+        "fixtures": [
+          {
+            "local_path": "graders/openai-media-cache.test.js",
+            "destination_path": "evals/coding-agent/graders/openai-media-cache.test.js"
+          }
+        ],
+        "command": "\"${BUN_BIN:-bun}\" test evals/coding-agent/graders/openai-media-cache.test.js"
       }
     }
   ]

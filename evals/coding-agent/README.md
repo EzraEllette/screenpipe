@@ -9,7 +9,7 @@ This is an agent eval suite, not a unit-test suite. Every case contains:
 - saved prompt, transcript, candidate patch, grader output, runtime fingerprint, and result;
 - repeated-trial reporting with success rate, `pass@k`, and `pass^k`.
 
-The current app corpus contains 57 git-mined regressions. See
+The current app corpus contains 58 git-mined regressions. See
 [DESIGN.md](./DESIGN.md) for the Anthropic guidance, source contract, and
 history-mining workflow. The companion website manifest uses this same harness.
 
@@ -460,3 +460,22 @@ wording or prove model compliance, native database locking, OS-wide filesystem
 isolation, real CLI/keychain discovery, package publication or other platforms.
 The observed IO ports are synthetic, not a universal access sandbox. Product
 startup tests with supplied credentials do not exercise the missing-key fallback.
+
+## Image cache fields at the provider boundary
+
+`ai-gateway-image-cache-boundary` executes the real OpenAI provider methods
+against a synthetic SDK that snapshots each submitted request. Fourteen outcomes
+cover both streaming modes, three supported image input shapes, image-only
+history, text cache boundaries, disabled history caching and older models.
+The parent has eight intended failures and six preserved passes; the historical
+reference and selected current code pass all fourteen. Returned content is also
+checked, so suppressing provider calls cannot manufacture a pass.
+
+Run `bun test evals/coding-agent/calibrate-image-cache.test.js`. Calibration
+rejects an unused fix, either caller reintroducing image fields, dropped images
+and disabled caching, while accepting equivalent internal predicate naming.
+Missing source remains an import error. Only the provider source is the oracle.
+
+The SDK and error-reporting ports are synthetic; no model or network calls run.
+This does not prove upstream API acceptance, gateway authorization/billing,
+audio/file/refusal normalization, model quality or trial isolation.
