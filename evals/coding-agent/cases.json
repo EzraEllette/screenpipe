@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "suite": "screenpipe-app-coding-agent-regressions",
-  "dataset_version": "2026-09-20.11",
+  "dataset_version": "2026-09-20.12",
   "suite_type": "regression",
   "owner": "screenpipe engineering",
   "policy": {
@@ -1979,6 +1979,37 @@
           }
         ],
         "command": "\"${BUN_BIN:-bun}\" test crates/screenpipe-core/assets/extensions/workflow-workspace.eval.test.ts"
+      }
+    },
+    {
+      "id": "app-continued-pipe-recording-directory",
+      "name": "Keep continued Pipe chats with their active recording directory",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "a6a611a159f6d8704acc6ad00d21a6b87db42a95"
+      },
+      "base_ref": "d300cfd9c355ab3568bffe802a5132bc40211615",
+      "oracle_ref": "a6a611a159f6d8704acc6ad00d21a6b87db42a95",
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/lib/chat/pi-project-dir.ts"
+      ],
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "workflow",
+        "compatibility"
+      ],
+      "prompt": "Continued Pipe chat follow-ups can select the account settings directory instead of the recording directory, separating their conversation from scheduled runs. Resolve continued Pipe session working directories beneath the currently active recording root, retaining drive identity, spaces and the exact valid pipe name. Read a changed root for later calls. If the native root lookup throws, returns an error or an empty value, fall back to the default home/.screenpipe/pipes directory. Preserve generic home/.screenpipe/pi-chat routing for ordinary chats, per-execution sessions, malformed IDs and unsafe pipe names (dot segments, slash/backslash, NUL or surrounding whitespace); those generic paths must not query native account or recording directories. Use the actual exported directory resolver and existing session parser with synthetic native path/command ports. No particular helper extraction is required. No real chats, scheduler/agent dispatch, native build or filesystem operations; this grades directory selection, not native persistence or complete account-state relocation.",
+      "agent_timeout_seconds": 1200,
+      "grader": {
+        "timeout_seconds": 90,
+        "fixtures": [
+          {
+            "local_path": "graders/pipe-directory.test.ts",
+            "destination_path": "evals/coding-agent/graders/pipe-directory.test.ts"
+          }
+        ],
+        "command": "\"${BUN_BIN:-bun}\" test evals/coding-agent/graders/pipe-directory.test.ts"
       }
     }
   ]

@@ -9,7 +9,7 @@ This is an agent eval suite, not a unit-test suite. Every case contains:
 - saved prompt, transcript, candidate patch, grader output, runtime fingerprint, and result;
 - repeated-trial reporting with success rate, `pass@k`, and `pass^k`.
 
-The current app corpus contains 60 git-mined regressions. See
+The current app corpus contains 61 git-mined regressions. See
 [DESIGN.md](./DESIGN.md) for the Anthropic guidance, source contract, and
 history-mining workflow. The companion website manifest uses this same harness.
 
@@ -514,3 +514,19 @@ accepting equivalent internal naming. Missing imports remain setup failures.
 Only the extension is the historical oracle; the existing public transport
 normalizer runs unchanged. These outcomes do not prove native persistence,
 real agent repair choices, model performance or enforced process isolation.
+
+## Continued Pipe recording directories
+
+`app-continued-pipe-recording-directory` exercises the actual directory resolver
+and session parser against synthetic native path/command ports. Eighteen outcomes
+cover custom roots, later root changes, Windows-style drive paths, spaces, lookup
+fallbacks, and generic routing for ordinary, per-execution and unsafe sessions.
+The parent fails seven outcomes and preserves eleven; reference/current pass all
+eighteen. Nine calibration controls reject unused fixes, stale caches, unsafe
+routing and lost fallback, while accepting equivalent variable naming.
+
+Run `bun test evals/coding-agent/calibrate-pipe-directory.test.js`. Missing modules
+remain setup errors. Only the directory resolver is the historical oracle.
+The synthetic join uses forward slashes; it does not prove Windows-native path
+semantics, native command correctness, complete chat continuation, account-state
+relocation or durable session persistence. No model, scheduler or native build runs.
