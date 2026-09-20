@@ -334,3 +334,26 @@ current shared protocol are real. This does not execute tools or establish live
 model behavior, full schema validation, every malformed XML form, prompt-injection
 resistance, native permission checks, encrypted transport or agent isolation.
 These are corpus and grader checks, not model trials.
+
+
+## Meeting summary completion and saved-note handoff
+
+`app-meeting-summary-handoff` mounts the real NoteView, summary surface and
+Markdown renderer with the real lifecycle, stream reducer and save queue.
+Nine DOM/IO outcomes cover retained streamed text, empty/stale saved reads,
+read failure and recovery, already-saved initial state, execution identity,
+active-run preservation and unmount cleanup. The parent fails five intended
+assertions and preserves four outcomes; reference and selected current source
+pass all nine. Only the two production component files are applied as oracle.
+
+Run `bun test evals/coding-agent/calibrate-meeting-handoff.test.js` with the
+app JavaScript dependencies installed. Calibration distinguishes behavioral
+failures from missing-source setup and rejects an unused helper, stale reads,
+lost completion rendering, early refresh bookkeeping and blanket refusal.
+Equivalent helper naming remains accepted.
+
+API, native, analytics, context, chat and unrelated child UI ports are synthetic.
+The host applies real onSaved callbacks to the meeting prop and permits the
+existing autosave of that same note; this is not proof of backend persistence,
+crash recovery, real generation, native capture or filesystem isolation.
+Dependencies are exposed only during grading. No model trial is implied.

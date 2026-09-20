@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "suite": "screenpipe-app-coding-agent-regressions",
-  "dataset_version": "2026-09-20.2",
+  "dataset_version": "2026-09-20.3",
   "suite_type": "regression",
   "owner": "screenpipe engineering",
   "policy": {
@@ -1688,6 +1688,51 @@
           }
         ],
         "command": "\"${BUN_BIN:-bun}\" test evals/coding-agent/graders/glm-tool-call-boundary.test.js"
+      }
+    },
+    {
+      "id": "app-meeting-summary-handoff",
+      "name": "Keep completed meeting summaries visible until authoritative save catches up",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "fc5a65ffbfc785d3b2e2240096ef33fa71d2f5c2",
+        "pull_request": "https://github.com/screenpipe/screenpipe/pull/6846"
+      },
+      "base_ref": "d86ad74d99fe6df68232ae04fcb6b7b5b3a99c40",
+      "oracle_ref": "fc5a65ffbfc785d3b2e2240096ef33fa71d2f5c2",
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/components/meeting-notes/note-view.tsx",
+        "apps/screenpipe-app-tauri/components/meeting-notes/meeting-workspace.tsx"
+      ],
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "meetings",
+        "streaming",
+        "persistence",
+        "recovery"
+      ],
+      "prompt": "A completed meeting summary disappears while its saved note is still catching up. Repair the real note view and summary surface so the matching streamed summary remains visible when execution changes from running to ready. With either no prior summary or an older saved summary, do not report a stale completed-note read as a successful save. Continue reading until the new summary is visible, including after a temporary failed read, and deliver the refreshed note without remounting. Once that execution has been refreshed, do not repeatedly reload its saved note. Preserve an already-saved summary when opening an initially completed meeting, ignore unrelated pipe/execution streams, do not refresh the saved note while execution is still running, and stop polling and event subscriptions on unmount. Preserve legitimate note autosave callbacks and existing title/content. Verify observable UI and save-boundary outcomes using synthetic local API, native and analytics ports. No live meeting data, provider calls or native builds are needed. No particular helper name or state layout is required.",
+      "agent_timeout_seconds": 1200,
+      "grader_dependency_links": [
+        {
+          "source_path": "apps/screenpipe-app-tauri/node_modules",
+          "destination_path": "apps/screenpipe-app-tauri/node_modules"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 120,
+        "fixtures": [
+          {
+            "local_path": "graders/meeting-handoff.eval.test.tsx",
+            "destination_path": "apps/screenpipe-app-tauri/meeting-handoff.eval.test.tsx"
+          },
+          {
+            "local_path": "graders/meeting-handoff.config.ts",
+            "destination_path": "apps/screenpipe-app-tauri/meeting-handoff.config.ts"
+          }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && node node_modules/vitest/vitest.mjs run --config meeting-handoff.config.ts"
       }
     }
   ]
