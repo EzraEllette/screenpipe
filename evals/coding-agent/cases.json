@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "suite": "screenpipe-app-coding-agent-regressions",
-  "dataset_version": "2026-09-19.7",
+  "dataset_version": "2026-09-20.1",
   "suite_type": "regression",
   "owner": "screenpipe engineering",
   "policy": {
@@ -1623,6 +1623,39 @@
           }
         ],
         "command": "cd apps/screenpipe-app-tauri && NODE_OPTIONS=--localstorage-file=.eval-localstorage bun x vitest run --config vitest.config.ts app/onboarding/page.test.tsx -t 'continues immediately when fresh authenticated flags|records a fresh login once|does not count an authenticated settings hydration|records one fresh login without|does not expose the control checkout|falls back explicitly to control|restores the pinned route|assigns a fresh-install treatment user|uses a paid account only|never enrolls an upgraded free install|does not start the standard funnel for managed|does not start a new funnel when standard onboarding resumes|leaves login completion analytics' --maxWorkers=1 --minWorkers=1"
+      }
+    },
+    {
+      "id": "ai-gateway-glm-bounded-tool-history",
+      "name": "Bound compacted Pi tool history before GLM dispatch",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "7f626da4ffde0e838a022044047a2835660b263d"
+      },
+      "base_ref": "0f2423d2976e04455ac51fde2879f00bbc491cd6",
+      "oracle_ref": "7f626da4ffde0e838a022044047a2835660b263d",
+      "oracle_paths": [
+        "packages/ai-gateway/src/providers/screenpipe-glm.ts"
+      ],
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "ai-gateway",
+        "glm",
+        "context",
+        "streaming"
+      ],
+      "prompt": "Large Pi tool results still exceed the GLM context budget after the gateway compacts its skill catalog. Before both streaming and non-streaming GLM provider dispatch, bound oversized string tool results to at most 8,000 characters when the request has a system/developer available-skills catalog (including text-part arrays) or the subagent function tool. Preserve at least the first and last 128 characters, preserve tool-call/result pairing and message order, and mark the omission with guidance to reread a narrower range. Keep results at or below 8,000 characters unchanged. Preserve user and assistant prose, original input objects, normal completion/stream delivery, model routing, ordinary tools/tool-choice, existing subagent removal, and the useful minimum output allowance for compacted Pi requests. Ordinary clients and requests with catalog text only in a user message must retain their full tool results and intentional small output limits. Other OpenAI-compatible providers must retain their original context. Check the real provider methods and outgoing SDK request with synthetic external ports; no live model calls. Any head/tail allocation satisfying these outcomes is acceptable.",
+      "agent_timeout_seconds": 1200,
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/ai-gateway-glm-tool-history.test.js",
+            "destination_path": "evals/coding-agent/graders/ai-gateway-glm-tool-history.test.js"
+          }
+        ],
+        "command": "\"${BUN_BIN:-bun}\" test evals/coding-agent/graders/ai-gateway-glm-tool-history.test.js"
       }
     }
   ]

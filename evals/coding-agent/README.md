@@ -9,7 +9,7 @@ This is an agent eval suite, not a unit-test suite. Every case contains:
 - saved prompt, transcript, candidate patch, grader output, runtime fingerprint, and result;
 - repeated-trial reporting with success rate, `pass@k`, and `pass^k`.
 
-The current app corpus contains 50 git-mined regressions. See
+The current app corpus contains 51 git-mined regressions. See
 [DESIGN.md](./DESIGN.md) for the Anthropic guidance, source contract, and
 history-mining workflow. The companion website manifest uses this same harness.
 
@@ -297,3 +297,16 @@ effects. It does not prove rendered UI rollback, native filesystem durability,
 cross-process races, or recovery after the final store save fails. No installed
 packages or native build is needed. Source setup errors cannot establish the
 regression. Actual model trials and enforced trial isolation remain separate.
+
+The `ai-gateway-glm-bounded-tool-history` case observes outgoing SDK requests
+from the real GLM and OpenAI provider methods, including streaming. It checks
+Pi-triggered bounds, retained evidence and tool pairing while preserving small
+results, ordinary clients, user/assistant prose, caller inputs and other providers.
+The parent fails twelve intended outcomes and preserves fourteen; the historical
+fix and current gateway/protocol implementation pass all twenty-six.
+
+Run `bun test evals/coding-agent/calibrate-glm-tool-history.test.js` for bypass,
+streaming, boundary, identity-loss and preserved-client controls. A different
+valid head/tail allocation is accepted. The SDK transport and telemetry are
+synthetic; there is no live inference, token-budget sufficiency, encrypted
+transport, gateway authentication, native persistence, model or isolation claim.
