@@ -9,7 +9,7 @@ This is an agent eval suite, not a unit-test suite. Every case contains:
 - saved prompt, transcript, candidate patch, grader output, runtime fingerprint, and result;
 - repeated-trial reporting with success rate, `pass@k`, and `pass^k`.
 
-The current app corpus contains 59 git-mined regressions. See
+The current app corpus contains 60 git-mined regressions. See
 [DESIGN.md](./DESIGN.md) for the Anthropic guidance, source contract, and
 history-mining workflow. The companion website manifest uses this same harness.
 
@@ -496,3 +496,21 @@ predicate logic and distinguishing missing source from behavior failure.
 Only the error module is the oracle. These synthetic function outcomes do not
 prove rendered UI, actual retry dispatch, TLS recovery or provider availability.
 No network calls, model trials or native builds run.
+
+## Workflow save receipts and readable context
+
+`app-workflow-save-receipt-boundary` drives the registered workflow tool against
+a synthetic loopback recorder. Fourteen outcomes cover rejected operations,
+capability and abort boundaries, exact literal payloads, compact context indexes,
+owned draft selectors, private snapshots readable through the real transport
+normalizer, and successful save receipts that survive a failed follow-up read.
+The parent fails eleven intended outcomes and preserves three; reference and
+selected current source pass all fourteen.
+
+Run `bun test evals/coding-agent/calibrate-workflow-receipt.test.js`. Eleven
+controls reject unused fixes, swallowed errors, oversized inline context,
+world-readable snapshots, discarded remaining state and repeated writes, while
+accepting equivalent internal naming. Missing imports remain setup failures.
+Only the extension is the historical oracle; the existing public transport
+normalizer runs unchanged. These outcomes do not prove native persistence,
+real agent repair choices, model performance or enforced process isolation.

@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "suite": "screenpipe-app-coding-agent-regressions",
-  "dataset_version": "2026-09-20.10",
+  "dataset_version": "2026-09-20.11",
   "suite_type": "regression",
   "owner": "screenpipe engineering",
   "policy": {
@@ -1947,6 +1947,38 @@
           }
         ],
         "command": "\"${BUN_BIN:-bun}\" test evals/coding-agent/graders/certificate-error.test.ts"
+      }
+    },
+    {
+      "id": "app-workflow-save-receipt-boundary",
+      "name": "Preserve workflow save receipts and expose actual operation failure",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "1f8ecb0858b63e82dc324050338953e7e4b2eb17"
+      },
+      "base_ref": "52706da629809407bf151c09294b677b65a32a78",
+      "oracle_ref": "1f8ecb0858b63e82dc324050338953e7e4b2eb17",
+      "oracle_paths": [
+        "crates/screenpipe-core/assets/extensions/workflow-workspace.ts"
+      ],
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "workflow",
+        "retry-safety",
+        "context-integrity"
+      ],
+      "prompt": "The workflow_workspace extension can report failed operations as successful tool results, omit remaining work after saves and lose medium-size context through the private transport. Execute the actual registered tool. Conflicts, missing capability, aborted operations and missing draft selectors must reject; missing drafts should report exact open ids and titles owned by the current task without substituting another draft or retrying a mutation. Preserve structured literal payloads and the current task. A successful save must retain its receipt and expose freshly read remaining work/current revisions in remaining (revision, catalogRevision, cycleStatus, canFinish, openDrafts); if that follow-up read fails, return the successful receipt with remaining.unavailable true and do not repeat the save. Keep context indexes bounded, explicit selectors complete and oversized context in a private readable snapshot with exact data and revision fields, including context between the private transport limit and the old larger inline threshold. Preserve compact index behavior and full draft/catalog reads. Use synthetic loopback recorder responses and temporary files; no real recorder, workflow publication, agent dispatch, model or native build. These are extension-boundary outcomes, not backend durability or full stop/resume behavior.",
+      "agent_timeout_seconds": 1200,
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/workflow-receipt.fixture.ts",
+            "destination_path": "crates/screenpipe-core/assets/extensions/workflow-workspace.eval.test.ts"
+          }
+        ],
+        "command": "\"${BUN_BIN:-bun}\" test crates/screenpipe-core/assets/extensions/workflow-workspace.eval.test.ts"
       }
     }
   ]
