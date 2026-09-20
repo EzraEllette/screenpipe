@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "suite": "screenpipe-app-coding-agent-regressions",
-  "dataset_version": "2026-09-20.4",
+  "dataset_version": "2026-09-20.5",
   "suite_type": "regression",
   "owner": "screenpipe engineering",
   "policy": {
@@ -1769,6 +1769,45 @@
           }
         ],
         "command": "\"${BUN_BIN:-bun}\" test evals/coding-agent/graders/enterprise-allowance.test.js"
+      }
+    },
+    {
+      "id": "app-restricted-enterprise-onboarding",
+      "name": "Gate restricted enterprise identity when onboarding resolves consumer build",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "46a170f92ea371feecc5a8db139d2fc1e3cac8ba"
+      },
+      "base_ref": "e594a3c7ab8bed3e90310ff05af4c89cff32a166",
+      "oracle_ref": "46a170f92ea371feecc5a8db139d2fc1e3cac8ba",
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/components/app-entitlement-gate.tsx"
+      ],
+      "tags": [
+        "regression",
+        "onboarding",
+        "enterprise",
+        "access",
+        "identity"
+      ],
+      "gate": "advisory",
+      "prompt": "A restricted enterprise member can continue consumer onboarding after sign-in because the onboarding route bypasses the enterprise-app gate. Once build detection confirms the consumer app, hide protected onboarding content and show the enterprise-app-required state for a signed-in member whose organization requires that app and restricts consumer access, even if the member also has a paid personal subscription. Observe both live sign-in and a cached identity while detection resolves. Preserve ordinary consumer onboarding, tokenless onboarding, paid personal access when the organization does not restrict it, and accounts whose organization does not require the enterprise app. Do not misclassify an unresolved or managed enterprise build; managed onboarding keeps ownership of its authentication flow. Preserve explicit not_required startup semantics, including cached restricted identities, and do not stop recording on these permitted onboarding paths. Test the real React gate with synthetic settings/managed-policy/native/provider ports. This case covers visible gate decisions and attempted command effects, not real recorder durability or native authentication. No helper or state variable name is required.",
+      "agent_timeout_seconds": 1200,
+      "grader_dependency_links": [
+        {
+          "source_path": "apps/screenpipe-app-tauri/node_modules",
+          "destination_path": "apps/screenpipe-app-tauri/node_modules"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 120,
+        "fixtures": [
+          {
+            "local_path": "graders/restricted-onboarding.fixture.tsx",
+            "destination_path": "apps/screenpipe-app-tauri/components/restricted-onboarding.eval.test.tsx"
+          }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && NODE_OPTIONS=--localstorage-file=.eval-localstorage ./node_modules/.bin/vitest run --config vitest.config.ts components/restricted-onboarding.eval.test.tsx --maxWorkers=1 --minWorkers=1"
       }
     }
   ]

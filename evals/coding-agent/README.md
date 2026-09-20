@@ -380,3 +380,22 @@ an unrelated newer GLM provider import is replaced by an unused constant.
 This verifies connection configuration, not full route dispatch, cryptographic
 verification, website membership computation, real gateway spend enforcement,
 settlement, SDK requests, model outcomes or filesystem isolation.
+
+
+## Restricted enterprise onboarding
+
+`app-restricted-enterprise-onboarding` renders the actual React entitlement gate
+and real entitlement policy. Ten outcomes cover live sign-in, cached identity
+and build-resolution transitions, alongside ordinary/paid/tokenless consumer,
+managed-build and explicit no-auth paths. The parent fails two visibility
+assertions and preserves eight outcomes; reference and current source pass ten.
+Permitted paths also preserve absence of recorder-stop commands.
+
+Run `bun test evals/coding-agent/calibrate-restricted-onboarding.test.js` with
+existing frontend dependencies installed. Calibration rejects blanket onboarding
+access/refusal, premature build classification, lost paid-personal exceptions,
+missing token requirements and ignored restriction flags. Equivalent internal
+names pass; missing source remains setup failure. The grader is installed only
+after an evaluated trajectory. Settings, managed policy, analytics and native
+commands are synthetic. Native auth, recorder durability, persisted enterprise
+policy, live downloads and execution isolation are outside this UI evidence.
