@@ -9,7 +9,7 @@ This is an agent eval suite, not a unit-test suite. Every case contains:
 - saved prompt, transcript, candidate patch, grader output, runtime fingerprint, and result;
 - repeated-trial reporting with success rate, `pass@k`, and `pass^k`.
 
-The current app corpus contains 58 git-mined regressions. See
+The current app corpus contains 59 git-mined regressions. See
 [DESIGN.md](./DESIGN.md) for the Anthropic guidance, source contract, and
 history-mining workflow. The companion website manifest uses this same harness.
 
@@ -479,3 +479,20 @@ Missing source remains an import error. Only the provider source is the oracle.
 The SDK and error-reporting ports are synthetic; no model or network calls run.
 This does not prove upstream API acceptance, gateway authorization/billing,
 audio/file/refusal normalization, model quality or trial isolation.
+
+## Expired certificate recovery
+
+`app-expired-certificate-recovery` exercises the public provider-error message
+and presentation interfaces. Eleven outcomes cover the escaped expired-TLS
+signature across hosted, remote and local presets, case normalization, raw-error
+suppression, unknown-text fallback and preserved authentication, throttling and
+safety-refusal guidance. The parent fails five intended outcomes and preserves
+six; the historical reference and selected current code pass all eleven.
+
+Run `bun test evals/coding-agent/calibrate-certificate-error.test.js`. Nine
+controls reject an unused fix, blanket connection classification, raw copy,
+nonretryable recovery and divergent message output, while accepting equivalent
+predicate logic and distinguishing missing source from behavior failure.
+Only the error module is the oracle. These synthetic function outcomes do not
+prove rendered UI, actual retry dispatch, TLS recovery or provider availability.
+No network calls, model trials or native builds run.

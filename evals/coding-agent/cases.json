@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "suite": "screenpipe-app-coding-agent-regressions",
-  "dataset_version": "2026-09-20.9",
+  "dataset_version": "2026-09-20.10",
   "suite_type": "regression",
   "owner": "screenpipe engineering",
   "policy": {
@@ -1916,6 +1916,37 @@
           }
         ],
         "command": "\"${BUN_BIN:-bun}\" test evals/coding-agent/graders/openai-media-cache.test.js"
+      }
+    },
+    {
+      "id": "app-expired-certificate-recovery",
+      "name": "Recover from expired TLS certificates with provider-specific guidance",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "bc2d014170e9cd8b81785ddf5fab6441c23d12f4"
+      },
+      "base_ref": "791c2018eecb6ff2d602bf6d9cff3ac5232b6df8",
+      "oracle_ref": "bc2d014170e9cd8b81785ddf5fab6441c23d12f4",
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/lib/chat/provider-errors.ts"
+      ],
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "provider-recovery",
+        "preserved-behavior"
+      ],
+      "prompt": "Chat displays an unclassified raw Error: certificate has expired failure. Fix the public provider-error presentation and message interfaces so that error, including letter-case variations, becomes retryable provider-specific connection guidance. Hosted screenpipe-cloud and pi presets need Screenpipe Cloud retry guidance without a quota/upgrade claim; remote providers need connection/retry guidance; native Ollama needs its local service-start instruction and configured model. Do not echo the raw certificate error. Keep the message and presentation interfaces consistent. Preserve null fallback for unrecognized failures and ordinary prose mentioning expired certificates, ordinary cloud TLS recovery, distinct rate-limit guidance, nonretryable model safety refusals and custom-provider authentication guidance about the key and endpoint. No live providers, UI or native build are needed; grade observable classifications and guidance rather than exact sentences.",
+      "agent_timeout_seconds": 900,
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/certificate-error.test.ts",
+            "destination_path": "evals/coding-agent/graders/certificate-error.test.ts"
+          }
+        ],
+        "command": "\"${BUN_BIN:-bun}\" test evals/coding-agent/graders/certificate-error.test.ts"
       }
     }
   ]
