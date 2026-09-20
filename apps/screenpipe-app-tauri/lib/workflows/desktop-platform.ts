@@ -135,7 +135,15 @@ export const desktopWorkflowsPlatform: WorkflowsPlatform = {
   } } : {}),
   ...(!browserPreview ? {
     releaseWorkflowRecording: (url: string) => invoke<void>("release_workflow_recording", { url }),
-    openCapturedMoment: (frameId: number, timestamp: string) => invoke<void>("open_workflow_captured_moment", { frameId, timestamp }),
+    openCapturedMoment: async (frameId: number, timestamp: string) => {
+      if (!Number.isSafeInteger(frameId) || frameId <= 0 || !Number.isFinite(Date.parse(timestamp))) {
+        throw new Error("Invalid captured moment");
+      }
+      // Workflows runs inside Screenpipe. Use the same native Timeline handoff
+      // as Search instead of reopening an installed app through an OS deep link.
+      const result = await commands.searchNavigateToTimeline(timestamp, frameId, null, null, null, null);
+      if (result.status === "error") throw new Error(result.error);
+    },
   } : {}),
   ...(!browserPreview ? { assistant: desktopAssistant } : {}),
   // The main app owns startup. Opening a workspace never starts a recorder.
