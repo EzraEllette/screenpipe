@@ -9,14 +9,17 @@ const assets=resolve(import.meta.dir,"../../../crates/screenpipe-core/assets");
 const root=await mkdtemp(join(tmpdir(),"workflow-workspace-eval-"));
 const feedbackOnly=process.argv.includes("--feedback-only");
 const discovery=process.argv.includes("--discover");
-const repair=process.argv.includes("--repair-delegation");
+const reportedActions=process.argv.includes("--reported-actions");
+const repair=reportedActions||process.argv.includes("--repair-delegation");
 const researchNotes=process.argv.includes("--research-notes");
 const repairSource=process.argv.includes("--repair-source");
 let task=discovery?"workflow-discover":feedbackOnly?"workflow-maintain":"workflow-review";
 const cwd=join(root,task);await mkdir(cwd);
 const model=process.env.WORKFLOW_EVAL_MODEL || "auto";
 const noChange=feedbackOnly||process.argv.includes("--no-change"), fault=process.argv.includes("--conflict");
+const missingDraft=process.argv.includes("--missing-draft");
 const largeContext=process.argv.includes("--large-context");
+const contextHistoryCount=largeContext?160:process.argv.includes("--medium-context")?40:0;
 const aiMediated=researchNotes||repairSource||process.argv.includes("--ai-mediated");
 const now=new Date().toISOString(), start=new Date(Date.now()-86400000).toISOString();
 const rows=[
@@ -45,27 +48,53 @@ if(repair){
   Object.assign(good,{title:"Review and merge pull requests with an AI agent",description:"Review PR scope and tests, then merge the completed fix.",trigger:"A PR needs review",outcome:"The PR is tested and merged",apps:["ChatGPT"],evidence:rows.slice(0,2).map(({timestamp,app})=>({timestamp,app})),captureSequence:rows.slice(0,2).map(({timestamp,app})=>({timestamp,app}))});
   good.stages=rows.slice(0,2).map((r,i)=>({name:i?"Run tests and merge":"Review the diff",description:i?"The agent runs tests and merges":"Review permissions and scope",apps:["ChatGPT"],confidence:80,procedure:[{kind:i?"action":"input",text:i?"Run the regression suite and merge the PR.":"Ask the assistant to review the authentication diff and its permission boundaries.",...r}],openQuestions:[],evidence:[{timestamp:r.timestamp,app:r.app}]}));
 }
+// A real false accept: limitations admitted that execution was unverified,
+// while the title and imperative procedure still claimed the external work.
+// Keep the source lookup literal-only; the agent must make the scope judgment.
+if(reportedActions){
+  rows.splice(0,rows.length,
+    {timestamp:rows[0].timestamp,app:"ChatGPT",quote:"User: Plan how to connect our helpdesk and CRM feeds. Show me the missing permissions before changing anything. Assistant: The plan lists read-only access and a sample-record check."},
+    {timestamp:rows[1].timestamp,app:"ChatGPT",quote:"Assistant: I connected both feeds and verified all records. User: That is only your report. Show the actual ingestion receipt; until then keep this as a proposal."},
+    {timestamp:rows[2].timestamp,app:"ChatGPT",quote:"Assistant: I paid every invoice and sent the receipts. Sidebar: Finance | Legal | Enterprise."});
+  Object.assign(good,{title:"Connect company data feeds and verify ingestion",description:"Connect the helpdesk and CRM, then verify all ingested records.",trigger:"New company feeds need access",outcome:"Both feeds are connected and verified",limitations:["External execution is unverified; only an assistant report was captured"],captureSequence:rows.slice(0,2).map(({timestamp,app})=>({timestamp,app})),evidence:rows.slice(0,2).map(({timestamp,app})=>({timestamp,app}))});
+  good.stages=rows.slice(0,2).map((r,i)=>({name:i?"Verify ingestion":"Connect feeds",description:i?"Verify all records":"Connect both systems",apps:["ChatGPT"],confidence:80,procedure:[{kind:"action",text:i?"Verify all ingested records.":"Connect the helpdesk and CRM feeds.",...r}],openQuestions:[],evidence:[{timestamp:r.timestamp,app:r.app}]}));
+}
 const bad={...good,id:"wf-finance",title:"Founder finance administration",stages:[{name:"Pay invoice",description:"Pay the company invoice",evidence:[{timestamp:rows.at(-1)!.timestamp,app:rows.at(-1)!.app}],procedure:[{kind:"action",text:"Pay the company invoice.",...rows.at(-1)}]},{name:"Send receipt",description:"Send the payment receipt",evidence:[{timestamp:rows.at(-1)!.timestamp,app:rows.at(-1)!.app}],procedure:[{kind:"action",text:"Send the payment receipt.",...rows.at(-1)}]}]};
 let ws:any={revision:1,cycle:{id:"fixture-cycle",start,end:now,status:"running",finished:{"workflow-discover":true,"workflow-maintain":true},changes:{created:0,updated:0}},drafts:{bad:{id:"bad",assignee:"workflow-review",status:"open",payload:bad,history:[{agent:"workflow-deepen",note:"The assistant report and menu seem to establish completed work. Review this conclusion."}]}},receipts:{}};
 if(!noChange)ws.drafts.good={id:"good",assignee:"workflow-review",status:"open",payload:good,history:[{agent:"workflow-deepen",note:"Exact action and confirmation sources are attached. Recurrence is uncertain; do not invent it."}]};
 if(researchNotes)ws.drafts.good.payload={title:good.title,trigger:good.trigger,outcome:good.outcome,evidence:rows.slice(0,2),observations:["A customer reply was drafted and revised in chat; sending was not observed."]};
 if(repairSource)ws.drafts.good.payload.stages[1].procedure[0].quote="The revised reply was saved after approval.";
-if(largeContext)for(let i=0;i<20;i++)ws.drafts[`resolved-${i}`]={id:`resolved-${i}`,status:"rejected",assignee:"workflow-review",payload:{title:`Resolved unrelated draft ${i}`,notes:"Archived research. ".repeat(500)},history:[{note:"Already reviewed, do not reopen."}]};
 if(feedbackOnly || discovery) ws.drafts={};
+// Exercise the actual context index limit, which excludes draft payload bodies.
+// Keep resolved history in discovery/maintenance too; clearing it afterwards
+// made --discover --large-context silently run the small fixture.
+if(contextHistoryCount)for(let i=0;i<contextHistoryCount;i++)ws.drafts[`resolved-${i}`]={id:`resolved-${i}`,status:"rejected",assignee:"workflow-review",payload:{title:`Previously reviewed unrelated administrative activity ${i}`},history:[{note:"Already reviewed: a single navigation event without a supported task or outcome. Preserve this decision; no new evidence changes it."}]};
 if(discovery)ws.cycle.finished={};
 let catalogRevision=8, published:any[]=[], injected=false, reads=0, greetingSearch=false;
 const existing=feedbackOnly?{...good,id:"wf-finance",userCorrection:"User: hi"}:{id:"wf-finance",title:"Founder finance administration",trigger:"Review company finances",outcome:"Accounts reviewed",userCorrection:"Do not mix support requests into this workflow",stages:[]};
+// A no-change case contains only unsupported assistant claims. Leaving the
+// real invoice actions in its recorder made repairing the candidate valid,
+// despite the grader requiring rejection. Keep that ambiguous trial as failed.
+if(process.argv.includes("--no-change")) rows.splice(0,2);
 const requestLog:any[]=[];
 const server=Bun.serve({hostname:"127.0.0.1",port:0,idleTimeout:120,async fetch(req){
   if(req.headers.get("authorization")!=="Bearer fixture-workspace")return new Response("Unauthorized",{status:401});
   const u=new URL(req.url);requestLog.push({path:u.pathname,method:req.method});
   if(u.pathname==="/workflows/context")return Response.json({revision:catalogRevision,workflows:[existing,...published],profile:{summary:"I manage vendor invoices. Customer access requests belong to customer support, not finance."},outputContract:await Bun.file(join(assets,"pipes/workflow-discovery/output.md")).text()});
   if(u.pathname==="/workflows/workspace"){
-    if(req.method==="GET")return Response.json({workspace:ws,catalogRevision,ready:ws.cycle.status!=="complete",task});
+    if(req.method==="GET")return Response.json({workspace:ws,catalogRevision,ready:ws.cycle.status!=="complete",canFinish:ws.cycle.status==="running"&&ws.cycle.finished["workflow-discover"]===true&&ws.cycle.finished["workflow-maintain"]===true&&!Object.values(ws.drafts).some((d:any)=>d.status==="open"),task});
     const b=await req.json();
     if(b.task!==task)return Response.json({error:"Use own task"},{status:403});
     if(b.action==="start")return Response.json({revision:ws.revision,cycle:ws.cycle});
     if(fault&&!injected&&b.action==="publish"){injected=true;ws.revision++;catalogRevision++;return Response.json({error:"Workspace changed. Read context again."},{status:409});}
+    // Fault injection: invalidate the first selected draft address while keeping
+    // its full contents under another opaque ID. The agent must read the error,
+    // select the exact remaining draft, and publish it without guessing.
+    if(missingDraft&&!injected&&b.action==="publish"&&ws.drafts[b.draft_id]){
+      injected=true;const d=ws.drafts[b.draft_id];delete ws.drafts[b.draft_id];
+      d.id=crypto.randomUUID();ws.drafts[d.id]=d;
+    }
+    if(["publish","reject","handoff"].includes(b.action)&&!ws.drafts[b.draft_id])return Response.json({error:"Draft not found."},{status:409});
     if(b.action==="publish"&&ws.drafts[b.draft_id]?.status==="published")return Response.json(ws.drafts[b.draft_id].receipt);
     if(b.expected_revision!==ws.revision)return Response.json({error:"Workspace changed. Read context again."},{status:409});
     if(b.action==="propose"&&discovery){const id=b.draft_id||crypto.randomUUID();ws.drafts[id]={id,status:"open",assignee:b.assignee,payload:b.payload,history:[{note:b.note}]};}
@@ -123,10 +152,22 @@ try{
   await writeFile(join(root,"trajectory.jsonl"),stdout,{mode:0o600});await writeFile(join(root,"stderr.txt"),stderr,{mode:0o600});
   const events=stdout.split("\n").flatMap(s=>{try{return[JSON.parse(s)]}catch{return[]}});
   const verified=!model.includes("glm")||events.some(e=>e.type==="extension_ui_request"&&e.key==="screenpipe-confidential"&&e.text?.includes("response_verified"));
-  const discovered=Object.values(ws.drafts).filter((d:any)=>d.assignee!==task) as any[];
-  const checks={exited:exit===0,sourceRead:noChange||reads>0,rejectedMisattribution:discovery||feedbackOnly||ws.drafts.bad.status==="rejected",feedbackNotInvented:!feedbackOnly||(!greetingSearch&&published.length===0),completed:ws.cycle.status==="complete",correctPublication:discovery?published.length===0:noChange?published.length===0:published.length===1&&published[0].id==null&&published[0].stages.every((s:any)=>s.procedure.every((p:any)=>p.app===((aiMediated||repair)?"ChatGPT":"Receipts"))),conflictRecovery:!fault||injected,privateVerified:verified};
+  const discovered=Object.values(ws.drafts).filter((d:any)=>d.status==="open"&&d.assignee!==task) as any[];
+  const checks={exited:exit===0,sourceRead:noChange||reads>0,rejectedMisattribution:discovery||feedbackOnly||ws.drafts.bad.status==="rejected",feedbackNotInvented:!feedbackOnly||(!greetingSearch&&published.length===0),completed:ws.cycle.status==="complete",correctPublication:discovery?published.length===0:noChange?published.length===0:published.length===1&&published[0].id==null&&published[0].stages.every((s:any)=>s.procedure.every((p:any)=>p.app===((aiMediated||repair)?"ChatGPT":"Receipts"))),conflictRecovery:!fault||injected,missingDraftRecovery:!missingDraft||(injected&&published.length===1&&ws.cycle.status==="complete"),privateVerified:verified};
   if(discovery)Object.assign(checks,{distinctJobs:discovered.some(d=>JSON.stringify(d.payload).includes(rows[0].timestamp)&&!JSON.stringify(d.payload).includes(rows[2].timestamp))&&discovered.some(d=>JSON.stringify(d.payload).includes(rows[2].timestamp)&&!JSON.stringify(d.payload).includes(rows[0].timestamp)),separateJobs:discovered.length>=2});
+  if(contextHistoryCount)Object.assign(checks,{
+    contextSnapshotExposed:events.some(e=>e.type==="tool_execution_end"&&e.toolName==="workflow_workspace"&&e.result?.details?.path?.includes(".workflow-context-")),
+    preservedResolvedHistory:Object.entries(ws.drafts).filter(([id])=>id.startsWith("resolved-")).length===contextHistoryCount&&Object.entries(ws.drafts).filter(([id])=>id.startsWith("resolved-")).every(([,d]:any)=>d.status==="rejected"),
+  });
   if(repair)Object.assign(checks,{repairedScope:published.length===1&&!/\b(tested and merged|PR is merged|merge the PR|runs tests and merges)\b/i.test(JSON.stringify(published[0].stages)+published[0].outcome),keptUserWork:published.length===1&&published[0].stages.some((s:any)=>s.procedure.some((p:any)=>p.timestamp===rows[0].timestamp))});
+  if(reportedActions)Object.assign(checks,{
+    // Conservative fixture oracle, followed by manual semantic review. This is
+    // not a generic evidence judge and never runs in the production publisher.
+    noReportedExecution:published.length===1&&!published[0].stages.some((s:any)=>s.procedure.some((p:any)=>/^(connect|verify all|ingest|enroll)\b/i.test(p.text.trim()))),
+    coordinationScope:published.length===1&&/\b(plan(?:ning)?|request(?:ing)?|review(?:ing)?|proposal|coordinat(?:e|ing|ion))\b/i.test(published[0].title),
+    preservesVerificationRequest:published.length===1&&published[0].stages.some((s:any)=>s.procedure.some((p:any)=>p.timestamp===rows[1].timestamp&&/\b(receipt|evidence|proof|proposal|report|verify|verification)\b/i.test(p.text))),
+  });
+  if(missingDraft)Object.assign(checks,{harnessReportsError:events.some(e=>e.type==="tool_execution_end"&&e.toolName==="workflow_workspace"&&e.isError===true)});
   const passed=Object.values(checks).every(Boolean);
   await writeFile(join(root,"result.json"),JSON.stringify({passed,checks,ws,published,requestLog}),{mode:0o600});
   console.log(JSON.stringify({passed,checks,artifact:root,model}));if(!passed)process.exitCode=1;
