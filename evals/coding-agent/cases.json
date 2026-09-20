@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "suite": "screenpipe-app-coding-agent-regressions",
-  "dataset_version": "2026-09-20.5",
+  "dataset_version": "2026-09-20.6",
   "suite_type": "regression",
   "owner": "screenpipe engineering",
   "policy": {
@@ -1808,6 +1808,38 @@
           }
         ],
         "command": "cd apps/screenpipe-app-tauri && NODE_OPTIONS=--localstorage-file=.eval-localstorage ./node_modules/.bin/vitest run --config vitest.config.ts components/restricted-onboarding.eval.test.tsx --maxWorkers=1 --minWorkers=1"
+      }
+    },
+    {
+      "id": "app-local-preset-preservation",
+      "name": "Preserve local-only presets through settings and account refresh",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "5c3661a0b979e5cd6204ac20fd8872a274efe47a"
+      },
+      "base_ref": "45778f74227cbff7a83f65265e834b5985f7e72b",
+      "oracle_ref": "5c3661a0b979e5cd6204ac20fd8872a274efe47a",
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/lib/hooks/use-settings.tsx"
+      ],
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "settings",
+        "account",
+        "local-model"
+      ],
+      "prompt": "A local-only AI preset configuration unexpectedly gains a cloud preset when settings reload or the account changes. Fix the actual settings persistence path so existing nonempty configurations, including custom model, prompt, URL, default selection and ordering, survive cold loads, repeated reloads, sign-in, subscription changes and sign-out unchanged. Explicit valid preset edits and unrelated settings changes must still persist, and intentional mixed cloud/local configurations must remain intact. Persisted missing, malformed or empty preset lists must recover usable defaults. Explicit empty or malformed preset updates must reject before any persistence or events, leaving prior settings intact. Preserve existing managed-policy behavior. No particular helper or internal structure is required. Rendered deletion controls, native durability and account network verification are outside this task.",
+      "agent_timeout_seconds": 1200,
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/local-preset-preservation.test.js",
+            "destination_path": "evals/coding-agent/graders/local-preset-preservation.test.js"
+          }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && \"${BUN_BIN:-bun}\" test ../../evals/coding-agent/graders/local-preset-preservation.test.js"
       }
     }
   ]

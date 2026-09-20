@@ -399,3 +399,23 @@ names pass; missing source remains setup failure. The grader is installed only
 after an evaluated trajectory. Settings, managed policy, analytics and native
 commands are synthetic. Native auth, recorder durability, persisted enterprise
 policy, live downloads and execution isolation are outside this UI evidence.
+
+
+## Local-only preset preservation
+
+`app-local-preset-preservation` executes the actual settings provider, shared
+settings store and write queue against synthetic native storage and account data.
+Twelve outcomes cover cold loads, repeated reloads, sign-in/subscription/sign-out
+transitions, malformed saved data, invalid mutations, mixed configurations and
+preserved explicit edits. The parent fails eight assertions and preserves four
+outcomes; the historical reference and selected current code pass twelve.
+Only the settings module is applied as the oracle.
+
+Run `bun test evals/coding-agent/calibrate-local-presets.test.js` to check known
+correct/broken, unused-helper, cloud-seeding, account-reset, silent-repair and
+blanket-refusal controls, equivalent helper naming and missing-source errors.
+The standalone grader needs no installed packages. React hooks and native,
+account, event and analytics ports are synthetic; mount effects do not execute.
+It does not prove rendered deletion controls, live account refresh, native
+durability, enforced isolation or model performance. Preset dependency deletion
+recovery remains a separate case.
