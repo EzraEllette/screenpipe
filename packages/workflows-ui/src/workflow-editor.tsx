@@ -92,6 +92,7 @@ export function WorkflowEditor({
   const [error, setError] = useState("");
   const [announcement, setAnnouncement] = useState("");
   const [dragOver, setDragOver] = useState<number | null>(null);
+  const [blockDragOver, setBlockDragOver] = useState<string | null>(null);
   const dragging = useRef<{ stage: number; detail?: number } | null>(null);
   const busy = useRef(false);
   const dirty = JSON.stringify(draft) !== JSON.stringify(initial);
@@ -275,6 +276,7 @@ export function WorkflowEditor({
             onChange={(trigger) => change({ ...draft, trigger })}
           />
         </label>
+        <div className={styles.stepsHeading}><strong>Steps</strong><span><GripVertical size={15} />Drag handles to reorder · click text to edit</span></div>
         <div className={styles.steps}>
           {draft.stages.map((stage, index) => (
             <article
@@ -385,7 +387,7 @@ export function WorkflowEditor({
               <div className={styles.blocks}>
                 {stage.procedure.map((detail, detailIndex) => (
                   <div
-                    className={styles.block}
+                    className={`${styles.block} ${blockDragOver === `${index}:${detailIndex}` ? styles.blockDrop : ""}`}
                     key={
                       detail.sourceIndex === null
                         ? `new-${detailIndex}`
@@ -398,6 +400,7 @@ export function WorkflowEditor({
                       ) {
                         e.preventDefault();
                         e.stopPropagation();
+                        setBlockDragOver(`${index}:${detailIndex}`);
                       }
                     }}
                     onDrop={(e) => {
@@ -409,6 +412,7 @@ export function WorkflowEditor({
                         e.stopPropagation();
                         moveDetail(index, dragging.current.detail, detailIndex);
                         dragging.current = null;
+                        setBlockDragOver(null);
                       }
                     }}
                   >
@@ -442,6 +446,7 @@ export function WorkflowEditor({
                       }}
                       onDragEnd={() => {
                         dragging.current = null;
+                        setBlockDragOver(null);
                       }}
                     >
                       <GripVertical size={15} />

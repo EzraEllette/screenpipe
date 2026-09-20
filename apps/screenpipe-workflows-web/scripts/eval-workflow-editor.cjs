@@ -24,8 +24,9 @@ require("node:fs").mkdirSync(out, { recursive: true });
     await p.goto(
       process.env.WORKFLOWS_PREVIEW_URL || "http://127.0.0.1:1431/preview",
     );
-    await p.getByRole("button", { name: "Open map" }).first().click();
-    await button("Edit workflow").click();
+    await p.getByRole("button", { name: "Edit steps", exact: true }).first().click();
+    await p.getByText("Drag handles to reorder · click text to edit", { exact: true }).waitFor();
+    console.log("PASS catalog opens editor directly with drag hint");
     await check("save disabled for unchanged draft", async () =>
       assert(await button("Save").isDisabled()),
     );

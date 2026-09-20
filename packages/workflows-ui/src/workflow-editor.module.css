@@ -1,6 +1,8 @@
 /* screenpipe — AI that knows everything you've seen, said, or heard */
 /* https://screenpipe.com */
 .editor {
+  container-type: inline-size;
+  container-name: workflow-editor;
   max-width: 920px;
   margin: 0 auto;
   color: var(--ink);
@@ -76,7 +78,7 @@
   justify-content: space-between;
   gap: 12px;
   padding: 12px 0;
-  margin-bottom: 32px;
+  margin-bottom: 20px;
   border-bottom: 1px solid var(--line);
   background: var(--paper);
 }
@@ -85,7 +87,9 @@
   align-items: center;
   gap: 8px;
 }
+.toolbar > div:last-child { flex-shrink: 0; }
 .toolbar strong {
+  white-space: nowrap;
   font-size: 13px;
 }
 .toolbar span {
@@ -98,7 +102,7 @@
   color: var(--panel);
 }
 .intro {
-  margin: 0 0 30px;
+  margin: 0 0 18px;
 }
 .intro .title {
   font-size: 30px;
@@ -115,6 +119,9 @@
 .endpoint textarea {
   margin-left: -8px;
 }
+.stepsHeading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; margin: 20px 0 12px; padding: 0 8px; }
+.stepsHeading strong { font-size: 13px; }
+.stepsHeading span { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); font-size: 12px; }
 .steps {
   margin: 12px 0;
 }
@@ -153,23 +160,26 @@
 }
 .editor .grip {
   cursor: grab;
-  color: var(--muted);
+  background: var(--soft);
+  color: var(--ink);
 }
 .editor .grip:active {
   cursor: grabbing;
 }
 .block {
-  display: flex;
+  display: grid;
+  grid-template-columns: 32px 85px minmax(0, 1fr) 32px;
   align-items: flex-start;
   gap: 4px;
   margin: 6px 0;
 }
+.blockDrop { box-shadow: 0 -2px 0 var(--ink); }
 .block textarea {
   flex: 1;
   min-width: 0;
 }
 .block select {
-  width: 85px;
+  width: 100%;
   font: inherit;
   font-size: 11px;
   color: var(--muted);
@@ -221,29 +231,15 @@
     opacity: 1;
   }
 }
-@media (max-width: 650px) {
-  .toolbar {
-    top: -16px;
-  }
-  .toolbar span {
-    display: none;
-  }
-  .intro .title {
-    font-size: 25px;
-  }
-  .step {
-    padding: 10px 6px;
-  }
-  .block {
-    flex-wrap: wrap;
-  }
-  .block textarea {
-    flex-basis: 65%;
-  }
-  .block select {
-    width: 64px;
-  }
-  .controls {
-    opacity: 1;
-  }
+@container workflow-editor (max-width: 560px) {
+  .toolbar { top: -16px; gap: 8px; }
+  .toolbar > div:first-child { flex-direction: column; align-items: flex-start; gap: 3px; }
+  .toolbar span { font-size: 11px; }
+  .intro .title { font-size: 25px; }
+  .step { padding: 10px 6px; }
+  .block { grid-template-columns: 32px minmax(0, 1fr) 32px; row-gap: 0; }
+  .block select { width: auto; justify-self: start; min-width: 85px; }
+  .block textarea { grid-column: 2 / -1; grid-row: 2; }
+  .block > button:last-child { grid-column: 3; grid-row: 1; }
+  .controls { opacity: 1; }
 }

@@ -446,11 +446,12 @@
 .filterPanel select:focus { border-color: #a8b47e; box-shadow: 0 0 0 2px #e7edda; }
 .filterPanel > button { height: 32px; padding: 0 10px; border: 0; background: transparent; color: #73776e; font-size: 9px; cursor: pointer; }
 .filterPanel > button:disabled { opacity: .4; cursor: default; }
-.workflowCard { display: flex; flex-direction: column; min-height: 330px; padding: 23px; border: 1px solid var(--line); border-radius: 10px; background: #fff; color: inherit; text-align: left; cursor: pointer; transition: .18s ease; }
+.workflowCard { position: relative; min-width: 0; display: flex; flex-direction: column; min-height: 330px; padding: 23px; border: 1px solid var(--line); border-radius: 10px; background: #fff; color: inherit; text-align: left; cursor: pointer; transition: .18s ease; }
 .workflowCard:hover { transform: translateY(-2px); border-color: #bdc0b5; box-shadow: 0 13px 30px rgba(30,32,25,.06); }
-.workflowCardTop { display: flex; align-items: center; justify-content: space-between; }
+.workflowCardTop { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .workflowCardTop > span { color: #999c93; font-size: 9px; }
-.workflowCardTop > div { display: flex; align-items: center; gap: 5px; }
+.workflowCardTop > div { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 5px; min-width: 0; }
+.workflowCardTop .pill { white-space: normal; }
 .workflowCard h2 { margin: 22px 0 8px; font-size: 18px; letter-spacing: -.025em; }
 .workflowCard > p { min-height: 42px; margin: 0; color: #73776e; font-size: 10px; line-height: 1.55; }
 .cardPath { display: grid; grid-template-columns: minmax(0,1fr) 16px minmax(0,1fr); gap: 7px; align-items: center; margin: 18px 0; padding: 12px; border-radius: 7px; background: #f5f6f1; color: #696d63; font-size: 8px; line-height: 1.4; }
@@ -460,14 +461,22 @@
 .cardMetrics span { display: block; color: #989b93; font-size: 7.5px; }
 .cardMetrics strong { display: block; margin-top: 5px; font-size: 11px; }
 .cardMetrics small { display: block; margin-top: 3px; color: #78786f; font-size: 9px; }
-.cardFooter { display: flex; justify-content: space-between; align-items: center; margin-top: auto; padding-top: 17px; }
+.cardFooter { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 12px; margin-top: auto; padding-top: 17px; }
 .cardFooter span { color: #83867e; font-size: 8px; }
-.cardFooter strong { display: inline-flex; align-items: center; gap: 4px; font-size: 9px; }
+.cardActions { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+.cardActions button { display: inline-flex; align-items: center; justify-content: center; gap: 5px; min-height: 32px; padding: 6px 8px; border: 0; border-radius: 5px; background: transparent; color: var(--ink); font: inherit; font-size: 11px; font-weight: 550; white-space: nowrap; cursor: pointer; }
+.cardActions .cardEdit { position: relative; z-index: 1; border: 1px solid var(--line); background: var(--panel); }
+.cardActions button:hover { background: var(--soft); }
+.cardActions button:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+.cardOpen::after { content: ""; position: absolute; inset: 0; border-radius: 10px; }
+.cardOpen:focus-visible::after { outline: 2px solid var(--ink); outline-offset: 2px; }
+.workflowCard h2, .workflowCard > p, .cardPath { overflow-wrap: anywhere; }
 
 .detailHeader { display: grid; grid-template-columns: minmax(0,1fr) 245px; gap: 60px; align-items: end; margin-bottom: 29px; }
 .detailHeader h1 { margin: 16px 0 9px; font-size: clamp(32px,4vw,49px); letter-spacing: -.052em; }
 .detailHeader > div > p { max-width: 760px; margin: 0; color: #70746a; font-size: 12px; line-height: 1.6; }
-.workflowActions { display: flex; flex-wrap: wrap; gap: 8px; }
+.workflowActions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 17px; }
+.workflowActions .skillButton { margin-top: 0; }
 .skillButton { display: inline-flex; align-items: center; gap: 7px; min-height: 34px; margin-top: 17px; padding: 0 12px; border: 1px solid #20221e; border-radius: 6px; background: #fff; color: #20221e; font-size: 8.5px; font-weight: 750; letter-spacing: .04em; text-transform: none; cursor: pointer; transition: .15s ease; }
 .skillButton:hover { background: #20221e; color: #fff; }
 .detailTotal { padding: 18px; border: 1px solid var(--line); border-radius: 9px; background: #fff; }
