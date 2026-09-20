@@ -26,7 +26,7 @@ export default function (pi: ExtensionAPI) {
         draft_id: {type:"string", description:"For context, read this draft in full; for writes, the owned draft to change."},
         workflow_id: {type:"string", description:"With context, read one existing catalog workflow in full."},
         assignee: {type:"string", enum: tasks},
-        payload: {type:"object", description:"Draft research or one workflow matching outputContract. Handoff can omit payload to preserve it."},
+        payload: {type:"object", description:"One workflow matching outputContract. With handoff, replaces the draft. With publish, validates and atomically saves this reviewed version; omit to publish the stored draft. Include description and stages with procedure/evidence. note never changes the payload."},
         note: {type:"string", description:"Evidence decision, specific question for the next agent, or what was actually checked. Required for writes."},
       }, required: ["action"], additionalProperties: false,
     } as any,
@@ -37,11 +37,18 @@ export default function (pi: ExtensionAPI) {
         if (base.protocol !== "http:" || !["localhost","127.0.0.1","[::1]"].includes(base.hostname) || !permissions.pipe_token) throw new Error("Local recorder capability unavailable");
         const headers = {"Content-Type":"application/json", Authorization:`Bearer ${permissions.pipe_token}`};
         const bounded = AbortSignal.any([signal, AbortSignal.timeout(150_000)]);
-        const call = async (path: string, body?: unknown) => {
+        const missingDraft = (ws: any) => `Draft ${JSON.stringify(input.draft_id)} not found. Copy an exact id from these open drafts assigned to you; do not guess or modify identifiers: ${JSON.stringify(Object.values(ws.drafts || {}).filter((d:any)=>d.status === "open" && d.assignee === task).map((d:any)=>({id:d.id,title:d.payload?.title})))}. No changes were saved.`;
+        const call = async (path: string, body?: unknown): Promise<any> => {
           const response = await fetch(new URL(path,base), {headers, redirect:"error",signal:bounded,
             ...(body === undefined ? {} : {method:"POST",body:JSON.stringify(body)})});
           const value = await response.json();
-          if (!response.ok) throw new Error(`${response.status}: ${value.error || "Workflow save failed"}`);
+          if (!response.ok) {
+            if (body !== undefined && input.draft_id && value.error === "Draft not found.") {
+              const state = await call(`/workflows/workspace?task=${task}`);
+              throw new Error(missingDraft(state.workspace));
+            }
+            throw new Error(`${response.status}: ${value.error || "Workflow save failed"}`);
+          }
           return value;
         };
         let result: any;
@@ -51,7 +58,7 @@ export default function (pi: ExtensionAPI) {
           const ws = state.workspace;
           if (input.draft_id) {
             const draft = ws.drafts?.[input.draft_id];
-            if (!draft) throw new Error("Draft not found");
+            if (!draft) throw new Error(missingDraft(ws));
             result = {revision:ws.revision, catalogRevision:state.catalogRevision, cycle:ws.cycle, draft, evidenceStatus:"These are an agent’s proposed quotations, not original recorder results. Independently read the source records with normal Screenpipe tools before publishing.", outputContract:catalog.outputContract};
           } else if (input.workflow_id) {
             const workflow = catalog.workflows.find((w:any)=>w.id === input.workflow_id);
