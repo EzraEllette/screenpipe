@@ -9,7 +9,7 @@ This is an agent eval suite, not a unit-test suite. Every case contains:
 - saved prompt, transcript, candidate patch, grader output, runtime fingerprint, and result;
 - repeated-trial reporting with success rate, `pass@k`, and `pass^k`.
 
-The current app corpus contains 52 git-mined regressions. See
+The current app corpus contains 56 git-mined regressions. See
 [DESIGN.md](./DESIGN.md) for the Anthropic guidance, source contract, and
 history-mining workflow. The companion website manifest uses this same harness.
 
@@ -419,3 +419,23 @@ account, event and analytics ports are synthetic; mount effects do not execute.
 It does not prove rendered deletion controls, live account refresh, native
 durability, enforced isolation or model performance. Preset dependency deletion
 recovery remains a separate case.
+
+## Overlapping chat settings and preset outcomes
+
+The `app-chat-overlapping-load-isolation` grader retains all thirteen original
+hook/store outcomes and adds delayed-settings-read races. The saved reopen
+target and emitted preset must belong to the newest chat after an older read
+finishes. The old grader passed a variant with those guards removed; the two
+new outcomes reject it. The historical parent fails three outcomes and preserves
+twelve; the reference and selected current source pass all fifteen.
+
+Run `bun test evals/coding-agent/calibrate-chat-overlap.test.js` with desktop
+JavaScript dependencies installed. Calibration covers the parent, reference,
+the original false pass, separate settings/preset bypasses, equivalent request
+guard naming, missing source and preserved navigation behavior. The fixture
+runs the actual React hook and chat store with synthetic disk, settings and
+event ports; title generation is stubbed to prevent model/native execution.
+
+This proves the selected delayed-read ordering, not native persistence, failures
+or races within the settings writer, the complete rendered chat UI, real model
+selection or enforced agent isolation. No model trial is implied.

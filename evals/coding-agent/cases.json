@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "suite": "screenpipe-app-coding-agent-regressions",
-  "dataset_version": "2026-09-20.6",
+  "dataset_version": "2026-09-20.7",
   "suite_type": "regression",
   "owner": "screenpipe engineering",
   "policy": {
@@ -784,9 +784,10 @@
       "grader": {
         "timeout_seconds": 420,
         "fixtures": [
-          { "source_path": "apps/screenpipe-app-tauri/lib/__tests__/save-conversation-race.test.tsx" }
+          { "local_path": "graders/chat-overlapping-load.fixture.tsx",
+            "destination_path": "apps/screenpipe-app-tauri/lib/__tests__/save-conversation-race.test.tsx" }
         ],
-        "command": "cd apps/screenpipe-app-tauri && NODE_OPTIONS=--localstorage-file=.eval-localstorage bun x vitest run --config vitest.config.ts lib/__tests__/save-conversation-race.test.tsx"
+        "command": "cd apps/screenpipe-app-tauri && NODE_OPTIONS=--localstorage-file=.eval-localstorage node node_modules/vitest/vitest.mjs run --config vitest.config.ts lib/__tests__/save-conversation-race.test.tsx --pool=forks --poolOptions.forks.singleFork=true"
       }
     },
     {
