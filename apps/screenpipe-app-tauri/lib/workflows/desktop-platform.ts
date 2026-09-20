@@ -25,7 +25,7 @@ import {
   saveWorkProfileToDisk,
 } from "./disk-storage";
 
-import { ensureWorkflowTask, startWorkflowJob, getWorkflowJob, latestWorkflowJob, stopWorkflowJob, loadScheduledCatalog, saveWorkflowCorrections } from "./scheduled-discovery";
+import { ensureWorkflowTask, startWorkflowJob, getWorkflowJob, latestWorkflowJob, stopWorkflowJob, loadScheduledCatalog, saveWorkflowCorrections, saveWorkflowEdits } from "./scheduled-discovery";
 
 const WORK_PROFILE_KEY = "screenpipe-workflows:work-profile:v1";
 const BROWSER_ANALYSIS_KEY = "screenpipe-workflows:last-analysis-v2";
@@ -143,9 +143,9 @@ export const desktopWorkflowsPlatform: WorkflowsPlatform = {
   fillContext: fillWorkContext,
   ensureRuntime: getWorkflowRuntime,
   analyzeCapturedWork: (days, options) => analyzeCapturedWork(days, options?.workProfile),
-  loadCapturedWork: () => loadSavedAnalysis(),
+  loadCapturedWork: () => browserPreview ? loadSavedAnalysis() : loadScheduledCatalog(),
   saveCapturedWork: (analysis) => browserPreview ? saveAnalysis(analysis) : saveWorkflowCorrections(analysis),
-  ...(!browserPreview ? { managesAnalysis: true, ensureAnalysisTask: ensureWorkflowTask,
+  ...(!browserPreview ? { saveWorkflowEdits, managesAnalysis: true, ensureAnalysisTask: ensureWorkflowTask,
     startAnalysisJob: startWorkflowJob, getAnalysisJob: getWorkflowJob,
     getLatestAnalysisJob: latestWorkflowJob, cancelAnalysisJob: stopWorkflowJob,
     subscribeAnalysisActivity: subscribeWorkflowActivity } : {}),

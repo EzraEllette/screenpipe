@@ -410,6 +410,12 @@ export function fixtureGuides(): NonNullable<WorkflowsPlatform["guides"]> {
 
 export function createFixtureWorkflowsPlatform(analysis: WorkflowAnalysis = fixtureWorkflowAnalysis): WorkflowsPlatform {
   let profile = fixturePersonalWorkProfile;
+  const storageKey = "screenpipe:fictional-workflow-editor-preview";
+  let current = structuredClone(analysis);
+  const restore = () => {
+    try { const saved = JSON.parse(localStorage.getItem(storageKey) || "null"); if (saved?.analysis?.workflows) current = saved; } catch {}
+    return current;
+  };
   let mode: import("./model-choice").WorkflowModelMode = "intelligent";
   return {
     modelPreference: { load: async () => mode, save: async next => { mode = next; } },
@@ -423,7 +429,25 @@ export function createFixtureWorkflowsPlatform(analysis: WorkflowAnalysis = fixt
       onField({ field: "summary", value: "Preview role: I manage customer operations and improve how our team handles requests." });
     },
     ensureRuntime: async () => fixtureWorkflowRuntime,
-    analyzeCapturedWork: async () => analysis,
+    loadCapturedWork: async () => restore(),
+    analyzeCapturedWork: async () => restore(),
+    saveWorkflowEdits: async (draft) => {
+      restore();
+      const workflow = current.analysis.workflows.find(w => (w.id ?? w.title) === draft.id);
+      if (!workflow || (workflow.revision ?? 0) !== draft.expected_revision) throw Object.assign(new Error("Workflow changed. Your draft is kept; reopen the latest version."), { status: 409 });
+      const stages = draft.stages.map(s => {
+        const prior = s.sourceIndex === null ? null : workflow.stages[s.sourceIndex];
+        return { ...(prior ?? { activeMinutes: 0, waitingMinutes: 0, apps: [], confidence: 0, observedOccurrences: 0, observedDays: 0, evidence: [] }),
+          name: s.name.trim(), description: s.description.trim(), userEdited: true,
+          procedure: s.procedure.map(p => ({ ...(p.sourceIndex === null ? { quote: "", timestamp: "", app: "" } : prior?.procedure?.[p.sourceIndex] ?? { quote: "", timestamp: "", app: "" }), kind: p.kind, text: p.text.trim(), userEdited: true })),
+        };
+      });
+      const saved = { ...workflow, id: draft.id, revision: draft.expected_revision + 1, title: draft.title.trim(), description: draft.description.trim(), trigger: draft.trigger.trim(), outcome: draft.outcome.trim(), stages, userEditedAt: new Date().toISOString() };
+      const next = { ...current, analysis: { workflows: current.analysis.workflows.map(w => w === workflow ? saved : w) } };
+      localStorage.setItem(storageKey, JSON.stringify(next));
+      current = next;
+      return saved;
+    },
     loadWorkProfile: async () => profile,
     saveWorkProfile: async (nextProfile) => (profile = nextProfile),
     guides: fixtureGuides(),
