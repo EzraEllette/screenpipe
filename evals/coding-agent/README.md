@@ -530,3 +530,21 @@ remain setup errors. Only the directory resolver is the historical oracle.
 The synthetic join uses forward slashes; it does not prove Windows-native path
 semantics, native command correctness, complete chat continuation, account-state
 relocation or durable session persistence. No model, scheduler or native build runs.
+
+## Device identity across settings resets
+
+`app-device-settings-identity` runs actual settings provider/store reset actions
+against synthetic storage and native ports. Nine outcomes cover empty frontend
+defaults, legacy and stable identities, compatibility initialization of empty
+stored identities, full/individual resets, ordinary field reset and later native
+identity changes. Parent: eight intended failures and one preserved pass.
+Reference/current: nine passes, 42 assertions.
+
+Run `bun test evals/coding-agent/calibrate-device-identity.test.js`. Ten controls
+reject unused fixes, random defaults, full/individual identity loss, blanket
+reset refusal and constant identities; an equivalent guard passes. Missing
+source remains an import error. Existing product tests cover defaults and
+legacy/stable identity resets; this adds no-write, ordinary-reset, compatibility
+and later-identity checks. React lifecycle is stubbed; reloads are explicit.
+This does not prove native identity generation, actual disk durability, record
+collision prevention, model performance or enforced trial isolation.
