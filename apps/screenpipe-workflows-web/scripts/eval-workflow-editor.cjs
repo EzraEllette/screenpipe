@@ -7,7 +7,9 @@ require("node:fs").mkdirSync(out, { recursive: true });
 (async () => {
   const browser = await chromium.launch({ headless: true, channel: "chrome" });
   const page = await browser.newPage({ viewport: { width: 1440, height: 1100 } });
+  page.setDefaultTimeout(10000);
   const errors = [];
+  let initialBlocks;
   page.on("pageerror", e => errors.push(e.message));
   const field = name => page.getByRole("textbox", { name, exact: true });
   const button = name => page.getByRole("button", { name, exact: true });
@@ -23,6 +25,28 @@ require("node:fs").mkdirSync(out, { recursive: true });
       assert.equal(await button("Edit steps").count(), 0);
       assert.equal(await button("Save").count(), 0);
       assert.equal(await button("Move step 1").getAttribute("draggable"), "true");
+    });
+    await check("details stay visible while editing controls disclose on hover and focus", async () => {
+      initialBlocks = await page.getByRole("article", { name: "Step 1", exact: true }).getByRole("textbox").evaluateAll(es => es.filter(e => e.getAttribute("aria-label").startsWith("Block ")).map(e => e.value));
+      assert.equal(initialBlocks.length, 3);
+      assert(initialBlocks.every(Boolean));
+      assert.equal(await page.getByText("Drag handles to reorder", { exact: false }).count(), 0);
+      await page.mouse.move(0, 0);
+      await page.waitForTimeout(150);
+      assert.equal(await button("Move step 1").evaluate(e => getComputedStyle(e).opacity), "0");
+      assert.equal(await button("Move block 1 in step 1").evaluate(e => getComputedStyle(e).opacity), "0");
+      await field("Step 1 title").hover();
+      await page.waitForTimeout(150);
+      assert.equal(await button("Move step 1").evaluate(e => getComputedStyle(e).opacity), "1");
+      assert.equal(await button("Move step 2").evaluate(e => getComputedStyle(e).opacity), "0");
+      await page.mouse.move(0, 0);
+      await button("Move step 2").focus();
+      await page.waitForTimeout(150);
+      assert.equal(await button("Move step 2").evaluate(e => getComputedStyle(e).opacity), "1");
+      await field("Workflow title").focus();
+      await page.getByText("Sources and screenshots", { exact: true }).first().click();
+      await page.locator("p").filter({ hasText: "Collect sources was observed in this fictional workspace." }).waitFor();
+      await page.getByText("Sources and screenshots", { exact: true }).first().click();
     });
     await check("drag step, auto-save and retain its screenshot", async () => {
       await page.getByRole("article", { name: "Step 1", exact: true }).hover();
@@ -62,21 +86,23 @@ require("node:fs").mkdirSync(out, { recursive: true });
     });
     await check("empty blocks remain drafts until filled", async () => {
       const before = await stored();
+      await field("Step 1 title").hover();
       await button("Add block").first().click();
       await page.getByText("Finish the empty block to save", { exact: true }).waitFor();
       await page.waitForTimeout(850);
       assert.equal((await stored()).revision, before.revision);
-      await field("Block 1 in step 1").fill("Gather the dated source links.");
+      await field("Block 4 in step 1").fill("Gather the dated source links.");
       await saved();
+      await field("Step 1 title").hover();
       await button("Add block").first().click();
-      await field("Block 2 in step 1").fill("Check the source author.");
+      await field("Block 5 in step 1").fill("Check the source author.");
       await saved();
     });
     await check("drag blocks auto-saves their new order", async () => {
-      await field("Block 1 in step 1").hover();
-      await button("Move block 1 in step 1").dragTo(field("Block 2 in step 1"));
+      await field("Block 4 in step 1").hover();
+      await button("Move block 4 in step 1").dragTo(field("Block 5 in step 1"));
       await saved();
-      assert.deepEqual((await stored()).stages[0].procedure.map(p => p.text), ["Check the source author.", "Gather the dated source links."]);
+      assert.deepEqual((await stored()).stages[0].procedure.map(p => p.text), [...initialBlocks, "Check the source author.", "Gather the dated source links."]);
     });
     await check("failed auto-save keeps text, exposes retry, does not loop", async () => {
       await page.evaluate(() => {
@@ -108,7 +134,8 @@ require("node:fs").mkdirSync(out, { recursive: true });
       await button("Open map").first().click();
       assert.equal(await field("Workflow title").inputValue(), "Research brief");
       assert.equal(await field("Step 1 title").inputValue(), "Collect sources");
-      assert.equal(await field("Block 1 in step 1").inputValue(), "Check the source author.");
+      assert.equal(await field("Block 4 in step 1").inputValue(), "Check the source author.");
+      assert.equal(await field("Block 1 in step 1").inputValue(), initialBlocks[0]);
     });
     await check("concurrent change rejected with local draft retained", async () => {
       await page.evaluate(() => {
@@ -146,6 +173,35 @@ require("node:fs").mkdirSync(out, { recursive: true });
       });
       await page.screenshot({ path: `${out}/inline-${width}.png` });
     }
+    await check("legacy evidence is retained without procedure blocks or screenshots", async () => {
+      const catalog = await page.evaluate(() => JSON.parse(localStorage.getItem("screenpipe:fictional-workflow-editor-preview")));
+      catalog.analysis.workflows = catalog.analysis.workflows.filter(w => w.id === "Research synthesis");
+      const stage = catalog.analysis.workflows[0].stages[0];
+      stage.procedure = [];
+      stage.screenshot = null;
+      const context = await browser.newContext();
+      await context.addInitScript(data => localStorage.setItem("screenpipe:fictional-workflow-editor-preview", JSON.stringify(data)), catalog);
+      const legacy = await context.newPage();
+      await legacy.goto(process.env.WORKFLOWS_PREVIEW_URL || "http://127.0.0.1:1431/preview");
+      await legacy.getByRole("button", { name: "Open map", exact: true }).first().click();
+      await legacy.getByText("Sources and screenshots", { exact: true }).first().click();
+      await legacy.locator("p").filter({ hasText: stage.evidence[0].detail }).waitFor();
+      assert.equal(await legacy.getByRole("article", { name: "Step 1", exact: true }).getByText("No captured source attached.").count(), 0);
+      await context.close();
+    });
+    await check("touch layout keeps controls hidden until a step is focused", async () => {
+      const context = await browser.newContext({ viewport: { width: 390, height: 900 }, isMobile: true, hasTouch: true });
+      context.setDefaultTimeout(10000);
+      const touch = await context.newPage();
+      await touch.goto(process.env.WORKFLOWS_PREVIEW_URL || "http://127.0.0.1:1431/preview");
+      await touch.getByRole("button", { name: "Open map", exact: true }).first().tap();
+      const grip = touch.getByRole("button", { name: "Move step 1", exact: true });
+      assert.equal(await grip.evaluate(e => getComputedStyle(e).opacity), "0");
+      await touch.getByRole("textbox", { name: "Step 1 title", exact: true }).tap();
+      await touch.waitForTimeout(150);
+      assert.equal(await grip.evaluate(e => getComputedStyle(e).opacity), "1");
+      await context.close();
+    });
     assert.deepEqual(errors, []);
     console.log("PASS no browser exceptions");
   } finally { await browser.close(); }

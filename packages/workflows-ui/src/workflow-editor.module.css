@@ -62,10 +62,12 @@
 .block:hover > button, .block:focus-within > button,
 .block:hover .actionKind, .block:focus-within .actionKind { opacity: 1; pointer-events: auto; }
 .blocks { margin-left: 24px; }
-.block { position: relative; display: grid; grid-template-columns: 65px minmax(0, 1fr) 28px; align-items: start; gap: 4px; margin: 2px 0; }
+.block { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) 65px 28px; align-items: start; gap: 4px; margin: 2px 0; }
 .blockDrop { box-shadow: 0 -2px 0 var(--ink); }
 .block > .grip { position: absolute; left: -30px; top: 1px; }
-.block textarea { min-width: 0; }
+.block textarea { min-width: 0; grid-column: 1; grid-row: 1; }
+.block select { grid-column: 2; grid-row: 1; }
+.block > button:last-child { grid-column: 3; grid-row: 1; }
 .block select { width: 100%; appearance: none; font: inherit; font-size: 11px; color: var(--muted); border: 0; border-radius: 4px; padding: 7px 4px; background: transparent; cursor: pointer; }
 .block select:hover, .block select:focus { appearance: auto; background: var(--soft); }
 .source { margin: 2px 0 0 29px; }
@@ -74,13 +76,13 @@
 .source > details > summary strong { font-size: 11px; font-weight: 400; }
 .source > details > summary svg { width: 12px; height: 12px; }
 .source p, .source blockquote { font-size: 12px; line-height: 1.5; }
+.source small { display: block; color: var(--muted); }
 .editor .add { position: absolute; top: 4px; right: 0; font-size: 0; gap: 0; }
 .editor .addStep { margin: 0 0 12px 49px; padding: 4px 6px; color: var(--muted); }
 .note { font-size: 11px; color: var(--muted); line-height: 1.5; padding: 0 5px; }
 .error { padding: 12px; border: 1px solid var(--line); border-radius: 6px; font-size: 13px; line-height: 1.6; }
 .srOnly { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; }
 @media (hover: none) {
-  .stepTop > .grip, .controls, .step > .add, .block > button, .block .actionKind { opacity: 1; pointer-events: auto; }
   .editor button { min-width: 32px; min-height: 32px; }
 }
 @media (prefers-reduced-motion: reduce) {

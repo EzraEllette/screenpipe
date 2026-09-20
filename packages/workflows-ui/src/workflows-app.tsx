@@ -952,8 +952,9 @@ function WorkflowDetail({ workflow, navigate, platform, workProfile, saveCorrect
         <p>{stage.apps.join(" · ")} · {stage.observedOccurrences} observations across {stage.observedDays} days</p>
         {stage.screenshot?.visualVerified && <div className={styles.stageScreenshot}><div className={styles.screenshotFrame}><img src={stage.screenshot.dataUrl} alt={`Captured reference for ${stage.name}`} draggable={false} data-lm-disable="true" /></div><CapturedMomentButton frameId={stage.screenshot.frameId} timestamp={stage.screenshot.timestamp} open={platform.openCapturedMoment} /></div>}
         {stage.procedure?.filter(p => p.quote).map((p, i) => <blockquote key={i}>{p.quote}<small>{p.app} · {formatEvidenceTimestamp(p.timestamp)}</small></blockquote>)}
+        {stage.evidence.filter(e => !stage.procedure?.some(p => p.quote === e.detail && p.timestamp === e.timestamp)).map((e, i) => <p key={`evidence-${i}`}>{e.detail}<small>{e.app} · {formatEvidenceTimestamp(e.timestamp)}</small></p>)}
         {stage.openQuestions?.map((question, i) => <p key={i}>{question}</p>)}
-        {!stage.screenshot?.visualVerified && !stage.procedure?.some(p => p.quote) && <p>No captured source attached.</p>}
+        {!stage.screenshot?.visualVerified && !stage.procedure?.some(p => p.quote) && !stage.evidence.length && <p>No captured source attached.</p>}
       </details>} /> : <section className={styles.detailHeader}>
         <div><Pill>Evidence on {workflow.repetitions} captured day{workflow.repetitions === 1 ? "" : "s"}</Pill><h1>{workflow.title}</h1><p>{workflow.description}</p>{workflowActions}</div>
         {timing ? <div className={styles.detailTotal}><span>{timing.sampleCount > 1 ? "Avg. time / run" : "Time for one run"}</span><strong>{formatEstimatedMinutes(timing.averageMinutes)}</strong><small>{timing.sampleCount} run{timing.sampleCount === 1 ? "" : "s"} · estimated elapsed time</small></div> : measuredDuration && <div className={styles.detailTotal}><span>Observed meeting duration</span><strong>{workflowDurationLabel(workflow)}</strong></div>}

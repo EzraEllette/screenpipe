@@ -27,11 +27,13 @@ function Text({
   value,
   onChange,
   title = false,
+  placeholder = label,
 }: {
   label: string;
   value: string;
   onChange: (text: string) => void;
   title?: boolean;
+  placeholder?: string;
 }) {
   const ref = useRef<HTMLTextAreaElement>(null);
   useLayoutEffect(() => {
@@ -57,7 +59,7 @@ function Text({
       ref={ref}
       rows={1}
       aria-label={label}
-      placeholder={label}
+      placeholder={placeholder}
       className={title ? styles.title : undefined}
       value={value}
       maxLength={8000}
@@ -468,6 +470,7 @@ export function WorkflowEditor({ workflow, save, actions, renderSource }: {
                     </select>
                     <Text
                       label={`Block ${detailIndex + 1} in step ${index + 1}`}
+                      placeholder="Write a step detail…"
                       value={detail.text}
                       onChange={(text) =>
                         stageChange(index, {
