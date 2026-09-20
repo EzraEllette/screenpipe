@@ -3,237 +3,98 @@
 .editor {
   container-type: inline-size;
   container-name: workflow-editor;
-  max-width: 920px;
+  max-width: 780px;
   margin: 0 auto;
   color: var(--ink);
 }
-.editor fieldset {
-  border: 0;
-  padding: 0;
-  margin: 0;
-  min-width: 0;
-}
+.editor fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
 .editor button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  min-width: 32px;
-  min-height: 32px;
-  padding: 6px;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--muted);
-  cursor: pointer;
-  font: inherit;
-  font-size: 13px;
+  display: inline-flex; align-items: center; justify-content: center; gap: 5px;
+  min-width: 28px; min-height: 28px; padding: 4px;
+  border: 0; border-radius: 4px; background: transparent; color: var(--muted);
+  cursor: pointer; font: inherit; font-size: 12px;
 }
-.editor button:hover {
-  background: var(--soft);
-  color: var(--ink);
-}
-.editor button:disabled {
-  opacity: 0.35;
-  cursor: default;
-}
-.editor button:focus-visible,
-.editor select:focus-visible {
-  outline: 2px solid var(--ink);
-  outline-offset: 2px;
-}
+.editor button:hover { background: var(--soft); color: var(--ink); }
+.editor button:disabled { opacity: .35; cursor: default; }
+.editor button:focus-visible, .editor select:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
 .editor textarea {
-  display: block;
-  box-sizing: border-box;
-  width: 100%;
-  min-height: 38px;
-  resize: none;
-  overflow: hidden;
-  border: 1px solid transparent;
-  border-radius: 4px;
-  padding: 8px;
-  background: transparent;
-  color: var(--ink);
-  font: inherit;
-  font-size: 14px;
-  line-height: 1.65;
+  display: block; box-sizing: border-box; width: 100%; min-height: 30px;
+  resize: none; overflow: hidden; border: 1px solid transparent; border-radius: 4px;
+  padding: 3px 5px; background: transparent; color: var(--ink);
+  font: inherit; font-size: 14px; line-height: 1.6;
 }
-.editor textarea:hover {
-  background: var(--soft);
-}
-.editor textarea:focus {
-  outline: none;
-  border-color: var(--line);
-  background: var(--panel);
-}
-.editor textarea::placeholder {
-  color: var(--muted);
-}
-.toolbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 12px 0;
-  margin-bottom: 20px;
-  border-bottom: 1px solid var(--line);
-  background: var(--paper);
-}
-.toolbar > div {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
+.editor textarea:hover { background: var(--soft); }
+.editor textarea:focus { outline: none; border-color: var(--line); background: var(--panel); }
+.editor textarea::placeholder { color: var(--muted); }
+.toolbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 0 0 12px; margin-bottom: 8px; }
+.toolbar > div { display: flex; align-items: center; gap: 6px; }
 .toolbar > div:last-child { flex: 1; min-width: 0; justify-content: flex-end; flex-wrap: wrap; }
-.toolbar > div:last-child > div { margin: 0; gap: 6px; }
+.toolbar > div:last-child > div { margin: 0; gap: 4px; }
 .toolbar > div:first-child { flex: 0 1 auto; }
-.toolbar strong {
-  white-space: nowrap;
-  font-size: 13px;
-}
-.toolbar span {
-  color: var(--muted);
-  font-size: 12px;
-}
-.intro {
-  margin: 0 0 18px;
-}
-.intro .title {
-  font-size: 30px;
-  font-weight: 600;
-  line-height: 1.25;
-  letter-spacing: -0.03em;
-}
-.endpoint {
-  display: block;
-  color: var(--muted);
-  font-size: 11px;
-  padding: 12px 8px;
-}
-.endpoint textarea {
-  margin-left: -8px;
-}
-.stepsHeading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; margin: 20px 0 12px; padding: 0 8px; }
-.stepsHeading strong { font-size: 13px; }
-.stepsHeading span { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); font-size: 12px; }
-.steps {
-  margin: 12px 0;
-}
-.step {
-  padding: 14px 16px 18px;
-  margin: 0 0 8px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--panel);
-}
-.step.drop {
-  border-top: 3px solid var(--ink);
-  padding-top: 12px;
-}
-.stepTop {
-  display: flex;
-  align-items: center;
-  margin-left: -5px;
-}
-.number {
-  font-size: 11px;
-  color: var(--muted);
-}
-.controls {
-  display: flex;
-  margin-left: auto;
-  opacity: 0;
-}
-.step:hover .controls,
-.step:focus-within .controls {
-  opacity: 1;
-}
-.step .title {
-  font-size: 19px;
-  font-weight: 550;
-}
-.editor .grip {
-  cursor: grab;
-  background: var(--soft);
-  color: var(--ink);
-}
-.editor .grip:active {
-  cursor: grabbing;
-}
-.block {
-  display: grid;
-  grid-template-columns: 32px 85px minmax(0, 1fr) 32px;
-  align-items: flex-start;
-  gap: 4px;
-  margin: 6px 0;
-}
+.toolbar span { color: var(--muted); font-size: 11px; }
+.intro { margin: 0 0 16px; }
+.intro .title { font-size: 30px; font-weight: 600; line-height: 1.25; letter-spacing: -.03em; margin-bottom: 4px; }
+.endpoint { display: block; color: var(--muted); font-size: 11px; padding: 6px 5px; }
+.endpoint textarea { margin-left: -5px; }
+.stepsHeading { margin: 18px 0 8px; padding: 0 5px; }
+.stepsHeading strong { color: var(--muted); font-size: 11px; font-weight: 500; }
+.steps { margin: 0 0 4px; padding-left: 26px; }
+.step { position: relative; padding: 4px 0; margin: 0 0 12px; border: 0; background: transparent; }
+.step.drop { box-shadow: 0 -2px 0 var(--ink); }
+.stepTop { padding-right: 30px; position: relative; display: grid; grid-template-columns: 24px minmax(0, 1fr) auto; align-items: start; }
+.number { padding-top: 7px; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.step .title { min-width: 0; font-size: 17px; font-weight: 550; line-height: 1.4; }
+.step > textarea { width: calc(100% - 24px); margin-left: 24px; }
+.editor .grip { cursor: grab; color: var(--muted); }
+.editor .grip:active { cursor: grabbing; }
+.stepTop > .grip { position: absolute; left: -30px; top: 0; }
+.controls { position: relative; }
+.controls > summary { display: flex; align-items: center; justify-content: center; min-width: 28px; min-height: 28px; border-radius: 4px; color: var(--muted); list-style: none; cursor: pointer; }
+.controls > summary::-webkit-details-marker { display: none; }
+.controls > summary:hover { background: var(--soft); }
+.controls > summary:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+.stepMenu { display: flex; position: absolute; top: 30px; right: 0; z-index: 3; padding: 4px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); box-shadow: 0 4px 12px #0000000d; }
+.controls[open] { opacity: 1; pointer-events: auto; }
+.stepTop > .grip, .controls, .step > .add, .block > button, .block .actionKind { opacity: 0; pointer-events: none; transition: opacity .12s ease; }
+.step:hover > .stepTop > .grip, .step:focus-within > .stepTop > .grip,
+.step:hover > .stepTop > .controls, .step:focus-within > .stepTop > .controls,
+.step:hover > .add, .step:focus-within > .add,
+.block:hover > button, .block:focus-within > button,
+.block:hover .actionKind, .block:focus-within .actionKind { opacity: 1; pointer-events: auto; }
+.blocks { margin-left: 24px; }
+.block { position: relative; display: grid; grid-template-columns: 65px minmax(0, 1fr) 28px; align-items: start; gap: 4px; margin: 2px 0; }
 .blockDrop { box-shadow: 0 -2px 0 var(--ink); }
-.block textarea {
-  flex: 1;
-  min-width: 0;
-}
-.block select {
-  width: 100%;
-  font: inherit;
-  font-size: 11px;
-  color: var(--muted);
-  border: 0;
-  border-radius: 4px;
-  padding: 9px 2px;
-  background: var(--soft);
-}
-.block > button {
-  margin-top: 4px;
-}
-.blocks {
-  padding: 0 6px;
-}
-.editor .add {
-  margin: 8px 0 0 4px;
-  font-size: 12px;
-}
-.editor .addStep {
-  width: 100%;
-  padding: 10px;
-  border: 1px dashed var(--line);
-  margin-bottom: 20px;
-}
-.note {
-  font-size: 12px;
-  color: var(--muted);
-  line-height: 1.6;
-  padding: 0 8px;
-}
-.error {
-  padding: 12px;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  font-size: 13px;
-  line-height: 1.6;
-}
-.srOnly {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  padding: 0;
-  overflow: hidden;
-  clip: rect(0, 0, 0, 0);
-  white-space: nowrap;
-}
+.block > .grip { position: absolute; left: -30px; top: 1px; }
+.block textarea { min-width: 0; }
+.block select { width: 100%; appearance: none; font: inherit; font-size: 11px; color: var(--muted); border: 0; border-radius: 4px; padding: 7px 4px; background: transparent; cursor: pointer; }
+.block select:hover, .block select:focus { appearance: auto; background: var(--soft); }
+.source { margin: 2px 0 0 29px; }
+.source > details { margin: 0; border: 0; border-radius: 0; background: transparent; }
+.source > details > summary { min-height: 26px; width: fit-content; padding: 2px 0; gap: 6px; color: var(--muted); }
+.source > details > summary strong { font-size: 11px; font-weight: 400; }
+.source > details > summary svg { width: 12px; height: 12px; }
+.source p, .source blockquote { font-size: 12px; line-height: 1.5; }
+.editor .add { position: absolute; top: 4px; right: 0; font-size: 0; gap: 0; }
+.editor .addStep { margin: 0 0 12px 49px; padding: 4px 6px; color: var(--muted); }
+.note { font-size: 11px; color: var(--muted); line-height: 1.5; padding: 0 5px; }
+.error { padding: 12px; border: 1px solid var(--line); border-radius: 6px; font-size: 13px; line-height: 1.6; }
+.srOnly { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; }
 @media (hover: none) {
-  .controls {
-    opacity: 1;
-  }
+  .stepTop > .grip, .controls, .step > .add, .block > button, .block .actionKind { opacity: 1; pointer-events: auto; }
+  .editor button { min-width: 32px; min-height: 32px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .stepTop > .grip, .controls, .step > .add, .block > button, .block .actionKind { transition: none; }
 }
 @container workflow-editor (max-width: 560px) {
-  .toolbar { gap: 8px; }
-  .toolbar > div:first-child { flex-direction: column; align-items: flex-start; gap: 3px; }
-  .toolbar span { font-size: 11px; }
   .intro .title { font-size: 25px; }
-  .step { padding: 10px 6px; }
-  .block { grid-template-columns: 32px minmax(0, 1fr) 32px; row-gap: 0; }
-  .block select { width: auto; justify-self: start; min-width: 85px; }
-  .block textarea { grid-column: 2 / -1; grid-row: 2; }
-  .block > button:last-child { grid-column: 3; grid-row: 1; }
-  .controls { opacity: 1; }
+  .steps { padding-left: 24px; }
+  .stepTop { grid-template-columns: 20px minmax(0, 1fr) auto; }
+  .step > textarea { width: calc(100% - 20px); margin-left: 20px; }
+  .blocks { margin-left: 20px; }
+  .source { margin-left: 25px; }
+  .block { grid-template-columns: minmax(0, 1fr) 28px; }
+  .block textarea { grid-column: 1; grid-row: 1; }
+  .block select { grid-column: 1; grid-row: 2; width: 85px; padding-top: 2px; padding-bottom: 2px; }
+  .block > button:last-child { grid-column: 2; grid-row: 1; }
 }

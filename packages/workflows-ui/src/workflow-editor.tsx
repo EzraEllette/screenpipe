@@ -6,6 +6,7 @@ import {
   ArrowDown,
   ArrowUp,
   GripVertical,
+  MoreHorizontal,
   Plus,
   Trash2,
   Undo2,
@@ -277,7 +278,7 @@ export function WorkflowEditor({ workflow, save, actions, renderSource }: {
             onChange={(trigger) => change({ ...draft, trigger })}
           />
         </label>
-        <div className={styles.stepsHeading}><strong>Steps</strong><span><GripVertical size={15} />Drag handles to reorder · click text to edit</span></div>
+        <div className={styles.stepsHeading}><strong>Steps</strong></div>
         <div className={styles.steps}>
           {draft.stages.map((stage, index) => (
             <article
@@ -333,7 +334,13 @@ export function WorkflowEditor({ workflow, save, actions, renderSource }: {
                 <span className={styles.number}>
                   {String(index + 1).padStart(2, "0")}
                 </span>
-                <div className={styles.controls}>
+              <Text
+                title
+                label={`Step ${index + 1} title`}
+                value={stage.name}
+                onChange={(name) => stageChange(index, { ...stage, name })}
+              />
+                <details className={styles.controls}><summary aria-label={`Step ${index + 1} actions`} title="Step actions"><MoreHorizontal size={16} /></summary><div className={styles.stepMenu}>
                   <button
                     type="button"
                     aria-label={`Move step ${index + 1} up`}
@@ -366,14 +373,8 @@ export function WorkflowEditor({ workflow, save, actions, renderSource }: {
                   >
                     <Trash2 size={15} />
                   </button>
-                </div>
+                </div></details>
               </div>
-              <Text
-                title
-                label={`Step ${index + 1} title`}
-                value={stage.name}
-                onChange={(name) => stageChange(index, { ...stage, name })}
-              />
               <Text
                 label={`Step ${index + 1} description`}
                 value={stage.description}
@@ -381,7 +382,6 @@ export function WorkflowEditor({ workflow, save, actions, renderSource }: {
                   stageChange(index, { ...stage, description })
                 }
               />
-              {stage.sourceIndex !== null && workflow.stages[stage.sourceIndex] && renderSource?.(workflow.stages[stage.sourceIndex])}
               <div className={styles.blocks}>
                 {stage.procedure.map((detail, detailIndex) => (
                   <div
@@ -446,6 +446,7 @@ export function WorkflowEditor({ workflow, save, actions, renderSource }: {
                       <GripVertical size={15} />
                     </button>
                     <select
+                      className={detail.kind === "action" ? styles.actionKind : undefined}
                       aria-label={`Block ${detailIndex + 1} type in step ${index + 1}`}
                       value={detail.kind}
                       onChange={(e) =>
@@ -495,9 +496,11 @@ export function WorkflowEditor({ workflow, save, actions, renderSource }: {
                   </div>
                 ))}
               </div>
+              {stage.sourceIndex !== null && workflow.stages[stage.sourceIndex] && <div className={styles.source}>{renderSource?.(workflow.stages[stage.sourceIndex])}</div>}
               <button
                 type="button"
                 className={styles.add}
+                title="Add block"
                 disabled={stage.procedure.length >= 100}
                 onClick={() => {
                   stageChange(index, {

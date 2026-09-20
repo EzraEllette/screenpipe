@@ -25,6 +25,7 @@ require("node:fs").mkdirSync(out, { recursive: true });
       assert.equal(await button("Move step 1").getAttribute("draggable"), "true");
     });
     await check("drag step, auto-save and retain its screenshot", async () => {
+      await page.getByRole("article", { name: "Step 1", exact: true }).hover();
       await button("Move step 1").dragTo(page.getByRole("article", { name: "Step 2", exact: true }));
       assert.equal(await field("Step 2 title").inputValue(), "Collect sources");
       await saved();
@@ -49,6 +50,7 @@ require("node:fs").mkdirSync(out, { recursive: true });
       const after = await stored();
       assert.equal(after.stages[2].name, "Collect sources");
       assert.deepEqual(after.stages[2].screenshot, before.stages[0].screenshot);
+      await page.getByRole("article", { name: "Step 3", exact: true }).hover();
       await button("Move step 3").dragTo(page.getByRole("article", { name: "Step 1", exact: true }));
       await saved();
     });
@@ -71,6 +73,7 @@ require("node:fs").mkdirSync(out, { recursive: true });
       await saved();
     });
     await check("drag blocks auto-saves their new order", async () => {
+      await field("Block 1 in step 1").hover();
       await button("Move block 1 in step 1").dragTo(field("Block 2 in step 1"));
       await saved();
       assert.deepEqual((await stored()).stages[0].procedure.map(p => p.text), ["Check the source author.", "Gather the dated source links."]);
