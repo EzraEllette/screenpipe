@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "suite": "screenpipe-app-coding-agent-regressions",
-  "dataset_version": "2026-09-20.3",
+  "dataset_version": "2026-09-20.4",
   "suite_type": "regression",
   "owner": "screenpipe engineering",
   "policy": {
@@ -1733,6 +1733,42 @@
           }
         ],
         "command": "cd apps/screenpipe-app-tauri && node node_modules/vitest/vitest.mjs run --config meeting-handoff.config.ts"
+      }
+    },
+    {
+      "id": "ai-gateway-enterprise-allowance",
+      "name": "Carry verified enterprise allowance from authenticated account truth to gateway metadata",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "8663ecbef34d7cd786b064a541c0e3740f4a3c14",
+        "pull_request": "https://github.com/screenpipe/screenpipe/pull/6837"
+      },
+      "base_ref": "d52da0a6484f1b54a349224ed67c6ea52637dcb3",
+      "oracle_ref": "8663ecbef34d7cd786b064a541c0e3740f4a3c14",
+      "oracle_paths": [
+        "packages/ai-gateway/src/utils/auth.ts",
+        "packages/ai-gateway/src/services/cloudflare-ai-gateway.ts"
+      ],
+      "gate": "advisory",
+      "tags": [
+        "regression",
+        "auth",
+        "enterprise",
+        "gateway",
+        "entitlement",
+        "capacity"
+      ],
+      "prompt": "Verified enterprise users inherit a lower consumer allowance when authenticated website account truth includes both enterprise membership and a compatible consumer billing plan. Repair the authentication-to-gateway handoff so an explicit boolean enterprise flag produces enterprise account identity and business_ultra gateway metadata after the existing complete, active, matching entitlement checks pass. Preserve compatible Pro, Max and Ultra billing fields, and ensure the serialized metadata reaches both OpenAI and Anthropic gateway connection headers. A false, missing or string enterprise flag must not upgrade an ordinary consumer. Inactive or denied app entitlement, missing app features, conflicting entitlement/billing plans, wrong verified subject and unsuccessful website responses must not mint paid gateway capacity. Explicit app/cloud denial stays free despite stale enterprise labels. Preserve consumer Max/Ultra capacity, cached verified account identity across device changes, service internal allowance and anonymous refusal without account lookup. Metadata must use a stable hashed account identifier and retain auto lane, caller workload and trial status without exposing the account ID or bearer token. Keep payload logging disabled, remove direct provider authorization headers and keep provider retry amplification disabled. Exercise actual authentication, gateway context and connection functions using synthetic verification/website ports; no live identity, billing, provider or native operations. No particular helper name is required.",
+      "agent_timeout_seconds": 1200,
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/enterprise-allowance.test.js",
+            "destination_path": "evals/coding-agent/graders/enterprise-allowance.test.js"
+          }
+        ],
+        "command": "\"${BUN_BIN:-bun}\" test evals/coding-agent/graders/enterprise-allowance.test.js"
       }
     }
   ]

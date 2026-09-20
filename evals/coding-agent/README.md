@@ -357,3 +357,26 @@ The host applies real onSaved callbacks to the meeting prop and permits the
 existing autosave of that same note; this is not proof of backend persistence,
 crash recovery, real generation, native capture or filesystem isolation.
 Dependencies are exposed only during grading. No model trial is implied.
+
+
+## Verified enterprise allowance through gateway metadata
+
+`ai-gateway-enterprise-allowance` joins real authentication, gateway context and
+connection construction with synthetic Clerk and website ports. Twenty outcomes
+cover enterprise precedence only after complete entitlement proof, ordinary
+consumer capacity, rejection boundaries, hashed identity, serialized metadata,
+OpenAI/Anthropic credential removal, cache identity and service/anonymous paths.
+The parent fails five intended assertions and preserves fifteen; reference and
+selected current source pass twenty. Only auth and gateway service are oracle
+patches. This standalone Bun suite needs no installed dependencies.
+
+Run `bun test evals/coding-agent/calibrate-enterprise-allowance.test.js` for
+parent/reference, equivalent naming, auth-only/gateway-only bypass, weak flag,
+early entitlement bypass, blanket Ultra, wrong wire metadata and missing-source
+controls. No website product code is included in this public case.
+
+The actual internal plan policy, model classification and account cache execute;
+an unrelated newer GLM provider import is replaced by an unused constant.
+This verifies connection configuration, not full route dispatch, cryptographic
+verification, website membership computation, real gateway spend enforcement,
+settlement, SDK requests, model outcomes or filesystem isolation.
