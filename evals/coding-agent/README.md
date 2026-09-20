@@ -9,7 +9,7 @@ This is an agent eval suite, not a unit-test suite. Every case contains:
 - saved prompt, transcript, candidate patch, grader output, runtime fingerprint, and result;
 - repeated-trial reporting with success rate, `pass@k`, and `pass^k`.
 
-The current app corpus contains 61 git-mined regressions. See
+The current app corpus contains 63 git-mined regressions. See
 [DESIGN.md](./DESIGN.md) for the Anthropic guidance, source contract, and
 history-mining workflow. The companion website manifest uses this same harness.
 
@@ -564,3 +564,26 @@ boundaries, retries, recovery, retention and data-compatible rollback. The
 28 passing controls calibrate a structured review grader; they are not native
 migration tests or model trials. Existing coding manifests and the shared runner
 are unchanged. The current native rollout-policy gap is recorded, not repaired.
+
+## Explicit migration retry readiness
+
+`app-migration-startup-retry` executes the real React prompt and UI controls with
+synthetic native status and command ports. The parent offers a retry while startup
+is busy or blocked: two intended failures and fourteen preserved passes. The
+historical fix and current source pass all sixteen outcomes, including explicit
+start/retry, process-scoped deferral, ineligible and reopening storage, permitted
+original-database recovery, no source deletion and an unresolved start request.
+Only the prompt component is applied as the historical oracle.
+
+Run `bun test evals/coding-agent/calibrate-migration-startup-retry.test.js` with the
+desktop JavaScript dependencies installed. Eleven controls reject unused fixes,
+either missing readiness gate, blanket suppression, automatic native start,
+lost deferral and source deletion. Equivalent readiness expressions pass; a
+missing component remains a setup error. These are grader calibrations, not
+model trials. Button casing and unrelated presentation copy are not scored.
+
+This UI case is separate from the managed-rollout review above. It does not
+establish native migration/recovery durability, disk or NAS behavior, recording
+continuity, native authorization, deployment reach or enforced trial isolation.
+The native rollout-policy finding remains open. No native build or production
+operation is performed; runtime links and fixtures appear only at grading time.

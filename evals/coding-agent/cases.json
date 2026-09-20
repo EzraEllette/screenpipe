@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "suite": "screenpipe-app-coding-agent-regressions",
-  "dataset_version": "2026-09-20.13",
+  "dataset_version": "2026-09-20.14",
   "suite_type": "regression",
   "owner": "screenpipe engineering",
   "policy": {
@@ -2040,6 +2040,45 @@
           }
         ],
         "command": "cd apps/screenpipe-app-tauri && \"${BUN_BIN:-bun}\" test ../../evals/coding-agent/graders/device-settings-identity.test.js"
+      }
+    },
+    {
+      "id": "app-migration-startup-retry",
+      "name": "Wait for storage readiness before offering explicit migration retry",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "65b05ea2ad2cc5c82a92456482ced5da3c27ad10",
+        "pull_request": "https://github.com/screenpipe/screenpipe/pull/7029"
+      },
+      "base_ref": "69be03c40091bcb1974b12f5d124852f346f69cc",
+      "oracle_ref": "65b05ea2ad2cc5c82a92456482ced5da3c27ad10",
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/components/storage-migration-prompt.tsx"
+      ],
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "migration",
+        "recovery",
+        "consent"
+      ],
+      "prompt": "The visible desktop migration prompt can offer a retry while startup still owns the database. Hide the migration dialog and perform no start, cancel or deletion when native status is busy or has a blocking reason, even if a failed in-place migration is pending. Once that status is ready, allow exactly an explicit retry for the selected root. Busy activity also stays quiet. Preserve ordinary legacy-storage offers without automatic start or source deletion; Do later must survive a recreated webview in the same app process, while a new process may offer the choice again without automatically converting. Keep the prompt closed for empty/ineligible, already-converted, vault-blocked and completed-but-reopening storage. Interrupted in-place conversion permits explicit retry without offering the original-database fallback; where native status permits cancellation, that recovery action must call cancel for the selected root and never delete the original. Failed starts must display their error and permit another explicit retry. Repeated app launches after failure/interruption must never automatically retry. During an unresolved explicit start, disable repeated start and deferral until the request resolves. Exercise the actual React prompt and native command boundary with synthetic status and storage ports. No particular helper, wording or internal implementation is required. This case does not establish native recovery, durability, deployment exposure or managed migration authorization; do not broaden automatic conversion, change native code, build native targets, publish or contact live services.",
+      "agent_timeout_seconds": 1200,
+      "grader_dependency_links": [
+        {
+          "source_path": "apps/screenpipe-app-tauri/node_modules",
+          "destination_path": "apps/screenpipe-app-tauri/node_modules"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 120,
+        "fixtures": [
+          {
+            "local_path": "graders/migration-startup-retry.fixture.tsx",
+            "destination_path": "apps/screenpipe-app-tauri/components/storage-migration-prompt.test.tsx"
+          }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && NODE_OPTIONS=--localstorage-file=.eval-localstorage bun x vitest run --config vitest.config.ts components/storage-migration-prompt.test.tsx --maxWorkers=1 --minWorkers=1"
       }
     }
   ]
