@@ -465,7 +465,6 @@
 .cardFooter span { color: #83867e; font-size: 8px; }
 .cardActions { display: flex; align-items: center; gap: 8px; margin-left: auto; }
 .cardActions button { display: inline-flex; align-items: center; justify-content: center; gap: 5px; min-height: 32px; padding: 6px 8px; border: 0; border-radius: 5px; background: transparent; color: var(--ink); font: inherit; font-size: 11px; font-weight: 550; white-space: nowrap; cursor: pointer; }
-.cardActions .cardEdit { position: relative; z-index: 1; border: 1px solid var(--line); background: var(--panel); }
 .cardActions button:hover { background: var(--soft); }
 .cardActions button:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
 .cardOpen::after { content: ""; position: absolute; inset: 0; border-radius: 10px; }

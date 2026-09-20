@@ -2,192 +2,147 @@
 // https://screenpipe.com
 const { chromium } = require("playwright");
 const assert = require("node:assert/strict");
-const out =
-  process.env.WORKFLOW_EDITOR_ARTIFACTS ||
-  require("node:path").join(
-    require("node:os").tmpdir(),
-    "screenpipe-workflow-editor-eval",
-  );
+const out = process.env.WORKFLOW_EDITOR_ARTIFACTS || require("node:path").join(require("node:os").tmpdir(), "screenpipe-workflow-editor-eval");
 require("node:fs").mkdirSync(out, { recursive: true });
 (async () => {
-  const b = await chromium.launch({ headless: true, channel: "chrome" });
-  const p = await b.newPage({ viewport: { width: 1440, height: 1100 } });
+  const browser = await chromium.launch({ headless: true, channel: "chrome" });
+  const page = await browser.newPage({ viewport: { width: 1440, height: 1100 } });
   const errors = [];
-  p.on("pageerror", (e) => errors.push(e.message));
-  const check = async (label, f) => {
-    await f();
-    console.log("PASS", label);
-  };
-  const field = (n) => p.getByRole("textbox", { name: n, exact: true });
-  const button = (n) => p.getByRole("button", { name: n, exact: true });
+  page.on("pageerror", e => errors.push(e.message));
+  const field = name => page.getByRole("textbox", { name, exact: true });
+  const button = name => page.getByRole("button", { name, exact: true });
+  const saved = () => page.getByRole("status", { name: "Save status" }).filter({ hasText: /^Saved$/ }).waitFor();
+  const stored = () => page.evaluate(() => JSON.parse(localStorage.getItem("screenpipe:fictional-workflow-editor-preview"))?.analysis.workflows.find(w => w.id === "Research synthesis"));
+  const check = async (label, f) => { await f(); console.log("PASS", label); };
   try {
-    await p.goto(
-      process.env.WORKFLOWS_PREVIEW_URL || "http://127.0.0.1:1431/preview",
-    );
-    await p.getByRole("button", { name: "Edit steps", exact: true }).first().click();
-    await p.getByText("Drag handles to reorder · click text to edit", { exact: true }).waitFor();
-    console.log("PASS catalog opens editor directly with drag hint");
-    await check("save disabled for unchanged draft", async () =>
-      assert(await button("Save").isDisabled()),
-    );
-    await check("inline edit + undo", async () => {
-      await field("Workflow title").fill("Research brief");
-      await button("Undo last edit").click();
-      assert.equal(
-        await field("Workflow title").inputValue(),
-        "Research synthesis",
-      );
-      await field("Workflow title").fill("Research brief");
+    await page.goto(process.env.WORKFLOWS_PREVIEW_URL || "http://127.0.0.1:1431/preview");
+    await button("Open map").first().click();
+    await check("workflow is editable immediately, without edit/save controls", async () => {
+      await field("Workflow title").waitFor();
+      assert.equal(await button("Edit workflow").count(), 0);
+      assert.equal(await button("Edit steps").count(), 0);
+      assert.equal(await button("Save").count(), 0);
+      assert.equal(await button("Move step 1").getAttribute("draggable"), "true");
     });
-    await check("keyboard stage reorder", async () => {
-      await button("Move step 1").focus();
-      await p.keyboard.press("Alt+ArrowDown");
+    await check("drag step, auto-save and retain its screenshot", async () => {
+      await button("Move step 1").dragTo(page.getByRole("article", { name: "Step 2", exact: true }));
       assert.equal(await field("Step 2 title").inputValue(), "Collect sources");
+      await saved();
+      const workflow = await stored();
+      assert.equal(workflow.stages[1].name, "Collect sources");
+      assert(workflow.stages[1].screenshot.dataUrl);
     });
-    await check("drag step reorder", async () => {
-      await button("Move step 2").dragTo(
-        p.getByRole("article", { name: "Step 1", exact: true }),
-      );
-      assert.equal(await field("Step 1 title").inputValue(), "Collect sources");
-    });
-    await check("new block validation + keyboard reorder", async () => {
-      await button("Add block").first().click();
-      assert(await button("Save").isDisabled());
-      await field("Block 1 in step 1").fill(
-        "Gather source links in the research note.",
-      );
-      await button("Add block").first().click();
-      await field("Block 2 in step 1").fill(
-        "Check that every source is dated.",
-      );
-      await button("Move block 2 in step 1").focus();
-      await p.keyboard.press("Alt+ArrowUp");
-      assert.equal(
-        await field("Block 1 in step 1").inputValue(),
-        "Check that every source is dated.",
-      );
-    });
-    await check("drag block reorder", async () => {
-      await button("Move block 1 in step 1").dragTo(field("Block 2 in step 1"));
-      assert.equal(
-        await field("Block 1 in step 1").inputValue(),
-        "Gather source links in the research note.",
-      );
-    });
-    await check("add step + delete + undo", async () => {
-      await button("Add step").click();
-      await field("Step 4 title").fill("Send for review");
-      await field("Step 4 description").fill(
-        "Ask the project owner to review the brief.",
-      );
-      await button("Delete step 4").click();
-      assert.equal(await field("Step 4 title").count(), 0);
+    await check("undo works after automatic save", async () => {
       await button("Undo last edit").click();
-      assert.equal(await field("Step 4 title").inputValue(), "Send for review");
+      assert.equal(await field("Step 1 title").inputValue(), "Collect sources");
+      await saved();
+      assert.equal((await stored()).stages[0].name, "Collect sources");
     });
-    await p
-      .locator("[data-workflows-scroll-region]")
-      .evaluate((e) => (e.scrollTop = 0));
-    await p.screenshot({ path: out + "/edited-blocks.png" });
-    await check("failed save keeps draft", async () => {
-      await p.evaluate(() => {
+    await check("successive saved reorders preserve source identity", async () => {
+      const before = await stored();
+      await button("Move step 1").focus();
+      await page.keyboard.press("Alt+ArrowDown");
+      await saved();
+      await button("Move step 2").focus();
+      await page.keyboard.press("Alt+ArrowDown");
+      await saved();
+      const after = await stored();
+      assert.equal(after.stages[2].name, "Collect sources");
+      assert.deepEqual(after.stages[2].screenshot, before.stages[0].screenshot);
+      await button("Move step 3").dragTo(page.getByRole("article", { name: "Step 1", exact: true }));
+      await saved();
+    });
+    await check("typing auto-saves without losing focus", async () => {
+      await field("Workflow title").fill("Research brief");
+      await saved();
+      assert(await field("Workflow title").evaluate(e => e === document.activeElement));
+      assert.equal((await stored()).title, "Research brief");
+    });
+    await check("empty blocks remain drafts until filled", async () => {
+      const before = await stored();
+      await button("Add block").first().click();
+      await page.getByText("Finish the empty block to save", { exact: true }).waitFor();
+      await page.waitForTimeout(850);
+      assert.equal((await stored()).revision, before.revision);
+      await field("Block 1 in step 1").fill("Gather the dated source links.");
+      await saved();
+      await button("Add block").first().click();
+      await field("Block 2 in step 1").fill("Check the source author.");
+      await saved();
+    });
+    await check("drag blocks auto-saves their new order", async () => {
+      await button("Move block 1 in step 1").dragTo(field("Block 2 in step 1"));
+      await saved();
+      assert.deepEqual((await stored()).stages[0].procedure.map(p => p.text), ["Check the source author.", "Gather the dated source links."]);
+    });
+    await check("failed auto-save keeps text, exposes retry, does not loop", async () => {
+      await page.evaluate(() => {
         window.__setItem = Storage.prototype.setItem;
-        Storage.prototype.setItem = function (k, v) {
-          if (k === "screenpipe:fictional-workflow-editor-preview")
-            throw new Error("Simulated disk full");
+        window.__failedSaves = 0;
+        Storage.prototype.setItem = function(k, v) {
+          if (k === "screenpipe:fictional-workflow-editor-preview") { window.__failedSaves++; throw new Error("Simulated disk full"); }
           return window.__setItem.call(this, k, v);
         };
       });
-      await button("Save").click();
-      await p
-        .getByRole("alert")
-        .filter({ hasText: "Simulated disk full" })
-        .waitFor();
-      assert.equal(
-        await field("Workflow title").inputValue(),
-        "Research brief",
-      );
-      await p.evaluate(() => (Storage.prototype.setItem = window.__setItem));
+      await field("Workflow description").fill("A traceable research brief for the team.");
+      await page.getByRole("alert").filter({ hasText: "Simulated disk full" }).waitFor();
+      await page.waitForTimeout(850);
+      assert.equal(await page.evaluate(() => window.__failedSaves), 1);
+      assert.equal(await field("Workflow description").inputValue(), "A traceable research brief for the team.");
+      await page.evaluate(() => Storage.prototype.setItem = window.__setItem);
+      await button("Retry save").click();
+      await saved();
     });
-
-    await check("save + reload persistence", async () => {
-      await button("Save").click();
-      await button("Edit workflow").waitFor();
-      await p.reload();
-      await p.getByRole("button", { name: "Open map" }).first().click();
-      await button("Edit workflow").click();
-      assert.equal(
-        await field("Workflow title").inputValue(),
-        "Research brief",
-      );
-      assert.equal(await field("Step 4 title").inputValue(), "Send for review");
-      assert.equal(
-        await field("Block 2 in step 1").inputValue(),
-        "Check that every source is dated.",
-      );
+    await check("leaving before debounce flushes valid changes", async () => {
+      await field("Workflow outcome").fill("A reviewed brief is ready to share.");
+      await button("All workflows").click();
+      await page.waitForFunction(() => JSON.parse(localStorage.getItem("screenpipe:fictional-workflow-editor-preview")).analysis.workflows.some(w => w.outcome === "A reviewed brief is ready to share."));
+      await button("Open map").first().click();
+      assert.equal(await field("Workflow outcome").inputValue(), "A reviewed brief is ready to share.");
     });
-    await check("concurrent write is rejected with draft kept", async () => {
-      await field("Workflow title").fill("My concurrent draft");
-      await p.evaluate(() => {
+    await check("reload restores saved title, steps and blocks", async () => {
+      await page.reload();
+      await button("Open map").first().click();
+      assert.equal(await field("Workflow title").inputValue(), "Research brief");
+      assert.equal(await field("Step 1 title").inputValue(), "Collect sources");
+      assert.equal(await field("Block 1 in step 1").inputValue(), "Check the source author.");
+    });
+    await check("concurrent change rejected with local draft retained", async () => {
+      await page.evaluate(() => {
         const k = "screenpipe:fictional-workflow-editor-preview";
         const v = JSON.parse(localStorage.getItem(k));
-        v.analysis.workflows.find(
-          (w) => w.id === "Research synthesis",
-        ).revision += 1;
+        const workflow = v.analysis.workflows.find(w => w.id === "Research synthesis");
+        workflow.revision++;
+        workflow.title = "Another editor's title";
         localStorage.setItem(k, JSON.stringify(v));
       });
-      await button("Save").click();
-      await p
-        .getByRole("alert")
-        .filter({ hasText: "Workflow changed" })
-        .waitFor();
-      assert.equal(
-        await field("Workflow title").inputValue(),
-        "My concurrent draft",
-      );
-    });
-    await check("cancel leaves saved content unchanged", async () => {
-      await button("Cancel edits").click();
-      await button("Edit workflow").click();
-      assert.equal(
-        await field("Workflow title").inputValue(),
-        "Research brief",
-      );
+      await field("Workflow title").fill("My local draft");
+      await page.getByRole("alert").filter({ hasText: "Workflow changed" }).waitFor();
+      assert.equal(await field("Workflow title").inputValue(), "My local draft");
+      assert.equal((await stored()).title, "Another editor's title");
+      await button("Discard draft and view latest").click();
+      assert.equal(await field("Workflow title").inputValue(), "Another editor's title");
     });
     await check("incomplete draft survives navigation", async () => {
       await button("Add step").click();
-      await p
-        .getByRole("button", { name: "Home", exact: false })
-        .first()
-        .click();
-      await p.getByRole("button", { name: "Open map" }).first().click();
-      await button("Edit workflow").click();
-      assert.equal(await field("Step 5 title").count(), 1);
-      assert(await button("Save").isDisabled());
-      await button("Cancel edits").click();
+      await button("All workflows").click();
+      await button("Open map").first().click();
+      assert.equal(await field("Step 4 title").inputValue(), "");
+      await field("Step 4 title").fill("Send for review");
+      await saved();
     });
-    await button("Edit workflow").click();
-    await p.setViewportSize({ width: 720, height: 1000 });
-    await p.waitForTimeout(250);
-    await check("narrow fields fit their contents", async () => {
-      const clipped = await p
-        .locator("textarea")
-        .evaluateAll((es) =>
-          es
-            .filter((e) => e.scrollHeight > e.clientHeight + 3)
-            .map((e) => e.getAttribute("aria-label")),
-        );
-      assert.deepEqual(clipped, []);
-    });
-    await p.screenshot({ path: out + "/editor-narrow-tested.png" });
-    await p.emulateMedia({ colorScheme: "dark" });
-    await p.screenshot({ path: out + "/editor-dark-preference.png" });
+    await page.locator("[data-workflows-scroll-region]").evaluate(e => e.scrollTop = 0);
+    await page.screenshot({ path: out + "/inline-workflow.png" });
+    for (const width of [1050, 720, 390]) {
+      await page.setViewportSize({ width, height: 1000 });
+      await check(`fields and controls fit at ${width}px`, async () => {
+        await page.waitForTimeout(100);
+        const bad = await page.locator("main textarea, main button").evaluateAll(es => es.filter(e => e.getBoundingClientRect().width && (e.getBoundingClientRect().right > innerWidth + 1 || (e.tagName === "TEXTAREA" && e.scrollHeight > e.clientHeight + 3))).map(e => e.getAttribute("aria-label") || e.textContent));
+        assert.deepEqual(bad, []);
+      });
+      await page.screenshot({ path: `${out}/inline-${width}.png` });
+    }
     assert.deepEqual(errors, []);
     console.log("PASS no browser exceptions");
-  } finally {
-    await b.close();
-  }
-})().catch((e) => {
-  console.error(e);
-  process.exitCode = 1;
-});
+  } finally { await browser.close(); }
+})().catch(e => { console.error(e); process.exitCode = 1; });

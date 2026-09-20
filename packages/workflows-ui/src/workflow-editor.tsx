@@ -1,18 +1,17 @@
 // screenpipe — AI that knows everything you've seen, said, or heard
 // https://screenpipe.com
 "use client";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import {
   ArrowDown,
   ArrowUp,
-  Check,
   GripVertical,
   Plus,
   Trash2,
   Undo2,
   X,
 } from "lucide-react";
-import type { WorkflowMap } from "./model";
+import type { WorkflowMap, WorkflowStage } from "./model";
 import {
   moveBlock,
   validWorkflowEdit,
@@ -66,61 +65,80 @@ function Text({
   );
 }
 
-export function WorkflowEditor({
-  workflow,
-  save,
-  close,
-}: {
+type EditorStage = Omit<StageEdit, "procedure"> & { key: string; procedure: (StageEdit["procedure"][number] & { key: string })[] };
+type EditorDraft = Omit<WorkflowEdit, "stages"> & { stages: EditorStage[] };
+function keyedDraft(draft: WorkflowEdit): EditorDraft {
+  return { ...draft, stages: draft.stages.map(stage => ({ ...stage, key: (stage as EditorStage).key || crypto.randomUUID(), procedure: stage.procedure.map(block => ({ ...block, key: (block as EditorStage["procedure"][number]).key || crypto.randomUUID() })) })) };
+}
+function payload(draft: EditorDraft): WorkflowEdit {
+  return { ...draft, stages: draft.stages.map(({ key, procedure, ...stage }) => ({ ...stage, procedure: procedure.map(({ key, ...block }) => block) })) };
+}
+// Keep local identities while source positions change after each saved reorder.
+function rebase(draft: EditorDraft, sent: EditorDraft, saved: WorkflowMap): EditorDraft {
+  return { ...draft, id: saved.id ?? sent.id, expected_revision: saved.revision ?? 0, stages: draft.stages.map(stage => {
+    const index = sent.stages.findIndex(s => s.key === stage.key);
+    return { ...stage, sourceIndex: index < 0 ? null : index, procedure: stage.procedure.map(block => {
+      const blockIndex = index < 0 ? -1 : sent.stages[index].procedure.findIndex(p => p.key === block.key);
+      return { ...block, sourceIndex: blockIndex < 0 ? null : blockIndex };
+    }) };
+  }) };
+}
+
+export function WorkflowEditor({ workflow, save, actions, renderSource }: {
   workflow: WorkflowMap;
-  save: (draft: WorkflowEdit) => Promise<void>;
-  close: () => void;
+  save: (draft: WorkflowEdit) => Promise<WorkflowMap>;
+  actions?: ReactNode;
+  renderSource?: (stage: WorkflowStage) => ReactNode;
 }) {
   const key = `screenpipe:workflow-edit:${workflow.id ?? workflow.title}`;
-  const [initial] = useState(() => workflowEdit(workflow));
-  const [draft, setDraft] = useState<WorkflowEdit>(() => {
+  const [initial, setInitial] = useState(() => keyedDraft(workflowEdit(workflow)));
+  const [draft, setDraft] = useState<EditorDraft>(() => {
     try {
       const saved = JSON.parse(sessionStorage.getItem(key) || "null");
-      if (saved?.id === initial.id && validWorkflowEdit(saved, true))
-        return saved;
-    } catch {
-      /* Optional tab-local recovery. */
-    }
+      if (saved?.id === initial.id && validWorkflowEdit(saved, true)) return keyedDraft(saved);
+    } catch { /* Optional tab-local recovery. */ }
     return initial;
   });
-  const [history, setHistory] = useState<WorkflowEdit[]>([]);
+  const [history, setHistory] = useState<EditorDraft[]>([]);
   const [saving, setSaving] = useState(false);
+  const [savedOnce, setSavedOnce] = useState(false);
   const [error, setError] = useState("");
   const [announcement, setAnnouncement] = useState("");
   const [dragOver, setDragOver] = useState<number | null>(null);
   const [blockDragOver, setBlockDragOver] = useState<string | null>(null);
   const dragging = useRef<{ stage: number; detail?: number } | null>(null);
   const busy = useRef(false);
-  const dirty = JSON.stringify(draft) !== JSON.stringify(initial);
+  const mounted = useRef(true);
+  const current = useRef(draft);
+  const baseline = useRef(initial);
+  const dirty = JSON.stringify(payload(draft)) !== JSON.stringify(payload(initial));
   const valid = validWorkflowEdit(draft);
-  useEffect(() => {
+  function remember(next: EditorDraft, base = baseline.current) {
     try {
-      if (dirty) sessionStorage.setItem(key, JSON.stringify(draft));
+      if (JSON.stringify(payload(next)) !== JSON.stringify(payload(base))) sessionStorage.setItem(key, JSON.stringify(next));
       else sessionStorage.removeItem(key);
-    } catch {
-      /* Editing still works when storage is full/disabled. */
-    }
-  }, [draft, dirty, key]);
+    } catch { /* Editing works when storage is unavailable. */ }
+  }
+  useEffect(() => { remember(draft); }, [draft, initial, key]);
   useEffect(() => {
     const warn = (e: BeforeUnloadEvent) => {
-      if (dirty) {
-        e.preventDefault();
-        e.returnValue = "";
-      }
+      if (dirty) { e.preventDefault(); e.returnValue = ""; }
     };
     window.addEventListener("beforeunload", warn);
     return () => window.removeEventListener("beforeunload", warn);
   }, [dirty]);
-  function change(next: WorkflowEdit) {
-    setHistory((h) => [...h.slice(-49), draft]);
+  function update(next: EditorDraft) {
+    current.current = next;
     setDraft(next);
+    remember(next);
+  }
+  function change(next: EditorDraft) {
+    const previous = current.current;
+    setHistory(h => [...h.slice(-49), previous]);
+    update(next);
     setError("");
   }
-  function stageChange(index: number, next: StageEdit) {
+  function stageChange(index: number, next: EditorStage) {
     change({
       ...draft,
       stages: draft.stages.map((s, i) => (i === index ? next : s)),
@@ -148,35 +166,58 @@ export function WorkflowEditor({
         ?.focus(),
     );
   }
-  function clearDraft() {
-    try {
-      sessionStorage.removeItem(key);
-    } catch {}
+  function useLatest() {
+    const next = keyedDraft(workflowEdit(workflow));
+    baseline.current = next;
+    setInitial(next);
+    update(next);
+    setHistory([]);
+    setError("");
   }
   async function submit() {
-    if (!dirty || !valid || busy.current) return;
+    const sent = current.current;
+    if (!validWorkflowEdit(sent) || busy.current || JSON.stringify(payload(sent)) === JSON.stringify(payload(baseline.current))) return;
     busy.current = true;
     setSaving(true);
     setError("");
+    let succeeded = false;
     try {
-      await save(draft);
-      clearDraft();
-      close();
+      const saved = await save(payload(sent));
+      const base = rebase(sent, sent, saved);
+      baseline.current = base;
+      setInitial(base);
+      const next = rebase(current.current, sent, saved);
+      update(next);
+      setHistory(h => h.map(entry => rebase(entry, sent, saved)));
+      setSavedOnce(true);
+      succeeded = true;
     } catch (e) {
-      setError(
-        e instanceof Error
-          ? e.message
-          : "Could not save. Your draft is still here.",
-      );
+      setError(e instanceof Error ? e.message : "Could not save. Your changes are kept here.");
     } finally {
       busy.current = false;
       setSaving(false);
+      // Finish edits made during a save even if the user has left this page.
+      if (succeeded && !mounted.current) void submit();
     }
   }
+  useEffect(() => {
+    if (!dirty && !saving && draft.expected_revision !== (workflow.revision ?? 0)) useLatest();
+  }, [workflow.revision, dirty, saving]);
+  const flush = useRef(submit);
+  flush.current = submit;
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; void flush.current(); };
+  }, []);
+  useEffect(() => {
+    if (!dirty || !valid || saving || error || draft.expected_revision !== (workflow.revision ?? 0)) return;
+    const timer = setTimeout(() => void flush.current(), 700);
+    return () => clearTimeout(timer);
+  }, [draft, dirty, valid, saving, error, workflow.revision]);
   return (
     <section
       className={styles.editor}
-      aria-label="Edit workflow"
+      aria-label="Workflow document"
       onKeyDown={(e) => {
         if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
           e.preventDefault();
@@ -187,74 +228,34 @@ export function WorkflowEditor({
       }}
     >
       <header className={styles.toolbar}>
+        <div><span role="status" aria-label="Save status">{error ? "Not saved" : saving ? "Saving…" : dirty ? valid ? "Saving…" : "Finish the empty block to save" : savedOnce ? "Saved" : ""}</span></div>
         <div>
-          <strong>Edit workflow</strong>
-          <span role="status">
-            {saving
-              ? "Saving…"
-              : dirty
-                ? "Unsaved changes"
-                : "Your edits stay through AI updates"}
-          </span>
-        </div>
-        <div>
-          <button
-            type="button"
-            title="Undo last edit"
-            aria-label="Undo last edit"
-            disabled={!history.length || saving}
-            onClick={() => {
-              setDraft(history[history.length - 1]);
-              setHistory((h) => h.slice(0, -1));
-              setError("");
-            }}
-          >
-            <Undo2 size={17} />
-          </button>
-          <button
-            type="button"
-            title="Cancel edits"
-            aria-label="Cancel edits"
-            disabled={saving}
-            onClick={() => {
-              clearDraft();
-              close();
-            }}
-          >
-            <X size={17} />
-          </button>
-          <button
-            type="button"
-            className={styles.save}
-            disabled={!dirty || !valid || saving}
-            onClick={() => void submit()}
-          >
-            <Check size={16} />
-            Save
-          </button>
+          {actions}
+          <button type="button" title="Undo last edit" aria-label="Undo last edit" disabled={!history.length} onClick={() => {
+            update(history[history.length - 1]);
+            setHistory(h => h.slice(0, -1));
+            setError("");
+          }}><Undo2 size={17} /></button>
         </div>
       </header>
       {error && (
         <p role="alert" className={styles.error}>
-          {error}
+          {error} <button type="button" onClick={() => void submit()} disabled={saving}>Retry save</button>
         </p>
       )}
-      {draft.expected_revision !== (workflow.revision ?? 0) && (
+      {!saving && draft.expected_revision !== (workflow.revision ?? 0) && (
         <p role="alert" className={styles.error}>
           A newer version is available. Your draft is kept.{" "}
           <button
             type="button"
             disabled={saving}
-            onClick={() => {
-              clearDraft();
-              close();
-            }}
+            onClick={useLatest}
           >
             Discard draft and view latest
           </button>
         </p>
       )}
-      <fieldset disabled={saving}>
+      <fieldset>
         <div className={styles.intro}>
           <Text
             title
@@ -281,11 +282,7 @@ export function WorkflowEditor({
           {draft.stages.map((stage, index) => (
             <article
               className={`${styles.step} ${dragOver === index ? styles.drop : ""}`}
-              key={
-                stage.sourceIndex === null
-                  ? `new-${index}`
-                  : `source-${stage.sourceIndex}`
-              }
+              key={stage.key}
               aria-label={`Step ${index + 1}`}
               onDragOver={(e) => {
                 if (
@@ -384,15 +381,12 @@ export function WorkflowEditor({
                   stageChange(index, { ...stage, description })
                 }
               />
+              {stage.sourceIndex !== null && workflow.stages[stage.sourceIndex] && renderSource?.(workflow.stages[stage.sourceIndex])}
               <div className={styles.blocks}>
                 {stage.procedure.map((detail, detailIndex) => (
                   <div
                     className={`${styles.block} ${blockDragOver === `${index}:${detailIndex}` ? styles.blockDrop : ""}`}
-                    key={
-                      detail.sourceIndex === null
-                        ? `new-${detailIndex}`
-                        : `source-${detail.sourceIndex}`
-                    }
+                    key={detail.key}
                     onDragOver={(e) => {
                       if (
                         dragging.current?.stage === index &&
@@ -510,7 +504,7 @@ export function WorkflowEditor({
                     ...stage,
                     procedure: [
                       ...stage.procedure,
-                      { sourceIndex: null, kind: "action", text: "" },
+                      { key: crypto.randomUUID(), sourceIndex: null, kind: "action", text: "" },
                     ],
                   });
                   focusField(
@@ -533,7 +527,7 @@ export function WorkflowEditor({
               ...draft,
               stages: [
                 ...draft.stages,
-                { sourceIndex: null, name: "", description: "", procedure: [] },
+                { key: crypto.randomUUID(), sourceIndex: null, name: "", description: "", procedure: [] },
               ],
             });
             focusField(`Step ${draft.stages.length + 1} title`);
