@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "suite": "screenpipe-app-coding-agent-regressions",
-  "dataset_version": "2026-09-20.7",
+  "dataset_version": "2026-09-20.8",
   "suite_type": "regression",
   "owner": "screenpipe engineering",
   "policy": {
@@ -1841,6 +1841,49 @@
           }
         ],
         "command": "cd apps/screenpipe-app-tauri && \"${BUN_BIN:-bun}\" test ../../evals/coding-agent/graders/local-preset-preservation.test.js"
+      }
+    },
+    {
+      "id": "mcp-live-database-boundary",
+      "name": "Keep MCP authentication outside the live recording database",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "a43b9757f3133a842bbe0d7764fff97e31f199c9"
+      },
+      "base_ref": "c92d8e5fd67b724846f2b9db5cf32a17fe58f4a5",
+      "oracle_ref": "a43b9757f3133a842bbe0d7764fff97e31f199c9",
+      "oracle_paths": [
+        "packages/screenpipe-mcp/src/index.ts"
+      ],
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "mcp",
+        "recording",
+        "data-integrity",
+        "authentication"
+      ],
+      "prompt": "The MCP authentication discovery fallback can bypass Screenpipe and read the live recording database when environment credentials and CLI discovery fail. Keep database ownership inside Screenpipe: the MCP process must not probe, open, copy or mutate db.sqlite or its WAL/shared-memory companions, or spawn an external SQLite client to recover credentials. With missing credentials or invalid CLI output, keep MCP initialization and tool listing available, surface the backend authentication failure clearly, and never invent a key or report recording results as success. Preserve local environment-key precedence over the legacy environment key, support the legacy key, and preserve successful discovery through the bundled CLI, node-adjacent npx and PATH-based npx. Repeated search calls should reuse discovery and send the resolved credential to the configured Screenpipe API. Verify observable tool responses, authenticated requests and forbidden filesystem/subprocess effects using synthetic inputs; do not access real recordings or credentials.",
+      "agent_timeout_seconds": 1200,
+      "grader_dependency_links": [
+        {
+          "source_path": "packages/screenpipe-mcp/node_modules",
+          "destination_path": "packages/screenpipe-mcp/node_modules"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 180,
+        "fixtures": [
+          {
+            "local_path": "graders/mcp-db-boundary.fixture.ts",
+            "destination_path": "packages/screenpipe-mcp/src/eval-db-boundary.test.ts"
+          },
+          {
+            "local_path": "graders/mcp-db-boundary.preload.cjs",
+            "destination_path": "packages/screenpipe-mcp/src/eval-db-boundary.preload.cjs"
+          }
+        ],
+        "command": "cd packages/screenpipe-mcp && SCREENPIPE_DISABLE_TELEMETRY=1 \"${BUN_BIN:-bun}\" run test -- src/eval-db-boundary.test.ts"
       }
     }
   ]

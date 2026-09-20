@@ -9,7 +9,7 @@ This is an agent eval suite, not a unit-test suite. Every case contains:
 - saved prompt, transcript, candidate patch, grader output, runtime fingerprint, and result;
 - repeated-trial reporting with success rate, `pass@k`, and `pass^k`.
 
-The current app corpus contains 56 git-mined regressions. See
+The current app corpus contains 57 git-mined regressions. See
 [DESIGN.md](./DESIGN.md) for the Anthropic guidance, source contract, and
 history-mining workflow. The companion website manifest uses this same harness.
 
@@ -439,3 +439,24 @@ event ports; title generation is stubbed to prevent model/native execution.
 This proves the selected delayed-read ordering, not native persistence, failures
 or races within the settings writer, the complete rendered chat UI, real model
 selection or enforced agent isolation. No model trial is implied.
+
+## MCP live database boundary
+
+`mcp-live-database-boundary` builds the real historical MCP entrypoint and drives
+its stdio tools through the SDK against a loopback API. A child-process preload
+models CLI failures/results and records selected filesystem/subprocess effects.
+Missing credentials and invalid CLI output must never reach the database; five
+preserved paths cover environment precedence, the legacy key and three CLI
+discovery routes. Repeated calls verify request credentials and visible results.
+
+Run `bun test evals/coding-agent/calibrate-mcp-db-boundary.test.js` with MCP
+dependencies installed. Controls reject the historical fallback, an unused fix,
+SQLite access without an existence probe, swallowed direct reads, lost CLI
+recovery and blanket denial; equivalent helper naming passes. Missing entrypoint
+is retained as a build error rather than intended regression evidence.
+
+Only the entrypoint is the historical oracle. This does not grade instruction
+wording or prove model compliance, native database locking, OS-wide filesystem
+isolation, real CLI/keychain discovery, package publication or other platforms.
+The observed IO ports are synthetic, not a universal access sandbox. Product
+startup tests with supplied credentials do not exercise the missing-key fallback.
