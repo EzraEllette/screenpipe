@@ -995,6 +995,14 @@ impl SCServer {
                 crate::routes::workflow_catalog::catalog,
             )
             .get(
+                "/workflows/workspace",
+                crate::routes::workflow_workspace::context,
+            )
+            .post(
+                "/workflows/workspace",
+                crate::routes::workflow_workspace::update,
+            )
+            .get(
                 "/workflows/pipeline",
                 crate::routes::workflow_pipeline::context,
             )

@@ -113,8 +113,10 @@ pub(crate) async fn context(
     let workflows: Vec<Value> = value["analysis"]["workflows"].as_array().into_iter().flatten().map(|w| json!({
         "id":workflow_id(w), "title":w["title"], "trigger":w["trigger"], "outcome":w["outcome"],
         "description":w["description"], "userCorrection":w["userCorrection"], "lastReviewedAt":w["lastReviewedAt"],
-        "timingRuns":w["timing"]["runs"],
-        "stages":w["stages"].as_array().into_iter().flatten().map(|s| json!({"name":s["name"],"description":s["description"],"procedure":s["procedure"]})).collect::<Vec<_>>()
+        "confidence":w["confidence"], "people":w["people"], "teams":w["teams"], "handoffs":w["handoffs"], "variations":w["variations"], "bottlenecks":w["bottlenecks"], "captureSequence":w["captureSequence"],
+        "timingRuns":w["timing"]["runs"], "limitations":w["limitations"], "openQuestions":w["openQuestions"], "quality":w["quality"], "apps":w["apps"],
+        "evidence":context_source_refs(&w["evidence"]),
+        "stages":w["stages"].as_array().into_iter().flatten().map(|s| json!({"name":s["name"],"description":s["description"],"apps":s["apps"],"confidence":s["confidence"],"procedure":s["procedure"],"evidence":context_source_refs(&s["evidence"]),"openQuestions":s["openQuestions"]})).collect::<Vec<_>>()
     })).collect();
     Ok(Json(
         json!({"revision":value["revision"].as_u64().unwrap_or(0), "now":Utc::now().to_rfc3339(),
@@ -124,6 +126,17 @@ pub(crate) async fn context(
     ))
 }
 
+// Keep source addresses available for targeted research without duplicating
+// full captured documents or screenshot payloads in the context index.
+fn context_source_refs(value: &Value) -> Vec<Value> {
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|e| json!({"timestamp":e["timestamp"],"app":e["app"],"source":e["source"],"speaker":e["speaker"]}))
+        .collect()
+}
+
 #[derive(Deserialize, OaSchema)]
 pub struct CommitRequest {
     pub expected_revision: u64,
@@ -131,6 +144,10 @@ pub struct CommitRequest {
     pub workflows: Vec<Value>,
     #[serde(default)]
     pub pipeline_revision: Option<u64>,
+    #[serde(default)]
+    pub workspace_revision: Option<u64>,
+    #[serde(default)]
+    pub draft_id: Option<String>,
 }
 
 /// Preserve identity and user-owned corrections. Absence from a partial scan
@@ -202,7 +219,7 @@ pub fn reconcile(mut previous: Value, updates: Vec<Value>, through: &str) -> Res
     Ok(previous)
 }
 
-async fn persist(
+pub(super) async fn persist(
     source: &WorkflowCatalogSource,
     previous: &Value,
     next: &Value,
@@ -247,6 +264,17 @@ pub(crate) async fn commit(
     if perms
         .0
         .as_ref()
+        .is_some_and(|p| workspace::is_task(&p.pipe_name))
+        && body.workspace_revision.is_none()
+    {
+        return Err(error(
+            StatusCode::FORBIDDEN,
+            "Publish through the workflow workspace.",
+        ));
+    }
+    if perms
+        .0
+        .as_ref()
         .is_some_and(|p| p.pipe_name == "workflow-discovery")
         && body.pipeline_revision.is_none()
     {
@@ -256,6 +284,17 @@ pub(crate) async fn commit(
         ));
     }
 
+    if body.workspace_revision.is_some()
+        && perms
+            .0
+            .as_ref()
+            .is_some_and(|p| p.pipe_name != "workflow-review")
+    {
+        return Err(error(
+            StatusCode::FORBIDDEN,
+            "Only Review can publish workspace drafts.",
+        ));
+    }
     let through = DateTime::parse_from_rfc3339(&body.checked_through)
         .map_err(|_| error(StatusCode::BAD_REQUEST, "Invalid checkpoint."))?
         .with_timezone(&Utc);
@@ -267,6 +306,33 @@ pub(crate) async fn commit(
         ));
     }
     let previous = read_catalog(&source).await?;
+    if let Some(rev) = body.workspace_revision {
+        let ws = workspace::state(&previous);
+        workspace::check_publish(&ws, rev, body.draft_id.as_deref())
+            .map_err(|e| error(StatusCode::CONFLICT, &e))?;
+        if let Some(id) = body.draft_id.as_deref() {
+            if ws["drafts"][id]["status"] == "published" {
+                return Ok(Json(ws["drafts"][id]["receipt"].clone()));
+            }
+            if body.workflows != vec![ws["drafts"][id]["payload"].clone()] {
+                return Err(error(
+                    StatusCode::CONFLICT,
+                    "Publish the reviewed draft without replacing its payload.",
+                ));
+            }
+        } else if !body.workflows.is_empty() {
+            return Err(error(
+                StatusCode::CONFLICT,
+                "Finish cannot introduce unreviewed changes.",
+            ));
+        }
+        if ws["cycle"]["end"] != body.checked_through {
+            return Err(error(
+                StatusCode::CONFLICT,
+                "Preserve the requested update boundary.",
+            ));
+        }
+    }
     if previous["revision"].as_u64().unwrap_or(0) != body.expected_revision {
         return Err(error(
             StatusCode::CONFLICT,
@@ -324,6 +390,10 @@ pub(crate) async fn commit(
     .map_err(|e| error(StatusCode::UNPROCESSABLE_ENTITY, &e))?;
     let mut normalized = normalize_updates(raw.clone(), &evidence)
         .map_err(|e| error(StatusCode::UNPROCESSABLE_ENTITY, &e))?;
+    if body.workspace_revision.is_some() {
+        workspace::validate_publication(&raw, &normalized)
+            .map_err(|e| error(StatusCode::UNPROCESSABLE_ENTITY, &e))?;
+    }
     let updates = normalized["workflows"].as_array_mut().unwrap();
     if updates.len() != body.workflows.len()
         || updates.iter().any(|w| {
@@ -381,6 +451,33 @@ pub(crate) async fn commit(
     // revision under the writer immediately before committing.
     let _guard = WRITER.lock().await;
     let previous = read_catalog(&source).await?;
+    if let Some(rev) = body.workspace_revision {
+        let ws = workspace::state(&previous);
+        workspace::check_publish(&ws, rev, body.draft_id.as_deref())
+            .map_err(|e| error(StatusCode::CONFLICT, &e))?;
+        if let Some(id) = body.draft_id.as_deref() {
+            if ws["drafts"][id]["status"] == "published" {
+                return Ok(Json(ws["drafts"][id]["receipt"].clone()));
+            }
+            if body.workflows != vec![ws["drafts"][id]["payload"].clone()] {
+                return Err(error(
+                    StatusCode::CONFLICT,
+                    "Publish the reviewed draft without replacing its payload.",
+                ));
+            }
+        } else if !body.workflows.is_empty() {
+            return Err(error(
+                StatusCode::CONFLICT,
+                "Finish cannot introduce unreviewed changes.",
+            ));
+        }
+        if ws["cycle"]["end"] != body.checked_through {
+            return Err(error(
+                StatusCode::CONFLICT,
+                "Preserve the requested update boundary.",
+            ));
+        }
+    }
     if previous["revision"].as_u64().unwrap_or(0) != body.expected_revision {
         return Err(error(
             StatusCode::CONFLICT,
@@ -416,7 +513,25 @@ pub(crate) async fn commit(
     }
     next["quality"] = analysis_quality(&[], 90, &next["analysis"]);
     next["diagnostics"] = json!({"sourceReads":reads,"executor":"scheduled-task"});
+    if body.workspace_revision.is_some() {
+        let mut ws = workspace::state(&previous);
+        if body.draft_id.is_some() {
+            // A single reviewed draft does not claim the whole requested period is done.
+            next["checkedThrough"] = previous["checkedThrough"].clone();
+        }
+        let receipt = json!({"revision":next["revision"],"changes":next["changes"],"checkedThrough":next["checkedThrough"]});
+        workspace::published(&mut ws, body.draft_id.as_deref(), &receipt);
+        if body.draft_id.is_none() {
+            next["changes"] = ws["cycle"]["changes"].clone();
+            next["needsWorkflowReview"] = json!(false);
+        }
+        next["analyzedAt"] = json!(Utc::now().to_rfc3339());
+        next["agentWorkspace"] = ws;
+    }
     persist(&source, &previous, &next).await?;
+    if body.workspace_revision.is_some() {
+        super::workflow_workspace::notify_ready(&next["agentWorkspace"], "workflow-review");
+    }
     Ok(Json(
         json!({"revision":next["revision"],"changes":next["changes"],"checkedThrough":next["checkedThrough"]}),
     ))
@@ -502,14 +617,39 @@ pub(crate) async fn correct(
     apply_feedback(workflow, &body)?;
     let updated_workflow = workflow.clone();
     next["needsWorkflowReview"] = json!(true);
+    if next["agentWorkspace"]["cycle"]["status"] == "running" {
+        next["agentWorkspace"]["cycle"]["finished"]["workflow-maintain"] = json!(false);
+        let revision = workspace::revision(&next["agentWorkspace"]) + 1;
+        next["agentWorkspace"]["revision"] = json!(revision);
+    }
     next["revision"] = json!(before["revision"].as_u64().unwrap_or(0) + 1);
     persist(&source, &before, &next).await?;
+    if next["agentWorkspace"]["cycle"]["status"] == "running" {
+        super::workflow_workspace::notify_ready(&next["agentWorkspace"], "desktop");
+    }
     Ok(Json(json!({"success":true,"workflow":updated_workflow})))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn context_preserves_source_addresses_without_capture_payloads() {
+        let refs = context_source_refs(&json!([{
+            "timestamp":"2026-09-19T10:00:00Z", "app":"Notes",
+            "source":"screen", "speaker":null,
+            "detail":"A long private document", "screenshot":"base64-image"
+        }]));
+        assert_eq!(
+            refs,
+            vec![json!({
+                "timestamp":"2026-09-19T10:00:00Z", "app":"Notes",
+                "source":"screen", "speaker":null
+            })]
+        );
+        assert!(context_source_refs(&Value::Null).is_empty());
+    }
+
     #[tokio::test]
     async fn pipe_cannot_grant_itself_rollout_access() {
         use screenpipe_core::pipes::permissions::PipePermissions;

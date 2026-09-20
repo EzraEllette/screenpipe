@@ -88,6 +88,22 @@ const AUTOMATE_MY_WORK_LEGACY_PROMPT_HASHES: &[&str] = &[
 ];
 const BUNDLED_BUILTIN_PIPES: &[(&str, &str)] = &[
     (
+        "workflow-discover",
+        include_str!("../../assets/pipes/workflow-discover/pipe.md"),
+    ),
+    (
+        "workflow-deepen",
+        include_str!("../../assets/pipes/workflow-deepen/pipe.md"),
+    ),
+    (
+        "workflow-review",
+        include_str!("../../assets/pipes/workflow-review/pipe.md"),
+    ),
+    (
+        "workflow-maintain",
+        include_str!("../../assets/pipes/workflow-maintain/pipe.md"),
+    ),
+    (
         "workflow-activity",
         include_str!("../../assets/pipes/workflow-activity/pipe.md"),
     ),
@@ -2883,6 +2899,9 @@ async fn setup_pipe_permissions(
     }
     if let Err(e) = PiExecutor::ensure_register_artifact_extension(pipe_dir) {
         warn!("failed to install register-artifact extension: {}", e);
+    }
+    if let Err(e) = PiExecutor::ensure_workflow_workspace_extension(pipe_dir) {
+        warn!("failed to install workflow workspace extension: {}", e);
     }
     if let Err(e) = PiExecutor::ensure_structured_output_extension(pipe_dir) {
         warn!("failed to install structured-output extension: {}", e);
@@ -7859,7 +7878,9 @@ fn render_prompt_with_port(
 
     // Workflow batches resume their durable coverage cursor. A schedule-derived
     // lookback can skip unread history, so only their pipeline supplies a range.
-    let mut prompt = if crate::workflows::pipeline::stage(&config.name).is_some() {
+    let mut prompt = if crate::workflows::workspace::is_task(&config.name) {
+        "Workflow run: use workflow_workspace context; its cycle is the requested window. Investigate with the normal screenpipe-api skill. Save drafts and decisions with workflow_workspace.\n".to_string()
+    } else if crate::workflows::pipeline::stage(&config.name).is_some() {
         "Workflow run: follow the task instructions and read /workflows/pipeline; pipeline.window is the authoritative window.\n".to_string()
     } else {
         let lookback_duration = parse_duration_str(&config.schedule)

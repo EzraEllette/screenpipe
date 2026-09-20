@@ -45,3 +45,4 @@ pub mod workflows;
 
 pub mod workflow_catalog;
 pub mod workflow_pipeline;
+pub(crate) mod workflow_workspace;

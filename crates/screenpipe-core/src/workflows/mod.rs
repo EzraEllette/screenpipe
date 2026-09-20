@@ -4,6 +4,7 @@
 //! Evidence validation shared by desktop discovery and scheduled catalog updates.
 pub mod model_choice;
 pub mod pipeline;
+pub mod workspace;
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use futures::{stream, StreamExt};
@@ -599,7 +600,6 @@ pub fn normalize_analysis(
         };
 
         let mut stages = Vec::new();
-        let mut claimed_stage_evidence = HashSet::new();
         for stage in item
             .get("stages")
             .and_then(Value::as_array)
@@ -613,21 +613,11 @@ pub fn normalize_analysis(
             ) else {
                 continue;
             };
+            // One captured document can contain evidence for several steps.
+            // Validate each quote against its source; consuming the frame once
+            // silently removed later stages from otherwise supported drafts.
             let evidence =
-                clean_evidence(stage.get("evidence").unwrap_or(&Value::Null), 4, catalog)
-                    .into_iter()
-                    .filter(|entry| {
-                        let Some(timestamp) = entry.get("timestamp").and_then(Value::as_str) else {
-                            return false;
-                        };
-                        let app = entry
-                            .get("app")
-                            .and_then(Value::as_str)
-                            .unwrap_or_default()
-                            .to_lowercase();
-                        claimed_stage_evidence.insert(format!("{timestamp}|{app}"))
-                    })
-                    .collect::<Vec<_>>();
+                clean_evidence(stage.get("evidence").unwrap_or(&Value::Null), 4, catalog);
             let confidence = bounded_number(stage, "confidence", 100);
             if !detailed_contract && (evidence.is_empty() || confidence < 50) {
                 continue;
@@ -1489,6 +1479,43 @@ pub mod timing;
 #[cfg(test)]
 mod quote_tests {
     use super::*;
+
+    #[test]
+    fn one_document_can_support_distinct_steps_without_consuming_its_frame() {
+        let timestamp = "2026-09-18T10:00:00Z";
+        let catalog = EvidenceCatalog {
+            points: vec![EvidencePoint {
+                timestamp: DateTime::parse_from_rfc3339(timestamp)
+                    .unwrap()
+                    .with_timezone(&Utc),
+                app: "Receipts".into(),
+                source: "screen".into(),
+                speaker: None,
+                detail: "Opened the vendor invoice. Receipt saved successfully.".into(),
+            }],
+            ..Default::default()
+        };
+        let stages: Vec<Value> = ["Opened the vendor invoice.", "Receipt saved successfully."].iter().enumerate().map(|(i,quote)| json!({
+            "name":format!("Step {i}"),"description":quote,"confidence":90,
+            "evidence":[{"timestamp":timestamp,"app":"Receipts"}],
+            "procedure":[{"kind":"action","text":quote,"quote":quote,"timestamp":timestamp,"app":"Receipts"}]
+        })).collect();
+        let raw = json!({"evidenceVersion":2,"workflows":[{"title":"Record invoice","description":"Enter and save invoice","stages":stages}]});
+        let result = normalize_analysis(raw.clone(), 90, &catalog).unwrap();
+        workspace::validate_publication(&raw, &result).unwrap();
+        assert_eq!(
+            result["workflows"][0]["stages"][1]["procedure"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        // Reusing one capture does not fabricate a second occurrence or an
+        // ordered recording of the whole process.
+        assert!(result["workflows"][0]["captureSequence"]
+            .as_array()
+            .is_none_or(Vec::is_empty));
+    }
 
     #[test]
     fn procedure_accepts_layout_whitespace_but_keeps_source_identity() {
