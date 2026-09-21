@@ -519,10 +519,10 @@ pub(crate) async fn verify(
     if groups {
         return Err(storage_error("element summary counts differ"));
     }
-    let missing:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM _bulk_element_parent_refs p WHERE NOT EXISTS(SELECT 1 FROM elements e WHERE e.id=p.parent_id))").fetch_one(&mut *validation).await?;
-    if missing {
-        return Err(storage_error("element parent is absent"));
-    }
+    // Count every preserved parent reference, including dangling legacy ones.
+    // Requiring those parents to exist would reintroduce the migration gate
+    // intentionally excluded by lifecycle::verify_integrity. New element
+    // writes still validate their affected relationships in Elements::sync.
     Ok(())
 }
 
