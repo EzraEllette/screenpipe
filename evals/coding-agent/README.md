@@ -621,3 +621,25 @@ The synthetic broken state fails its intended assertion; the reference passes.
 The command adapter retains Buffers when `encoding: null` is requested and keeps
 normal command output as text. This is harness calibration, not model evaluation
 or proof of process isolation; no real recordings or customer files are used.
+
+## Localization recovery preserves accepted output
+
+`app-localization-recovery-preservation` executes the actual translation service
+with synthetic provider responses and disposable catalogs. Cold recovery must
+not overwrite an accepted rich-text or ICU translation with an incompatible
+legacy download. Fourteen outcomes cover arrival order, later valid corrections,
+frontend/native catalogs, multiple locales, disjoint messages, retained rejected
+diagnostics, source identity/format refusal, warm-cache preservation and stale
+loose-output cleanup. The parent fails five persisted-output checks while nine
+preserved behaviors pass; the service-only reference passes all fourteen.
+
+Run `bun test evals/coding-agent/calibrate-localization-recovery.test.js` with
+`@generaltranslation/icu` 0.1.2 available in the desktop dependency directory.
+Ten calibration controls reject unused fixes, first-valid-only merging, dropped
+diagnostics, frontend-only repair, identity bypass and blanket refusal. Equivalent
+object assignment passes; missing service code remains a setup error. Current
+source separately passes the fourteen outcomes and five existing service tests.
+
+Fixtures and dependency links are materialized only for grading. No live provider,
+real user content, native build, release or publication is involved. These are
+corpus checks, not model trials, packaging validation or proof of trial isolation.

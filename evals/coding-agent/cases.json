@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "suite": "screenpipe-app-coding-agent-regressions",
-  "dataset_version": "2026-09-21.1",
+  "dataset_version": "2026-09-21.2",
   "suite_type": "regression",
   "owner": "screenpipe engineering",
   "policy": {
@@ -2111,6 +2111,45 @@
           }
         ],
         "command": "\"${BUN_BIN:-bun}\" test evals/coding-agent/graders/mcp-workflow-ids.test.js"
+      }
+    },
+    {
+      "id": "app-localization-recovery-preservation",
+      "name": "Preserve accepted localization during cold recovery",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "474f641f520b9057be862e3d2ed1cb9f03d1978b",
+        "pull_request": "https://github.com/screenpipe/screenpipe/pull/7172"
+      },
+      "base_ref": "90ebd317d61df0a81a3ac92ee29a1c25dffaa798",
+      "oracle_ref": "474f641f520b9057be862e3d2ed1cb9f03d1978b",
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/scripts/i18n/service.mjs"
+      ],
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "localization",
+        "recovery",
+        "data-preservation"
+      ],
+      "prompt": "Cold localization recovery can report success while writing an incompatible legacy translation over a valid translation already recovered from another provider file. Fix the actual translation service so persisted locale catalogs preserve accepted rich-text structure and ICU placeholders when a later incompatible file is downloaded. Accept a later valid correction, recover regardless of whether the incompatible file arrives first or last, combine disjoint messages, and preserve unmatched rejected entries for diagnostics. Apply these rules independently to frontend and native catalogs and each locale. Fully recovered messages must not trigger translation, branch creation or uploads. Refuse downloaded results with mismatched branch, file, version, locale or format. Preserve the warm-cache path: valid cached frontend/native messages make no provider calls, caller-owned cache stays unchanged, and stale loose output is cleared. Use synthetic provider responses and disposable temporary files; do not contact a translation provider, translate real content, build or publish an app. No particular merge expression or internal helper is required. Native packaging, live provider availability and actual model quality are outside this task.",
+      "agent_timeout_seconds": 1200,
+      "grader_dependency_links": [
+        {
+          "source_path": "apps/screenpipe-app-tauri/node_modules",
+          "destination_path": "apps/screenpipe-app-tauri/node_modules"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/localization-recovery.fixture.js",
+            "destination_path": "apps/screenpipe-app-tauri/scripts/i18n/eval-localization-recovery.test.js"
+          }
+        ],
+        "command": "\"${BUN_BIN:-bun}\" test apps/screenpipe-app-tauri/scripts/i18n/eval-localization-recovery.test.js"
       }
     }
   ]
