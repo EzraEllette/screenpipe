@@ -24,8 +24,13 @@ test("release snapshot handoff is independent of source file discovery order", a
       await fs.mkdir(path.dirname(path.join(root, file)), { recursive: true });
       await fs.writeFile(path.join(root, file), `export function Probe() { return <button><${icon} />Manage</button>; }`);
     }
+    const route = path.join(root, "app/(main)/[slug]/page.tsx");
+    await fs.mkdir(path.dirname(route), { recursive: true });
+    await fs.writeFile(route, "export default function Page() { return <p>Literal route message</p>; }");
     const snapshot = await prepareLocalization({ root, config, mode: "cached" });
-    expect(snapshot.coverage.ja.frontend.total).toBe(1);
+    expect(snapshot.coverage.ja.frontend.total).toBe(2);
+    const source = JSON.parse(await fs.readFile(path.join(root, ".localization/source/en.json"), "utf8"));
+    expect(Object.values(source)).toContain("Literal route message");
     process.env.SCREENPIPE_I18N_SNAPSHOT = path.join(root, ".localization/snapshot.json");
     const handedOff = await prepareLocalization({ root, config: { ...config, src: [...config.src].reverse() }, mode: "cached" });
     expect(handedOff).toEqual(snapshot);
