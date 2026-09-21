@@ -9,7 +9,7 @@ This is an agent eval suite, not a unit-test suite. Every case contains:
 - saved prompt, transcript, candidate patch, grader output, runtime fingerprint, and result;
 - repeated-trial reporting with success rate, `pass@k`, and `pass^k`.
 
-The current app corpus contains 59 git-mined regressions. See
+The current app corpus contains 63 git-mined regressions. See
 [DESIGN.md](./DESIGN.md) for the Anthropic guidance, source contract, and
 history-mining workflow. The companion website manifest uses this same harness.
 
@@ -496,3 +496,94 @@ predicate logic and distinguishing missing source from behavior failure.
 Only the error module is the oracle. These synthetic function outcomes do not
 prove rendered UI, actual retry dispatch, TLS recovery or provider availability.
 No network calls, model trials or native builds run.
+
+## Workflow save receipts and readable context
+
+`app-workflow-save-receipt-boundary` drives the registered workflow tool against
+a synthetic loopback recorder. Fourteen outcomes cover rejected operations,
+capability and abort boundaries, exact literal payloads, compact context indexes,
+owned draft selectors, private snapshots readable through the real transport
+normalizer, and successful save receipts that survive a failed follow-up read.
+The parent fails eleven intended outcomes and preserves three; reference and
+selected current source pass all fourteen.
+
+Run `bun test evals/coding-agent/calibrate-workflow-receipt.test.js`. Eleven
+controls reject unused fixes, swallowed errors, oversized inline context,
+world-readable snapshots, discarded remaining state and repeated writes, while
+accepting equivalent internal naming. Missing imports remain setup failures.
+Only the extension is the historical oracle; the existing public transport
+normalizer runs unchanged. These outcomes do not prove native persistence,
+real agent repair choices, model performance or enforced process isolation.
+
+## Continued Pipe recording directories
+
+`app-continued-pipe-recording-directory` exercises the actual directory resolver
+and session parser against synthetic native path/command ports. Eighteen outcomes
+cover custom roots, later root changes, Windows-style drive paths, spaces, lookup
+fallbacks, and generic routing for ordinary, per-execution and unsafe sessions.
+The parent fails seven outcomes and preserves eleven; reference/current pass all
+eighteen. Nine calibration controls reject unused fixes, stale caches, unsafe
+routing and lost fallback, while accepting equivalent variable naming.
+
+Run `bun test evals/coding-agent/calibrate-pipe-directory.test.js`. Missing modules
+remain setup errors. Only the directory resolver is the historical oracle.
+The synthetic join uses forward slashes; it does not prove Windows-native path
+semantics, native command correctness, complete chat continuation, account-state
+relocation or durable session persistence. No model, scheduler or native build runs.
+
+## Device identity across settings resets
+
+`app-device-settings-identity` runs actual settings provider/store reset actions
+against synthetic storage and native ports. Nine outcomes cover empty frontend
+defaults, legacy and stable identities, compatibility initialization of empty
+stored identities, full/individual resets, ordinary field reset and later native
+identity changes. Parent: eight intended failures and one preserved pass.
+Reference/current: nine passes, 42 assertions.
+
+Run `bun test evals/coding-agent/calibrate-device-identity.test.js`. Ten controls
+reject unused fixes, random defaults, full/individual identity loss, blanket
+reset refusal and constant identities; an equivalent guard passes. Missing
+source remains an import error. Existing product tests cover defaults and
+legacy/stable identity resets; this adds no-write, ordinary-reset, compatibility
+and later-identity checks. React lifecycle is stubbed; reloads are explicit.
+This does not prove native identity generation, actual disk durability, record
+collision prevention, model performance or enforced trial isolation.
+
+## Storage migration rollout review
+
+Use [the migration rollout review](MIGRATION-ROLLOUT-REVIEW.md) when evaluating
+storage-format changes or managed background migrations. The source-inspected
+case distinguishes ordinary user opt-in from the native hidden-UI automatic
+path introduced in #7023. A historical fix that intentionally enables broader
+migration is not automatically a safe product contract for a new eval.
+
+Run `bun test evals/coding-agent/migration-rollout-review.test.js`. Sixteen
+review scenarios cover separate migration authority, native cohort/stop controls,
+managed policy changes, recording/pause preservation, disk/history/storage
+boundaries, retries, recovery, retention and data-compatible rollback. The
+28 passing controls calibrate a structured review grader; they are not native
+migration tests or model trials. Existing coding manifests and the shared runner
+are unchanged. The current native rollout-policy gap is recorded, not repaired.
+
+## Explicit migration retry readiness
+
+`app-migration-startup-retry` executes the real React prompt and UI controls with
+synthetic native status and command ports. The parent offers a retry while startup
+is busy or blocked: two intended failures and fourteen preserved passes. The
+historical fix and current source pass all sixteen outcomes, including explicit
+start/retry, process-scoped deferral, ineligible and reopening storage, permitted
+original-database recovery, no source deletion and an unresolved start request.
+Only the prompt component is applied as the historical oracle.
+
+Run `bun test evals/coding-agent/calibrate-migration-startup-retry.test.js` with the
+desktop JavaScript dependencies installed. Eleven controls reject unused fixes,
+either missing readiness gate, blanket suppression, automatic native start,
+lost deferral and source deletion. Equivalent readiness expressions pass; a
+missing component remains a setup error. These are grader calibrations, not
+model trials. Button casing and unrelated presentation copy are not scored.
+
+This UI case is separate from the managed-rollout review above. It does not
+establish native migration/recovery durability, disk or NAS behavior, recording
+continuity, native authorization, deployment reach or enforced trial isolation.
+The native rollout-policy finding remains open. No native build or production
+operation is performed; runtime links and fixtures appear only at grading time.
