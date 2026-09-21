@@ -609,3 +609,15 @@ materialized only for grading. These are corpus and grader checks, not model
 trials, native catalog persistence, stdio dispatch, authentication or bounded
 stalled-response evidence. No real recordings, credentials or provider calls
 are used; execution isolation and model improvement remain unproven.
+
+### Binary source fixtures
+
+`bun test evals/coding-agent/binary-fixtures.test.ts` verifies the actual runner
+with a temporary synthetic Git repository. Git-backed fixtures must retain all
+256 byte values, including NUL and invalid UTF-8, and report hashes of those exact
+bytes. The control also preserves local binary fixtures, default and explicit
+source refs, UTF-8 text, empty files, executable flags and binary oracle patches.
+The synthetic broken state fails its intended assertion; the reference passes.
+The command adapter retains Buffers when `encoding: null` is requested and keeps
+normal command output as text. This is harness calibration, not model evaluation
+or proof of process isolation; no real recordings or customer files are used.
