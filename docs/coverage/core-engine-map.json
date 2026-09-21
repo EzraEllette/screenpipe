@@ -738,6 +738,7 @@
         "tests/cancellable_query_test.rs",
         "tests/cancellation_performance_bench.rs",
         "tests/close_severs_connections_test.rs",
+        "tests/hybrid_recovery.rs",
         "tests/memory_pressure_test.rs",
         "tests/multi_pool_wal_parity_test.rs",
         "tests/quarantine_self_heal_test.rs",
@@ -1370,6 +1371,7 @@
       "crate": "screenpipe-engine",
       "files": [
         "src/routes/workflow_catalog.rs",
+        "src/routes/workflow_edits.rs",
         "src/routes/workflow_pipeline.rs",
         "src/routes/workflows.rs",
         "tests/workflow_catalog_contract_test.rs"
