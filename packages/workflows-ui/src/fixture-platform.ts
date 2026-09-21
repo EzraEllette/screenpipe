@@ -130,7 +130,7 @@ function fixtureWorkflow(input: FixtureWorkflow, index: number): WorkflowMap {
       observedOccurrences: 5 + index,
       observedDays: 4 + index,
       evidence: [allEvidence[stageIndex]],
-      screenshot: screenshot(name, input.apps[Math.min(stageIndex, input.apps.length - 1)], index * 10 + stageIndex + 1),
+      screenshot: { ...screenshot(name, input.apps[Math.min(stageIndex, input.apps.length - 1)], index * 10 + stageIndex + 1), timestamp: allEvidence[stageIndex].timestamp, matchDistanceSeconds: 0 },
     })),
     bottlenecks: [{
       label: input.friction,
@@ -384,7 +384,7 @@ function fixtureSkillReceipt(draft: WorkflowSkillDraft) {
   };
 }
 
-async function rasterizeFixture(workflow: WorkflowMap) {
+async function rasterizeFixture(workflow: Pick<WorkflowMap, "stages">) {
       // Rasterize this file's fictional SVGs so previews exercise the same raster-only export.
       for (const stage of workflow.stages) {
         if (!stage.screenshot?.dataUrl.startsWith("data:image/svg+xml")) continue;
@@ -448,8 +448,14 @@ export function createFixtureWorkflowsPlatform(analysis: WorkflowAnalysis = fixt
       onField({ field: "company", value: "Preview company: a team that helps businesses resolve customer requests." });
       onField({ field: "summary", value: "Preview role: I manage customer operations and improve how our team handles requests." });
     },
+    loadWorkflowRecording: async (timestamp, app) => {
+      const stage = current.analysis.workflows.flatMap(w => w.stages).find(s => s.evidence.some(e => e.timestamp === timestamp && e.app === app));
+      if (!stage?.screenshot) return null;
+      await rasterizeFixture({ stages: [stage] });
+      return { kind: "image", url: stage.screenshot.dataUrl, frameId: stage.screenshot.frameId, timestamp: stage.screenshot.timestamp, offsetSeconds: 0, matchDistanceSeconds: 0 };
+    },
     ensureRuntime: async () => fixtureWorkflowRuntime,
-    loadCapturedWork: async () => restore(),
+    loadCapturedWork: async () => { const value = restore(); await Promise.all(value.analysis.workflows.map(rasterizeFixture)); return structuredClone(value); },
     analyzeCapturedWork: async () => restore(),
     saveWorkflowEdits: async (draft) => {
       restore();
