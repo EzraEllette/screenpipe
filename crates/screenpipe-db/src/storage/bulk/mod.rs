@@ -16,7 +16,7 @@ mod tests;
 
 use super::{storage_error, HybridStorage};
 pub(crate) use connection::pool_options;
-pub(crate) use connection::register_hash;
+pub(crate) use connection::{register_hash, register_hash_extension};
 pub(super) use lifecycle::export;
 pub(super) use schema::{bootstrap, bootstrap_in_place, finish_indexes, upgrade_recording};
 use std::sync::{atomic::AtomicUsize, Arc, Mutex};
