@@ -614,12 +614,9 @@ enum TimelineGrouping {
         return urls
     }
 
-    private static let dayBoundaryFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.dateFormat = "EEE, MMM d"
-        return f
-    }()
+    private static var dayBoundaryFormatter: DateFormatter {
+        UILocalization.shared.dateFormatter("EEEMMMd")
+    }
 
     private static func dayKey(_ date: Date) -> String {
         let cal = Calendar.current

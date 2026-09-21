@@ -68,7 +68,7 @@ function parseArgs(argv) {
 function command(program, args, options = {}) {
   const result = spawnSync(program, args, {
     cwd: options.cwd ?? REPO,
-    encoding: options.encoding ?? "utf8",
+    encoding: options.encoding === undefined ? "utf8" : options.encoding,
     input: options.input,
     env: options.env ?? process.env,
     maxBuffer: MAX_BUFFER,
@@ -77,7 +77,8 @@ function command(program, args, options = {}) {
   return {
     status: result.status,
     signal: result.signal,
-    stdout: result.stdout?.toString() ?? "",
+    // An explicit null requests raw Git blob/patch bytes, including invalid UTF-8.
+    stdout: options.encoding === null ? (result.stdout ?? Buffer.alloc(0)) : (result.stdout?.toString() ?? ""),
     stderr: result.stderr?.toString() ?? "",
     error: result.error?.message ?? null,
   };

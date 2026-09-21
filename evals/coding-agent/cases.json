@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "suite": "screenpipe-app-coding-agent-regressions",
-  "dataset_version": "2026-09-20.14",
+  "dataset_version": "2026-09-21.1",
   "suite_type": "regression",
   "owner": "screenpipe engineering",
   "policy": {
@@ -2079,6 +2079,38 @@
           }
         ],
         "command": "cd apps/screenpipe-app-tauri && NODE_OPTIONS=--localstorage-file=.eval-localstorage bun x vitest run --config vitest.config.ts components/storage-migration-prompt.test.tsx --maxWorkers=1 --minWorkers=1"
+      }
+    },
+    {
+      "id": "mcp-maintained-workflow-retrieval",
+      "name": "Retrieve maintained workflows without weakening ID request boundaries",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "9c38b194f5e324b1fcf78fbc3ece1adf4af29274"
+      },
+      "base_ref": "ea0a6852e1bbb89b87535a1618a44d0bc752640b",
+      "oracle_ref": "9c38b194f5e324b1fcf78fbc3ece1adf4af29274",
+      "oracle_paths": [
+        "packages/screenpipe-mcp/src/workflow-tools.ts"
+      ],
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "mcp",
+        "workflow",
+        "input-validation"
+      ],
+      "prompt": "The MCP workflow tools can list maintained workflows but reject their returned IDs when retrieving details. Make maintained wf-prefixed lowercase hexadecimal UUID IDs retrievable while preserving legacy wf-prefixed 64-character lowercase hexadecimal IDs. Preserve the exact workflow identity and complete returned JSON, including unknown nested fields and evidence. The automation-detail option defaults to true and respects explicit true or false; nonboolean options must fail before a backend call. Reject malformed IDs, wrong lengths, nonhex content, surrounding whitespace and path/query/fragment or encoded-path injection before requesting anything. Preserve list search encoding, empty catalogs and safe integer pagination (limit 1 through 100, offset zero or greater), rejecting invalid inputs and unknown tools without requests. Each valid invocation makes one backend read. Non-success HTTP responses, transport failures and malformed JSON must surface failure instead of an empty success; a later explicit retry can recover. Exercise the actual workflow tool function using a synthetic API port. Do not access real recordings, credentials or providers. Native catalog persistence, stdio transport, authorization and stalled-response timeouts are outside this task.",
+      "agent_timeout_seconds": 1200,
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/mcp-workflow-ids.test.js",
+            "destination_path": "evals/coding-agent/graders/mcp-workflow-ids.test.js"
+          }
+        ],
+        "command": "\"${BUN_BIN:-bun}\" test evals/coding-agent/graders/mcp-workflow-ids.test.js"
       }
     }
   ]

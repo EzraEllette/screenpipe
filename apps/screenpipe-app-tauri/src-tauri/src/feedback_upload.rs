@@ -638,6 +638,8 @@ async fn run_feedback_upload(
         "{}{}\n\n=== Browser Console Logs ===\n{}\n\n=== Recording Diagnostics ===\n{}\n\n=== Storage Migration Diagnostics ===\n{}",
         request.chat_history, logs, request.console_log, recording_diagnostics, migration_diagnostics
     );
+    let raw_bundle =
+        append_localization_diagnostics(raw_bundle, &crate::localization::diagnostics());
     let redacted_logs =
         crate::feedback_redact::redact_pii_for_feedback(raw_bundle, request.settings_json.clone())
             .await
@@ -656,6 +658,10 @@ async fn run_feedback_upload(
         video,
     )
     .await
+}
+
+pub(crate) fn append_localization_diagnostics(bundle: String, diagnostics: &str) -> String {
+    format!("{bundle}\n\n=== Localization Diagnostics ===\n{diagnostics}")
 }
 
 fn finish(app: &AppHandle, completed: FeedbackUploadCompleted) {
@@ -919,6 +925,89 @@ mod tests {
         let requests = server.received_requests().await.unwrap();
         let upload = requests.iter().find(|r| r.method == "PUT").unwrap();
         assert_eq!(upload.body, redacted.as_bytes());
+    }
+
+    #[tokio::test]
+    async fn database_verification_failure_reaches_support_after_log_rotation() {
+        let dir = tempfile::tempdir().unwrap();
+        let database = dir.path().join("db.sqlite");
+        let damaged = vec![0x5a; 4096];
+        std::fs::write(&database, &damaged).unwrap();
+        screenpipe_db::persist_sqlite_quarantine(
+            &database,
+            Some(11),
+            "SQLite hard fault (extended result code 11)",
+        )
+        .unwrap();
+        let failure = match screenpipe_db::DatabaseManager::new(
+            database.to_str().unwrap(),
+            Default::default(),
+        )
+        .await
+        {
+            Ok(db) => {
+                db.close().await;
+                panic!("verified damage must keep startup blocked");
+            }
+            Err(error) => error,
+        };
+        assert!(failure.to_string().contains("file is not a database"));
+        assert_eq!(std::fs::read(&database).unwrap(), damaged);
+        tokio::fs::write(
+            dir.path().join("screenpipe-app.2026-09-20.log"),
+            format!("ERROR boot phase → error: Failed to initialize database: {failure}\npassword=hunter2\n"),
+        ).await.unwrap();
+        tokio::fs::write(
+            dir.path().join("screenpipe-app.2026-09-21.log"),
+            "INFO app restarted; engine startup pending\n",
+        )
+        .await
+        .unwrap();
+        let files = crate::log_files::collect_log_files(&[dir.path().to_path_buf()]).await;
+        let logs = collect_log_text_from_files(files).await;
+        let redacted = crate::feedback_redact::redact_diagnostics_locally(logs)
+            .await
+            .unwrap();
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/logs"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {
+                "signedUrl": format!("{}/upload/log", server.uri()), "path": "logs/report.log"
+            }})))
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/upload/log"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/logs/confirm"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {"id": 42}})))
+            .mount(&server)
+            .await;
+        upload_report(
+            &Client::new(),
+            &server.uri(),
+            &request(),
+            redacted,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let requests = server.received_requests().await.unwrap();
+        let upload = requests.iter().find(|r| r.method == "PUT").unwrap();
+        let report = String::from_utf8_lossy(&upload.body);
+        for expected in [
+            "Failed to initialize database",
+            "database has verified damage",
+            "file is not a database",
+            "engine startup pending",
+        ] {
+            assert!(report.contains(expected), "missing {expected}: {report}");
+        }
+        assert!(!report.contains("hunter2"));
     }
 
     #[tokio::test]

@@ -1370,6 +1370,14 @@ pub struct SettingsStore {
     #[serde(rename = "isLoading")]
     pub is_loading: bool,
 
+    /// Interface language only. "system" follows the OS; never changes capture.
+    #[serde(rename = "uiLocale")]
+    pub ui_locale: String,
+
+    /// Last resolved PostHog rollout decision, shared with all native surfaces.
+    #[serde(rename = "uiLocalizationEnabled")]
+    pub ui_localization_enabled: bool,
+
     #[serde(rename = "devMode")]
     pub dev_mode: bool,
     #[serde(rename = "ocrEngine")]
@@ -1994,6 +2002,8 @@ Rules:
             },
             ai_presets: vec![default_free_preset],
             is_loading: false,
+            ui_locale: "system".to_string(),
+            ui_localization_enabled: false,
             dev_mode: false,
             #[cfg(target_os = "macos")]
             ocr_engine: "apple-native".to_string(),

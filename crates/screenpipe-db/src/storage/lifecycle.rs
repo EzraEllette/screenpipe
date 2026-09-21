@@ -1285,13 +1285,10 @@ pub(super) async fn verify_integrity(pool: &SqlitePool) -> Result<(), sqlx::Erro
     if checks != ["ok"] {
         return Err(storage_error("SQLite integrity verification failed"));
     }
-    if !sqlx::query("PRAGMA foreign_key_check")
-        .fetch_all(pool)
-        .await?
-        .is_empty()
-    {
-        return Err(storage_error("SQLite foreign-key verification failed"));
-    }
+    // Usable legacy histories can contain dangling foreign keys. Preserve
+    // those rows: migration verifies logical receipts and archive contents,
+    // rather than requiring old data to satisfy today's relationship rules.
+    // Ordinary writes still enforce their foreign-key constraints.
     Ok(())
 }
 

@@ -709,6 +709,10 @@ const applyProCloudAudioDefaults = (settings: Settings): Settings => {
 };
 
 let DEFAULT_SETTINGS: Settings = {
+            uiLocale: "system",
+            uiLocalizationEnabled: process.env.NEXT_PUBLIC_SCREENPIPE_WEB_DEV === "mock"
+              && typeof window !== "undefined"
+              && new URLSearchParams(window.location.search).get("mockLocalization") === "true",
 			dataSyncEnabled: false,
 			activitiesEnabled: false,
 			activitiesIntervalMinutes: 15,
