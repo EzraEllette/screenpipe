@@ -604,7 +604,7 @@ function AnalysisQualityPanel({ quality }: { quality: AnalysisQuality }) {
         <div><span>Structured context</span><strong>{quality.parsedContextCount.toLocaleString()}</strong><p>Screen observations with additional structure available to the map.</p></div>
         <div><span>Verified observations</span><strong>{quality.verifiedEvidenceCount.toLocaleString()}</strong><p>Map evidence matched back to an exact captured observation.</p></div>
         <div><span>Stage screenshots</span><strong>{quality.screenshotCount} · {quality.screenshotCoverage}%</strong><p>Local frames matched within two minutes of their observations.</p></div>
-        <div><span>Quality notes</span>{quality.warnings.length ? <ul>{quality.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul> : <p>No material coverage warnings for this period.</p>}</div>
+        <div><span>Quality notes</span>{quality.warnings.length ? <ul>{quality.warnings.map((warning) => <li key={warning}>{screenDataNote(warning)}</li>)}</ul> : <p>No material coverage warnings for this period.</p>}</div>
       </div>
     </details>
   );
@@ -884,6 +884,14 @@ function WorkflowCorrection({ workflow, save }: { workflow: WorkflowMap; save: (
   </details>;
 }
 
+// Saved coverage notes can contain legacy capture names. Keep source quotations intact.
+function screenDataNote(text: string): string {
+  return text
+    .replace(/\b(?:OCR|a11y)(?:[- ]derived)?(?: (?:screen )?(?:text|excerpts|data))?\b/gi, "screen data")
+    .replace(/\baccessibility[- ](?:derived|extracted) (?:screen )?text\b/gi, "screen data")
+    .replace(/(^|[.!?]\s+)screen data\b/g, "$1Screen data");
+}
+
 function WorkflowDetail({ workflow, navigate, platform, workProfile, saveCorrection, saveEdits, onShareWorkflow }: { workflow: WorkflowMap | null; navigate: (view: AppView) => void; platform: WorkflowsPlatform; workProfile: WorkProfile | null; saveCorrection?: (note: string) => Promise<void>; saveEdits?: (draft: WorkflowEdit) => Promise<WorkflowMap>; onShareWorkflow?: WorkflowsAppProps["onShareWorkflow"] }) {
   const [expandedStages, setExpandedStages] = useState<Set<number>>(() => new Set());
   const [guideOpen, setGuideOpen] = useState(false);
@@ -1006,11 +1014,11 @@ function WorkflowDetail({ workflow, navigate, platform, workProfile, saveCorrect
         <div><span>Stage screenshots</span><strong>{workflow.quality.screenshotCount} of {workflow.stages.length}</strong></div>
         <div><span>Source coverage</span><strong>{qualityLabel(workflow.quality.grade)}</strong></div>
       </section>
-        <ul>{workflow.quality.reasons.map((reason) => <li key={reason}><CheckCircle2 size={12} />{reason}</li>)}</ul>
-        <p className={styles.panelEmpty}>References show where text was captured. They do not prove task completion or a continuous sequence. Model confidence is not an accuracy score.</p>
+        <ul>{workflow.quality.reasons.map((reason) => <li key={reason}><CheckCircle2 size={12} />{screenDataNote(reason)}</li>)}</ul>
+        <p className={styles.panelEmpty}>These references show parts of the work. They may not show the full process or confirm it was completed.</p>
         {!!workflow.captureSequence?.length && <section aria-label="Ordered capture example"><strong>Ordered capture example</strong><p className={styles.panelEmpty}>Check that these moments concern the same task. Time order alone does not establish this.</p><ol>{workflow.captureSequence.map((entry, index) => <li key={`${entry.timestamp}-${index}`}><details><summary>{workflow.stages[index]?.name} · {formatEvidenceTimestamp(entry.timestamp)} · {entry.app}</summary><p>{entry.detail}</p></details></li>)}</ol></section>}
         {timing && <section aria-label="Time per run"><strong>Time per run</strong><p className={styles.panelEmpty}>{formatMinutes(timing.minMinutes)}–{formatMinutes(timing.maxMinutes)} across {timing.sampleCount} run{timing.sampleCount === 1 ? "" : "s"}. Estimated elapsed time includes pauses; it is not active work time.</p><ol>{timing.runs.map(run => <li key={run.start.timestamp}><details><summary>{formatEvidenceTimestamp(run.start.timestamp)} · {formatMinutes((Date.parse(run.end.timestamp) - Date.parse(run.start.timestamp)) / 60_000)}</summary><p>{run.summary}</p>{(["start", "end"] as const).map(boundary => <div key={boundary}><strong>{boundary === "start" ? "Started" : "Finished"}</strong><p>{formatEvidenceTimestamp(run[boundary].timestamp)} · {run[boundary].app}</p><blockquote>{run[boundary].quote}</blockquote><TimingSourceButton timestamp={run[boundary].timestamp} open={platform.assistant?.openLink} /></div>)}</details></li>)}</ol></section>}
-        {!!workflow.limitations?.length && <ul>{workflow.limitations.map((limitation) => <li key={limitation}>{limitation}</li>)}</ul>}
+        {!!workflow.limitations?.length && <ul>{workflow.limitations.map((limitation) => <li key={limitation}>{screenDataNote(limitation)}</li>)}</ul>}
       </details>
       </div>
       {skillOpen && <WorkflowSkillDialog workflow={workflow} draft={skillDraft} generating={skillGenerating} saving={skillSaving} saved={skillSaved} preview={platform.skillInstallMode === "preview"} progress={skillProgress} error={skillError} update={setSkillDraft} retry={generateSkill} save={saveSkill} close={() => setSkillOpen(false)} />}
