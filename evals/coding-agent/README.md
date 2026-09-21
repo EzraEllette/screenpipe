@@ -9,7 +9,7 @@ This is an agent eval suite, not a unit-test suite. Every case contains:
 - saved prompt, transcript, candidate patch, grader output, runtime fingerprint, and result;
 - repeated-trial reporting with success rate, `pass@k`, and `pass^k`.
 
-The current app corpus contains 63 git-mined regressions. See
+The current app corpus contains 64 git-mined regressions. See
 [DESIGN.md](./DESIGN.md) for the Anthropic guidance, source contract, and
 history-mining workflow. The companion website manifest uses this same harness.
 
@@ -587,3 +587,25 @@ establish native migration/recovery durability, disk or NAS behavior, recording
 continuity, native authorization, deployment reach or enforced trial isolation.
 The native rollout-policy finding remains open. No native build or production
 operation is performed; runtime links and fixtures appear only at grading time.
+
+## Maintained workflow retrieval
+
+`mcp-maintained-workflow-retrieval` preserves the escaped #7161 failure: listing
+maintained workflows succeeded while retrieval rejected their UUID-based IDs.
+The actual workflow tool function runs with a synthetic API port. Seventeen
+outcomes cover maintained and legacy IDs, automation-detail defaults and explicit
+options, list-to-detail continuity, complete JSON, safe query encoding, pagination,
+malformed IDs and injection, refusal before requests, provider failures and a
+later explicit retry. The parent fails seven intended outcomes and preserves ten;
+the workflow-tools-only reference and current source pass all seventeen.
+
+Run `bun test evals/coding-agent/calibrate-workflow-ids.test.js`. Fourteen controls
+reject unused fixes, broad ID acceptance, UUID-only compatibility loss, wrong
+identity, option/validation bypasses, empty success and blanket refusal; equivalent
+private constant naming passes. Missing source remains a setup failure.
+
+No installed packages or dependency links are required. The hidden fixture is
+materialized only for grading. These are corpus and grader checks, not model
+trials, native catalog persistence, stdio dispatch, authentication or bounded
+stalled-response evidence. No real recordings, credentials or provider calls
+are used; execution isolation and model improvement remain unproven.
