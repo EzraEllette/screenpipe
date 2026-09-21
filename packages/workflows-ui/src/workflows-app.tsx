@@ -761,6 +761,27 @@ function WorkflowsView({ workflows, knownWorkflowCount, activityPeriod, filters,
   );
 }
 
+function CatalogPlaceholder({ detail = false }: { detail?: boolean }) {
+  const ui = useGT();
+  const bar = (width: string, height = 10) => <span className={styles.skeletonBar} style={{ width, height }} />;
+  return <section aria-busy="true" aria-label={ui("Loading workflows")}>
+    <div className={`${styles.pageHeader} ${styles.catalogHeader}`}><h1>{detail ? ui("Workflow") : ui("Your workflows")}</h1><span role="status" className={styles.catalogLoadStatus}>{ui("Loading saved workflows…")}</span></div>
+    <div aria-hidden="true">
+      {!detail && <div className={styles.filterBar}><div>{bar("100px")}{bar("140px", 8)}</div>{bar("85px", 28)}</div>}
+      <div className={detail ? styles.skeletonDetail : styles.workflowGrid}>
+        {Array.from({ length: detail ? 3 : 4 }, (_, i) => <div key={i} className={`${styles.workflowCard} ${styles.skeletonCard}`}>
+          <div className={styles.workflowCardTop}>{bar("20px")}{bar("120px", 18)}</div>
+          <div className={styles.skeletonTitle}>{bar("78%", 20)}</div>
+          <div className={styles.skeletonLines}>{bar("100%")}{bar("91%")}{bar("64%")}</div>
+          <div className={styles.cardPath}>{bar("90%", 28)}<span />{bar("95%", 28)}</div>
+          <div className={styles.cardMetrics}>{[0, 1, 2, 3].map(n => <div key={n}>{bar("70%", 7)}{bar("22px", 12)}</div>)}</div>
+          <div className={styles.cardFooter}>{bar("45%", 8)}{bar("55px", 8)}</div>
+        </div>)}
+      </div>
+    </div>
+  </section>;
+}
+
 function readableSkillInstructions(value: string) {
   return value
     .replace(/^#{1,6}\s+/gm, "")
@@ -1274,6 +1295,9 @@ export function WorkflowsApp({ platform, initialAnalysis = null, storageKey = "s
   const [runtime, setRuntime] = useState<WorkflowRuntime | null>(null);
   const [analysis, setAnalysis] = useState<WorkflowAnalysis | null>(() => initialAnalysis ? sanitizeWorkflowAnalysis(initialAnalysis) : null);
   const [catalogReady, setCatalogReady] = useState(!platform.loadCapturedWork);
+  const [catalogLoading, setCatalogLoading] = useState(Boolean(platform.loadCapturedWork));
+  const [catalogLoadError, setCatalogLoadError] = useState(false);
+  const [catalogLoadRevision, setCatalogLoadRevision] = useState(0);
   const [scopeId, setScopeId] = useState(initialScopeId ?? initialAnalysis?.scope?.id ?? "");
   const [analyzing, setAnalyzing] = useState(false);
   const [analysisJob, setAnalysisJob] = useState<WorkflowAnalysisJob | null>(null);
@@ -1321,18 +1345,24 @@ export function WorkflowsApp({ platform, initialAnalysis = null, storageKey = "s
 
   const selectScope = useCallback((nextScopeId: string) => {
     setScopeId(nextScopeId);
+    setCatalogReady(false);
+    setCatalogLoading(true);
+    setCatalogLoadError(false);
     setAnalysis(null);
     setAnalysisError("");
     setSelectedWorkflow(0);
   }, []);
 
   const refreshRuntime = useCallback(() => {
+    setCatalogLoading(Boolean(platform.loadCapturedWork));
+    setCatalogLoadError(false);
     void platform.ensureRuntime()
       .then((nextRuntime) => {
         setRuntime(nextRuntime);
+        setCatalogLoadRevision(value => value + 1);
         setScopeId((current) => current || nextRuntime.availableScopes?.[0]?.id || "");
       })
-      .catch((error) => setAnalysisError(error instanceof Error ? error.message : String(error || "Could not prepare your work history.")));
+      .catch(() => { setCatalogLoading(false); setCatalogLoadError(true); });
   }, [platform]);
 
   useEffect(() => {
@@ -1359,20 +1389,28 @@ export function WorkflowsApp({ platform, initialAnalysis = null, storageKey = "s
   useEffect(() => {
     if (!runtime || !platform.loadCapturedWork) return;
     setCatalogReady(false);
+    setCatalogLoading(true);
+    setCatalogLoadError(false);
     let cancelled = false;
-    void platform.loadCapturedWork(WORKFLOW_CATALOG_DAYS, { scope: activeScope ?? undefined })
-      .then((nextAnalysis) => {
-        if (!cancelled && nextAnalysis) {
-          setAnalysis(current => retainNewerWorkflowEdits(current, sanitizeWorkflowAnalysis(nextAnalysis)));
-          setCatalogReady(true);
-          setSelectedWorkflow(0);
-        }
-      })
-      .catch((error) => {
-        if (!cancelled) setAnalysisError(error instanceof Error ? error.message : "Could not load the workflow report.");
-      });
-    return () => { cancelled = true; };
-  }, [activeScope?.id, platform, Boolean(runtime)]);
+    let retryTimer: ReturnType<typeof setTimeout>;
+    const load = async (attempt = 0) => {
+      try {
+        const nextAnalysis = await platform.loadCapturedWork!(WORKFLOW_CATALOG_DAYS, { scope: activeScope ?? undefined });
+        if (cancelled) return;
+        if (nextAnalysis) setAnalysis(current => retainNewerWorkflowEdits(current, sanitizeWorkflowAnalysis(nextAnalysis)));
+        setCatalogReady(true);
+        setCatalogLoading(false);
+        setCatalogLoadError(false);
+      } catch {
+        if (cancelled) return;
+        // Brief backend restarts should not flash onboarding or discard saved cards.
+        if (attempt < 2) retryTimer = setTimeout(() => void load(attempt + 1), 1000 * (attempt + 1));
+        else { setCatalogLoading(false); setCatalogLoadError(true); }
+      }
+    };
+    void load();
+    return () => { cancelled = true; clearTimeout(retryTimer); };
+  }, [activeScope?.id, platform, Boolean(runtime), catalogLoadRevision]);
 
   useEffect(() => {
     const refined = (event: Event) => {
@@ -1628,6 +1666,16 @@ export function WorkflowsApp({ platform, initialAnalysis = null, storageKey = "s
     case "profile": content = workProfile ? <ProfileView contextDiscovery={platform.contextDiscovery} fillContext={platform.fillContext} profile={workProfile} workspaceView={workspaceProfile} saving={contextProfile.status === "saving"} saved={contextProfile.status === "saved"} error={contextProfile.error} update={contextProfile.update} retry={contextProfile.retry} /> : <div className={styles.contextPage}><h1>Context</h1>{contextProfile.error ? <p role="alert">{contextProfile.error} <button type="button" onClick={contextProfile.retry}>Retry</button></p> : <p role="status">Loading context…</p>}</div>; break;
     case "evidence": content = <EvidenceView workflows={workflows} openWorkflow={openWorkflow} runtime={runtime} />; break;
     case "privacy": content = <PrivacyView runtime={runtime} />; break;
+  }
+
+  const catalogView = view !== "profile" && view !== "privacy";
+  if (catalogView && !knownWorkflows.length && (catalogLoading || catalogLoadError)) {
+    content = catalogLoading ? <CatalogPlaceholder detail={view === "workflow"} /> : <>
+      <div className={`${styles.pageHeader} ${styles.catalogHeader}`}><h1>Your workflows</h1></div>
+      <section className={styles.catalogLoadError} role="alert"><AlertTriangle size={20} /><h2>Couldn’t load your workflows</h2><p>Screenpipe may still be starting or reconnecting. Try loading them again.</p><button className={styles.primaryButton} onClick={refreshRuntime}><RefreshCw size={14} />Retry loading</button></section>
+    </>;
+  } else if (catalogView && analysis && (catalogLoading || catalogLoadError)) {
+    content = <><div className={styles.catalogRefreshNotice} role={catalogLoadError ? "alert" : "status"}>{catalogLoadError ? <><span>Couldn’t refresh. Your last loaded workflows are still shown.</span><button onClick={refreshRuntime}>Retry loading</button></> : ui("Refreshing saved workflows…")}</div>{content}</>;
   }
 
   return <>

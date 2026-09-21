@@ -1022,3 +1022,21 @@
   .workflowNotes .bottleneckList article { grid-template-columns: 20px minmax(0, 1fr); }
   .workflowNotes .bottleneckTime { grid-column: 2; }
 }
+
+/* Loading follows the catalog geometry without pretending the catalog is empty. */
+.skeletonBar { display: block; max-width: 100%; flex-shrink: 0; border-radius: 4px; background: var(--line); animation: catalogPulse 1.8s ease-in-out infinite; }
+.skeletonCard { pointer-events: none; cursor: default; }
+.skeletonTitle { margin: 22px 0 14px; }
+.skeletonLines { display: grid; gap: 7px; min-height: 42px; }
+.skeletonDetail { display: grid; gap: 16px; }
+.skeletonCard .cardMetrics .skeletonBar + .skeletonBar { margin-top: 9px; }
+.catalogLoadStatus, .catalogRefreshNotice { color: var(--muted); font-size: 12px; }
+.catalogRefreshNotice { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 0; }
+.catalogRefreshNotice button { color: inherit; background: none; border: 0; text-decoration: underline; cursor: pointer; }
+.catalogLoadError { border: 1px solid var(--line); border-radius: 8px; padding: 40px 24px; text-align: center; }
+.catalogLoadError > svg { color: var(--muted); }
+.catalogLoadError h2 { font-size: 20px; margin: 16px 0 8px; }
+.catalogLoadError p { color: var(--muted); margin: 0 0 24px; font-size: 13px; }
+.catalogLoadError button { margin: auto; }
+@keyframes catalogPulse { 0%, 100% { opacity: .5; } 50% { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .skeletonBar { animation: none; } }
