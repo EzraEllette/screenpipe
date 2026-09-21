@@ -82,6 +82,7 @@ fn preflight_existing_database_header(path: &Path) -> Result<(), SqlxError> {
 }
 
 pub(crate) fn register_sqlite_extensions() -> Result<(), sqlx::Error> {
+    crate::storage::bulk::register_hash_extension()?;
     unsafe {
         // The current sqlite-vec Rust binding exposes this symbol as `fn()`, while its C
         // implementation uses SQLite's three-argument extension ABI.
