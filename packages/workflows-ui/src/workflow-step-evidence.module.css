@@ -22,7 +22,7 @@
 .rawSource > summary > span:last-child { display: inline-flex; gap: 4px; align-items: center; }
 .rawText { max-height: 160px; overflow: auto; overscroll-behavior: contain; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; line-height: 1.6; padding: 10px 12px; background: var(--soft); border-radius: 4px; color: var(--muted); }
 .questions { font-size: 12px; color: var(--muted); }
-.questions ul { padding-left: 18px; line-height: 1.6; }
+.questions ul { margin: 0; padding: 0; list-style: none; line-height: 1.6; }
 .player { position: relative; padding-top: 22px; }
 .player > section { margin: 0 0 8px; border-radius: 6px; }
 .player .close { position: absolute; right: 0; top: -6px; }

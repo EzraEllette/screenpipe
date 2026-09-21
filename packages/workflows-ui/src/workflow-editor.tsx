@@ -124,6 +124,16 @@ export function WorkflowEditor({ workflow, save, actions, renderSource }: {
     document.addEventListener("keydown", escape);
     return () => { document.removeEventListener("pointerdown", dismiss); document.removeEventListener("keydown", escape); };
   }, [blockMenu]);
+  const editorRoot = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    const dismiss = (event: PointerEvent) => {
+      editorRoot.current?.querySelectorAll<HTMLDetailsElement>("details[data-step-actions][open]").forEach(menu => {
+        if (!(event.target instanceof Node) || !menu.contains(event.target)) menu.open = false;
+      });
+    };
+    document.addEventListener("pointerdown", dismiss);
+    return () => document.removeEventListener("pointerdown", dismiss);
+  }, []);
   const dragging = useRef<{ stage: number; detail?: number } | null>(null);
   const busy = useRef(false);
   const mounted = useRef(true);
@@ -234,6 +244,7 @@ export function WorkflowEditor({ workflow, save, actions, renderSource }: {
   }, [draft, dirty, valid, saving, error, workflow.revision]);
   return (
     <section
+      ref={editorRoot}
       className={styles.editor}
       aria-label="Workflow document"
       onKeyDown={(e) => {
@@ -357,7 +368,13 @@ export function WorkflowEditor({ workflow, save, actions, renderSource }: {
                 value={stage.name}
                 onChange={(name) => stageChange(index, { ...stage, name })}
               />
-                <details className={styles.controls}><summary aria-label={`Step ${index + 1} actions`} title="Step actions"><MoreHorizontal size={16} /></summary><div className={styles.stepMenu}>
+                <details data-step-actions className={styles.controls} onKeyDown={event => {
+                  if (event.key === "Escape") {
+                    event.preventDefault(); event.stopPropagation();
+                    event.currentTarget.open = false;
+                    event.currentTarget.querySelector<HTMLElement>("summary")?.focus();
+                  }
+                }}><summary aria-label={`Step ${index + 1} actions`} title="Step actions"><MoreHorizontal size={16} /></summary><div className={styles.stepMenu}>
                   <button
                     type="button"
                     aria-label={`Move step ${index + 1} up`}
