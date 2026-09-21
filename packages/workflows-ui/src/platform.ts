@@ -142,6 +142,8 @@ export type WorkflowsAppProps = {
   composerAccessory?: import("./assistant").WorkflowComposerAccessory;
   /** Open the host sharing review; clicking must not send the workflow. */
   onShareWorkflow?: (workflow: WorkflowMap) => void;
+  /** Optional host integration with the existing external-agent launchers. */
+  workflowAgentActions?: (workflow: WorkflowMap) => import("react").ReactNode;
   /** Host-owned live recorder status and controls. */
   recordingStatus?: import("react").ReactNode;
   analysisUnavailableReason?: string;

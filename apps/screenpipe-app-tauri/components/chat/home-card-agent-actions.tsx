@@ -115,7 +115,7 @@ export function HomeCardAgentActions({
 }: {
   pipe: HomeCardAgentTask;
   entryCard?: ChatEntryCard;
-  placement?: "card" | "chip";
+  placement?: "card" | "chip" | "toolbar";
 }) {
   const [state, setState] = useState<LaunchState | null>(null);
   const [activeAgent, setActiveAgent] = useState<HomeCardAgentId | null>(null);
@@ -199,10 +199,12 @@ export function HomeCardAgentActions({
       data-placement={placement}
       role="group"
       aria-label={`Run ${pipe.title} in another agent`}
-      className={`absolute top-1/2 z-20 flex -translate-y-1/2 items-center gap-0.5 rounded-md border border-border bg-background p-0.5 text-foreground transition-opacity duration-150 motion-reduce:transition-none ${
-        placement === "chip" ? "left-1/2 -translate-x-1/2" : "right-3"
+      className={`z-20 flex items-center gap-0.5 rounded-md border border-border bg-background p-0.5 text-foreground transition-opacity duration-150 motion-reduce:transition-none ${
+        placement === "toolbar"
+          ? "relative shrink-0"
+          : `absolute top-1/2 -translate-y-1/2 ${placement === "chip" ? "left-1/2 -translate-x-1/2" : "right-3"}`
       } ${
-        state
+        placement === "toolbar" || state
           ? "pointer-events-auto opacity-100"
           : "pointer-events-none opacity-0 group-hover/home-card:pointer-events-auto group-hover/home-card:opacity-100 group-focus-within/home-card:pointer-events-auto group-focus-within/home-card:opacity-100"
       }`}
@@ -247,7 +249,7 @@ export function HomeCardAgentActions({
                 </button>
               </TooltipTrigger>
               <TooltipContent
-                side={placement === "chip" ? "bottom" : "right"}
+                side={placement === "card" ? "right" : "bottom"}
                 sideOffset={6}
                 className="rounded-md px-2.5 py-1.5 text-[11px] font-normal"
               >

@@ -6,7 +6,7 @@ import { fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { RecordingStatus } from "@/components/recording-status";
 import { SidebarFooter } from "@/components/sidebar-footer";
-import { IntegratedWorkflows } from "./integrated-workflows";
+import { IntegratedWorkflows, workflowAgentTask } from "./integrated-workflows";
 
 vi.mock("@/lib/workflows/desktop-platform", async () => {
   const { createFixtureWorkflowsPlatform } = await import("@screenpipe/workflows-ui/fixture");
@@ -51,6 +51,10 @@ it("opens the existing sharing review from the selected workflow in the main app
   const card = (await screen.findByRole("heading", { name: "Research synthesis" })).closest("article")!;
   fireEvent.click(within(card).getByRole("button", { name: "Open map" }));
   expect(screen.queryByRole("dialog", { name: "Sharing review" })).not.toBeInTheDocument();
+  const agents = screen.getByRole("group", { name: "Run Research synthesis in another agent" });
+  for (const name of ["Claude", "Cursor", "Codex"]) {
+    expect(within(agents).getByRole("button", { name: `Run in ${name}` })).toBeVisible();
+  }
   fireEvent.click(screen.getByRole("button", { name: "Share with team" }));
   expect(screen.getByRole("dialog", { name: "Sharing review" })).toHaveTextContent("Research synthesis");
   expect(screen.getByRole("dialog", { name: "Sharing review" })).toHaveTextContent("workflow");
@@ -70,3 +74,14 @@ it("opens the existing sharing review from the selected workflow in the main app
 });
 
 vi.mock("@/lib/workflows/rollout", () => ({ useWorkflowsRolloutEnabled: () => true, requireWorkflowsRollout: vi.fn() }));
+
+it("hands off workflow identity without embedding captured content", async () => {
+  const { fixtureWorkflowAnalysis } = await import("@screenpipe/workflows-ui/fixture");
+  const workflow = fixtureWorkflowAnalysis.analysis.workflows[0];
+  const task = workflowAgentTask({ ...workflow, id: "wf-example", title: 'Review "launch"' });
+  expect(task.previewPrompt).toContain('wf-example');
+  expect(task.previewPrompt).toContain(JSON.stringify('Review "launch"'));
+  expect(task.previewPrompt).toContain("Retrieve its current steps and sources");
+  expect(task.previewPrompt).toContain("confirm before sending");
+  expect(task.previewPrompt).not.toContain(workflow.stages[0].evidence[0].detail);
+});

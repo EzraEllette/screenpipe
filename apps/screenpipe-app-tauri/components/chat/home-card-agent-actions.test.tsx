@@ -84,6 +84,13 @@ describe("HomeCardAgentActions", () => {
     }
   });
 
+  it("keeps workflow toolbar launchers visible and in document flow", () => {
+    render(<HomeCardAgentActions pipe={DAY_RECAP} placement="toolbar" />);
+    const actions = screen.getByRole("group", { name: "Run Day Recap in another agent" });
+    expect(actions).toHaveClass("relative", "opacity-100", "pointer-events-auto");
+    expect(actions).not.toHaveClass("absolute", "opacity-0", "-translate-y-1/2");
+  });
+
   it("centers the action cluster over compact chips", () => {
     render(<HomeCardAgentActions pipe={DAY_RECAP} placement="chip" />);
 
