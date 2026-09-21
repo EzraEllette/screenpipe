@@ -199,10 +199,10 @@ export function HomeCardAgentActions({
       data-placement={placement}
       role="group"
       aria-label={`Run ${pipe.title} in another agent`}
-      className={`z-20 flex items-center gap-0.5 rounded-md border border-border bg-background p-0.5 text-foreground transition-opacity duration-150 motion-reduce:transition-none ${
+      className={`flex items-center gap-0.5 rounded-md border border-border bg-background p-0.5 text-foreground transition-opacity duration-150 motion-reduce:transition-none ${
         placement === "toolbar"
-          ? "relative shrink-0"
-          : `absolute top-1/2 -translate-y-1/2 ${placement === "chip" ? "left-1/2 -translate-x-1/2" : "right-3"}`
+          ? "shrink-0"
+          : `absolute z-20 top-1/2 -translate-y-1/2 ${placement === "chip" ? "left-1/2 -translate-x-1/2" : "right-3"}`
       } ${
         placement === "toolbar" || state
           ? "pointer-events-auto opacity-100"
