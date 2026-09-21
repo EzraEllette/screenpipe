@@ -14,6 +14,26 @@ const play = () => fireEvent.click(screen.getByRole("button", { name: `View reco
 afterEach(cleanup);
 
 describe("step evidence media", () => {
+  it("opens verified captures in native Timeline without loading an inline video", async () => {
+    const open = vi.fn().mockResolvedValue(undefined);
+    const load = vi.fn();
+    render(<WorkflowStepEvidence workflow={workflow} stage={stage} platform={{ openCapturedMoment: open, loadWorkflowRecording: load } as unknown as WorkflowsPlatform} />);
+    fireEvent.click(screen.getByRole("button", { name: `Open recording for ${stage.name}` }));
+    await waitFor(() => expect(open).toHaveBeenCalledWith(stage.screenshot!.frameId, stage.screenshot!.timestamp));
+    expect(load).not.toHaveBeenCalled();
+    expect(screen.queryByLabelText("Local recording")).toBeNull();
+  });
+
+  it("resolves legacy captures, opens Timeline and releases the temporary media", async () => {
+    const open = vi.fn().mockResolvedValue(undefined);
+    const load = vi.fn().mockResolvedValue({ kind: "video", url: "https://fixture.invalid/legacy.mp4", frameId: 123, timestamp: stage.evidence[0].timestamp });
+    const release = vi.fn().mockResolvedValue(undefined);
+    render(<WorkflowStepEvidence workflow={workflow} stage={{ ...stage, screenshot: null }} platform={{ openCapturedMoment: open, loadWorkflowRecording: load, releaseWorkflowRecording: release } as unknown as WorkflowsPlatform} />);
+    fireEvent.click(screen.getByRole("button", { name: `Open recording for ${stage.name}` }));
+    await waitFor(() => expect(open).toHaveBeenCalledWith(123, stage.evidence[0].timestamp));
+    expect(release).toHaveBeenCalledWith("https://fixture.invalid/legacy.mp4");
+  });
+
   it("loads only on request and releases the media when closed", async () => {
     const load = vi.fn().mockResolvedValue({ kind: "video", url: "https://fixture.invalid/clip.mp4", timestamp: stage.evidence[0].timestamp, frameId: 1, offsetSeconds: 2 });
     const release = vi.fn().mockResolvedValue(undefined);
