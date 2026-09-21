@@ -66,10 +66,9 @@ export function WorkflowStepEvidence({ workflow, stage, platform }: {
       {!!sources.length && <button type="button" className={styles.sourceToggle} aria-expanded={sourcesOpen} aria-controls={sourcesId} onClick={() => setSourcesOpen(!sourcesOpen)}>{sources.length} source{sources.length === 1 ? "" : "s"}<ChevronDown size={12} /></button>}
     </div>
     {!!sources.length && <div id={sourcesId} hidden={!sourcesOpen} className={styles.sourceList} role="region" aria-label={`Sources for ${stage.name}`}>
-          {sources.map((source, index) => <details className={styles.rawSource} key={`${source.timestamp}-${index}`}>
-            <summary><span>{source.app || "Captured source"} · {when(source.timestamp)}</span><span>Captured text<ChevronDown size={12} /></span></summary>
-            <div className={styles.rawText} role="region" aria-label={`Captured text ${index + 1} for ${stage.name}`} tabIndex={0}>{source.text}</div>
-          </details>)}
+          {sources.map((source, index) => <div className={styles.sourceMeta} key={`${source.timestamp}-${index}`}>
+            {source.app || "Captured source"} · {when(source.timestamp)}
+          </div>)}
     </div>}
     {!!stage.openQuestions?.length && <details className={styles.questions}><summary>Unresolved details<ChevronDown size={12} /></summary><ul>{stage.openQuestions.map(q => <li key={q}><WorkflowQuestion workflow={workflow} question={q} stage={stage.name} interactive={!!platform.assistant?.saveFeedback} /></li>)}</ul></details>}
   </section>;
