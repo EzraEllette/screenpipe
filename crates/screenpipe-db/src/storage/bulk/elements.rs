@@ -145,8 +145,8 @@ pub(super) async fn bootstrap_mode(
         "INSERT INTO _bulk_element_rows(id,{columns},_archive_generation) SELECT id,{columns},1 FROM _bulk_elements_source"), "_bulk_elements_source", super::FILE_ROWS).await?;
         crate::storage::faults::checkpoint("migration_elements_copied");
         // The unpublished staged copy owns every record. Removing its temporary
-        // predecessor bypasses per-row self-FK deletion scans; complete relationship
-        // verification checks the constructed candidate before activation.
+        // predecessor bypasses per-row self-FK deletion scans; logical receipts
+        // verify that the candidate preserves the original relationships.
         crate::storage::schema::construction_sql(
             conn,
             "PRAGMA foreign_keys=OFF; DROP TABLE _bulk_elements_source; PRAGMA foreign_keys=ON;",
