@@ -2,11 +2,22 @@
 // https://screenpipe.com
 
 import { fileURLToPath } from "node:url";
+import { existsSync } from "node:fs";
+import { localizationMode } from "./scripts/i18n/config.mjs";
+import { desktopCompiler } from "./scripts/i18n/compiler.mjs";
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
     transpilePackages: ['@screenpipe/workflows-ui'],
-    webpack: (config) => {
+  webpack: (config) => {
+    const mode = localizationMode();
+    const snapshot = fileURLToPath(new URL("./lib/i18n/generated.json", import.meta.url));
+    if (!existsSync(snapshot)) {
+      throw new Error("Localization snapshot missing. Start with bun run dev or bun run build.");
+    }
+    // Every mode prepares this file, including an English-only snapshot in off
+    // mode. Import it directly so production JSON resolution cannot bypass an alias.
+    if (mode !== "off") config.plugins.push(desktopCompiler.webpack());
         config.resolve.symlinks = false;
         // This local file dependency changes without a package version bump.
         config.snapshot = { ...config.snapshot, unmanagedPaths: [
