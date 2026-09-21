@@ -347,7 +347,14 @@ impl HybridStorage {
             .bind(&ids_json)
             .fetch_one(&mut *snapshot)
             .await?;
-        if total < 0 || total as usize > self.descriptor.budget.response_bytes {
+        // A single indivisible migrated record must remain retrievable. The
+        // aggregate response budget still bounds requests for multiple frames.
+        let response_limit = if ids.len() == 1 {
+            usize::MAX
+        } else {
+            self.descriptor.budget.response_bytes
+        };
+        if total < 0 || total as usize > response_limit {
             return Err(storage_error("response payload budget exceeded"));
         }
         let sql = format!("SELECT f.id,p.generation,p.state,p.file_id,p.bytes,{columns},pf.search_path,pf.detail_path,pf.search_checksum,pf.detail_checksum FROM frames f JOIN frame_payloads p ON p.frame_id=f.id LEFT JOIN payload_files pf ON pf.id=p.file_id WHERE f.id IN (SELECT value FROM json_each(?))");
@@ -465,7 +472,7 @@ impl HybridStorage {
                 .chain(decoded.values())
                 .map(FramePayload::bytes)
                 .sum();
-            if bytes > self.descriptor.budget.response_bytes {
+            if bytes > response_limit {
                 return Err(storage_error("response payload budget exceeded"));
             }
             out.extend(decoded);
