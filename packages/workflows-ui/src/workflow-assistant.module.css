@@ -1,10 +1,22 @@
 /* screenpipe — AI that knows everything you've seen, said, or heard */
 /* https://screenpipe.com */
 
-.launcher { position: absolute; z-index: 30; right: 22px; bottom: 22px; display: grid; place-items: center; width: 44px; height: 44px; padding: 0; border: 1px solid #d5d6ce; border-radius: 50%; background: #fff; color: #333; box-shadow: 0 3px 12px #0000000d; cursor: pointer; }
+.launcher { position: absolute; z-index: 30; right: 22px; bottom: 22px; display: grid; place-items: center; width: 44px; height: 44px; padding: 0; border: 1px solid #d5d6ce; border-radius: 50%; background: #fff; color: #333; box-shadow: 0 3px 12px #0000000d; cursor: pointer; transition: background 160ms, border-color 160ms, transform 160ms; }
 .launcher:hover { background: #f6f6f3; border-color: #aeb0a6; }
-.launcher > span { position: absolute; right: 54px; display: flex; align-items: center; gap: 12px; padding: 7px 10px; white-space: nowrap; border: 1px solid #dedfd8; border-radius: 6px; background: #fff; font-family: inherit; font-size: 12px; opacity: 0; pointer-events: none; }
-.launcher:hover > span, .launcher:focus-visible > span { opacity: 1; }
+.launcher:active { transform: scale(.94); }
+.launcherMark { overflow: visible; transition: transform 240ms cubic-bezier(.2,.8,.2,1); }
+.launcherFrame { transform-origin: 16px 16px; }
+.launcherEyes { transform-origin: 16px 14.5px; }
+.launcher:is(:hover, :focus-visible) .launcherMark { transform: translateY(-1px) rotate(-5deg); }
+.launcher:is(:hover, :focus-visible) .launcherEyes { animation: launcherGlance 900ms ease-in-out both; }
+@keyframes launcherGlance {
+  0% { transform: translateX(0) scaleY(1); }
+  25%, 45% { transform: translateX(1px) scaleY(1); }
+  55% { transform: translateX(1px) scaleY(.12); }
+  68%, 100% { transform: translateX(1px) scaleY(1); }
+}
+.launcher > span { position: absolute; right: 54px; display: flex; align-items: center; gap: 12px; padding: 7px 10px; white-space: nowrap; border: 1px solid #dedfd8; border-radius: 6px; background: #fff; font-family: inherit; font-size: 12px; opacity: 0; pointer-events: none; transition: opacity 120ms ease; transition-delay: 0ms; }
+.launcher:hover > span, .launcher:focus-visible > span { opacity: 1; transition-delay: 350ms; }
 .launcher kbd { font: inherit; color: #888b82; }
 .launcher > i { position: absolute; top: 2px; right: 2px; }
 .panel { --chat-ink: #20211e; --chat-muted: #797b72; --chat-line: #e3e4de; --chat-soft: #f5f5f1; --chat-surface: #fff; position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0; color: var(--chat-ink); background: var(--chat-surface); font: 14px/1.65 Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; letter-spacing: -.012em; }
@@ -82,7 +94,15 @@
 @keyframes pulse { 50% { opacity: .45; } }
 @media (max-width: 959px) { .docked { position: absolute; z-index: 35; top: 0; bottom: 0; right: 0; height: auto; width: min(var(--assistant-width), 100vw); box-shadow: -4px 0 20px #00000008; } }
 @media (max-width: 600px) { .floating { right: 10px; bottom: 10px; width: calc(100vw - 20px); max-height: calc(100svh - 20px); } .launcher { right: 16px; bottom: 16px; } .resizeHandle { display: none; } .body { padding-left: 18px; padding-right: 18px; } }
-@media (prefers-reduced-motion: reduce) { .floating, .activity i, .launcher i { animation: none; } }
+@media (prefers-reduced-motion: reduce) {
+  .floating, .activity i, .launcher i, .launcher .launcherEyes { animation: none !important; }
+  .launcher, .launcher .launcherMark, .launcher > span { transition: none; }
+  .launcher:active, .launcher:is(:hover, :focus-visible) .launcherMark { transform: none; }
+}
+:global(.dark) .launcher { background: #20221c; border-color: #3c3f36; color: #e6e7de; }
+:global(.dark) .launcher:hover { background: #2a2c25; border-color: #797b72; }
+:global(.dark) .launcher > span { background: #20221c; border-color: #3c3f36; color: #e6e7de; }
+:global(.dark) .launcher kbd { color: #a0a393; }
 :global(.dark) .panel { --chat-ink: #e6e7de; --chat-muted: #a0a393; --chat-line: #3c3f36; --chat-soft: #2a2c25; --chat-surface: #20221c; }
 :global(.dark) .context, :global(.dark) .empty button { color: #afb2a3; }
 :global(.dark) .send { background: #dfe2d5; color: #20221c; }

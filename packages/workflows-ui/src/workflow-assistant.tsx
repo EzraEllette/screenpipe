@@ -301,8 +301,11 @@ export function WorkflowAssistant({ platform, context, onDockChange, onWidthChan
   }
 
   return <>
-    {!open && (loaded || loadError) && !useHeaderToggle && <button ref={launcher} className={styles.launcher} onClick={() => setOpen(true)} title={`${launcherLabel} (${shortcuts.right.keys.join(" ")})`} aria-keyshortcuts={shortcuts.right.aria} aria-label={launcherLabel} aria-expanded={false}>
-      <MessageCircle size={20} strokeWidth={1.65} /><span>{launcherLabel}<kbd>{shortcuts.right.keys.join(" ")}</kbd></span>{busy && <i aria-label="Answer in progress" />}
+    {!open && (loaded || loadError) && !useHeaderToggle && <button ref={launcher} className={styles.launcher} onClick={() => setOpen(true)} aria-keyshortcuts={shortcuts.right.aria} aria-label={launcherLabel} aria-expanded={false}>
+      <svg className={styles.launcherMark} viewBox="0 0 32 32" width="28" height="28" fill="none" aria-hidden="true">
+        <path className={styles.launcherFrame} d="M8 5.5h16a3 3 0 0 1 3 3v13a3 3 0 0 1-3 3h-9l-6 3v-3H8a3 3 0 0 1-3-3v-13a3 3 0 0 1 3-3Z" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" />
+        <g className={styles.launcherEyes} fill="currentColor"><rect x="11" y="12" width="2.5" height="5" rx="1.25" /><rect x="19" y="12" width="2.5" height="5" rx="1.25" /></g>
+      </svg><span aria-hidden="true">{launcherLabel}<kbd>{shortcuts.right.keys.join(" ")}</kbd></span>{busy && <i aria-label="Answer in progress" />}
     </button>}
     <aside id="workflows-assistant" ref={panel} hidden={!open} className={[styles.panel, state.mode === "sidebar" ? styles.docked : styles.floating].join(" ")}
       style={{ "--assistant-width": width + "px" } as React.CSSProperties}
