@@ -10,7 +10,6 @@ import {
   Plus,
   Trash2,
   Undo2,
-  X,
 } from "lucide-react";
 import type { WorkflowMap, WorkflowStage } from "./model";
 import {
@@ -109,6 +108,22 @@ export function WorkflowEditor({ workflow, save, actions, renderSource }: {
   const [announcement, setAnnouncement] = useState("");
   const [dragOver, setDragOver] = useState<number | null>(null);
   const [blockDragOver, setBlockDragOver] = useState<string | null>(null);
+  const [blockMenu, setBlockMenu] = useState<string | null>(null);
+  const blockMenuTrigger = useRef<HTMLButtonElement | null>(null);
+  useEffect(() => {
+    if (!blockMenu) return;
+    const dismiss = (event: PointerEvent) => {
+      if (!(event.target instanceof Element) || !event.target.closest("[data-block-actions]")) setBlockMenu(null);
+    };
+    const escape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault(); setBlockMenu(null); blockMenuTrigger.current?.focus();
+      }
+    };
+    document.addEventListener("pointerdown", dismiss);
+    document.addEventListener("keydown", escape);
+    return () => { document.removeEventListener("pointerdown", dismiss); document.removeEventListener("keydown", escape); };
+  }, [blockMenu]);
   const dragging = useRef<{ stage: number; detail?: number } | null>(null);
   const busy = useRef(false);
   const mounted = useRef(true);
@@ -412,11 +427,15 @@ export function WorkflowEditor({ workflow, save, actions, renderSource }: {
                       }
                     }}
                   >
+                    <div className={styles.blockControls} data-block-actions data-open={blockMenu === detail.key || undefined}>
                     <button
                       className={styles.grip}
                       type="button"
                       draggable
-                      title="Drag block. Alt + Up/Down to reorder."
+                      title="Drag to move. Click for block actions."
+                      aria-expanded={blockMenu === detail.key}
+                      aria-haspopup="dialog"
+                      onClick={(event) => { blockMenuTrigger.current = event.currentTarget; setBlockMenu(blockMenu === detail.key ? null : detail.key); }}
                       aria-label={`Move block ${detailIndex + 1} in step ${index + 1}`}
                       onKeyDown={(e) => {
                         if (
@@ -433,6 +452,7 @@ export function WorkflowEditor({ workflow, save, actions, renderSource }: {
                       }}
                       onDragStart={(e) => {
                         e.stopPropagation();
+                        setBlockMenu(null);
                         dragging.current = {
                           stage: index,
                           detail: detailIndex,
@@ -447,8 +467,10 @@ export function WorkflowEditor({ workflow, save, actions, renderSource }: {
                     >
                       <GripVertical size={15} />
                     </button>
+                    {blockMenu === detail.key && <div role="dialog" aria-label={`Actions for block ${detailIndex + 1} in step ${index + 1}`} className={styles.blockMenu}>
+                      <label>Block type
                     <select
-                      className={detail.kind === "action" ? styles.actionKind : undefined}
+                      autoFocus
                       aria-label={`Block ${detailIndex + 1} type in step ${index + 1}`}
                       value={detail.kind}
                       onChange={(e) =>
@@ -468,6 +490,26 @@ export function WorkflowEditor({ workflow, save, actions, renderSource }: {
                         ),
                       )}
                     </select>
+                      </label>
+                    <button
+                      type="button"
+                      title="Delete block"
+                      aria-label={`Delete block ${detailIndex + 1} in step ${index + 1}`}
+                      onClick={() => {
+                        setBlockMenu(null);
+                        stageChange(index, {
+                          ...stage,
+                          procedure: stage.procedure.filter(
+                            (_, i) => i !== detailIndex,
+                          ),
+                        });
+                      }}
+                    >
+                      <Trash2 size={14} />Delete block
+                    </button>
+                    </div>}
+                    </div>
+                    {detail.kind !== "action" && <span className={styles.kindLabel}>{detail.kind}</span>}
                     <Text
                       label={`Block ${detailIndex + 1} in step ${index + 1}`}
                       placeholder="Write a step detail…"
@@ -481,21 +523,7 @@ export function WorkflowEditor({ workflow, save, actions, renderSource }: {
                         })
                       }
                     />
-                    <button
-                      type="button"
-                      title="Delete block"
-                      aria-label={`Delete block ${detailIndex + 1} in step ${index + 1}`}
-                      onClick={() =>
-                        stageChange(index, {
-                          ...stage,
-                          procedure: stage.procedure.filter(
-                            (_, i) => i !== detailIndex,
-                          ),
-                        })
-                      }
-                    >
-                      <X size={15} />
-                    </button>
+
                   </div>
                 ))}
               </div>

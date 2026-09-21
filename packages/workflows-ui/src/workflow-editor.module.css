@@ -55,21 +55,24 @@
 .controls > summary:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
 .stepMenu { display: flex; position: absolute; top: 30px; right: 0; z-index: 3; padding: 4px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); box-shadow: 0 4px 12px #0000000d; }
 .controls[open] { opacity: 1; pointer-events: auto; }
-.stepTop > .grip, .controls, .step > .add, .block > button, .block .actionKind { opacity: 0; pointer-events: none; transition: opacity .12s ease; }
+.stepTop > .grip, .controls, .step > .add, .blockControls > .grip { opacity: 0; pointer-events: none; transition: opacity .12s ease; }
 .step:hover > .stepTop > .grip, .step:focus-within > .stepTop > .grip,
 .step:hover > .stepTop > .controls, .step:focus-within > .stepTop > .controls,
 .step:hover > .add, .step:focus-within > .add,
-.block:hover > button, .block:focus-within > button,
-.block:hover .actionKind, .block:focus-within .actionKind { opacity: 1; pointer-events: auto; }
+.block:hover > .blockControls > .grip, .block:focus-within > .blockControls > .grip,
+.blockControls[data-open] > .grip { opacity: 1; pointer-events: auto; }
 .blocks { margin-left: 24px; }
-.block { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) 65px 28px; align-items: start; gap: 4px; margin: 2px 0; }
+.block { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) 76px; align-items: start; gap: 4px; margin: 2px 0; }
 .blockDrop { box-shadow: 0 -2px 0 var(--ink); }
-.block > .grip { position: absolute; left: -30px; top: 1px; }
+.block::before { content: ""; position: absolute; left: -30px; top: 0; bottom: 0; width: 30px; }
+.blockControls { position: absolute; left: -30px; top: 1px; }
+.blockControls[data-open] { z-index: 5; }
 .block textarea { min-width: 0; grid-column: 1; grid-row: 1; }
-.block select { grid-column: 2; grid-row: 1; }
-.block > button:last-child { grid-column: 3; grid-row: 1; }
-.block select { width: 100%; appearance: none; font: inherit; font-size: 11px; color: var(--muted); border: 0; border-radius: 4px; padding: 7px 4px; background: transparent; cursor: pointer; }
-.block select:hover, .block select:focus { appearance: auto; background: var(--soft); }
+.kindLabel { grid-column: 2; grid-row: 1; padding: 8px 4px; font-size: 11px; line-height: 1.4; color: var(--muted); pointer-events: none; }
+.blockMenu { position: absolute; left: 0; top: 29px; box-sizing: border-box; width: 200px; padding: 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); box-shadow: 0 4px 12px #00000012; }
+.blockMenu label { display: block; padding: 4px; font-size: 11px; color: var(--muted); }
+.blockMenu select { display: block; box-sizing: border-box; width: 100%; margin-top: 6px; border: 1px solid var(--line); border-radius: 4px; padding: 6px 8px; font: inherit; font-size: 13px; color: var(--ink); background: var(--panel); }
+.blockMenu > button { justify-content: flex-start; width: 100%; padding: 7px 4px; }
 .source { margin: 2px 0 0 29px; }
 .source > details { margin: 0; border: 0; border-radius: 0; background: transparent; }
 .source > details > summary { min-height: 26px; width: fit-content; padding: 2px 0; gap: 6px; color: var(--muted); }
@@ -86,7 +89,7 @@
   .editor button { min-width: 32px; min-height: 32px; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .stepTop > .grip, .controls, .step > .add, .block > button, .block .actionKind { transition: none; }
+  .stepTop > .grip, .controls, .step > .add, .blockControls > .grip { transition: none; }
 }
 @container workflow-editor (max-width: 560px) {
   .intro .title { font-size: 25px; }
@@ -95,8 +98,7 @@
   .step > textarea { width: calc(100% - 20px); margin-left: 20px; }
   .blocks { margin-left: 20px; }
   .source { margin-left: 25px; }
-  .block { grid-template-columns: minmax(0, 1fr) 28px; }
+  .block { grid-template-columns: minmax(0, 1fr); }
   .block textarea { grid-column: 1; grid-row: 1; }
-  .block select { grid-column: 1; grid-row: 2; width: 85px; padding-top: 2px; padding-bottom: 2px; }
-  .block > button:last-child { grid-column: 2; grid-row: 1; }
+  .kindLabel { grid-column: 1; grid-row: 2; padding: 0 5px 3px; }
 }
