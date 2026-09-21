@@ -4,6 +4,7 @@
 
 "use client";
 import { useNavigationWidth } from "./use-navigation-width";
+import { WorkflowQuestion } from "./workflow-question";
 import { WorkflowStepEvidence } from "./workflow-step-evidence";
 import { WorkflowEditor } from "./workflow-editor";
 import { retainNewerWorkflowEdits, type WorkflowEdit } from "./workflow-edits";
@@ -978,7 +979,7 @@ function WorkflowDetail({ workflow, navigate, platform, workProfile, saveCorrect
                     <p>{detail.text}</p>
                     {detail.quote && <details><summary>{detail.userEdited || stage.userEdited ? "Original reference" : "Source excerpt"} · {detail.app}</summary><blockquote>{detail.quote}</blockquote><small>{formatEvidenceTimestamp(detail.timestamp)} · {detail.userEdited || stage.userEdited ? "Edited instructions are not verified by this reference" : "Text match, not execution verification"}</small></details>}
                   </li>)}</ol> : <p>Step not yet verified.</p>}
-                  {!!stage.openQuestions?.length && <details className={styles.procedureQuestions}><summary>Unresolved details</summary><ul>{stage.openQuestions.map((question) => <li key={question}>{question}</li>)}</ul></details>}
+                  {!!stage.openQuestions?.length && <details className={styles.procedureQuestions}><summary>Unresolved details</summary><ul>{stage.openQuestions.map((question) => <li key={question}><WorkflowQuestion workflow={workflow} question={question} stage={stage.name} interactive={!!platform.assistant?.saveFeedback} /></li>)}</ul></details>}
                 </section>
                 {stage.screenshot?.visualVerified && <div className={styles.stageScreenshot}>
                   <>
@@ -992,6 +993,7 @@ function WorkflowDetail({ workflow, navigate, platform, workProfile, saveCorrect
         </div>
         <div className={styles.flowEndpoint}><span>Ends with</span><strong>{workflow.outcome}</strong></div>
       </section>}
+      {!!workflow.openQuestions?.length && <section aria-label="Open questions"><h2>Open questions</h2><div>{workflow.openQuestions.map((question, index) => <WorkflowQuestion key={`${index}:${question}`} workflow={workflow} question={question} interactive={!!platform.assistant?.saveFeedback} />)}</div></section>}
       {!!workflow.variations.length && <section className={styles.panel}><h2>Variations</h2><ul className={styles.plainList}>{workflow.variations.map(item => <li key={item}>{item}</li>)}</ul></section>}
       {!!actionableFriction.length && <section><div className={styles.sectionHeading}><div><h2>Friction you can affect</h2></div></div><BottleneckList items={actionableFriction.map((item) => ({ ...item, workflowTitle: workflow.title, repetitions: workflow.repetitions }))} /></section>}
       {!!constraints.length && <section><div className={styles.sectionHeading}><div><h2>External and required constraints</h2></div></div><BottleneckList items={constraints.map((item) => ({ ...item, workflowTitle: workflow.title, repetitions: workflow.repetitions }))} numbered={false} /></section>}
@@ -1008,7 +1010,6 @@ function WorkflowDetail({ workflow, navigate, platform, workProfile, saveCorrect
         <p className={styles.panelEmpty}>References show where text was captured. They do not prove task completion or a continuous sequence. Model confidence is not an accuracy score.</p>
         {!!workflow.captureSequence?.length && <section aria-label="Ordered capture example"><strong>Ordered capture example</strong><p className={styles.panelEmpty}>Check that these moments concern the same task. Time order alone does not establish this.</p><ol>{workflow.captureSequence.map((entry, index) => <li key={`${entry.timestamp}-${index}`}><details><summary>{workflow.stages[index]?.name} · {formatEvidenceTimestamp(entry.timestamp)} · {entry.app}</summary><p>{entry.detail}</p></details></li>)}</ol></section>}
         {timing && <section aria-label="Time per run"><strong>Time per run</strong><p className={styles.panelEmpty}>{formatMinutes(timing.minMinutes)}–{formatMinutes(timing.maxMinutes)} across {timing.sampleCount} run{timing.sampleCount === 1 ? "" : "s"}. Estimated elapsed time includes pauses; it is not active work time.</p><ol>{timing.runs.map(run => <li key={run.start.timestamp}><details><summary>{formatEvidenceTimestamp(run.start.timestamp)} · {formatMinutes((Date.parse(run.end.timestamp) - Date.parse(run.start.timestamp)) / 60_000)}</summary><p>{run.summary}</p>{(["start", "end"] as const).map(boundary => <div key={boundary}><strong>{boundary === "start" ? "Started" : "Finished"}</strong><p>{formatEvidenceTimestamp(run[boundary].timestamp)} · {run[boundary].app}</p><blockquote>{run[boundary].quote}</blockquote><TimingSourceButton timestamp={run[boundary].timestamp} open={platform.assistant?.openLink} /></div>)}</details></li>)}</ol></section>}
-        {!!workflow.openQuestions?.length && <section aria-label="Open questions"><strong>Open questions</strong><ul>{workflow.openQuestions.map(question => <li key={question}>{question}</li>)}</ul></section>}
         {!!workflow.limitations?.length && <ul>{workflow.limitations.map((limitation) => <li key={limitation}>{limitation}</li>)}</ul>}
       </details>
       </div>

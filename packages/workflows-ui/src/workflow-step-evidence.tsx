@@ -6,6 +6,7 @@ import { useMemo, useState } from "react";
 import { ChevronDown, Maximize2, Minimize2, Play, X } from "lucide-react";
 import type { WorkflowMap, WorkflowStage } from "./model";
 import type { WorkflowsPlatform } from "./platform";
+import { WorkflowQuestion } from "./workflow-question";
 import { WorkflowReplay } from "./workflow-replay";
 import styles from "./workflow-step-evidence.module.css";
 
@@ -70,6 +71,6 @@ export function WorkflowStepEvidence({ workflow, stage, platform }: {
         </div>
       </details>}
     </div>
-    {!!stage.openQuestions?.length && <details className={styles.questions}><summary>Unresolved details<ChevronDown size={12} /></summary><ul>{stage.openQuestions.map(q => <li key={q}>{q}</li>)}</ul></details>}
+    {!!stage.openQuestions?.length && <details className={styles.questions}><summary>Unresolved details<ChevronDown size={12} /></summary><ul>{stage.openQuestions.map(q => <li key={q}><WorkflowQuestion workflow={workflow} question={q} stage={stage.name} interactive={!!platform.assistant?.saveFeedback} /></li>)}</ul></details>}
   </section>;
 }

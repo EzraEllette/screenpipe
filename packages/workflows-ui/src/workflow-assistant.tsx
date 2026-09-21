@@ -39,8 +39,8 @@ export function WorkflowAssistant({ platform, context, onDockChange, onWidthChan
   const [historyOpen, setHistoryOpen] = useState(false);
   const [historyQuery, setHistoryQuery] = useState("");
   const [displayOpen, setDisplayOpen] = useState(false);
-  const [pendingFeedback, setPendingFeedback] = useState<AssistantContext | null>(null);
-  const consumedFeedback = useRef<AssistantContext | null>(null);
+  const [pendingFeedback, setPendingFeedback] = useState<{ context: AssistantContext; question?: string } | null>(null);
+  const consumedFeedback = useRef<typeof pendingFeedback>(null);
   const savingFeedback = useRef(false);
   const [feedbackSaving, setFeedbackSaving] = useState(false);
   const [feedbackError, setFeedbackError] = useState("");
@@ -168,12 +168,12 @@ export function WorkflowAssistant({ platform, context, onDockChange, onWidthChan
   useEffect(() => {
     if (!active || !platform.saveFeedback) return;
     const openFeedback = (event: Event) => {
-      const selected = (event as CustomEvent<AssistantContext>).detail;
+      const selected = (event as CustomEvent<AssistantContext & { question?: string }>).detail;
       if (!selected?.workflow || selected.purpose !== "feedback") return;
       const snapshot = assistantContextSnapshot(selected);
       // Preserve previous corrections locally while keeping media out of chat history.
       snapshot.workflow!.userCorrection = selected.workflow.userCorrection;
-      setPendingFeedback(snapshot);
+      setPendingFeedback({ context: snapshot, question: typeof selected.question === "string" ? selected.question.trim() : undefined });
       setHistoryOpen(false);
       setOpen(true);
     };
@@ -184,13 +184,17 @@ export function WorkflowAssistant({ platform, context, onDockChange, onWidthChan
   useEffect(() => {
     if (!pendingFeedback || !loaded || busy || controller.current || consumedFeedback.current === pendingFeedback) return;
     consumedFeedback.current = pendingFeedback;
-    const fresh = { ...newAssistantConversation(), feedbackContext: pendingFeedback };
+    const fresh = { ...newAssistantConversation(), feedbackContext: pendingFeedback.context };
+    if (pendingFeedback.question) {
+      fresh.title = pendingFeedback.question.slice(0, 64);
+      fresh.messages = [{ id: crypto.randomUUID(), role: "assistant", text: pendingFeedback.question, at: new Date().toISOString() }];
+    }
     update(current => ({ ...current, activeId: fresh.id, conversations: [...current.conversations, fresh] }));
     setPendingFeedback(null);
     setIncludeContext(true);
     setError("");
     setFeedbackError("");
-    void send(FEEDBACK_PROMPT);
+    if (!pendingFeedback.question) void send(FEEDBACK_PROMPT);
     requestAnimationFrame(() => input.current?.focus());
   }, [pendingFeedback, loaded, busy, update]);
 

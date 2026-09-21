@@ -24,6 +24,29 @@ function submit() {
 }
 
 describe("workflow feedback conversation", () => {
+  it("opens a selected question without an AI call and keeps its answer scoped after navigation", async () => {
+    const saved = emptyAssistantState(); saved.conversations[0].draft = "Keep my draft";
+    const { platform, props, rerender } = setup({ load: vi.fn().mockResolvedValue(saved) });
+    const question = "Who reviews the synthesis before it is shared?";
+    act(() => { window.dispatchEvent(new CustomEvent("workflows:feedback", { detail: { ...feedback, question } })); });
+    await screen.findByText(question);
+    expect(platform.ask).not.toHaveBeenCalled();
+    expect(platform.saveFeedback).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: "Save feedback" })).not.toBeInTheDocument();
+    rerender(<WorkflowAssistant {...props} context={{ key: "different", title: "Another workflow" }} />);
+    submit();
+    await screen.findByRole("button", { name: "Save feedback" });
+    expect(platform.ask).toHaveBeenCalledTimes(1);
+    expect(platform.ask).toHaveBeenLastCalledWith(expect.objectContaining({
+      history: [expect.objectContaining({ role: "assistant", text: question })],
+      context: expect.objectContaining({ workflow: expect.objectContaining({ id: "wf-original" }) }),
+    }));
+    fireEvent.click(screen.getByRole("button", { name: "Save feedback" }));
+    await screen.findByText("Feedback saved for the next update");
+    expect(platform.saveFeedback).toHaveBeenCalledWith(expect.objectContaining({ id: "wf-original" }), expect.stringContaining(question));
+    expect(vi.mocked(platform.save).mock.calls.at(-1)![0].conversations[0].draft).toBe("Keep my draft");
+  });
+
   it("automatically reviews a fresh chat on every click and preserves ordinary drafts", async () => {
     const saved = emptyAssistantState(); saved.conversations[0].draft = "An unfinished question";
     const { platform } = setup({ load: vi.fn().mockResolvedValue(saved) });

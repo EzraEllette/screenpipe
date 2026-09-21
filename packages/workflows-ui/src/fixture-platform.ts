@@ -206,6 +206,10 @@ const workflows = [
     ], activeMinutes: 51, waitingMinutes: 7, friction: "Frequent tab switching breaks focus", control: "direct" }, 4),
 ];
 
+// Fictional uncertainties exercise the same clarification flow as saved workflows.
+workflows[4].openQuestions = ["Who reviews the synthesis before it is shared?", "What makes a source reliable enough to include?"];
+workflows[4].stages[0].openQuestions = ["Where should the source list be saved?"];
+
 const totalMinutes = 1_860;
 
 export const fixtureWorkflowAnalysis: WorkflowAnalysis = {
