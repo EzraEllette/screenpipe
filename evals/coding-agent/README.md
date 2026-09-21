@@ -9,7 +9,7 @@ This is an agent eval suite, not a unit-test suite. Every case contains:
 - saved prompt, transcript, candidate patch, grader output, runtime fingerprint, and result;
 - repeated-trial reporting with success rate, `pass@k`, and `pass^k`.
 
-The current app corpus contains 64 git-mined regressions. See
+The current app corpus contains 66 git-mined regressions. See
 [DESIGN.md](./DESIGN.md) for the Anthropic guidance, source contract, and
 history-mining workflow. The companion website manifest uses this same harness.
 
@@ -643,3 +643,19 @@ source separately passes the fourteen outcomes and five existing service tests.
 Fixtures and dependency links are materialized only for grading. No live provider,
 real user content, native build, release or publication is involved. These are
 corpus checks, not model trials, packaging validation or proof of trial isolation.
+
+## Home-level MCP configuration permissions
+
+`app-mcp-home-config-scope` exercises the actual Settings connect/disconnect
+functions through synthetic filesystem and native path-resolution ports. Thirteen
+outcomes cover home-directory permission refusal on POSIX, Windows and verbatim
+Windows targets, plus preservation of existing JSON/TOML settings, backup and
+error behavior. The parent fails three intended connection outcomes and preserves
+ten; the source-only reference passes all thirteen. These are simulated path
+semantics, not native Windows or desktop acceptance.
+
+Run `bun test evals/coding-agent/calibrate-mcp-home-scope.test.js` for controls
+covering parent/reference, unused-correct-source and write/backup bypasses, an
+equivalent implementation and missing-source setup failure. Dependencies are
+linked only for grading. No real config, credential or agent is accessed; these
+checks do not establish model improvement or enforced workspace isolation.
