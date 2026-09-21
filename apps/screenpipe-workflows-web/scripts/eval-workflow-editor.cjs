@@ -92,6 +92,31 @@ require("node:fs").mkdirSync(out, { recursive: true });
       await references.getByRole("img", { name: "Captured moment for Collect sources", exact: true }).waitFor();
       await references.getByRole("button", { name: "Close recording for Collect sources" }).click();
     });
+    await check("expanded sources align with step content at wide and narrow widths", async () => {
+      const references = page.getByRole("region", { name: "References for Collect sources", exact: true });
+      const toggle = references.getByRole("button", { name: "1 source", exact: true });
+      for (const width of [1440, 720, 390]) {
+        await page.setViewportSize({ width, height: 1000 });
+        if (width < 680) await button("Collapse left sidebar").click();
+        await toggle.click();
+        const sources = references.getByRole("region", { name: "Sources for Collect sources", exact: true });
+        const sourceBounds = await sources.boundingBox();
+        const referenceBounds = await references.boundingBox();
+        assert(Math.abs(sourceBounds.x - referenceBounds.x) < 2);
+        assert(sourceBounds.x + sourceBounds.width <= referenceBounds.x + referenceBounds.width + 2);
+        const sourceRow = sources.locator("summary").first();
+        const meta = await sourceRow.locator("span").first().boundingBox();
+        const disclosure = await sourceRow.locator("span").last().boundingBox();
+        if (Math.abs(meta.y - disclosure.y) < 3) assert(disclosure.x - meta.x - meta.width < 20);
+        await sources.scrollIntoViewIfNeeded();
+        await page.screenshot({ path: `${out}/source-alignment-${width}.png` });
+        await toggle.click();
+        assert.equal(await sources.isVisible(), false);
+      }
+      await page.setViewportSize({ width: 1440, height: 1100 });
+      await button("Open left sidebar").click();
+      await field("Workflow title").focus();
+    });
     await check("step controls stay reachable and dismiss with Escape or an outside click", async () => {
       await field("Step 1 title").hover();
       const grip = button("Move step 1");
