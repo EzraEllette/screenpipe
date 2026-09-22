@@ -787,7 +787,7 @@ export default function OnboardingPage() {
         clearTrialActivationAssignment();
       } catch (error) {
         console.error("failed to finish onboarding:", error);
-        if (currentSlide === "first-task") throw error;
+        if (currentSlide === "first-task" || currentSlide === "recommended-setup") throw error;
       } finally {
         // A transient store/IPC failure must not permanently consume the
         // user's click. The automatic retry above handles the common case;
@@ -850,7 +850,9 @@ export default function OnboardingPage() {
     handleNextSlide,
   ]);
 
-  if (isLoading || !isSettingsLoaded || !isManagedDeploymentResolved) {
+  // Initial hydration needs the full-page loader. A step saving completion
+  // owns its busy UI and must stay mounted to retain choices and show retries.
+  if ((isLoading && !isTransitioning) || !isSettingsLoaded || !isManagedDeploymentResolved) {
     return (
       <div className="flex items-center justify-center min-h-screen bg-background">
         <div className="w-6 h-6 border border-foreground border-t-transparent rounded-full animate-spin" />
