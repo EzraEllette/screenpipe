@@ -9,7 +9,7 @@ This is an agent eval suite, not a unit-test suite. Every case contains:
 - saved prompt, transcript, candidate patch, grader output, runtime fingerprint, and result;
 - repeated-trial reporting with success rate, `pass@k`, and `pass^k`.
 
-The current app corpus contains 70 git-mined regressions. See
+The current app corpus contains 71 git-mined regressions. See
 [DESIGN.md](./DESIGN.md) for the Anthropic guidance, source contract, and
 history-mining workflow. The companion website manifest uses this same harness.
 
@@ -729,3 +729,24 @@ is not proof of agent isolation, live authentication/payment/provider operation,
 transcription policy, playback or model improvement. Separately selected current
 product route tests preserve transcription behavior; they are not hidden outcomes
 of this case.
+
+## Abandoned SQLite read snapshots
+
+`app-abandoned-read-wal-cleanup` runs the real database manager, SQLx pool and
+SQLite WAL on synthetic temporary files. Six outcomes exercise dropped guards,
+explicit release, aborted requests, active-reader consistency, ordinary release
+and deadline interruption. Writes during and after cleanup must survive reopen
+and an integrity check. The oracle is limited to the historical cancellable-read
+implementation; it does not apply scheduler or native recovery changes.
+
+Run `bun test evals/coding-agent/calibrate-wal-read-cleanup.test.js` with the locked
+Rust dependencies available offline and a task-owned `target` cache. Calibration
+checks the parent/reference, an unused corrected implementation, equivalent
+cleanup logic and connection retirement, unconditional rollback, a stale cancellation handler and missing
+source classification. Set `SCREENPIPE_EVAL_CALIBRATION_RECEIPTS` to retain
+per-control logs. Hidden fixtures and build-cache links are added only for grading.
+
+This case does not establish native recording resumption, scheduler policy,
+migration authority, actual device histories, execution isolation or model gains.
+Build failures remain infrastructure failures; inspect the executed assertion
+logs before treating any failure as the intended historical defect.

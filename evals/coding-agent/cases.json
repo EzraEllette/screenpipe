@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "suite": "screenpipe-app-coding-agent-regressions",
-  "dataset_version": "2026-09-22.7",
+  "dataset_version": "2026-09-22.8",
   "suite_type": "regression",
   "owner": "screenpipe engineering",
   "policy": {
@@ -2863,6 +2863,50 @@
           }
         ],
         "command": "node .eval-onboarding-sdk.mjs && cd apps/screenpipe-app-tauri && NODE_OPTIONS=--localstorage-file=.eval-localstorage bun x vitest run --config vitest.config.ts app/onboarding/page.test.tsx -t 'eval SDK assignment outcomes' --maxWorkers=1 --minWorkers=1"
+      }
+    },
+    {
+      "id": "app-abandoned-read-wal-cleanup",
+      "name": "Release abandoned SQLite read snapshots without losing writes",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "2978ef82da358544450998f81dd5a687651cffee",
+        "pull_request": "https://github.com/screenpipe/screenpipe/pull/7194"
+      },
+      "base_ref": "b15733e7b1a252f71a037a968d4f63af578aac47",
+      "oracle_ref": "2978ef82da358544450998f81dd5a687651cffee",
+      "oracle_paths": [
+        "crates/screenpipe-db/src/cancellable_query.rs"
+      ],
+      "gate": "advisory",
+      "trigger_paths": [
+        "crates/screenpipe-db/src/cancellable_query.rs",
+        "crates/screenpipe-db/src/storage/snapshot.rs"
+      ],
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "sqlite",
+        "cancellation",
+        "durable-recording"
+      ],
+      "prompt": "A cancelled read request can leave a raw SQLite read transaction on a pooled connection. Later checkpoints remain pinned even after that request is gone. Fix cancellable read cleanup so dropping the guard, explicitly releasing it, or aborting its owning task releases the abandoned snapshot before returning pool capacity. A single-slot read pool must become usable within three seconds; a passive checkpoint must drain once the abandoned reader is gone. Writes made during the read and after cleanup must remain visible, survive database reopen and retain database integrity. Preserve an active reader's original snapshot while concurrent writes continue, ordinary non-transaction release, interruption of long SQLite work within three seconds when given a 20 ms deadline, and a clean progress handler for the next borrower. Keep the public cancellable-read interfaces usable. This task is limited to read-connection cleanup; it does not change scheduler restart policy, native recovery, user pause or migration authority.",
+      "agent_timeout_seconds": 1800,
+      "grader_dependency_links": [
+        {
+          "source_path": "target",
+          "destination_path": "target"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 600,
+        "fixtures": [
+          {
+            "local_path": "graders/wal-read-cleanup.rs",
+            "destination_path": "crates/screenpipe-db/tests/eval_wal_read_cleanup.rs"
+          }
+        ],
+        "command": "cargo test --offline --locked -p screenpipe-db --test eval_wal_read_cleanup -- --test-threads=1"
       }
     }
   ]
