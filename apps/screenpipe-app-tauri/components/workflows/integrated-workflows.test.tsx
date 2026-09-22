@@ -91,3 +91,22 @@ it("hands off workflow identity without embedding captured content", async () =>
   expect(task.previewPrompt).toContain("confirm before sending");
   expect(task.previewPrompt).not.toContain(workflow.stages[0].evidence[0].detail);
 });
+
+
+it("opens quiet header filters and restores the catalog after clearing them", async () => {
+  window.history.replaceState(null, "", "/home?mode=workflows");
+  render(<IntegratedWorkflows active onModeChange={vi.fn()} recordingStatus={null} />);
+  const filters = await screen.findByRole("button", { name: "Filters", exact: true });
+  expect(filters).toHaveAttribute("title", "Filters");
+  expect(screen.getByRole("button", { name: "Update now" })).toHaveAttribute("title", "Update now");
+  fireEvent.click(filters);
+  const panel = screen.getByRole("region", { name: "Workflow filters" });
+  expect(filters).toHaveAttribute("aria-controls", panel.id);
+  fireEvent.change(within(panel).getByLabelText("Evidence quality"), { target: { value: "strong" } });
+  expect(screen.getByRole("button", { name: "Filters (1)" })).toHaveAttribute("aria-expanded", "true");
+  fireEvent.click(screen.getByRole("button", { name: "Clear filters" }));
+  expect(within(panel).getByLabelText("Evidence quality")).toHaveValue("all");
+  expect(screen.queryByRole("button", { name: "Clear filters" })).not.toBeInTheDocument();
+  fireEvent.click(filters);
+  expect(screen.queryByRole("region", { name: "Workflow filters" })).not.toBeInTheDocument();
+});

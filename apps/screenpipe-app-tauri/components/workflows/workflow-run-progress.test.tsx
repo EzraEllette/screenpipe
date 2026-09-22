@@ -41,7 +41,7 @@ it("cleans up late subscriptions and ignores stale events after switching runs",
 
 it("shows no-change success and never labels a failed run with older change counts", () => {
   const view = render(<WorkflowRunProgress active={false} job={{ id: "1", status: "complete" }} changes={{ created: 0, updated: 0 }} analyze={vi.fn()} />);
-  expect(screen.getByRole("status")).toHaveTextContent("No changes saved");
+  expect(screen.getByRole("status")).toHaveTextContent("No changes found");
   view.rerender(<WorkflowRunProgress active={false} job={{ id: "2", status: "failed" }} changes={{ created: 0, updated: 2 }} analyze={vi.fn()} />);
   expect(screen.getByRole("status")).toHaveTextContent("Update failed");
   expect(screen.queryByText("0 new · 2 updated")).not.toBeInTheDocument();
@@ -58,9 +58,29 @@ it("shows an incomplete pipeline as resumable without claiming the catalog saved
 
 it("shows actual reviewed coverage after reload rather than calling yesterday's batch current", () => {
   render(<WorkflowRunProgress active={false} updatedAt="2026-09-17T17:55:00Z" checkedThrough="2026-09-16T21:08:00Z" changes={{created:0,updated:0}} analyze={vi.fn()} />);
-  expect(screen.getByRole("status")).toHaveTextContent("No changes saved");
+  expect(screen.getByRole("status")).toHaveTextContent("No changes found");
   expect(screen.getByRole("status")).toHaveTextContent("Sep 16");
   fireEvent.click(screen.getByRole("button",{name:/Show agent activity/}));
   expect(screen.getByRole("region",{name:"Agent activity"})).toHaveTextContent("Data reviewed through");
   expect(screen.queryByText(/Waiting for the next agent/)).not.toBeInTheDocument();
+});
+
+it("keeps quiet receipts compact without hiding failure, resume, or stop controls", () => {
+  const analyze = vi.fn(), stop = vi.fn();
+  const props = { quiet: true, active: false, analyze, stop, checkedThrough: "2026-09-16T21:08:00Z", updatedAt: "2026-09-17T17:55:00Z", changes: { created: 0, updated: 0 } };
+  const view = render(<WorkflowRunProgress {...props} />);
+  expect(screen.getByRole("status")).toHaveTextContent("Reviewed through");
+  fireEvent.click(screen.getByRole("button", { name: /Show agent activity/ }));
+  expect(screen.getByRole("region", { name: "Agent activity" })).toHaveTextContent("No changes found");
+  fireEvent.keyDown(document, { key: "Escape" });
+  expect(screen.queryByRole("region", { name: "Agent activity" })).not.toBeInTheDocument();
+  view.rerender(<WorkflowRunProgress {...props} job={{ id: "failed", status: "failed" }} />);
+  expect(screen.getByRole("status")).toHaveTextContent("Update failed");
+  view.rerender(<WorkflowRunProgress {...props} job={{ id: "incomplete", status: "incomplete" }} />);
+  expect(screen.getByRole("status")).toHaveTextContent("Update incomplete");
+  fireEvent.click(screen.getByRole("button", { name: "Resume update" }));
+  expect(analyze).toHaveBeenCalledOnce();
+  view.rerender(<WorkflowRunProgress {...props} active job={{ id: "active", status: "processing" }} />);
+  fireEvent.click(screen.getByRole("button", { name: "Stop" }));
+  expect(stop).toHaveBeenCalledOnce();
 });

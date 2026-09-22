@@ -1,14 +1,15 @@
 // screenpipe — AI that knows everything you've seen, said, or heard
 // https://screenpipe.com
 "use client";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Check, ChevronDown, Circle, Loader2, RefreshCw, Square, AlertCircle } from "lucide-react";
 import type { WorkflowAnalysisJob, WorkflowRunActivity, WorkflowsPlatform } from "./platform";
 import styles from "./workflows-app.module.css";
 import { useGT } from "gt-react";
 
 
-export function WorkflowRunProgress({ job, active, subscribe, stop, analyze, updatedAt, checkedThrough, changes, disabledReason }: {
+export function WorkflowRunProgress({ job, active, subscribe, stop, analyze, updatedAt, checkedThrough, changes, disabledReason, quiet = false, actions }: {
+  quiet?: boolean; actions?: ReactNode;
   disabledReason?: string;
   job?: WorkflowAnalysisJob | null; active: boolean;
   subscribe?: WorkflowsPlatform["subscribeAnalysisActivity"];
@@ -52,15 +53,18 @@ export function WorkflowRunProgress({ job, active, subscribe, stop, analyze, upd
   changes = job?.result?.changes ?? changes;
   checkedThrough = job?.result?.checkedThrough ?? checkedThrough;
   const reviewed = checkedThrough && Number.isFinite(Date.parse(checkedThrough)) ? new Date(checkedThrough).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : undefined;
-  const result = changes ? changes.created === 0 && changes.updated === 0 ? "No changes saved" : `${changes.created} new · ${changes.updated} updated` : "Workflows updated";
+  const result = changes ? changes.created === 0 && changes.updated === 0 ? "No changes found" : `${changes.created} new · ${changes.updated} updated` : "Workflows updated";
   const label = active ? current?.label ?? (job?.message || (job?.status === "queued" ? "Waiting for agent" : "Agent working"))
     : job?.status === "incomplete" ? "Update incomplete" : job?.status === "failed" ? "Update failed" : job?.status === "complete" ? result
     : updatedAt ? result : "";
-  return <div className={styles.refreshControls}>
+  const receipt = quiet && !active && reviewed && job?.status !== "failed" && job?.status !== "incomplete"
+    ? ui("Reviewed through {date}", { date: reviewed }) : label;
+  const actionLabel = active && stop ? ui("Stop") : job?.status === "incomplete" ? ui("Resume update") : ui("Update now");
+  return <div className={quiet ? styles.quietRefreshControls : styles.refreshControls}>
     {(active || items.length > 0 || job || updatedAt) ? <div ref={root} className={styles.runProgress}>
       <button ref={toggle} type="button" className={styles.runToggle} aria-expanded={open} aria-label={ui("{value1}. Show agent activity", { value1: label })} onClick={() => setOpen(!open)}>
         {active ? <Loader2 size={14} className={styles.runSpinner} /> : job?.status === "failed" ? <AlertCircle size={14} /> : job?.status === "incomplete" ? <Circle size={14} /> : <Check size={14} />}
-        <span role="status">{label}{!active && reviewed && <small style={{ display: "block" }}>Through {reviewed}</small>}</span>
+        <span role="status">{receipt}{!quiet && !active && reviewed && <small style={{ display: "block" }}>Through {reviewed}</small>}</span>
         {active && Number.isFinite(seconds) && <time>{Math.floor(seconds / 60)}:{String(seconds % 60).padStart(2, "0")}</time>}
         <ChevronDown size={12} style={{ transform: open ? "rotate(180deg)" : undefined }} />
       </button>
@@ -74,7 +78,10 @@ export function WorkflowRunProgress({ job, active, subscribe, stop, analyze, upd
         <footer>{active ? ui("Your saved workflows stay available.") : (job?.status === "failed" || job?.status === "incomplete") ? job.message : result}</footer>
       </section>}
     </div> : <span role="status">{label}</span>}
-    {active && stop ? <button className={styles.secondaryButton} onClick={stop}><Square size={11} />Stop</button>
-      : <button className={styles.secondaryButton} onClick={analyze} disabled={active || !!disabledReason} title={disabledReason}><RefreshCw size={14} />{job?.status === "incomplete" ? ui("Resume update") : ui("Update now")}</button>}
+    <div className={quiet ? styles.quietHeaderActions : styles.runActions}>
+      {actions}
+      {active && stop ? <button className={quiet ? styles.quietIconButton : styles.secondaryButton} onClick={stop} aria-label={actionLabel} title={actionLabel}><Square size={16} />{!quiet && actionLabel}</button>
+        : <button className={quiet ? styles.quietIconButton : styles.secondaryButton} onClick={analyze} disabled={active || !!disabledReason} aria-label={actionLabel} title={disabledReason || actionLabel}><RefreshCw size={16} />{!quiet && actionLabel}</button>}
+    </div>
   </div>;
 }

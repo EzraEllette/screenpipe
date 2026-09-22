@@ -63,7 +63,7 @@ import {
   X,
   Workflow,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useId } from "react";
 import { type AppView, isPrimaryAppView } from "./navigation";
 import {
   activeFilterCount,
@@ -718,6 +718,7 @@ function OverviewView({
 
 function WorkflowsView({ workflows, knownWorkflowCount, activityPeriod, filters, setFilters, openWorkflow, analyze, analyzing, error, stop, updatedAt, checkedThrough, changes, job, subscribe, analysisUnavailableReason }: { analysisUnavailableReason?: string; workflows: WorkflowMap[]; knownWorkflowCount: number; activityPeriod: WorkflowActivityPeriod; filters: WorkflowFilters; setFilters: (filters: WorkflowFilters) => void; openWorkflow: (index: number) => void; analyze: () => void; analyzing: boolean; error: string; stop?: () => void; updatedAt?: string; checkedThrough?: string; changes?: { created: number; updated: number }; job?: WorkflowAnalysisJob | null; subscribe?: WorkflowsPlatform["subscribeAnalysisActivity"] }) {
   const ui = useGT();
+  const filtersId = useId();
   const [filtersOpen, setFiltersOpen] = useState(false);
   const visible = useMemo(() => filterWorkflows(workflows, filters), [filters, workflows]);
   const availableApps = useMemo(() => [...new Set(workflows.flatMap((workflow) => workflow.apps))].sort((a, b) => a.localeCompare(b)), [workflows]);
@@ -729,15 +730,19 @@ function WorkflowsView({ workflows, knownWorkflowCount, activityPeriod, filters,
 
   return (
     <>
-      <div className={`${styles.pageHeader} ${styles.catalogHeader}`}><div><h1>Your workflows</h1></div><WorkflowRunProgress disabledReason={analysisUnavailableReason} job={job} active={analyzing} subscribe={subscribe} stop={stop} analyze={analyze} updatedAt={updatedAt} checkedThrough={checkedThrough} changes={changes} /></div>
+      <div className={`${styles.catalogHeader} ${styles.quietCatalogHeader}`}>
+        <div className={styles.catalogHeading}>
+          <h1>Your workflows</h1>
+          <div className={styles.catalogCount}>
+            <span>{filterCount || filters.query ? ui("{visible} of {total} shown", { visible: visible.length, total: workflows.length }) : ui("{count, plural, one {# workflow} other {# workflows}}", { count: workflows.length })} · {activityPeriod === 0 ? ui("All known") : activityPeriodLabel(activityPeriod)}</span>
+            {(filterCount > 0 || filters.query) && <button className={styles.clearButton} onClick={() => setFilters(defaultWorkflowFilters)}>{ui("Clear filters")}</button>}
+          </div>
+        </div>
+        <WorkflowRunProgress quiet actions={workflows.length > 0 && <button type="button" className={styles.quietIconButton} aria-label={filterCount ? ui("Filters ({count})", { count: filterCount }) : ui("Filters")} title={ui("Filters")} aria-expanded={filtersOpen} aria-controls={filtersId} onClick={() => setFiltersOpen(open => !open)}><SlidersHorizontal size={16} />{filterCount > 0 && <span className={styles.filterCount}>{filterCount}</span>}</button>} disabledReason={analysisUnavailableReason} job={job} active={analyzing} subscribe={subscribe} stop={stop} analyze={analyze} updatedAt={updatedAt} checkedThrough={checkedThrough} changes={changes} />
+      </div>
       {error && <p role="alert" className={styles.depthNotice}>{error}</p>}
       {!knownWorkflowCount ? <EmptyWorkMap analyzing={analyzing} analyze={analyze} /> : !workflows.length ? <section className={styles.emptyState}><Clock3 size={23} /><h2>No known workflows were active in this period</h2><p>Your {knownWorkflowCount} known workflows are still in the catalog. Choose “All known” to see them.</p></section> : <>
-        <section className={styles.filterBar} aria-label={ui("Workflow filters")}>
-          <div><strong>{visible.length} of {workflows.length} shown</strong><span>{filters.query ? ui("Matching “{value1}”", { value1: filters.query }) : activityPeriodLabel(activityPeriod)}</span></div>
-          {(filterCount > 0 || filters.query) && <button className={styles.clearButton} onClick={() => setFilters(defaultWorkflowFilters)}><X size={12} />Clear</button>}
-          <button className={filtersOpen || filterCount ? styles.filterButtonActive : styles.filterButton} onClick={() => setFiltersOpen((open) => !open)}><SlidersHorizontal size={14} />Filters{filterCount ? ` (${filterCount})` : ""}<ChevronDown size={13} /></button>
-        </section>
-        {filtersOpen && <section className={styles.filterPanel}>
+        {filtersOpen && <section id={filtersId} aria-label={ui("Workflow filters")} className={styles.filterPanel}>
           <label><span>Evidence quality</span><select value={filters.quality} onChange={(event) => updateFilter("quality", event.target.value as WorkflowFilters["quality"])}><option value="all">Any support level</option><option value="good">Good or stronger</option><option value="strong">Strong only</option></select></label>
           <label><span>Time per run</span><select value={filters.duration} onChange={(event) => updateFilter("duration", event.target.value as WorkflowFilters["duration"])}><option value="all">Any duration</option><option value="short">15 minutes or less</option><option value="medium">16–45 minutes</option><option value="long">More than 45 minutes</option></select></label>
           <label><span>Friction type</span><select value={filters.friction} onChange={(event) => updateFilter("friction", event.target.value as WorkflowFilters["friction"])}><option value="all">Any friction</option><option value="waiting">Waiting</option><option value="switching">Switching</option><option value="rework">Rework</option><option value="handoff">Handoff</option><option value="unclear">Unclear</option></select></label>
@@ -774,9 +779,12 @@ function CatalogPlaceholder({ detail = false }: { detail?: boolean }) {
   const ui = useGT();
   const bar = (width: string, height = 10) => <span className={styles.skeletonBar} style={{ width, height }} />;
   return <section aria-busy="true" aria-label={ui("Loading workflows")}>
-    <div className={`${styles.pageHeader} ${styles.catalogHeader}`}><h1>{detail ? ui("Workflow") : ui("Your workflows")}</h1><span role="status" className={styles.catalogLoadStatus}>{ui("Loading saved workflows…")}</span></div>
+    {detail ? <div className={`${styles.pageHeader} ${styles.catalogHeader}`}><h1>{ui("Workflow")}</h1><span role="status" className={styles.catalogLoadStatus}>{ui("Loading saved workflows…")}</span></div> : <div className={`${styles.catalogHeader} ${styles.quietCatalogHeader}`}>
+      <div className={styles.catalogHeading}><h1>{ui("Your workflows")}</h1><div className={styles.catalogCount} aria-hidden="true">{bar("150px", 12)}</div></div>
+      <div className={styles.quietHeaderActions} aria-hidden="true">{bar("36px", 36)}{bar("36px", 36)}</div>
+      <div className={styles.quietRefreshControls}><span role="status" className={`${styles.runProgress} ${styles.catalogLoadStatus}`}>{ui("Loading saved workflows…")}</span></div>
+    </div>}
     <div aria-hidden="true">
-      {!detail && <div className={styles.filterBar}><div>{bar("100px")}{bar("140px", 8)}</div>{bar("85px", 28)}</div>}
       <div className={detail ? styles.skeletonDetail : styles.workflowGrid}>
         {Array.from({ length: detail ? 3 : 4 }, (_, i) => <div key={i} className={`${styles.workflowCard} ${styles.skeletonCard}`}>
           <div className={styles.skeletonTitle}>{bar("78%", 20)}</div>
