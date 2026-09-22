@@ -481,6 +481,9 @@ pub(crate) struct PiggybackObservation {
     /// (holding capture suspended just makes the meeting silent). See
     /// `decide_piggyback`.
     pub tap_ever_started: bool,
+    /// Windows compatibility selection has explicitly returned far-end
+    /// ownership to the configured output for the rest of this meeting.
+    pub compatibility_fallback: bool,
     /// Pids the currently-registered Meeting Tap was built over (sorted).
     /// Empty when no tap is registered. Lets the decider notice the
     /// mic-holder set changing mid-meeting (manual meetings track it live)
@@ -536,6 +539,23 @@ pub(crate) fn decide_piggyback(obs: &PiggybackObservation) -> Vec<PiggybackActio
         }
         for dev in &obs.suspended {
             actions.push(PiggybackAction::Resume(dev.clone()));
+        }
+        return actions;
+    }
+
+    // A positively identified Windows-incompatible target set is a meeting-
+    // lifetime decision, not a retryable tap failure. Release far-end only;
+    // MicFollow owns all microphone/session-input state independently.
+    if obs.compatibility_fallback {
+        for dev in &obs.session_devices {
+            if dev == &tap {
+                actions.push(PiggybackAction::StopSessionDevice(dev.clone()));
+            }
+        }
+        for dev in &obs.suspended {
+            if dev.ends_with(" (output)") {
+                actions.push(PiggybackAction::Resume(dev.clone()));
+            }
         }
         return actions;
     }
@@ -658,6 +678,9 @@ pub(crate) struct PiggybackState {
     /// One-shot per meeting: a hard mic capture failure (StartSessionInput
     /// errored) was already reported. Reset on meeting end.
     pub mic_fail_reported: bool,
+    /// Positively classified Windows incompatibility. Latched until the
+    /// meeting boundary so holder-set flap cannot churn output ownership.
+    pub compatibility_fallback: Option<String>,
     /// Per-meeting telemetry accumulator (Task 1). Folded from the volatile
     /// fields above at the piggybacking-stop edge (before they reset) and at
     /// the meeting-end edge; emitted to the events bus and reset there.
@@ -1039,7 +1062,10 @@ fn stable_output_names(
 /// `enabled_devices` because `start_device` would otherwise ADD the device;
 /// user-disabled devices are skipped inside it. `resume_device` is the
 /// unrelated user-facing un-pause flow — do NOT call that.
-async fn resume_and_restart(audio_manager: &std::sync::Arc<super::AudioManager>, name: &str) {
+async fn resume_and_restart(
+    audio_manager: &std::sync::Arc<super::AudioManager>,
+    name: &str,
+) -> bool {
     audio_manager.unsuspend_device(name);
     if audio_manager.enabled_devices().await.contains(name) {
         if let Ok(device) = crate::core::device::parse_audio_device(name) {
@@ -1050,9 +1076,11 @@ async fn resume_and_restart(audio_manager: &std::sync::Arc<super::AudioManager>,
                     name,
                     e
                 );
+                return false;
             }
         }
     }
+    true
 }
 
 fn select_meeting_inputs(
@@ -1283,6 +1311,7 @@ pub(crate) async fn run_meeting_piggyback_sweep(
         tap_strikes: state.tap_strikes,
         tap_cooldown_elapsed: cooldown_elapsed,
         tap_ever_started: state.telemetry.tap_started_count > 0,
+        compatibility_fallback: state.compatibility_fallback.is_some(),
         tap_built_pids: state.tap_pids.clone(),
         retap_target_pids,
     };
@@ -1293,8 +1322,9 @@ pub(crate) async fn run_meeting_piggyback_sweep(
     // normal capture even when the piggyback cannot deliver, and the meeting
     // records nothing. Ownership requires an active meeting too — outside one
     // the gate must never hold capture.
-    audio_manager
-        .set_piggyback_owns_capture(flag_on && obs.meeting.is_some() && obs.tap_ever_started);
+    audio_manager.set_piggyback_owns_capture(
+        flag_on && obs.meeting.is_some() && obs.tap_ever_started && !obs.compatibility_fallback,
+    );
 
     let tap_device_str = format!("{} (output)", MEETING_TAP_DEVICE_NAME);
     let tap_streaming = session_streaming.contains(&tap_device_str);
@@ -1340,7 +1370,7 @@ pub(crate) async fn run_meeting_piggyback_sweep(
                 }
             }
             PiggybackAction::Resume(name) => {
-                resume_and_restart(audio_manager, &name).await;
+                let _ = resume_and_restart(audio_manager, &name).await;
             }
             PiggybackAction::StartTap { pids } => {
                 state.last_tap_attempt = Some(std::time::Instant::now());
@@ -1349,6 +1379,11 @@ pub(crate) async fn run_meeting_piggyback_sweep(
                     .start_session_device(&tap, Some(pids.clone()))
                     .await
                 {
+                    #[cfg(target_os = "windows")]
+                    if let Some(reason) = windows_compatibility_reason(&e) {
+                        engage_compatibility_fallback(audio_manager, state, reason).await;
+                        continue;
+                    }
                     record_tap_strike(state);
                     warn!(
                         "[MEETING_PIGGYBACK] failed to start meeting tap (strike {}/{}): {}",
@@ -1376,6 +1411,11 @@ pub(crate) async fn run_meeting_piggyback_sweep(
                     .start_session_device(&tap, Some(pids.clone()))
                     .await
                 {
+                    #[cfg(target_os = "windows")]
+                    if let Some(reason) = windows_compatibility_reason(&e) {
+                        engage_compatibility_fallback(audio_manager, state, reason).await;
+                        continue;
+                    }
                     record_tap_strike(state);
                     warn!(
                         "[MEETING_PIGGYBACK] failed to rebuild meeting tap over new pid set (strike {}/{}): {}",
@@ -1592,9 +1632,52 @@ pub(crate) async fn run_meeting_piggyback_sweep(
         state.manual_pids_candidate = None;
         state.manual_enum_error_logged = false;
         state.retap_delay_candidate = None;
+        state.compatibility_fallback = None;
     }
 
     tap_streaming
+}
+
+#[cfg(target_os = "windows")]
+fn windows_compatibility_reason(error: &anyhow::Error) -> Option<String> {
+    error
+        .chain()
+        .find_map(|cause| {
+            cause.downcast_ref::<crate::core::process_tap::WindowsProcessTapCompatibility>()
+        })
+        .map(ToString::to_string)
+}
+
+#[cfg(target_os = "windows")]
+async fn engage_compatibility_fallback(
+    audio_manager: &std::sync::Arc<super::AudioManager>,
+    state: &mut PiggybackState,
+    reason: String,
+) {
+    state.compatibility_fallback = Some(reason.clone());
+    state.tap_pids.clear();
+    // Open the manager gate before restarting outputs; otherwise start_device
+    // immediately rejects the configured fallback as still tap-owned.
+    audio_manager.set_piggyback_owns_capture(false);
+    let suspended_outputs = audio_manager
+        .suspended_devices()
+        .into_iter()
+        .filter(|name| name.ends_with(" (output)"))
+        .collect::<Vec<_>>();
+    tracing::info!("[MEETING_PIGGYBACK] {reason}; restoring configured output capture");
+    if suspended_outputs.is_empty() {
+        tracing::info!("[MEETING_PIGGYBACK] compatibility outcome: configured output retained");
+    } else {
+        let mut restored = true;
+        for name in suspended_outputs {
+            restored &= resume_and_restart(audio_manager, &name).await;
+        }
+        if restored {
+            tracing::info!("[MEETING_PIGGYBACK] compatibility outcome: configured output restored");
+        } else {
+            tracing::warn!("[MEETING_PIGGYBACK] compatibility outcome: configured output restore failed; normal output follow remains enabled for retry");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2147,6 +2230,27 @@ mod tests {
         assert!(!actions
             .iter()
             .any(|a| matches!(a, PiggybackAction::StartTap { .. })));
+    }
+
+    #[test]
+    fn compatibility_fallback_releases_outputs_but_keeps_microphones_latched() {
+        let mut obs = base();
+        obs.tap_ever_started = true;
+        obs.compatibility_fallback = true;
+        obs.session_devices = [tap_name(), "Meeting Mic (input)".to_string()].into();
+        obs.suspended = [
+            "Speakers (Realtek) (output)".to_string(),
+            "Other Mic (input)".to_string(),
+        ]
+        .into();
+        let actions = decide_piggyback(&obs);
+        assert_eq!(
+            actions,
+            vec![
+                PiggybackAction::StopSessionDevice(tap_name()),
+                PiggybackAction::Resume("Speakers (Realtek) (output)".to_string()),
+            ]
+        );
     }
 
     #[test]

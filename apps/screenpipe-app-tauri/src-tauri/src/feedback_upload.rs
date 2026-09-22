@@ -1089,6 +1089,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn meeting_output_compatibility_fallback_reaches_support_after_rotation() {
+        let dir = tempfile::tempdir().unwrap();
+        tokio::fs::write(
+            dir.path().join("screenpipe-app.2026-09-20.log"),
+            "INFO [MEETING_PIGGYBACK] Windows meeting tap compatibility fallback: requested pids [120, 220] resolve to multiple independent roots [120, 220]; restoring configured output capture\nINFO [MEETING_PIGGYBACK] compatibility outcome: configured output restored\npassword=hunter2\n",
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(
+            dir.path().join("screenpipe-app.2026-09-21.log"),
+            "INFO later application log after rotation\n",
+        )
+        .await
+        .unwrap();
+        let files = crate::log_files::collect_log_files(&[dir.path().to_path_buf()]).await;
+        let logs = collect_log_text_from_files(files).await;
+        let redacted = crate::feedback_redact::redact_diagnostics_locally(logs)
+            .await
+            .unwrap();
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/logs"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {
+                "signedUrl": format!("{}/upload/log", server.uri()), "path": "logs/report.log"
+            }})))
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/upload/log"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/logs/confirm"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {"id": 42}})))
+            .mount(&server)
+            .await;
+        upload_report(
+            &Client::new(),
+            &server.uri(),
+            &request(),
+            redacted,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let requests = server.received_requests().await.unwrap();
+        let upload = requests
+            .iter()
+            .find(|request| request.method == "PUT")
+            .unwrap();
+        let report = String::from_utf8_lossy(&upload.body);
+        for expected in [
+            "requested pids [120, 220] resolve to multiple independent roots [120, 220]",
+            "compatibility outcome: configured output restored",
+            "later application log after rotation",
+        ] {
+            assert!(report.contains(expected), "missing {expected}: {report}");
+        }
+        assert!(!report.contains("hunter2"));
+    }
+
+    #[tokio::test]
     async fn transcription_gateway_failure_reaches_support_after_log_rotation() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
