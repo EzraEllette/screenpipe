@@ -1063,6 +1063,7 @@ fn stable_output_names(
 /// user-disabled devices are skipped inside it. `resume_device` is the
 /// unrelated user-facing un-pause flow — do NOT call that.
 #[derive(Debug)]
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 enum ResumeOutcome {
     Running,
     Skipped(&'static str),
@@ -1070,6 +1071,7 @@ enum ResumeOutcome {
 }
 
 impl ResumeOutcome {
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     fn diagnostic(&self, name: &str) -> String {
         match self {
             Self::Running => format!("configured output restored and running: {name}"),
@@ -1104,6 +1106,12 @@ async fn resume_and_restart(
         return ResumeOutcome::Skipped("meeting ended");
     }
     if let Err(error) = audio_manager.start_device(&device).await {
+        // The next monitor tick retries via the enabled pass.
+        tracing::warn!(
+            "[MEETING_PIGGYBACK] failed to restart resumed device {}: {}",
+            name,
+            error
+        );
         return ResumeOutcome::OpenFailed(error.to_string());
     }
     if audio_manager.is_device_actively_streaming(&device) {

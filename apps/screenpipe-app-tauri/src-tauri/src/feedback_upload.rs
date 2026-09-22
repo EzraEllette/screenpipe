@@ -1089,6 +1089,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(target_os = "windows")]
     async fn meeting_output_compatibility_fallback_reaches_support_after_rotation() {
         let dir = tempfile::tempdir().unwrap();
         let cause =
