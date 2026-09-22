@@ -848,6 +848,7 @@ mod tests {
         let db = DatabaseManager::new(source.to_str().unwrap(), Default::default())
             .await
             .unwrap();
+        let timeout_pool_options = db.pool.options().clone();
         db.execute_raw_sql_write(
             "INSERT INTO frames(id,timestamp,full_text) VALUES(1,'2026-09-18','private history')",
         )
@@ -898,8 +899,9 @@ mod tests {
         // Exercise a real pool timeout, then a successful startup outcome.
         // Each iteration rereads only persisted evidence, as a later process
         // would after the original rolling logs have disappeared.
-        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        let pool = timeout_pool_options
             .max_connections(1)
+            .min_connections(0)
             .acquire_timeout(Duration::from_millis(20))
             .connect("sqlite::memory:")
             .await
