@@ -748,20 +748,20 @@ function WorkflowsView({ workflows, knownWorkflowCount, activityPeriod, filters,
         </section>}
         {visible.length ? <div className={styles.workflowGrid}>{visible.map((workflow) => {
           const originalIndex = workflows.indexOf(workflow);
-          const actionableCount = workflow.bottlenecks.filter(isActionableBottleneck).length;
-          const constraintCount = workflow.bottlenecks.length - actionableCount;
           const timing = workflowTiming(workflow.timing);
           return (
             <article key={workflow.id || workflow.title} className={styles.workflowCard}>
-              <div className={styles.workflowCardTop}><span>{String(workflow.rank).padStart(2, "0")}</span><div><Pill>{workflow.catalogStatus === "not-reobserved" ? ui("Kept from earlier scan") : workflow.evidenceStatus === "supported-steps" ? ui("Steps have sources") : ui("Candidate · needs review")}</Pill>{actionableCount > 0 && <Pill tone="warm">{actionableCount} possible improvement{actionableCount === 1 ? "" : "s"}</Pill>}{constraintCount > 0 && <Pill>{ui("{count, plural, one {# constraint} other {# constraints}}", { count: constraintCount })}</Pill>}</div></div>
-              <h2>{workflow.title}</h2><p>{workflow.description}</p>
-              <details className={styles.cardDetails}><summary>Workflow details</summary><div className={styles.cardPath}><span>{workflow.trigger}</span><ArrowRight size={12} /><span>{workflow.outcome}</span></div>
-              <div className={styles.cardMetrics}><div title={timing ? ui("Estimated elapsed time from source-backed start and finish moments. Includes pauses; not active work time. Open the map to inspect the runs.") : ui("Not enough evidence of complete workflow runs to estimate an average.")}><span>{timing?.sampleCount === 1 ? ui("Time for one run") : !timing && hasMeasuredDuration(workflow) ? ui("Meeting duration") : ui("Avg. time / run")}</span><strong>{timing ? formatEstimatedMinutes(timing.averageMinutes) : hasMeasuredDuration(workflow) ? formatMinutes(workflow.totalMinutes) : "—"}</strong>{timing && <small>{ui("{count, plural, one {# run} other {# runs}}", { count: timing.sampleCount })} · estimated</small>}</div><div><span>Stages</span><strong>{workflow.stages.length}</strong></div><div><span>Evidence</span><strong>{workflow.quality.evidenceCount}</strong></div><div><span>Screenshots</span><strong>{workflow.quality.screenshotCount}/{workflow.stages.length}</strong></div></div>
-              </details>
-              <div className={styles.cardSummary}>{workflow.stages.length} steps <span>·</span> {workflow.quality.screenshotCount}/{workflow.stages.length} screenshots <span>·</span> {timing ? `${formatEstimatedMinutes(timing.averageMinutes)} / run · estimated` : "Run time not measured"}</div>
-              <div className={styles.cardFooter}><span>{workflow.frequency}</span><div className={styles.cardActions}>
-                <button type="button" className={styles.cardOpen} onClick={() => openWorkflow(originalIndex)}>Open map <ChevronRight size={14} /></button>
-              </div></div>
+              <h2>{workflow.title}</h2>
+              <p className={styles.cardDescription}>{workflow.description}</p>
+              <div className={styles.cardFooter}>
+                <div className={styles.cardSummary}>
+                  {workflow.stages.length} steps
+                  {timing && <><span aria-hidden="true">·</span>{`${formatEstimatedMinutes(timing.averageMinutes)} / run · estimated`}</>}
+                </div>
+                <div className={styles.cardActions}>
+                  <button type="button" className={styles.cardOpen} onClick={() => openWorkflow(originalIndex)}><span className={styles.cardOpenLabel}>{ui("Open map")}</span><ChevronRight size={14} /></button>
+                </div>
+              </div>
             </article>
           );
         })}</div> : <section className={styles.emptyState}><Search size={23} /><h2>No workflows match these filters</h2><p>Broaden the filters or clear the search to see the rest of your mapped work.</p><button className={styles.primaryButton} onClick={() => setFilters(defaultWorkflowFilters)}>Clear filters</button></section>}
@@ -779,12 +779,9 @@ function CatalogPlaceholder({ detail = false }: { detail?: boolean }) {
       {!detail && <div className={styles.filterBar}><div>{bar("100px")}{bar("140px", 8)}</div>{bar("85px", 28)}</div>}
       <div className={detail ? styles.skeletonDetail : styles.workflowGrid}>
         {Array.from({ length: detail ? 3 : 4 }, (_, i) => <div key={i} className={`${styles.workflowCard} ${styles.skeletonCard}`}>
-          <div className={styles.workflowCardTop}>{bar("20px")}{bar("120px", 18)}</div>
           <div className={styles.skeletonTitle}>{bar("78%", 20)}</div>
-          <div className={styles.skeletonLines}>{bar("100%")}{bar("91%")}{bar("64%")}</div>
-          <div className={styles.cardSummary}>{bar("64%", 12)}</div>
-          <div className={styles.cardDetails}>{bar("90px", 11)}</div>
-          <div className={styles.cardFooter}>{bar("45%", 8)}{bar("55px", 8)}</div>
+          <div className={styles.skeletonLines}>{bar("95%")}{bar("72%")}{detail && bar("64%")}</div>
+          <div className={styles.cardFooter}>{bar("140px", 10)}{bar("16px", 10)}</div>
         </div>)}
       </div>
     </div>
