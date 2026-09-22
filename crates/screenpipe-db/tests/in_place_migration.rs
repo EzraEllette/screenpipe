@@ -25,6 +25,87 @@ async fn fixture(root: &std::path::Path) {
 }
 
 #[tokio::test]
+async fn many_archive_files_complete_verification_without_exhausting_runtime_budget() {
+    const CHILD_ROOT: &str = "SCREENPIPE_MANY_ARCHIVE_FILES_CHILD";
+    let Ok(root) = std::env::var(CHILD_ROOT) else {
+        let root = tempfile::tempdir().unwrap();
+        // The regression spins inside a synchronous SQLite callback. A child
+        // process gives this test a real timeout that also stops the spinner.
+        let output = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            tokio::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "many_archive_files_complete_verification_without_exhausting_runtime_budget",
+                    "--nocapture",
+                ])
+                .env(CHILD_ROOT, root.path())
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        .expect("verification stalled across many immutable files")
+        .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    };
+    let root = std::path::Path::new(&root);
+    let path = root.join("db.sqlite");
+    let db = DatabaseManager::new(path.to_str().unwrap(), Default::default())
+        .await
+        .unwrap();
+    let detail = "archive detail ".repeat(512);
+    let mut tx = db.begin_immediate_with_retry().await.unwrap();
+    for id in 1..=160 {
+        sqlx::query("INSERT INTO frames(id,timestamp,full_text,accessibility_tree_json) VALUES(?,'2026-09-21','verification history',?)")
+            .bind(id).bind(&detail).execute(&mut **tx.conn()).await.unwrap();
+        sqlx::query("INSERT INTO elements(id,frame_id,source,role,text,properties) VALUES(?,?,'accessibility','AXText','verification element',?)")
+            .bind(id).bind(id).bind(&detail).execute(&mut **tx.conn()).await.unwrap();
+    }
+    tx.commit().await.unwrap();
+    db.close().await;
+    let mut options = MigrationOptions::default();
+    options.budget.file_bytes = 1024;
+    options.budget.record_bytes = 2048;
+    options.budget.decode_bytes = 8192;
+    options.budget.response_bytes = 8192;
+    let report = migrate(root, Default::default(), options).await.unwrap();
+    assert!(report.all_eligible_payloads_archived);
+    assert_eq!(report.frames, 160);
+    assert!(
+        screenpipe_db::storage::inventory(root)
+            .unwrap()
+            .iter()
+            .filter(|path| path.extension().is_some_and(|ext| ext == "parquet"))
+            .count()
+            >= 160
+    );
+    let db = DatabaseManager::new(path.to_str().unwrap(), Default::default())
+        .await
+        .unwrap();
+    db.verify_storage().await.unwrap();
+    assert_eq!(
+        db.frame_payloads(&[160], Projection::All).await.unwrap()[&160]
+            .accessibility_tree_json
+            .as_deref(),
+        Some(detail.as_str())
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT properties FROM elements WHERE id=160")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap(),
+        detail
+    );
+    db.close().await;
+}
+
+#[tokio::test]
 async fn oversized_legacy_bulk_records_are_archived_and_remain_readable() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("db.sqlite");
@@ -1483,7 +1564,7 @@ async fn failed_payload_write_resumes_without_discarding_published_files() {
 }
 
 #[tokio::test]
-#[ignore = "fills a marked disposable volume to exercise saved disk-full progress"]
+#[ignore = "fills a marked disposable non-sparse volume to exercise saved disk-full progress"]
 async fn exhausted_volume_resumes_after_space_is_restored() {
     use std::io::Write;
     let volume = std::path::PathBuf::from(std::env::var("SCREENPIPE_CONSTRAINED_VOLUME").unwrap());
@@ -1491,6 +1572,8 @@ async fn exhausted_volume_resumes_after_space_is_restored() {
     assert!(fs2::total_space(&volume).unwrap() <= 512 * 1024 * 1024);
     let root = tempfile::tempdir_in(&volume).unwrap();
     fixture(root.path()).await;
+    // Sparse filesystems can reclaim SQLite blocks after the injected ENOSPC
+    // and finish successfully. Use a non-sparse volume to require a retry.
     let filler = root.path().join("unrelated-data");
     let filled = std::sync::atomic::AtomicBool::new(false);
     let mut options = MigrationOptions::default();
@@ -1508,19 +1591,21 @@ async fn exhausted_volume_resumes_after_space_is_restored() {
                 return;
             }
             let mut file = std::fs::File::create(&filler).unwrap();
-            let block = vec![0x5a; 1024 * 1024];
-            while fs2::available_space(&volume).unwrap() > 2 * 1024 * 1024 {
-                if file
-                    .write_all(&block)
-                    .and_then(|_| file.sync_all())
-                    .is_err()
-                {
+            // Two MiB of headroom can still finish this highly compressible
+            // fixture. Exercise an actual full filesystem, not a guessed
+            // reserve threshold that can silently stop injecting a failure.
+            let block = vec![0x5a; 64 * 1024];
+            loop {
+                if let Err(error) = file.write_all(&block).and_then(|_| file.sync_all()) {
+                    assert_eq!(error.kind(), std::io::ErrorKind::StorageFull);
+                    eprintln!("injected actual disk exhaustion: {error}");
                     break;
                 }
             }
         },
     )
     .await;
+    assert!(filled.load(std::sync::atomic::Ordering::SeqCst));
     assert!(result.is_err());
     assert!(screenpipe_db::storage::migration_requires_resume(root.path()).unwrap());
     assert!(DatabaseManager::new(
