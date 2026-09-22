@@ -4,6 +4,7 @@
 
 use super::*;
 
+// Diagnostic threshold only: backlog does not establish a recording failure.
 const WAL_BACKLOG_WARNING_PAGES: i32 = 40_000;
 
 fn report_wal_checkpoint(
@@ -37,12 +38,10 @@ fn report_wal_checkpoint(
 }
 
 async fn run_routine_wal_checkpoint(pool: &SqlitePool) -> Result<(i32, i32, i32), sqlx::Error> {
-    // Routine maintenance must never shorten the live WAL file. A TRUNCATE
-    // checkpoint can make an already-open connection short-read the old WAL
-    // extent if its wal-index generation is stale. PASSIVE still copies every
-    // safe frame into the main database, but leaves WAL reuse/reset to SQLite's
-    // normal writer path instead of physically truncating the file underneath
-    // the app's many long-lived readers.
+    // PASSIVE copies available frames without waiting for readers. FULL,
+    // RESTART and TRUNCATE can hold SQLite's writer lock while waiting for
+    // readers, delaying recording. SQLite coordinates WAL reuse itself;
+    // an incomplete checkpoint does not require an engine restart.
     let row = sqlx::query("PRAGMA wal_checkpoint(PASSIVE)")
         .fetch_one(pool)
         .await?;
@@ -1383,14 +1382,13 @@ impl DatabaseManager {
         )
     }
 
-    /// Spawn the background task that owns ALL WAL checkpointing.
+    /// Spawn the background task that owns routine WAL checkpointing.
     ///
     /// Since `wal_autocheckpoint = 0` (see [`WAL_SAFETY_PRAGMAS`]), committing
     /// connections do not checkpoint inline. This task therefore owns routine
-    /// checkpointing: it runs a non-truncating `PASSIVE` checkpoint often enough
-    /// to copy safe frames into the main database without shortening the WAL
-    /// underneath long-lived readers. No live path truncates the WAL; physical
-    /// cleanup belongs exclusively to offline recovery after all owners close.
+    /// checkpointing with `PASSIVE`, allowing readers to defer checkpoint work
+    /// while recording continues. SQLite can reuse the WAL after those readers
+    /// finish; backlog alone must not interrupt capture.
     pub fn start_wal_maintenance(&self) {
         let pool = self.write_pool.clone();
         let shutdown = self.close_token.clone();
@@ -1419,10 +1417,8 @@ impl DatabaseManager {
                     }
                 }
 
-                // The upstream WAL-reset race requires a checkpoint and write
-                // to overlap on independent connections. Every routine pass,
-                // including checkpoints below the warning threshold, shares the same
-                // process-wide coordinator as every capture writer.
+                // Share the process-wide writer coordinator so maintenance
+                // participates in the same ordering and shutdown as capture.
                 let _write_guard = tokio::select! {
                     permit = Arc::clone(&write_semaphore).acquire_owned() => {
                         match permit {
@@ -1441,8 +1437,7 @@ impl DatabaseManager {
                 match run_guarded_routine_wal_checkpoint(&pool, &write_queue_health).await {
                     Ok(Some((busy, log_pages, checkpointed))) => {
                         // Backlog is deferred checkpoint work, not a failed
-                        // capture writer. Keep recording and retry PASSIVE;
-                        // never reset the live WAL or restart the engine here.
+                        // capture writer. Keep recording and retry PASSIVE.
                         report_wal_checkpoint(busy, log_pages, checkpointed, &mut backlog_since);
                     }
                     Ok(None) => {
@@ -2057,7 +2052,7 @@ mod wal_maintenance_tests {
             .len();
         assert!(
             wal_size_after >= wal_size_before,
-            "maintenance reset the live WAL"
+            "maintenance truncated the reader-pinned WAL"
         );
         reader.rollback().await.expect("release pinned reader");
         let (busy, log, checkpointed) = db.wal_checkpoint().await.unwrap();

@@ -587,7 +587,6 @@ impl DatabaseManager {
 
         // Every recorder owns periodic PASSIVE checkpointing. Active readers
         // can defer that work, but checkpoint pressure must not stop capture.
-        // Live checkpoints never truncate or reset the WAL beneath readers.
         if background {
             db_manager.start_wal_maintenance();
         }
