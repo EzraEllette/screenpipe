@@ -47,6 +47,15 @@ results and `cargo llvm-cov` data on top when judging release confidence.
 | windows | 31 | 3442 | 144 | 2899.1 | 21 | 11 | 100% |
 | macos | 31 | 3502 | 124 | 2911.4 | 22 | 11 | 100% |
 | linux | 27 | 3061 | 116 | 2548.3 | 20 | 11 | 100% |
+- Active test blocks: 3588
+- Ignored/manual test blocks: 150
+- Weighted coverage points: 2966.6
+
+| Platform | Suites | Active tests | Ignored tests | Weighted points | Layers | Flows | Critical score |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| windows | 31 | 3444 | 144 | 2901.1 | 21 | 11 | 100% |
+| macos | 31 | 3504 | 124 | 2913.4 | 22 | 11 | 100% |
+| linux | 27 | 3063 | 116 | 2550.3 | 20 | 11 | 100% |
 
 ## Refresh
 
