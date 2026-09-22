@@ -770,6 +770,30 @@ pub async fn compact_migrated_storage_with_progress(
     .await
 }
 
+async fn checkpoint_source_before_rename(source: &Path) -> Result<(), sqlx::Error> {
+    use sqlx::Connection;
+    super::diagnostics::stage("checkpointing_source_before_rename");
+    // Detect external SQLite readers and flush a retained WAL before journaling
+    // or moving the file. Keep genuine busy/integrity failures fail-closed.
+    let mut exclusive = sqlx::SqliteConnection::connect_with(
+        &sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(source)
+            .create_if_missing(false)
+            .pragma("locking_mode", "EXCLUSIVE")
+            .busy_timeout(std::time::Duration::from_secs(5)),
+    )
+    .await?;
+    let check = async {
+        sqlx::raw_sql("BEGIN EXCLUSIVE; COMMIT;")
+            .execute(&mut exclusive)
+            .await?;
+        super::schema::construction_checkpoint(&mut exclusive).await
+    }
+    .await;
+    exclusive.close().await?;
+    check
+}
+
 async fn migrate_observed(
     root: &Path,
     config: DbConfig,
@@ -907,24 +931,7 @@ async fn migrate_observed(
         source.close().await;
         drop(source);
         let (receipts, searches) = original?;
-        // Detect external SQLite readers before journaling or moving the file.
-        let mut exclusive = sqlx::SqliteConnection::connect_with(
-            &sqlx::sqlite::SqliteConnectOptions::new()
-                .filename(&source_path)
-                .create_if_missing(false)
-                .pragma("locking_mode", "EXCLUSIVE")
-                .busy_timeout(std::time::Duration::from_secs(5)),
-        )
-        .await?;
-        let check = async {
-            sqlx::raw_sql("BEGIN EXCLUSIVE; COMMIT;")
-                .execute(&mut exclusive)
-                .await?;
-            super::schema::construction_checkpoint(&mut exclusive).await
-        }
-        .await;
-        exclusive.close().await?;
-        check?;
+        checkpoint_source_before_rename(&source_path).await?;
         let generation = uuid::Uuid::new_v4().to_string();
         let directory = PathBuf::from("storage").join(&generation);
         let journal = Journal {
@@ -1035,6 +1042,12 @@ async fn migrate_observed(
         super::diagnostics::stage("closing_retry_history");
         db.close().await;
         let (receipts, searches) = refreshed?;
+        if !index.is_file() {
+            // A final read-only connection can leave a committed WAL behind
+            // after both pools close. Retry needs the same exclusive checkpoint
+            // as the first attempt before recording the file's new identity.
+            checkpoint_source_before_rename(&source_path).await?;
+        }
         journal.source = receipts;
         super::diagnostics::tables(&journal.source);
         journal.search_receipts = searches;

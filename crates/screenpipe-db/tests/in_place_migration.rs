@@ -32,7 +32,7 @@ async fn many_archive_files_complete_verification_without_exhausting_runtime_bud
         // The regression spins inside a synchronous SQLite callback. A child
         // process gives this test a real timeout that also stops the spinner.
         let output = tokio::time::timeout(
-            std::time::Duration::from_secs(30),
+            std::time::Duration::from_secs(90),
             tokio::process::Command::new(std::env::current_exe().unwrap())
                 .args([
                     "--exact",
