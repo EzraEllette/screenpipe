@@ -1091,9 +1091,20 @@ mod tests {
     #[tokio::test]
     async fn meeting_output_compatibility_fallback_reaches_support_after_rotation() {
         let dir = tempfile::tempdir().unwrap();
+        let cause =
+            screenpipe_audio::core::process_tap::WindowsProcessTapCompatibility::MultipleRoots {
+                requested_pids: vec![120, 220],
+                roots: vec![120, 220],
+            }
+            .to_string();
+        let outcome = screenpipe_audio::audio_manager::compatibility_outcome_diagnostic(
+            "configured output restoration failed for Speakers (output): representative open failure",
+        );
+        assert!(cause.contains("multiple independent roots [120, 220]"));
+        assert!(outcome.contains("restoration failed"));
         tokio::fs::write(
             dir.path().join("screenpipe-app.2026-09-20.log"),
-            "INFO [MEETING_PIGGYBACK] Windows meeting tap compatibility fallback: requested pids [120, 220] resolve to multiple independent roots [120, 220]; restoring configured output capture\nINFO [MEETING_PIGGYBACK] compatibility outcome: configured output restored\npassword=hunter2\n",
+            format!("INFO [MEETING_PIGGYBACK] {cause}; restoring configured output capture\nWARN {outcome}\npassword=hunter2\n"),
         )
         .await
         .unwrap();
@@ -1144,7 +1155,9 @@ mod tests {
         let report = String::from_utf8_lossy(&upload.body);
         for expected in [
             "requested pids [120, 220] resolve to multiple independent roots [120, 220]",
-            "compatibility outcome: configured output restored",
+            "compatibility outcome: configured output restoration failed",
+            "representative open failure",
+            "normal output follow remains enabled",
             "later application log after rotation",
         ] {
             assert!(report.contains(expected), "missing {expected}: {report}");

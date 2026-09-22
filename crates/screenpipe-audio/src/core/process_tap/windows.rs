@@ -1116,6 +1116,24 @@ mod compatibility_tests {
     }
 
     #[test]
+    fn supported_tap_widening_to_an_unrelated_root_is_rejected() {
+        let processes = HashMap::from([
+            (10, process(Some(1), "supported-call.exe")),
+            (11, process(Some(10), "supported-child.exe")),
+            (20, process(Some(1), "new-mic-holder.exe")),
+            (1, process(None, "explorer.exe")),
+        ]);
+        assert_eq!(classify_target_processes(&[11], &processes).unwrap(), 10);
+        assert!(matches!(
+            classify_target_processes(&[11, 20], &processes)
+                .unwrap_err()
+                .downcast_ref::<WindowsProcessTapCompatibility>(),
+            Some(WindowsProcessTapCompatibility::MultipleRoots { roots, .. })
+                if roots == &vec![10, 20]
+        ));
+    }
+
+    #[test]
     fn teams_desktop_and_child_reject_but_unrelated_single_root_does_not() {
         let processes = HashMap::from([
             (30, process(Some(1), "ms-teams.exe")),

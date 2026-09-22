@@ -1062,25 +1062,55 @@ fn stable_output_names(
 /// `enabled_devices` because `start_device` would otherwise ADD the device;
 /// user-disabled devices are skipped inside it. `resume_device` is the
 /// unrelated user-facing un-pause flow — do NOT call that.
-async fn resume_and_restart(
-    audio_manager: &std::sync::Arc<super::AudioManager>,
-    name: &str,
-) -> bool {
-    audio_manager.unsuspend_device(name);
-    if audio_manager.enabled_devices().await.contains(name) {
-        if let Ok(device) = crate::core::device::parse_audio_device(name) {
-            if let Err(e) = audio_manager.start_device(&device).await {
-                // The next monitor tick retries via the enabled pass.
-                tracing::warn!(
-                    "[MEETING_PIGGYBACK] failed to restart resumed device {}: {}",
-                    name,
-                    e
-                );
-                return false;
+#[derive(Debug)]
+enum ResumeOutcome {
+    Running,
+    Skipped(&'static str),
+    OpenFailed(String),
+}
+
+impl ResumeOutcome {
+    fn diagnostic(&self, name: &str) -> String {
+        match self {
+            Self::Running => format!("configured output restored and running: {name}"),
+            Self::Skipped(reason) => {
+                format!("configured output restoration skipped ({reason}): {name}")
+            }
+            Self::OpenFailed(error) => {
+                format!("configured output restoration failed for {name}: {error}")
             }
         }
     }
-    true
+}
+
+async fn resume_and_restart(
+    audio_manager: &std::sync::Arc<super::AudioManager>,
+    name: &str,
+) -> ResumeOutcome {
+    audio_manager.unsuspend_device(name);
+    if !audio_manager.enabled_devices().await.contains(name) {
+        return ResumeOutcome::Skipped("not configured");
+    }
+    let Ok(device) = crate::core::device::parse_audio_device(name) else {
+        return ResumeOutcome::Skipped("invalid device name");
+    };
+    if audio_manager.user_disabled_devices().await.contains(name) {
+        return ResumeOutcome::Skipped("user paused");
+    }
+    if audio_manager.is_disabled().await {
+        return ResumeOutcome::Skipped("audio capture disabled");
+    }
+    if audio_manager.meetings_only_capture_waiting().await {
+        return ResumeOutcome::Skipped("meeting ended");
+    }
+    if let Err(error) = audio_manager.start_device(&device).await {
+        return ResumeOutcome::OpenFailed(error.to_string());
+    }
+    if audio_manager.is_device_actively_streaming(&device) {
+        ResumeOutcome::Running
+    } else {
+        ResumeOutcome::Skipped("start completed without a running stream")
+    }
 }
 
 fn select_meeting_inputs(
@@ -1632,10 +1662,18 @@ pub(crate) async fn run_meeting_piggyback_sweep(
         state.manual_pids_candidate = None;
         state.manual_enum_error_logged = false;
         state.retap_delay_candidate = None;
-        state.compatibility_fallback = None;
+        reset_compatibility_fallback(state);
     }
 
-    tap_streaming
+    far_end_streaming_for_output_follow(tap_streaming, state)
+}
+
+fn far_end_streaming_for_output_follow(tap_streaming: bool, state: &PiggybackState) -> bool {
+    tap_streaming && state.compatibility_fallback.is_none()
+}
+
+fn reset_compatibility_fallback(state: &mut PiggybackState) {
+    state.compatibility_fallback = None;
 }
 
 #[cfg(target_os = "windows")]
@@ -1659,6 +1697,13 @@ async fn engage_compatibility_fallback(
     // Open the manager gate before restarting outputs; otherwise start_device
     // immediately rejects the configured fallback as still tap-owned.
     audio_manager.set_piggyback_owns_capture(false);
+    // A retap rejection follows a formerly working tap. Ensure that stale
+    // session owner is gone before any configured endpoint is restarted.
+    let tap = crate::core::device::AudioDevice::new(
+        crate::core::device::MEETING_TAP_DEVICE_NAME.to_string(),
+        crate::core::device::DeviceType::Output,
+    );
+    let _ = audio_manager.stop_session_device(&tap).await;
     let suspended_outputs = audio_manager
         .suspended_devices()
         .into_iter()
@@ -1666,18 +1711,37 @@ async fn engage_compatibility_fallback(
         .collect::<Vec<_>>();
     tracing::info!("[MEETING_PIGGYBACK] {reason}; restoring configured output capture");
     if suspended_outputs.is_empty() {
-        tracing::info!("[MEETING_PIGGYBACK] compatibility outcome: configured output retained");
-    } else {
-        let mut restored = true;
-        for name in suspended_outputs {
-            restored &= resume_and_restart(audio_manager, &name).await;
-        }
-        if restored {
-            tracing::info!("[MEETING_PIGGYBACK] compatibility outcome: configured output restored");
+        let running_outputs = audio_manager
+            .current_devices()
+            .into_iter()
+            .filter(|device| device.device_type == crate::core::device::DeviceType::Output)
+            .filter(|device| audio_manager.is_device_actively_streaming(device))
+            .map(|device| device.to_string())
+            .collect::<Vec<_>>();
+        if running_outputs.is_empty() {
+            tracing::warn!("[MEETING_PIGGYBACK] compatibility outcome: no configured output was running; normal output follow remains enabled");
         } else {
-            tracing::warn!("[MEETING_PIGGYBACK] compatibility outcome: configured output restore failed; normal output follow remains enabled for retry");
+            tracing::info!("[MEETING_PIGGYBACK] compatibility outcome: configured output retained and running: {:?}", running_outputs);
+        }
+    } else {
+        for name in suspended_outputs {
+            let outcome = resume_and_restart(audio_manager, &name).await;
+            let diagnostic = compatibility_outcome_diagnostic(&outcome.diagnostic(&name));
+            match outcome {
+                ResumeOutcome::Running => tracing::info!("{diagnostic}"),
+                ResumeOutcome::Skipped(_) | ResumeOutcome::OpenFailed(_) => {
+                    tracing::warn!("{diagnostic}")
+                }
+            }
         }
     }
+}
+
+#[doc(hidden)]
+pub fn compatibility_outcome_diagnostic(outcome: &str) -> String {
+    format!(
+        "[MEETING_PIGGYBACK] compatibility outcome: {outcome}; normal output follow remains enabled"
+    )
 }
 
 #[cfg(test)]
@@ -2251,6 +2315,63 @@ mod tests {
                 PiggybackAction::Resume("Speakers (Realtek) (output)".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn compatibility_fallback_stays_latched_through_pid_gaps_flaps_and_quiet_audio() {
+        let mut obs = base();
+        obs.compatibility_fallback = true;
+        obs.tap_ever_started = true;
+        obs.suspended = ["Speakers (Realtek) (output)".to_string()].into();
+        for pids in [vec![100, 200], vec![], vec![100], vec![200, 100]] {
+            obs.meeting = Some(pids);
+            obs.session_streaming.clear();
+            let actions = decide_piggyback(&obs);
+            assert!(!actions.iter().any(|action| matches!(
+                action,
+                PiggybackAction::StartTap { .. } | PiggybackAction::RetapForPidChange { .. }
+            )));
+            assert!(actions.contains(&PiggybackAction::Resume(
+                "Speakers (Realtek) (output)".to_string()
+            )));
+        }
+    }
+
+    #[test]
+    fn compatibility_handoff_immediately_allows_output_follow() {
+        let mut state = PiggybackState {
+            compatibility_fallback: Some("multiple roots".to_string()),
+            ..Default::default()
+        };
+        // The sweep's pre-action snapshot can still say the old tap streamed;
+        // the latched manager handoff must win in that same tick.
+        assert!(!far_end_streaming_for_output_follow(true, &state));
+        reset_compatibility_fallback(&mut state);
+        assert!(far_end_streaming_for_output_follow(true, &state));
+    }
+
+    #[test]
+    fn compatibility_latch_resets_only_at_meeting_boundary() {
+        let mut state = PiggybackState {
+            compatibility_fallback: Some("Teams ancestry".to_string()),
+            tap_pids: vec![100],
+            ..Default::default()
+        };
+        assert!(state.compatibility_fallback.is_some());
+        reset_compatibility_fallback(&mut state);
+        assert!(state.compatibility_fallback.is_none());
+        // Resetting far-end compatibility must not touch near-end ownership.
+        assert_eq!(state.tap_pids, vec![100]);
+    }
+
+    #[test]
+    fn compatibility_diagnostic_preserves_failed_open_and_follow_outcome() {
+        let diagnostic = compatibility_outcome_diagnostic(
+            &ResumeOutcome::OpenFailed("endpoint unavailable".to_string())
+                .diagnostic("Speakers (output)"),
+        );
+        assert!(diagnostic.contains("endpoint unavailable"));
+        assert!(diagnostic.contains("normal output follow remains enabled"));
     }
 
     #[test]
