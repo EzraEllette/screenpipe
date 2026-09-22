@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "suite": "screenpipe-app-coding-agent-regressions",
-  "dataset_version": "2026-09-22.1",
+  "dataset_version": "2026-09-22.4",
   "suite_type": "regression",
   "owner": "screenpipe engineering",
   "policy": {
@@ -2229,6 +2229,39 @@
           }
         ],
         "command": "\"${BUN_BIN:-bun}\" test evals/coding-agent/graders/app-external-chat-scan.test.js"
+      }
+    },
+    {
+      "id": "ai-gateway-tts-wav-response",
+      "name": "Return requested WAV audio without mislabelling provider bytes",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "ffff7de62e09bcd7058e219dbc13620e38c7189a"
+      },
+      "base_ref": "b68c120070351b90afb9e1df1e5f2c866f7fe396",
+      "oracle_ref": "ffff7de62e09bcd7058e219dbc13620e38c7189a",
+      "oracle_paths": [
+        "packages/ai-gateway/src/utils/voice-utils.ts"
+      ],
+      "gate": "advisory",
+      "tags": [
+        "regression",
+        "gateway",
+        "tts",
+        "binary-response",
+        "provider-failure"
+      ],
+      "prompt": "The text-to-speech handler labels provider bytes audio/wav even when the provider sends another format. Repair the existing handleTextToSpeech/textToSpeech path. The HTTP handler must request linear16 audio in a WAV container from the existing speech endpoint, using the default voice or the explicitly supported voice, the configured provider authorization and the literal text. A successful provider WAV response must reach the caller byte-for-byte with status200 and audio/wav. Empty or shorter-than12-byte results, MP3 bytes, and buffers without both RIFF and WAVE signatures must produce a JSON error with status500, never successful audio. This is a format/signature boundary, not a full WAV decoder requirement. Provider HTTP rejection, transport rejection or body-read failure must similarly fail once without automatic retries, and a later explicit request must recover. Preserve rejection of missing/nonstring/empty text and unsupported voices with400 before provider access; whitespace-only text remains a500 error without provider access. Preserve the utility public API for explicitly requested non-WAV encoding such as mp3: forward that encoding, do not force a WAV container or WAV validation, and preserve successful bytes. Use only synthetic provider responses and text. No specific private helper name or implementation structure is required. This evaluates the actual TTS handler and utility, not gateway authentication/rate limits, transcription, real playback, provider connectivity or full container integrity.",
+      "agent_timeout_seconds": 900,
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/tts-wav.test.js",
+            "destination_path": "evals/coding-agent/graders/tts-wav.test.js"
+          }
+        ],
+        "command": "\"${BUN_BIN:-bun}\" test evals/coding-agent/graders/tts-wav.test.js"
       }
     }
   ]

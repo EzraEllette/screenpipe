@@ -9,7 +9,7 @@ This is an agent eval suite, not a unit-test suite. Every case contains:
 - saved prompt, transcript, candidate patch, grader output, runtime fingerprint, and result;
 - repeated-trial reporting with success rate, `pass@k`, and `pass^k`.
 
-The current app corpus contains 67 git-mined regressions. See
+The current app corpus contains 68 git-mined regressions. See
 [DESIGN.md](./DESIGN.md) for the Anthropic guidance, source contract, and
 history-mining workflow. The companion website manifest uses this same harness.
 
@@ -678,3 +678,22 @@ changes only the scanner. UI, native filesystem permissions, actual import
 persistence and newer maintenance/sync behavior are outside this case. The
 separate current product dialog check uses a synthetic scan/import port. No real
 chat histories are read, and no execution-isolation claim follows.
+
+## TTS WAV response boundary
+
+`ai-gateway-tts-wav-response` executes the actual speech handler, voice utility
+and response helpers against a synthetic provider. Fifteen outcomes cover WAV
+request parameters and byte preservation, malformed signatures and short bodies,
+provider HTTP/transport/body failures, explicit recovery, invalid input and
+preserved MP3 utility calls. Only the voice utility is the historical oracle.
+
+Run `bun test evals/coding-agent/calibrate-tts-wav.test.js`. Ten controls cover
+parent/reference, an unused correct utility, equivalent helper naming, missing
+container selection, arbitrary-byte acceptance, discarded audio, forced WAV
+validation, blanket refusal and missing-source setup failure.
+
+These are corpus and grader checks, not model trials. The unrelated transcription
+SDK and completion factory are fail-closed ports. Gateway authentication/rate
+limits, actual playback, live provider compatibility and full WAV container
+integrity are outside this signature-level contract. No real audio, native build,
+model call or dependency link is used; execution isolation remains unproven.
