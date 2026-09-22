@@ -4,20 +4,36 @@
 
 use super::*;
 
-const WAL_HARD_CAP_PAGES: i32 = 40_000;
+const WAL_BACKLOG_WARNING_PAGES: i32 = 40_000;
 
-fn wal_backlog_restart_reason(
+fn report_wal_checkpoint(
+    busy: i32,
     log_pages: i32,
-    checkpointed_pages: i32,
-) -> Option<crate::write_queue::DatabaseRestartReason> {
-    let pending_pages = log_pages.saturating_sub(checkpointed_pages);
-    (pending_pages > WAL_HARD_CAP_PAGES).then_some(
-        crate::write_queue::DatabaseRestartReason::WalBacklog {
+    checkpointed: i32,
+    backlog_since: &mut Option<std::time::Instant>,
+) {
+    let pending_pages = log_pages.saturating_sub(checkpointed);
+    if pending_pages > WAL_BACKLOG_WARNING_PAGES {
+        let since = backlog_since.get_or_insert_with(std::time::Instant::now);
+        warn!(
             pending_pages,
             log_pages,
-            checkpointed_pages,
-        },
-    )
+            checkpointed,
+            busy,
+            backlog_seconds = since.elapsed().as_secs(),
+            "passive WAL checkpoint deferred; recording continues while reader snapshots drain"
+        );
+    } else if pending_pages == 0 && backlog_since.take().is_some() {
+        info!(
+            log_pages,
+            checkpointed, "WAL backlog cleared; recording continued without an engine restart"
+        );
+    } else {
+        debug!(
+            busy,
+            log_pages, checkpointed, pending_pages, "passive WAL checkpoint"
+        );
+    }
 }
 
 async fn run_routine_wal_checkpoint(pool: &SqlitePool) -> Result<(i32, i32, i32), sqlx::Error> {
@@ -1380,13 +1396,13 @@ impl DatabaseManager {
         let shutdown = self.close_token.clone();
         let write_queue_health = self.write_queue_health.clone();
         let write_semaphore = std::sync::Arc::clone(&self.write_semaphore);
-        let persistent_failure_hook = self.persistent_failure_hook.clone();
         tokio::spawn(async move {
             // 60s (not 300s): with inline auto-checkpoint off, the WAL grows for
             // the whole interval between ticks, so check more often to keep it
             // small under sustained write load.
             const INTERVAL: Duration = Duration::from_secs(60);
             let mut interval = tokio::time::interval(INTERVAL);
+            let mut backlog_since = None;
             // `interval()` yields its first tick immediately. Startup has just
             // run a serialized checkpoint, so consume that tick and wait a
             // full interval instead of racing callers' first transactions.
@@ -1405,7 +1421,7 @@ impl DatabaseManager {
 
                 // The upstream WAL-reset race requires a checkpoint and write
                 // to overlap on independent connections. Every routine pass,
-                // including the common below-cap path, shares the same
+                // including checkpoints below the warning threshold, shares the same
                 // process-wide coordinator as every capture writer.
                 let _write_guard = tokio::select! {
                     permit = Arc::clone(&write_semaphore).acquire_owned() => {
@@ -1424,30 +1440,10 @@ impl DatabaseManager {
                 };
                 match run_guarded_routine_wal_checkpoint(&pool, &write_queue_health).await {
                     Ok(Some((busy, log_pages, checkpointed))) => {
-                        let backlog_pages = log_pages.saturating_sub(checkpointed);
-                        if let Some(reason) = wal_backlog_restart_reason(log_pages, checkpointed) {
-                            warn!(
-                                "passive wal checkpoint left {} pages pending; requesting a full engine restart before WAL reuse (log={}, checkpointed={}, busy={})",
-                                backlog_pages, log_pages, checkpointed, busy
-                            );
-                            // The writer coordinator cannot quiesce query-pool
-                            // readers or an external opener, so a serialized
-                            // RESTART is not a complete lifecycle boundary. Ask
-                            // the owner to stop capture, drain readers, close
-                            // both pools, and respawn; startup checkpoints before
-                            // any traffic is admitted.
-                            if persistent_failure_hook.signal_wal_backlog_restart(reason) {
-                                return;
-                            }
-                            warn!(
-                                "wal hard cap exceeded but no lifecycle restart hook is installed; staying on safe PASSIVE checkpoints"
-                            );
-                        } else {
-                            debug!(
-                                "passive wal checkpoint: busy={}, checkpointed {}/{} pages ({} pending)",
-                                busy, checkpointed, log_pages, backlog_pages
-                            );
-                        }
+                        // Backlog is deferred checkpoint work, not a failed
+                        // capture writer. Keep recording and retry PASSIVE;
+                        // never reset the live WAL or restart the engine here.
+                        report_wal_checkpoint(busy, log_pages, checkpointed, &mut backlog_since);
                     }
                     Ok(None) => {
                         error!(
@@ -1493,6 +1489,7 @@ impl DatabaseManager {
 
     pub(crate) fn spawn_startup_integrity_check(&self, database_path: Arc<str>) {
         let pool = self.startup_integrity_pool();
+        let persistent_failure_hook = self.persistent_failure_hook.clone();
         crate::recovery::register_database_pool(std::path::Path::new(&*database_path), &pool);
         let timeout = Duration::from_secs(self.storage.as_ref().map_or_else(
             || crate::storage::StorageBudget::default().lifecycle_timeout_secs,
@@ -1500,7 +1497,6 @@ impl DatabaseManager {
         ));
         let health = self.write_queue_health.clone();
         let shutdown = self.close_token.clone();
-        let persistent_failure_hook = self.persistent_failure_hook.clone();
         tokio::spawn(async move {
             // Let boot settle so the scan doesn't compete with migrations
             // and the first capture writes for I/O.
@@ -1645,11 +1641,7 @@ impl DatabaseManager {
 
 #[cfg(test)]
 mod wal_maintenance_tests {
-    use super::{
-        run_guarded_routine_wal_checkpoint, run_routine_wal_checkpoint, wal_backlog_restart_reason,
-        DatabaseManager, WAL_HARD_CAP_PAGES,
-    };
-    use crate::write_queue::{persistent_failure_slot, DatabaseRestartReason};
+    use super::{run_guarded_routine_wal_checkpoint, run_routine_wal_checkpoint, DatabaseManager};
     use screenpipe_config::{DbConfig, DeviceTier};
     use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
     use sqlx::Row;
@@ -1978,117 +1970,9 @@ mod wal_maintenance_tests {
         pool.close().await;
     }
 
-    #[tokio::test]
-    async fn reader_pinned_backlog_requests_one_lifecycle_restart_without_resetting_wal() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let db_path = dir.path().join("db.sqlite");
-        let wal_path = dir.path().join("db.sqlite-wal");
-        let options = SqliteConnectOptions::new()
-            .filename(&db_path)
-            .create_if_missing(true)
-            .journal_mode(SqliteJournalMode::Wal)
-            .pragma("wal_autocheckpoint", "0")
-            .busy_timeout(std::time::Duration::from_secs(5));
-        let pool = SqlitePoolOptions::new()
-            .min_connections(3)
-            .max_connections(3)
-            .connect_with(options)
-            .await
-            .expect("open WAL database");
-
-        sqlx::query("CREATE TABLE events (id INTEGER PRIMARY KEY, body TEXT NOT NULL)")
-            .execute(&pool)
-            .await
-            .expect("create table");
-        run_routine_wal_checkpoint(&pool)
-            .await
-            .expect("checkpoint setup frames");
-
-        let mut reader = pool.begin().await.expect("begin reader");
-        let _: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events")
-            .fetch_one(&mut *reader)
-            .await
-            .expect("establish reader snapshot");
-
-        for id in 0..128 {
-            sqlx::query("INSERT INTO events (body) VALUES (?1)")
-                .bind(format!("event-{id}-{}", "x".repeat(1024)))
-                .execute(&pool)
-                .await
-                .expect("insert event");
-        }
-        let wal_size_before = std::fs::metadata(&wal_path)
-            .expect("WAL exists before checkpoint")
-            .len();
-
-        let (_, log_pages, checkpointed) = run_routine_wal_checkpoint(&pool)
-            .await
-            .expect("passive checkpoint with reader");
-        assert!(
-            log_pages > checkpointed,
-            "reader must leave frames pending for the escalation test"
-        );
-
-        let observed = Arc::new(Mutex::new(Vec::new()));
-        let observed_from_hook = Arc::clone(&observed);
-        let restart_hook = persistent_failure_slot(Some(Arc::new(move |reason| {
-            observed_from_hook.lock().unwrap().push(reason);
-        })));
-        let reason = DatabaseRestartReason::WalBacklog {
-            pending_pages: log_pages.saturating_sub(checkpointed),
-            log_pages,
-            checkpointed_pages: checkpointed,
-        };
-        assert!(restart_hook.signal_wal_backlog_restart(reason));
-        assert!(restart_hook.signal_wal_backlog_restart(reason));
-        assert_eq!(
-            observed.lock().unwrap().as_slice(),
-            &[reason],
-            "one manager generation must request at most one lifecycle restart"
-        );
-
-        let wal_size_after = std::fs::metadata(&wal_path)
-            .expect("WAL remains allocated after restart request")
-            .len();
-        assert_eq!(
-            wal_size_after, wal_size_before,
-            "requesting lifecycle recovery must not reset the live WAL"
-        );
-
-        sqlx::query("INSERT INTO events (body) VALUES ('before-lifecycle-handoff')")
-            .execute(&pool)
-            .await
-            .expect("restart request itself must not mutate or block SQLite");
-        reader.rollback().await.expect("release reader snapshot");
-        let integrity: String = sqlx::query_scalar("PRAGMA integrity_check")
-            .fetch_one(&pool)
-            .await
-            .expect("integrity check");
-        assert_eq!(integrity, "ok");
-
-        pool.close().await;
-    }
-
-    #[test]
-    fn wal_backlog_policy_preserves_the_existing_hard_cap() {
-        assert_eq!(
-            wal_backlog_restart_reason(WAL_HARD_CAP_PAGES, 0),
-            None,
-            "the ceiling is exclusive"
-        );
-        assert_eq!(
-            wal_backlog_restart_reason(WAL_HARD_CAP_PAGES + 1, 0),
-            Some(DatabaseRestartReason::WalBacklog {
-                pending_pages: WAL_HARD_CAP_PAGES + 1,
-                log_pages: WAL_HARD_CAP_PAGES + 1,
-                checkpointed_pages: 0,
-            })
-        );
-    }
-
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[ignore = "manual 60-second production scheduler chaos test with a ~170 MB WAL"]
-    async fn production_scheduler_requests_lifecycle_for_oversized_reader_pinned_wal() {
+    async fn production_scheduler_preserves_recording_through_reader_pinned_wal() {
         let dir = tempfile::tempdir().expect("temp dir");
         let db_path = dir.path().join("db.sqlite");
         let wal_path = dir.path().join("db.sqlite-wal");
@@ -2096,13 +1980,16 @@ mod wal_maintenance_tests {
         let db = DatabaseManager::new(&db_path_string, DbConfig::for_tier(DeviceTier::Low))
             .await
             .expect("production database manager");
-        sqlx::query("CREATE TABLE wal_cap_chaos(id INTEGER PRIMARY KEY, payload BLOB NOT NULL)")
-            .execute(&db.pool)
+        db.execute_raw_sql_write(
+            "CREATE TABLE wal_cap_chaos(id INTEGER PRIMARY KEY, payload BLOB NOT NULL)",
+        )
+        .await
+        .expect("create chaos table");
+        let meeting_id = db
+            .insert_meeting("Teams", "audio_process", Some("WAL pressure test"), None)
             .await
-            .expect("create chaos table");
-        run_routine_wal_checkpoint(&db.pool)
-            .await
-            .expect("checkpoint setup frames");
+            .unwrap();
+        db.wal_checkpoint().await.expect("checkpoint setup frames");
 
         let mut reader = db.pool.begin().await.expect("begin pinned reader");
         let _: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM wal_cap_chaos")
@@ -2110,24 +1997,24 @@ mod wal_maintenance_tests {
             .await
             .expect("establish reader snapshot");
 
-        // One transaction creates more than WAL_HARD_CAP_PAGES real pages while
+        // One transaction creates more than WAL_BACKLOG_WARNING_PAGES real pages while
         // the old reader pins the first frame. This exercises the exact
-        // production timer + threshold + lifecycle-handoff branch after 60 seconds.
-        sqlx::query(
+        // production timer and backlog branch after 60 seconds.
+        db.execute_raw_sql_write(
             "WITH RECURSIVE rows(n) AS (\
                 VALUES(1) UNION ALL SELECT n + 1 FROM rows WHERE n < 42000\
              ) INSERT INTO wal_cap_chaos(payload) SELECT zeroblob(4096) FROM rows",
         )
-        .execute(&db.pool)
         .await
         .expect("create oversized WAL");
-        let (_, log_pages, checkpointed) = run_routine_wal_checkpoint(&db.pool)
+        let (_, log_pages, checkpointed) = db
+            .wal_checkpoint()
             .await
             .expect("measure reader-pinned backlog");
         let backlog = log_pages.saturating_sub(checkpointed);
         assert!(
-            backlog > super::WAL_HARD_CAP_PAGES,
-            "test did not exceed hard cap: backlog={backlog}, log={log_pages}, checkpointed={checkpointed}"
+            backlog > super::WAL_BACKLOG_WARNING_PAGES,
+            "test did not exceed backlog warning threshold: backlog={backlog}, log={log_pages}, checkpointed={checkpointed}"
         );
         let wal_size_before = std::fs::metadata(&wal_path)
             .expect("oversized WAL exists")
@@ -2137,31 +2024,65 @@ mod wal_maintenance_tests {
             "WAL was not realistically large"
         );
 
-        let (restart_tx, restart_rx) = tokio::sync::oneshot::channel();
-        let restart_tx = Arc::new(Mutex::new(Some(restart_tx)));
+        let restarts = Arc::new(Mutex::new(Vec::new()));
+        let observed = restarts.clone();
         db.set_database_restart_hook(Arc::new(move |reason| {
-            if let Some(tx) = restart_tx.lock().unwrap().take() {
-                let _ = tx.send(reason);
-            }
+            observed.lock().unwrap().push(reason)
         }));
-        let reason = tokio::time::timeout(Duration::from_secs(65), restart_rx)
+        // Cross a real production maintenance tick while captures keep using
+        // the coordinated writer. Backpressure must not trigger a lifecycle reset.
+        for index in 0..65 {
+            db.insert_meeting_transcript_segment(
+                meeting_id,
+                "e2e",
+                None,
+                &format!("segment-{index}"),
+                "microphone",
+                "input",
+                None,
+                "live transcript during WAL pressure",
+                chrono::Utc::now(),
+            )
             .await
-            .expect("scheduled lifecycle request timed out")
-            .expect("scheduled lifecycle sender dropped");
-        assert!(matches!(
-            reason,
-            DatabaseRestartReason::WalBacklog { pending_pages, .. }
-                if pending_pages > WAL_HARD_CAP_PAGES
-        ));
+            .expect("live transcript remains durable during checkpoint pressure");
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        assert!(
+            restarts.lock().unwrap().is_empty(),
+            "backlog interrupted recording"
+        );
 
         let wal_size_after = std::fs::metadata(&wal_path)
             .expect("WAL remains allocated")
             .len();
-        assert_eq!(
-            wal_size_after, wal_size_before,
-            "scheduled hard-cap handling reset the live WAL"
+        assert!(
+            wal_size_after >= wal_size_before,
+            "maintenance reset the live WAL"
         );
         reader.rollback().await.expect("release pinned reader");
+        let (busy, log, checkpointed) = db.wal_checkpoint().await.unwrap();
+        assert_eq!(
+            (busy, log),
+            (0, checkpointed),
+            "backlog did not drain after reader release"
+        );
         db.close().await;
+        let reopened = DatabaseManager::new(&db_path_string, DbConfig::for_tier(DeviceTier::Low))
+            .await
+            .unwrap();
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM meeting_transcript_segments WHERE meeting_id = ?1",
+        )
+        .bind(meeting_id)
+        .fetch_one(&reopened.pool)
+        .await
+        .unwrap();
+        assert_eq!(count, 65, "captures must survive close and reopen");
+        let integrity: String = sqlx::query_scalar("PRAGMA integrity_check")
+            .fetch_one(&reopened.pool)
+            .await
+            .unwrap();
+        assert_eq!(integrity, "ok");
+        reopened.close().await;
     }
 }
