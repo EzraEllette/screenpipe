@@ -341,6 +341,7 @@ pub(crate) mod tests {
         let mut ctx = tauri::test::mock_context(tauri::test::noop_assets());
         ctx.config_mut().identifier = "pe.screenpi.staged-update-test".into();
         ctx.config_mut().version = Some("1.0.0".into());
+        ctx.package_info_mut().version = "1.0.0".parse().unwrap();
         ctx.config_mut().plugins.0.insert(
             "updater".into(),
             serde_json::json!({

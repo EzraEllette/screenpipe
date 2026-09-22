@@ -109,6 +109,13 @@ async fn install_windows_update(
     if let Err(error) = update.install(bytes) {
         UPDATE_RESTART_STARTED.store(false, Ordering::SeqCst);
         recording.set_capture_intent(wants_recording);
+        crate::update_diagnostics::record(
+            "installer_handoff_failed",
+            &format!(
+                "from={} target={} error={error} capture_intent_restored={wants_recording}",
+                update.current_version, update.version,
+            ),
+        );
         return Err(error);
     }
     std::mem::forget(restart);
