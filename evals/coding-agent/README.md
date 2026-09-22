@@ -9,7 +9,7 @@ This is an agent eval suite, not a unit-test suite. Every case contains:
 - saved prompt, transcript, candidate patch, grader output, runtime fingerprint, and result;
 - repeated-trial reporting with success rate, `pass@k`, and `pass^k`.
 
-The current app corpus contains 64 git-mined regressions. See
+The current app corpus contains 66 git-mined regressions. See
 [DESIGN.md](./DESIGN.md) for the Anthropic guidance, source contract, and
 history-mining workflow. The companion website manifest uses this same harness.
 
@@ -621,3 +621,41 @@ The synthetic broken state fails its intended assertion; the reference passes.
 The command adapter retains Buffers when `encoding: null` is requested and keeps
 normal command output as text. This is harness calibration, not model evaluation
 or proof of process isolation; no real recordings or customer files are used.
+
+## Localization recovery preserves accepted output
+
+`app-localization-recovery-preservation` executes the actual translation service
+with synthetic provider responses and disposable catalogs. Cold recovery must
+not overwrite an accepted rich-text or ICU translation with an incompatible
+legacy download. Fourteen outcomes cover arrival order, later valid corrections,
+frontend/native catalogs, multiple locales, disjoint messages, retained rejected
+diagnostics, source identity/format refusal, warm-cache preservation and stale
+loose-output cleanup. The parent fails five persisted-output checks while nine
+preserved behaviors pass; the service-only reference passes all fourteen.
+
+Run `bun test evals/coding-agent/calibrate-localization-recovery.test.js` with
+`@generaltranslation/icu` 0.1.2 available in the desktop dependency directory.
+Ten calibration controls reject unused fixes, first-valid-only merging, dropped
+diagnostics, frontend-only repair, identity bypass and blanket refusal. Equivalent
+object assignment passes; missing service code remains a setup error. Current
+source separately passes the fourteen outcomes and five existing service tests.
+
+Fixtures and dependency links are materialized only for grading. No live provider,
+real user content, native build, release or publication is involved. These are
+corpus checks, not model trials, packaging validation or proof of trial isolation.
+
+## Home-level MCP configuration permissions
+
+`app-mcp-home-config-scope` exercises the actual Settings connect/disconnect
+functions through synthetic filesystem and native path-resolution ports. Thirteen
+outcomes cover home-directory permission refusal on POSIX, Windows and verbatim
+Windows targets, plus preservation of existing JSON/TOML settings, backup and
+error behavior. The parent fails three intended connection outcomes and preserves
+ten; the source-only reference passes all thirteen. These are simulated path
+semantics, not native Windows or desktop acceptance.
+
+Run `bun test evals/coding-agent/calibrate-mcp-home-scope.test.js` for controls
+covering parent/reference, unused-correct-source and write/backup bypasses, an
+equivalent implementation and missing-source setup failure. Dependencies are
+linked only for grading. No real config, credential or agent is accessed; these
+checks do not establish model improvement or enforced workspace isolation.

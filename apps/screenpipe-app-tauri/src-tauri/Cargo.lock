@@ -11210,7 +11210,7 @@ dependencies = [
 
 [[package]]
 name = "screenpipe-app"
-version = "2.7.60"
+version = "2.7.62"
 dependencies = [
  "aes 0.8.4",
  "aes-gcm 0.10.3",
@@ -11565,6 +11565,7 @@ dependencies = [
  "screenpipe-config",
  "screenpipe-fs",
  "screenpipe-resource",
+ "screenpipe-secrets",
  "screenpipe-semantic",
  "screenpipe-sqlite-coordinator",
  "serde",
