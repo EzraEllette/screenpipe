@@ -18,6 +18,7 @@ use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, warn};
 
 use screenpipe_audio::audio_manager::builder::{AudioCaptureMode, TranscriptionMode};
+use screenpipe_audio::audio_manager::ReconciliationWorkerSnapshot;
 use screenpipe_audio::core::engine::AudioTranscriptionEngine;
 
 use crate::recording_coverage::{coverage_snapshot, CoverageSnapshot};
@@ -858,7 +859,7 @@ pub struct AudioPipelineHealthInfo {
     pub batch_paused_reason: Option<String>,
     /// Authoritative background worker state. Missing on older servers.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub reconciliation_worker: Option<ReconciliationWorkerHealthInfo>,
+    pub reconciliation_worker: Option<ReconciliationWorkerSnapshot>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pending_transcription_segments: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -868,34 +869,6 @@ pub struct AudioPipelineHealthInfo {
     pub meeting_detected: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub meeting_app: Option<String>,
-}
-
-#[derive(Serialize, OaSchema, Deserialize, Clone)]
-pub struct ReconciliationWorkerHealthInfo {
-    pub state: String,
-    pub engine: String,
-    pub processed_chunks: u64,
-    pub last_progress_at: Option<u64>,
-    pub last_failure_at: Option<u64>,
-    pub last_failure: Option<String>,
-}
-
-impl From<screenpipe_audio::audio_manager::ReconciliationWorkerSnapshot>
-    for ReconciliationWorkerHealthInfo
-{
-    fn from(snapshot: screenpipe_audio::audio_manager::ReconciliationWorkerSnapshot) -> Self {
-        Self {
-            state: serde_json::to_value(snapshot.state)
-                .ok()
-                .and_then(|value| value.as_str().map(ToOwned::to_owned))
-                .unwrap_or_else(|| "stopped".to_string()),
-            engine: snapshot.engine,
-            processed_chunks: snapshot.processed_chunks,
-            last_progress_at: snapshot.last_progress_at,
-            last_failure_at: snapshot.last_failure_at,
-            last_failure: snapshot.last_failure,
-        }
-    }
 }
 
 /// Hard ceiling on /health response time. The endpoint is on the path of
@@ -1992,9 +1965,7 @@ async fn health_check_inner(state: &Arc<AppState>) -> HealthCheckResponse {
                     None
                 },
                 batch_paused_reason: None,
-                reconciliation_worker: Some(
-                    state.audio_manager.reconciliation_worker_snapshot().into(),
-                ),
+                reconciliation_worker: Some(state.audio_manager.reconciliation_worker_snapshot()),
                 pending_transcription_segments,
                 oldest_pending_transcription_at,
                 meeting_detected,

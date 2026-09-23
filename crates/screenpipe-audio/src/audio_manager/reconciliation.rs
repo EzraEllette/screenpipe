@@ -34,12 +34,12 @@ const RECONCILIATION_LOOKBACK_HOURS: i64 = 24 * 7;
 const RECONCILIATION_FRESHNESS_DELAY_SECS: i64 = 10 * 60;
 const RECONCILIATION_CHUNKS_PER_SWEEP: i64 = 50;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReconciliationSweep {
     pub processed_chunks: usize,
     pub hit_candidate_limit: bool,
-    /// Stable, non-sensitive failure category for worker health reporting.
-    pub failure: Option<&'static str>,
+    /// Technical failure retained for worker health and support diagnostics.
+    pub failure: Option<String>,
 }
 
 use crate::core::engine::AudioTranscriptionEngine;
@@ -47,7 +47,9 @@ use crate::metrics::AudioPipelineMetrics;
 use crate::segmentation::segmentation_manager::SegmentationManager;
 use crate::speaker::identify_gate::segment_duration_secs;
 use crate::speaker::segment::{get_segments_without_samples, SpeechSegment};
-use crate::transcription::engine::{TranscriptionEngine, TranscriptionSession};
+use crate::transcription::engine::{
+    TranscriptionCancelled, TranscriptionEngine, TranscriptionSession,
+};
 use crate::transcription::get_or_create_speaker_from_embedding;
 use crate::transcription::{AudioInsertCallback, AudioInsertInfo, TranscriptionDiarizationSegment};
 
@@ -258,6 +260,7 @@ pub async fn reconcile_untranscribed(
     data_dir: Option<&Path>,
     batch_max_duration_secs: Option<u64>,
     metrics: Option<Arc<AudioPipelineMetrics>>,
+    cancellation: Option<Arc<AtomicBool>>,
 ) -> ReconciliationSweep {
     // Prevent concurrent reconciliation runs — two Whisper sessions = 200%+ CPU.
     // Acquired *before* the transcription-disabled check because orphaned-chunk
@@ -329,7 +332,7 @@ pub async fn reconcile_untranscribed(
                 e
             );
             return ReconciliationSweep {
-                failure: Some("database query failed"),
+                failure: Some(format!("database query failed: {e}")),
                 ..Default::default()
             };
         }
@@ -371,6 +374,13 @@ pub async fn reconcile_untranscribed(
     const MAX_CONSECUTIVE_DB_ERRORS: u32 = 3;
 
     for batch in &batches {
+        if cancellation
+            .as_ref()
+            .is_some_and(|signal| signal.load(Ordering::Acquire))
+        {
+            debug!("reconciliation: sweep cancelled before next batch");
+            break;
+        }
         // Bail out early if the DB is saturated — don't amplify contention
         if consecutive_db_errors >= MAX_CONSECUTIVE_DB_ERRORS {
             warn!(
@@ -484,16 +494,25 @@ pub async fn reconcile_untranscribed(
         // Providers like Deepgram can return diarization turns alongside text;
         // local ASR engines return plain text and use the local diarization path.
         let transcription_output = match session
-            .transcribe_detailed(&combined_samples, sample_rate, &device_name)
+            .transcribe_detailed_with_cancellation(
+                &combined_samples,
+                sample_rate,
+                &device_name,
+                cancellation.clone(),
+            )
             .await
         {
             Ok(output) => output,
+            Err(e) if e.downcast_ref::<TranscriptionCancelled>().is_some() => {
+                debug!("reconciliation: local transcription cancelled; audio remains pending");
+                break;
+            }
             Err(e) => {
                 error!("reconciliation: transcription failed for batch: {}", e);
                 if let Some(metrics) = &metrics {
                     metrics.record_transcription_error();
                 }
-                last_failure = Some("provider transcription failed");
+                last_failure = Some(format!("provider transcription failed: {e}"));
                 // An account-standing denial fails every batch in this sweep the
                 // same way; continuing would hammer the API once per batch (seen
                 // in the wild: a 403-denied account produced a request every
@@ -703,7 +722,7 @@ pub async fn reconcile_untranscribed(
                     primary_chunk.id, e
                 );
                 consecutive_db_errors += 1;
-                last_failure = Some("database write failed");
+                last_failure = Some(format!("database write failed: {e}"));
                 // The pending JSON file persists — next sweep will retry
                 continue;
             }
@@ -2489,6 +2508,7 @@ mod tests {
                 Some(tmp.path()),
                 None,
                 None,
+                None,
             )
         };
         sweep().await;
@@ -3082,6 +3102,7 @@ mod tests {
                         Arc::new(AudioTranscriptionEngine::ParakeetMlx),
                         Some(segmentation_manager),
                         Some(&data_dir),
+                        None,
                         None,
                         None,
                     )

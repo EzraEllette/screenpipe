@@ -66,6 +66,7 @@ use crate::{
 };
 
 use chrono::{DateTime, Utc};
+use oasgen::OaSchema;
 use serde::{Deserialize, Serialize};
 
 /// Rate-limiter for the "Error processing audio" log.
@@ -166,7 +167,7 @@ pub(crate) fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, OaSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ReconciliationWorkerState {
     Stopped,
@@ -176,7 +177,7 @@ pub enum ReconciliationWorkerState {
     Failed,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, OaSchema, PartialEq, Eq)]
 pub struct ReconciliationWorkerSnapshot {
     pub state: ReconciliationWorkerState,
     pub engine: String,
@@ -259,6 +260,7 @@ pub struct AudioManager {
     engine_builds: EngineBuildCoordinator,
     /// Handle to the reconciliation background task so we can abort it on shutdown.
     reconciliation_handle: Arc<RwLock<Option<JoinHandle<()>>>>,
+    reconciliation_cancellation: Arc<RwLock<Option<Arc<AtomicBool>>>>,
     reconciliation_status: Arc<std::sync::RwLock<ReconciliationWorkerSnapshot>>,
     /// Wakes the background reconciliation task when a foreground sweep fills
     /// its 50-chunk cap, so a meeting backlog keeps draining immediately.
@@ -484,6 +486,7 @@ impl AudioManager {
             engine: Arc::new(RwLock::new(None)),
             engine_builds: EngineBuildCoordinator::new(),
             reconciliation_handle: Arc::new(RwLock::new(None)),
+            reconciliation_cancellation: Arc::new(RwLock::new(None)),
             reconciliation_status: Arc::new(std::sync::RwLock::new(
                 ReconciliationWorkerSnapshot::default(),
             )),
@@ -630,6 +633,8 @@ impl AudioManager {
             let meeting_detector_bg = self.meeting_detector().await;
             let reconciliation_wakeup = self.reconciliation_wakeup.clone();
             let reconciliation_status = self.reconciliation_status.clone();
+            let cancellation = Arc::new(AtomicBool::new(false));
+            *self.reconciliation_cancellation.write().await = Some(cancellation.clone());
             let engine_label = self.options.read().await.transcription_engine.to_string();
             if let Ok(mut status) = reconciliation_status.write() {
                 status.state = ReconciliationWorkerState::Waiting;
@@ -666,8 +671,11 @@ impl AudioManager {
                             }
                         }
 
-                        let engine_guard = engine_ref.read().await;
-                        if let Some(ref transcription_engine) = *engine_guard {
+                        // Clone the Arc-backed engine out of the shared slot before
+                        // native inference. Settings replacement must never wait on
+                        // a read guard held by synchronous Whisper compute.
+                        let transcription_engine = engine_ref.read().await.clone();
+                        if let Some(transcription_engine) = transcription_engine {
                             if let Ok(mut status) = reconciliation_status.write() {
                                 status.state = ReconciliationWorkerState::Processing;
                             }
@@ -678,13 +686,14 @@ impl AudioManager {
 
                             let sweep = super::reconciliation::reconcile_untranscribed(
                                 &db,
-                                transcription_engine,
+                                &transcription_engine,
                                 on_insert_bg.as_ref(),
                                 audio_engine,
                                 Some(seg_mgr.clone()),
                                 output_path_bg.as_deref(),
                                 batch_max_dur,
                                 Some(metrics_bg.clone()),
+                                Some(cancellation.clone()),
                             )
                             .await;
                             let count = sweep.processed_chunks;
@@ -774,6 +783,9 @@ impl AudioManager {
     }
 
     async fn stop_reconciliation_worker(&self) {
+        if let Some(cancellation) = self.reconciliation_cancellation.write().await.take() {
+            cancellation.store(true, Ordering::Release);
+        }
         if let Some(handle) = self.reconciliation_handle.write().await.take() {
             handle.abort();
             let _ = handle.await;
@@ -1752,6 +1764,7 @@ impl AudioManager {
                                 data_dir,
                                 batch_max_duration_secs,
                                 Some(metrics.clone()),
+                                None,
                             )
                             .await;
                             let count = sweep.processed_chunks;
@@ -2686,6 +2699,65 @@ mod tests {
         assert_eq!(
             manager.reconciliation_worker_snapshot().state,
             ReconciliationWorkerState::Stopped
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn apply_options_cancels_and_owns_non_yielding_reconciliation_work() {
+        let db = Arc::new(
+            DatabaseManager::new("sqlite::memory:", Default::default())
+                .await
+                .unwrap(),
+        );
+        let manager = AudioManager::new(
+            AudioManagerOptions {
+                is_disabled: true,
+                ..Default::default()
+            },
+            db,
+        )
+        .await
+        .unwrap();
+
+        let cancellation = Arc::new(AtomicBool::new(false));
+        *manager.reconciliation_cancellation.write().await = Some(cancellation.clone());
+        let engine = manager.engine.clone();
+        let entered = Arc::new(std::sync::Barrier::new(2));
+        let exited = Arc::new(AtomicBool::new(false));
+        let task_entered = entered.clone();
+        let task_exited = exited.clone();
+        let handle = tokio::spawn(async move {
+            // This mirrors the production ownership boundary: clone the engine
+            // out of the slot, then enter native work with no Tokio yield point.
+            let _owned_engine = engine.read().await.clone();
+            task_entered.wait();
+            while !cancellation.load(Ordering::Acquire) {
+                std::hint::spin_loop();
+            }
+            task_exited.store(true, Ordering::Release);
+        });
+        *manager.reconciliation_handle.write().await = Some(handle);
+        entered.wait();
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            manager.apply_options(AudioManagerOptions {
+                is_disabled: true,
+                transcription_engine: Arc::new(AudioTranscriptionEngine::Deepgram),
+                ..Default::default()
+            }),
+        )
+        .await
+        .expect("configuration replacement must cooperatively stop synchronous work")
+        .unwrap();
+
+        assert!(exited.load(Ordering::Acquire));
+        assert!(manager.reconciliation_handle.read().await.is_none());
+        assert!(manager.reconciliation_cancellation.read().await.is_none());
+        assert!(manager.engine.read().await.is_none());
+        assert_eq!(
+            manager.options.read().await.transcription_engine.as_ref(),
+            &AudioTranscriptionEngine::Deepgram
         );
     }
 
