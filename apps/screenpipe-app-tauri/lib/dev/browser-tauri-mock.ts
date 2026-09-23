@@ -541,19 +541,25 @@ export function createBrowserIpcMock(options: BrowserIpcMockOptions) {
       })] as const;
     }),
   );
-  // Synthetic failure in the real chat UI for inspecting billing recovery.
-  const billingPreview = buildProviderErrorPresentation(
-    'Internal error: Credit balance is too low: { "errorKind": "billing_error" }',
-    { provider: "acp", acpAgent: { id: "claude-acp", useScreenpipeCloud: false } },
-  );
-  chatFixtures.set(`${chatsDir}/browser-acp-billing.json`, JSON.stringify({
-    id: "browser-acp-billing", title: "Claude billing recovery", titleSource: "user", kind: "chat",
-    createdAt: Date.now(), updatedAt: Date.now(), lastUserMessageAt: Date.now(),
-    messages: [
-      { id: "billing-user", role: "user", content: "What did I work on in the last hour?", timestamp: Date.now() },
-      { id: "billing-assistant", role: "assistant", content: `Error: ${billingPreview?.message}`, provider: "acp", model: "claude-acp", timestamp: Date.now() + 1 },
-    ],
-  }));
+  // Synthetic failures in the real chat UI for inspecting ACP account recovery.
+  for (const [agentId, title, error] of [
+    ["claude-acp", "Claude billing recovery", 'Internal error: Credit balance is too low: { "errorKind": "billing_error" }'],
+    ["cursor", "Cursor billing recovery", "spending_limit_exceeded"],
+    ["codex-acp", "Codex usage recovery", '{"codexErrorInfo":"usageLimitExceeded"}'],
+  ]) {
+    const id = `browser-acp-billing-${agentId}`;
+    const billingPreview = buildProviderErrorPresentation(error, {
+      provider: "acp", acpAgent: { id: agentId, useScreenpipeCloud: false },
+    });
+    chatFixtures.set(`${chatsDir}/${id}.json`, JSON.stringify({
+      id, title, titleSource: "user", kind: "chat",
+      createdAt: Date.now(), updatedAt: Date.now(), lastUserMessageAt: Date.now(),
+      messages: [
+        { id: `${id}-user`, role: "user", content: "What did I work on in the last hour?", timestamp: Date.now() },
+        { id: `${id}-assistant`, role: "assistant", content: `Error: ${billingPreview?.message}`, provider: "acp", model: agentId, timestamp: Date.now() + 1 },
+      ],
+    }));
+  }
   let liveViews =
     options.scenario === "empty"
       ? []

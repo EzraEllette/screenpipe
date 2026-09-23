@@ -327,30 +327,36 @@ describe("provider error copy", () => {
     ).toContain("2 free AI messages");
   });
 
-  it.each([
-    ['Internal error: Credit balance is too low: { "errorKind": "billing_error" }', "Add credits"],
-    ["spending_limit_exceeded", "adjust the limit or see when it resets"],
-    ["You've hit your usage limit.", "usage settings to check when it resets"],
-    ['429 {"error":{"code":"insufficient_quota"}}', "credit balance, payment method, and spending limit"],
-  ])("gives own-account ACP users a recovery step for %s", (raw, recovery) => {
-    const result = buildProviderErrorPresentation(raw, {
-      provider: "acp", model: "claude-acp",
-      acpAgent: { id: "claude-acp", useScreenpipeCloud: false },
+  describe.each([
+    ["claude-acp", "Claude Code"],
+    ["cursor", "Cursor"],
+    ["codex-acp", "Codex"],
+  ])("%s account recovery", (agentId, agentName) => {
+    it.each([
+      ['Internal error: Credit balance is too low: { "errorKind": "billing_error" }', "Add credits"],
+      ["spending_limit_exceeded", "adjust the limit or see when it resets"],
+      ["You've hit your usage limit.", "usage settings to check when it resets"],
+      ['429 {"error":{"code":"insufficient_quota"}}', "credit balance, payment method, and spending limit"],
+    ])("gives a recovery step for %s", (raw, recovery) => {
+      const result = buildProviderErrorPresentation(raw, {
+        provider: "acp", model: agentId,
+        acpAgent: { id: agentId, useScreenpipeCloud: false },
+      });
+      expect(result).toMatchObject({ kind: "agent_billing", retryable: false });
+      expect(result?.message).toContain(agentName);
+      expect(result?.message).toContain(recovery);
+      expect(result?.message).toContain("send your message again");
+      expect(result?.message).toContain("choose another AI preset");
+      expect(result?.message).not.toMatch(/Internal error|billing_error|screenpipe support|not our|can't grant|Anthropic|https?:/i);
     });
-    expect(result).toMatchObject({ kind: "agent_billing", retryable: false });
-    expect(result?.message).toContain("Claude Code");
-    expect(result?.message).toContain(recovery);
-    expect(result?.message).toContain("send your message again");
-    expect(result?.message).toContain("choose another AI preset");
-    expect(result?.message).not.toMatch(/Internal error|billing_error|screenpipe support|not our|can't grant/i);
-  });
 
-  it("links the reported Claude credit failure to Console billing", () => {
-    const result = buildProviderErrorPresentation("Credit balance is too low", {
-      provider: "acp", acpAgent: { id: "claude-acp" },
+    it("uses the selected agent's billing settings without assuming a reset", () => {
+      const result = buildProviderErrorPresentation("Credit balance is too low", {
+        provider: "acp", acpAgent: { id: agentId },
+      });
+      expect(result?.message).toContain(`your ${agentName} account's billing settings`);
+      expect(result?.message).not.toContain("resets");
     });
-    expect(result?.message).toContain("[Anthropic Console billing](https://platform.claude.com/settings/billing)");
-    expect(result?.message).not.toContain("resets");
   });
 
   it("keeps hosted billing failures out of own-account ACP guidance", () => {

@@ -278,9 +278,7 @@ function buildAgentBillingMessage(errorStr: string, preset?: ProviderLike | null
   const normalized = errorStr.toLowerCase().replace(/\\"/g, '"');
   const agentId = preset.acpAgent?.id || preset.model;
   const agent = preset.agentName?.trim() || (agentId ? acpAdapterInfo(agentId).name : "AI provider");
-  const billing = agentId === "claude-acp"
-    ? "[Anthropic Console billing](https://platform.claude.com/settings/billing)"
-    : `your ${agent} account's billing settings`;
+  const billing = `your ${agent} account's billing settings`;
   const alternative = "To continue now, choose another AI preset.";
 
   if (/credit balance is too low|insufficient[_ ]credits|insufficient[_ ]balance/.test(normalized)) {
