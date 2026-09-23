@@ -39,6 +39,8 @@ use tracing_oslog::OsLogger;
 use updates::start_update_check;
 use window::ShowRewindWindow;
 
+pub(crate) const LOG_FILTER: &str = "info,hyper=error,tower_http=error,whisper_rs=warn,audiopipe=warn,ort=warn,xcap::platform::impl_window=off,xcap::platform::impl_monitor=off,xcap::platform::utils=off";
+
 mod activity_history;
 mod app_panic;
 mod first_run_summary;
@@ -1293,8 +1295,6 @@ async fn main() {
             // xcap probes stale monitor / window IDs every refresh and logs
             // ERROR for IDs that don't exist (e.g. after a display unplug).
             // Benign noise that swamps real errors in user feedback logs.
-            const LOG_FILTER: &str = "info,hyper=error,tower_http=error,whisper_rs=warn,audiopipe=warn,ort=warn,xcap::platform::impl_window=off,xcap::platform::impl_monitor=off,xcap::platform::utils=off";
-
             let file_layer = tracing_subscriber::fmt::layer()
                 .with_writer(file_appender)
                 .with_ansi(false)

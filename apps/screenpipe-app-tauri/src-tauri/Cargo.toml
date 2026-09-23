@@ -345,6 +345,9 @@ tauri = { version = "=2.11.2", features = ["test"] }
 # staged_update tests: sign fake update archives with a throwaway key
 minisign = "0.7"
 
+[target.'cfg(windows)'.dev-dependencies]
+audiopipe = { git = "https://github.com/screenpipe/audiopipe.git", rev = "fca5c8bb14d6d9fa0c7da8d502f3c8964ba8e5ed", default-features = false, features = ["parakeet", "directml"] }
+
 
 [package.metadata.cargo-machete]
 # screenpipe-redact: workspace dep added for async PII reconciliation (PR #3188);
