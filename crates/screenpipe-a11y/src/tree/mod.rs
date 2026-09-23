@@ -352,6 +352,9 @@ pub enum TruncationReason {
     Timeout,
     /// Hit the maximum node count (`max_nodes`).
     MaxNodes,
+    /// Retained discovery has more bounded work queued. This is cooperative
+    /// continuation, not provider overload.
+    Pending,
 }
 
 /// Screen bounds of the focused window, normalized to the monitor's extent
@@ -408,6 +411,9 @@ pub struct TreeSnapshot {
     pub truncated: bool,
     /// Why the walk stopped (timeout, max_nodes, or completed naturally).
     pub truncation_reason: TruncationReason,
+    /// Internal owner-thread work may remain after this snapshot becomes
+    /// publishable (for example, bounded property refresh at the node cap).
+    pub retained_work_pending: bool,
     /// Deepest depth reached during the walk.
     pub max_depth_reached: usize,
     /// Screen bounds of the walked (focused) window, normalized to the
@@ -677,6 +683,51 @@ pub enum FocusedWindowFilterResult {
     NotFound,
 }
 
+impl FocusedWindowFilterResult {
+    /// Whether metadata alone permits a screenshot while tree extraction is
+    /// deferred. URL policies and ignored browser-extension popups require
+    /// fresh tree data; fail closed without it.
+    pub fn permits_deferred_capture(&self, config: &TreeWalkerConfig) -> bool {
+        config.ignored_windows.is_empty()
+            && config.ignored_urls.is_empty()
+            && config.included_urls.is_empty()
+            && matches!(self, Self::Allowed { .. })
+    }
+}
+
+#[cfg(test)]
+mod deferred_capture_tests {
+    use super::*;
+
+    #[test]
+    fn backoff_preserves_privacy_and_requires_known_window_metadata() {
+        let mut config = TreeWalkerConfig::default();
+        let allowed = FocusedWindowFilterResult::Allowed {
+            app_name: "msedge.exe".into(),
+            window_name: "CPU list".into(),
+        };
+        assert!(allowed.permits_deferred_capture(&config));
+        assert!(!FocusedWindowFilterResult::NotFound.permits_deferred_capture(&config));
+        config.ignored_windows.push("Private extension".into());
+        assert!(!allowed.permits_deferred_capture(&config));
+        config.ignored_windows.clear();
+        for reason in [
+            SkipReason::Incognito,
+            SkipReason::ExcludedApp,
+            SkipReason::UserIgnored,
+            SkipReason::NotInIncludeList,
+            SkipReason::BlockedUrl,
+        ] {
+            assert!(!FocusedWindowFilterResult::Skipped(reason).permits_deferred_capture(&config));
+        }
+        config.ignored_urls = serde_json::from_str(r#"["private.example"]"#).unwrap();
+        assert!(!allowed.permits_deferred_capture(&config));
+        config.ignored_urls.clear();
+        config.included_urls = serde_json::from_str(r#"[{"domain":"work.example"}]"#).unwrap();
+        assert!(!allowed.permits_deferred_capture(&config));
+    }
+}
+
 /// Reason a window was skipped during tree walk.
 #[derive(Debug, Clone)]
 pub enum SkipReason {
@@ -690,6 +741,10 @@ pub enum SkipReason {
     NotInIncludeList,
     /// Focused browser tab was rejected by the configured URL policy.
     BlockedUrl,
+    /// URL policy is configured and bounded discovery has not reached the
+    /// committed browser document yet. Pixels remain withheld, but retained
+    /// discovery must continue rather than resetting on every slice.
+    UrlPending,
 }
 
 impl std::fmt::Display for SkipReason {
@@ -700,6 +755,7 @@ impl std::fmt::Display for SkipReason {
             SkipReason::UserIgnored => write!(f, "user-configured ignored window"),
             SkipReason::NotInIncludeList => write!(f, "not in included windows list"),
             SkipReason::BlockedUrl => write!(f, "blocked by browser URL policy"),
+            SkipReason::UrlPending => write!(f, "browser URL privacy validation pending"),
         }
     }
 }
@@ -714,6 +770,10 @@ pub trait TreeWalkerPlatform: Send {
     /// Windows keeps COM/UIA cache objects on the walker thread, so callers
     /// should update the config instead of recreating the walker in hot paths.
     fn update_config(&mut self, _config: TreeWalkerConfig) {}
+
+    /// Release subscriptions and retained private state on the platform
+    /// walker's owning thread. The next walk must start from a fresh tree.
+    fn suspend(&mut self) {}
 }
 
 /// Evaluate app, title, and incognito filters without walking the focused
@@ -864,6 +924,10 @@ impl TreeWalkerPlatform for UrlFilteredWalker {
         }
         self.inner.update_config(config);
     }
+
+    fn suspend(&mut self) {
+        self.inner.suspend();
+    }
 }
 
 /// Stub for unsupported platforms.
@@ -900,6 +964,7 @@ mod tests {
             simhash: 0,
             truncated: false,
             truncation_reason: TruncationReason::None,
+            retained_work_pending: false,
             max_depth_reached: 1,
             window_bounds: None,
         }

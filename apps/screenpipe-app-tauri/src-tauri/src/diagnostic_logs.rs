@@ -222,6 +222,100 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn uia_limits_survive_support_collection_and_rotation() {
+        use screenpipe_a11y::capture_diagnostics::{RetainedUiaIssue, UiaCaptureIssue};
+        use screenpipe_a11y::tree::TruncationReason;
+
+        let dir = tempfile::tempdir().unwrap();
+        let current = dir.path().join("screenpipe.2026-09-22.log");
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(std::fs::File::create(&current).unwrap())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            UiaCaptureIssue {
+                view: "control",
+                elapsed: Duration::from_millis(251),
+                budget: Duration::from_millis(250),
+                nodes: 120,
+                max_nodes: 5000,
+                truncation: TruncationReason::Timeout,
+                root_hresult: None,
+            }
+            .report();
+            RetainedUiaIssue {
+                stage: "event_overflow",
+                hresult: None,
+                elapsed: Duration::from_millis(12),
+                budget: Duration::from_millis(12),
+                nodes: 4096,
+                fallback: "bounded_resync",
+                accessibility_outcome: "last_coherent_projection",
+                pixel_outcome: "preserved",
+            }
+            .report();
+            RetainedUiaIssue {
+                stage: "fresh_document_refresh",
+                hresult: Some(0x80040201_u32 as i32),
+                elapsed: Duration::from_millis(9),
+                budget: Duration::from_millis(12),
+                nodes: 5000,
+                fallback: "bounded_resync",
+                accessibility_outcome: "invalidated_recovery_pending",
+                pixel_outcome: "preserved_when_privacy_allows",
+            }
+            .report();
+            UiaCaptureIssue {
+                view: "raw",
+                elapsed: Duration::from_millis(300),
+                budget: Duration::from_millis(100),
+                nodes: 0,
+                max_nodes: 500,
+                truncation: TruncationReason::None,
+                root_hresult: Some(0x80040201_u32 as i32),
+            }
+            .report();
+        });
+        std::fs::rename(&current, dir.path().join("screenpipe.2026-09-22.1.log")).unwrap();
+        std::fs::write(
+            &current,
+            "recorder restarted\ncontact=private-person@example.com\n",
+        )
+        .unwrap();
+
+        let report = collect_redacted_from_dirs(&[dir.path().to_path_buf()])
+            .await
+            .unwrap();
+        for evidence in [
+            "UIA capture limited; screenshot recording remains available",
+            "request_scope=\"element\"",
+            "stage=\"traversal\"",
+            "reason=Timeout",
+            "elapsed_ms=251",
+            "budget_ms=250",
+            "nodes=120",
+            "max_nodes=5000",
+            "accessibility_outcome=\"partial\"",
+            "stage=\"root\"",
+            "hresult=0x80040201",
+            "accessibility_outcome=\"unavailable\"",
+            "UIA retained capture issue",
+            "stage=\"event_overflow\"",
+            "fallback=\"bounded_resync\"",
+            "pixel_outcome=\"preserved\"",
+            "stage=\"fresh_document_refresh\"",
+            "accessibility_outcome=\"invalidated_recovery_pending\"",
+            "pixel_outcome=\"preserved_when_privacy_allows\"",
+        ] {
+            assert!(
+                report.contains(evidence),
+                "support report lost {evidence}: {report}"
+            );
+        }
+        assert!(!report.contains("private-person@example.com"));
+    }
+
+    #[tokio::test]
     #[cfg(feature = "e2e")]
     async fn abandoned_read_recovery_survives_support_rotation_and_redaction() {
         use tracing::instrument::WithSubscriber;

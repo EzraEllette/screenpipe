@@ -1402,6 +1402,7 @@ impl TreeWalkerPlatform for LinuxTreeWalker {
             simhash,
             truncated: state.truncated,
             truncation_reason: state.truncation_reason,
+            retained_work_pending: false,
             max_depth_reached: state.max_depth_reached,
             window_bounds: None,
         }))

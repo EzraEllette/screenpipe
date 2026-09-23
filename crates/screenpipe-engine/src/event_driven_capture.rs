@@ -21,7 +21,8 @@ use screenpipe_a11y::tree::TreeWalkerConfig;
 use screenpipe_a11y::ActivityFeed;
 use screenpipe_capture::ocr_gate::OcrGate;
 use screenpipe_capture::paired_capture::{
-    detach_tree_from_pixels, paired_capture, CaptureContext, PairedCaptureResult,
+    detach_tree_from_pixels, paired_capture, paired_capture_deferred, CaptureContext,
+    PairedCaptureResult,
 };
 use screenpipe_capture::{TreeWalkerWorker, TreeWalkerWorkerOutcome};
 use screenpipe_core::window_pattern::{self, WindowPattern};
@@ -848,6 +849,10 @@ pub(crate) fn should_release_on_pause_entry(was_paused: bool, is_paused: bool) -
     is_paused && !was_paused
 }
 
+fn should_suspend_on_focus_away(was_active: bool, is_active: bool) -> bool {
+    was_active && !is_active
+}
+
 type MonitorBounds = (i32, i32, i32, i32);
 
 fn monitor_bounds(monitor: &SafeMonitor) -> MonitorBounds {
@@ -1279,6 +1284,9 @@ pub(crate) async fn event_driven_capture_loop(
     // at 2fps on macOS, WGC on Windows) — measurable share of a core per
     // idle display on multi-monitor setups.
     let mut was_cold = false;
+    // The UIA subscription belongs only to the focused monitor. Clear it once
+    // on every Active -> Warm/Cold edge; resume lazily acquires a fresh tree.
+    let mut accessibility_was_active = true;
     // Tracks whether we already released the SCStream/WGC handle on entry
     // to a pause state (screen locked, OS low-power / battery-critical via
     // power profile, DRM-protected window focused, or outside the user's
@@ -1347,6 +1355,15 @@ pub(crate) async fn event_driven_capture_loop(
                     crate::schedule_monitor::schedule_paused(),
                 );
                 monitor.release_capture_stream();
+                if let Err(error) = tree_walker
+                    .suspend_with_timeout(Duration::from_millis(250))
+                    .await
+                {
+                    warn!(
+                        "monitor {}: accessibility worker suspend failed on pause: {}",
+                        monitor_id, error
+                    );
+                }
             }
             was_in_pause_state = true;
             // Drain triggers that piled up while paused so the linker
@@ -1418,6 +1435,19 @@ pub(crate) async fn event_driven_capture_loop(
                 monitor.release_capture_stream();
             }
             was_cold = is_cold;
+            let accessibility_is_active = matches!(capture_state, CaptureState::Active);
+            if should_suspend_on_focus_away(accessibility_was_active, accessibility_is_active) {
+                if let Err(error) = tree_walker
+                    .suspend_with_timeout(Duration::from_millis(250))
+                    .await
+                {
+                    warn!(
+                        "monitor {}: accessibility worker suspend failed on focus-away: {}",
+                        monitor_id, error
+                    );
+                }
+            }
+            accessibility_was_active = accessibility_is_active;
 
             match capture_state {
                 CaptureState::Active => { /* fall through to normal capture */ }
@@ -1798,6 +1828,14 @@ pub(crate) async fn event_driven_capture_loop(
             if trigger.is_none() {
                 trigger = state.poll_activity();
             }
+        }
+
+        // A Windows worker continues a pending retained-tree baseline on its
+        // owning MTA between screenshots. Once it reaches a coherent terminal
+        // projection, route one capture through the existing privacy gates and
+        // SnapshotWriter so useful AX does not wait for the 30s idle cadence.
+        if trigger.is_none() && tree_walker.take_background_ready() {
+            trigger = Some(CaptureTrigger::Manual);
         }
 
         // Promote a deferred soft checkpoint (#4844) once its floor has
@@ -3101,24 +3139,26 @@ async fn do_capture(
     }
 
     use screenpipe_a11y::tree::TreeWalkResult;
+    let mut defer_text_extraction = false;
     if let Some(ref app) = trigger_app {
         let decision = walk_budget.should_walk(app);
         if !decision.walk && !bypass_capture_throttles {
-            debug!(
-                "walk budget: throttling tree walk for {} (tier={:?}) — skipping capture",
-                app, decision.tier
-            );
-            // Skip the entire capture. Previously this fell through to a
-            // TreeWalkResult::NotFound which triggered OCR fallback — but the
-            // fallback costs ~322ms of Vision CPU, more than the walk we just
-            // throttled to save CPU. The next trigger past the budget
-            // min_interval will produce a fresh walk with real AX text.
-            return Ok(CaptureOutput {
-                result: None,
-                image,
-                elements_deduped: false,
-                corrupt: None,
-            });
+            if cfg!(target_os = "windows") {
+                // AX backoff must not reject a recording or substitute another
+                // expensive OCR pass. Save the pixels after the privacy gates.
+                defer_text_extraction = true;
+            } else {
+                debug!(
+                    "walk budget: throttling tree walk for {} (tier={:?}) — skipping capture",
+                    app, decision.tier
+                );
+                return Ok(CaptureOutput {
+                    result: None,
+                    image,
+                    elements_deduped: false,
+                    corrupt: None,
+                });
+            }
         } else if !decision.walk {
             debug!(
                 "walk budget: allowing checkpoint {} capture for {} despite tier={:?}",
@@ -3135,7 +3175,21 @@ async fn do_capture(
     // different monitor would both waste work and pair unrelated pixels with
     // that window's tree, identity, and dedup hash. Non-focused monitors use
     // the screenshot/OCR path below instead.
-    let tree_walk_result = if monitor_hosts_focus {
+    let tree_walk_result = if monitor_hosts_focus && defer_text_extraction {
+        // The normal walk checks these filters before any provider request.
+        // Preserve that gate when no walk is admitted. URL, ignored popup and
+        // DRM policies need fresh tree data; fail closed when it is unavailable.
+        let filters = screenpipe_a11y::tree::check_focused_window_filters(config.clone())?;
+        if !filters.permits_deferred_capture(&config) || params.pause_on_drm_content {
+            return Ok(CaptureOutput {
+                result: None,
+                image,
+                elements_deduped: false,
+                corrupt: None,
+            });
+        }
+        None
+    } else if monitor_hosts_focus {
         let worker_timeout = tree_walk_worker_timeout(&config);
         match params
             .tree_walker
@@ -3177,7 +3231,18 @@ async fn do_capture(
     // attempts — they're user/incognito filters, not real walks.
     match tree_walk_result.as_ref() {
         Some(TreeWalkResult::Found(snap)) => {
-            walk_budget.record_walk(&snap.app_name, snap.walk_duration, snap.truncated);
+            // Cooperative retained-tree discovery and a terminal memory cap do
+            // not indicate a slow provider. Only real provider timeout pressure
+            // feeds adaptive backoff.
+            let budget_truncated = if cfg!(target_os = "windows") {
+                matches!(
+                    snap.truncation_reason,
+                    screenpipe_a11y::tree::TruncationReason::Timeout
+                )
+            } else {
+                snap.truncated
+            };
+            walk_budget.record_walk(&snap.app_name, snap.walk_duration, budget_truncated);
             if snap.walk_duration > std::time::Duration::from_millis(100) {
                 let next = walk_budget.should_walk(&snap.app_name);
                 debug!(
@@ -3245,6 +3310,12 @@ async fn do_capture(
     let mut tree_snapshot = match tree_walk_result {
         Some(TreeWalkResult::Found(snap)) => Some(snap),
         Some(TreeWalkResult::Skipped(reason)) => {
+            if !matches!(reason, screenpipe_a11y::tree::SkipReason::UrlPending) {
+                let _ = params
+                    .tree_walker
+                    .suspend_with_timeout(Duration::from_millis(250))
+                    .await;
+            }
             debug!(
                 "skipping capture: window filtered ({}) on monitor {}",
                 reason, params.monitor_id
@@ -3256,7 +3327,14 @@ async fn do_capture(
                 corrupt: None,
             });
         }
-        Some(TreeWalkResult::NotFound) | None => None,
+        Some(TreeWalkResult::NotFound) => {
+            let _ = params
+                .tree_walker
+                .suspend_with_timeout(Duration::from_millis(250))
+                .await;
+            None
+        }
+        None => None,
     };
     let ax_focus_pid = if tree_snapshot.is_some() && !screenshot_disabled {
         get_focused_pid_fresh()
@@ -3538,7 +3616,11 @@ async fn do_capture(
         focused_window_bounds,
     };
 
-    let result = paired_capture(&ctx, tree_snapshot.as_ref(), Some(ocr_gate)).await?;
+    let result = if defer_text_extraction {
+        paired_capture_deferred(&ctx).await?
+    } else {
+        paired_capture(&ctx, tree_snapshot.as_ref(), Some(ocr_gate)).await?
+    };
     if let Some(sender) = params.semantic_tx {
         match tree_snapshot {
             Some(snapshot) if ax_screenshot_coherent => {
@@ -3559,7 +3641,7 @@ async fn do_capture(
             }
         }
     }
-    let deduped = elements_ref_frame_id.is_some();
+    let deduped = !defer_text_extraction && elements_ref_frame_id.is_some();
     // Extract image from Arc for comparer reuse. Arc::try_unwrap succeeds
     // because paired_capture no longer retains a clone.
     let image = Arc::try_unwrap(ctx.image).unwrap_or_else(|arc| (*arc).clone());
@@ -4216,6 +4298,7 @@ mod tests {
             simhash: 0,
             truncated: false,
             truncation_reason: screenpipe_a11y::tree::TruncationReason::None,
+            retained_work_pending: false,
             max_depth_reached: 0,
             window_bounds: None,
         };
@@ -4251,6 +4334,7 @@ mod tests {
             simhash: 0,
             truncated: false,
             truncation_reason: screenpipe_a11y::tree::TruncationReason::None,
+            retained_work_pending: false,
             max_depth_reached: 0,
             window_bounds: None,
         };
@@ -4290,6 +4374,7 @@ mod tests {
             simhash: 0,
             truncated: false,
             truncation_reason: screenpipe_a11y::tree::TruncationReason::None,
+            retained_work_pending: false,
             max_depth_reached: 0,
             window_bounds: None,
         };
@@ -4329,6 +4414,7 @@ mod tests {
             simhash: 0,
             truncated: false,
             truncation_reason: screenpipe_a11y::tree::TruncationReason::None,
+            retained_work_pending: false,
             max_depth_reached: 0,
             window_bounds: None,
         };
@@ -4411,6 +4497,7 @@ mod tests {
             simhash: 0,
             truncated: false,
             truncation_reason: screenpipe_a11y::tree::TruncationReason::None,
+            retained_work_pending: false,
             max_depth_reached: 0,
             window_bounds: None,
         };
@@ -4522,6 +4609,7 @@ mod tests {
             simhash: 0,
             truncated: false,
             truncation_reason: screenpipe_a11y::tree::TruncationReason::None,
+            retained_work_pending: false,
             max_depth_reached: 0,
             window_bounds: None,
         };
@@ -5594,6 +5682,14 @@ mod tests {
             !should_release_on_pause_entry(false, false),
             "active steady-state: must NOT release"
         );
+    }
+
+    #[test]
+    fn should_suspend_accessibility_only_on_focus_away_edge() {
+        assert!(should_suspend_on_focus_away(true, false));
+        assert!(!should_suspend_on_focus_away(false, false));
+        assert!(!should_suspend_on_focus_away(false, true));
+        assert!(!should_suspend_on_focus_away(true, true));
     }
 
     #[test]
