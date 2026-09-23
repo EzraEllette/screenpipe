@@ -362,16 +362,37 @@ impl TranscriptionEngine {
                 }
                 #[cfg(all(feature = "parakeet", not(feature = "parakeet-mlx")))]
                 {
-                    info!("transcription engine runtime: Parakeet (CPU)");
                     const MODEL_NAME: &str = "parakeet-tdt-0.6b-v3";
-                    let load_result = tokio::task::spawn_blocking(|| {
-                        audiopipe::Model::from_pretrained_cache_only(MODEL_NAME)
+                    #[cfg(all(target_os = "windows", feature = "directml"))]
+                    let provider_choice = super::parakeet_windows::choose_parakeet_provider();
+                    #[cfg(not(all(target_os = "windows", feature = "directml")))]
+                    let provider_choice = (
+                        audiopipe::ParakeetExecutionProvider::Cpu,
+                        "DirectML is unavailable on this build".to_string(),
+                    );
+                    #[cfg(all(target_os = "windows", feature = "directml"))]
+                    let (requested_provider, provider_reason) =
+                        (provider_choice.provider, provider_choice.reason);
+                    #[cfg(not(all(target_os = "windows", feature = "directml")))]
+                    let (requested_provider, provider_reason) = provider_choice;
+                    info!(
+                        "transcription engine runtime: initializing Parakeet requested_provider={:?}: {}",
+                        requested_provider, provider_reason
+                    );
+                    let load_result = tokio::task::spawn_blocking(move || {
+                        audiopipe::Model::from_pretrained_cache_only_with_provider(
+                            MODEL_NAME,
+                            requested_provider,
+                        )
                     })
                     .await
                     .map_err(|e| anyhow!("parakeet model loading task panicked: {}", e))?;
                     match load_result {
                         Ok(model) => {
-                            info!("parakeet-tdt-0.6b-v3 (multilingual) model loaded successfully");
+                            info!(
+                                "parakeet-tdt-0.6b-v3 (multilingual) model loaded successfully; active_provider={}",
+                                model.execution_provider().unwrap_or("unknown")
+                            );
                             Ok(Self::Parakeet {
                                 model: Arc::new(StdMutex::new(model)),
                                 vocabulary,

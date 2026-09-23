@@ -271,6 +271,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn directml_failure_and_cpu_retry_survive_rotation_and_redaction() {
+        let logs = tempfile::tempdir().unwrap();
+        for day in 1..=7 {
+            let content = if day == 1 {
+                "audiopipe: GPU inference failed (DirectML device removed during encoder inference); rebuilt Parakeet on CPU and retrying the same audio\nparakeet transcription recovered on active_provider=CPU outcome=completed user=private.person@example.com\n"
+            } else {
+                "routine app restart\n"
+            };
+            std::fs::write(
+                logs.path().join(format!("screenpipe-app.2026-09-{day:02}.log")),
+                content,
+            )
+            .unwrap();
+        }
+
+        let report = collect_redacted_from_dirs(&[logs.path().to_path_buf()])
+            .await
+            .unwrap();
+        println!("redacted DirectML recovery report:\n{report}");
+        assert!(report.contains("DirectML device removed"));
+        assert!(report.contains("rebuilt Parakeet on CPU"));
+        assert!(report.contains("active_provider=CPU outcome=completed"));
+        assert!(!report.contains("private.person"));
+        assert!(report.contains("user=[EMAIL]"));
+    }
+
+    #[tokio::test]
     async fn capture_pause_cause_and_resume_survive_support_collection() {
         // The native focus-warm-pause E2E also asserts these actual messages.
         let dir = tempfile::tempdir().unwrap();
