@@ -135,7 +135,7 @@ wiremock = "0.6"
 
 # Audio
 hound = "3.5"
-audiopipe = { git = "https://github.com/screenpipe/audiopipe.git", rev = "fca5c8bb14d6d9fa0c7da8d502f3c8964ba8e5ed", default-features = false }
+audiopipe = { git = "https://github.com/EzraEllette/audiopipe.git", rev = "72955625f86c5975be5d468c23c301a1eef21714", default-features = false }
 mlx-rs = "0.25"
 
 # Privacy filter enclave attestation (shared by engine + redact)
@@ -165,6 +165,7 @@ uiautomation = "0.16.1"
 [patch.crates-io]
 # enables chinese mirror (hf is banned in china) and rustls-tls
 hf-hub = { git = "https://github.com/neo773/hf-hub", rev = "437dcf4049233f4a0e0cfc4e1c1dbf5ed2c57760" }
+
 
 [profile.release]
 codegen-units = 1

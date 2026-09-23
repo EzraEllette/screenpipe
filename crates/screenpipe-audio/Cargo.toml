@@ -94,7 +94,7 @@ ort = { workspace = true, default-features = false, features = ["ndarray", "half
 ort-sys = { workspace = true }
 knf-rs = "0.3.2"
 futures = { workspace = true }
-audiopipe = { workspace = true, features = ["qwen3-asr-antirez-blas", "parakeet"], optional = true }
+audiopipe = { workspace = true, features = ["parakeet"], optional = true }
 mlx-rs = { workspace = true, optional = true }
 bytes = { workspace = true, features = ["serde"] }
 rand = { workspace = true }
@@ -201,9 +201,9 @@ default = ["pulseaudio"]
 metal = ["whisper-rs/metal", "audiopipe?/metal", "audiopipe?/coreml"]
 cuda = ["whisper-rs/cuda"]
 directml = ["audiopipe?/directml"]
-vulkan = ["audiopipe?/vulkan-ggml"]
+vulkan = ["audiopipe?/vulkan-ggml", "whisper-rs/vulkan"]
 pulseaudio = ["dep:libpulse-binding", "dep:libpulse-simple-binding"]
-qwen3-asr = ["dep:audiopipe"]
+qwen3-asr = ["dep:audiopipe", "audiopipe?/qwen3-asr", "audiopipe?/qwen3-asr-antirez-blas"]
 parakeet = ["dep:audiopipe"]
 parakeet-mlx = ["dep:audiopipe", "audiopipe?/parakeet-mlx", "dep:mlx-rs"]
 

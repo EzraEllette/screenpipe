@@ -218,7 +218,10 @@ impl TranscriptionEngine {
         // process; no panic hook can catch it). Degrade to Disabled like the
         // model-not-downloaded path; the onboarding compat notice and the
         // engine-safety check in screenpipe-config explain the limitation.
-        if !screenpipe_core::cpu_features::has_avx2() && config.requires_avx2() {
+        let requires_avx2 = config.requires_avx2()
+            && !(cfg!(target_os = "windows")
+                && matches!(*config, AudioTranscriptionEngine::Qwen3Asr));
+        if !screenpipe_core::cpu_features::has_avx2() && requires_avx2 {
             // Warn once per process: the audio manager re-runs engine
             // creation on every device/model refresh tick, and repeating the
             // same warning forever buries real errors in the logs.
@@ -289,15 +292,46 @@ impl TranscriptionEngine {
                 #[cfg(feature = "qwen3-asr")]
                 {
                     info!("transcription engine runtime: initializing Qwen3 ASR");
+                    #[cfg(target_os = "windows")]
+                    const MODEL_NAME: &str = "qwen3-asr-0.6b";
+                    #[cfg(not(target_os = "windows"))]
                     const MODEL_NAME: &str = "qwen3-asr-0.6b-antirez";
                     let load_result = tokio::task::spawn_blocking(|| {
+                        #[cfg(all(target_os = "windows", feature = "directml"))]
+                        {
+                            let choice = super::parakeet_windows::choose_parakeet_provider();
+                            info!("qwen3-asr DirectML provider selection: {}", choice.reason);
+                            let provider = match choice.provider {
+                                audiopipe::ParakeetExecutionProvider::DirectMlDevice(id) =>
+                                    audiopipe::Qwen3ExecutionProvider::DirectMlDevice(id),
+                                _ => audiopipe::Qwen3ExecutionProvider::Cpu,
+                            };
+                            match audiopipe::Model::from_pretrained_cache_only_with_qwen3_provider(
+                                MODEL_NAME, provider,
+                            ) {
+                                Ok(model) => Ok(model),
+                                Err(gpu_error) => {
+                                    warn!("qwen3-asr DirectML initialization failed ({gpu_error}); retrying on CPU");
+                                    let recovered = audiopipe::Model::from_pretrained_cache_only_with_qwen3_provider(
+                                        MODEL_NAME, audiopipe::Qwen3ExecutionProvider::Cpu,
+                                    );
+                                    if recovered.is_ok() {
+                                        warn!("qwen3-asr CPU initialization completed after DirectML initialization failure ({gpu_error})");
+                                    }
+                                    recovered.map_err(|cpu_error| audiopipe::Error::Other(format!(
+                                        "DirectML initialization failed ({gpu_error}); CPU initialization failed ({cpu_error})"
+                                    )))
+                                }
+                            }
+                        }
+                        #[cfg(not(all(target_os = "windows", feature = "directml")))]
                         audiopipe::Model::from_pretrained_cache_only(MODEL_NAME)
                     })
                     .await
                     .map_err(|e| anyhow!("qwen3-asr model loading task panicked: {}", e))?;
                     match load_result {
                         Ok(model) => {
-                            info!("qwen3-asr (OpenBLAS) model loaded successfully");
+                            info!("qwen3-asr model loaded successfully");
                             Ok(Self::Qwen3Asr {
                                 model: Arc::new(StdMutex::new(model)),
                                 vocabulary,
@@ -550,6 +584,7 @@ impl TranscriptionEngine {
                     config: config.clone(),
                     languages: languages.clone(),
                     vocabulary: merge_keyterms(vocabulary, extra_keyterms),
+                    gpu_recovery_attempted: false,
                 })
             }
             #[cfg(feature = "qwen3-asr")]
@@ -634,6 +669,7 @@ pub enum TranscriptionSession {
         config: Arc<AudioTranscriptionEngine>,
         languages: Vec<Language>,
         vocabulary: Vec<VocabularyEntry>,
+        gpu_recovery_attempted: bool,
     },
     #[cfg(feature = "qwen3-asr")]
     Qwen3Asr {
@@ -931,10 +967,35 @@ impl TranscriptionSession {
 
             Self::Whisper {
                 state,
+                context,
+                config,
                 languages,
                 vocabulary,
-                ..
-            } => process_with_whisper(audio, languages.clone(), state, vocabulary).await,
+                gpu_recovery_attempted,
+            } => match process_with_whisper(audio, languages.clone(), state, vocabulary).await {
+                Ok(text) => Ok(text),
+                Err(gpu_error) => {
+                    if *gpu_recovery_attempted {
+                        return Err(gpu_error);
+                    }
+                    *gpu_recovery_attempted = true;
+                    warn!("whisper inference failed ({gpu_error}); rebuilding the session on CPU and retrying the same audio");
+                    let model_path = get_cached_whisper_model_path(config)
+                            .ok_or_else(|| anyhow!("whisper CPU recovery model is not cached after GPU failure: {gpu_error}"))?;
+                    let cpu_params =
+                        create_whisper_context_parameters_with_gpu(config.clone(), false)?;
+                    let cpu_context = Arc::new(WhisperContext::new_with_params(&model_path, cpu_params)
+                            .map_err(|cpu_error| anyhow!("whisper GPU inference failed ({gpu_error}); CPU context initialization failed ({cpu_error})"))?);
+                    let mut cpu_state = cpu_context.create_state()
+                            .map_err(|cpu_error| anyhow!("whisper GPU inference failed ({gpu_error}); CPU state initialization failed ({cpu_error})"))?;
+                    let recovered = process_with_whisper(audio, languages.clone(), &mut cpu_state, vocabulary).await
+                            .map_err(|cpu_error| anyhow!("whisper GPU inference failed ({gpu_error}); CPU inference failed ({cpu_error})"))?;
+                    *state = cpu_state;
+                    *context = cpu_context;
+                    warn!("whisper CPU inference completed after GPU inference recovery");
+                    Ok(recovered)
+                }
+            },
 
             Self::OpenAICompatible {
                 endpoint,

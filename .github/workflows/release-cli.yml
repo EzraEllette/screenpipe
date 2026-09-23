@@ -347,6 +347,19 @@ jobs:
           Write-Host "x64: ORT_LIB_LOCATION=$libDir (dynamic import link)"
           Get-ChildItem "$extractDir/lib"
 
+      - name: Install Vulkan SDK for Whisper
+        shell: pwsh
+        run: |
+          $version = '1.4.357.0'
+          Invoke-WebRequest -Uri "https://sdk.lunarg.com/sdk/download/$version/windows/vulkan_sdk.exe" -OutFile vulkan_sdk.exe
+          if ((Get-FileHash vulkan_sdk.exe -Algorithm SHA256).Hash.ToLowerInvariant() -ne '81f474711e9042f4cd22b31b2f7a8870db2e428b21586fb43dd80150be97310d') { throw 'Vulkan SDK installer hash mismatch' }
+          & .\vulkan_sdk.exe --accept-licenses --default-answer --confirm-command install copy_only=1
+          if ($LASTEXITCODE -ne 0) { throw "Vulkan SDK install failed: $LASTEXITCODE" }
+          $sdk = "C:\VulkanSDK\$version"
+          if (-not (Test-Path "$sdk\Include\vulkan\vulkan.h")) { throw "Vulkan SDK headers missing at $sdk" }
+          "VULKAN_SDK=$sdk" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "$sdk\Bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
       - name: Install wget (Windows)
         shell: pwsh
         run: |
@@ -419,7 +432,7 @@ jobs:
           # Use prebuilt NASM objects on Windows: https://aws.github.io/aws-lc-rs/requirements/windows.html#prebuilt-nasm-objects
           AWS_LC_SYS_PREBUILT_NASM: "1"
         run: |
-          cargo build --release -p screenpipe-engine --bin screenpipe --features directml,redact-onnx-directml --target x86_64-pc-windows-msvc
+          cargo build --release -p screenpipe-engine --bin screenpipe --features directml,vulkan,redact-onnx-directml --target x86_64-pc-windows-msvc
 
       - name: Upload debug symbols to Sentry
         # Skipped on smoke_only dispatches: nothing from those builds ships.
@@ -509,6 +522,13 @@ jobs:
           # DirectML.dll: the DirectML-flavored onnxruntime.dll needs it for the
           # DML EP (staged by the "Download ONNX Runtime" step).
           Copy-Item "apps/screenpipe-app-tauri/src-tauri/onnxruntime-win-x64-1.24.2/lib/DirectML.dll" "$packageDir/bin/"
+          $vkVersion = '1.4.357.0'
+          $vkUrl = "https://sdk.lunarg.com/sdk/download/$vkVersion/windows/VulkanRT-X64-$vkVersion-Components.zip"
+          Invoke-WebRequest -Uri $vkUrl -OutFile vulkan-runtime.zip
+          if ((Get-FileHash vulkan-runtime.zip -Algorithm SHA256).Hash.ToLowerInvariant() -ne 'a14672efed15aafc7f5a16572d35cd3a3416eadf670aeee3cdf50ee32d5fbf83') { throw 'Vulkan runtime archive hash mismatch' }
+          7z x vulkan-runtime.zip -ovulkan-runtime -y
+          Copy-Item "vulkan-runtime/VulkanRT-X64-$vkVersion-Components/x64/vulkan-1.dll" "$packageDir/bin/"
+          Copy-Item "vulkan-runtime/VulkanRT-X64-$vkVersion-Components/VulkanRT-License.txt" "$packageDir/bin/"
           # Copy OpenBLAS DLL(s) for qwen3-asr (libopenblas.dll or openblas.dll)
           $openblasBin = "apps/screenpipe-app-tauri/src-tauri/openblas/bin"
           if (Test-Path $openblasBin) {

@@ -76,7 +76,7 @@ pub fn create_whisper_context_parameters_with_gpu<'a>(
     // but we always want to try GPU if the runtime supports it.
     context_param.use_gpu(use_gpu);
     if use_gpu {
-        info!("whisper context: gpu acceleration enabled (Metal on macOS, Vulkan on Windows)");
+        info!("whisper context: GPU backend requested (Metal on macOS, Vulkan on Windows); backend initialization logs determine the active device");
     } else {
         info!("whisper context: GPU unavailable; using CPU fallback");
     }

@@ -3,8 +3,6 @@
 
 use audiopipe::ParakeetExecutionProvider;
 
-const MIN_DEDICATED_VIDEO_MEMORY: u64 = 4 * 1024 * 1024 * 1024;
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AdapterCandidate {
     ordinal: u32,
@@ -12,7 +10,8 @@ struct AdapterCandidate {
     dedicated_video_memory: u64,
     software: bool,
     remote: bool,
-    unified_memory_architecture: Result<bool, String>,
+    d3d12_compatible: Result<(), String>,
+    unified_memory_architecture: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,31 +41,30 @@ fn choose_from_candidates(
     };
     let capability_errors = candidates
         .iter()
-        .filter_map(|adapter| adapter.unified_memory_architecture.as_ref().err())
+        .filter_map(|adapter| adapter.d3d12_compatible.as_ref().err())
         .cloned()
         .collect::<Vec<_>>();
     let eligible = candidates
         .into_iter()
         .filter(|adapter| !adapter.software && !adapter.remote)
-        .filter(|adapter| adapter.unified_memory_architecture == Ok(false))
-        .filter(|adapter| adapter.dedicated_video_memory >= MIN_DEDICATED_VIDEO_MEMORY)
+        .filter(|adapter| adapter.d3d12_compatible.is_ok())
         .max_by_key(|adapter| adapter.dedicated_video_memory);
 
     match eligible {
         Some(adapter) => ParakeetProviderChoice {
             provider: ParakeetExecutionProvider::DirectMlDevice(adapter.ordinal as i32),
             reason: format!(
-                "eligible non-UMA adapter ordinal {} ('{}') with {} MiB dedicated video memory",
+                "compatible hardware adapter ordinal {} ('{}') with {} MiB dedicated video memory, UMA={}",
                 adapter.ordinal,
                 adapter.name,
-                adapter.dedicated_video_memory / (1024 * 1024)
+                adapter.dedicated_video_memory / (1024 * 1024),
+                adapter.unified_memory_architecture.map_or("unknown".to_string(), |uma| uma.to_string())
             ),
         },
         None => ParakeetProviderChoice {
             provider: ParakeetExecutionProvider::Cpu,
             reason: format!(
-                "no non-software, non-remote, non-UMA adapter with at least {} MiB dedicated video memory{}",
-                MIN_DEDICATED_VIDEO_MEMORY / (1024 * 1024),
+                "no non-software, non-remote, D3D12-compatible hardware adapter{}",
                 if capability_errors.is_empty() {
                     String::new()
                 } else {
@@ -112,26 +110,28 @@ fn enumerate_adapters() -> windows::core::Result<Vec<AdapterCandidate>> {
             .position(|character| *character == 0)
             .unwrap_or(desc.Description.len());
         let name = String::from_utf16_lossy(&desc.Description[..name_len]);
+        let capabilities = adapter_capabilities(&adapter);
         adapters.push(AdapterCandidate {
             ordinal: index,
             name: name.clone(),
             dedicated_video_memory: desc.DedicatedVideoMemory as u64,
             software: desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32 != 0,
             remote: desc.Flags & DXGI_ADAPTER_FLAG_REMOTE.0 as u32 != 0,
-            unified_memory_architecture: adapter_is_uma(&adapter).map_err(|error| {
+            d3d12_compatible: capabilities.as_ref().map(|_| ()).map_err(|error| {
                 format!(
-                    "adapter ordinal {index} ('{name}') architecture query failed with HRESULT {:#010x}: {error}",
+                    "adapter ordinal {index} ('{name}') D3D12CreateDevice failed with HRESULT {:#010x}: {error}",
                     error.code().0
                 )
             }),
+            unified_memory_architecture: capabilities.ok().flatten(),
         });
     }
     Ok(adapters)
 }
 
-fn adapter_is_uma(
+fn adapter_capabilities(
     adapter: &windows::Win32::Graphics::Dxgi::IDXGIAdapter1,
-) -> windows::core::Result<bool> {
+) -> windows::core::Result<Option<bool>> {
     use std::ffi::c_void;
     use windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_11_0;
     use windows::Win32::Graphics::Direct3D12::{
@@ -143,14 +143,14 @@ fn adapter_is_uma(
     unsafe { D3D12CreateDevice(adapter, D3D_FEATURE_LEVEL_11_0, &mut device)? };
     let device: ID3D12Device = device.expect("D3D12CreateDevice succeeded without a device");
     let mut architecture = D3D12_FEATURE_DATA_ARCHITECTURE1::default();
-    unsafe {
+    let architecture_result = unsafe {
         device.CheckFeatureSupport(
             D3D12_FEATURE_ARCHITECTURE1,
             (&mut architecture as *mut D3D12_FEATURE_DATA_ARCHITECTURE1).cast::<c_void>(),
             std::mem::size_of::<D3D12_FEATURE_DATA_ARCHITECTURE1>() as u32,
-        )?;
-    }
-    Ok(architecture.UMA.as_bool())
+        )
+    };
+    Ok(architecture_result.ok().map(|_| architecture.UMA.as_bool()))
 }
 
 #[cfg(test)]
@@ -164,7 +164,8 @@ mod tests {
             dedicated_video_memory: gib * 1024 * 1024 * 1024,
             software: false,
             remote: false,
-            unified_memory_architecture: Ok(false),
+            d3d12_compatible: Ok(()),
+            unified_memory_architecture: Some(false),
         }
     }
 
@@ -188,19 +189,20 @@ mod tests {
     }
 
     #[test]
-    fn rejects_uma_low_memory_software_and_remote_adapters() {
+    fn integrated_zero_and_low_dedicated_memory_adapters_are_eligible() {
         let mut software = adapter("software", 16);
         software.software = true;
         let mut remote = adapter("remote", 16);
         remote.remote = true;
-        let mut integrated = adapter("integrated", 16);
-        integrated.unified_memory_architecture = Ok(true);
-        let choice = choose_from_candidates(
-            None,
-            Ok(vec![integrated, adapter("low", 2), software, remote]),
+        let mut integrated = adapter("integrated", 0);
+        integrated.ordinal = 7;
+        integrated.unified_memory_architecture = Some(true);
+        let choice = choose_from_candidates(None, Ok(vec![integrated, software, remote]));
+        assert_eq!(
+            choice.provider,
+            ParakeetExecutionProvider::DirectMlDevice(7)
         );
-        assert_eq!(choice.provider, ParakeetExecutionProvider::Cpu);
-        assert!(choice.reason.contains("non-UMA"));
+        assert!(choice.reason.contains("UMA=true"));
     }
 
     #[test]
@@ -221,10 +223,12 @@ mod tests {
         assert!(enumeration.reason.contains("0x887a0001"));
 
         let mut unknown = adapter("unknown", 8);
-        unknown.unified_memory_architecture = Err("architecture HRESULT fixture".to_string());
+        unknown.d3d12_compatible = Err("D3D12CreateDevice HRESULT fixture".to_string());
         let capability = choose_from_candidates(None, Ok(vec![unknown]));
         assert_eq!(capability.provider, ParakeetExecutionProvider::Cpu);
-        assert!(capability.reason.contains("architecture HRESULT fixture"));
+        assert!(capability
+            .reason
+            .contains("D3D12CreateDevice HRESULT fixture"));
     }
 
     #[test]
