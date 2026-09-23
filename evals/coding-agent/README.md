@@ -9,9 +9,21 @@ This is an agent eval suite, not a unit-test suite. Every case contains:
 - saved prompt, transcript, candidate patch, grader output, runtime fingerprint, and result;
 - repeated-trial reporting with success rate, `pass@k`, and `pass^k`.
 
-The current app corpus contains 73 git-mined regressions. See
+The current app corpus contains 74 git-mined regressions. See
 [DESIGN.md](./DESIGN.md) for the Anthropic guidance, source contract, and
 history-mining workflow. The companion website manifest uses this same harness.
+
+`app-acp-billing-saved-recovery` exercises the real foreground event hook,
+provider presentation and saved-message rendering with synthetic native, event,
+storage and network ports. Twelve outcomes cover provider-specific account
+recovery with and without HTTP 429, persistence, automatic versus manual retries,
+stale-session retry suppression, context overflow and successful recovery.
+The parent fails seven intended outcomes and preserves five; the reference
+passes twelve. Guidance is checked semantically, with an equivalent-prose control.
+Run `bun test evals/coding-agent/calibrate-acp-billing-recovery.test.js` with the
+desktop test dependencies installed. Graders and dependency links are installed
+only after grading starts; those links do not establish execution isolation.
+No native ACP, live billing, entitlement safety or model performance is measured.
 
 `app-daily-summary-terminal-error` runs the actual summary orchestration and
 its internal helpers against synthetic native commands and event delivery.
