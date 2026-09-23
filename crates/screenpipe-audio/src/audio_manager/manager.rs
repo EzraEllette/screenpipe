@@ -181,10 +181,7 @@ async fn run_reconciliation_worker(
     status: Arc<std::sync::RwLock<ReconciliationWorkerSnapshot>>,
     cancellation: Arc<AtomicBool>,
 ) {
-    tokio::select! {
-        _ = tokio::time::sleep(RECONCILIATION_IDLE_INTERVAL) => {}
-        _ = wakeup.notified() => {}
-    }
+    wait_for_reconciliation_work(&meeting_detector, &wakeup).await;
     let mut consecutive_full_sweeps = 0usize;
     loop {
         let swept = AssertUnwindSafe(async {
@@ -279,6 +276,21 @@ async fn run_reconciliation_worker(
         }
 
         consecutive_full_sweeps = 0;
+        wait_for_reconciliation_work(&meeting_detector, &wakeup).await;
+    }
+}
+
+async fn wait_for_reconciliation_work(
+    meeting_detector: &Option<Arc<MeetingDetector>>,
+    wakeup: &Notify,
+) {
+    if let Some(detector) = meeting_detector {
+        tokio::select! {
+            _ = tokio::time::sleep(RECONCILIATION_IDLE_INTERVAL) => {}
+            _ = wakeup.notified() => {}
+            _ = detector.meeting_state_changed() => {}
+        }
+    } else {
         tokio::select! {
             _ = tokio::time::sleep(RECONCILIATION_IDLE_INTERVAL) => {}
             _ = wakeup.notified() => {}
@@ -2682,11 +2694,14 @@ mod tests {
             );
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let endpoint = format!("http://{}/v1/listen", listener.local_addr().unwrap());
-            let provider_failing = Arc::new(AtomicBool::new(true));
+            let provider_failing = Arc::new(AtomicBool::new(false));
+            let provider_requests = Arc::new(AtomicUsize::new(0));
             let server_failing = provider_failing.clone();
+            let server_requests = provider_requests.clone();
             let server = tokio::spawn(async move {
                 loop {
                     let (mut stream, _) = listener.accept().await.unwrap();
+                    server_requests.fetch_add(1, Ordering::AcqRel);
                     let mut request = Vec::new();
                     loop {
                         let mut buffer = [0u8; 4096];
@@ -2748,6 +2763,8 @@ mod tests {
             };
             *manager.engine.write().await = Some(runtime);
             *manager.options.write().await = options.clone();
+            let meeting_detector = Arc::new(MeetingDetector::new());
+            meeting_detector.set_v2_in_meeting(true);
             let captured_at = Utc::now() - chrono::Duration::hours(1);
             for index in 0..51 {
                 let path = temp
@@ -2774,7 +2791,7 @@ mod tests {
                 manager.segmentation_manager.clone(),
                 options.output_path.take(),
                 manager.metrics.clone(),
-                None,
+                Some(meeting_detector.clone()),
                 manager.reconciliation_wakeup.clone(),
                 manager.reconciliation_status.clone(),
                 cancellation.clone(),
@@ -2786,6 +2803,81 @@ mod tests {
             };
             manager.reconciliation_wakeup.notify_one();
 
+            tokio::time::timeout(Duration::from_secs(15), async {
+                loop {
+                    let snapshot = manager.reconciliation_worker_snapshot();
+                    if snapshot.state == ReconciliationWorkerState::WaitingForMeetingEnd {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+            })
+            .await
+            .expect("worker defers the saved backlog during an active meeting");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            assert_eq!(
+                provider_requests.load(Ordering::Acquire),
+                0,
+                "active-meeting deferral must not call the transcription provider"
+            );
+            assert_eq!(
+                db.get_reconciliation_candidate_chunks(
+                    Utc::now() - chrono::Duration::days(7),
+                    Utc::now() - chrono::Duration::minutes(10),
+                    100,
+                )
+                .await
+                .unwrap()
+                .len(),
+                51,
+                "active-meeting deferral retains the complete backlog"
+            );
+
+            meeting_detector.set_v2_in_meeting(false);
+
+            tokio::time::timeout(Duration::from_secs(15), async {
+                loop {
+                    let candidates = db
+                        .get_reconciliation_candidate_chunks(
+                            Utc::now() - chrono::Duration::days(7),
+                            Utc::now() - chrono::Duration::minutes(10),
+                            100,
+                        )
+                        .await
+                        .unwrap();
+                    if candidates.is_empty() {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+            })
+            .await
+            .expect(
+                "meeting-end detector edge drains the capped continuation without audio callbacks",
+            );
+            let recovered = manager.reconciliation_worker_snapshot();
+            assert_eq!(recovered.state, ReconciliationWorkerState::Waiting);
+            assert_eq!(recovered.processed_chunks, 51);
+            assert!(recovered.last_progress_at.is_some());
+
+            let failure_path = temp
+                .path()
+                .join("Provider Failure (input)_2026-09-23_01-00-00.wav");
+            let failure_samples: Vec<f32> = (0..1_600)
+                .map(|sample| (sample as f32 * 0.1).sin() * 0.1)
+                .collect();
+            crate::utils::ffmpeg::write_audio_to_file(
+                &failure_samples,
+                16_000,
+                &failure_path,
+                false,
+            )
+            .unwrap();
+            db.get_or_insert_audio_chunk(&failure_path.to_string_lossy(), Some(captured_at))
+                .await
+                .unwrap();
+            provider_failing.store(true, Ordering::Release);
+            manager.reconciliation_wakeup.notify_one();
             tokio::time::timeout(Duration::from_secs(15), async {
                 loop {
                     let snapshot = manager.reconciliation_worker_snapshot();
@@ -2809,34 +2901,21 @@ mod tests {
                 .await
                 .unwrap()
                 .len(),
-                51,
-                "provider failure retains the complete backlog"
+                1,
+                "provider failure retains the saved chunk"
             );
             provider_failing.store(false, Ordering::Release);
             manager.reconciliation_wakeup.notify_one();
-
             tokio::time::timeout(Duration::from_secs(15), async {
                 loop {
-                    let candidates = db
-                        .get_reconciliation_candidate_chunks(
-                            Utc::now() - chrono::Duration::days(7),
-                            Utc::now() - chrono::Duration::minutes(10),
-                            100,
-                        )
-                        .await
-                        .unwrap();
-                    if candidates.is_empty() {
+                    if manager.reconciliation_worker_snapshot().processed_chunks == 52 {
                         break;
                     }
                     tokio::time::sleep(Duration::from_millis(25)).await;
                 }
             })
             .await
-            .expect("single meeting-end wakeup drains the capped continuation");
-            let recovered = manager.reconciliation_worker_snapshot();
-            assert_eq!(recovered.state, ReconciliationWorkerState::Waiting);
-            assert_eq!(recovered.processed_chunks, 51);
-            assert!(recovered.last_progress_at.is_some());
+            .expect("worker recovers the provider-failed chunk");
             cancellation.store(true, Ordering::Release);
             worker.abort();
             let _ = worker.await;
