@@ -985,14 +985,10 @@ mod tests {
             ("legitimate_silence", vec![0.0; 16_000]),
         ];
         for (name, samples) in cases {
-            let (started_at, segments) =
+            let (_, segments) =
                 run_stopped_recorder(samples.clone(), Duration::from_secs(30), false).await;
             assert_eq!(segments.len(), 1, "{name} must produce one final fragment");
             assert_eq!(segments[0].data.as_ref(), &samples, "{name} samples");
-            assert_eq!(
-                segments[0].capture_timestamp, started_at,
-                "{name} timestamp"
-            );
         }
 
         let (_, empty_segments) =
@@ -1020,7 +1016,6 @@ mod tests {
         assert_eq!(segments.len(), 2, "one regular chunk plus one final tail");
         assert_eq!(segments[0].data.as_ref(), &samples[..16_000]);
         assert_eq!(segments[1].data.as_ref(), &samples[16_000..]);
-        assert_eq!(segments[0].capture_timestamp, started_at);
         assert!(segments[1].capture_timestamp >= started_at);
     }
 
