@@ -135,7 +135,7 @@ wiremock = "0.6"
 
 # Audio
 hound = "3.5"
-audiopipe = { git = "https://github.com/EzraEllette/audiopipe.git", rev = "72955625f86c5975be5d468c23c301a1eef21714", default-features = false }
+audiopipe = { git = "https://github.com/EzraEllette/audiopipe.git", rev = "b63f02e41392cd01d5c8d14febfe8b9b94639983", default-features = false }
 mlx-rs = "0.25"
 
 # Privacy filter enclave attestation (shared by engine + redact)
