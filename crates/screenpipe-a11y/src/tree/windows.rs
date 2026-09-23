@@ -497,6 +497,7 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
             32,
             retained_max_nodes,
             slice_timeout,
+            is_windows_browser(&app_lower),
             url_policy_requires_fresh,
         ) {
             Ok(captured) => captured,
@@ -544,15 +545,28 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
                 "uia retained capture slice"
             );
             if url_policy_enabled && !stats.url_fresh {
-                return Ok(TreeWalkResult::Skipped(if stats.url_pending_discovery {
-                    SkipReason::UrlPending
-                } else {
-                    SkipReason::BlockedUrl
-                }));
+                return Ok(TreeWalkResult::Skipped(
+                    if stats.document_pending_discovery {
+                        SkipReason::UrlPending
+                    } else {
+                        SkipReason::BlockedUrl
+                    },
+                ));
             }
         }
         let root = captured.root;
-        let truncation_reason = captured.truncation;
+        let truncation_reason = if captured
+            .retained
+            .as_ref()
+            .is_some_and(|stats| stats.document_pending_discovery)
+        {
+            // A cold Chromium profile may first expose only browser chrome.
+            // Keep ordinary (no URL policy) discovery alive in the owner
+            // worker until the committed RootWebArea appears.
+            crate::tree::TruncationReason::Pending
+        } else {
+            captured.truncation
+        };
 
         // Get monitor dimensions for normalizing element bounds to 0-1 coords
         let monitor_rect = get_monitor_rect(hwnd);
@@ -1813,6 +1827,11 @@ mod tests {
         let mut storm_recovery_floor = None;
         let mut saw_storm_recovery = false;
         let mut saw_storm_marker = false;
+        let mut saw_plain_before = false;
+        let mut saw_plain_after = false;
+        let mut early_y = None::<f32>;
+        let mut early_on_screen = None::<bool>;
+        let mut saw_scroll_geometry_change = false;
         let mut saw_capacity = false;
         let mut final_nodes = 0;
         for sample in 0..4000 {
@@ -1829,6 +1848,33 @@ mod tests {
                     saw_edit |= snapshot.text_content.contains("CAPTURED-MARKER-EDITED");
                     saw_storm_marker |= snapshot.text_content.contains("STORM-")
                         || snapshot.text_content.contains("storm ");
+                    saw_plain_before |= snapshot.text_content.contains("PLAIN-TEXT-BEFORE");
+                    saw_plain_after |= snapshot.text_content.contains("PLAIN-TEXT-AFTER");
+                    if let Some(node) = snapshot
+                        .nodes
+                        .iter()
+                        .find(|node| node.text == "EARLY-MARKER-0000")
+                    {
+                        if let Some(on_screen) = node.on_screen {
+                            if let Some(initial) = early_on_screen {
+                                saw_scroll_geometry_change |= initial != on_screen;
+                            } else {
+                                early_on_screen = Some(on_screen);
+                            }
+                        }
+                        match (early_y, node.bounds.as_ref().map(|bounds| bounds.top)) {
+                            (Some(before), Some(after)) => {
+                                saw_scroll_geometry_change |= (before - after).abs() > 0.01;
+                            }
+                            (Some(_), None) => {
+                                // Scrolling the marker wholly off-monitor
+                                // intentionally omits its normalized bounds.
+                                saw_scroll_geometry_change = true;
+                            }
+                            (None, Some(initial)) => early_y = Some(initial),
+                            (None, None) => {}
+                        }
+                    }
                     let has_added = snapshot.text_content.contains("ADDED-LATE-MARKER");
                     saw_removed_after_add |= saw_added && !has_added;
                     saw_added |= has_added;
@@ -1864,6 +1910,8 @@ mod tests {
                 && saw_edit
                 && saw_added
                 && saw_removed_after_add
+                && saw_plain_after
+                && saw_scroll_geometry_change
                 && saw_storm_marker
                 && saw_storm_recovery
             {
@@ -1884,6 +1932,12 @@ mod tests {
         assert!(saw_edit, "post-cap fixture edit event was not refreshed");
         assert!(saw_added, "post-cap addition was not observed");
         assert!(saw_removed_after_add, "post-cap removal was not observed");
+        assert!(saw_plain_before, "initial plain text was not observed");
+        assert!(saw_plain_after, "plain text change was not refreshed");
+        assert!(
+            saw_scroll_geometry_change,
+            "scroll/layout change did not refresh retained descendant bounds"
+        );
         assert!(saw_storm_marker, "event storm marker was not observed");
         assert!(
             saw_storm_recovery,
@@ -1894,16 +1948,17 @@ mod tests {
     #[test]
     #[ignore]
     fn retained_edge_cpu_page_probe() {
+        const EXPECTED_URL: &str = "https://www.cpubenchmark.net/cpu-list/";
         let config = TreeWalkerConfig::default();
         let mut walker = WindowsTreeWalker::new(config.clone());
-        let mut samples = Vec::new();
+        let mut discovery_samples = Vec::new();
         let mut last = None;
-        for sample in 0..750 {
+        for sample in 0..2_000 {
             walker.update_config(config.clone());
             let started = Instant::now();
             if let TreeWalkResult::Found(snapshot) = walker.walk_focused_window().unwrap() {
                 let elapsed = started.elapsed().as_millis() as u64;
-                samples.push(elapsed);
+                discovery_samples.push(elapsed);
                 if sample % 25 == 0 {
                     println!(
                         "sample={sample} call_ms={elapsed} nodes={} text_len={} url_present={} truncated={}",
@@ -1913,55 +1968,86 @@ mod tests {
                         snapshot.truncated
                     );
                 }
-                let reached_capacity =
-                    snapshot.truncation_reason == crate::tree::TruncationReason::MaxNodes;
+                let reached_full_coverage = snapshot.truncation_reason
+                    == crate::tree::TruncationReason::MaxNodes
+                    && snapshot.node_count == 5_000
+                    && snapshot.text_content.len() >= 50_000
+                    && snapshot.browser_url.as_deref() == Some(EXPECTED_URL);
                 last = Some(snapshot);
-                if reached_capacity {
+                if reached_full_coverage {
                     break;
                 }
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         let snapshot = last.expect("CPU page was not captured");
-        samples.sort_unstable();
-        let p95 = samples[(samples.len() * 95 / 100).min(samples.len() - 1)];
+        discovery_samples.sort_unstable();
+        let p95 = discovery_samples
+            [(discovery_samples.len() * 95 / 100).min(discovery_samples.len() - 1)];
         println!(
-            "cpu_page samples={} min_ms={} p95_ms={} max_ms={} nodes={} text_len={} url={:?}",
-            samples.len(),
-            samples[0],
+            "cpu_page_discovery samples={} min_ms={} p95_ms={} max_ms={} nodes={} text_len={} url={:?}",
+            discovery_samples.len(),
+            discovery_samples[0],
             p95,
-            samples[samples.len() - 1],
+            discovery_samples[discovery_samples.len() - 1],
             snapshot.node_count,
             snapshot.text_content.len(),
             snapshot.browser_url
         );
         assert_eq!(snapshot.app_name, "msedge.exe");
-        assert!(snapshot.text_content.len() > 100);
-        assert!(samples[samples.len() - 1] < 1000);
+        assert_eq!(snapshot.browser_url.as_deref(), Some(EXPECTED_URL));
+        assert_eq!(snapshot.node_count, 5_000);
+        assert!(snapshot.text_content.len() >= 50_000);
+        assert!(discovery_samples[discovery_samples.len() - 1] < 1000);
 
         let mut warm_samples = Vec::new();
         let mut warm_min_nodes = usize::MAX;
         let mut warm_min_text = usize::MAX;
-        for _ in 0..20 {
+        let mut settling_calls = 0usize;
+        for _ in 0..2_000 {
             walker.update_config(config.clone());
             let started = Instant::now();
             if let TreeWalkResult::Found(snapshot) = walker.walk_focused_window().unwrap() {
-                warm_samples.push(started.elapsed().as_millis() as u64);
-                warm_min_nodes = warm_min_nodes.min(snapshot.node_count);
-                warm_min_text = warm_min_text.min(snapshot.text_content.len());
+                let full_coverage = snapshot.browser_url.as_deref() == Some(EXPECTED_URL)
+                    && snapshot.node_count == 5_000
+                    && snapshot.text_content.len() >= 50_000
+                    && snapshot.truncation_reason == crate::tree::TruncationReason::MaxNodes;
+                if full_coverage {
+                    warm_samples.push(started.elapsed().as_millis() as u64);
+                    warm_min_nodes = warm_min_nodes.min(snapshot.node_count);
+                    warm_min_text = warm_min_text.min(snapshot.text_content.len());
+                    if warm_samples.len() == 20 {
+                        break;
+                    }
+                } else {
+                    // A queued startup rebuild belongs to settling, not the
+                    // warm sample set. Reset so the final set is consecutive;
+                    // never silently skip a partial call between warm calls.
+                    settling_calls += 1;
+                    warm_samples.clear();
+                    warm_min_nodes = usize::MAX;
+                    warm_min_text = usize::MAX;
+                }
+            } else {
+                settling_calls += 1;
+                warm_samples.clear();
+                warm_min_nodes = usize::MAX;
+                warm_min_text = usize::MAX;
             }
+            std::thread::sleep(std::time::Duration::from_millis(5));
         }
+        assert_eq!(warm_samples.len(), 20, "20 consecutive warm calls required");
         warm_samples.sort_unstable();
         let warm_p95 = warm_samples[(warm_samples.len() * 95 / 100).min(warm_samples.len() - 1)];
         println!(
-            "cpu_page_warm samples={} min_ms={} p95_ms={} max_ms={} min_nodes={} min_text_len={} events_restarted={}",
+            "cpu_page_warm samples={} min_ms={} p95_ms={} max_ms={} min_nodes={} min_text_len={} settling_calls={}",
             warm_samples.len(),
             warm_samples[0],
             warm_p95,
             warm_samples[warm_samples.len() - 1],
             warm_min_nodes,
             warm_min_text,
-            warm_min_nodes < 5000,
+            settling_calls,
         );
     }
 

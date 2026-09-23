@@ -858,49 +858,109 @@ mod tests {
     #[ignore]
     async fn native_platform_worker_suspends_and_reacquires() {
         let mut config = TreeWalkerConfig::default();
-        config.included_urls = vec![screenpipe_config::DomainRule {
-            domain: "127.0.0.1".into(),
-            include_subdomains: false,
-            excluded_subdomains: Vec::new(),
-        }];
+        if std::env::var_os("SCREENPIPE_UIA_STRICT_URL").is_some() {
+            config.included_urls = vec![screenpipe_config::DomainRule {
+                domain: "127.0.0.1".into(),
+                include_subdomains: false,
+                excluded_subdomains: Vec::new(),
+            }];
+        }
         let worker = TreeWalkerWorker::spawn("native-lifecycle", config.clone()).unwrap();
         async fn discover_allowed(worker: &TreeWalkerWorker, config: &TreeWalkerConfig) -> bool {
+            let expected_url = std::env::var("SCREENPIPE_UIA_ACCEPTANCE_URL")
+                .expect("SCREENPIPE_UIA_ACCEPTANCE_URL must name the owned fixture");
+            let complete_fixture = |snapshot: &screenpipe_a11y::tree::TreeSnapshot| {
+                snapshot.browser_url.as_deref() == Some(expected_url.as_str())
+                    && snapshot.node_count == 5_000
+                    && snapshot.text_content.contains("CAPTURED-MARKER-2000")
+                    && snapshot.truncation_reason
+                        != screenpipe_a11y::tree::TruncationReason::Pending
+            };
             let started = Instant::now();
             let initial = worker
                 .walk_with_timeout(config.clone(), Duration::from_secs(2))
                 .await
                 .unwrap();
-            eprintln!("native_static_initial={initial:?}");
-            if matches!(
-                initial,
-                TreeWalkerWorkerOutcome::Completed(TreeWalkResult::Found(ref snapshot))
-                    if snapshot.browser_url.as_deref().is_some_and(|url| url.contains("127.0.0.1"))
-                        && snapshot.truncation_reason
-                            != screenpipe_a11y::tree::TruncationReason::Pending
-            ) {
+            let initial_complete = matches!(
+                &initial,
+                TreeWalkerWorkerOutcome::Completed(TreeWalkResult::Found(snapshot))
+                    if complete_fixture(snapshot)
+            );
+            let initial_status = match &initial {
+                TreeWalkerWorkerOutcome::Completed(TreeWalkResult::Found(snapshot)) => format!(
+                    "found nodes={} text_len={} url_match={} marker={} truncation={:?}",
+                    snapshot.node_count,
+                    snapshot.text_content.len(),
+                    snapshot.browser_url.as_deref() == Some(expected_url.as_str()),
+                    snapshot.text_content.contains("CAPTURED-MARKER-2000"),
+                    snapshot.truncation_reason,
+                ),
+                TreeWalkerWorkerOutcome::Completed(TreeWalkResult::Skipped(reason)) => {
+                    format!("skipped reason={reason}")
+                }
+                TreeWalkerWorkerOutcome::Completed(TreeWalkResult::NotFound) => "not_found".into(),
+                TreeWalkerWorkerOutcome::TimedOut { .. } => "timed_out".into(),
+                TreeWalkerWorkerOutcome::Saturated => "saturated".into(),
+            };
+            eprintln!("native_static_initial {initial_status}");
+            if initial_complete {
                 return true;
             }
-            tokio::time::timeout(Duration::from_secs(60), async {
-                while !worker.take_background_ready() {
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                }
-            })
-            .await
-            .expect("static-page continuation reaches terminal state");
-            let outcome = worker
-                .walk_with_timeout(config.clone(), Duration::from_secs(2))
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+            loop {
+                tokio::time::timeout_at(deadline, async {
+                    while !worker.take_background_ready() {
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                })
                 .await
-                .unwrap();
-            let allowed = matches!(
-                outcome,
-                TreeWalkerWorkerOutcome::Completed(TreeWalkResult::Found(snapshot))
-                    if snapshot.browser_url.as_deref().is_some_and(|url| url.contains("127.0.0.1"))
-            );
-            eprintln!(
-                "native_static_continuation elapsed_ms={} allowed={allowed}",
-                started.elapsed().as_millis()
-            );
-            allowed
+                .expect("static-page continuation reaches terminal state");
+                let outcome = worker
+                    .walk_with_timeout(config.clone(), Duration::from_secs(2))
+                    .await
+                    .unwrap();
+                let allowed = matches!(
+                    &outcome,
+                    TreeWalkerWorkerOutcome::Completed(TreeWalkResult::Found(snapshot))
+                        if complete_fixture(snapshot)
+                );
+                let still_pending = matches!(
+                    &outcome,
+                    TreeWalkerWorkerOutcome::Completed(TreeWalkResult::Found(snapshot))
+                        if snapshot.truncation_reason
+                            == screenpipe_a11y::tree::TruncationReason::Pending
+                ) || matches!(
+                    &outcome,
+                    TreeWalkerWorkerOutcome::Completed(TreeWalkResult::Skipped(
+                        screenpipe_a11y::tree::SkipReason::UrlPending
+                    ))
+                );
+                let terminal_status = match &outcome {
+                    TreeWalkerWorkerOutcome::Completed(TreeWalkResult::Found(snapshot)) => format!(
+                        "found nodes={} text_len={} url_match={} marker={} truncation={:?}",
+                        snapshot.node_count,
+                        snapshot.text_content.len(),
+                        snapshot.browser_url.as_deref() == Some(expected_url.as_str()),
+                        snapshot.text_content.contains("CAPTURED-MARKER-2000"),
+                        snapshot.truncation_reason,
+                    ),
+                    TreeWalkerWorkerOutcome::Completed(TreeWalkResult::Skipped(reason)) => {
+                        format!("skipped reason={reason}")
+                    }
+                    TreeWalkerWorkerOutcome::Completed(TreeWalkResult::NotFound) => {
+                        "not_found".into()
+                    }
+                    TreeWalkerWorkerOutcome::TimedOut { .. } => "timed_out".into(),
+                    TreeWalkerWorkerOutcome::Saturated => "saturated".into(),
+                };
+                eprintln!(
+                    "native_static_continuation elapsed_ms={} allowed={allowed} pending={still_pending} {terminal_status}",
+                    started.elapsed().as_millis()
+                );
+                if allowed || !still_pending {
+                    return allowed;
+                }
+            }
         }
         assert!(discover_allowed(&worker, &config).await);
         assert!(worker

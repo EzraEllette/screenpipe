@@ -43,7 +43,7 @@ use windows::Win32::UI::Accessibility::{
     UIA_AutomationIdPropertyId, UIA_BoundingRectanglePropertyId, UIA_ClassNamePropertyId,
     UIA_ControlTypePropertyId, UIA_HasKeyboardFocusPropertyId, UIA_HelpTextPropertyId,
     UIA_IsEnabledPropertyId, UIA_IsKeyboardFocusablePropertyId, UIA_IsPasswordPropertyId,
-    UIA_LocalizedControlTypePropertyId, UIA_NamePropertyId,
+    UIA_LayoutInvalidatedEventId, UIA_LocalizedControlTypePropertyId, UIA_NamePropertyId,
     UIA_ScrollHorizontalScrollPercentPropertyId, UIA_ScrollVerticalScrollPercentPropertyId,
     UIA_Text_TextChangedEventId, UIA_ValueValuePropertyId, UIA_EVENT_ID, UIA_PROPERTY_ID,
 };
@@ -124,7 +124,7 @@ pub(crate) struct RetainedCaptureStats {
     pub overflowed: bool,
     pub url_fresh: bool,
     pub fresh_url: Option<String>,
-    pub url_pending_discovery: bool,
+    pub document_pending_discovery: bool,
 }
 
 type RuntimeId = Vec<i32>;
@@ -175,14 +175,20 @@ impl IUIAutomationPropertyChangedEventHandler_Impl for RetainedPropertyHandler_I
     fn HandlePropertyChangedEvent(
         &self,
         sender: Option<&IUIAutomationElement>,
-        _propertyid: UIA_PROPERTY_ID,
+        propertyid: UIA_PROPERTY_ID,
         _newvalue: &VARIANT,
     ) -> windows::core::Result<()> {
         if let Some(sender) = sender {
-            self.0.push(sender, false);
+            self.0
+                .push(sender, property_requires_branch_refresh(propertyid));
         }
         Ok(())
     }
+}
+
+fn property_requires_branch_refresh(propertyid: UIA_PROPERTY_ID) -> bool {
+    propertyid == UIA_ScrollHorizontalScrollPercentPropertyId
+        || propertyid == UIA_ScrollVerticalScrollPercentPropertyId
 }
 
 #[implement(IUIAutomationStructureChangedEventHandler)]
@@ -214,7 +220,12 @@ impl IUIAutomationEventHandler_Impl for RetainedTextHandler_Impl {
         _eventid: UIA_EVENT_ID,
     ) -> windows::core::Result<()> {
         if let Some(sender) = sender {
-            self.0.push(sender, false);
+            // Chromium reports leaf text changes on the containing text
+            // provider (often the Document), and layout invalidation on the
+            // affected ancestor. Refreshing only that sender's properties
+            // would preserve stale descendant names and bounds. Rebuild just
+            // the reported retained branch through the normal bounded queue.
+            self.0.push(sender, true);
         }
         Ok(())
     }
@@ -526,6 +537,15 @@ impl UiaContext {
                 &text_handler,
             )
         };
+        let layout_result = unsafe {
+            self.automation.AddAutomationEventHandler(
+                UIA_LayoutInvalidatedEventId,
+                &root,
+                TreeScope_Subtree,
+                self.cache_request(semantic),
+                &text_handler,
+            )
+        };
         if let Err(error) = &property_result {
             RetainedUiaIssue {
                 stage: "property_subscription",
@@ -565,6 +585,19 @@ impl UiaContext {
             }
             .report();
         }
+        if let Err(error) = &layout_result {
+            RetainedUiaIssue {
+                stage: "layout_subscription",
+                hresult: Some(error.code().0),
+                elapsed: Duration::ZERO,
+                budget: Duration::ZERO,
+                nodes: 1,
+                fallback: "periodic_resync",
+                accessibility_outcome: "partial",
+                pixel_outcome: "preserved",
+            }
+            .report();
+        }
         let projected = Arc::new(retained_root.node.clone());
         Ok(RetainedUiaCapture {
             tree: RetainedTree::new(retained_root),
@@ -575,7 +608,10 @@ impl UiaContext {
             notices,
             semantic,
             last_resync: Instant::now(),
-            subscribed: property_result.is_ok() || structure_result.is_ok() || text_result.is_ok(),
+            subscribed: property_result.is_ok()
+                || structure_result.is_ok()
+                || text_result.is_ok()
+                || layout_result.is_ok(),
             projected,
             last_projection: Instant::now(),
             rebuilding: false,
@@ -602,6 +638,11 @@ impl UiaContext {
                 &capture.root,
                 &capture.text_handler,
             );
+            let _ = self.automation.RemoveAutomationEventHandler(
+                UIA_LayoutInvalidatedEventId,
+                &capture.root,
+                &capture.text_handler,
+            );
         }
         capture.subscribed = false;
         capture.notices.queue.lock().clear();
@@ -613,6 +654,7 @@ impl UiaContext {
         max_calls: usize,
         max_nodes: usize,
         timeout: Duration,
+        expect_browser_document: bool,
         require_fresh_url: bool,
     ) -> windows::core::Result<CapturedTree> {
         let start = Instant::now();
@@ -622,7 +664,7 @@ impl UiaContext {
             semantic: capture.semantic,
             calls: Cell::new(0),
         };
-        let (url_fresh, fresh_url) = if require_fresh_url && max_calls >= 2 {
+        let (document_found, url_fresh, fresh_url) = if expect_browser_document && max_calls >= 2 {
             match capture.tree.refresh_matching(
                 &provider,
                 (max_calls / 2).min(4),
@@ -635,6 +677,7 @@ impl UiaContext {
                 },
             ) {
                 Ok(nodes) => {
+                    let document_found = !nodes.is_empty();
                     let urls = nodes
                         .into_iter()
                         .filter_map(|node| node.value)
@@ -644,7 +687,11 @@ impl UiaContext {
                         })
                         .collect::<std::collections::HashSet<_>>();
                     let unique = urls.len() == 1;
-                    (unique, unique.then(|| urls.into_iter().next()).flatten())
+                    (
+                        document_found,
+                        !require_fresh_url || unique,
+                        unique.then(|| urls.into_iter().next()).flatten(),
+                    )
                 }
                 Err(error) => {
                     tracing::debug!(
@@ -654,13 +701,13 @@ impl UiaContext {
                         fallback = "blocked_url",
                         "fresh browser URL validation failed"
                     );
-                    (false, None)
+                    (false, false, None)
                 }
             }
-        } else if !require_fresh_url {
-            (true, None)
+        } else if !expect_browser_document {
+            (true, !require_fresh_url, None)
         } else {
-            (false, None)
+            (false, false, None)
         };
         let notices = {
             let mut queue = capture.notices.queue.lock();
@@ -710,11 +757,16 @@ impl UiaContext {
             }
         }
         if unknown_count > 0 {
+            // Layout/text events may be raised by Chromium's Raw View fragment
+            // root, which is intentionally absent from the retained Control
+            // View identities. The affected branch cannot be named safely, so
+            // request one bounded root recovery after current work settles.
+            capture.overflow_recovery_pending = true;
             tracing::debug!(
                 target: "screenpipe_a11y_capture",
                 stage = "unknown_event_identity",
                 count = unknown_count,
-                fallback = "periodic_resync",
+                fallback = "bounded_resync",
                 "uia event did not match retained identity"
             );
         }
@@ -743,8 +795,8 @@ impl UiaContext {
             Progress::Deferred => TruncationReason::Pending,
             Progress::Complete => TruncationReason::None,
         };
-        if require_fresh_url
-            && !url_fresh
+        if expect_browser_document
+            && !document_found
             && progress == Progress::Complete
             && capture.last_resync.elapsed() >= Duration::from_millis(50)
             && capture.url_validation_started.elapsed() < Duration::from_secs(2)
@@ -755,8 +807,8 @@ impl UiaContext {
             capture.tree.resync();
             capture.last_resync = Instant::now();
         }
-        let url_pending_discovery = require_fresh_url
-            && !url_fresh
+        let document_pending_discovery = expect_browser_document
+            && !document_found
             && (capture.tree.has_pending_work()
                 || capture.url_validation_started.elapsed() < Duration::from_secs(2));
         if progress == Progress::Complete && capture.rebuilding {
@@ -791,7 +843,7 @@ impl UiaContext {
                 overflowed,
                 url_fresh,
                 fresh_url,
-                url_pending_discovery,
+                document_pending_discovery,
             }),
         })
     }
@@ -1764,6 +1816,17 @@ fn control_type_id_to_name(id: i32) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scroll_percent_changes_rebuild_the_reported_branch() {
+        assert!(property_requires_branch_refresh(
+            UIA_ScrollHorizontalScrollPercentPropertyId
+        ));
+        assert!(property_requires_branch_refresh(
+            UIA_ScrollVerticalScrollPercentPropertyId
+        ));
+        assert!(!property_requires_branch_refresh(UIA_NamePropertyId));
+    }
 
     #[test]
     fn test_control_type_names() {
