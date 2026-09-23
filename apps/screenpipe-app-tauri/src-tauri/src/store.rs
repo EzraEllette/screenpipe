@@ -43,6 +43,56 @@ fn is_retryable_windows_store_error(error: &(dyn std::error::Error + 'static)) -
     false
 }
 
+#[cfg(windows)]
+fn windows_store_attribute_class(path: &Path) -> String {
+    use std::os::windows::fs::MetadataExt;
+    match std::fs::metadata(path) {
+        Ok(metadata) => {
+            let value = metadata.file_attributes();
+            format!(
+                "readonly={},hidden={},system={},reparse={}",
+                value & 0x1 != 0,
+                value & 0x2 != 0,
+                value & 0x4 != 0,
+                value & 0x400 != 0
+            )
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => "missing".into(),
+        Err(_) => "unavailable".into(),
+    }
+}
+
+#[cfg(windows)]
+fn clear_windows_store_create_blocking_attributes(path: &Path) -> std::io::Result<bool> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::fs::MetadataExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::{
+        SetFileAttributesW, FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_SYSTEM,
+        FILE_FLAGS_AND_ATTRIBUTES,
+    };
+
+    let metadata = match std::fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    let attributes = metadata.file_attributes();
+    let blockers = FILE_ATTRIBUTE_HIDDEN.0 | FILE_ATTRIBUTE_SYSTEM.0;
+    if attributes & blockers == 0 {
+        return Ok(false);
+    }
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    unsafe {
+        SetFileAttributesW(
+            PCWSTR(wide.as_ptr()),
+            FILE_FLAGS_AND_ATTRIBUTES(attributes & !blockers),
+        )
+    }
+        .map_err(std::io::Error::from)?;
+    Ok(true)
+}
+
 fn retry_windows_store_io<T, E>(mut operation: impl FnMut() -> Result<T, E>) -> Result<T, E>
 where
     E: std::error::Error + 'static,
@@ -77,7 +127,7 @@ fn read_store_file(path: &Path) -> std::io::Result<Vec<u8>> {
 }
 
 #[cfg(windows)]
-fn reset_windows_store_file_permissions(path: &Path) -> anyhow::Result<()> {
+pub(crate) fn reset_windows_store_file_permissions(path: &Path) -> anyhow::Result<()> {
     use std::os::windows::process::CommandExt;
 
     let mut permissions = match std::fs::metadata(path) {
@@ -89,13 +139,25 @@ fn reset_windows_store_file_permissions(path: &Path) -> anyhow::Result<()> {
         permissions.set_readonly(false);
         std::fs::set_permissions(path, permissions)?;
     }
+    let attributes = windows_store_attribute_class(path);
+    let cleared_create_blockers = clear_windows_store_create_blocking_attributes(path)?;
 
     // Cloud-backed and virtual filesystems may reject `icacls /reset` even
     // though the current process can already update the file. Do not make a
     // Windows-specific ACL utility a startup dependency for a writable store.
-    if std::fs::OpenOptions::new().write(true).open(path).is_ok() {
-        return Ok(());
-    }
+    let write_probe_error = match retry_windows_store_io(|| {
+        std::fs::OpenOptions::new().write(true).open(path)
+    }) {
+        Ok(_) => {
+            if cleared_create_blockers {
+                tracing::warn!(operation = "settings_store_access", stage = "write_probe", raw_os_code = 0, attributes = %attributes, recovery = "cleared_hidden_system", "Windows settings store access recovery");
+            }
+            return Ok(());
+        }
+        Err(error) => error,
+    };
+    let raw_os_code = write_probe_error.raw_os_error().unwrap_or(0);
+    tracing::warn!(operation = "settings_store_access", stage = "write_probe", raw_os_code, attributes = %attributes, recovery = "acl_repair_started", "Windows settings store access recovery");
 
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let status = std::process::Command::new("icacls.exe")
@@ -104,10 +166,9 @@ fn reset_windows_store_file_permissions(path: &Path) -> anyhow::Result<()> {
         .creation_flags(CREATE_NO_WINDOW)
         .status()?;
     if !status.success() {
+        tracing::error!(operation = "settings_store_access", stage = "inheritance_repair", raw_os_code, attributes = %attributes, recovery = "failed", repair_exit_code = status.code().unwrap_or(-1), "Windows settings store access recovery");
         return Err(anyhow::anyhow!(
-            "failed to enable inherited settings permissions for {}: icacls exited with {}",
-            path.display(),
-            status
+            "write probe failed with raw Windows error {raw_os_code}; failed to enable inherited settings permissions: icacls exited with {status}"
         ));
     }
 
@@ -118,12 +179,14 @@ fn reset_windows_store_file_permissions(path: &Path) -> anyhow::Result<()> {
         .status()?;
     if !status.success() {
         return Err(anyhow::anyhow!(
-            "failed to reset settings permissions for {}: icacls exited with {}",
-            path.display(),
-            status
+            "write probe failed with raw Windows error {raw_os_code}; failed to reset settings permissions: icacls exited with {status}"
         ));
     }
-    std::fs::OpenOptions::new().write(true).open(path)?;
+    std::fs::OpenOptions::new().write(true).open(path).map_err(|error| {
+        tracing::error!(operation = "settings_store_access", stage = "verification", raw_os_code, attributes = %attributes, recovery = "failed", verification_os_code = error.raw_os_error().unwrap_or(0), "Windows settings store access recovery");
+        anyhow::anyhow!("write probe failed with raw Windows error {raw_os_code}; ACL repair completed but verification failed: {error}")
+    })?;
+    tracing::warn!(operation = "settings_store_access", stage = "write_probe", raw_os_code, attributes = %attributes, recovery = "acl_repair_succeeded", "Windows settings store access recovery");
     Ok(())
 }
 
@@ -814,36 +877,53 @@ fn save_store_to_disk<R: tauri::Runtime>(
     retry_windows_store_io(|| store.save()).map_err(|e| e.to_string())
 }
 
-pub(crate) fn save_store_with_permission_repair(
-    app: &AppHandle,
-    store: &tauri_plugin_store::Store<tauri::Wry>,
+pub(crate) fn save_store_at_with_permission_repair<R: tauri::Runtime>(
+    store_path: &Path,
+    store: &tauri_plugin_store::Store<R>,
 ) -> Result<(), String> {
     match save_store_to_disk(store) {
         Ok(()) => Ok(()),
         Err(first_error) => {
             #[cfg(not(windows))]
-            {
-                let _ = app;
-                return Err(first_error);
-            }
+            return Err(first_error);
 
             #[cfg(windows)]
             {
-                let store_path = get_base_dir(app, None)
-                    .map_err(|error| error.to_string())?
-                    .join("store.bin");
-                tracing::warn!(
-                    "settings save failed; repairing Windows store permissions and retrying: {}",
-                    first_error
-                );
-                normalize_windows_store_permissions(&store_path).map_err(|repair_error| {
-                    format!(
-                        "settings save failed ({first_error}); permission repair also failed: {repair_error}"
-                    )
+                let raw_os_code = [5, 32, 33]
+                    .into_iter()
+                    .find(|code| first_error.contains(&format!("os error {code}")))
+                    .unwrap_or(0);
+                tracing::warn!(operation = "settings_store_save", stage = "create_truncate", raw_os_code, attributes = %windows_store_attribute_class(store_path), recovery = "permission_repair_started", "Windows settings store access recovery");
+                normalize_windows_store_permissions(store_path).map_err(|repair_error| {
+                    format!("settings save failed ({first_error}); permission repair also failed: {repair_error}")
                 })?;
-                save_store_to_disk(store)
+                match save_store_to_disk(store) {
+                    Ok(()) => {
+                        tracing::warn!(operation = "settings_store_save", stage = "create_truncate", raw_os_code, attributes = %windows_store_attribute_class(store_path), recovery = "retry_succeeded", "Windows settings store access recovery");
+                        Ok(())
+                    }
+                    Err(retry_error) => Err(format!("settings save failed ({first_error}); permission repair completed but retry failed: {retry_error}")),
+                }
             }
         }
+    }
+}
+
+pub(crate) fn save_store_with_permission_repair(
+    app: &AppHandle,
+    store: &tauri_plugin_store::Store<tauri::Wry>,
+) -> Result<(), String> {
+    #[cfg(not(windows))]
+    {
+        let _ = app;
+        save_store_to_disk(store)
+    }
+    #[cfg(windows)]
+    {
+        let store_path = get_base_dir(app, None)
+            .map_err(|error| error.to_string())?
+            .join("store.bin");
+        save_store_at_with_permission_repair(&store_path, store)
     }
 }
 
@@ -4572,6 +4652,97 @@ mod tests {
         assert_eq!(std::fs::read(&store_path).unwrap(), canonical_before);
         assert_eq!(std::fs::read(&snapshot_path).unwrap(), snapshot_before);
         assert!(app.get_store(&store_path).is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn startup_build_retries_transient_windows_write_probe_lock_and_reopens() {
+        let tmp = tempfile::tempdir().unwrap();
+        let canonical = json!({"settings": {"aiPresets": presets_n(2)}});
+        let store_path = write_store(tmp.path(), &canonical);
+        let canonical_before = std::fs::read(&store_path).unwrap();
+        let app = tauri::test::mock_builder()
+            .plugin(tauri_plugin_store::Builder::default().build())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let lock = open_with_share_mode(&store_path, 1);
+        let unlocker = std::thread::spawn(move || {
+            std::thread::sleep(WINDOWS_STORE_RETRY_DELAY * 2);
+            drop(lock);
+        });
+
+        let store = build_store_at(app.handle(), store_path.clone())
+            .expect("startup must outlast a transient write-probe lock");
+        unlocker.join().unwrap();
+        assert_eq!(std::fs::read(&store_path).unwrap(), canonical_before);
+        drop(store);
+
+        let reopened = build_store_at(app.handle(), store_path.clone())
+            .expect("settings must reopen after the transient lock recovery");
+        assert_eq!(
+            reopened.get("settings").unwrap()["aiPresets"],
+            canonical["settings"]["aiPresets"]
+        );
+        assert_eq!(std::fs::read(&store_path).unwrap(), canonical_before);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn plugin_save_persists_onboarding_over_hidden_system_store_and_reopens() {
+        use std::os::windows::fs::MetadataExt;
+
+        const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
+        const FILE_ATTRIBUTE_SYSTEM: u32 = 0x4;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        use std::os::windows::process::CommandExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store_path = tmp.path().join("store.bin");
+        let app = tauri::test::mock_builder()
+            .plugin(tauri_plugin_store::Builder::default().build())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let store = StoreBuilder::new(app.handle(), store_path.clone())
+            .disable_auto_save()
+            .build()
+            .unwrap();
+        store.set("settings", json!({"aiPresets": presets_n(2)}));
+        store.set("onboarding", json!({"completed": false}));
+        save_store_to_disk(store.as_ref()).unwrap();
+        let status = std::process::Command::new("attrib.exe")
+            .args(["+H", "+S"])
+            .arg(&store_path)
+            .creation_flags(CREATE_NO_WINDOW)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let attributes = std::fs::metadata(&store_path).unwrap().file_attributes();
+        assert_eq!(
+            attributes & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM),
+            FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM
+        );
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&store_path)
+            .expect("write-open must succeed before create-truncate fails");
+
+        store.set("onboarding", json!({"completed": true}));
+        save_store_at_with_permission_repair(&store_path, store.as_ref())
+            .expect("permission normalization must make plugin save possible");
+        drop(store);
+
+        let reopened = StoreBuilder::new(app.handle(), store_path.clone())
+            .disable_auto_save()
+            .build()
+            .unwrap();
+        assert_eq!(reopened.get("onboarding").unwrap()["completed"], true);
+        assert_eq!(
+            reopened.get("settings").unwrap()["aiPresets"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
     }
 
     #[cfg(windows)]

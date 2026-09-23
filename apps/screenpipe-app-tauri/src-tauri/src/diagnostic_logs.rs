@@ -221,6 +221,59 @@ async fn build_bundle(files: &[LogFile]) -> String {
 mod tests {
     use super::*;
 
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn settings_access_recovery_survives_rotation_and_redaction_without_private_data() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::os::windows::process::CommandExt;
+
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let root = tempfile::tempdir().unwrap();
+        let logs = root.path().join("logs");
+        std::fs::create_dir(&logs).unwrap();
+        let current = logs.join("screenpipe-app.2026-09-23.log");
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(std::fs::File::create(&current).unwrap())
+            .finish();
+        let private_dir = root.path().join("private-person@example.com");
+        std::fs::create_dir(&private_dir).unwrap();
+        let store_path = private_dir.join("store.bin");
+        std::fs::write(&store_path, b"credential=secret-value").unwrap();
+        let status = std::process::Command::new("attrib.exe")
+            .args(["+H", "+S"])
+            .arg(&store_path)
+            .creation_flags(CREATE_NO_WINDOW)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        tracing::subscriber::with_default(subscriber, || {
+            crate::store::reset_windows_store_file_permissions(&store_path).unwrap();
+            let lock = std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(1)
+                .open(&store_path)
+                .unwrap();
+            let error = crate::store::reset_windows_store_file_permissions(&store_path)
+                .expect_err("persistent sharing denial must fail closed");
+            assert!(error.to_string().contains("raw Windows error"));
+            drop(lock);
+        });
+        std::fs::rename(&current, logs.join("screenpipe-app.2026-09-23.1.log")).unwrap();
+        std::fs::write(&current, "screenpipe restarted\n").unwrap();
+
+        let report = collect_redacted_from_dirs(&[logs]).await.unwrap();
+        assert!(report.contains("operation=\"settings_store_access\""));
+        assert!(report.contains("stage=\"write_probe\""));
+        assert!(report.contains("recovery=\"cleared_hidden_system\""));
+        assert!(report.contains("raw_os_code=0"));
+        assert!(report.contains("recovery=\"failed\""));
+        assert!(report.contains("raw_os_code=5") || report.contains("raw_os_code=32"));
+        assert!(!report.contains("private-person@example.com"));
+        assert!(!report.contains("secret-value"));
+        assert!(!report.contains(&store_path.to_string_lossy().to_string()));
+    }
+
     #[tokio::test]
     #[cfg(feature = "e2e")]
     async fn abandoned_read_recovery_survives_support_rotation_and_redaction() {
