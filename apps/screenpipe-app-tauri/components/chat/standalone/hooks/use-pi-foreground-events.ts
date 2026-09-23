@@ -21,7 +21,7 @@ import {
   buildHostedBusyRetryMessage,
   buildModelNotAllowedMessage,
   buildRateLimitMessage,
-  classifyQuotaError,
+  classifyQuotaError as classifyHostedQuotaError,
   parseRateLimitWaitSeconds,
   PI_MAX_RATE_LIMIT_RETRIES,
 } from "@/lib/chat/quota-errors";
@@ -137,6 +137,14 @@ export function usePiForegroundEvents({
     if (!preset) return preset;
     if (preset.provider !== "acp") return preset;
     return { ...preset, agentName: acpAdapterInfo(preset.acpAgent?.id).name };
+  };
+  const classifyQuotaError = (error: string) => {
+    // An ACP account can return 429 for exhausted credits. Keep its billing
+    // recovery instead of treating it as a brief throttle and retrying.
+    if (buildProviderErrorPresentation(error, getActivePreset())?.kind === "agent_billing") {
+      return "none";
+    }
+    return classifyHostedQuotaError(error);
   };
   const dailyLimitMessage = (errorStr: string) => {
     setQuotaUpgradeFromError(errorStr);

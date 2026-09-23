@@ -2,10 +2,12 @@
 // https://screenpipe.com
 
 import { useRef, useState } from "react";
-import { act, renderHook } from "@testing-library/react";
+import { act, render, renderHook, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Message } from "@/lib/chat/types";
+import type { AIPreset } from "@/lib/utils/tauri";
 import { buildContextOverflowMessage } from "@/lib/chat/provider-errors";
+import { MessageContent } from "../../message-content";
 import { usePiChatState } from "../use-pi-chat-state";
 import { usePiForegroundEvents } from "../use-pi-foreground-events";
 
@@ -34,7 +36,7 @@ const initial: Message = {
   ],
 };
 
-function useErrorHarness() {
+function useErrorHarness(activePreset?: AIPreset) {
   const pi = usePiChatState();
   const [messages, setMessages] = useState<Message[]>([initial]);
   const messagesRef = useRef(messages);
@@ -42,7 +44,7 @@ function useErrorHarness() {
   const handler = useRef<((event: unknown) => void) | null>(null);
   usePiForegroundEvents({
     ...pi,
-    activePreset: undefined,
+    activePreset,
     buildProviderConfig: () => null,
     cancelStreamingMessageRender: vi.fn(),
     clearPipeExecution: vi.fn(),
@@ -125,5 +127,48 @@ describe("Pi terminal provider errors", () => {
     });
     expect(result.current.messages[0].content).toBe(answer);
     expect(result.current.messages[0].retryPrompt).toBeUndefined();
+  });
+
+  it.each([false, true])("retains actionable ACP billing guidance through the final saved turn (HTTP 429: %s)", (with429) => {
+    const preset: AIPreset = {
+      id: "claude", provider: "acp", model: "claude-acp", prompt: "",
+      acpAgent: { id: "claude-acp", useScreenpipeCloud: false },
+      defaultPreset: true, apiKey: null, maxContextChars: 100000,
+    };
+    const { result } = renderHook(() => useErrorHarness(preset));
+    const raw = `${with429 ? "429 " : ""}Internal error: Credit balance is too low: { "errorKind": "billing_error" }`;
+    const errorMessage = { role: "assistant", stopReason: "error", errorMessage: raw, content: [] };
+    const rawLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      act(() => {
+        const { pi, handler } = result.current;
+        pi.piMessageIdRef.current = initial.id;
+        pi.piStreamingTextRef.current = progress;
+        pi.piContentBlocksRef.current = [...initial.contentBlocks!];
+        handler.current!({ type: "message_update", assistantMessageEvent: {
+          type: "error", reason: "ACP request failed", error: raw,
+        } });
+        handler.current!({ type: "message_end", message: errorMessage });
+        handler.current!({ type: "agent_end", messages: [errorMessage] });
+      });
+      const message = result.current.messages[0];
+      expect(message.content).toContain("Claude Code needs more credits");
+      expect(message.content).toContain("Add credits");
+      expect(message.content).toContain("choose another AI preset");
+      expect(message.retryPrompt).toBeUndefined();
+      // Keep the original technical cause in the console logs collected by
+      // support, while persisted chat history carries the recovery message.
+      expect(rawLog).toHaveBeenCalledWith("[Pi] LLM error via", "message_end", ":", raw);
+      const saved = storeMessages.mock.calls.at(-1)?.[1]?.[0];
+      expect(saved).toEqual(message);
+      render(<MessageContent message={JSON.parse(JSON.stringify(saved))} />);
+      expect(screen.getByRole("alert")).toHaveTextContent("Claude Code needs more credits");
+      expect(screen.getByRole("link", { name: "Anthropic Console billing" })).toHaveAttribute(
+        "href", "https://platform.claude.com/settings/billing",
+      );
+      expect(screen.queryByRole("button", { name: "Try again" })).not.toBeInTheDocument();
+    } finally {
+      rawLog.mockRestore();
+    }
   });
 });
