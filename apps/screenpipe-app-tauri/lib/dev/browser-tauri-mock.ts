@@ -16,6 +16,7 @@ import type {
   SaveBrainViewRequest,
 } from "@/lib/utils/tauri";
 import type { BrowserDevScenario } from "./browser-engine-mock";
+import { buildProviderErrorPresentation } from "../chat/provider-errors";
 
 export type BrowserDevMode = "mock" | "live";
 
@@ -540,6 +541,25 @@ export function createBrowserIpcMock(options: BrowserIpcMockOptions) {
       })] as const;
     }),
   );
+  // Synthetic failures in the real chat UI for inspecting ACP account recovery.
+  for (const [agentId, title, error] of [
+    ["claude-acp", "Claude billing recovery", 'Internal error: Credit balance is too low: { "errorKind": "billing_error" }'],
+    ["cursor", "Cursor billing recovery", "spending_limit_exceeded"],
+    ["codex-acp", "Codex usage recovery", '{"codexErrorInfo":"usageLimitExceeded"}'],
+  ]) {
+    const id = `browser-acp-billing-${agentId}`;
+    const billingPreview = buildProviderErrorPresentation(error, {
+      provider: "acp", acpAgent: { id: agentId, useScreenpipeCloud: false },
+    });
+    chatFixtures.set(`${chatsDir}/${id}.json`, JSON.stringify({
+      id, title, titleSource: "user", kind: "chat",
+      createdAt: Date.now(), updatedAt: Date.now(), lastUserMessageAt: Date.now(),
+      messages: [
+        { id: `${id}-user`, role: "user", content: "What did I work on in the last hour?", timestamp: Date.now() },
+        { id: `${id}-assistant`, role: "assistant", content: `Error: ${billingPreview?.message}`, provider: "acp", model: agentId, timestamp: Date.now() + 1 },
+      ],
+    }));
+  }
   let liveViews =
     options.scenario === "empty"
       ? []
