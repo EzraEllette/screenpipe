@@ -332,6 +332,44 @@ struct UiaRetainedProvider<'a> {
     calls: Cell<usize>,
 }
 
+#[cfg(test)]
+struct UiaCallTimer {
+    label: &'static str,
+    started: Instant,
+}
+
+#[cfg(test)]
+impl UiaCallTimer {
+    fn new(label: &'static str) -> Option<Self> {
+        std::env::var_os("SCREENPIPE_UIA_PHASE_TRACE").map(|_| Self {
+            label,
+            started: Instant::now(),
+        })
+    }
+}
+
+#[cfg(test)]
+impl Drop for UiaCallTimer {
+    fn drop(&mut self) {
+        let elapsed = self.started.elapsed();
+        if elapsed >= Duration::from_millis(50) {
+            eprintln!(
+                "uia_slow_call label={} elapsed_ms={}",
+                self.label,
+                elapsed.as_millis()
+            );
+        }
+    }
+}
+
+#[cfg(not(test))]
+fn uia_call_timer(_: &'static str) {}
+
+#[cfg(test)]
+fn uia_call_timer(label: &'static str) -> Option<UiaCallTimer> {
+    UiaCallTimer::new(label)
+}
+
 impl Provider for UiaRetainedProvider<'_> {
     type Key = RuntimeId;
     type Handle = IUIAutomationElement;
@@ -344,7 +382,11 @@ impl Provider for UiaRetainedProvider<'_> {
         // BuildUpdatedCache plus stable RuntimeId lookup are separate provider calls.
         self.calls.set(self.calls.get() + 2);
         let cache = self.uia.cache_request(self.semantic);
-        let fresh = unsafe { handle.BuildUpdatedCache(cache)? };
+        let fresh = {
+            let _timer = uia_call_timer("BuildUpdatedCache");
+            unsafe { handle.BuildUpdatedCache(cache)? }
+        };
+        let _timer = uia_call_timer("GetRuntimeId_after_refresh");
         self.uia.retained_element(fresh)
     }
 
@@ -354,12 +396,16 @@ impl Provider for UiaRetainedProvider<'_> {
     ) -> Result<Option<RetainedElement<Self::Key, Self::Handle>>, Self::Error> {
         self.calls.set(self.calls.get() + 2);
         let result = unsafe {
+            let _timer = uia_call_timer("GetFirstChildElementBuildCache");
             self.uia
                 .tree_walker(self.semantic)
                 .GetFirstChildElementBuildCache(handle, self.uia.cache_request(self.semantic))
         };
         match result {
-            Ok(element) => self.uia.retained_element(element).map(Some),
+            Ok(element) => {
+                let _timer = uia_call_timer("GetRuntimeId_after_first_child");
+                self.uia.retained_element(element).map(Some)
+            }
             // The windows projection represents a null UIA element as E_POINTER.
             // For navigation only, that is the normal end-of-list sentinel.
             Err(error) if error.code().0 == 0 || error.code().0 == 0x80004003u32 as i32 => Ok(None),
@@ -373,12 +419,16 @@ impl Provider for UiaRetainedProvider<'_> {
     ) -> Result<Option<RetainedElement<Self::Key, Self::Handle>>, Self::Error> {
         self.calls.set(self.calls.get() + 2);
         let result = unsafe {
+            let _timer = uia_call_timer("GetNextSiblingElementBuildCache");
             self.uia
                 .tree_walker(self.semantic)
                 .GetNextSiblingElementBuildCache(handle, self.uia.cache_request(self.semantic))
         };
         match result {
-            Ok(element) => self.uia.retained_element(element).map(Some),
+            Ok(element) => {
+                let _timer = uia_call_timer("GetRuntimeId_after_next_sibling");
+                self.uia.retained_element(element).map(Some)
+            }
             Err(error) if error.code().0 == 0 || error.code().0 == 0x80004003u32 as i32 => Ok(None),
             Err(error) => Err(error),
         }
@@ -443,6 +493,7 @@ impl UiaContext {
     /// Initialize UI Automation COM objects. Must be called on a COM-initialized thread.
     pub(crate) fn new() -> windows::core::Result<Self> {
         unsafe {
+            let _timer = uia_call_timer("CoCreateInstance_CUIAutomation");
             let automation: IUIAutomation = CoCreateInstance(&CUIAutomation, None, CLSCTX_ALL)?;
 
             // Create cache request with all properties we need
@@ -562,10 +613,14 @@ impl UiaContext {
         semantic: bool,
     ) -> windows::core::Result<RetainedUiaCapture> {
         let root = unsafe {
+            let _timer = uia_call_timer("ElementFromHandleBuildCache_retained_root");
             self.automation
                 .ElementFromHandleBuildCache(hwnd, self.cache_request(semantic))?
         };
-        let retained_root = self.retained_element(root.clone())?;
+        let retained_root = {
+            let _timer = uia_call_timer("GetRuntimeId_retained_root");
+            self.retained_element(root.clone())?
+        };
         let notices = Arc::new(RetainedNotices {
             queue: Mutex::new(Vec::new()),
             overflowed: AtomicBool::new(false),
@@ -586,6 +641,7 @@ impl UiaContext {
             UIA_ScrollVerticalScrollPercentPropertyId,
         ];
         let property_result = unsafe {
+            let _timer = uia_call_timer("AddPropertyChangedEventHandlerNativeArray");
             self.automation.AddPropertyChangedEventHandlerNativeArray(
                 &root,
                 TreeScope_Subtree,
@@ -595,6 +651,7 @@ impl UiaContext {
             )
         };
         let structure_result = unsafe {
+            let _timer = uia_call_timer("AddStructureChangedEventHandler");
             self.automation.AddStructureChangedEventHandler(
                 &root,
                 TreeScope_Subtree,
@@ -603,6 +660,7 @@ impl UiaContext {
             )
         };
         let text_result = unsafe {
+            let _timer = uia_call_timer("AddAutomationEventHandler_text");
             self.automation.AddAutomationEventHandler(
                 UIA_Text_TextChangedEventId,
                 &root,
@@ -612,6 +670,7 @@ impl UiaContext {
             )
         };
         let layout_result = unsafe {
+            let _timer = uia_call_timer("AddAutomationEventHandler_layout");
             self.automation.AddAutomationEventHandler(
                 UIA_LayoutInvalidatedEventId,
                 &root,
@@ -700,22 +759,34 @@ impl UiaContext {
             return;
         }
         unsafe {
-            let _ = self
-                .automation
-                .RemovePropertyChangedEventHandler(&capture.root, &capture.property_handler);
-            let _ = self
-                .automation
-                .RemoveStructureChangedEventHandler(&capture.root, &capture.structure_handler);
-            let _ = self.automation.RemoveAutomationEventHandler(
-                UIA_Text_TextChangedEventId,
-                &capture.root,
-                &capture.text_handler,
-            );
-            let _ = self.automation.RemoveAutomationEventHandler(
-                UIA_LayoutInvalidatedEventId,
-                &capture.root,
-                &capture.text_handler,
-            );
+            {
+                let _timer = uia_call_timer("RemovePropertyChangedEventHandler");
+                let _ = self
+                    .automation
+                    .RemovePropertyChangedEventHandler(&capture.root, &capture.property_handler);
+            }
+            {
+                let _timer = uia_call_timer("RemoveStructureChangedEventHandler");
+                let _ = self
+                    .automation
+                    .RemoveStructureChangedEventHandler(&capture.root, &capture.structure_handler);
+            }
+            {
+                let _timer = uia_call_timer("RemoveAutomationEventHandler_text");
+                let _ = self.automation.RemoveAutomationEventHandler(
+                    UIA_Text_TextChangedEventId,
+                    &capture.root,
+                    &capture.text_handler,
+                );
+            }
+            {
+                let _timer = uia_call_timer("RemoveAutomationEventHandler_layout");
+                let _ = self.automation.RemoveAutomationEventHandler(
+                    UIA_LayoutInvalidatedEventId,
+                    &capture.root,
+                    &capture.text_handler,
+                );
+            }
         }
         capture.subscribed = false;
         capture.notices.queue.lock().clear();

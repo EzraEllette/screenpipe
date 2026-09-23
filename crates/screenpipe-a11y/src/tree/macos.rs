@@ -1289,7 +1289,6 @@ impl WalkState {
             start,
             truncated: false,
             truncation_reason: super::TruncationReason::None,
-            retained_work_pending: false,
             max_depth_reached: 0,
             app: AppState::None,
             window_x: 0.0,

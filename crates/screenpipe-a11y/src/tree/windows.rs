@@ -2087,6 +2087,43 @@ mod tests {
         );
     }
 
+    /// Bounded real-window loop used by the Windows responsiveness harness.
+    /// The harness owns foreground verification and UIA-free input/title probes.
+    #[test]
+    #[ignore]
+    fn retained_edge_input_responsiveness_probe() {
+        let config = TreeWalkerConfig::default();
+        let mut walker = WindowsTreeWalker::new(config.clone());
+        let started = Instant::now();
+        let mut calls = 0usize;
+        let mut found = 0usize;
+        while started.elapsed() < std::time::Duration::from_secs(20) {
+            walker.update_config(config.clone());
+            let call_started = Instant::now();
+            if matches!(
+                walker.walk_focused_window().unwrap(),
+                TreeWalkResult::Found(_)
+            ) {
+                found += 1;
+            }
+            calls += 1;
+            let elapsed = call_started.elapsed();
+            if elapsed >= std::time::Duration::from_millis(50) {
+                println!(
+                    "input_probe_slow_call call={calls} elapsed_ms={}",
+                    elapsed.as_millis()
+                );
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        println!(
+            "input_probe_complete calls={calls} found={found} elapsed_ms={}",
+            started.elapsed().as_millis()
+        );
+        assert!(calls > 0);
+        assert!(found > 0);
+    }
+
     /// Same-title live navigation privacy acceptance. Start on an allowed
     /// `localhost` page, wait for `url_policy_allowed=true`, then navigate the
     /// focused browser to the same-title `127.0.0.1` page.
