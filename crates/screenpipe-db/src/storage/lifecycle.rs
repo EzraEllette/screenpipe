@@ -964,8 +964,8 @@ async fn migrate_observed(
         )
         .await?;
         let verification = async {
-            verify_integrity(&db.pool).await?;
-            super::diagnostics::stage("verifying_archives");
+            // Includes the full SQLite integrity check. Running it here too
+            // scans every table and index twice without intervening writes.
             db.verify_storage().await?;
             if table_receipts(&db, Some(&journal.source)).await? != journal.source {
                 return Err(storage_error(
@@ -1674,6 +1674,7 @@ impl DatabaseManager {
     pub async fn verify_storage(&self) -> Result<(), sqlx::Error> {
         verify_integrity(&self.pool).await?;
         if let Some(storage) = &self.storage {
+            super::diagnostics::stage("verifying_archives");
             storage.verify_catalog(&self.pool).await?;
             storage.verify_bulk(&self.pool).await?;
             let mut after = None;

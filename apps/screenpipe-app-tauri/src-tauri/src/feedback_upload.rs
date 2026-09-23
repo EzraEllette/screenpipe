@@ -792,6 +792,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn archive_verification_failure_reaches_support_without_rolling_logs() {
+        use screenpipe_db::{storage, DatabaseManager};
+        let root = tempfile::tempdir().unwrap();
+        let db = DatabaseManager::new_hybrid(root.path(), Default::default(), Default::default())
+            .await
+            .unwrap();
+        // SQLite is intact but the committed archive catalog is not. The
+        // single verification pass must reject it and identify the real phase.
+        db.execute_raw_sql_write("INSERT INTO _bulk_files(table_name,path,state,rows,checksum) VALUES('elements','private history','published',1,'invalid')")
+            .await.unwrap();
+        let error = storage::diagnostics::observe(
+            root.path(),
+            "conversion",
+            |_, _| {},
+            db.verify_storage(),
+        )
+        .await
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("bulk payload catalog is incomplete"));
+        db.close().await;
+        assert_migration_failure_uploaded(
+            root.path(),
+            &[
+                "verifying_archives",
+                "bulk payload catalog is incomplete",
+                "\"status\": \"failed\"",
+            ],
+        )
+        .await;
+    }
+
+    #[tokio::test]
     async fn element_selection_failure_reaches_support_without_rolling_logs() {
         use screenpipe_db::{storage, DatabaseManager};
         let root = tempfile::tempdir().unwrap();

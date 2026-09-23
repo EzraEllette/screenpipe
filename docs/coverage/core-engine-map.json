@@ -678,6 +678,7 @@
         "src/db/tests.rs",
         "src/db/truncation_tests.rs",
         "src/storage/bulk/tests.rs",
+        "src/storage/bulk/elements/lifecycle.rs",
         "src/storage/diagnostics.rs",
         "src/storage/lifecycle.rs",
         "src/storage/parity.rs",
