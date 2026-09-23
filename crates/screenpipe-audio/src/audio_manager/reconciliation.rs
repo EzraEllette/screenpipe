@@ -240,7 +240,6 @@ fn install_merged_audio(pending: &PendingTranscription) -> std::io::Result<()> {
 ///
 /// Returns both the number of chunks processed and whether the candidate query
 /// hit its cap, which tells the scheduler to keep draining without a 120s nap.
-#[allow(clippy::too_many_arguments)]
 /// Account-standing or hosted allowance denials apply to the whole sweep,
 /// not this audio batch. Leave recordings pending until the account recovers.
 fn is_account_standing_error(error: &anyhow::Error) -> bool {
@@ -251,6 +250,7 @@ fn is_account_standing_error(error: &anyhow::Error) -> bool {
         || message.contains("transcription_capacity_paused")
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn reconcile_untranscribed(
     db: &DatabaseManager,
     transcription_engine: &TranscriptionEngine,
@@ -332,7 +332,7 @@ pub async fn reconcile_untranscribed(
                 e
             );
             return ReconciliationSweep {
-                failure: Some(format!("database query failed: {e}")),
+                failure: Some(worker_failure_detail("database query failed", &e)),
                 ..Default::default()
             };
         }
@@ -512,7 +512,11 @@ pub async fn reconcile_untranscribed(
                 if let Some(metrics) = &metrics {
                     metrics.record_transcription_error();
                 }
-                last_failure = Some(format!("provider transcription failed: {e}"));
+                last_failure = Some(worker_failure_detail("provider transcription failed", &e));
+                // A full candidate page did not make progress. Do not treat it
+                // as a successful cap hit and immediately hammer the same
+                // unavailable provider; retain the audio for the next wake.
+                hit_candidate_limit = false;
                 // An account-standing denial fails every batch in this sweep the
                 // same way; continuing would hammer the API once per batch (seen
                 // in the wild: a 403-denied account produced a request every
@@ -722,7 +726,7 @@ pub async fn reconcile_untranscribed(
                     primary_chunk.id, e
                 );
                 consecutive_db_errors += 1;
-                last_failure = Some(format!("database write failed: {e}"));
+                last_failure = Some(worker_failure_detail("database write failed", &e));
                 // The pending JSON file persists — next sweep will retry
                 continue;
             }
@@ -770,6 +774,27 @@ pub async fn reconcile_untranscribed(
         hit_candidate_limit,
         failure: last_failure,
     }
+}
+
+fn worker_failure_detail(category: &str, error: &impl std::fmt::Display) -> String {
+    let detail = error.to_string();
+    if let Some(http_start) = detail.find("(HTTP ") {
+        if let Some(close) = detail[http_start..].find(')') {
+            return format!("{category} {}", &detail[http_start..=http_start + close]);
+        }
+    }
+    let safe = detail
+        .split(" for url")
+        .next()
+        .unwrap_or(&detail)
+        .split(" — body")
+        .next()
+        .unwrap_or(&detail)
+        .split(": {")
+        .next()
+        .unwrap_or(&detail);
+    let safe: String = safe.chars().take(200).collect();
+    format!("{category}: {safe}")
 }
 
 /// Returns the path to the pending-transcriptions directory, creating it if needed.
@@ -1856,6 +1881,68 @@ fn extract_device_from_path(file_path: &str) -> (String, bool) {
 mod tests {
     use super::*;
 
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "runs the real cached Whisper model through production reconciliation"]
+    async fn cancelled_real_whisper_reconciliation_retains_pending_audio() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let db = temp_db(temp.path()).await;
+        let path = temp
+            .path()
+            .join("Cancellation Test (input)_2026-09-23_00-00-00.wav");
+        let samples: Vec<f32> = (0..16_000 * 600)
+            .map(|index| ((index as f32 * 0.071).sin() * 0.2) + 0.03)
+            .collect();
+        write_audio_to_file(&samples, 16_000, &path, false).expect("audio fixture");
+        let captured_at = Utc::now() - chrono::Duration::hours(1);
+        db.get_or_insert_audio_chunk(&path.to_string_lossy(), Some(captured_at))
+            .await
+            .expect("pending audio row");
+
+        let config = Arc::new(AudioTranscriptionEngine::WhisperTinyQuantized);
+        let engine = TranscriptionEngine::new(
+            config.clone(),
+            None,
+            None,
+            vec![screenpipe_core::Language::English],
+            vec![],
+        )
+        .await
+        .expect("cached Whisper engine");
+        let cancellation = Arc::new(AtomicBool::new(false));
+        let cancel_from_thread = cancellation.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(2));
+            cancel_from_thread.store(true, Ordering::Release);
+        });
+
+        let sweep = reconcile_untranscribed(
+            &db,
+            &engine,
+            None,
+            config,
+            None,
+            Some(temp.path()),
+            None,
+            None,
+            Some(cancellation),
+        )
+        .await;
+
+        assert_eq!(sweep.processed_chunks, 0);
+        assert_eq!(sweep.failure, None, "cancellation is not provider failure");
+        let candidates = db
+            .get_reconciliation_candidate_chunks(
+                Utc::now() - chrono::Duration::days(7),
+                Utc::now() - chrono::Duration::minutes(10),
+                50,
+            )
+            .await
+            .expect("pending candidates");
+        assert_eq!(candidates.len(), 1, "cancelled audio remains pending");
+        assert!(path.exists(), "cancelled source media remains durable");
+    }
+
     // ── pending-chunk durable recovery (SCREENPIPE-CLI-RC) ──────────────────
 
     async fn temp_db(dir: &Path) -> DatabaseManager {
@@ -2552,6 +2639,126 @@ mod tests {
         assert_eq!(std::fs::read(&paths[0]).unwrap(), merged);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn worker_provider_failure_and_recovery_emit_support_trace() {
+        use crate::transcription::deepgram::DeepgramTranscriptionConfig;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tracing::instrument::WithSubscriber;
+
+        let Some(trace_path) = std::env::var_os("SCREENPIPE_TEST_AUDIO_TRACE_PATH") else {
+            return;
+        };
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(std::fs::File::create(trace_path).unwrap())
+            .finish();
+
+        async {
+            let temp = tempfile::tempdir().unwrap();
+            let db = temp_db(temp.path()).await;
+            let path = temp
+                .path()
+                .join("Support Trace (input)_2026-09-23_00-00-00.wav");
+            let samples: Vec<f32> = (0..16_000)
+                .map(|index| (index as f32 * 0.1).sin() * 0.1)
+                .collect();
+            write_audio_to_file(&samples, 16_000, &path, false).unwrap();
+            db.get_or_insert_audio_chunk(
+                &path.to_string_lossy(),
+                Some(Utc::now() - chrono::Duration::hours(1)),
+            )
+            .await
+            .unwrap();
+
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .unwrap();
+            let endpoint = format!("http://{}/v1/listen", listener.local_addr().unwrap());
+            let failing = Arc::new(AtomicBool::new(true));
+            let server_failing = failing.clone();
+            let server = tokio::spawn(async move {
+                loop {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let mut request = Vec::new();
+                    loop {
+                        let mut buffer = [0u8; 4096];
+                        let count = stream.read(&mut buffer).await.unwrap();
+                        if count == 0 {
+                            break;
+                        }
+                        request.extend_from_slice(&buffer[..count]);
+                        if let Some(end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+                            let headers = String::from_utf8_lossy(&request[..end]).to_lowercase();
+                            let length = headers
+                                .lines()
+                                .find_map(|line| line.strip_prefix("content-length:"))
+                                .and_then(|value| value.trim().parse::<usize>().ok())
+                                .unwrap_or(0);
+                            if request.len() >= end + 4 + length {
+                                break;
+                            }
+                        }
+                    }
+                    let (status, body) = if server_failing.load(Ordering::Acquire) {
+                        ("503 Service Unavailable", r#"{"error":"test provider unavailable"}"#)
+                    } else {
+                        ("200 OK", r#"{"results":{"channels":[{"alternatives":[{"transcript":"recovered transcript"}]}]}}"#)
+                    };
+                    let response = format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    stream.write_all(response.as_bytes()).await.unwrap();
+                }
+            });
+            let config = DeepgramTranscriptionConfig {
+                endpoint,
+                auth_token: "fixture-token".into(),
+                auth_header_prefix: "Token",
+            };
+            let engine = TranscriptionEngine::Deepgram {
+                config: config.clone(),
+                languages: vec![],
+                vocabulary: vec![],
+            };
+
+            let failed = reconcile_untranscribed(
+                &db,
+                &engine,
+                None,
+                Arc::new(AudioTranscriptionEngine::Deepgram),
+                None,
+                Some(temp.path()),
+                None,
+                None,
+                None,
+            )
+            .await;
+            let technical_failure = failed.failure.expect("provider failure status");
+            assert!(technical_failure.contains("503 Service Unavailable"));
+            assert!(!technical_failure.contains("fixture-token"));
+
+            failing.store(false, Ordering::Release);
+            let recovered = reconcile_untranscribed(
+                &db,
+                &engine,
+                None,
+                Arc::new(AudioTranscriptionEngine::Deepgram),
+                None,
+                Some(temp.path()),
+                None,
+                None,
+                None,
+            )
+            .await;
+            assert_eq!(recovered.processed_chunks, 1);
+            assert_eq!(recovered.failure, None);
+            server.abort();
+        }
+        .with_subscriber(subscriber)
+        .await;
     }
 
     #[tokio::test]
