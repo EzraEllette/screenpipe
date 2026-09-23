@@ -24,14 +24,18 @@ const timeoutMs=Number(process.env.WORKFLOW_EVAL_TIMEOUT_MS || 180000);
 if (!Number.isFinite(timeoutMs) || timeoutMs < 1000 || timeoutMs > 900000) throw new Error("Evaluation timeout must be between 1 and 900 seconds");
 const noChange=feedbackOnly||process.argv.includes("--no-change"), fault=process.argv.includes("--conflict");
 const missingDraft=process.argv.includes("--missing-draft");
+const publicationFailure=process.argv.find(a=>a.startsWith("--publication-failure="))?.split("=")[1];
+if(publicationFailure && !["503","504","persistent"].includes(publicationFailure))throw new Error("Unknown publication failure case");
+if(publicationFailure && (timingCase||discovery||repair||researchNotes||repairSource||noChange||fault||missingDraft))throw new Error("Run publication failures as standalone review cases");
+let publicationAttempts=0,publicationFailures=0;
 const largeContext=process.argv.includes("--large-context");
 const contextHistoryCount=largeContext?160:process.argv.includes("--medium-context")?40:0;
 const aiMediated=researchNotes||repairSource||process.argv.includes("--ai-mediated");
 const now=process.env.WORKFLOW_EVAL_NOW || new Date().toISOString(), start=new Date(Date.parse(now)-86400000).toISOString();
 const rows=[
-  {timestamp:new Date(Date.now()-7200000).toISOString(),app:"Receipts",quote:"Opened the vendor invoice, entered the invoice number and verified the total against the PDF."},
-  {timestamp:new Date(Date.now()-7100000).toISOString(),app:"Receipts",quote:"Saved the receipt. Confirmation: Invoice INV-123 saved successfully."},
-  {timestamp:new Date(Date.now()-6000000).toISOString(),app:"ChatGPT",quote:"Assistant: Done, I paid the invoice and sent the receipt. Workspace menu: Inbox | Finance | Legal | Enterprise. Customer: Can you help me get access?"},
+  {timestamp:new Date(Date.parse(now)-7200000).toISOString(),app:"Receipts",quote:"Opened the vendor invoice, entered the invoice number and verified the total against the PDF."},
+  {timestamp:new Date(Date.parse(now)-7100000).toISOString(),app:"Receipts",quote:"Saved the receipt. Confirmation: Invoice INV-123 saved successfully."},
+  {timestamp:new Date(Date.parse(now)-6000000).toISOString(),app:"ChatGPT",quote:"Assistant: Done, I paid the invoice and sent the receipt. Workspace menu: Inbox | Finance | Legal | Enterprise. Customer: Can you help me get access?"},
 ];
 if(aiMediated){
   rows[0].app="ChatGPT";rows[0].quote="User: Draft a reply to the customer's setup question. Explain where to find the setting. Assistant: Here is a draft reply explaining the setting location.";
@@ -39,11 +43,11 @@ if(aiMediated){
 }
 if(discovery || repair){
   rows.splice(0,rows.length,
-    {timestamp:new Date(Date.now()-7200000).toISOString(),app:"ChatGPT",quote:"User: Review the authentication PR diff and identify missing permission checks. Assistant: The draft review flags the unguarded account lookup. User: Add a regression test and show me the revised diff before merging."},
-    {timestamp:new Date(Date.now()-7100000).toISOString(),app:"ChatGPT",quote:"User: Now review the export PR the same way. Check scope and tests first. Assistant: Here is the draft review and test plan. User: Keep the fix narrow; remove the unrelated cleanup from the plan."},
-    {timestamp:new Date(Date.now()-6000000).toISOString(),app:"ChatGPT",quote:"User: Triage today's customer inbox. Group unresolved setup questions and draft replies. Assistant: Here are two reply drafts. User: Shorten the first and remove the promised delivery date."},
-    {timestamp:new Date(Date.now()-5900000).toISOString(),app:"ChatGPT",quote:"User: Do the same inbox review for yesterday's unanswered customer threads. Assistant: Here are the draft replies. User: Keep these as drafts until I review them."},
-    {timestamp:new Date(Date.now()-5000000).toISOString(),app:"ChatGPT",quote:"Assistant: I paid all invoices, deployed the code and sent every email. Sidebar: Finance | Legal | Enterprise."});
+    {timestamp:new Date(Date.parse(now)-7200000).toISOString(),app:"ChatGPT",quote:"User: Review the authentication PR diff and identify missing permission checks. Assistant: The draft review flags the unguarded account lookup. User: Add a regression test and show me the revised diff before merging."},
+    {timestamp:new Date(Date.parse(now)-7100000).toISOString(),app:"ChatGPT",quote:"User: Now review the export PR the same way. Check scope and tests first. Assistant: Here is the draft review and test plan. User: Keep the fix narrow; remove the unrelated cleanup from the plan."},
+    {timestamp:new Date(Date.parse(now)-6000000).toISOString(),app:"ChatGPT",quote:"User: Triage today's customer inbox. Group unresolved setup questions and draft replies. Assistant: Here are two reply drafts. User: Shorten the first and remove the promised delivery date."},
+    {timestamp:new Date(Date.parse(now)-5900000).toISOString(),app:"ChatGPT",quote:"User: Do the same inbox review for yesterday's unanswered customer threads. Assistant: Here are the draft replies. User: Keep these as drafts until I review them."},
+    {timestamp:new Date(Date.parse(now)-5000000).toISOString(),app:"ChatGPT",quote:"Assistant: I paid all invoices, deployed the code and sent every email. Sidebar: Finance | Legal | Enterprise."});
 }
 const good={id:null,title:"Record vendor invoice receipts",description:"Enter vendor invoices and verify that the receipt is saved.",trigger:"A vendor invoice arrives",outcome:"A receipt is saved",confidence:85,apps:["Receipts"],people:[],teams:[],handoffs:[],variations:[],openQuestions:[],limitations:["One captured instance; recurrence needs further evidence"],timingRuns:[],captureSequence:rows.slice(0,2).map(({timestamp,app})=>({timestamp,app})),stages:rows.slice(0,2).map((row,i)=>({name:i?"Save receipt":"Review invoice",description:i?"Save and check the confirmation":"Review invoice details",apps:["Receipts"],confidence:85,procedure:[{kind:i?"check":"action",text:i?"Save the receipt and check the confirmation.":"Enter the invoice number and verify the total against the PDF.",...row}],openQuestions:[],evidence:[{timestamp:row.timestamp,app:row.app}]})),bottlenecks:[],evidence:rows.slice(0,2).map(({timestamp,app})=>({timestamp,app}))};
 if(aiMediated){
@@ -112,6 +116,9 @@ if (timingCase === "historical") {
 // Keep resolved history after fixture setup so large-context trials exercise
 // the real snapshot boundary, including timing maintenance.
 if(contextHistoryCount)for(let i=0;i<contextHistoryCount;i++)ws.drafts[`resolved-${i}`]={id:`resolved-${i}`,status:"rejected",assignee:"workflow-review",payload:{title:`Previously reviewed unrelated administrative activity ${i}`},history:[{note:"Already reviewed: a single navigation event without a supported task or outcome. Preserve this decision; no new evidence changes it."}]};
+// Put the supported draft past the snapshot boundary so a large-context trial
+// must recover it from the complete file, not just the beginning of the index.
+if(contextHistoryCount && ws.drafts.good){const draft=ws.drafts.good;delete ws.drafts.good;ws.drafts.good=draft;}
 const requestLog:any[]=[];
 const server=Bun.serve({hostname:"127.0.0.1",port:0,idleTimeout:120,async fetch(req){
   if(req.headers.get("authorization")!=="Bearer fixture-workspace")return new Response("Unauthorized",{status:401});
@@ -135,7 +142,10 @@ const server=Bun.serve({hostname:"127.0.0.1",port:0,idleTimeout:120,async fetch(
     if(["reject","handoff"].includes(b.action)&&ws.drafts[b.draft_id]?.status!=="open")return Response.json({error:"Draft is no longer open."},{status:409});
     if(b.expected_revision!==ws.revision)return Response.json({error:"Workspace changed. Read context again."},{status:409});
     if(b.action==="propose"&&(discovery||timingCase)){const id=b.draft_id||crypto.randomUUID();ws.drafts[id]={id,status:"open",assignee:b.assignee,payload:b.payload,history:[{note:b.note}]};}
-    else if(b.action==="reject") {ws.drafts[b.draft_id].status="rejected";ws.drafts[b.draft_id].decision=b.note;}
+    else if(b.action==="reject") {
+      if(ws.drafts[b.draft_id].publicationRetry?.retryable)return Response.json({error:"Publication is waiting for source verification. Keep this draft open and retry publication when the recorder recovers, or hand it off for investigation. A temporary save failure is not evidence against the workflow. Read current context before retrying."},{status:409});
+      ws.drafts[b.draft_id].status="rejected";ws.drafts[b.draft_id].decision=b.note;
+    }
     else if(b.action==="handoff") {const d=ws.drafts[b.draft_id];if(b.assignee===task&&(!b.payload||JSON.stringify(b.payload)===JSON.stringify(d.payload)))return Response.json({error:"This self-handoff does not edit the draft. Supply the changed workflow object in payload, or hand the draft to another agent with a question. note is commentary only; it never changes description, stages or procedure. No changes were saved."},{status:409});d.payload=b.payload||d.payload;d.assignee=b.assignee;d.history.push({note:b.note});}
     else if(b.action==="publish") {
       if(b.catalog_revision!==catalogRevision)return Response.json({error:"Catalog changed"},{status:409});
@@ -149,6 +159,17 @@ const server=Bun.serve({hostname:"127.0.0.1",port:0,idleTimeout:120,async fetch(
       // Validate literal source identity, but deliberately do not encode the
       // semantic oracle. The reviewer must reject an exactly quoted bad claim.
       if(payload.stages?.some((s:any)=>s.procedure?.some((p:any)=>!rows.some(r=>r.timestamp===p.timestamp&&r.app===p.app&&r.quote.includes(p.quote)))))return Response.json({error:"Unsupported source quote"},{status:422});
+      // Mirror the Rust retry contract, without showing the outcome oracle to
+      // the agent. Native tests separately exercise the real persistence path.
+      if(publicationFailure){
+        publicationAttempts++;
+        if(publicationFailure==="persistent"||publicationFailures===0){
+          publicationFailures++;
+          if(!d.publicationRetry?.retryable){d.publicationRetry={retryable:true};ws.revision++;}
+          return Response.json({error:"Recorder temporarily unavailable; retry publication later"},{status:publicationFailure==="504"?504:503});
+        }
+      }
+      delete d.publicationRetry;
       d.payload=structuredClone(payload);published.push(structuredClone(payload));catalogRevision++;d.status="published";d.receipt={revision:catalogRevision,changes:{created:payload.id?0:1,updated:payload.id?1:0}};
     } else if(b.action==="finish") {
       if(timingCase&&task==="workflow-review"&&!ws.cycle.finished["workflow-maintain"])return Response.json({error:"Maintenance has not finished."},{status:409});
@@ -221,6 +242,19 @@ try{
   const discovered=Object.values(ws.drafts).filter((d:any)=>d.status==="open"&&d.assignee!==task) as any[];
   let checks: Record<string, boolean>={exited:exit===0,sourceRead:noChange||reads>0,rejectedMisattribution:discovery||feedbackOnly||ws.drafts.bad?.status==="rejected",feedbackNotInvented:!feedbackOnly||(!greetingSearch&&published.length===0),completed:ws.cycle.status==="complete",correctPublication:discovery?published.length===0:noChange?published.length===0:published.length===1&&published[0].id==null&&published[0].stages.every((s:any)=>s.procedure.every((p:any)=>p.app===((aiMediated||repair)?"ChatGPT":"Receipts"))),conflictRecovery:!fault||injected,missingDraftRecovery:!missingDraft||(injected&&published.length===1&&ws.cycle.status==="complete"),privateVerified:verified};
   if(discovery)Object.assign(checks,{distinctJobs:discovered.some(d=>JSON.stringify(d.payload).includes(rows[0].timestamp)&&!JSON.stringify(d.payload).includes(rows[2].timestamp))&&discovered.some(d=>JSON.stringify(d.payload).includes(rows[2].timestamp)&&!JSON.stringify(d.payload).includes(rows[0].timestamp)),separateJobs:discovered.length>=2});
+  if(publicationFailure){
+    Object.assign(checks,{
+      outageExercised:publicationFailures>0,
+      preservedSupportedDraft:ws.drafts.good?.status!=="rejected" && ws.drafts.good?.payload?.stages?.every((s:any)=>s.procedure?.every((p:any)=>rows.some(r=>r.timestamp===p.timestamp&&r.app===p.app&&r.quote.includes(p.quote)))),
+      harnessReportsError:events.some(e=>e.type==="tool_execution_end"&&e.toolName==="workflow_workspace"&&e.isError===true),
+    });
+    if(publicationFailure==="persistent"){
+      // Correctly leaving work pending is the intended outcome during an
+      // outage. A timeout still fails: the agent must stop without spinning.
+      delete checks.completed;delete checks.correctPublication;
+      Object.assign(checks,{pendingWithoutPublication:published.length===0&&ws.drafts.good?.status==="open"&&ws.drafts.good?.publicationRetry?.retryable===true,checkpointUnchanged:ws.cycle.status==="running"&&catalogRevision===8});
+    }else Object.assign(checks,{recoveredPublication:publicationAttempts>=2&&publicationFailures===1&&ws.drafts.good?.status==="published"&&!ws.drafts.good?.publicationRetry});
+  }
 
   if(repair)Object.assign(checks,{repairedScope:published.length===1&&!/\b(tested and merged|PR is merged|merge the PR|runs tests and merges)\b/i.test(JSON.stringify(published[0].stages)+published[0].outcome),keptUserWork:published.length===1&&published[0].stages.some((s:any)=>s.procedure.some((p:any)=>p.timestamp===rows[0].timestamp))});
   if(reportedActions)Object.assign(checks,{
@@ -256,7 +290,7 @@ try{
     };
   }
   const passed=Object.values(checks).every(Boolean);
-  await writeFile(join(root,"result.json"),JSON.stringify({passed,checks,ws,published,cycleResults,requestLog,promptVersions,model,case:timingCase||null,now,timeoutMs}),{mode:0o600});
+  await writeFile(join(root,"result.json"),JSON.stringify({passed,checks,ws,published,cycleResults,requestLog,promptVersions,model,case:timingCase||publicationFailure||null,publicationAttempts,publicationFailures,now,timeoutMs}),{mode:0o600});
   if(timing && timing.expected.length && published.length) await writeFile(join(root,"native-timing-input.json"),JSON.stringify({payload:published.at(-1),rows:timing.rows,expectedAverageMinutes:7,expectedSamples:2}),{mode:0o600});
   console.log(JSON.stringify({passed,checks,artifact:root,model}));if(!passed)process.exitCode=1;
 }finally{server.stop(true);}
