@@ -319,6 +319,39 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(all(target_os = "windows", feature = "directml"))]
+    #[ignore = "requires the real native dependency recycle-recovery log"]
+    async fn real_directml_recycle_recovery_survives_support_collection() {
+        let emitted = std::fs::read(
+            std::env::var("SCREENPIPE_TEST_DIRECTML_RECOVERY_LOG")
+                .expect("run the dependency native recycle failure test first"),
+        )
+        .expect("read actual production-filtered dependency events");
+        assert!(!emitted.is_empty());
+        let logs = tempfile::tempdir().unwrap();
+        let current = logs.path().join("screenpipe-app.2026-09-23.log");
+        std::fs::write(&current, emitted).unwrap();
+        std::fs::rename(
+            &current,
+            logs.path().join("screenpipe-app.2026-09-23.1.log"),
+        )
+        .unwrap();
+        std::fs::write(&current, "screenpipe restarted after provider recovery\n").unwrap();
+        let report = collect_redacted_from_dirs(&[logs.path().to_path_buf()])
+            .await
+            .unwrap();
+        println!("redacted real DirectML recycle recovery report:\n{report}");
+        assert!(report.contains("DirectML session recycle failed"));
+        assert!(report.contains("887A0002"));
+        assert!(report.contains("CPU recovery initialized after DirectML session recycle failure"));
+        assert!(report.contains("CPU inference completed after DirectML initialization recovery"));
+        assert!(report.contains("screenpipe restarted"));
+        assert!(!report.contains("parakeet: loading"));
+        assert!(!report.contains("private.person"));
+        assert!(report.contains("contact=[EMAIL]"));
+    }
+
+    #[tokio::test]
     async fn capture_pause_cause_and_resume_survive_support_collection() {
         // The native focus-warm-pause E2E also asserts these actual messages.
         let dir = tempfile::tempdir().unwrap();

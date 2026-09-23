@@ -13,7 +13,7 @@ pub mod openai_compatible;
 #[cfg(all(
     target_os = "windows",
     feature = "directml",
-    any(feature = "parakeet", test)
+    feature = "parakeet"
 ))]
 mod parakeet_windows;
 pub mod stt;
