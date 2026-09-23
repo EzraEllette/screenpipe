@@ -459,11 +459,27 @@ pub(crate) async fn reclaim(
     Ok(())
 }
 
+// Compute the preceding maximum once in primary-key order. A correlated MAX
+// rescans the entire prefix for every file, making large catalogs quadratic.
+// Keep the maximum (rather than only the preceding row) so even malformed or
+// missing-file ranges retain exactly the same overlap checks.
+const INVALID_RANGES: &str = "WITH ranges AS (
+    SELECT first_id,last_id,file_id,
+           max(last_id) OVER (ORDER BY first_id
+               ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS previous_last
+    FROM _bulk_element_ranges
+) SELECT EXISTS(
+    SELECT 1 FROM ranges r JOIN _bulk_files p ON p.id=r.file_id
+    WHERE r.first_id>r.last_id OR p.table_name!='elements'
+       OR p.state NOT IN ('published','dirty')
+       OR r.first_id<=r.previous_last
+)";
+
 pub(crate) async fn verify(
     storage: &Arc<HybridStorage>,
     pool: &SqlitePool,
 ) -> Result<(), sqlx::Error> {
-    let bad:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM _bulk_element_ranges r JOIN _bulk_files p ON p.id=r.file_id WHERE r.first_id>r.last_id OR p.table_name!='elements' OR p.state NOT IN ('published','dirty') OR r.first_id<=(SELECT max(last_id) FROM _bulk_element_ranges WHERE first_id<r.first_id))").fetch_one(pool).await?;
+    let bad: bool = sqlx::query_scalar(INVALID_RANGES).fetch_one(pool).await?;
     if bad {
         return Err(storage_error("element range catalog is invalid"));
     }
@@ -607,4 +623,113 @@ async fn export_batch(
         query.execute(&mut *tx).await?;
     }
     tx.commit().await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::INVALID_RANGES;
+    use rusqlite::{Connection, StatementStatus};
+
+    fn catalog(ranges: &[(i64, i64)]) -> Connection {
+        let mut db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE _bulk_files(id INTEGER PRIMARY KEY,table_name TEXT,state TEXT);
+            CREATE TABLE _bulk_element_ranges(first_id INTEGER PRIMARY KEY,last_id INTEGER NOT NULL,
+                file_id INTEGER NOT NULL UNIQUE REFERENCES _bulk_files(id));",
+        )
+        .unwrap();
+        let tx = db.transaction().unwrap();
+        for (id, &(first, last)) in ranges.iter().enumerate() {
+            tx.execute(
+                "INSERT INTO _bulk_files VALUES(?,'elements','published')",
+                [id as i64],
+            )
+            .unwrap();
+            tx.execute(
+                "INSERT INTO _bulk_element_ranges VALUES(?,?,?)",
+                [first, last, id as i64],
+            )
+            .unwrap();
+        }
+        tx.commit().unwrap();
+        db
+    }
+
+    #[test]
+    fn range_catalog_rejects_overlaps_and_invalid_publications() {
+        for (ranges, invalid) in [
+            (vec![], false),
+            (vec![(i64::MIN, -1), (0, 0), (1, i64::MAX)], false),
+            (vec![(20, 30), (0, 10)], false),
+            (vec![(0, 10), (10, 20)], true),
+            (vec![(0, 100), (10, 20), (30, 40)], true),
+            (vec![(0, 10), (11, 9)], true),
+        ] {
+            let db = catalog(&ranges);
+            assert_eq!(
+                db.query_row(INVALID_RANGES, [], |r| r.get::<_, bool>(0))
+                    .unwrap(),
+                invalid,
+                "{ranges:?}"
+            );
+        }
+        for (table, state, invalid) in [
+            ("elements", "published", false),
+            ("elements", "dirty", false),
+            ("elements", "encoding", true),
+            ("elements", "retired", true),
+            ("outputs", "published", true),
+        ] {
+            let db = catalog(&[(1, 2)]);
+            db.execute(
+                "UPDATE _bulk_files SET table_name=?,state=?",
+                [table, state],
+            )
+            .unwrap();
+            assert_eq!(
+                db.query_row(INVALID_RANGES, [], |r| r.get::<_, bool>(0))
+                    .unwrap(),
+                invalid,
+                "{table} {state}"
+            );
+        }
+        // Even if earlier ranges have lost their catalog entries, their
+        // largest end still participates in the original overlap check.
+        let db = catalog(&[(0, 100), (10, 20), (30, 40)]);
+        db.execute_batch("PRAGMA foreign_keys=OFF").unwrap();
+        db.execute("DELETE FROM _bulk_files WHERE id<2", [])
+            .unwrap();
+        assert!(db
+            .query_row(INVALID_RANGES, [], |r| r.get::<_, bool>(0))
+            .unwrap());
+    }
+
+    #[test]
+    fn range_catalog_work_scales_with_archive_count() {
+        let mut previous = 0;
+        for count in [1_000, 2_000, 4_000] {
+            let db = catalog(
+                &(0..count)
+                    .map(|i| (i * 32_768, (i + 1) * 32_768 - 1))
+                    .collect::<Vec<_>>(),
+            );
+            let mut statement = db.prepare(INVALID_RANGES).unwrap();
+            let started = std::time::Instant::now();
+            assert!(!statement.query_row([], |r| r.get::<_, bool>(0)).unwrap());
+            let steps = statement.get_status(StatementStatus::VmStep);
+            eprintln!(
+                "range catalog: files={count} steps={steps} elapsed={:?}",
+                started.elapsed()
+            );
+            // Instruction counts prove the absence of repeated prefix scans
+            // without a timing assertion sensitive to concurrent builds.
+            if previous != 0 {
+                assert!(
+                    steps < previous * 3,
+                    "doubling files must not quadruple verification work"
+                );
+            }
+            previous = steps;
+        }
+    }
 }
