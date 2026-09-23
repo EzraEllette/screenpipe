@@ -14,10 +14,10 @@
       "name": "Preserve both writers during concurrent chat saves",
       "source": {
         "kind": "git_regression",
-        "fix_commit": "1a74f9c68"
+        "fix_commit": "1a74f9c68a19fdab0ba0d26409c111a79b3d5735"
       },
-      "base_ref": "1a74f9c68^",
-      "oracle_ref": "1a74f9c68",
+      "base_ref": "8c0affa6bd2476d84a226f85a7b18cab126d0a33",
+      "oracle_ref": "1a74f9c68a19fdab0ba0d26409c111a79b3d5735",
       "tags": [
         "regression",
         "escaped-failure",
@@ -25,26 +25,28 @@
         "concurrency",
         "data-loss"
       ],
-      "prompt": "A user has the same chat open in two app windows. Both writers start from the same conversation. Writer A saves a new message, then writer B saves a different new message from its stale snapshot. The later save silently deletes writer A's message. Fix conversation persistence so concurrent saves preserve both suffixes, do not duplicate messages, retain the richer copy of a streaming message, and do not let stale scalar fields revert newer disk state. Keep the solution scoped to chat persistence and add or update tests as needed.",
+      "prompt": "A saved chat can lose messages when a later writer saves an older snapshot. Fix the conversation persistence API so stale snapshots contribute new messages without losing either suffix or repeating message IDs, and preserve the already-saved message order. For the same streaming message ID retain longer text, then more structured content blocks when text length ties. A stale snapshot must preserve newer saved scalar fields; a current edit must still persist its title and browser state. Concurrent message saves and concurrent updates to distinct flags must all survive. A missing-conversation flag update remains a no-op. Save errors must reject and leave later saves usable. Keep ordinary new saves and reloads working. Tests exercise actual persistence calls through synthetic filesystem ports, including overlapping calls in one runtime and an external commit between calls; independent native webview scheduling is outside this case. Keep the solution scoped to chat persistence and add or update tests as needed.",
       "agent_timeout_seconds": 900,
-      "dependency_links": [
-        {
-          "source_path": "apps/screenpipe-app-tauri/node_modules",
-          "destination_path": "apps/screenpipe-app-tauri/node_modules"
-        }
-      ],
       "grader": {
         "timeout_seconds": 300,
         "fixtures": [
           {
-            "source_path": "apps/screenpipe-app-tauri/lib/__tests__/chat-merge.test.ts"
-          },
-          {
-            "source_path": "apps/screenpipe-app-tauri/lib/__tests__/chat-storage-concurrency.test.ts"
+            "local_path": "graders/chat-save-outcomes.fixture.ts",
+            "destination_path": "apps/screenpipe-app-tauri/lib/__tests__/eval-chat-save.test.ts"
           }
         ],
-        "command": "cd apps/screenpipe-app-tauri && bun x vitest run --config vitest.config.ts lib/__tests__/chat-merge.test.ts lib/__tests__/chat-storage-concurrency.test.ts"
-      }
+        "command": "cd apps/screenpipe-app-tauri && NODE_OPTIONS=--localstorage-file=.eval-localstorage node node_modules/vitest/vitest.mjs run --config vitest.config.ts lib/__tests__/eval-chat-save.test.ts --pool=forks --poolOptions.forks.singleFork=true"
+      },
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/lib/chat-storage.ts",
+        "apps/screenpipe-app-tauri/lib/chat-merge.ts"
+      ],
+      "grader_dependency_links": [
+        {
+          "source_path": "apps/screenpipe-app-tauri/node_modules",
+          "destination_path": "apps/screenpipe-app-tauri/node_modules"
+        }
+      ]
     },
     {
       "id": "app-terminal-quota-retry",

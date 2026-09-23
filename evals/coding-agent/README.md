@@ -750,3 +750,24 @@ This case does not establish native recording resumption, scheduler policy,
 migration authority, actual device histories, execution isolation or model gains.
 Build failures remain infrastructure failures; inspect the executed assertion
 logs before treating any failure as the intended historical defect.
+## Conversation save outcomes
+
+`app-chat-concurrent-save` exercises the persistence API and reads back the saved
+JSON through synthetic filesystem ports. Its grader no longer imports a helper
+or reset function introduced by the reference fix: the parent reaches eight
+behavior failures while preserving four outcomes, and the source-only reference
+passes all twelve. Outcomes cover stale and overlapping message saves, streaming
+richness, saved ordering, scalar intent, concurrent flag updates, missing IDs and
+recovery after a rejected write.
+
+Run `bun test evals/coding-agent/calibrate-chat-save.test.js` with the desktop
+Vitest dependencies installed. Nine controls cover parent/reference, an unused
+correct helper, equivalent private names, conflict bypass, always keeping disk,
+streaming/scalar clobbering and missing-source setup failure. Set
+`SCREENPIPE_EVAL_CALIBRATION_RECEIPTS` to retain per-control logs. Fixtures and
+dependencies are materialized only for grading.
+
+The twelve outcomes also pass against current persistence source using the
+historical synthetic test setup. This is not the complete current app suite,
+independent native webview scheduling, real filesystem durability, proof of
+workspace isolation or a model trial.
