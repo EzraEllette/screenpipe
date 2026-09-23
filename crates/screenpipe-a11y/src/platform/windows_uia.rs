@@ -132,9 +132,53 @@ type RuntimeId = Vec<i32>;
 const RETAINED_EVENT_LIMIT: usize = 4096;
 const RETAINED_RESYNC_INTERVAL: Duration = Duration::from_secs(300);
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BrowserDocumentKind {
+    Chromium,
+    Mozilla,
+}
+
+fn matches_browser_document(kind: BrowserDocumentKind, node: &AccessibilityNode) -> bool {
+    node.control_type.eq_ignore_ascii_case("document")
+        && match kind {
+            BrowserDocumentKind::Chromium => node.automation_id.as_deref() == Some("RootWebArea"),
+            // Firefox/Zen use DOMNodeID for AutomationId. Top-level selection
+            // is enforced by refresh_matching's Document-ancestor exclusion.
+            BrowserDocumentKind::Mozilla => true,
+        }
+}
+
+fn validated_document_url(
+    nodes: Vec<AccessibilityNode>,
+    require_fresh_url: bool,
+) -> (bool, bool, Option<String>) {
+    let document_found = !nodes.is_empty();
+    let urls = nodes
+        .into_iter()
+        .filter_map(|node| node.value)
+        .filter(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            value.starts_with("http://") || value.starts_with("https://")
+        })
+        .collect::<std::collections::HashSet<_>>();
+    let unique = urls.len() == 1;
+    (
+        document_found,
+        !require_fresh_url || unique,
+        unique.then(|| urls.into_iter().next()).flatten(),
+    )
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RetainedNoticeKind {
+    Property,
+    BranchProperties,
+    Structure,
+}
+
 struct RetainedNotice {
     element: IUIAutomationElement,
-    structure: bool,
+    kind: RetainedNoticeKind,
 }
 
 struct RetainedNotices {
@@ -143,7 +187,7 @@ struct RetainedNotices {
 }
 
 impl RetainedNotices {
-    fn push(&self, element: &IUIAutomationElement, structure: bool) {
+    fn push(&self, element: &IUIAutomationElement, kind: RetainedNoticeKind) {
         let Some(mut queue) = self.queue.try_lock() else {
             self.overflowed.store(true, Ordering::Release);
             return;
@@ -152,7 +196,11 @@ impl RetainedNotices {
             self.overflowed.store(true, Ordering::Release);
             return;
         }
-        if structure && queue.iter().any(|notice| notice.structure) {
+        if kind == RetainedNoticeKind::Structure
+            && queue
+                .iter()
+                .any(|notice| notice.kind == RetainedNoticeKind::Structure)
+        {
             // RuntimeId lookup is provider IPC and does not belong in the
             // callback. Coalesce structural storms to one retained notice and
             // request one root recovery after the current baseline settles.
@@ -163,7 +211,7 @@ impl RetainedNotices {
         // all provider communication remain on the owning UIA walker thread.
         queue.push(RetainedNotice {
             element: element.clone(),
-            structure,
+            kind,
         });
     }
 }
@@ -179,8 +227,12 @@ impl IUIAutomationPropertyChangedEventHandler_Impl for RetainedPropertyHandler_I
         _newvalue: &VARIANT,
     ) -> windows::core::Result<()> {
         if let Some(sender) = sender {
-            self.0
-                .push(sender, property_requires_branch_refresh(propertyid));
+            let kind = if property_requires_branch_refresh(propertyid) {
+                RetainedNoticeKind::BranchProperties
+            } else {
+                RetainedNoticeKind::Property
+            };
+            self.0.push(sender, kind);
         }
         Ok(())
     }
@@ -204,7 +256,7 @@ impl IUIAutomationStructureChangedEventHandler_Impl for RetainedStructureHandler
         if let Some(sender) = sender {
             // UIA defines sender as the affected element or its parent depending
             // on change type. Rebuilding that retained branch is safe for both.
-            self.0.push(sender, true);
+            self.0.push(sender, RetainedNoticeKind::Structure);
         }
         Ok(())
     }
@@ -220,12 +272,10 @@ impl IUIAutomationEventHandler_Impl for RetainedTextHandler_Impl {
         _eventid: UIA_EVENT_ID,
     ) -> windows::core::Result<()> {
         if let Some(sender) = sender {
-            // Chromium reports leaf text changes on the containing text
-            // provider (often the Document), and layout invalidation on the
-            // affected ancestor. Refreshing only that sender's properties
-            // would preserve stale descendant names and bounds. Rebuild just
-            // the reported retained branch through the normal bounded queue.
-            self.0.push(sender, true);
+            // Chromium commonly reports text/layout changes on Document.
+            // Refresh retained descendant properties without discarding their
+            // identities, children, or an in-progress traversal.
+            self.0.push(sender, RetainedNoticeKind::BranchProperties);
         }
         Ok(())
     }
@@ -247,9 +297,33 @@ pub(crate) struct RetainedUiaCapture {
     last_projection: Instant,
     rebuilding: bool,
     projected_revision: u64,
-    overflow_recovery_pending: bool,
-    overflow_recovery_started: bool,
+    overflow_recovery: RecoveryRequest,
     url_validation_started: Instant,
+}
+
+#[derive(Default)]
+struct RecoveryRequest {
+    pending: bool,
+    in_flight: bool,
+}
+
+impl RecoveryRequest {
+    fn request(&mut self) {
+        self.pending = true;
+    }
+
+    fn start(&mut self) -> bool {
+        if !self.pending || self.in_flight {
+            return false;
+        }
+        self.pending = false;
+        self.in_flight = true;
+        true
+    }
+
+    fn finish(&mut self) {
+        self.in_flight = false;
+    }
 }
 
 struct UiaRetainedProvider<'a> {
@@ -616,8 +690,7 @@ impl UiaContext {
             last_projection: Instant::now(),
             rebuilding: false,
             projected_revision: 1,
-            overflow_recovery_pending: false,
-            overflow_recovery_started: false,
+            overflow_recovery: RecoveryRequest::default(),
             url_validation_started: Instant::now(),
         })
     }
@@ -654,7 +727,7 @@ impl UiaContext {
         max_calls: usize,
         max_nodes: usize,
         timeout: Duration,
-        expect_browser_document: bool,
+        browser_document_kind: Option<BrowserDocumentKind>,
         require_fresh_url: bool,
     ) -> windows::core::Result<CapturedTree> {
         let start = Instant::now();
@@ -664,51 +737,58 @@ impl UiaContext {
             semantic: capture.semantic,
             calls: Cell::new(0),
         };
-        let (document_found, url_fresh, fresh_url) = if expect_browser_document && max_calls >= 2 {
-            match capture.tree.refresh_matching(
-                &provider,
-                (max_calls / 2).min(4),
-                start + timeout,
-                Some("document"),
-                true,
-                |node| {
-                    node.control_type.eq_ignore_ascii_case("document")
-                        && node.automation_id.as_deref() == Some("RootWebArea")
-                },
-            ) {
-                Ok(nodes) => {
-                    let document_found = !nodes.is_empty();
-                    let urls = nodes
-                        .into_iter()
-                        .filter_map(|node| node.value)
-                        .filter(|value| {
-                            let value = value.trim().to_ascii_lowercase();
-                            value.starts_with("http://") || value.starts_with("https://")
-                        })
-                        .collect::<std::collections::HashSet<_>>();
-                    let unique = urls.len() == 1;
-                    (
-                        document_found,
-                        !require_fresh_url || unique,
-                        unique.then(|| urls.into_iter().next()).flatten(),
-                    )
+        let (document_found, url_fresh, fresh_url) =
+            if let Some(kind) = browser_document_kind.filter(|_| max_calls >= 2) {
+                match capture.tree.refresh_matching(
+                    &provider,
+                    (max_calls / 2).min(4),
+                    start + timeout,
+                    Some("document"),
+                    true,
+                    |node| matches_browser_document(kind, node),
+                ) {
+                    Ok((nodes, false)) => validated_document_url(nodes, require_fresh_url),
+                    Ok((_, true)) => {
+                        capture.last_resync = Instant::now();
+                        capture.rebuilding = true;
+                        capture.url_validation_started = Instant::now();
+                        RetainedUiaIssue {
+                            stage: "fresh_document_identity_mismatch",
+                            hresult: None,
+                            elapsed: start.elapsed(),
+                            budget: timeout,
+                            nodes: capture.tree.len(),
+                            fallback: "bounded_resync",
+                            accessibility_outcome: "invalidated_recovery_pending",
+                            pixel_outcome: "preserved_when_privacy_allows",
+                        }
+                        .report();
+                        (false, false, None)
+                    }
+                    Err(error) => {
+                        capture.tree.resync();
+                        capture.last_resync = Instant::now();
+                        capture.rebuilding = true;
+                        capture.url_validation_started = Instant::now();
+                        RetainedUiaIssue {
+                            stage: "fresh_document_refresh",
+                            hresult: Some(error.code().0),
+                            elapsed: start.elapsed(),
+                            budget: timeout,
+                            nodes: capture.tree.len(),
+                            fallback: "bounded_resync",
+                            accessibility_outcome: "invalidated_recovery_pending",
+                            pixel_outcome: "preserved_when_privacy_allows",
+                        }
+                        .report();
+                        (false, false, None)
+                    }
                 }
-                Err(error) => {
-                    tracing::debug!(
-                        target: "screenpipe_a11y_capture",
-                        stage = "fresh_url_validation",
-                        hresult = format_args!("0x{:08X}", error.code().0 as u32),
-                        fallback = "blocked_url",
-                        "fresh browser URL validation failed"
-                    );
-                    (false, false, None)
-                }
-            }
-        } else if !expect_browser_document {
-            (true, !require_fresh_url, None)
-        } else {
-            (false, false, None)
-        };
+            } else if browser_document_kind.is_none() {
+                (true, !require_fresh_url, None)
+            } else {
+                (false, false, None)
+            };
         let notices = {
             let mut queue = capture.notices.queue.lock();
             let take = queue.len().min(max_calls.min(8));
@@ -719,7 +799,7 @@ impl UiaContext {
             // Remember a missed-event recovery request, but never discard an
             // unfinished baseline repeatedly under a storm. Finish or reach
             // capacity first, then perform one bounded root resync.
-            capture.overflow_recovery_pending = true;
+            capture.overflow_recovery.request();
             RetainedUiaIssue {
                 stage: "event_overflow",
                 hresult: None,
@@ -736,7 +816,7 @@ impl UiaContext {
         let mut unknown_count = 0usize;
         let mut event_calls = 0usize;
         for notice in notices {
-            if was_pending && notice.structure {
+            if was_pending && notice.kind == RetainedNoticeKind::Structure {
                 capture.notices.queue.lock().push(notice);
                 continue;
             }
@@ -746,14 +826,31 @@ impl UiaContext {
             }
             event_calls += 1;
             match self.runtime_id(&notice.element) {
-                Ok(key) if capture.tree.changed(&key, notice.structure) => {
-                    if notice.structure {
-                        // Present the last coherent projection while the
-                        // changed branch is rebuilt, then swap atomically.
+                Ok(key) => {
+                    let changed = match notice.kind {
+                        RetainedNoticeKind::Property => capture.tree.changed(&key, false),
+                        RetainedNoticeKind::BranchProperties => {
+                            capture.tree.refresh_branch_properties(&key)
+                        }
+                        RetainedNoticeKind::Structure => capture.tree.changed(&key, true),
+                    };
+                    if changed && notice.kind == RetainedNoticeKind::Structure {
+                        // Mark the branch rebuild; each bounded partial
+                        // revision remains truthfully projected below.
                         capture.rebuilding = true;
                     }
+                    if !changed {
+                        if notice.kind == RetainedNoticeKind::BranchProperties {
+                            capture.tree.refresh_all_properties();
+                        } else {
+                            unknown_count += 1;
+                        }
+                    }
                 }
-                _ => unknown_count += 1,
+                Err(_) if notice.kind == RetainedNoticeKind::BranchProperties => {
+                    capture.tree.refresh_all_properties();
+                }
+                Err(_) => unknown_count += 1,
             }
         }
         if unknown_count > 0 {
@@ -761,7 +858,7 @@ impl UiaContext {
             // root, which is intentionally absent from the retained Control
             // View identities. The affected branch cannot be named safely, so
             // request one bounded root recovery after current work settles.
-            capture.overflow_recovery_pending = true;
+            capture.overflow_recovery.request();
             tracing::debug!(
                 target: "screenpipe_a11y_capture",
                 stage = "unknown_event_identity",
@@ -770,15 +867,16 @@ impl UiaContext {
                 "uia event did not match retained identity"
             );
         }
-        if capture.overflow_recovery_pending
-            && !capture.overflow_recovery_started
+        if capture.overflow_recovery.pending
+            && !capture.overflow_recovery.in_flight
             && !was_pending
             && capture.last_resync.elapsed() >= Duration::from_secs(1)
         {
-            capture.tree.resync();
-            capture.last_resync = Instant::now();
-            capture.rebuilding = true;
-            capture.overflow_recovery_started = true;
+            if capture.overflow_recovery.start() {
+                capture.tree.resync();
+                capture.last_resync = Instant::now();
+                capture.rebuilding = true;
+            }
         } else if !was_pending && capture.last_resync.elapsed() >= RETAINED_RESYNC_INTERVAL {
             capture.tree.resync();
             capture.last_resync = Instant::now();
@@ -792,10 +890,11 @@ impl UiaContext {
         )?;
         let truncation = match progress {
             Progress::Capacity => TruncationReason::MaxNodes,
+            Progress::Deferred if capture.tree.len() >= max_nodes => TruncationReason::MaxNodes,
             Progress::Deferred => TruncationReason::Pending,
             Progress::Complete => TruncationReason::None,
         };
-        if expect_browser_document
+        if browser_document_kind == Some(BrowserDocumentKind::Chromium)
             && !document_found
             && progress == Progress::Complete
             && capture.last_resync.elapsed() >= Duration::from_millis(50)
@@ -807,21 +906,20 @@ impl UiaContext {
             capture.tree.resync();
             capture.last_resync = Instant::now();
         }
-        let document_pending_discovery = expect_browser_document
+        let document_pending_discovery = browser_document_kind.is_some()
             && !document_found
+            && capture.tree.len() < max_nodes
             && (capture.tree.has_pending_work()
                 || capture.url_validation_started.elapsed() < Duration::from_secs(2));
         if progress == Progress::Complete && capture.rebuilding {
             capture.rebuilding = false;
-            capture.overflow_recovery_pending = false;
-            capture.overflow_recovery_started = false;
+            capture.overflow_recovery.finish();
         } else if progress == Progress::Capacity {
             // Capacity is a truthful terminal partial projection, not an
             // endlessly unfinished baseline. A cooldown above prevents an
             // event storm from restarting the root every capture.
-            if capture.overflow_recovery_started {
-                capture.overflow_recovery_pending = false;
-                capture.overflow_recovery_started = false;
+            if capture.overflow_recovery.in_flight {
+                capture.overflow_recovery.finish();
             }
         }
         // Publish every actual mutation, including prompt branch invalidation
@@ -839,7 +937,7 @@ impl UiaContext {
                 calls: provider.calls.get() + event_calls,
                 retained_nodes: capture.tree.len(),
                 notices: notice_count,
-                pending: capture.tree.has_pending_work(),
+                pending: capture.tree.has_runnable_work(max_nodes),
                 overflowed,
                 url_fresh,
                 fresh_url,
@@ -1818,7 +1916,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn scroll_percent_changes_rebuild_the_reported_branch() {
+    fn scroll_percent_changes_refresh_the_reported_branch_properties() {
         assert!(property_requires_branch_refresh(
             UIA_ScrollHorizontalScrollPercentPropertyId
         ));
@@ -1826,6 +1924,61 @@ mod tests {
             UIA_ScrollVerticalScrollPercentPropertyId
         ));
         assert!(!property_requires_branch_refresh(UIA_NamePropertyId));
+    }
+
+    #[test]
+    fn recovery_request_arriving_during_pass_survives_completion() {
+        let mut recovery = RecoveryRequest::default();
+        recovery.request();
+        assert!(recovery.start());
+        assert!(!recovery.pending);
+        assert!(recovery.in_flight);
+
+        // Models a missed event after its affected leaf was already visited.
+        recovery.request();
+        recovery.finish();
+        assert!(recovery.pending);
+        assert!(!recovery.in_flight);
+
+        assert!(recovery.start());
+        assert!(!recovery.pending);
+        recovery.finish();
+        assert!(!recovery.pending);
+        assert!(!recovery.in_flight);
+    }
+
+    #[test]
+    fn browser_document_matching_and_url_validation_are_provider_aware() {
+        let chromium = AccessibilityNode {
+            control_type: "Document".into(),
+            automation_id: Some("RootWebArea".into()),
+            value: Some("https://example.test/committed".into()),
+            ..Default::default()
+        };
+        let mozilla = AccessibilityNode {
+            automation_id: Some("page-root-dom-id".into()),
+            ..chromium.clone()
+        };
+        assert!(matches_browser_document(
+            BrowserDocumentKind::Chromium,
+            &chromium
+        ));
+        assert!(!matches_browser_document(
+            BrowserDocumentKind::Chromium,
+            &mozilla
+        ));
+        assert!(matches_browser_document(
+            BrowserDocumentKind::Mozilla,
+            &mozilla
+        ));
+
+        let (_, valid, url) = validated_document_url(vec![mozilla.clone()], true);
+        assert!(valid);
+        assert_eq!(url.as_deref(), Some("https://example.test/committed"));
+        assert!(!validated_document_url(Vec::new(), true).1);
+        let mut other = mozilla.clone();
+        other.value = Some("https://other.test/iframe".into());
+        assert!(!validated_document_url(vec![mozilla, other], true).1);
     }
 
     #[test]

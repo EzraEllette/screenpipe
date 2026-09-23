@@ -1095,6 +1095,7 @@ impl MacosTreeWalker {
             simhash,
             truncated: state.truncated,
             truncation_reason: state.truncation_reason,
+            retained_work_pending: false,
             max_depth_reached: state.max_depth_reached,
             window_bounds,
         }))
@@ -1288,6 +1289,7 @@ impl WalkState {
             start,
             truncated: false,
             truncation_reason: super::TruncationReason::None,
+            retained_work_pending: false,
             max_depth_reached: 0,
             app: AppState::None,
             window_x: 0.0,

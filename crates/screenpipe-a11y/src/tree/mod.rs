@@ -411,6 +411,9 @@ pub struct TreeSnapshot {
     pub truncated: bool,
     /// Why the walk stopped (timeout, max_nodes, or completed naturally).
     pub truncation_reason: TruncationReason,
+    /// Internal owner-thread work may remain after this snapshot becomes
+    /// publishable (for example, bounded property refresh at the node cap).
+    pub retained_work_pending: bool,
     /// Deepest depth reached during the walk.
     pub max_depth_reached: usize,
     /// Screen bounds of the walked (focused) window, normalized to the
@@ -961,6 +964,7 @@ mod tests {
             simhash: 0,
             truncated: false,
             truncation_reason: TruncationReason::None,
+            retained_work_pending: false,
             max_depth_reached: 1,
             window_bounds: None,
         }

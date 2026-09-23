@@ -778,6 +778,7 @@ mod tests {
             simhash: 1,
             truncated: false,
             truncation_reason: TruncationReason::None,
+            retained_work_pending: false,
             max_depth_reached: 3,
             window_bounds: None,
             semantic_nodes: Vec::new(),

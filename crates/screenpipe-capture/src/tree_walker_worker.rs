@@ -479,9 +479,9 @@ fn run_worker(
     background_ready: Arc<AtomicBool>,
 ) {
     let mut runner = runner_factory(initial_config);
-    let mut continuation: Option<(TreeWalkerConfig, Duration)> = None;
+    let mut continuation: Option<(TreeWalkerConfig, Duration, bool)> = None;
     loop {
-        let command = if let Some((_, delay)) = continuation.as_ref() {
+        let command = if let Some((_, delay, _)) = continuation.as_ref() {
             match receiver.recv_timeout(*delay) {
                 Ok(command) => Some(command),
                 Err(mpsc::RecvTimeoutError::Timeout) => None,
@@ -494,12 +494,21 @@ fn run_worker(
             }
         };
         let Some(command) = command else {
-            let (config, _) = continuation.take().expect("continuation exists");
+            let (config, _, mut publishable_notified) =
+                continuation.take().expect("continuation exists");
             let started = std::time::Instant::now();
             let result = runner.walk(config.clone());
             let provider_time = started.elapsed();
+            if is_publishable(&result) && !publishable_notified {
+                background_ready.store(true, Ordering::Release);
+                publishable_notified = true;
+            }
             if needs_background_continuation(&result) {
-                continuation = Some((config, continuation_delay(provider_time)));
+                continuation = Some((
+                    config,
+                    continuation_delay(provider_time),
+                    publishable_notified,
+                ));
             } else if matches!(result, TreeWalkResult::Found(_)) {
                 background_ready.store(true, Ordering::Release);
             } else {
@@ -520,10 +529,15 @@ fn run_worker(
                 let started = std::time::Instant::now();
                 let result = runner.walk(config.clone());
                 let should_continue = needs_background_continuation(&result);
+                let publishable_notified = is_publishable(&result);
                 completed.store(true, Ordering::Release);
                 let delivered = response.send(result).is_ok();
                 if delivered && should_continue && !abandoned.load(Ordering::Acquire) {
-                    continuation = Some((config, continuation_delay(started.elapsed())));
+                    continuation = Some((
+                        config,
+                        continuation_delay(started.elapsed()),
+                        publishable_notified,
+                    ));
                 } else {
                     continuation = None;
                     if !delivered && !abandoned.load(Ordering::Acquire) {
@@ -546,11 +560,20 @@ fn run_worker(
     debug!("tree walker worker exiting");
 }
 
+fn is_publishable(result: &TreeWalkResult) -> bool {
+    matches!(
+        result,
+        TreeWalkResult::Found(snapshot)
+            if snapshot.truncation_reason != screenpipe_a11y::tree::TruncationReason::Pending
+    )
+}
+
 fn needs_background_continuation(result: &TreeWalkResult) -> bool {
     matches!(
         result,
         TreeWalkResult::Found(snapshot)
             if snapshot.truncation_reason == screenpipe_a11y::tree::TruncationReason::Pending
+                || snapshot.retained_work_pending
     ) || matches!(
         result,
         TreeWalkResult::Skipped(screenpipe_a11y::tree::SkipReason::UrlPending)
@@ -625,6 +648,13 @@ mod tests {
     }
 
     fn snapshot(reason: screenpipe_a11y::tree::TruncationReason) -> TreeWalkResult {
+        snapshot_with_retained_work(reason, false)
+    }
+
+    fn snapshot_with_retained_work(
+        reason: screenpipe_a11y::tree::TruncationReason,
+        retained_work_pending: bool,
+    ) -> TreeWalkResult {
         TreeWalkResult::Found(screenpipe_a11y::tree::TreeSnapshot {
             app_name: "test".into(),
             app_id: None,
@@ -643,6 +673,7 @@ mod tests {
             simhash: 1,
             truncated: reason != screenpipe_a11y::tree::TruncationReason::None,
             truncation_reason: reason,
+            retained_work_pending,
             max_depth_reached: 1,
             window_bounds: None,
         })
@@ -733,6 +764,155 @@ mod tests {
         .await
         .expect("continuation reaches a terminal snapshot");
         assert_eq!(calls.load(Ordering::Acquire), 4);
+    }
+
+    #[tokio::test]
+    async fn publishable_capacity_snapshot_continues_retained_refresh_once() {
+        struct FullCapRefreshRunner {
+            calls: Arc<AtomicUsize>,
+            updated: Arc<AtomicBool>,
+        }
+        impl TreeWalkRunner for FullCapRefreshRunner {
+            fn walk(&mut self, _config: TreeWalkerConfig) -> TreeWalkResult {
+                let call = self.calls.fetch_add(1, Ordering::AcqRel) + 1;
+                if call < 3 {
+                    snapshot_with_retained_work(
+                        screenpipe_a11y::tree::TruncationReason::MaxNodes,
+                        true,
+                    )
+                } else {
+                    self.updated.store(true, Ordering::Release);
+                    snapshot_with_retained_work(
+                        screenpipe_a11y::tree::TruncationReason::MaxNodes,
+                        false,
+                    )
+                }
+            }
+        }
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let updated = Arc::new(AtomicBool::new(false));
+        let factory: RunnerFactory = {
+            let calls = calls.clone();
+            let updated = updated.clone();
+            Arc::new(move |_| {
+                Box::new(FullCapRefreshRunner {
+                    calls: calls.clone(),
+                    updated: updated.clone(),
+                })
+            })
+        };
+        let config = TreeWalkerConfig::default();
+        let worker =
+            TreeWalkerWorker::spawn_with_factory("full-cap-refresh", config.clone(), factory)
+                .unwrap();
+        let first = worker
+            .walk_with_timeout(config, Duration::from_millis(100))
+            .await
+            .unwrap();
+        assert!(matches!(
+            first,
+            TreeWalkerWorkerOutcome::Completed(TreeWalkResult::Found(ref snapshot))
+                if snapshot.truncation_reason
+                    == screenpipe_a11y::tree::TruncationReason::MaxNodes
+                    && snapshot.retained_work_pending
+        ));
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !worker.take_background_ready() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("retained full-cap refresh quiesces");
+        assert!(updated.load(Ordering::Acquire));
+        assert_eq!(calls.load(Ordering::Acquire), 3);
+        assert!(!worker.take_background_ready(), "completion notifies once");
+    }
+
+    #[tokio::test]
+    async fn discovery_notifies_once_while_full_cap_refresh_keeps_running() {
+        struct DiscoveryRefreshRunner {
+            calls: Arc<AtomicUsize>,
+            allow_quiesce: Arc<AtomicBool>,
+            suspended: Arc<AtomicUsize>,
+        }
+        impl TreeWalkRunner for DiscoveryRefreshRunner {
+            fn walk(&mut self, _config: TreeWalkerConfig) -> TreeWalkResult {
+                let call = self.calls.fetch_add(1, Ordering::AcqRel) + 1;
+                if call == 1 {
+                    snapshot(screenpipe_a11y::tree::TruncationReason::Pending)
+                } else {
+                    snapshot_with_retained_work(
+                        screenpipe_a11y::tree::TruncationReason::MaxNodes,
+                        !self.allow_quiesce.load(Ordering::Acquire),
+                    )
+                }
+            }
+
+            fn suspend(&mut self) {
+                self.suspended.fetch_add(1, Ordering::AcqRel);
+            }
+        }
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let allow_quiesce = Arc::new(AtomicBool::new(false));
+        let suspended = Arc::new(AtomicUsize::new(0));
+        let factory: RunnerFactory = {
+            let calls = calls.clone();
+            let allow_quiesce = allow_quiesce.clone();
+            let suspended = suspended.clone();
+            Arc::new(move |_| {
+                Box::new(DiscoveryRefreshRunner {
+                    calls: calls.clone(),
+                    allow_quiesce: allow_quiesce.clone(),
+                    suspended: suspended.clone(),
+                })
+            })
+        };
+        let config = TreeWalkerConfig::default();
+        let worker =
+            TreeWalkerWorker::spawn_with_factory("discovery-refresh", config.clone(), factory)
+                .unwrap();
+        let first = worker
+            .walk_with_timeout(config, Duration::from_millis(100))
+            .await
+            .unwrap();
+        assert!(matches!(
+            first,
+            TreeWalkerWorkerOutcome::Completed(TreeWalkResult::Found(ref snapshot))
+                if snapshot.truncation_reason
+                    == screenpipe_a11y::tree::TruncationReason::Pending
+        ));
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !worker.take_background_ready() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("full-cap discovery becomes publishable");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(calls.load(Ordering::Acquire) >= 3);
+        assert!(
+            !worker.take_background_ready(),
+            "no ready flood while refreshing"
+        );
+
+        allow_quiesce.store(true, Ordering::Release);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !worker.take_background_ready() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("refresh completion notifies once");
+        assert!(!worker.take_background_ready());
+        assert!(worker
+            .suspend_with_timeout(Duration::from_millis(100))
+            .await
+            .unwrap());
+        assert_eq!(suspended.load(Ordering::Acquire), 1);
     }
 
     #[tokio::test]

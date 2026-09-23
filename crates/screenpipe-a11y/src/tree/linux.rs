@@ -591,6 +591,7 @@ impl WalkState {
             start,
             truncated: false,
             truncation_reason: TruncationReason::None,
+            retained_work_pending: false,
             max_depth_reached: 0,
             window_x: 0.0,
             window_y: 0.0,
@@ -1402,6 +1403,7 @@ impl TreeWalkerPlatform for LinuxTreeWalker {
             simhash,
             truncated: state.truncated,
             truncation_reason: state.truncation_reason,
+            retained_work_pending: false,
             max_depth_reached: state.max_depth_reached,
             window_bounds: None,
         }))

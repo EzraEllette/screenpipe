@@ -253,6 +253,17 @@ mod tests {
                 pixel_outcome: "preserved",
             }
             .report();
+            RetainedUiaIssue {
+                stage: "fresh_document_refresh",
+                hresult: Some(0x80040201_u32 as i32),
+                elapsed: Duration::from_millis(9),
+                budget: Duration::from_millis(12),
+                nodes: 5000,
+                fallback: "bounded_resync",
+                accessibility_outcome: "invalidated_recovery_pending",
+                pixel_outcome: "preserved_when_privacy_allows",
+            }
+            .report();
             UiaCaptureIssue {
                 view: "raw",
                 elapsed: Duration::from_millis(300),
@@ -291,6 +302,9 @@ mod tests {
             "stage=\"event_overflow\"",
             "fallback=\"bounded_resync\"",
             "pixel_outcome=\"preserved\"",
+            "stage=\"fresh_document_refresh\"",
+            "accessibility_outcome=\"invalidated_recovery_pending\"",
+            "pixel_outcome=\"preserved_when_privacy_allows\"",
         ] {
             assert!(
                 report.contains(evidence),

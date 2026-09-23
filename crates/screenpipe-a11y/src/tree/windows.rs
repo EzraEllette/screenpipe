@@ -13,7 +13,7 @@ use super::{
 };
 use crate::capture_diagnostics::RetainedUiaIssue;
 use crate::events::AccessibilityNode;
-use crate::platform::windows_uia::{RetainedUiaCapture, UiaContext};
+use crate::platform::windows_uia::{BrowserDocumentKind, RetainedUiaCapture, UiaContext};
 
 use anyhow::Result;
 use chrono::Utc;
@@ -56,11 +56,25 @@ const EXCLUDED_APPS: &[&str] = &[
 ];
 
 fn is_windows_browser(app_lower: &str) -> bool {
-    [
-        "msedge", "chrome", "chromium", "brave", "firefox", "opera", "vivaldi", "arc", "zen",
+    browser_document_kind(app_lower).is_some()
+}
+
+fn browser_document_kind(app_lower: &str) -> Option<BrowserDocumentKind> {
+    if ["firefox", "zen"]
+        .iter()
+        .any(|browser| app_lower.contains(browser))
+    {
+        Some(BrowserDocumentKind::Mozilla)
+    } else if [
+        "msedge", "chrome", "chromium", "brave", "opera", "vivaldi", "arc",
     ]
     .iter()
     .any(|browser| app_lower.contains(browser))
+    {
+        Some(BrowserDocumentKind::Chromium)
+    } else {
+        None
+    }
 }
 
 /// UIA control types that should be skipped (decorative, not text-bearing).
@@ -497,7 +511,7 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
             32,
             retained_max_nodes,
             slice_timeout,
-            is_windows_browser(&app_lower),
+            browser_document_kind(&app_lower),
             url_policy_requires_fresh,
         ) {
             Ok(captured) => captured,
@@ -567,6 +581,10 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
         } else {
             captured.truncation
         };
+        let retained_work_pending = captured
+            .retained
+            .as_ref()
+            .is_some_and(|stats| stats.pending);
 
         // Get monitor dimensions for normalizing element bounds to 0-1 coords
         let monitor_rect = get_monitor_rect(hwnd);
@@ -601,7 +619,7 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
             &mut walk_index,
         );
         if url_policy_enabled {
-            // The freshly read browser-chrome value is authoritative for URL
+            // The freshly read committed Document value is authoritative for URL
             // policy. A retained Document value may lag same-title navigation.
             browser_url = fresh_policy_url;
         }
@@ -697,6 +715,7 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
             simhash,
             truncated: truncation_reason != super::TruncationReason::None,
             truncation_reason,
+            retained_work_pending,
             max_depth_reached: 0,
             window_bounds,
         }))
@@ -1289,6 +1308,23 @@ fn append_text(buffer: &mut String, text: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn browser_document_provider_classification_distinguishes_mozilla() {
+        assert_eq!(
+            browser_document_kind("firefox.exe"),
+            Some(BrowserDocumentKind::Mozilla)
+        );
+        assert_eq!(
+            browser_document_kind("zen.exe"),
+            Some(BrowserDocumentKind::Mozilla)
+        );
+        assert_eq!(
+            browser_document_kind("msedge.exe"),
+            Some(BrowserDocumentKind::Chromium)
+        );
+        assert_eq!(browser_document_kind("notepad.exe"), None);
+    }
 
     #[allow(clippy::too_many_arguments)]
     fn extract_for_test(
@@ -1920,8 +1956,8 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         println!(
-            "fixture_total_ms={} final_nodes={final_nodes}",
-            started.elapsed().as_millis()
+            "fixture_total_ms={} final_nodes={final_nodes} plain_before={saw_plain_before} plain_after={saw_plain_after} scroll_geometry_changed={saw_scroll_geometry_change} edited={saw_edit} added={saw_added} removed={saw_removed_after_add} storm_marker={saw_storm_marker} storm_recovery={saw_storm_recovery}",
+            started.elapsed().as_millis(),
         );
         assert!(saw_early, "early fixture marker was not retained");
         assert!(

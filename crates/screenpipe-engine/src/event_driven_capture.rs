@@ -4298,6 +4298,7 @@ mod tests {
             simhash: 0,
             truncated: false,
             truncation_reason: screenpipe_a11y::tree::TruncationReason::None,
+            retained_work_pending: false,
             max_depth_reached: 0,
             window_bounds: None,
         };
@@ -4333,6 +4334,7 @@ mod tests {
             simhash: 0,
             truncated: false,
             truncation_reason: screenpipe_a11y::tree::TruncationReason::None,
+            retained_work_pending: false,
             max_depth_reached: 0,
             window_bounds: None,
         };
@@ -4372,6 +4374,7 @@ mod tests {
             simhash: 0,
             truncated: false,
             truncation_reason: screenpipe_a11y::tree::TruncationReason::None,
+            retained_work_pending: false,
             max_depth_reached: 0,
             window_bounds: None,
         };
@@ -4411,6 +4414,7 @@ mod tests {
             simhash: 0,
             truncated: false,
             truncation_reason: screenpipe_a11y::tree::TruncationReason::None,
+            retained_work_pending: false,
             max_depth_reached: 0,
             window_bounds: None,
         };
@@ -4493,6 +4497,7 @@ mod tests {
             simhash: 0,
             truncated: false,
             truncation_reason: screenpipe_a11y::tree::TruncationReason::None,
+            retained_work_pending: false,
             max_depth_reached: 0,
             window_bounds: None,
         };
@@ -4604,6 +4609,7 @@ mod tests {
             simhash: 0,
             truncated: false,
             truncation_reason: screenpipe_a11y::tree::TruncationReason::None,
+            retained_work_pending: false,
             max_depth_reached: 0,
             window_bounds: None,
         };

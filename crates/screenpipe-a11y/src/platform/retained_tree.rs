@@ -5,6 +5,8 @@
 //! Handles never leave the owning walker thread. Only identities enter via events.
 
 use crate::events::AccessibilityNode;
+#[cfg(test)]
+use crate::events::ElementBounds;
 use std::collections::{HashMap, VecDeque};
 use std::hash::Hash;
 use std::time::Instant;
@@ -42,13 +44,22 @@ pub(super) enum Progress {
 
 enum Work<K> {
     Properties(K),
-    Children { parent: K, after: Option<K> },
+    BranchProperties {
+        root: K,
+        pending: VecDeque<K>,
+        follow_up: bool,
+    },
+    Children {
+        parent: K,
+        after: Option<K>,
+    },
 }
 
 impl<K> Work<K> {
     fn key(&self) -> &K {
         match self {
             Self::Properties(key) => key,
+            Self::BranchProperties { root, .. } => root,
             Self::Children { parent, .. } => parent,
         }
     }
@@ -94,8 +105,55 @@ impl<K: Clone + Eq + Hash, H: Clone> RetainedTree<K, H> {
     pub fn has_pending_work(&self) -> bool {
         !self.work.is_empty()
     }
+    pub fn has_runnable_work(&self, max_nodes: usize) -> bool {
+        self.work.iter().any(|work| match work {
+            Work::Properties(_) | Work::BranchProperties { .. } => true,
+            Work::Children { parent, .. } => {
+                self.entries.len() < max_nodes
+                    && self
+                        .entries
+                        .get(parent)
+                        .is_some_and(|entry| entry.path.len() < 128)
+            }
+        })
+    }
     pub fn revision(&self) -> u64 {
         self.revision
+    }
+
+    /// Queue shallow property refreshes for every retained node in a branch.
+    /// Existing children, identities, and traversal continuations stay intact.
+    /// Repeated ancestor notifications coalesce with already queued refreshes.
+    pub fn refresh_branch_properties(&mut self, key: &K) -> bool {
+        let Some(entry) = self.entries.get(key) else {
+            return false;
+        };
+        let branch_path = entry.path.clone();
+        if let Some(Work::BranchProperties { follow_up, .. }) = self
+            .work
+            .iter_mut()
+            .find(|work| matches!(work, Work::BranchProperties { root, .. } if root == key))
+        {
+            *follow_up = true;
+            return true;
+        }
+        let pending = self
+            .entries
+            .iter()
+            .filter(|(_, entry)| entry.path.starts_with(&branch_path))
+            .map(|(key, _)| key.clone())
+            .collect::<VecDeque<_>>();
+        self.work.push_front(Work::BranchProperties {
+            root: key.clone(),
+            pending,
+            follow_up: false,
+        });
+        true
+    }
+
+    pub fn refresh_all_properties(&mut self) {
+        let root = self.root_key.clone();
+        self.refresh_branch_properties(&root);
     }
 
     /// Refresh a small set of privacy-critical nodes synchronously within the
@@ -109,7 +167,7 @@ impl<K: Clone + Eq + Hash, H: Clone> RetainedTree<K, H> {
         excluded_ancestor_control: Option<&str>,
         invalidate_descendants_on_value_change: bool,
         matches: F,
-    ) -> Result<Vec<AccessibilityNode>, P::Error>
+    ) -> Result<(Vec<AccessibilityNode>, bool), P::Error>
     where
         P: Provider<Key = K, Handle = H>,
         F: Fn(&AccessibilityNode) -> bool,
@@ -137,7 +195,8 @@ impl<K: Clone + Eq + Hash, H: Clone> RetainedTree<K, H> {
             };
             let mut fresh = provider.refresh(&entry.handle)?;
             if fresh.key != key {
-                continue;
+                self.resync();
+                return Ok((refreshed, true));
             }
             let path = entry.path.clone();
             let children = std::mem::take(&mut self.node_mut(&path).children);
@@ -165,7 +224,7 @@ impl<K: Clone + Eq + Hash, H: Clone> RetainedTree<K, H> {
                 self.revision = self.revision.wrapping_add(1);
             }
         }
-        Ok(refreshed)
+        Ok((refreshed, false))
     }
 
     /// Unknown identities require a resync; they must never be treated as an
@@ -230,10 +289,63 @@ impl<K: Clone + Eq + Hash, H: Clone> RetainedTree<K, H> {
                     }
                     let path = entry.path.clone();
                     let node = self.node_mut(&path);
-                    fresh.node.children = std::mem::take(&mut node.children);
+                    let children = std::mem::take(&mut node.children);
+                    let mutated = *node != fresh.node;
+                    fresh.node.children = children;
                     *node = fresh.node;
-                    self.revision = self.revision.wrapping_add(1);
+                    if mutated {
+                        self.revision = self.revision.wrapping_add(1);
+                    }
                     self.entries.get_mut(&key).unwrap().handle = fresh.handle;
+                    calls += 1;
+                }
+                Work::BranchProperties {
+                    root,
+                    mut pending,
+                    follow_up,
+                } => {
+                    let Some(key) = pending.pop_front() else {
+                        if follow_up {
+                            let path = self.entries.get(&root).map(|entry| entry.path.clone());
+                            if let Some(path) = path {
+                                let pending = self
+                                    .entries
+                                    .iter()
+                                    .filter(|(_, entry)| entry.path.starts_with(&path))
+                                    .map(|(key, _)| key.clone())
+                                    .collect();
+                                self.work.push_front(Work::BranchProperties {
+                                    root,
+                                    pending,
+                                    follow_up: false,
+                                });
+                            }
+                        }
+                        continue;
+                    };
+                    self.work.push_front(Work::BranchProperties {
+                        root,
+                        pending,
+                        follow_up,
+                    });
+                    let Some(entry) = self.entries.get(&key) else {
+                        continue;
+                    };
+                    let mut fresh = provider.refresh(&entry.handle)?;
+                    if fresh.key != key {
+                        self.resync();
+                        return Ok(Progress::Deferred);
+                    }
+                    let path = entry.path.clone();
+                    let node = self.node_mut(&path);
+                    let children = std::mem::take(&mut node.children);
+                    let mutated = *node != fresh.node;
+                    fresh.node.children = children;
+                    *node = fresh.node;
+                    self.entries.get_mut(&key).unwrap().handle = fresh.handle;
+                    if mutated {
+                        self.revision = self.revision.wrapping_add(1);
+                    }
                     calls += 1;
                 }
                 Work::Children { parent, after } => {
@@ -332,6 +444,7 @@ mod tests {
 
     struct Fake {
         nodes: RefCell<HashMap<usize, (String, Vec<usize>)>>,
+        bounds: RefCell<HashMap<usize, ElementBounds>>,
         calls: RefCell<Vec<usize>>,
     }
     impl Fake {
@@ -342,6 +455,21 @@ mod tests {
             nodes.get_mut(&0).unwrap().1 = (1..=count).collect();
             Self {
                 nodes: RefCell::new(nodes),
+                bounds: RefCell::new(
+                    (0..=count)
+                        .map(|n| {
+                            (
+                                n,
+                                ElementBounds {
+                                    x: n as f64,
+                                    y: 0.0,
+                                    width: 10.0,
+                                    height: 10.0,
+                                },
+                            )
+                        })
+                        .collect(),
+                ),
                 calls: RefCell::new(vec![]),
             }
         }
@@ -352,6 +480,7 @@ mod tests {
                 node: AccessibilityNode {
                     name: Some(self.nodes.borrow()[&key].0.clone()),
                     value: Some(self.nodes.borrow()[&key].0.clone()),
+                    bounds: Some(self.bounds.borrow()[&key].clone()),
                     ..Default::default()
                 },
             }
@@ -452,13 +581,17 @@ mod tests {
         assert!(p.calls.borrow().is_empty());
         assert_eq!(advance(&mut tree, &p, 100, 3), Progress::Capacity);
         assert_eq!(tree.len(), 3);
+        assert!(tree.has_pending_work());
+        assert!(!tree.has_runnable_work(3));
         p.nodes.borrow_mut().get_mut(&2).unwrap().0 = "fresh at capacity".into();
         tree.changed(&2, false);
+        assert!(tree.has_runnable_work(3));
         advance(&mut tree, &p, 100, 3);
         assert_eq!(
             tree.root.children[1].name.as_deref(),
             Some("fresh at capacity")
         );
+        assert!(!tree.has_runnable_work(3));
         assert_eq!(advance(&mut tree, &p, 100, 20), Progress::Complete);
         assert_eq!(tree.root.children.len(), 10);
     }
@@ -486,7 +619,7 @@ mod tests {
         p.nodes.borrow_mut().get_mut(&1).unwrap().0 = "https://blocked.example".into();
         p.calls.borrow_mut().clear();
 
-        let refreshed = tree
+        let (refreshed, stale) = tree
             .refresh_matching(
                 &p,
                 1,
@@ -497,6 +630,7 @@ mod tests {
             )
             .unwrap();
 
+        assert!(!stale);
         assert_eq!(refreshed.len(), 1);
         assert_eq!(
             tree.root.children[0].name.as_deref(),
@@ -514,7 +648,7 @@ mod tests {
         assert_eq!(advance(&mut tree, &p, 100, 100), Progress::Complete);
         let revision = tree.revision();
 
-        let refreshed = tree
+        let (refreshed, stale) = tree
             .refresh_matching(
                 &p,
                 1,
@@ -525,6 +659,7 @@ mod tests {
             )
             .unwrap();
 
+        assert!(!stale);
         assert_eq!(tree.revision(), revision);
         assert_eq!(tree.root.children[0].children.len(), 1);
         assert!(refreshed[0].children.is_empty());
@@ -560,5 +695,149 @@ mod tests {
             Some("node 3")
         );
         assert_eq!(tree.root.children[1].name.as_deref(), Some("node 4"));
+    }
+
+    #[test]
+    fn repeated_branch_property_refresh_preserves_large_populated_branch() {
+        let p = Fake::list(200);
+        let mut tree = RetainedTree::new(p.element(0));
+        assert_eq!(advance(&mut tree, &p, 1000, 201), Progress::Capacity);
+        assert_eq!(tree.len(), 201);
+        assert_eq!(tree.root.children.len(), 200);
+
+        p.calls.borrow_mut().clear();
+        p.nodes.borrow_mut().get_mut(&200).unwrap().0 = "late text and bounds".into();
+        p.bounds.borrow_mut().get_mut(&200).unwrap().x = 9000.0;
+        assert!(tree.refresh_branch_properties(&0));
+        for _ in 0..20 {
+            assert!(tree.refresh_branch_properties(&0));
+            let _ = advance(&mut tree, &p, 7, 201);
+            assert_eq!(tree.len(), 201);
+            assert_eq!(tree.root.children.len(), 200);
+        }
+        assert_eq!(advance(&mut tree, &p, 1000, 201), Progress::Capacity);
+        assert_eq!(tree.len(), 201);
+        assert_eq!(tree.root.children.len(), 200);
+        assert_eq!(
+            tree.root.children[199].name.as_deref(),
+            Some("late text and bounds")
+        );
+        assert_eq!(tree.root.children[199].bounds.as_ref().unwrap().x, 9000.0);
+        // Repeated notices coalesce into one follow-up generation, so work is
+        // bounded by two passes over the retained identities.
+        assert!(p.calls.borrow().len() <= 403);
+    }
+
+    #[test]
+    fn document_ancestor_exclusion_omits_nested_iframe_documents() {
+        let p = Fake::list(3);
+        p.nodes.borrow_mut().get_mut(&0).unwrap().1 = vec![1];
+        p.nodes.borrow_mut().get_mut(&1).unwrap().1 = vec![2];
+        let mut tree = RetainedTree::new(p.element(0));
+        assert_eq!(advance(&mut tree, &p, 100, 100), Progress::Complete);
+        tree.root.children[0].control_type = "Document".into();
+        tree.root.children[0].children[0].control_type = "Document".into();
+
+        let (refreshed, stale) = tree
+            .refresh_matching(
+                &p,
+                4,
+                Instant::now() + Duration::from_secs(1),
+                Some("document"),
+                false,
+                |node| node.control_type.eq_ignore_ascii_case("document"),
+            )
+            .unwrap();
+
+        assert!(!stale);
+        assert_eq!(refreshed.len(), 1);
+        assert_eq!(refreshed[0].name.as_deref(), Some("node 1"));
+    }
+
+    #[test]
+    fn branch_notice_after_leaf_refresh_gets_a_bounded_follow_up_pass() {
+        let p = Fake::list(20);
+        let mut tree = RetainedTree::new(p.element(0));
+        assert_eq!(advance(&mut tree, &p, 100, 100), Progress::Complete);
+        p.calls.borrow_mut().clear();
+
+        assert!(tree.refresh_branch_properties(&0));
+        assert_eq!(advance(&mut tree, &p, 1, 100), Progress::Deferred);
+        let refreshed_key = *p.calls.borrow().last().unwrap();
+        p.nodes.borrow_mut().get_mut(&refreshed_key).unwrap().0 =
+            "changed after first visit".into();
+        assert!(tree.refresh_branch_properties(&0));
+
+        assert_eq!(advance(&mut tree, &p, 100, 100), Progress::Complete);
+        let path = tree.entries[&refreshed_key].path.clone();
+        assert_eq!(
+            tree.node(&path).name.as_deref(),
+            Some("changed after first visit")
+        );
+        assert!(p.calls.borrow().len() <= 42);
+    }
+
+    #[test]
+    fn unchanged_branch_refresh_keeps_populated_parent_revision_stable() {
+        let p = Fake::list(3);
+        p.nodes.borrow_mut().get_mut(&0).unwrap().1 = vec![1];
+        p.nodes.borrow_mut().get_mut(&1).unwrap().1 = vec![2, 3];
+        let mut tree = RetainedTree::new(p.element(0));
+        assert_eq!(advance(&mut tree, &p, 100, 100), Progress::Complete);
+        let revision = tree.revision();
+
+        assert!(tree.refresh_branch_properties(&1));
+        assert_eq!(advance(&mut tree, &p, 100, 100), Progress::Complete);
+
+        assert_eq!(tree.revision(), revision);
+        assert_eq!(tree.root.children[0].children.len(), 2);
+    }
+
+    #[test]
+    fn stale_matching_handle_invalidates_old_descendants_and_resumes() {
+        struct Renaming<'a>(&'a Fake);
+        impl Provider for Renaming<'_> {
+            type Key = usize;
+            type Handle = usize;
+            type Error = ();
+            fn refresh(&self, handle: &usize) -> Result<Element<usize, usize>, ()> {
+                let mut element = self.0.element(*handle);
+                if *handle == 1 {
+                    element.key = 99;
+                }
+                Ok(element)
+            }
+            fn first_child(&self, handle: &usize) -> Result<Option<Element<usize, usize>>, ()> {
+                self.0.first_child(handle)
+            }
+            fn next_sibling(&self, handle: &usize) -> Result<Option<Element<usize, usize>>, ()> {
+                self.0.next_sibling(handle)
+            }
+        }
+
+        let p = Fake::list(4);
+        p.nodes.borrow_mut().get_mut(&0).unwrap().1 = vec![1];
+        p.nodes.borrow_mut().get_mut(&1).unwrap().1 = vec![2, 3];
+        let mut tree = RetainedTree::new(p.element(0));
+        assert_eq!(advance(&mut tree, &p, 100, 4), Progress::Capacity);
+        assert_eq!(tree.root.children[0].children.len(), 2);
+
+        let (_, stale) = tree
+            .refresh_matching(
+                &Renaming(&p),
+                1,
+                Instant::now() + Duration::from_secs(1),
+                None,
+                true,
+                |node| node.name.as_deref() == Some("node 1"),
+            )
+            .unwrap();
+        assert!(stale);
+        assert!(tree.root.children.is_empty());
+
+        p.nodes.borrow_mut().get_mut(&0).unwrap().1 = vec![4];
+        assert_eq!(advance(&mut tree, &p, 100, 10), Progress::Complete);
+        assert_eq!(tree.root.children.len(), 1);
+        assert_eq!(tree.root.children[0].name.as_deref(), Some("node 4"));
     }
 }
