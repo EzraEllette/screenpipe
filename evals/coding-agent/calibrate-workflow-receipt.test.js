@@ -30,3 +30,13 @@ test('discarding remaining-work state is rejected',()=>fails(grade('remaining',f
 test('successful save must survive a failed follow-up read',()=>fails(grade('follow-up',replace(fixed,'result = {...result, remaining: {unavailable:true, next:','throw new Error("follow-up read failed"); result = {...result, remaining: {unavailable:true, next:'))));
 test('retrying successful mutation after read failure is rejected',()=>fails(grade('repeat-save',replace(fixed,'result = {...result, remaining: {unavailable:true, next:','await call("/workflows/workspace", {...input,task}); result = {...result, remaining: {unavailable:true, next:'))));
 test('missing extension remains an import failure',()=>{const r=grade('missing',null);expect(r.status).toBe(1);expect(r.stderr).toMatch(/Cannot find|ModuleNotFound/);expect(r.stderr).not.toContain('expect(received)');});
+
+// A correct implementation may validate optimistic-concurrency inputs before I/O.
+test('valid revision guards do not turn fixture omissions into product failures',()=>{
+ const guarded=replace(fixed,'const permissions =',`
+ if (input.action !== "context" && input.action !== "start" && (!Number.isSafeInteger(input.expected_revision) || input.expected_revision < 0)) throw new Error("expected revision required");
+ if (input.action === "publish" && (!Number.isSafeInteger(input.catalog_revision) || input.catalog_revision < 0)) throw new Error("catalog revision required");
+ const permissions =`);
+ const r=grade('revision-guard',guarded);
+ expect(r.status).toBe(0);expect(r.stderr).toContain('14 pass');
+});
