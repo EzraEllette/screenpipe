@@ -849,6 +849,10 @@ pub(crate) fn should_release_on_pause_entry(was_paused: bool, is_paused: bool) -
     is_paused && !was_paused
 }
 
+fn should_suspend_on_focus_away(was_active: bool, is_active: bool) -> bool {
+    was_active && !is_active
+}
+
 type MonitorBounds = (i32, i32, i32, i32);
 
 fn monitor_bounds(monitor: &SafeMonitor) -> MonitorBounds {
@@ -1280,6 +1284,9 @@ pub(crate) async fn event_driven_capture_loop(
     // at 2fps on macOS, WGC on Windows) — measurable share of a core per
     // idle display on multi-monitor setups.
     let mut was_cold = false;
+    // The UIA subscription belongs only to the focused monitor. Clear it once
+    // on every Active -> Warm/Cold edge; resume lazily acquires a fresh tree.
+    let mut accessibility_was_active = true;
     // Tracks whether we already released the SCStream/WGC handle on entry
     // to a pause state (screen locked, OS low-power / battery-critical via
     // power profile, DRM-protected window focused, or outside the user's
@@ -1348,6 +1355,15 @@ pub(crate) async fn event_driven_capture_loop(
                     crate::schedule_monitor::schedule_paused(),
                 );
                 monitor.release_capture_stream();
+                if let Err(error) = tree_walker
+                    .suspend_with_timeout(Duration::from_millis(250))
+                    .await
+                {
+                    warn!(
+                        "monitor {}: accessibility worker suspend failed on pause: {}",
+                        monitor_id, error
+                    );
+                }
             }
             was_in_pause_state = true;
             // Drain triggers that piled up while paused so the linker
@@ -1419,6 +1435,19 @@ pub(crate) async fn event_driven_capture_loop(
                 monitor.release_capture_stream();
             }
             was_cold = is_cold;
+            let accessibility_is_active = matches!(capture_state, CaptureState::Active);
+            if should_suspend_on_focus_away(accessibility_was_active, accessibility_is_active) {
+                if let Err(error) = tree_walker
+                    .suspend_with_timeout(Duration::from_millis(250))
+                    .await
+                {
+                    warn!(
+                        "monitor {}: accessibility worker suspend failed on focus-away: {}",
+                        monitor_id, error
+                    );
+                }
+            }
+            accessibility_was_active = accessibility_is_active;
 
             match capture_state {
                 CaptureState::Active => { /* fall through to normal capture */ }
@@ -1799,6 +1828,14 @@ pub(crate) async fn event_driven_capture_loop(
             if trigger.is_none() {
                 trigger = state.poll_activity();
             }
+        }
+
+        // A Windows worker continues a pending retained-tree baseline on its
+        // owning MTA between screenshots. Once it reaches a coherent terminal
+        // projection, route one capture through the existing privacy gates and
+        // SnapshotWriter so useful AX does not wait for the 30s idle cadence.
+        if trigger.is_none() && tree_walker.take_background_ready() {
+            trigger = Some(CaptureTrigger::Manual);
         }
 
         // Promote a deferred soft checkpoint (#4844) once its floor has
@@ -3197,14 +3234,15 @@ async fn do_capture(
             // Cooperative retained-tree discovery and a terminal memory cap do
             // not indicate a slow provider. Only real provider timeout pressure
             // feeds adaptive backoff.
-            walk_budget.record_walk(
-                &snap.app_name,
-                snap.walk_duration,
+            let budget_truncated = if cfg!(target_os = "windows") {
                 matches!(
                     snap.truncation_reason,
                     screenpipe_a11y::tree::TruncationReason::Timeout
-                ),
-            );
+                )
+            } else {
+                snap.truncated
+            };
+            walk_budget.record_walk(&snap.app_name, snap.walk_duration, budget_truncated);
             if snap.walk_duration > std::time::Duration::from_millis(100) {
                 let next = walk_budget.should_walk(&snap.app_name);
                 debug!(
@@ -3272,6 +3310,12 @@ async fn do_capture(
     let mut tree_snapshot = match tree_walk_result {
         Some(TreeWalkResult::Found(snap)) => Some(snap),
         Some(TreeWalkResult::Skipped(reason)) => {
+            if !matches!(reason, screenpipe_a11y::tree::SkipReason::UrlPending) {
+                let _ = params
+                    .tree_walker
+                    .suspend_with_timeout(Duration::from_millis(250))
+                    .await;
+            }
             debug!(
                 "skipping capture: window filtered ({}) on monitor {}",
                 reason, params.monitor_id
@@ -3283,7 +3327,14 @@ async fn do_capture(
                 corrupt: None,
             });
         }
-        Some(TreeWalkResult::NotFound) | None => None,
+        Some(TreeWalkResult::NotFound) => {
+            let _ = params
+                .tree_walker
+                .suspend_with_timeout(Duration::from_millis(250))
+                .await;
+            None
+        }
+        None => None,
     };
     let ax_focus_pid = if tree_snapshot.is_some() && !screenshot_disabled {
         get_focused_pid_fresh()
@@ -5625,6 +5676,14 @@ mod tests {
             !should_release_on_pause_entry(false, false),
             "active steady-state: must NOT release"
         );
+    }
+
+    #[test]
+    fn should_suspend_accessibility_only_on_focus_away_edge() {
+        assert!(should_suspend_on_focus_away(true, false));
+        assert!(!should_suspend_on_focus_away(false, false));
+        assert!(!should_suspend_on_focus_away(false, true));
+        assert!(!should_suspend_on_focus_away(true, true));
     }
 
     #[test]

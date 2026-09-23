@@ -22,7 +22,7 @@ use tracing::{debug, error, warn};
 
 use super::windows_uia::{self, ClickElementRequest};
 
-use windows::Win32::Foundation::{BOOL, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::DataExchange::GetClipboardSequenceNumber;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::SystemInformation::GetTickCount;
@@ -37,13 +37,13 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     VK_LSHIFT, VK_LWIN, VK_MENU, VK_RCONTROL, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, DispatchMessageW, EnumChildWindows, EnumWindows, GetClassNameW,
-    GetForegroundWindow, GetMessageW, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible,
-    KillTimer, PostThreadMessageW, SetTimer, SetWindowsHookExW, TranslateMessage,
-    UnhookWindowsHookEx, EVENT_SYSTEM_FOREGROUND, HC_ACTION, HHOOK, KBDLLHOOKSTRUCT, MSG,
-    MSLLHOOKSTRUCT, WH_KEYBOARD_LL, WH_MOUSE_LL, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS,
-    WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT,
-    WM_RBUTTONDOWN, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WM_XBUTTONDOWN,
+    CallNextHookEx, DispatchMessageW, EnumChildWindows, GetClassNameW, GetForegroundWindow,
+    GetMessageW, GetWindowTextW, GetWindowThreadProcessId, KillTimer, PostThreadMessageW, SetTimer,
+    SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, EVENT_SYSTEM_FOREGROUND, HC_ACTION,
+    HHOOK, KBDLLHOOKSTRUCT, MSG, MSLLHOOKSTRUCT, WH_KEYBOARD_LL, WH_MOUSE_LL,
+    WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN,
+    WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT, WM_RBUTTONDOWN, WM_SYSKEYDOWN,
+    WM_SYSKEYUP, WM_TIMER, WM_XBUTTONDOWN,
 };
 
 /// Lower the current thread's OS priority so user input threads (mouse/keyboard hook,
@@ -2096,75 +2096,6 @@ pub(crate) fn is_transient_shell_window(hwnd: HWND) -> bool {
         TRANSIENT_SHELL_WINDOW_CLASSES
             .iter()
             .any(|c| class.as_str() == *c)
-    }
-}
-
-/// Windows 11 can report an Explorer-owned Alt-Tab proxy as the foreground
-/// HWND while the corresponding Edge window is visibly active. UIA on that
-/// proxy exposes only shell chrome. Resolve the matching visible Chromium
-/// top-level window without changing focus or crossing a provider boundary.
-pub(crate) fn resolve_accessibility_window(hwnd: HWND) -> HWND {
-    unsafe {
-        let mut class_buf = [0u16; 128];
-        let class_len = GetClassNameW(hwnd, &mut class_buf);
-        if class_len == 0
-            || String::from_utf16_lossy(&class_buf[..class_len as usize])
-                != "Windows.Internal.Shell.TabProxyWindow"
-        {
-            return hwnd;
-        }
-        let mut title_buf = [0u16; 512];
-        let title_len = GetWindowTextW(hwnd, &mut title_buf);
-        if title_len == 0 {
-            return hwnd;
-        }
-        struct Search {
-            title: String,
-            found: HWND,
-            matches: usize,
-        }
-        unsafe extern "system" fn visit(candidate: HWND, state: LPARAM) -> BOOL {
-            unsafe {
-                let search = &mut *(state.0 as *mut Search);
-                if !IsWindowVisible(candidate).as_bool() {
-                    return BOOL(1);
-                }
-                let mut class_buf = [0u16; 64];
-                let class_len = GetClassNameW(candidate, &mut class_buf);
-                let class = String::from_utf16_lossy(&class_buf[..class_len.max(0) as usize]);
-                if class != "Chrome_WidgetWin_1" && class != "Chrome_WidgetWin_0" {
-                    return BOOL(1);
-                }
-                let mut title_buf = [0u16; 512];
-                let title_len = GetWindowTextW(candidate, &mut title_buf);
-                let title = String::from_utf16_lossy(&title_buf[..title_len.max(0) as usize]);
-                if title == search.title || title.starts_with(&(search.title.clone() + " - ")) {
-                    let mut pid = 0u32;
-                    GetWindowThreadProcessId(candidate, Some(&mut pid));
-                    if get_process_name(pid)
-                        .is_some_and(|name| name.eq_ignore_ascii_case("msedge.exe"))
-                    {
-                        search.matches += 1;
-                        search.found = candidate;
-                    }
-                }
-                BOOL(1)
-            }
-        }
-        let mut search = Search {
-            title: String::from_utf16_lossy(&title_buf[..title_len as usize]),
-            found: HWND::default(),
-            matches: 0,
-        };
-        let _ = EnumWindows(
-            Some(visit),
-            LPARAM((&mut search as *mut Search).cast::<core::ffi::c_void>() as isize),
-        );
-        if search.matches == 1 && search.found != HWND::default() {
-            search.found
-        } else {
-            hwnd
-        }
     }
 }
 

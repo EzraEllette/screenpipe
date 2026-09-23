@@ -115,13 +115,16 @@ pub(crate) struct CapturedTree {
     pub retained: Option<RetainedCaptureStats>,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct RetainedCaptureStats {
     pub calls: usize,
     pub retained_nodes: usize,
     pub notices: usize,
     pub pending: bool,
     pub overflowed: bool,
+    pub url_fresh: bool,
+    pub fresh_url: Option<String>,
+    pub url_pending_discovery: bool,
 }
 
 type RuntimeId = Vec<i32>;
@@ -141,8 +144,18 @@ struct RetainedNotices {
 
 impl RetainedNotices {
     fn push(&self, element: &IUIAutomationElement, structure: bool) {
-        let mut queue = self.queue.lock();
+        let Some(mut queue) = self.queue.try_lock() else {
+            self.overflowed.store(true, Ordering::Release);
+            return;
+        };
         if queue.len() >= RETAINED_EVENT_LIMIT {
+            self.overflowed.store(true, Ordering::Release);
+            return;
+        }
+        if structure && queue.iter().any(|notice| notice.structure) {
+            // RuntimeId lookup is provider IPC and does not belong in the
+            // callback. Coalesce structural storms to one retained notice and
+            // request one root recovery after the current baseline settles.
             self.overflowed.store(true, Ordering::Release);
             return;
         }
@@ -222,6 +235,10 @@ pub(crate) struct RetainedUiaCapture {
     projected: Arc<AccessibilityNode>,
     last_projection: Instant,
     rebuilding: bool,
+    projected_revision: u64,
+    overflow_recovery_pending: bool,
+    overflow_recovery_started: bool,
+    url_validation_started: Instant,
 }
 
 struct UiaRetainedProvider<'a> {
@@ -562,6 +579,10 @@ impl UiaContext {
             projected,
             last_projection: Instant::now(),
             rebuilding: false,
+            projected_revision: 1,
+            overflow_recovery_pending: false,
+            overflow_recovery_started: false,
+            url_validation_started: Instant::now(),
         })
     }
 
@@ -592,9 +613,55 @@ impl UiaContext {
         max_calls: usize,
         max_nodes: usize,
         timeout: Duration,
+        require_fresh_url: bool,
     ) -> windows::core::Result<CapturedTree> {
         let start = Instant::now();
         let overflowed = capture.notices.overflowed.swap(false, Ordering::AcqRel);
+        let provider = UiaRetainedProvider {
+            uia: self,
+            semantic: capture.semantic,
+            calls: Cell::new(0),
+        };
+        let (url_fresh, fresh_url) = if require_fresh_url && max_calls >= 2 {
+            match capture.tree.refresh_matching(
+                &provider,
+                (max_calls / 2).min(4),
+                start + timeout,
+                Some("document"),
+                true,
+                |node| {
+                    node.control_type.eq_ignore_ascii_case("document")
+                        && node.automation_id.as_deref() == Some("RootWebArea")
+                },
+            ) {
+                Ok(nodes) => {
+                    let urls = nodes
+                        .into_iter()
+                        .filter_map(|node| node.value)
+                        .filter(|value| {
+                            let value = value.trim().to_ascii_lowercase();
+                            value.starts_with("http://") || value.starts_with("https://")
+                        })
+                        .collect::<std::collections::HashSet<_>>();
+                    let unique = urls.len() == 1;
+                    (unique, unique.then(|| urls.into_iter().next()).flatten())
+                }
+                Err(error) => {
+                    tracing::debug!(
+                        target: "screenpipe_a11y_capture",
+                        stage = "fresh_url_validation",
+                        hresult = format_args!("0x{:08X}", error.code().0 as u32),
+                        fallback = "blocked_url",
+                        "fresh browser URL validation failed"
+                    );
+                    (false, None)
+                }
+            }
+        } else if !require_fresh_url {
+            (true, None)
+        } else {
+            (false, None)
+        };
         let notices = {
             let mut queue = capture.notices.queue.lock();
             let take = queue.len().min(max_calls.min(8));
@@ -602,6 +669,10 @@ impl UiaContext {
         };
         let notice_count = notices.len();
         if overflowed {
+            // Remember a missed-event recovery request, but never discard an
+            // unfinished baseline repeatedly under a storm. Finish or reach
+            // capacity first, then perform one bounded root resync.
+            capture.overflow_recovery_pending = true;
             RetainedUiaIssue {
                 stage: "event_overflow",
                 hresult: None,
@@ -609,8 +680,8 @@ impl UiaContext {
                 budget: timeout,
                 nodes: capture.tree.len(),
                 fallback: "bounded_resync",
-                accessibility_outcome: "last_coherent_projection",
-                pixel_outcome: "preserved",
+                accessibility_outcome: "partial_recovery_pending",
+                pixel_outcome: "preserved_when_privacy_allows",
             }
             .report();
         }
@@ -618,10 +689,8 @@ impl UiaContext {
         let mut unknown_count = 0usize;
         let mut event_calls = 0usize;
         for notice in notices {
-            // Do not let a provider's structure-event storm continually reset
-            // an unfinished baseline. The active continuation observes the
-            // current provider state; periodic resync covers changes behind it.
             if was_pending && notice.structure {
+                capture.notices.queue.lock().push(notice);
                 continue;
             }
             if event_calls >= max_calls || Instant::now() >= start + timeout {
@@ -649,20 +718,23 @@ impl UiaContext {
                 "uia event did not match retained identity"
             );
         }
-        if overflowed || (!was_pending && capture.last_resync.elapsed() >= RETAINED_RESYNC_INTERVAL)
+        if capture.overflow_recovery_pending
+            && !capture.overflow_recovery_started
+            && !was_pending
+            && capture.last_resync.elapsed() >= Duration::from_secs(1)
         {
             capture.tree.resync();
             capture.last_resync = Instant::now();
             capture.rebuilding = true;
+            capture.overflow_recovery_started = true;
+        } else if !was_pending && capture.last_resync.elapsed() >= RETAINED_RESYNC_INTERVAL {
+            capture.tree.resync();
+            capture.last_resync = Instant::now();
+            capture.rebuilding = true;
         }
-        let provider = UiaRetainedProvider {
-            uia: self,
-            semantic: capture.semantic,
-            calls: Cell::new(0),
-        };
         let progress = capture.tree.advance(
             &provider,
-            max_calls.saturating_sub(event_calls) / 2,
+            max_calls.saturating_sub(event_calls + provider.calls.get()) / 2,
             max_nodes,
             start + timeout,
         )?;
@@ -671,17 +743,42 @@ impl UiaContext {
             Progress::Deferred => TruncationReason::Pending,
             Progress::Complete => TruncationReason::None,
         };
+        if require_fresh_url
+            && !url_fresh
+            && progress == Progress::Complete
+            && capture.last_resync.elapsed() >= Duration::from_millis(50)
+            && capture.url_validation_started.elapsed() < Duration::from_secs(2)
+        {
+            // Chromium can expose its committed RootWebArea shortly after the
+            // initial chrome-only tree completes. Retry bounded discovery
+            // without authorizing pixels or clearing the worker each frame.
+            capture.tree.resync();
+            capture.last_resync = Instant::now();
+        }
+        let url_pending_discovery = require_fresh_url
+            && !url_fresh
+            && (capture.tree.has_pending_work()
+                || capture.url_validation_started.elapsed() < Duration::from_secs(2));
         if progress == Progress::Complete && capture.rebuilding {
             capture.rebuilding = false;
+            capture.overflow_recovery_pending = false;
+            capture.overflow_recovery_started = false;
+        } else if progress == Progress::Capacity {
+            // Capacity is a truthful terminal partial projection, not an
+            // endlessly unfinished baseline. A cooldown above prevents an
+            // event storm from restarting the root every capture.
+            if capture.overflow_recovery_started {
+                capture.overflow_recovery_pending = false;
+                capture.overflow_recovery_started = false;
+            }
+        }
+        // Publish every actual mutation, including prompt branch invalidation
+        // and truthful capacity-limited partial trees. Never deep-clone an
+        // unchanged retained tree on the 250ms capture cadence.
+        if capture.projected_revision != capture.tree.revision() {
             capture.projected = Arc::new(capture.tree.root.clone());
             capture.last_projection = Instant::now();
-        } else if !capture.rebuilding
-            && ((was_pending && progress == Progress::Complete)
-                || notice_count > 0
-                || capture.last_projection.elapsed() >= Duration::from_millis(250))
-        {
-            capture.projected = Arc::new(capture.tree.root.clone());
-            capture.last_projection = Instant::now();
+            capture.projected_revision = capture.tree.revision();
         }
         Ok(CapturedTree {
             root: capture.projected.clone(),
@@ -692,6 +789,9 @@ impl UiaContext {
                 notices: notice_count,
                 pending: capture.tree.has_pending_work(),
                 overflowed,
+                url_fresh,
+                fresh_url,
+                url_pending_discovery,
             }),
         })
     }

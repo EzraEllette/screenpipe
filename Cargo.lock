@@ -8722,6 +8722,7 @@ dependencies = [
  "once_cell",
  "regex",
  "screenpipe-a11y",
+ "screenpipe-config",
  "screenpipe-core",
  "screenpipe-db",
  "screenpipe-screen",

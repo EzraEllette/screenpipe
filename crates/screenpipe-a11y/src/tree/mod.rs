@@ -738,6 +738,10 @@ pub enum SkipReason {
     NotInIncludeList,
     /// Focused browser tab was rejected by the configured URL policy.
     BlockedUrl,
+    /// URL policy is configured and bounded discovery has not reached the
+    /// committed browser document yet. Pixels remain withheld, but retained
+    /// discovery must continue rather than resetting on every slice.
+    UrlPending,
 }
 
 impl std::fmt::Display for SkipReason {
@@ -748,6 +752,7 @@ impl std::fmt::Display for SkipReason {
             SkipReason::UserIgnored => write!(f, "user-configured ignored window"),
             SkipReason::NotInIncludeList => write!(f, "not in included windows list"),
             SkipReason::BlockedUrl => write!(f, "blocked by browser URL policy"),
+            SkipReason::UrlPending => write!(f, "browser URL privacy validation pending"),
         }
     }
 }
@@ -762,6 +767,10 @@ pub trait TreeWalkerPlatform: Send {
     /// Windows keeps COM/UIA cache objects on the walker thread, so callers
     /// should update the config instead of recreating the walker in hot paths.
     fn update_config(&mut self, _config: TreeWalkerConfig) {}
+
+    /// Release subscriptions and retained private state on the platform
+    /// walker's owning thread. The next walk must start from a fresh tree.
+    fn suspend(&mut self) {}
 }
 
 /// Evaluate app, title, and incognito filters without walking the focused
@@ -911,6 +920,10 @@ impl TreeWalkerPlatform for UrlFilteredWalker {
                 crate::url_filter::UrlPolicy::new(&self.ignored_urls, &self.included_urls);
         }
         self.inner.update_config(config);
+    }
+
+    fn suspend(&mut self) {
+        self.inner.suspend();
     }
 }
 
