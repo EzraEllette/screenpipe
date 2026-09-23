@@ -1554,13 +1554,34 @@ mod tests {
 
     #[tokio::test]
     async fn transcription_gateway_failure_reaches_support_after_log_rotation() {
+        assert_transcription_failure_reaches_support_after_log_rotation(
+            504,
+            "upstream inference timed out",
+            1,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn transcription_rate_limit_reaches_support_after_log_rotation() {
+        assert_transcription_failure_reaches_support_after_log_rotation(
+            429,
+            "queue full or wait deadline; retry later",
+            3,
+        )
+        .await;
+    }
+
+    async fn assert_transcription_failure_reaches_support_after_log_rotation(
+        status: u16,
+        cause: &str,
+        attempts: u64,
+    ) {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/audio/transcriptions"))
-            .respond_with(
-                ResponseTemplate::new(504).set_body_string("upstream inference timed out"),
-            )
-            .expect(1)
+            .respond_with(ResponseTemplate::new(status).set_body_string(cause))
+            .expect(attempts)
             .mount(&server)
             .await;
         let failure = screenpipe_audio::transcription::openai_compatible::batch::transcribe_with_openai_compatible(
@@ -1623,8 +1644,12 @@ mod tests {
             "{report}"
         );
         assert!(report.contains("audio=120s, timeout=120s"), "{report}");
-        assert!(report.contains("504 Gateway Timeout"), "{report}");
-        assert!(report.contains("upstream inference timed out"), "{report}");
+        assert!(
+            report.contains(&reqwest::StatusCode::from_u16(status).unwrap().to_string()),
+            "{report}"
+        );
+        assert!(report.contains(cause), "{report}");
+        assert!(report.contains(&format!("attempt={attempts}")), "{report}");
         assert!(!report.contains("hunter2"));
     }
 
