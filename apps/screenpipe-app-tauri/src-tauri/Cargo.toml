@@ -266,7 +266,6 @@ windows = { version = "0.58", features = [
     # GetLastInputInfo/GetTickCount for the recording-health user-presence tier
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_System_SystemInformation",
-    "Win32_Storage_FileSystem",
 ] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
