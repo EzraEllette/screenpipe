@@ -1,5 +1,5 @@
 // screenpipe — AI that knows everything you've seen, said, or heard
-// https://screenpi.pe
+// https://screenpipe.com
 
 use std::{
     sync::{
@@ -377,6 +377,10 @@ pub async fn run_record_and_transcribe(
                 }
             }
 
+            if !is_running.load(Ordering::Relaxed) {
+                break;
+            }
+
             flush_audio(
                 &mut collected_audio,
                 overlap_samples,
@@ -386,6 +390,7 @@ pub async fn run_record_and_transcribe(
                 &device_name,
                 &metrics,
                 true, // aec_active = true (16kHz)
+                false,
             )
             .await?;
             segment_start_time = now_epoch_secs();
@@ -401,6 +406,7 @@ pub async fn run_record_and_transcribe(
             &device_name,
             &metrics,
             true, // aec_active = true
+            true,
         )
         .await
         {
@@ -519,6 +525,10 @@ pub async fn run_record_and_transcribe(
                 source_buffer.log_stats();
             }
 
+            if !is_running.load(Ordering::Relaxed) {
+                break;
+            }
+
             flush_audio(
                 &mut collected_audio,
                 overlap_samples,
@@ -528,6 +538,7 @@ pub async fn run_record_and_transcribe(
                 &device_name,
                 &metrics,
                 false, // aec_active = false
+                false,
             )
             .await?;
             segment_start_time = now_epoch_secs();
@@ -542,6 +553,7 @@ pub async fn run_record_and_transcribe(
             &device_name,
             &metrics,
             false,
+            true,
         )
         .await
         {
@@ -805,6 +817,7 @@ async fn flush_audio(
     device_name: &str,
     metrics: &Arc<AudioPipelineMetrics>,
     aec_active: bool,
+    final_flush: bool,
 ) -> Result<()> {
     if collected_audio.is_empty() {
         return Ok(());
@@ -826,7 +839,9 @@ async fn flush_audio(
     } else {
         audio_stream.device_config.sample_rate().0
     };
-
+    let sample_count = send_data.len();
+    let duration_seconds = sample_count as f64 / sample_rate as f64;
+    let flush_kind = if final_flush { "final" } else { "regular" };
     match whisper_sender.send_timeout(
         AudioInput {
             data: Arc::new(send_data),
@@ -838,18 +853,24 @@ async fn flush_audio(
         Duration::from_secs(30),
     ) {
         Ok(_) => {
-            debug!("sent audio segment to audio model");
+            info!(
+                "audio recorder {} flush queued successfully for {}: samples={}, sample_rate={}Hz, duration={:.3}s, capture_timestamp={}",
+                flush_kind, device_name, sample_count, sample_rate, duration_seconds, capture_timestamp
+            );
             metrics.record_chunk_sent();
         }
         Err(e) => {
             if e.is_disconnected() {
-                error!("whisper channel disconnected, restarting recording process");
+                error!(
+                    "audio recorder {} flush queue failed for {}: samples={}, sample_rate={}Hz, duration={:.3}s, cause=whisper channel disconnected",
+                    flush_kind, device_name, sample_count, sample_rate, duration_seconds
+                );
                 return Err(anyhow!("Whisper channel disconnected"));
             } else if e.is_timeout() {
                 metrics.record_channel_full();
                 warn!(
-                    "whisper channel still full after 30s, dropping audio segment for {}",
-                    device_name
+                    "audio recorder {} flush queue failed for {}: samples={}, sample_rate={}Hz, duration={:.3}s, cause=whisper channel still full after 30s; dropping audio segment",
+                    flush_kind, device_name, sample_count, sample_rate, duration_seconds
                 );
             }
         }
@@ -862,6 +883,246 @@ async fn flush_audio(
 mod tests {
     use super::*;
     use crate::core::device::AudioDevice;
+
+    async fn run_stopped_recorder(
+        samples: Vec<f32>,
+        segment_duration: Duration,
+        aec: bool,
+    ) -> (u64, Vec<AudioInput>) {
+        let sample_rate = 16_000_u32;
+        let device = Arc::new(AudioDevice::new(
+            "Stopped recorder regression fixture".to_string(),
+            if aec {
+                DeviceType::Input
+            } else {
+                DeviceType::Output
+            },
+        ));
+        let (audio_stream, tx) = AudioStream::from_sender_for_test(device, sample_rate, 1);
+        let audio_stream = Arc::new(audio_stream);
+        let (whisper_tx, whisper_rx) = crossbeam::channel::bounded::<AudioInput>(8);
+        let is_running = Arc::new(AtomicBool::new(true));
+        let metrics = Arc::new(AudioPipelineMetrics::new());
+        let metrics_for_wait = metrics.clone();
+        metrics
+            .audio_level_rms_x10000
+            .store(u64::MAX, Ordering::Relaxed);
+        let started_before_spawn = now_epoch_secs();
+        let pipeline = tokio::spawn({
+            let audio_stream = audio_stream.clone();
+            let is_running = is_running.clone();
+            let metrics = metrics.clone();
+            async move {
+                run_record_and_transcribe(
+                    audio_stream,
+                    segment_duration,
+                    Arc::new(whisper_tx),
+                    is_running,
+                    metrics,
+                    None,
+                    None,
+                    aec,
+                )
+                .await
+            }
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while tx.receiver_count() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("recorder subscription timeout");
+        let started_after_subscription = now_epoch_secs();
+        if !samples.is_empty() {
+            tx.send(samples).expect("send recorder fixture");
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while metrics_for_wait
+                    .audio_level_rms_x10000
+                    .load(Ordering::Relaxed)
+                    == u64::MAX
+                {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("recorder sample-consumption timeout");
+            if segment_duration == Duration::from_secs(1) {
+                tokio::time::timeout(Duration::from_secs(1), async {
+                    while metrics_for_wait.chunks_sent.load(Ordering::Relaxed) == 0 {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("regular recorder flush timeout");
+            }
+        }
+        is_running.store(false, Ordering::Relaxed);
+        tx.send(Vec::new()).ok();
+        tokio::time::timeout(Duration::from_secs(2), pipeline)
+            .await
+            .expect("recorder shutdown timeout")
+            .expect("recorder task")
+            .expect("recorder result");
+
+        let segments = whisper_rx.try_iter().collect::<Vec<_>>();
+        if let Some(first) = segments.first() {
+            assert!(first.capture_timestamp >= started_before_spawn);
+            assert!(first.capture_timestamp <= started_after_subscription);
+        }
+        for pair in segments.windows(2) {
+            assert!(pair[1].capture_timestamp >= pair[0].capture_timestamp);
+        }
+        (started_before_spawn, segments)
+    }
+
+    #[tokio::test]
+    async fn stopped_raw_recorder_flushes_each_final_fragment_once() {
+        let cases = [
+            ("one_second", vec![0.25; 16_000]),
+            ("three_point_two_seconds", vec![0.5; 51_200]),
+            ("legitimate_silence", vec![0.0; 16_000]),
+        ];
+        for (name, samples) in cases {
+            let (_, segments) =
+                run_stopped_recorder(samples.clone(), Duration::from_secs(30), false).await;
+            assert_eq!(segments.len(), 1, "{name} must produce one final fragment");
+            assert_eq!(segments[0].data.as_ref(), &samples, "{name} samples");
+        }
+
+        let (_, empty_segments) =
+            run_stopped_recorder(Vec::new(), Duration::from_secs(30), false).await;
+        assert!(
+            empty_segments.is_empty(),
+            "empty stop must not create a fragment"
+        );
+    }
+
+    #[tokio::test]
+    async fn stopped_raw_recorder_keeps_regular_chunk_and_one_retained_tail() {
+        let samples = (0..48_000).map(|n| n as f32).collect::<Vec<_>>();
+        let (started_at, segments) =
+            run_stopped_recorder(samples.clone(), Duration::from_secs(1), false).await;
+
+        assert_eq!(
+            segments
+                .iter()
+                .map(|segment| segment.data.len())
+                .sum::<usize>(),
+            samples.len()
+        );
+
+        assert_eq!(segments.len(), 2, "one regular chunk plus one final tail");
+        assert_eq!(segments[0].data.as_ref(), &samples[..16_000]);
+        assert_eq!(segments[1].data.as_ref(), &samples[16_000..]);
+        assert!(segments[1].capture_timestamp >= started_at);
+    }
+
+    #[tokio::test]
+    async fn stopped_aec_recorder_flushes_processed_tail_once() {
+        let samples = vec![0.25; 3_200];
+        let (_, segments) = run_stopped_recorder(samples, Duration::from_secs(30), true).await;
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].sample_rate, 16_000);
+        assert!(!segments[0].data.is_empty());
+        assert_eq!(
+            segments[0].data.len() % crate::core::aec::FRAME_SIZE_10MS,
+            0
+        );
+        assert!(segments[0].data.len() <= 3_200);
+    }
+
+    #[tokio::test]
+    async fn stopped_recorder_emits_real_final_flush_outcomes_for_support() {
+        use tracing::instrument::WithSubscriber;
+
+        let Some(trace_path) = std::env::var_os("SCREENPIPE_TEST_AUDIO_TRACE_PATH") else {
+            return;
+        };
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(std::fs::File::create(trace_path).unwrap())
+            .finish();
+        async {
+            let device = Arc::new(AudioDevice::new(
+                "Stopped recorder diagnostic fixture".to_string(),
+                DeviceType::Output,
+            ));
+            let (stream, _tx) = AudioStream::from_sender_for_test(device, 16_000, 1);
+            let stream = Arc::new(stream);
+            let (success_sender, success_receiver) = crossbeam::channel::bounded::<AudioInput>(1);
+            let mut final_fragment = vec![0.25; 16_000];
+            flush_audio(
+                &mut final_fragment,
+                0,
+                now_epoch_secs(),
+                &stream,
+                &Arc::new(success_sender),
+                "Stopped recorder diagnostic fixture (output)",
+                &Arc::new(AudioPipelineMetrics::new()),
+                false,
+                true,
+            )
+            .await
+            .expect("final flush success");
+            assert_eq!(success_receiver.recv().unwrap().data.len(), 16_000);
+
+            let (sender, receiver) = crossbeam::channel::bounded::<AudioInput>(1);
+            drop(receiver);
+            let mut retained = vec![0.5; 51_200];
+            let error = flush_audio(
+                &mut retained,
+                0,
+                now_epoch_secs(),
+                &stream,
+                &Arc::new(sender),
+                "Stopped recorder queue failure fixture (output)",
+                &Arc::new(AudioPipelineMetrics::new()),
+                false,
+                true,
+            )
+            .await
+            .expect_err("disconnected queue must fail");
+            assert!(error.to_string().contains("disconnected"));
+        }
+        .with_subscriber(subscriber)
+        .await;
+    }
+
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    async fn stopped_raw_recorder_persists_short_fragments_with_production_writer() {
+        let Some(output_dir) = std::env::var_os("SCREENPIPE_TEST_AUDIO_EVIDENCE_DIR") else {
+            return;
+        };
+        let output_dir = std::path::PathBuf::from(output_dir);
+        std::fs::create_dir_all(&output_dir).unwrap();
+
+        for (name, samples) in [
+            ("one_second", vec![0.25; 16_000]),
+            ("three_point_two_seconds", vec![0.5; 51_200]),
+        ] {
+            let (_, segments) =
+                run_stopped_recorder(samples.clone(), Duration::from_secs(30), false).await;
+            assert_eq!(segments.len(), 1, "{name} fragment count");
+            assert_eq!(segments[0].data.len(), samples.len(), "{name} sample count");
+            let path = crate::utils::ffmpeg::write_audio_to_new_file(
+                segments[0].data.as_ref(),
+                segments[0].sample_rate,
+                name,
+                &output_dir,
+                chrono::DateTime::from_timestamp(segments[0].capture_timestamp as i64, 0),
+            )
+            .expect("production MP4 writer");
+            println!(
+                "native persisted fixture: case={name} samples={} sample_rate={} expected_duration={:.3}s path={path}",
+                segments[0].data.len(),
+                segments[0].sample_rate,
+                segments[0].data.len() as f64 / segments[0].sample_rate as f64
+            );
+        }
+    }
 
     #[test]
     fn live_tap_marks_recorder_mono_output_as_mono() {

@@ -761,6 +761,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn audio_flush_and_persistence_diagnostics_reach_mocked_support_upload() {
+        let Some(native_trace) = std::env::var_os("SCREENPIPE_TEST_AUDIO_TRACE_PATH") else {
+            return;
+        };
+        let logs = tempfile::tempdir().unwrap();
+        for day in 20..23 {
+            let body = if day == 22 {
+                let mut emitted = std::fs::read_to_string(&native_trace)
+                    .expect("native recorder diagnostic trace");
+                emitted.push_str("email=private@example.com\n");
+                emitted
+            } else {
+                "ordinary rotated log\n".to_string()
+            };
+            std::fs::write(
+                logs.path()
+                    .join(format!("screenpipe-app.2026-09-{day}.log")),
+                body,
+            )
+            .unwrap();
+        }
+
+        let files = crate::log_files::collect_log_files(&[logs.path().to_path_buf()]).await;
+        let raw = collect_log_text_from_files(files).await;
+        let redacted = crate::feedback_redact::redact_pii_for_feedback(raw, "{}".into())
+            .await
+            .unwrap();
+        let unattended =
+            crate::diagnostic_logs::collect_redacted_from_dirs(&[logs.path().to_path_buf()])
+                .await
+                .unwrap();
+        for report in [&redacted, &unattended] {
+            assert!(report.contains("audio recorder final flush queued successfully"));
+            assert!(report.contains("samples=16000"));
+            assert!(report.contains("duration=1.000s"));
+            assert!(report.contains("audio recorder final flush queue failed"));
+            assert!(report.contains("cause=whisper channel disconnected"));
+            assert!(!report.contains("private@example.com"));
+        }
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/logs"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {
+                "signedUrl": format!("{}/upload/log", server.uri()), "path": "logs/report.log"
+            }})))
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/upload/log"))
+            .and(body_bytes(redacted.as_bytes()))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/logs/confirm"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {"id": 42}})))
+            .mount(&server)
+            .await;
+        upload_report(
+            &Client::new(),
+            &server.uri(),
+            &request(),
+            redacted,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
     async fn parity_scan_failure_reaches_support_without_rolling_logs() {
         use screenpipe_db::{storage, DatabaseManager};
         let root = tempfile::tempdir().unwrap();
