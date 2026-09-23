@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "suite": "screenpipe-app-coding-agent-regressions",
-  "dataset_version": "2026-09-22.8",
+  "dataset_version": "2026-09-23.2",
   "suite_type": "regression",
   "owner": "screenpipe engineering",
   "policy": {
@@ -2952,6 +2952,54 @@
           }
         ],
         "command": "bun --no-env-file test evals/coding-agent/graders/daily-summary-errors.test.js"
+      }
+    },
+    {
+      "id": "app-pipe-run-registered-outputs",
+      "name": "Expose registered outputs for the active pipe run",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "d3569717c055679ca232b822491cd72ac58ca06c"
+      },
+      "base_ref": "67f8cc7ceb74e5772ff44970419a664e7827fe74",
+      "oracle_ref": "d3569717c055679ca232b822491cd72ac58ca06c",
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/lib/hooks/use-chat-inspector.ts"
+      ],
+      "gate": "advisory",
+      "trigger_paths": [
+        "apps/screenpipe-app-tauri/lib/hooks/use-chat-inspector.ts",
+        "apps/screenpipe-app-tauri/lib/hooks/use-unified-artifacts.ts",
+        "apps/screenpipe-app-tauri/lib/source-citations.ts"
+      ],
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "pipe-outputs",
+        "execution-scope",
+        "recovery"
+      ],
+      "prompt": "The public useChatInspector hook only exposes explicit artifact tool results, so a pipe run whose output was registered separately appears to have no output. Restore outputs for the supplied active pipe-run source even when the transcript has no artifact tool call. Query the artifact API with that source and exclude rows belonging to other runs. Preserve explicit tool outputs and avoid duplicate registered outputs when their original path already identifies an explicit output. Ordinary chat without a pipe-run source must preserve explicit outputs without reading the artifact API. Removing the pipe context must clear its registered outputs. An initial artifact API refusal must leave registered outputs empty and a later transcript update must recover the registered output after the API recovers. Preserve the public hook interface; evaluate observable outputs and requests rather than private helper names or UI wording. Use synthetic local API responses only. This task covers the actual hook and internal artifact/citation helpers, not full chat UI wiring, native registration, database persistence, or live services.",
+      "agent_timeout_seconds": 900,
+      "grader_dependency_links": [
+        {
+          "source_path": "apps/screenpipe-app-tauri/node_modules",
+          "destination_path": "apps/screenpipe-app-tauri/node_modules"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/pipe-run-outputs.fixture.ts",
+            "destination_path": "apps/screenpipe-app-tauri/eval-pipe-run-outputs.test.ts"
+          },
+          {
+            "local_path": "graders/pipe-run-outputs.config.mjs",
+            "destination_path": "apps/screenpipe-app-tauri/eval-pipe-run-outputs.config.mjs"
+          }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && node node_modules/vitest/vitest.mjs run --config eval-pipe-run-outputs.config.mjs"
       }
     }
   ]

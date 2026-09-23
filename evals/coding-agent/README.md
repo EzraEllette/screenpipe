@@ -9,7 +9,7 @@ This is an agent eval suite, not a unit-test suite. Every case contains:
 - saved prompt, transcript, candidate patch, grader output, runtime fingerprint, and result;
 - repeated-trial reporting with success rate, `pass@k`, and `pass^k`.
 
-The current app corpus contains 72 git-mined regressions. See
+The current app corpus contains 73 git-mined regressions. See
 [DESIGN.md](./DESIGN.md) for the Anthropic guidance, source contract, and
 history-mining workflow. The companion website manifest uses this same harness.
 
@@ -786,3 +786,21 @@ The twelve outcomes also pass against current persistence source using the
 historical synthetic test setup. This is not the complete current app suite,
 independent native webview scheduling, real filesystem durability, proof of
 workspace isolation or a model trial.
+
+## Registered pipe-run outputs
+
+`app-pipe-run-registered-outputs` executes the public chat-inspector hook with
+real artifact and citation helpers against a synthetic local API. Six outcomes
+cover active-run visibility without tool calls, other-run exclusion, explicit
+output deduplication, ordinary chat, leaving the pipe context and recovery after
+a temporary API refusal. The parent fails three intended outcomes and preserves
+three; the hook-only reference passes all six.
+
+Run `bun test evals/coding-agent/calibrate-pipe-run-outputs.test.js` with desktop
+React/Vitest dependencies installed. Seven controls cover parent/reference, an
+unused corrected hook, equivalent helper naming, removed source filtering,
+blanket suppression and missing-source setup failure. Set
+`SCREENPIPE_EVAL_CALIBRATION_RECEIPTS` to retain per-control logs. Fixtures and
+dependency links are materialized only for grading. These are corpus checks,
+not model trials, full chat UI or native persistence evidence, or proof of
+execution isolation. No real files, recordings or provider accounts are used.
