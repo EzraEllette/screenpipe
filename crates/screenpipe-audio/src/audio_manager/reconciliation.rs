@@ -38,6 +38,8 @@ const RECONCILIATION_CHUNKS_PER_SWEEP: i64 = 50;
 pub struct ReconciliationSweep {
     pub processed_chunks: usize,
     pub hit_candidate_limit: bool,
+    /// Stable, non-sensitive failure category for worker health reporting.
+    pub failure: Option<&'static str>,
 }
 
 use crate::core::engine::AudioTranscriptionEngine;
@@ -326,7 +328,10 @@ pub async fn reconcile_untranscribed(
                 "reconciliation: failed to query untranscribed chunks: {}",
                 e
             );
-            return ReconciliationSweep::default();
+            return ReconciliationSweep {
+                failure: Some("database query failed"),
+                ..Default::default()
+            };
         }
     };
 
@@ -361,6 +366,7 @@ pub async fn reconcile_untranscribed(
 
     let engine_config = transcription_engine.config();
     let mut success_count = 0;
+    let mut last_failure = None;
     let mut consecutive_db_errors = 0u32;
     const MAX_CONSECUTIVE_DB_ERRORS: u32 = 3;
 
@@ -487,6 +493,7 @@ pub async fn reconcile_untranscribed(
                 if let Some(metrics) = &metrics {
                     metrics.record_transcription_error();
                 }
+                last_failure = Some("provider transcription failed");
                 // An account-standing denial fails every batch in this sweep the
                 // same way; continuing would hammer the API once per batch (seen
                 // in the wild: a 403-denied account produced a request every
@@ -696,6 +703,7 @@ pub async fn reconcile_untranscribed(
                     primary_chunk.id, e
                 );
                 consecutive_db_errors += 1;
+                last_failure = Some("database write failed");
                 // The pending JSON file persists — next sweep will retry
                 continue;
             }
@@ -741,6 +749,7 @@ pub async fn reconcile_untranscribed(
     ReconciliationSweep {
         processed_chunks: success_count,
         hit_candidate_limit,
+        failure: last_failure,
     }
 }
 

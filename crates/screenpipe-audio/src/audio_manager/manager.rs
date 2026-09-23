@@ -166,6 +166,39 @@ pub(crate) fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReconciliationWorkerState {
+    Stopped,
+    Waiting,
+    WaitingForMeetingEnd,
+    Processing,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReconciliationWorkerSnapshot {
+    pub state: ReconciliationWorkerState,
+    pub engine: String,
+    pub processed_chunks: u64,
+    pub last_progress_at: Option<u64>,
+    pub last_failure_at: Option<u64>,
+    pub last_failure: Option<String>,
+}
+
+impl Default for ReconciliationWorkerSnapshot {
+    fn default() -> Self {
+        Self {
+            state: ReconciliationWorkerState::Stopped,
+            engine: "unknown".into(),
+            processed_chunks: 0,
+            last_progress_at: None,
+            last_failure_at: None,
+            last_failure: None,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct AudioManager {
     /// Liveness token for `Drop`. Every field below is shared (`Arc`), so a
@@ -226,6 +259,7 @@ pub struct AudioManager {
     engine_builds: EngineBuildCoordinator,
     /// Handle to the reconciliation background task so we can abort it on shutdown.
     reconciliation_handle: Arc<RwLock<Option<JoinHandle<()>>>>,
+    reconciliation_status: Arc<std::sync::RwLock<ReconciliationWorkerSnapshot>>,
     /// Wakes the background reconciliation task when a foreground sweep fills
     /// its 50-chunk cap, so a meeting backlog keeps draining immediately.
     reconciliation_wakeup: Arc<Notify>,
@@ -450,6 +484,9 @@ impl AudioManager {
             engine: Arc::new(RwLock::new(None)),
             engine_builds: EngineBuildCoordinator::new(),
             reconciliation_handle: Arc::new(RwLock::new(None)),
+            reconciliation_status: Arc::new(std::sync::RwLock::new(
+                ReconciliationWorkerSnapshot::default(),
+            )),
             reconciliation_wakeup: Arc::new(Notify::new()),
             drm_stopped_devices: Arc::new(RwLock::new(Vec::new())),
             user_disabled_devices: Arc::new(RwLock::new(HashSet::new())),
@@ -475,6 +512,13 @@ impl AudioManager {
         {
             self.stop_internal().await?;
         }
+
+        // A stopped capture intentionally leaves its backlog worker alive. A
+        // configuration replacement is different: the old worker owns the old
+        // detector/output/engine and must finish cancellation before those are
+        // replaced. This also releases any engine read guard before we take the
+        // engine-build gate below.
+        self.stop_reconciliation_worker().await;
 
         let deepgram_status = match &options.deepgram_config {
             Some(c) if c.is_ready() => format!(
@@ -575,6 +619,7 @@ impl AudioManager {
 
         // Spawn reconciliation sweep for orphaned audio chunks (batch mode only)
         if self.options.read().await.transcription_mode == TranscriptionMode::Batch {
+            self.stop_reconciliation_worker().await;
             let db = self.db.clone();
             let engine_ref = self.engine.clone();
             let on_insert_bg = self.on_transcription_insert.clone();
@@ -584,6 +629,12 @@ impl AudioManager {
             let metrics_bg = self.metrics.clone();
             let meeting_detector_bg = self.meeting_detector().await;
             let reconciliation_wakeup = self.reconciliation_wakeup.clone();
+            let reconciliation_status = self.reconciliation_status.clone();
+            let engine_label = self.options.read().await.transcription_engine.to_string();
+            if let Ok(mut status) = reconciliation_status.write() {
+                status.state = ReconciliationWorkerState::Waiting;
+                status.engine = engine_label;
+            }
             let handle = tokio::spawn(async move {
                 // Wait for model load + initial recordings, unless a foreground
                 // session-end sweep tells us its 50-chunk cap left more work.
@@ -605,6 +656,9 @@ impl AudioManager {
                         if let Some(detector) = &meeting_detector_bg {
                             detector.check_grace_period().await;
                             if detector.is_in_audio_session() {
+                                if let Ok(mut status) = reconciliation_status.write() {
+                                    status.state = ReconciliationWorkerState::WaitingForMeetingEnd;
+                                }
                                 debug!(
                                     "reconciliation: skipping background sweep during active audio session"
                                 );
@@ -614,6 +668,9 @@ impl AudioManager {
 
                         let engine_guard = engine_ref.read().await;
                         if let Some(ref transcription_engine) = *engine_guard {
+                            if let Ok(mut status) = reconciliation_status.write() {
+                                status.state = ReconciliationWorkerState::Processing;
+                            }
                             let opts = options_ref.read().await;
                             let audio_engine = opts.transcription_engine.clone();
                             let batch_max_dur = opts.batch_max_duration_secs;
@@ -631,6 +688,21 @@ impl AudioManager {
                             )
                             .await;
                             let count = sweep.processed_chunks;
+                            if let Ok(mut status) = reconciliation_status.write() {
+                                status.processed_chunks = status
+                                    .processed_chunks
+                                    .saturating_add(count as u64);
+                                if count > 0 {
+                                    status.last_progress_at = Some(now_ms() / 1000);
+                                }
+                                if let Some(failure) = sweep.failure {
+                                    status.state = ReconciliationWorkerState::Failed;
+                                    status.last_failure_at = Some(now_ms() / 1000);
+                                    status.last_failure = Some(failure.to_string());
+                                } else {
+                                    status.state = ReconciliationWorkerState::Waiting;
+                                }
+                            }
                             if count > 0 {
                                 info!("reconciliation: transcribed {} orphaned chunks", count);
                             }
@@ -652,6 +724,11 @@ impl AudioManager {
                                 "reconciliation: sweep panicked, worker continues: {}",
                                 reason
                             );
+                            if let Ok(mut status) = reconciliation_status.write() {
+                                status.state = ReconciliationWorkerState::Failed;
+                                status.last_failure_at = Some(now_ms() / 1000);
+                                status.last_failure = Some("worker sweep panicked".into());
+                            }
                             false
                         }
                     };
@@ -694,6 +771,23 @@ impl AudioManager {
         info!("audio manager started");
 
         Ok(())
+    }
+
+    async fn stop_reconciliation_worker(&self) {
+        if let Some(handle) = self.reconciliation_handle.write().await.take() {
+            handle.abort();
+            let _ = handle.await;
+        }
+        if let Ok(mut status) = self.reconciliation_status.write() {
+            status.state = ReconciliationWorkerState::Stopped;
+        }
+    }
+
+    pub fn reconciliation_worker_snapshot(&self) -> ReconciliationWorkerSnapshot {
+        self.reconciliation_status
+            .read()
+            .map(|status| status.clone())
+            .unwrap_or_default()
     }
 
     pub async fn restart(&self) -> Result<()> {
@@ -1788,9 +1882,7 @@ impl AudioManager {
 
         // Abort reconciliation first — it holds an engine read-lock during transcription,
         // so it must be cancelled before we drop the engine to avoid use-after-free.
-        if let Some(handle) = self.reconciliation_handle.write().await.take() {
-            handle.abort();
-        }
+        self.stop_reconciliation_worker().await;
 
         let rec = self.recording_handles.clone();
         let recording = self.recording_receiver_handle.clone();
@@ -2550,6 +2642,52 @@ mod tests {
         Arc,
     };
     use tokio::sync::{Barrier, Notify, Semaphore};
+
+    #[tokio::test]
+    async fn apply_options_cancels_retained_worker_before_engine_invalidation() {
+        let db = Arc::new(
+            DatabaseManager::new("sqlite::memory:", Default::default())
+                .await
+                .unwrap(),
+        );
+        let manager = AudioManager::new(
+            AudioManagerOptions {
+                is_disabled: true,
+                ..Default::default()
+            },
+            db,
+        )
+        .await
+        .unwrap();
+
+        let engine = manager.engine.clone();
+        let entered = Arc::new(Notify::new());
+        let entered_task = entered.clone();
+        let handle = tokio::spawn(async move {
+            let _guard = engine.read().await;
+            entered_task.notify_one();
+            std::future::pending::<()>().await;
+        });
+        *manager.reconciliation_handle.write().await = Some(handle);
+        entered.notified().await;
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            manager.apply_options(AudioManagerOptions {
+                is_disabled: true,
+                ..Default::default()
+            }),
+        )
+        .await
+        .expect("engine replacement must not wait on a retained worker")
+        .unwrap();
+
+        assert!(manager.reconciliation_handle.read().await.is_none());
+        assert_eq!(
+            manager.reconciliation_worker_snapshot().state,
+            ReconciliationWorkerState::Stopped
+        );
+    }
 
     #[tokio::test]
     async fn explicit_resume_cannot_report_success_when_meetings_only_gate_skips_start() {
