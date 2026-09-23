@@ -1474,6 +1474,17 @@ impl AudioManager {
                 // ALWAYS persist audio to disk immediately, before any deferral.
                 // This ensures audio survives app restarts and can be retranscribed later.
                 let persisted_file_path = if let Some(ref out) = output_path {
+                    let queued_sample_count = audio.data.len();
+                    let queued_duration_seconds =
+                        queued_sample_count as f64 / audio.sample_rate as f64;
+                    info!(
+                        "audio persistence write started for {}: samples={}, sample_rate={}Hz, duration={:.3}s, capture_timestamp={}",
+                        audio.device,
+                        queued_sample_count,
+                        audio.sample_rate,
+                        queued_duration_seconds,
+                        audio.capture_timestamp
+                    );
                     let resampled = if audio.sample_rate != SAMPLE_RATE {
                         match resample(audio.data.as_ref(), audio.sample_rate, SAMPLE_RATE) {
                             Ok(r) => r,
@@ -1503,7 +1514,14 @@ impl AudioManager {
 
                     match write_result {
                         Ok(Ok(path)) => {
-                            debug!("audio persisted to disk: {}", path);
+                            info!(
+                                "audio persistence write succeeded for {}: samples={}, sample_rate={}Hz, duration={:.3}s, path={}",
+                                audio.device,
+                                queued_sample_count,
+                                audio.sample_rate,
+                                queued_duration_seconds,
+                                path
+                            );
                             // Insert into DB immediately so retranscribe can find this audio
                             // even if transcription is deferred. No transcription yet — just the chunk.
                             // Use the original capture timestamp so audio appears at the correct
@@ -1567,11 +1585,25 @@ impl AudioManager {
                             Some(path)
                         }
                         Ok(Err(e)) => {
-                            error!("failed to persist audio before deferral: {:?}", e);
+                            error!(
+                                "audio persistence write failed for {}: samples={}, sample_rate={}Hz, duration={:.3}s, cause={:?}",
+                                audio.device,
+                                queued_sample_count,
+                                audio.sample_rate,
+                                queued_duration_seconds,
+                                e
+                            );
                             None
                         }
                         Err(e) => {
-                            error!("audio persistence worker failed: {}", e);
+                            error!(
+                                "audio persistence worker failed for {}: samples={}, sample_rate={}Hz, duration={:.3}s, cause={}",
+                                audio.device,
+                                queued_sample_count,
+                                audio.sample_rate,
+                                queued_duration_seconds,
+                                e
+                            );
                             None
                         }
                     }
