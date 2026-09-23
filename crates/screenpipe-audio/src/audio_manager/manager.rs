@@ -1477,14 +1477,6 @@ impl AudioManager {
                     let queued_sample_count = audio.data.len();
                     let queued_duration_seconds =
                         queued_sample_count as f64 / audio.sample_rate as f64;
-                    info!(
-                        "audio persistence write started for {}: samples={}, sample_rate={}Hz, duration={:.3}s, capture_timestamp={}",
-                        audio.device,
-                        queued_sample_count,
-                        audio.sample_rate,
-                        queued_duration_seconds,
-                        audio.capture_timestamp
-                    );
                     let resampled = if audio.sample_rate != SAMPLE_RATE {
                         match resample(audio.data.as_ref(), audio.sample_rate, SAMPLE_RATE) {
                             Ok(r) => r,
@@ -1515,11 +1507,12 @@ impl AudioManager {
                     match write_result {
                         Ok(Ok(path)) => {
                             info!(
-                                "audio persistence write succeeded for {}: samples={}, sample_rate={}Hz, duration={:.3}s, path={}",
+                                "audio persistence write succeeded for {}: samples={}, sample_rate={}Hz, duration={:.3}s, capture_timestamp={}, path={}",
                                 audio.device,
                                 queued_sample_count,
                                 audio.sample_rate,
                                 queued_duration_seconds,
+                                audio.capture_timestamp,
                                 path
                             );
                             // Insert into DB immediately so retranscribe can find this audio

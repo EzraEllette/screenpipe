@@ -842,16 +842,6 @@ async fn flush_audio(
     let sample_count = send_data.len();
     let duration_seconds = sample_count as f64 / sample_rate as f64;
     let flush_kind = if final_flush { "final" } else { "regular" };
-    info!(
-        "audio recorder {} flush queued for {}: samples={}, sample_rate={}Hz, duration={:.3}s, capture_timestamp={}",
-        flush_kind,
-        device_name,
-        sample_count,
-        sample_rate,
-        duration_seconds,
-        capture_timestamp
-    );
-
     match whisper_sender.send_timeout(
         AudioInput {
             data: Arc::new(send_data),
@@ -864,8 +854,8 @@ async fn flush_audio(
     ) {
         Ok(_) => {
             info!(
-                "audio recorder {} flush queued successfully for {}: samples={}, sample_rate={}Hz, duration={:.3}s",
-                flush_kind, device_name, sample_count, sample_rate, duration_seconds
+                "audio recorder {} flush queued successfully for {}: samples={}, sample_rate={}Hz, duration={:.3}s, capture_timestamp={}",
+                flush_kind, device_name, sample_count, sample_rate, duration_seconds, capture_timestamp
             );
             metrics.record_chunk_sent();
         }
@@ -894,14 +884,19 @@ mod tests {
     use super::*;
     use crate::core::device::AudioDevice;
 
-    async fn run_stopped_raw_recorder(
+    async fn run_stopped_recorder(
         samples: Vec<f32>,
         segment_duration: Duration,
+        aec: bool,
     ) -> (u64, Vec<AudioInput>) {
         let sample_rate = 16_000_u32;
         let device = Arc::new(AudioDevice::new(
             "Stopped recorder regression fixture".to_string(),
-            DeviceType::Output,
+            if aec {
+                DeviceType::Input
+            } else {
+                DeviceType::Output
+            },
         ));
         let (audio_stream, tx) = AudioStream::from_sender_for_test(device, sample_rate, 1);
         let audio_stream = Arc::new(audio_stream);
@@ -909,7 +904,10 @@ mod tests {
         let is_running = Arc::new(AtomicBool::new(true));
         let metrics = Arc::new(AudioPipelineMetrics::new());
         let metrics_for_wait = metrics.clone();
-        let expected_timestamp = now_epoch_secs();
+        metrics
+            .audio_level_rms_x10000
+            .store(u64::MAX, Ordering::Relaxed);
+        let started_before_spawn = now_epoch_secs();
         let pipeline = tokio::spawn({
             let audio_stream = audio_stream.clone();
             let is_running = is_running.clone();
@@ -923,15 +921,33 @@ mod tests {
                     metrics,
                     None,
                     None,
-                    false,
+                    aec,
                 )
                 .await
             }
         });
 
-        tokio::time::sleep(Duration::from_millis(25)).await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while tx.receiver_count() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("recorder subscription timeout");
+        let started_after_subscription = now_epoch_secs();
         if !samples.is_empty() {
             tx.send(samples).expect("send recorder fixture");
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while metrics_for_wait
+                    .audio_level_rms_x10000
+                    .load(Ordering::Relaxed)
+                    == u64::MAX
+                {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("recorder sample-consumption timeout");
             if segment_duration == Duration::from_secs(1) {
                 tokio::time::timeout(Duration::from_secs(1), async {
                     while metrics_for_wait.chunks_sent.load(Ordering::Relaxed) == 0 {
@@ -940,8 +956,6 @@ mod tests {
                 })
                 .await
                 .expect("regular recorder flush timeout");
-            } else {
-                tokio::time::sleep(Duration::from_millis(25)).await;
             }
         }
         is_running.store(false, Ordering::Relaxed);
@@ -952,7 +966,15 @@ mod tests {
             .expect("recorder task")
             .expect("recorder result");
 
-        (expected_timestamp, whisper_rx.try_iter().collect())
+        let segments = whisper_rx.try_iter().collect::<Vec<_>>();
+        if let Some(first) = segments.first() {
+            assert!(first.capture_timestamp >= started_before_spawn);
+            assert!(first.capture_timestamp <= started_after_subscription);
+        }
+        for pair in segments.windows(2) {
+            assert!(pair[1].capture_timestamp >= pair[0].capture_timestamp);
+        }
+        (started_before_spawn, segments)
     }
 
     #[tokio::test]
@@ -964,7 +986,7 @@ mod tests {
         ];
         for (name, samples) in cases {
             let (started_at, segments) =
-                run_stopped_raw_recorder(samples.clone(), Duration::from_secs(30)).await;
+                run_stopped_recorder(samples.clone(), Duration::from_secs(30), false).await;
             assert_eq!(segments.len(), 1, "{name} must produce one final fragment");
             assert_eq!(segments[0].data.as_ref(), &samples, "{name} samples");
             assert_eq!(
@@ -974,7 +996,7 @@ mod tests {
         }
 
         let (_, empty_segments) =
-            run_stopped_raw_recorder(Vec::new(), Duration::from_secs(30)).await;
+            run_stopped_recorder(Vec::new(), Duration::from_secs(30), false).await;
         assert!(
             empty_segments.is_empty(),
             "empty stop must not create a fragment"
@@ -985,13 +1007,92 @@ mod tests {
     async fn stopped_raw_recorder_keeps_regular_chunk_and_one_retained_tail() {
         let samples = (0..48_000).map(|n| n as f32).collect::<Vec<_>>();
         let (started_at, segments) =
-            run_stopped_raw_recorder(samples.clone(), Duration::from_secs(1)).await;
+            run_stopped_recorder(samples.clone(), Duration::from_secs(1), false).await;
+
+        assert_eq!(
+            segments
+                .iter()
+                .map(|segment| segment.data.len())
+                .sum::<usize>(),
+            samples.len()
+        );
 
         assert_eq!(segments.len(), 2, "one regular chunk plus one final tail");
         assert_eq!(segments[0].data.as_ref(), &samples[..16_000]);
         assert_eq!(segments[1].data.as_ref(), &samples[16_000..]);
         assert_eq!(segments[0].capture_timestamp, started_at);
         assert!(segments[1].capture_timestamp >= started_at);
+    }
+
+    #[tokio::test]
+    async fn stopped_aec_recorder_flushes_processed_tail_once() {
+        let samples = vec![0.25; 3_200];
+        let (_, segments) = run_stopped_recorder(samples, Duration::from_secs(30), true).await;
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].sample_rate, 16_000);
+        assert!(!segments[0].data.is_empty());
+        assert_eq!(
+            segments[0].data.len() % crate::core::aec::FRAME_SIZE_10MS,
+            0
+        );
+        assert!(segments[0].data.len() <= 3_200);
+    }
+
+    #[tokio::test]
+    async fn stopped_recorder_emits_real_final_flush_outcomes_for_support() {
+        use tracing::instrument::WithSubscriber;
+
+        let Some(trace_path) = std::env::var_os("SCREENPIPE_TEST_AUDIO_TRACE_PATH") else {
+            return;
+        };
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(std::fs::File::create(trace_path).unwrap())
+            .finish();
+        async {
+            let device = Arc::new(AudioDevice::new(
+                "Stopped recorder diagnostic fixture".to_string(),
+                DeviceType::Output,
+            ));
+            let (stream, _tx) = AudioStream::from_sender_for_test(device, 16_000, 1);
+            let stream = Arc::new(stream);
+            let (success_sender, success_receiver) = crossbeam::channel::bounded::<AudioInput>(1);
+            let mut final_fragment = vec![0.25; 16_000];
+            flush_audio(
+                &mut final_fragment,
+                0,
+                now_epoch_secs(),
+                &stream,
+                &Arc::new(success_sender),
+                "Stopped recorder diagnostic fixture (output)",
+                &Arc::new(AudioPipelineMetrics::new()),
+                false,
+                true,
+            )
+            .await
+            .expect("final flush success");
+            assert_eq!(success_receiver.recv().unwrap().data.len(), 16_000);
+
+            let (sender, receiver) = crossbeam::channel::bounded::<AudioInput>(1);
+            drop(receiver);
+            let mut retained = vec![0.5; 51_200];
+            let error = flush_audio(
+                &mut retained,
+                0,
+                now_epoch_secs(),
+                &stream,
+                &Arc::new(sender),
+                "Stopped recorder queue failure fixture (output)",
+                &Arc::new(AudioPipelineMetrics::new()),
+                false,
+                true,
+            )
+            .await
+            .expect_err("disconnected queue must fail");
+            assert!(error.to_string().contains("disconnected"));
+        }
+        .with_subscriber(subscriber)
+        .await;
     }
 
     #[cfg(target_os = "windows")]
@@ -1008,7 +1109,7 @@ mod tests {
             ("three_point_two_seconds", vec![0.5; 51_200]),
         ] {
             let (_, segments) =
-                run_stopped_raw_recorder(samples.clone(), Duration::from_secs(30)).await;
+                run_stopped_recorder(samples.clone(), Duration::from_secs(30), false).await;
             assert_eq!(segments.len(), 1, "{name} fragment count");
             assert_eq!(segments[0].data.len(), samples.len(), "{name} sample count");
             let path = crate::utils::ffmpeg::write_audio_to_new_file(

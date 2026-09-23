@@ -762,16 +762,18 @@ mod tests {
 
     #[tokio::test]
     async fn audio_flush_and_persistence_diagnostics_reach_mocked_support_upload() {
+        let Some(native_trace) = std::env::var_os("SCREENPIPE_TEST_AUDIO_TRACE_PATH") else {
+            return;
+        };
         let logs = tempfile::tempdir().unwrap();
-        for day in 10..18 {
-            let body = if day == 17 {
-                concat!(
-                    "2026-09-17T12:00:00Z INFO audio recorder final flush queued successfully for System Audio (output): samples=51200, sample_rate=16000Hz, duration=3.200s\n",
-                    "2026-09-17T12:00:01Z ERROR audio persistence write failed for System Audio (output): samples=16000, sample_rate=16000Hz, duration=1.000s, cause=ffmpeg exited with status 1\n",
-                    "email=private@example.com\n"
-                )
+        for day in 20..23 {
+            let body = if day == 22 {
+                let mut emitted = std::fs::read_to_string(&native_trace)
+                    .expect("native recorder diagnostic trace");
+                emitted.push_str("email=private@example.com\n");
+                emitted
             } else {
-                "ordinary rotated log\n"
+                "ordinary rotated log\n".to_string()
             };
             std::fs::write(
                 logs.path()
@@ -792,10 +794,10 @@ mod tests {
                 .unwrap();
         for report in [&redacted, &unattended] {
             assert!(report.contains("audio recorder final flush queued successfully"));
-            assert!(report.contains("samples=51200"));
-            assert!(report.contains("duration=3.200s"));
-            assert!(report.contains("audio persistence write failed"));
-            assert!(report.contains("cause=ffmpeg exited with status 1"));
+            assert!(report.contains("samples=16000"));
+            assert!(report.contains("duration=1.000s"));
+            assert!(report.contains("audio recorder final flush queue failed"));
+            assert!(report.contains("cause=whisper channel disconnected"));
             assert!(!report.contains("private@example.com"));
         }
 
