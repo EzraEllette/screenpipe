@@ -221,6 +221,72 @@ async fn build_bundle(files: &[LogFile]) -> String {
 mod tests {
     use super::*;
 
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn settings_access_recovery_survives_rotation_and_redaction_without_private_data() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let logs = root.path().join("logs");
+        std::fs::create_dir(&logs).unwrap();
+        let current = logs.join("screenpipe-app.2026-09-23.log");
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(std::fs::File::create(&current).unwrap())
+            .finish();
+        let private_dir = root.path().join("private-person@example.com");
+        std::fs::create_dir(&private_dir).unwrap();
+        let store_path = private_dir.join("store.bin");
+        std::fs::write(
+            &store_path,
+            br#"{"settings":{"openaiApiKey":"secret-value"},"onboarding":{"isCompleted":false}}"#,
+        )
+        .unwrap();
+        tracing::subscriber::with_default(subscriber, || {
+            let app = tauri::test::mock_builder()
+                .plugin(tauri_plugin_store::Builder::default().build())
+                .build(tauri::test::mock_context(tauri::test::noop_assets()))
+                .unwrap();
+            let store = crate::store::build_store_at(app.handle(), store_path.clone()).unwrap();
+            let mut onboarding = crate::store::OnboardingStore::default();
+            onboarding.complete();
+            store.set("onboarding", serde_json::json!(onboarding));
+            let mut permissions = std::fs::metadata(&store_path).unwrap().permissions();
+            permissions.set_readonly(true);
+            std::fs::set_permissions(&store_path, permissions).unwrap();
+            crate::store::save_store_at_with_permission_repair(&store_path, store.as_ref())
+                .unwrap();
+            let persisted: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&store_path).unwrap()).unwrap();
+            assert_eq!(
+                persisted.pointer("/onboarding/isCompleted"),
+                Some(&serde_json::json!(true))
+            );
+
+            let lock = std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(1)
+                .open(&store_path)
+                .unwrap();
+            let error = crate::store::reset_windows_store_file_permissions(&store_path)
+                .expect_err("persistent sharing denial must fail closed");
+            assert!(error.to_string().contains("raw Windows error"));
+            drop(lock);
+        });
+        std::fs::rename(&current, logs.join("screenpipe-app.2026-09-23.1.log")).unwrap();
+        std::fs::write(&current, "screenpipe restarted\n").unwrap();
+
+        let report = collect_redacted_from_dirs(&[logs]).await.unwrap();
+        assert!(report.contains("operation=\"settings_store_access\""));
+        assert!(report.contains("operation=\"settings_store_save\""));
+        assert!(report.contains("stage=\"write_probe\""));
+        assert!(report.contains("recovery=\"retry_succeeded\""));
+        assert!(report.contains("recovery=\"failed\""));
+        assert!(report.contains("raw_os_code=5") || report.contains("raw_os_code=32"));
+        assert!(!report.contains("private-person@example.com"));
+        assert!(!report.contains("secret-value"));
+        assert!(!report.contains(&store_path.to_string_lossy().to_string()));
+    }
+
     #[tokio::test]
     async fn uia_limits_survive_support_collection_and_rotation() {
         use screenpipe_a11y::capture_diagnostics::{RetainedUiaIssue, UiaCaptureIssue};
