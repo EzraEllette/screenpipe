@@ -21,7 +21,8 @@ use screenpipe_a11y::tree::TreeWalkerConfig;
 use screenpipe_a11y::ActivityFeed;
 use screenpipe_capture::ocr_gate::OcrGate;
 use screenpipe_capture::paired_capture::{
-    detach_tree_from_pixels, paired_capture, CaptureContext, PairedCaptureResult,
+    detach_tree_from_pixels, paired_capture, paired_capture_deferred, CaptureContext,
+    PairedCaptureResult,
 };
 use screenpipe_capture::{TreeWalkerWorker, TreeWalkerWorkerOutcome};
 use screenpipe_core::window_pattern::{self, WindowPattern};
@@ -3101,24 +3102,26 @@ async fn do_capture(
     }
 
     use screenpipe_a11y::tree::TreeWalkResult;
+    let mut defer_text_extraction = false;
     if let Some(ref app) = trigger_app {
         let decision = walk_budget.should_walk(app);
         if !decision.walk && !bypass_capture_throttles {
-            debug!(
-                "walk budget: throttling tree walk for {} (tier={:?}) — skipping capture",
-                app, decision.tier
-            );
-            // Skip the entire capture. Previously this fell through to a
-            // TreeWalkResult::NotFound which triggered OCR fallback — but the
-            // fallback costs ~322ms of Vision CPU, more than the walk we just
-            // throttled to save CPU. The next trigger past the budget
-            // min_interval will produce a fresh walk with real AX text.
-            return Ok(CaptureOutput {
-                result: None,
-                image,
-                elements_deduped: false,
-                corrupt: None,
-            });
+            if cfg!(target_os = "windows") {
+                // AX backoff must not reject a recording or substitute another
+                // expensive OCR pass. Save the pixels after the privacy gates.
+                defer_text_extraction = true;
+            } else {
+                debug!(
+                    "walk budget: throttling tree walk for {} (tier={:?}) — skipping capture",
+                    app, decision.tier
+                );
+                return Ok(CaptureOutput {
+                    result: None,
+                    image,
+                    elements_deduped: false,
+                    corrupt: None,
+                });
+            }
         } else if !decision.walk {
             debug!(
                 "walk budget: allowing checkpoint {} capture for {} despite tier={:?}",
@@ -3135,7 +3138,21 @@ async fn do_capture(
     // different monitor would both waste work and pair unrelated pixels with
     // that window's tree, identity, and dedup hash. Non-focused monitors use
     // the screenshot/OCR path below instead.
-    let tree_walk_result = if monitor_hosts_focus {
+    let tree_walk_result = if monitor_hosts_focus && defer_text_extraction {
+        // The normal walk checks these filters before any provider request.
+        // Preserve that gate when no walk is admitted. URL, ignored popup and
+        // DRM policies need fresh tree data; fail closed when it is unavailable.
+        let filters = screenpipe_a11y::tree::check_focused_window_filters(config.clone())?;
+        if !filters.permits_deferred_capture(&config) || params.pause_on_drm_content {
+            return Ok(CaptureOutput {
+                result: None,
+                image,
+                elements_deduped: false,
+                corrupt: None,
+            });
+        }
+        None
+    } else if monitor_hosts_focus {
         let worker_timeout = tree_walk_worker_timeout(&config);
         match params
             .tree_walker
@@ -3177,7 +3194,17 @@ async fn do_capture(
     // attempts — they're user/incognito filters, not real walks.
     match tree_walk_result.as_ref() {
         Some(TreeWalkResult::Found(snap)) => {
-            walk_budget.record_walk(&snap.app_name, snap.walk_duration, snap.truncated);
+            // Cooperative retained-tree discovery and a terminal memory cap do
+            // not indicate a slow provider. Only real provider timeout pressure
+            // feeds adaptive backoff.
+            walk_budget.record_walk(
+                &snap.app_name,
+                snap.walk_duration,
+                matches!(
+                    snap.truncation_reason,
+                    screenpipe_a11y::tree::TruncationReason::Timeout
+                ),
+            );
             if snap.walk_duration > std::time::Duration::from_millis(100) {
                 let next = walk_budget.should_walk(&snap.app_name);
                 debug!(
@@ -3538,7 +3565,11 @@ async fn do_capture(
         focused_window_bounds,
     };
 
-    let result = paired_capture(&ctx, tree_snapshot.as_ref(), Some(ocr_gate)).await?;
+    let result = if defer_text_extraction {
+        paired_capture_deferred(&ctx).await?
+    } else {
+        paired_capture(&ctx, tree_snapshot.as_ref(), Some(ocr_gate)).await?
+    };
     if let Some(sender) = params.semantic_tx {
         match tree_snapshot {
             Some(snapshot) if ax_screenshot_coherent => {
@@ -3559,7 +3590,7 @@ async fn do_capture(
             }
         }
     }
-    let deduped = elements_ref_frame_id.is_some();
+    let deduped = !defer_text_extraction && elements_ref_frame_id.is_some();
     // Extract image from Arc for comparer reuse. Arc::try_unwrap succeeds
     // because paired_capture no longer retains a clone.
     let image = Arc::try_unwrap(ctx.image).unwrap_or_else(|arc| (*arc).clone());

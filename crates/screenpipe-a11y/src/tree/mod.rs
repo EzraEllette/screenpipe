@@ -352,6 +352,9 @@ pub enum TruncationReason {
     Timeout,
     /// Hit the maximum node count (`max_nodes`).
     MaxNodes,
+    /// Retained discovery has more bounded work queued. This is cooperative
+    /// continuation, not provider overload.
+    Pending,
 }
 
 /// Screen bounds of the focused window, normalized to the monitor's extent
@@ -675,6 +678,51 @@ pub enum FocusedWindowFilterResult {
     Skipped(SkipReason),
     /// No reliable focused-window metadata was available.
     NotFound,
+}
+
+impl FocusedWindowFilterResult {
+    /// Whether metadata alone permits a screenshot while tree extraction is
+    /// deferred. URL policies and ignored browser-extension popups require
+    /// fresh tree data; fail closed without it.
+    pub fn permits_deferred_capture(&self, config: &TreeWalkerConfig) -> bool {
+        config.ignored_windows.is_empty()
+            && config.ignored_urls.is_empty()
+            && config.included_urls.is_empty()
+            && matches!(self, Self::Allowed { .. })
+    }
+}
+
+#[cfg(test)]
+mod deferred_capture_tests {
+    use super::*;
+
+    #[test]
+    fn backoff_preserves_privacy_and_requires_known_window_metadata() {
+        let mut config = TreeWalkerConfig::default();
+        let allowed = FocusedWindowFilterResult::Allowed {
+            app_name: "msedge.exe".into(),
+            window_name: "CPU list".into(),
+        };
+        assert!(allowed.permits_deferred_capture(&config));
+        assert!(!FocusedWindowFilterResult::NotFound.permits_deferred_capture(&config));
+        config.ignored_windows.push("Private extension".into());
+        assert!(!allowed.permits_deferred_capture(&config));
+        config.ignored_windows.clear();
+        for reason in [
+            SkipReason::Incognito,
+            SkipReason::ExcludedApp,
+            SkipReason::UserIgnored,
+            SkipReason::NotInIncludeList,
+            SkipReason::BlockedUrl,
+        ] {
+            assert!(!FocusedWindowFilterResult::Skipped(reason).permits_deferred_capture(&config));
+        }
+        config.ignored_urls = serde_json::from_str(r#"["private.example"]"#).unwrap();
+        assert!(!allowed.permits_deferred_capture(&config));
+        config.ignored_urls.clear();
+        config.included_urls = serde_json::from_str(r#"[{"domain":"work.example"}]"#).unwrap();
+        assert!(!allowed.permits_deferred_capture(&config));
+    }
 }
 
 /// Reason a window was skipped during tree walk.
