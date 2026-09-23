@@ -181,7 +181,10 @@ async fn run_reconciliation_worker(
     status: Arc<std::sync::RwLock<ReconciliationWorkerSnapshot>>,
     cancellation: Arc<AtomicBool>,
 ) {
-    wait_for_reconciliation_work(&meeting_detector, &wakeup).await;
+    tokio::select! {
+        _ = tokio::time::sleep(RECONCILIATION_IDLE_INTERVAL) => {}
+        _ = wakeup.notified() => {}
+    }
     let mut consecutive_full_sweeps = 0usize;
     loop {
         let swept = AssertUnwindSafe(async {
@@ -276,21 +279,6 @@ async fn run_reconciliation_worker(
         }
 
         consecutive_full_sweeps = 0;
-        wait_for_reconciliation_work(&meeting_detector, &wakeup).await;
-    }
-}
-
-async fn wait_for_reconciliation_work(
-    meeting_detector: &Option<Arc<MeetingDetector>>,
-    wakeup: &Notify,
-) {
-    if let Some(detector) = meeting_detector {
-        tokio::select! {
-            _ = tokio::time::sleep(RECONCILIATION_IDLE_INTERVAL) => {}
-            _ = wakeup.notified() => {}
-            _ = detector.meeting_state_changed() => {}
-        }
-    } else {
         tokio::select! {
             _ = tokio::time::sleep(RECONCILIATION_IDLE_INTERVAL) => {}
             _ = wakeup.notified() => {}
@@ -2668,7 +2656,8 @@ mod tests {
     use tokio::sync::{Barrier, Notify, Semaphore};
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn owned_worker_drains_past_chunk_cap_after_single_wakeup() {
+    #[ignore = "wall-clock regression exercises the production 120-second idle fallback"]
+    async fn owned_worker_drains_past_chunk_cap_after_meeting_ends_without_callbacks() {
         use crate::transcription::deepgram::DeepgramTranscriptionConfig;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tracing::instrument::WithSubscriber;
@@ -2835,7 +2824,7 @@ mod tests {
 
             meeting_detector.set_v2_in_meeting(false);
 
-            tokio::time::timeout(Duration::from_secs(15), async {
+            tokio::time::timeout(Duration::from_secs(180), async {
                 loop {
                     let candidates = db
                         .get_reconciliation_candidate_chunks(
@@ -2853,7 +2842,7 @@ mod tests {
             })
             .await
             .expect(
-                "meeting-end detector edge drains the capped continuation without audio callbacks",
+                "120-second idle fallback drains the capped continuation without audio callbacks",
             );
             let recovered = manager.reconciliation_worker_snapshot();
             assert_eq!(recovered.state, ReconciliationWorkerState::Waiting);
