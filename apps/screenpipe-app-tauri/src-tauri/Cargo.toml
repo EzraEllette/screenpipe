@@ -346,7 +346,7 @@ tauri = { version = "=2.11.2", features = ["test"] }
 minisign = "0.7"
 
 [target.'cfg(windows)'.dev-dependencies]
-audiopipe = { git = "https://github.com/screenpipe/audiopipe.git", rev = "eb5d24627dc119fbbdfc02acc09f1ab3fff3dcc3", default-features = false, features = ["parakeet", "directml"] }
+audiopipe = { git = "https://github.com/screenpipe/audiopipe.git", rev = "b5482501396693a47d1ad6253cee9e6396920649", default-features = false, features = ["parakeet", "directml"] }
 
 
 [package.metadata.cargo-machete]

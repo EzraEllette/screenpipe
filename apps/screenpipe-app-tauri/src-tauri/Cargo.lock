@@ -478,7 +478,7 @@ dependencies = [
 [[package]]
 name = "antirez-asr-sys"
 version = "0.1.0"
-source = "git+https://github.com/screenpipe/audiopipe.git?rev=eb5d24627dc119fbbdfc02acc09f1ab3fff3dcc3#eb5d24627dc119fbbdfc02acc09f1ab3fff3dcc3"
+source = "git+https://github.com/screenpipe/audiopipe.git?rev=b5482501396693a47d1ad6253cee9e6396920649#b5482501396693a47d1ad6253cee9e6396920649"
 dependencies = [
  "cc",
 ]
@@ -1004,7 +1004,7 @@ dependencies = [
 [[package]]
 name = "audiopipe"
 version = "0.2.0"
-source = "git+https://github.com/screenpipe/audiopipe.git?rev=eb5d24627dc119fbbdfc02acc09f1ab3fff3dcc3#eb5d24627dc119fbbdfc02acc09f1ab3fff3dcc3"
+source = "git+https://github.com/screenpipe/audiopipe.git?rev=b5482501396693a47d1ad6253cee9e6396920649#b5482501396693a47d1ad6253cee9e6396920649"
 dependencies = [
  "antirez-asr-sys",
  "half",
@@ -9993,7 +9993,7 @@ checksum = "478e0585659a122aa407eb7e3c0e1fa51b1d8a870038bd29f0cf4a8551eea972"
 [[package]]
 name = "qwen3-asr-sys"
 version = "0.1.0"
-source = "git+https://github.com/screenpipe/audiopipe.git?rev=eb5d24627dc119fbbdfc02acc09f1ab3fff3dcc3#eb5d24627dc119fbbdfc02acc09f1ab3fff3dcc3"
+source = "git+https://github.com/screenpipe/audiopipe.git?rev=b5482501396693a47d1ad6253cee9e6396920649#b5482501396693a47d1ad6253cee9e6396920649"
 dependencies = [
  "cc",
  "cmake",

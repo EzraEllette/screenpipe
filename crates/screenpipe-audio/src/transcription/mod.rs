@@ -10,7 +10,11 @@ pub mod deepgram;
 pub mod diarization;
 pub mod engine;
 pub mod openai_compatible;
-#[cfg(all(target_os = "windows", feature = "directml", feature = "parakeet"))]
+#[cfg(all(
+    target_os = "windows",
+    feature = "directml",
+    any(feature = "parakeet", test)
+))]
 mod parakeet_windows;
 pub mod stt;
 pub mod whisper;
