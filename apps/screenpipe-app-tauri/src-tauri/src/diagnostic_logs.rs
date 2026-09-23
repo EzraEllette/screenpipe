@@ -278,7 +278,7 @@ mod tests {
         let current = logs.path().join("screenpipe-app.2026-09-23.log");
         let subscriber = tracing_subscriber::fmt()
             .with_ansi(false)
-            .with_env_filter(tracing_subscriber::EnvFilter::new("info,ort=warn"))
+            .with_env_filter(tracing_subscriber::EnvFilter::new(crate::LOG_FILTER))
             .with_writer(std::fs::File::create(&current).unwrap())
             .finish();
 
@@ -309,9 +309,11 @@ mod tests {
             .unwrap();
         println!("redacted real DirectML recovery report:\n{report}");
         assert!(report.contains("DirectML initialization failed"));
+        assert!(report.contains("887A0002"));
         assert!(report.contains("CPU initialization completed"));
         assert!(report.contains("CPU inference completed"));
         assert!(report.contains("screenpipe restarted"));
+        assert!(!report.contains("parakeet: loading"));
         assert!(!report.contains("private.person"));
         assert!(report.contains("contact=[EMAIL]"));
     }
