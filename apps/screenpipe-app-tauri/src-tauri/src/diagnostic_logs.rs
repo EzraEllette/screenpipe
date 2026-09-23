@@ -271,30 +271,49 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn directml_failure_and_cpu_retry_survive_rotation_and_redaction() {
+    #[cfg(all(target_os = "windows", feature = "directml"))]
+    #[ignore = "downloads the real Parakeet model for native provider acceptance"]
+    async fn real_directml_initialization_failure_and_cpu_recovery_survive_support_collection() {
         let logs = tempfile::tempdir().unwrap();
-        for day in 1..=7 {
-            let content = if day == 1 {
-                "audiopipe: GPU inference failed (DirectML device removed during encoder inference); rebuilt Parakeet on CPU and retrying the same audio\nparakeet transcription recovered on active_provider=CPU outcome=completed user=private.person@example.com\n"
-            } else {
-                "routine app restart\n"
-            };
-            std::fs::write(
-                logs.path().join(format!("screenpipe-app.2026-09-{day:02}.log")),
-                content,
+        let current = logs.path().join("screenpipe-app.2026-09-23.log");
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_env_filter(tracing_subscriber::EnvFilter::new("info,ort=warn"))
+            .with_writer(std::fs::File::create(&current).unwrap())
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!("diagnostic contact=private.person@example.com");
+            audiopipe::Model::download_pretrained("parakeet-tdt-0.6b-v3")
+                .expect("the native acceptance harness requires the public Parakeet model");
+            let mut model = audiopipe::Model::from_pretrained_cache_only_with_provider(
+                "parakeet-tdt-0.6b-v3",
+                audiopipe::ParakeetExecutionProvider::DirectMlDevice(i32::MAX),
             )
-            .unwrap();
-        }
+            .expect("an invalid real DirectML device must recover through real CPU sessions");
+            assert_eq!(model.execution_provider(), Some("CPU"));
+            model
+                .transcribe(&vec![0.0; 16_000], Default::default())
+                .expect("real CPU inference after provider recovery must complete");
+        });
+
+        std::fs::rename(
+            &current,
+            logs.path().join("screenpipe-app.2026-09-23.1.log"),
+        )
+        .unwrap();
+        std::fs::write(&current, "screenpipe restarted after provider recovery\n").unwrap();
 
         let report = collect_redacted_from_dirs(&[logs.path().to_path_buf()])
             .await
             .unwrap();
-        println!("redacted DirectML recovery report:\n{report}");
-        assert!(report.contains("DirectML device removed"));
-        assert!(report.contains("rebuilt Parakeet on CPU"));
-        assert!(report.contains("active_provider=CPU outcome=completed"));
+        println!("redacted real DirectML recovery report:\n{report}");
+        assert!(report.contains("DirectML initialization failed"));
+        assert!(report.contains("CPU initialization completed"));
+        assert!(report.contains("CPU inference completed"));
+        assert!(report.contains("screenpipe restarted"));
         assert!(!report.contains("private.person"));
-        assert!(report.contains("user=[EMAIL]"));
+        assert!(report.contains("contact=[EMAIL]"));
     }
 
     #[tokio::test]
