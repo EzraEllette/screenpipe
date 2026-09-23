@@ -692,7 +692,6 @@ jobs:
           if ((Get-FileHash vulkan-runtime.zip -Algorithm SHA256).Hash.ToLowerInvariant() -ne $vkZipSha) { throw 'Vulkan runtime archive hash mismatch' }
           7z x vulkan-runtime.zip -ovulkan-runtime -y
           Copy-Item $vkDll "$extractDir/lib/vulkan-1.dll"
-          Copy-Item "vulkan-runtime/*/VulkanRT-License.txt" "$extractDir/lib/VulkanRT-License.txt"
           # Import-table (load-time) link against the MS DLL for BOTH arches:
           # pyke's static prebuilt is AVX2-only on x64, and pyke has no arm64
           # build. Load-time linking ≠ ort's `load-dynamic` feature (runtime
