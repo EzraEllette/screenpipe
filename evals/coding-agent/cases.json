@@ -2910,6 +2910,49 @@
         ],
         "command": "cargo test --offline --locked -p screenpipe-db --test eval_wal_read_cleanup -- --test-threads=1"
       }
+    },
+    {
+      "id": "app-daily-summary-terminal-error",
+      "name": "Preserve terminal provider failures in daily summaries",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "ee91ade94484a349c98fd7ad9613f4a6018b50bf"
+      },
+      "base_ref": "e58cc923243682bb8fb9d87fbf5f33d41f122a2f",
+      "oracle_ref": "ee91ade94484a349c98fd7ad9613f4a6018b50bf",
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/lib/daily-summary-pi.ts"
+      ],
+      "gate": "advisory",
+      "trigger_paths": [
+        "apps/screenpipe-app-tauri/lib/daily-summary-pi.ts",
+        "apps/screenpipe-app-tauri/lib/events/error-text.ts"
+      ],
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "provider-errors",
+        "quota",
+        "retry"
+      ],
+      "prompt": "Daily-summary generation can treat a terminal provider failure as a usable summary or lose the original allowance/rate-limit detail. Repair the actual runDailySummaryWithPi boundary. An assistant error in message_end without an explicit willRetry=true hint, or an assistant error in agent_end, must reject with the original provider detail, including errorMessage and legacy error fields. When detail is absent, return a non-empty failure explanation. A terminal error must beat partial or earlier assistant prose and must not trigger an empty-result reprompt. Preserve successful trimmed summary text, ignore error-like user/tool messages, and allow explicit retry hints to reach a later valid completion. Preserve one bounded empty-completion reprompt: it may recover valid text, but a second empty completion must reject as empty. Ordinary error events must retain provider detail. Unregister the event handler and stop the session when a started request completes or fails. Use synthetic native/event ports; do not call live providers or read personal activity. This task covers the summary orchestration boundary, not native recording, real provider delivery, the activity UI, model behavior or general runtime-start retry policy.",
+      "agent_timeout_seconds": 900,
+      "grader_dependency_links": [
+        {
+          "source_path": "apps/screenpipe-app-tauri/node_modules",
+          "destination_path": "apps/screenpipe-app-tauri/node_modules"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/daily-summary-errors.test.js",
+            "destination_path": "evals/coding-agent/graders/daily-summary-errors.test.js"
+          }
+        ],
+        "command": "bun --no-env-file test evals/coding-agent/graders/daily-summary-errors.test.js"
+      }
     }
   ]
 }
