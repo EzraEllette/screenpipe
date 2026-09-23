@@ -29,7 +29,7 @@ test("structured saves serialize quotes and JSON-like source content without she
 });
 test("server conflicts are errors, not success text",async()=>{
   server.reload({fetch:()=>Response.json({error:"Workspace changed"},{status:409})});
-  await expect(tool.execute("id",{action:"publish",draft_id:"a"},new AbortController().signal)).rejects.toThrow("Workspace changed");
+  await expect(tool.execute("id",{action:"publish",expected_revision:1,catalog_revision:1,draft_id:"a"},new AbortController().signal)).rejects.toThrow("Workspace changed");
 });
 test("missing capability never falls back to a broad owner token",async()=>{
   writeFileSync(join(dir,".screenpipe-permissions.json"),"{}");
@@ -38,7 +38,7 @@ test("missing capability never falls back to a broad owner token",async()=>{
 });
 test("an already-aborted task cannot save",async()=>{
   const abort=new AbortController();abort.abort();
-  await expect(tool.execute("id",{action:"publish",draft_id:"a"},abort.signal)).rejects.toThrow();
+  await expect(tool.execute("id",{action:"publish",expected_revision:1,catalog_revision:1,draft_id:"a"},abort.signal)).rejects.toThrow();
   expect(requests).toHaveLength(0);
 });
 
@@ -101,7 +101,7 @@ test.each(["handoff", "publish", "reject"])("unknown draft %s returns exact cand
     if(req.method==="POST"){writes++;return Response.json({error:"Draft not found."},{status:409});}
     return Response.json({workspace:{drafts:{a:{id:"exact-id",status:"open",assignee:"workflow-review",payload:{title:"Review invoice"}},b:{id:"other-owner",status:"open",assignee:"workflow-deepen"}}}});
   }});
-  const error=await tool.execute("id",{action,draft_id:"typo",note:"repair"},new AbortController().signal).catch((e:Error)=>e);
+  const error=await tool.execute("id",{action,expected_revision:1,catalog_revision:1,draft_id:"typo",note:"repair"},new AbortController().signal).catch((e:Error)=>e);
   expect(error).toBeInstanceOf(Error);expect(writes).toBe(1);
   expect(error.message).toContain("exact-id");
   expect(error.message).not.toContain("other-owner");
@@ -112,7 +112,7 @@ test("publication returns remaining work with current revisions, distinct from i
   server.reload({fetch:(req:Request)=>Response.json(req.method==="POST"
     ? {revision:8,changes:{created:1},checkedThrough:"previous-window"}
     : {workspace:{revision:12,cycle:{status:"running"},drafts:{done:{status:"published"}}},catalogRevision:8,canFinish:true})});
-  const result=await checked(tool.execute("id",{action:"publish",draft_id:"done"},new AbortController().signal));
+  const result=await checked(tool.execute("id",{action:"publish",expected_revision:1,catalog_revision:1,draft_id:"done"},new AbortController().signal));
   expect(result.isError).not.toBe(true);
   expect(JSON.parse(result.content[0].text)).toMatchObject({revision:8,remaining:{revision:12,catalogRevision:8,cycleStatus:"running",canFinish:true,openDrafts:[]}});
 });
@@ -122,7 +122,7 @@ test("a failed state read after saving preserves the successful receipt",async()
     if(req.method==="POST"){writes++;return Response.json({revision:8,changes:{created:1}});}
     return Response.json({error:"Recorder unavailable"},{status:503});
   }});
-  const result=await checked(tool.execute("id",{action:"publish",draft_id:"done"},new AbortController().signal));
+  const result=await checked(tool.execute("id",{action:"publish",expected_revision:1,catalog_revision:1,draft_id:"done"},new AbortController().signal));
   expect(result.isError).not.toBe(true);expect(writes).toBe(1);
   expect(JSON.parse(result.content[0].text)).toMatchObject({revision:8,remaining:{unavailable:true}});
 });

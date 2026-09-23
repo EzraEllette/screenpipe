@@ -188,3 +188,37 @@ test("batch and workspace contracts describe the same workflow fields",()=>{
   expect(item.startsWith('{"id":')).toBe(true);
   expect(batch).toContain(`"workflows":[${item}]`);
 });
+
+
+test("maintenance sees neglected empty steps and historical sources without private content", () => {
+  const index = workflowIndex({ id:"legacy", lastReviewedAt:"2026-09-10T10:00:00Z", userEdits:{stages:true}, evidence:[], stages:[
+    {procedure:[], evidence:[{timestamp:"2026-09-01T10:00:00Z",quote:"private"}], screenshot:{frameId:1}},
+    {procedure:[{text:"private action"}], evidence:[], screenshot:{visualVerified:true,dataUrl:"private pixels"}}
+  ]});
+  expect(index.evidenceCoverage).toEqual({stageCount:2,stagesWithProcedure:1,stagesWithVerifiedScreenshot:1});
+  expect(index.lastReviewedAt).toBe("2026-09-10T10:00:00Z");
+  expect(index.sourceRange?.first).toBe("2026-09-01T10:00:00Z");
+  expect(index.userEdits).toEqual({stages:true});
+  expect(JSON.stringify(index)).not.toContain("private");
+});
+
+
+test("new-cycle context exposes prior investigation without treating it as workflow evidence",async()=>{
+  const notes={"workflow-maintain":{cycleId:"previous",through:"2026-09-21T12:00:00Z",note:"wf-a: earlier recording unavailable; recheck with new evidence.",truncated:false}};
+  server.reload({fetch:(req:Request)=>Response.json(new URL(req.url).pathname==="/workflows/workspace"
+    ? {workspace:{revision:9,cycle:{id:"next"},drafts:{},researchNotes:notes},catalogRevision:4,ready:true}
+    : {workflows:[{id:"wf-a",title:"Receipts"}],profile:{}})});
+  const result=JSON.parse((await tool.execute("id",{action:"context"},new AbortController().signal)).content[0].text);
+  expect(result.researchNotes).toEqual(notes);
+  expect(result.cycle.id).toBe("next");
+  expect(result.workflows[0].evidence).toBeUndefined();
+});
+
+test("retryable publication state is visible in the draft index and full record", async () => {
+  const {draft} = contextFixture();
+  (draft as any).publicationRetry = {retryable:true};
+  const index = JSON.parse((await tool.execute("id", {action:"context"}, new AbortController().signal)).content[0].text);
+  expect(index.drafts[0].publicationRetry).toEqual({retryable:true});
+  const selected = JSON.parse((await tool.execute("id", {action:"context",draft_id:"draft-a"}, new AbortController().signal)).content[0].text);
+  expect(selected.draft.publicationRetry).toEqual({retryable:true});
+});

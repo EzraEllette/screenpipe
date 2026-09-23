@@ -109,6 +109,13 @@ async fn install_windows_update(
     if let Err(error) = update.install(bytes) {
         UPDATE_RESTART_STARTED.store(false, Ordering::SeqCst);
         recording.set_capture_intent(wants_recording);
+        crate::update_diagnostics::record(
+            "installer_handoff_failed",
+            &format!(
+                "from={} target={} error={error} capture_intent_restored={wants_recording}",
+                update.current_version, update.version,
+            ),
+        );
         return Err(error);
     }
     std::mem::forget(restart);
@@ -353,17 +360,48 @@ const AUTO_UPDATE_GATE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 /// try again" than to block the click indefinitely.
 const BANNER_GATE_TIMEOUT_SECS: u64 = 60;
 
-/// Cooldown after an update *download/install* fails for a non-auth reason.
-/// The periodic check runs every 5 min; without this, a machine that can
-/// download the bundle but can't apply it (signature/Gatekeeper/permission
-/// issue) re-downloads the same version every cycle forever — one stuck
-/// machine produced ~1,400 re-downloads of a single version in 4 days and
-/// inflated the `app_downloaded` metric ~12x. While a version is in cooldown
+/// Cooldown after a permanent download/install failure. The periodic check
+/// runs every 5 min; without this, signature/Gatekeeper/permission failures
+/// re-download the same broken bundle every cycle. While a version is in cooldown
 /// we still hit the cheap CHECK endpoint but skip the binary download until
 /// the window elapses, a newer version ships, or the user retries manually
 /// (which passes `force=true`). A durable failed-install marker carries the
 /// cooldown across the relaunch that discovered the failure.
 const UPDATE_FAILURE_COOLDOWN: Duration = Duration::from_secs(6 * 60 * 60);
+
+// After the existing bounded retry burst, allow network recovery on a later
+// periodic check without reviving the broken-install download loop.
+const UPDATE_TRANSPORT_COOLDOWN: Duration = Duration::from_secs(15 * 60);
+
+fn update_failure_cooldown(error: &tauri_plugin_updater::Error) -> Duration {
+    use tauri_plugin_updater::Error;
+    let retryable_status = |status: u16| matches!(status, 408 | 429 | 500..=599);
+    let transient = match error {
+        Error::Reqwest(error) => {
+            error.is_connect()
+                || error.is_timeout()
+                || error.is_body()
+                || error.is_decode()
+                || error
+                    .status()
+                    .is_some_and(|status| retryable_status(status.as_u16()))
+        }
+        // tauri-plugin-updater 2.11 wraps download HTTP statuses in Network
+        // rather than preserving reqwest::Error. Parse only its known prefix;
+        // unknown errors conservatively retain the install cooldown.
+        Error::Network(message) => message
+            .strip_prefix("Download request failed with status: ")
+            .and_then(|rest| rest.split_whitespace().next())
+            .and_then(|status| status.parse::<u16>().ok())
+            .is_some_and(retryable_status),
+        _ => false,
+    };
+    if transient {
+        UPDATE_TRANSPORT_COOLDOWN
+    } else {
+        UPDATE_FAILURE_COOLDOWN
+    }
+}
 
 /// Wait for boot to reach a settled state, with timeout. Logs the
 /// outcome with `label` so deferrals are searchable in support logs.
@@ -654,6 +692,16 @@ fn record_update_attempt(app: &tauri::AppHandle, to_version: &str) {
             .map(|d| d.as_secs())
             .unwrap_or(0),
     };
+    crate::update_diagnostics::record(
+        "restart_committed",
+        &format!(
+            "from={} target={} attempt_ts={} executable={:?}",
+            attempt.from_version,
+            attempt.to_version,
+            attempt.ts_epoch_secs,
+            std::env::current_exe()
+        ),
+    );
     match serde_json::to_vec(&attempt).map(|bytes| std::fs::write(&path, bytes)) {
         Ok(Ok(())) => info!(
             "update attempt recorded: {} → {}",
@@ -669,7 +717,11 @@ fn record_update_attempt(app: &tauri::AppHandle, to_version: &str) {
 /// unrelated cases.
 fn consume_update_attempt_marker(app: &tauri::AppHandle) -> Option<UpdateAttempt> {
     let path = update_attempt_marker_path(app)?;
-    let raw = std::fs::read(&path).ok()?;
+    consume_update_attempt_at(&path, &app.package_info().version.to_string())
+}
+
+fn consume_update_attempt_at(path: &std::path::Path, current: &str) -> Option<UpdateAttempt> {
+    let raw = std::fs::read(path).ok()?;
     if let Err(e) = std::fs::remove_file(&path) {
         warn!("failed to remove update-attempt marker: {}", e);
     }
@@ -680,7 +732,19 @@ fn consume_update_attempt_marker(app: &tauri::AppHandle) -> Option<UpdateAttempt
             return None;
         }
     };
-    let current = app.package_info().version.to_string();
+    crate::update_diagnostics::append(
+        path.parent()?,
+        "relaunch_observed",
+        &format!(
+            "from={} target={} attempt_ts={} running={} executable={:?} outcome={:?}",
+            attempt.from_version,
+            attempt.to_version,
+            attempt.ts_epoch_secs,
+            current,
+            std::env::current_exe(),
+            classify_update_attempt(&attempt, &current)
+        ),
+    );
     match classify_update_attempt(&attempt, &current) {
         UpdateAttemptOutcome::Applied => {
             info!(
@@ -780,8 +844,14 @@ fn failed_version_in_cooldown(
 /// but the boot check immediately downloads, restarts, and fails again.
 fn cooldown_from_failed_attempt(
     failed_attempt: Option<&UpdateAttempt>,
-) -> Option<(String, std::time::Instant)> {
-    failed_attempt.map(|attempt| (attempt.to_version.clone(), std::time::Instant::now()))
+) -> Option<(String, std::time::Instant, Duration)> {
+    failed_attempt.map(|attempt| {
+        (
+            attempt.to_version.clone(),
+            std::time::Instant::now(),
+            UPDATE_FAILURE_COOLDOWN,
+        )
+    })
 }
 
 /// The Tauri updater replaces the bundle containing its configured executable.
@@ -927,10 +997,10 @@ pub struct UpdatesManager {
     pending_update: Arc<Mutex<Option<PendingUpdateSnapshot>>>,
     /// Prevents concurrent check_for_updates calls (boot check + periodic race)
     is_checking: AtomicBool,
-    /// (version, when-it-failed) for the last update whose download/install
+    /// (version, when-it-failed, cooldown) for the last update whose download/install
     /// failed for a non-auth reason. Gates the periodic loop from re-downloading
     /// the same broken version every 5 min — see `UPDATE_FAILURE_COOLDOWN`.
-    last_failed_update: Arc<Mutex<Option<(String, std::time::Instant)>>>,
+    last_failed_update: Arc<Mutex<Option<(String, std::time::Instant, Duration)>>>,
 }
 
 /// Remove `<binary>.sp-old*` leftovers next to the app executable.
@@ -1166,7 +1236,7 @@ impl UpdatesManager {
                     .lock()
                     .await
                     .as_ref()
-                    .map(|(v, _)| v.clone());
+                    .map(|(v, _, _)| v.clone());
                 match classify_update(
                     pending.as_ref().map(|p| p.version.as_str()),
                     last_failed.as_deref(),
@@ -1195,17 +1265,17 @@ impl UpdatesManager {
                 let in_cooldown = {
                     let guard = self.last_failed_update.lock().await;
                     failed_version_in_cooldown(
-                        guard.as_ref().map(|(v, at)| (v.as_str(), at.elapsed())),
+                        guard.as_ref().map(|(v, at, _)| (v.as_str(), at.elapsed())),
                         &update.version,
-                        UPDATE_FAILURE_COOLDOWN,
+                        guard
+                            .as_ref()
+                            .map_or(UPDATE_FAILURE_COOLDOWN, |(_, _, cooldown)| *cooldown),
                     )
                 };
                 if in_cooldown {
                     info!(
-                        "update v{} recently failed to install; skipping auto-download \
-                         (cooldown {}h) — click 'check for updates' to retry",
-                        update.version,
-                        UPDATE_FAILURE_COOLDOWN.as_secs() / 3600
+                        "update v{} is in its failure cooldown; skipping auto-download — click 'check for updates' to retry",
+                        update.version
                     );
                     if let Some(ref item) = self.update_menu_item {
                         item.set_enabled(true)?;
@@ -1522,12 +1592,15 @@ impl UpdatesManager {
                     // Generic failure (network/disk/server/signature). Clear
                     // latched state so the periodic loop and tray can retry
                     // without an app restart, and tell the user what happened.
-                    // Record the failed version so the cooldown gate above stops
-                    // us from re-downloading this same broken bundle every 5 min
-                    // (the auto-update download-loop fix).
+                    // Keep permanent failures in the long cooldown, but allow
+                    // exhausted network/server retries to recover on a later
+                    // periodic check without requiring a manual restart.
                     warn!("update download failed after retries: {}", err_str);
-                    *self.last_failed_update.lock().await =
-                        Some((update.version.clone(), std::time::Instant::now()));
+                    *self.last_failed_update.lock().await = Some((
+                        update.version.clone(),
+                        std::time::Instant::now(),
+                        update_failure_cooldown(&e),
+                    ));
                     *self.update_available.lock().await = false;
                     *self.pending_update.lock().await = None;
                     if let Some(ref item) = self.update_menu_item {
@@ -1932,7 +2005,20 @@ pub fn start_update_check(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
+    #[cfg(target_os = "macos")]
+    pub(crate) fn consume_failed_update_fixture(root: &std::path::Path) {
+        let path = root.join(super::UPDATE_ATTEMPT_MARKER_FILE);
+        std::fs::write(
+            &path,
+            r#"{"from_version":"1.0.0","to_version":"99.0.0","ts_epoch_secs":1}"#,
+        )
+        .unwrap();
+        assert!(super::consume_update_attempt_at(&path, "1.0.0").is_some());
+        assert!(!path.exists());
+        assert!(super::consume_update_attempt_at(&path, "1.0.0").is_none());
+    }
+
     use super::*;
 
     const HOUR: Duration = Duration::from_secs(3600);
@@ -1990,6 +2076,74 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn interrupted_download_recovers_on_a_later_automatic_check() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            socket.read(&mut request).await.unwrap();
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 10000\r\nConnection: close\r\n\r\npartial",
+                )
+                .await
+                .unwrap();
+        });
+        let response = reqwest::get(format!("http://{address}/update.tar.gz"))
+            .await
+            .unwrap();
+        let error = tauri_plugin_updater::Error::Reqwest(response.bytes().await.unwrap_err());
+        server.await.unwrap();
+        let cooldown = update_failure_cooldown(&error);
+        assert!(failed_version_in_cooldown(
+            Some(("2.7.63", Duration::from_secs(5 * 60))),
+            "2.7.63",
+            cooldown
+        ));
+        assert!(
+            !failed_version_in_cooldown(
+                Some(("2.7.63", Duration::from_secs(15 * 60))),
+                "2.7.63",
+                cooldown
+            ),
+            "a broken archive stream must not suppress automatic recovery for six hours"
+        );
+    }
+
+    #[test]
+    fn download_server_failures_have_a_short_bounded_cooldown() {
+        for status in [408, 429, 500, 502, 503, 504] {
+            let error = tauri_plugin_updater::Error::Network(format!(
+                "Download request failed with status: {status} temporary"
+            ));
+            assert_eq!(
+                update_failure_cooldown(&error),
+                Duration::from_secs(15 * 60)
+            );
+        }
+    }
+
+    #[test]
+    fn permanent_download_and_install_errors_keep_the_long_cooldown() {
+        use tauri_plugin_updater::Error;
+        for error in [
+            Error::Network("Download request failed with status: 401 Unauthorized".into()),
+            Error::Network("Download request failed with status: 403 Forbidden".into()),
+            Error::Network("Download request failed with status: 404 Not Found".into()),
+            Error::Network("unrecognized failure".into()),
+            Error::SignatureUtf8("invalid signature".into()),
+            Error::Io(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "cannot stage archive",
+            )),
+        ] {
+            assert_eq!(update_failure_cooldown(&error), UPDATE_FAILURE_COOLDOWN);
+        }
+    }
+
     #[test]
     fn cooldown_ignores_a_newer_version() {
         // A newer version than the one that failed must download immediately.
@@ -2031,7 +2185,7 @@ mod tests {
         assert!(failed_version_in_cooldown(
             cooldown
                 .as_ref()
-                .map(|(version, started)| (version.as_str(), started.elapsed())),
+                .map(|(version, started, _)| (version.as_str(), started.elapsed())),
             "2.6.81",
             UPDATE_FAILURE_COOLDOWN,
         ));

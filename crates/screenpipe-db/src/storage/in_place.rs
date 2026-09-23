@@ -104,6 +104,17 @@ async fn run(
         .pragma("synchronous", "FULL")
         .pragma("temp_store", "FILE")
         .pragma("secure_delete", "OFF")
+        // This single offline connection updates several indexes per batch.
+        // SQLite's default 2 MiB cache repeatedly spills their dirty pages.
+        // Use a bounded share of the existing decode allowance (64 MiB by
+        // default); capture connections and durability settings are unchanged.
+        .pragma(
+            "cache_size",
+            format!(
+                "-{}",
+                (storage.descriptor.budget.decode_bytes / 2048).max(1)
+            ),
+        )
         .busy_timeout(std::time::Duration::from_secs(5));
     let pool = bulk::pool_options(Some(storage.clone()), false)
         .max_connections(1)

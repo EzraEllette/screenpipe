@@ -9,9 +9,24 @@ This is an agent eval suite, not a unit-test suite. Every case contains:
 - saved prompt, transcript, candidate patch, grader output, runtime fingerprint, and result;
 - repeated-trial reporting with success rate, `pass@k`, and `pass^k`.
 
-The current app corpus contains 71 git-mined regressions. See
+The current app corpus contains 72 git-mined regressions. See
 [DESIGN.md](./DESIGN.md) for the Anthropic guidance, source contract, and
 history-mining workflow. The companion website manifest uses this same harness.
+
+`app-daily-summary-terminal-error` runs the actual summary orchestration and
+its internal helpers against synthetic native commands and event delivery.
+Thirteen outcomes cover terminal message/agent errors, original provider detail,
+partial-text precedence, retry hints, empty-result retry bounds and cleanup.
+The parent fails seven intended outcomes and preserves six; the reference and
+current orchestration pass all thirteen. This does not establish activity UI,
+recording, provider delivery, general runtime-start recovery or model performance.
+
+Run `bun test evals/coding-agent/calibrate-daily-summary-errors.test.js` with the
+desktop test dependencies installed. Ten controls include parent/reference,
+equivalent helper renaming, an unused correct module, lost error detail,
+ignored agent-end errors, retry-hint refusal, omitted cleanup, blanket refusal,
+and missing-source setup failure. Dependencies and fixtures are installed only
+when grading begins; dependency links do not establish agent isolation.
 
 `app-onboarding-sdk-cold-start-assignment` runs the historical React page with
 PostHog 1.359.1, the SDK pinned by that source revision. It observes eleven
@@ -750,3 +765,24 @@ This case does not establish native recording resumption, scheduler policy,
 migration authority, actual device histories, execution isolation or model gains.
 Build failures remain infrastructure failures; inspect the executed assertion
 logs before treating any failure as the intended historical defect.
+## Conversation save outcomes
+
+`app-chat-concurrent-save` exercises the persistence API and reads back the saved
+JSON through synthetic filesystem ports. Its grader no longer imports a helper
+or reset function introduced by the reference fix: the parent reaches eight
+behavior failures while preserving four outcomes, and the source-only reference
+passes all twelve. Outcomes cover stale and overlapping message saves, streaming
+richness, saved ordering, scalar intent, concurrent flag updates, missing IDs and
+recovery after a rejected write.
+
+Run `bun test evals/coding-agent/calibrate-chat-save.test.js` with the desktop
+Vitest dependencies installed. Nine controls cover parent/reference, an unused
+correct helper, equivalent private names, conflict bypass, always keeping disk,
+streaming/scalar clobbering and missing-source setup failure. Set
+`SCREENPIPE_EVAL_CALIBRATION_RECEIPTS` to retain per-control logs. Fixtures and
+dependencies are materialized only for grading.
+
+The twelve outcomes also pass against current persistence source using the
+historical synthetic test setup. This is not the complete current app suite,
+independent native webview scheduling, real filesystem durability, proof of
+workspace isolation or a model trial.
