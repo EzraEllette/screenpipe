@@ -9,9 +9,62 @@ This is an agent eval suite, not a unit-test suite. Every case contains:
 - saved prompt, transcript, candidate patch, grader output, runtime fingerprint, and result;
 - repeated-trial reporting with success rate, `pass@k`, and `pass^k`.
 
-The current app corpus contains 73 git-mined regressions. See
+The current app corpus contains 77 git-mined regressions. See
 [DESIGN.md](./DESIGN.md) for the Anthropic guidance, source contract, and
 history-mining workflow. The companion website manifest uses this same harness.
+
+`app-business-capacity-plan-picker` drives the actual account settings component
+with synthetic native, settings and telemetry ports. Eight outcomes cover visible
+capacity plans and prices, exact billing targets, current-plan labeling, the next
+capacity step and preserved login/account navigation. The parent fails six
+intended outcomes and preserves two; the historical fix passes all eight. The
+same outcomes pass on current source using its offline localization test setup.
+Run `bun test evals/coding-agent/calibrate-capacity-plan-picker.test.js` with the
+desktop test dependencies installed. Nine controls include incorrect targets,
+missing navigation, an unused correct module, blanket current-plan labels, lost
+account navigation, equivalent helper/test-id names and query ordering, and
+missing-source setup classification. The grader does not require test IDs or
+private helper names. Fixtures and dependency links are installed only at grading.
+This does not establish live billing, backend proration, native behavior, agent
+isolation or model capability.
+
+`app-terminal-quota-retry` exercises the actual foreground event hook with
+synthetic native commands and event delivery. Seven event outcomes cover terminal
+quota/model retry cancellation, finalization, retained transient retries, delayed
+throttling recovery and successful answers; 76 historical helper assertions remain.
+The parent fails three terminal outcomes and preserves 80 assertions; the reference
+passes all 83. A disabled stop condition previously passed the source-name grader.
+Run `bun test evals/coding-agent/calibrate-terminal-quota.test.js` for eight controls
+including disabled/blanket stopping, lost stop effects, equivalent detector naming,
+blanket retry suppression and missing-source setup classification. Runtime links
+are installed only for grading. This does not establish native process termination,
+live billing, isolation or model performance.
+
+`app-acp-billing-saved-recovery` exercises the real foreground event hook,
+provider presentation and saved-message rendering with synthetic native, event,
+storage and network ports. Twelve outcomes cover provider-specific account
+recovery with and without HTTP 429, persistence, automatic versus manual retries,
+stale-session retry suppression, context overflow and successful recovery.
+The parent fails seven intended outcomes and preserves five; the reference
+passes twelve. Guidance is checked semantically, with an equivalent-prose control.
+Run `bun test evals/coding-agent/calibrate-acp-billing-recovery.test.js` with the
+desktop test dependencies installed. Graders and dependency links are installed
+only after grading starts; those links do not establish execution isolation.
+No native ACP, live billing, entitlement safety or model performance is measured.
+
+`ai-gateway-voice-transcription-budget` exercises the actual voice route, budget
+readers and transcription handler with SQLite-backed D1 reads and synthetic
+identity and provider ports.
+The parent fails four intended budget refusals and preserves three outcomes;
+the historical reference passes all seven. Exact cap boundaries refuse provider
+work, while values immediately below all caps preserve the original audio bytes.
+Run `bun test evals/coding-agent/calibrate-voice-transcription-budget.test.js` with
+the gateway dependencies installed. Controls reject unused correct code, ignored
+gates, provider work before refusal, blanket denial and fabricated transcripts,
+and accept equivalent private bindings and SQL. A wrong account bucket is rejected.
+Missing source is a setup failure. Telemetry writes remain inert.
+This does not establish concurrent reservation safety, duration billing, anonymous
+identity, realtime metering, live delivery, isolation or model capability.
 
 `app-daily-summary-terminal-error` runs the actual summary orchestration and
 its internal helpers against synthetic native commands and event delivery.
@@ -804,3 +857,21 @@ blanket suppression and missing-source setup failure. Set
 dependency links are materialized only for grading. These are corpus checks,
 not model trials, full chat UI or native persistence evidence, or proof of
 execution isolation. No real files, recordings or provider accounts are used.
+
+## Connection-probe response compatibility
+
+`app-connection-probe-response` exercises the public connection-test service with
+synthetic provider responses and real request/error helpers. Sixteen outcomes
+cover streaming-default custom, OpenAI, Ollama and Anthropic gateways, token
+parameter recovery, configured connection identity, JSON compatibility, empty
+messages, error details, reply length and cancellation. The historical parent
+fails five response assertions and preserves eleven outcomes; the source-only
+reference and current service pass all sixteen.
+
+Run `bun test evals/coding-agent/calibrate-connection-probe.test.js` with desktop
+Vitest dependencies installed. Ten controls reject unused fixes, retry/provider
+regressions, constant replies and lost credentials. A valid SSE parser passes
+without requiring a particular request flag. Missing source remains a setup
+error. Hidden fixtures and dependencies are materialized only for grading.
+These are corpus checks, not model trials, settings persistence, native/live
+provider acceptance or proof of execution isolation.

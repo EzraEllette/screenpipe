@@ -1830,13 +1830,13 @@ export function ChatSidebar({
               collapsed={recentsCollapsed}
               onCollapsedChange={setRecentsCollapsed}
               headerAction={
-                <div className="group ml-auto flex items-center gap-1">
+                <div className="ml-auto flex items-center gap-1">
                   <DropdownMenu>
                     <DropdownMenuTrigger asChild>
                       <button
                         type="button"
                         disabled={conversationRestrictionActive}
-                        className="inline-flex h-5 w-5 items-center justify-center rounded opacity-0 transition-opacity hover:bg-muted/40 focus-visible:opacity-100 group-hover:opacity-100"
+                        className="inline-flex h-5 w-5 items-center justify-center rounded hover:bg-muted/40"
                         aria-label={ui("Organize recents")}
                         title={ui("Organize recents")}
                       >
@@ -1915,7 +1915,7 @@ export function ChatSidebar({
                       <button
                         type="button"
                         className={cn(
-                          "inline-flex items-center gap-0.5 text-[10px] normal-case tracking-wider opacity-0 transition-[color,opacity] group-hover:opacity-100 focus-visible:opacity-100",
+                          "inline-flex items-center gap-0.5 text-[10px] normal-case tracking-wider transition-colors",
                           (recentsCollapsed || !hasAnythingToView) && "hidden",
                           onViewAll
                             ? "sidebar-text-secondary hover:text-foreground"

@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "suite": "screenpipe-app-coding-agent-regressions",
-  "dataset_version": "2026-09-23.2",
+  "dataset_version": "2026-09-24.1",
   "suite_type": "regression",
   "owner": "screenpipe engineering",
   "policy": {
@@ -64,14 +64,8 @@
         "quota",
         "retry"
       ],
-      "prompt": "The Pi chat transport receives provider 429 responses that mean the account has exhausted a daily allowance or the selected model is not permitted. The app currently treats these as transient and keeps retrying, leaving the user in a loop. Make terminal quota/plan errors stop the retry path and surface the assistant error, while ordinary transient failures remain retryable. Preserve existing silent prompt-timeout and connection-card behavior.",
+      "prompt": "The Pi chat transport receives provider 429 responses that mean the account has exhausted a daily allowance or the selected model is not permitted. The app currently treats these as transient and keeps retrying, leaving the user in a loop. Make terminal quota/plan errors stop the retry path and surface the assistant error, while ordinary transient failures remain retryable. Preserve existing silent prompt-timeout and connection-card behavior. Exercise the actual foreground event handling: terminal message errors followed by an agent-end event promising another retry must stop that session, finalize the assistant error, and clear loading/streaming state without submitting another prompt. Ordinary provider retry events stay active; a transient throttled response can retry after its wait, and successful answers still finalize. No live provider or native process is needed.",
       "agent_timeout_seconds": 720,
-      "dependency_links": [
-        {
-          "source_path": "apps/screenpipe-app-tauri/node_modules",
-          "destination_path": "apps/screenpipe-app-tauri/node_modules"
-        }
-      ],
       "grader": {
         "timeout_seconds": 300,
         "fixtures": [
@@ -89,7 +83,13 @@
           }
         ],
         "command": "cd apps/screenpipe-app-tauri && bun x vitest run --config vitest.config.ts lib/chat/__tests__/eval-terminal-quota.test.ts lib/chat/__tests__/quota-errors.test.ts lib/chat/__tests__/provider-errors.test.ts"
-      }
+      },
+      "grader_dependency_links": [
+        {
+          "source_path": "apps/screenpipe-app-tauri/node_modules",
+          "destination_path": "apps/screenpipe-app-tauri/node_modules"
+        }
+      ]
     },
     {
       "id": "app-timeline-stream-reliability",
@@ -3000,6 +3000,193 @@
           }
         ],
         "command": "cd apps/screenpipe-app-tauri && node node_modules/vitest/vitest.mjs run --config eval-pipe-run-outputs.config.mjs"
+      }
+    },
+    {
+      "id": "app-acp-billing-saved-recovery",
+      "name": "Preserve own-account ACP billing recovery without automatic retries",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "02e8048c8138e8a2bb4fccb0a92ab945672d5b31"
+      },
+      "base_ref": "6661cc543625435bd8992efba6aa3277cb519883",
+      "oracle_ref": "02e8048c8138e8a2bb4fccb0a92ab945672d5b31",
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/lib/chat/provider-errors.ts",
+        "apps/screenpipe-app-tauri/components/chat/standalone/hooks/use-pi-foreground-events.ts"
+      ],
+      "gate": "advisory",
+      "trigger_paths": [
+        "apps/screenpipe-app-tauri/lib/chat/provider-errors.ts",
+        "apps/screenpipe-app-tauri/components/chat/standalone/hooks/use-pi-foreground-events.ts",
+        "apps/screenpipe-app-tauri/components/chat/standalone/message-content.tsx"
+      ],
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "billing-recovery",
+        "acp",
+        "retry",
+        "persistence"
+      ],
+      "prompt": "Own-account ACP billing failures currently leave an opaque or misleading failed turn. When the selected Claude Code account has insufficient credits, Cursor reaches a spending limit, or Codex reaches a usage limit, retain actionable guidance naming that selected provider and the relevant account recovery (add credits, review or adjust spending limits, or review usage reset/plan options), plus the option to switch AI presets. This must survive message error events, message end, terminal agent end and saving/reloading the message as an accessible error alert. A billing failure prefixed with HTTP 429 is still a billing failure: do not offer an immediate retry button or automatically resend the prompt. Preserve an ordinary transient HTTP 429 response retry with the original prompt, and prevent a delayed retry from sending into a changed session. Preserve context-overflow recovery after earlier tool progress, retaining the progress blocks and a manual retry prompt, whether or not earlier error events were delivered. A subsequent successful answer must replace the error and clear its retry action. Keep public hook/message interfaces compatible. Exact prose, private helper names and logging format are not prescribed. Use synthetic local native, event, storage and network ports only. This task covers the foreground event hook, internal provider presentation and saved-message rendering, not native ACP execution, live provider billing or financial entitlement policy.",
+      "agent_timeout_seconds": 900,
+      "grader_dependency_links": [
+        {
+          "source_path": "apps/screenpipe-app-tauri/node_modules",
+          "destination_path": "apps/screenpipe-app-tauri/node_modules"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/acp-billing-recovery.fixture.tsx.txt",
+            "destination_path": "apps/screenpipe-app-tauri/eval-acp-billing-semantic.test.tsx"
+          }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && node node_modules/vitest/vitest.mjs run --config vitest.config.ts eval-acp-billing-semantic.test.tsx"
+      }
+    },
+    {
+      "id": "ai-gateway-voice-transcription-budget",
+      "name": "Enforce transcription budgets before voice provider work",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "dc35366d18ce0732e935cbfbdaa6093f6534406e"
+      },
+      "base_ref": "9064c3134d61bc3848ac3d84da24392f14d20ea5",
+      "oracle_ref": "dc35366d18ce0732e935cbfbdaa6093f6534406e",
+      "oracle_paths": [
+        "packages/ai-gateway/src/index.ts",
+        "packages/ai-gateway/src/handlers/realtime-transcription.ts",
+        "packages/ai-gateway/src/services/cost-tracker.ts",
+        "packages/ai-gateway/src/services/hosted-ai-cost-controls.ts",
+        "packages/ai-gateway/src/services/transcription-budget.ts",
+        "packages/ai-gateway/src/types.ts"
+      ],
+      "gate": "advisory",
+      "tags": [
+        "regression",
+        "billing",
+        "voice",
+        "provider-effects",
+        "budget"
+      ],
+      "prompt": "The hosted POST /v1/voice/transcribe route can contact its transcription provider despite exhausted spending limits. Repair the actual request boundary for an authenticated Business account in good standing. At the configured account daily, global hourly or global daily transcription cap, return 429 before any provider call. If the cost ledger cannot be read, return 503 before provider work. Use the existing cost ledger and configurable transcription limits; synthetic test caps are 103, 501 and 502 respectively, not production policy. Preserve an in-budget audio/wav request, including values immediately below every cap: send the original audio bytes to the provider exactly once and return 200 with its transcript in the transcription field. Preserve a 400 response with no provider call for application/json audio requests. Identity verification, entitlement service, rate limiter, D1 (SQLite-backed reads with inert telemetry writes) and transcription provider are synthetic ports; all other network access is refused. Any implementation achieving these outcomes is acceptable. This case does not establish atomic reservations or concurrent spending safety, duration-based billing, anonymous identity, realtime metering, live provider delivery, native behavior, agent isolation or model capability.",
+      "agent_timeout_seconds": 900,
+      "grader_dependency_links": [
+        {
+          "source_path": "packages/ai-gateway/node_modules",
+          "destination_path": "packages/ai-gateway/node_modules"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/voice-transcription-budget.test.js",
+            "destination_path": "evals/coding-agent/graders/voice-transcription-budget.test.js"
+          }
+        ],
+        "command": "\"${BUN_BIN:-bun}\" test evals/coding-agent/graders/voice-transcription-budget.test.js"
+      }
+    },
+    {
+      "id": "app-connection-probe-response",
+      "name": "Return valid connection-probe replies from streaming-default gateways",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "9a4950abb4bbcddec07942609297b8d57de5e437"
+      },
+      "base_ref": "22d2053908e55e86d7b84365e3ba508896e63060",
+      "oracle_ref": "9a4950abb4bbcddec07942609297b8d57de5e437",
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/lib/utils/ai-preset-connection.ts",
+        "apps/screenpipe-app-tauri/lib/utils/chat-test-body.ts"
+      ],
+      "gate": "advisory",
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "connection-test",
+        "provider-compatibility",
+        "recovery"
+      ],
+      "prompt": "The public testAiPresetConnection service reports a connection failure for working OpenAI-compatible gateways that default to server-sent events. Restore the actual provider reply for custom, OpenAI, native Ollama and Anthropic connections, including gateways that require max_completion_tokens instead of max_tokens. Preserve configured model, endpoint and provider credentials, a nonnegative finite latency, ordinary JSON replies, existing empty-text message compatibility and the 100-character displayed reply limit. Missing messages, provider authorization errors, array-shaped provider errors and transport failures must remain failures with their meaningful details; caller cancellation must reach the provider request. Any implementation that achieves these outcomes is acceptable, including successful SSE handling. Preserve the public service interface. Use synthetic provider ports only. This covers the connection service and its internal request/error helpers, not settings UI persistence, native networking or live provider acceptance.",
+      "agent_timeout_seconds": 900,
+      "grader_dependency_links": [
+        {
+          "source_path": "apps/screenpipe-app-tauri/node_modules",
+          "destination_path": "apps/screenpipe-app-tauri/node_modules"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/connection-probe.fixture.ts",
+            "destination_path": "apps/screenpipe-app-tauri/eval-connection-probe.test.ts"
+          },
+          {
+            "local_path": "graders/connection-probe.config.mjs",
+            "destination_path": "apps/screenpipe-app-tauri/eval-connection-probe.config.mjs"
+          }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && node node_modules/vitest/vitest.mjs run --config eval-connection-probe.config.mjs"
+      },
+      "trigger_paths": [
+        "apps/screenpipe-app-tauri/lib/utils/ai-preset-connection.ts",
+        "apps/screenpipe-app-tauri/lib/utils/chat-test-body.ts",
+        "apps/screenpipe-app-tauri/lib/utils/ai-endpoint-url.ts",
+        "apps/screenpipe-app-tauri/lib/utils/validation.ts"
+      ]
+    },
+    {
+      "id": "app-business-capacity-plan-picker",
+      "name": "Expose capacity plans and route each selection to its billing target",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "9d7866f0eec57826f3af7660e4c2a224e3f53dbc"
+      },
+      "base_ref": "e86a6d71a79ba302f9a8e6a765e1d4d1342404c3",
+      "oracle_ref": "9d7866f0eec57826f3af7660e4c2a224e3f53dbc",
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/components/settings/account-plan-options.tsx",
+        "apps/screenpipe-app-tauri/components/settings/account-section.tsx"
+      ],
+      "gate": "advisory",
+      "trigger_paths": [
+        "apps/screenpipe-app-tauri/components/settings/account-plan-options.tsx",
+        "apps/screenpipe-app-tauri/components/settings/account-section.tsx"
+      ],
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "billing",
+        "plan-picker"
+      ],
+      "prompt": "Account settings hides Business Max and Ultra behind an unset feature flag. Make all five plan choices visible without enabling a feature flag: Free $0, Basic $25, Business $50, Business Max $100 and Business Ultra $200 per month. Describe Max and Ultra as 2x and 4x daily query/request capacity respectively, retaining the same 400 credits and frontier models, not extra credit allowances. A signed-in Business owner selecting Max must open the screenpipe.com/account/billing page with target_plan=pro_max and interval=month; a Max owner selecting Ultra must use target_plan=pro_ultra and interval=month. These capacity changes must not start a new in-app checkout. Mark each Max or Ultra owner on the matching priced plan as current, without a purchase button for that current plan or a current marker on ordinary Business. Recommend Max as the next step for Business, Ultra for Max, and no next step above Ultra or for team/enterprise accounts. Preserve signed-out stale-account gating: an account without a token, even with a stale cloud subscription flag, must show sign-in guidance and no active subscription. Signed-in subscribers must retain their active account display and working web-account link. Preserve the public AccountSection interface. Exact layout, test ids, CSS, internal helper names, analytics names and URL query ordering are not prescribed. Use synthetic native/provider ports only. This covers account settings presentation and outgoing billing navigation, not live financial operations, backend proration, native behavior or model performance.",
+      "agent_timeout_seconds": 900,
+      "grader_dependency_links": [
+        {
+          "source_path": "apps/screenpipe-app-tauri/node_modules",
+          "destination_path": "apps/screenpipe-app-tauri/node_modules"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/capacity-plan-picker.fixture.tsx.txt",
+            "destination_path": "apps/screenpipe-app-tauri/eval-capacity-plan-picker.test.tsx"
+          },
+          {
+            "local_path": "graders/capacity-plan-picker.config.mjs",
+            "destination_path": "apps/screenpipe-app-tauri/eval-capacity-plan-picker.config.mjs"
+          }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && node node_modules/vitest/vitest.mjs run --config eval-capacity-plan-picker.config.mjs"
       }
     }
   ]
