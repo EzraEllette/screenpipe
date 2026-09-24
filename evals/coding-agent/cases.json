@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "suite": "screenpipe-app-coding-agent-regressions",
-  "dataset_version": "2026-09-23.5",
+  "dataset_version": "2026-09-24.1",
   "suite_type": "regression",
   "owner": "screenpipe engineering",
   "policy": {
@@ -3046,6 +3046,50 @@
           }
         ],
         "command": "cd apps/screenpipe-app-tauri && node node_modules/vitest/vitest.mjs run --config vitest.config.ts eval-acp-billing-semantic.test.tsx"
+      }
+    },
+    {
+      "id": "ai-gateway-voice-transcription-budget",
+      "name": "Enforce transcription budgets before voice provider work",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "dc35366d18ce0732e935cbfbdaa6093f6534406e"
+      },
+      "base_ref": "9064c3134d61bc3848ac3d84da24392f14d20ea5",
+      "oracle_ref": "dc35366d18ce0732e935cbfbdaa6093f6534406e",
+      "oracle_paths": [
+        "packages/ai-gateway/src/index.ts",
+        "packages/ai-gateway/src/handlers/realtime-transcription.ts",
+        "packages/ai-gateway/src/services/cost-tracker.ts",
+        "packages/ai-gateway/src/services/hosted-ai-cost-controls.ts",
+        "packages/ai-gateway/src/services/transcription-budget.ts",
+        "packages/ai-gateway/src/types.ts"
+      ],
+      "gate": "advisory",
+      "tags": [
+        "regression",
+        "billing",
+        "voice",
+        "provider-effects",
+        "budget"
+      ],
+      "prompt": "The hosted POST /v1/voice/transcribe route can contact its transcription provider despite exhausted spending limits. Repair the actual request boundary for an authenticated Business account in good standing. At the configured account daily, global hourly or global daily transcription cap, return 429 before any provider call. If the cost ledger cannot be read, return 503 before provider work. Use the existing cost ledger and configurable transcription limits; synthetic test caps are 103, 501 and 502 respectively, not production policy. Preserve an in-budget audio/wav request, including values immediately below every cap: send the original audio bytes to the provider exactly once and return 200 with its transcript in the transcription field. Preserve a 400 response with no provider call for application/json audio requests. Identity verification, entitlement service, rate limiter, D1 (SQLite-backed reads with inert telemetry writes) and transcription provider are synthetic ports; all other network access is refused. Any implementation achieving these outcomes is acceptable. This case does not establish atomic reservations or concurrent spending safety, duration-based billing, anonymous identity, realtime metering, live provider delivery, native behavior, agent isolation or model capability.",
+      "agent_timeout_seconds": 900,
+      "grader_dependency_links": [
+        {
+          "source_path": "packages/ai-gateway/node_modules",
+          "destination_path": "packages/ai-gateway/node_modules"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/voice-transcription-budget.test.js",
+            "destination_path": "evals/coding-agent/graders/voice-transcription-budget.test.js"
+          }
+        ],
+        "command": "\"${BUN_BIN:-bun}\" test evals/coding-agent/graders/voice-transcription-budget.test.js"
       }
     }
   ]

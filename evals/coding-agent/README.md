@@ -9,7 +9,7 @@ This is an agent eval suite, not a unit-test suite. Every case contains:
 - saved prompt, transcript, candidate patch, grader output, runtime fingerprint, and result;
 - repeated-trial reporting with success rate, `pass@k`, and `pass^k`.
 
-The current app corpus contains 74 git-mined regressions. See
+The current app corpus contains 75 git-mined regressions. See
 [DESIGN.md](./DESIGN.md) for the Anthropic guidance, source contract, and
 history-mining workflow. The companion website manifest uses this same harness.
 
@@ -24,6 +24,20 @@ Run `bun test evals/coding-agent/calibrate-acp-billing-recovery.test.js` with th
 desktop test dependencies installed. Graders and dependency links are installed
 only after grading starts; those links do not establish execution isolation.
 No native ACP, live billing, entitlement safety or model performance is measured.
+
+`ai-gateway-voice-transcription-budget` exercises the actual voice route, budget
+readers and transcription handler with SQLite-backed D1 reads and synthetic
+identity and provider ports.
+The parent fails four intended budget refusals and preserves three outcomes;
+the historical reference passes all seven. Exact cap boundaries refuse provider
+work, while values immediately below all caps preserve the original audio bytes.
+Run `bun test evals/coding-agent/calibrate-voice-transcription-budget.test.js` with
+the gateway dependencies installed. Controls reject unused correct code, ignored
+gates, provider work before refusal, blanket denial and fabricated transcripts,
+and accept equivalent private bindings and SQL. A wrong account bucket is rejected.
+Missing source is a setup failure. Telemetry writes remain inert.
+This does not establish concurrent reservation safety, duration billing, anonymous
+identity, realtime metering, live delivery, isolation or model capability.
 
 `app-daily-summary-terminal-error` runs the actual summary orchestration and
 its internal helpers against synthetic native commands and event delivery.
