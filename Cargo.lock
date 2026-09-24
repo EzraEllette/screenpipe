@@ -12227,7 +12227,7 @@ dependencies = [
 [[package]]
 name = "whisper-rs"
 version = "0.16.0"
-source = "git+https://github.com/screenpipe/whisper-rs.git?rev=97e4070#97e40705033724dee601e89f3bd701af8096c846"
+source = "git+https://github.com/EzraEllette/whisper-rs.git?rev=b649c3fccc8dcee4512c2778b049e64aa2d15978#b649c3fccc8dcee4512c2778b049e64aa2d15978"
 dependencies = [
  "libc",
  "tracing",
@@ -12237,7 +12237,7 @@ dependencies = [
 [[package]]
 name = "whisper-rs-sys"
 version = "0.15.0"
-source = "git+https://github.com/screenpipe/whisper-rs.git?rev=97e4070#97e40705033724dee601e89f3bd701af8096c846"
+source = "git+https://github.com/EzraEllette/whisper-rs.git?rev=b649c3fccc8dcee4512c2778b049e64aa2d15978#b649c3fccc8dcee4512c2778b049e64aa2d15978"
 dependencies = [
  "bindgen 0.72.1",
  "cfg-if",

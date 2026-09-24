@@ -4,9 +4,10 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { dispatchEnterprise, reportEnterprise } from "./enterprise-release.cjs";
 
-const root = new URL("../../", import.meta.url).pathname;
+const root = fileURLToPath(new URL("../../", import.meta.url));
 const readYaml = (path: string): any => Bun.YAML.parse(readFileSync(join(root, path), "utf8"));
 const app = readYaml(".github/workflows/release-app.yml");
 const enterprise = readYaml(".github/workflows/release-enterprise.yml");
@@ -93,6 +94,18 @@ test("both Windows builds use the shared install action from the workflow revisi
   const action = readYaml(`.github/actions/${installAction}/action.yml`);
   expect(action.runs.using).toBe("composite");
   expect(action.runs.steps[0].shell).toBe("pwsh");
+});
+
+test("all Windows native dependency builds select the shared Ninja setup", () => {
+  const appStep = app.jobs["publish-tauri"].steps.find((step: any) => step.name === "Configure Ninja for Windows native dependencies");
+  expect(appStep.if).toBe("matrix.os_type == 'windows'");
+  expect(appStep.run).toBe("./.github/scripts/setup-ninja-windows.ps1");
+
+  const enterpriseStep = enterprise.jobs["release-enterprise-windows"].steps.find(
+    (step: any) => step.name === "Configure Ninja for Windows native dependencies",
+  );
+  expect(enterpriseStep.run).toBe("./.github/scripts/setup-ninja-windows.ps1");
+  expect(readFileSync(join(root, ".github/scripts/setup-ninja-windows.ps1"), "utf8")).toContain('"CMAKE_GENERATOR=Ninja"');
 });
 
 test("completion reports every platform even if one is failed or skipped", () => {

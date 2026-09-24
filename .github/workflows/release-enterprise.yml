@@ -356,6 +356,10 @@ jobs:
         shell: pwsh
         run: ./.github/scripts/setup-vulkan-windows.ps1 -Architecture x64 -InstallSdk -StageRuntimeDirectory apps/screenpipe-app-tauri/src-tauri/onnxruntime-win-x64-1.24.2/lib
 
+      - name: Configure Ninja for Windows native dependencies
+        shell: pwsh
+        run: ./.github/scripts/setup-ninja-windows.ps1
+
       - name: Use enterprise config
         shell: bash
         run: cp -p apps/screenpipe-app-tauri/src-tauri/tauri.enterprise.conf.json apps/screenpipe-app-tauri/src-tauri/tauri.conf.json
