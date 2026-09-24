@@ -676,22 +676,7 @@ jobs:
             Copy-Item "ort-dml/runtimes/win-arm64/native/onnxruntime.lib" "$extractDir/lib/"
             Copy-Item "directml/bin/arm64-win/DirectML.dll" "$extractDir/lib/"
           }
-          # Bundle the official architecture-matched Vulkan loader so CPU-only
-          # machines can launch even when no vendor ICD installed vulkan-1.dll.
-          $vkVersion = '1.4.357.0'
-          if ($arch -eq 'x64') {
-            $vkUrl = "https://sdk.lunarg.com/sdk/download/$vkVersion/windows/VulkanRT-X64-$vkVersion-Components.zip"
-            $vkZipSha = 'a14672efed15aafc7f5a16572d35cd3a3416eadf670aeee3cdf50ee32d5fbf83'
-            $vkDll = "vulkan-runtime/VulkanRT-X64-$vkVersion-Components/x64/vulkan-1.dll"
-          } else {
-            $vkUrl = "https://sdk.lunarg.com/sdk/download/$vkVersion/warm/VulkanRT-ARM64-$vkVersion-Components.zip"
-            $vkZipSha = '0a51a619525e0c7a156125c4f80c4f591c494cef9ff59dc4481735779a9a280c'
-            $vkDll = "vulkan-runtime/VulkanRT-ARM64-$vkVersion-Components/vulkan-1.dll"
-          }
-          Invoke-WebRequest -Uri $vkUrl -OutFile vulkan-runtime.zip
-          if ((Get-FileHash vulkan-runtime.zip -Algorithm SHA256).Hash.ToLowerInvariant() -ne $vkZipSha) { throw 'Vulkan runtime archive hash mismatch' }
-          7z x vulkan-runtime.zip -ovulkan-runtime -y
-          Copy-Item $vkDll "$extractDir/lib/vulkan-1.dll"
+          ./.github/scripts/setup-vulkan-windows.ps1 -Architecture $arch -StageRuntimeDirectory "$extractDir/lib"
           # Import-table (load-time) link against the MS DLL for BOTH arches:
           # pyke's static prebuilt is AVX2-only on x64, and pyke has no arm64
           # build. Load-time linking ≠ ort's `load-dynamic` feature (runtime
@@ -712,23 +697,7 @@ jobs:
       - name: Install Vulkan SDK for Whisper
         if: matrix.os_type == 'windows'
         shell: pwsh
-        run: |
-          $version = '1.4.357.0'
-          if ('${{ matrix.target }}' -eq 'aarch64-pc-windows-msvc') {
-            $url = "https://sdk.lunarg.com/sdk/download/$version/warm/vulkan_sdk.exe"
-            $sha = 'c10f18a9085018f66e1f50bd60623f17b7081faca165248de54f78728120f334'
-          } else {
-            $url = "https://sdk.lunarg.com/sdk/download/$version/windows/vulkan_sdk.exe"
-            $sha = '81f474711e9042f4cd22b31b2f7a8870db2e428b21586fb43dd80150be97310d'
-          }
-          Invoke-WebRequest -Uri $url -OutFile vulkan_sdk.exe
-          if ((Get-FileHash vulkan_sdk.exe -Algorithm SHA256).Hash.ToLowerInvariant() -ne $sha) { throw 'Vulkan SDK installer hash mismatch' }
-          & .\vulkan_sdk.exe --accept-licenses --default-answer --confirm-command install copy_only=1
-          if ($LASTEXITCODE -ne 0) { throw "Vulkan SDK install failed: $LASTEXITCODE" }
-          $sdk = "C:\VulkanSDK\$version"
-          if (-not (Test-Path "$sdk\Include\vulkan\vulkan.h")) { throw "Vulkan SDK headers missing at $sdk" }
-          "VULKAN_SDK=$sdk" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "$sdk\Bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+        run: ./.github/scripts/setup-vulkan-windows.ps1 -Architecture ${{ matrix.target == 'aarch64-pc-windows-msvc' && 'arm64' || 'x64' }} -InstallSdk
 
       - name: Install Ninja (ARM64)
         if: matrix.os_type == 'windows' && matrix.target == 'aarch64-pc-windows-msvc'

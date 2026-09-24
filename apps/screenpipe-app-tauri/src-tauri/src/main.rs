@@ -519,7 +519,7 @@ async fn main() {
         let cpu = screenpipe_core::cpu_features::snapshot();
         if !cpu.avx2 {
             eprintln!(
-                "screenpipe: cpu lacks AVX2 ({}); running in compatibility mode — local Whisper STT disabled (Windows ONNX Qwen and Parakeet remain available)",
+                "screenpipe: cpu lacks AVX2 ({}); running in compatibility mode — local Whisper and non-Windows Qwen STT disabled (Windows ONNX Qwen and Parakeet remain available)",
                 cpu.as_log_string()
             );
             health::set_cpu_compat_mode(true);
@@ -1326,7 +1326,7 @@ async fn main() {
             // subscriber is up, so it lands in the log files users send us.
             if !screenpipe_core::cpu_features::has_avx2() {
                 warn!(
-                    "cpu lacks AVX2 ({}); running in compatibility mode — local Whisper STT disabled; Windows ONNX Qwen, Parakeet, and cloud engines remain available",
+                    "cpu lacks AVX2 ({}); running in compatibility mode — local Whisper and non-Windows Qwen STT disabled; Windows ONNX Qwen, Parakeet, and cloud engines remain available",
                     screenpipe_core::cpu_features::snapshot().as_log_string()
                 );
             }
