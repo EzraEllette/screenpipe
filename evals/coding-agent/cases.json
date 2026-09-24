@@ -64,14 +64,8 @@
         "quota",
         "retry"
       ],
-      "prompt": "The Pi chat transport receives provider 429 responses that mean the account has exhausted a daily allowance or the selected model is not permitted. The app currently treats these as transient and keeps retrying, leaving the user in a loop. Make terminal quota/plan errors stop the retry path and surface the assistant error, while ordinary transient failures remain retryable. Preserve existing silent prompt-timeout and connection-card behavior.",
+      "prompt": "The Pi chat transport receives provider 429 responses that mean the account has exhausted a daily allowance or the selected model is not permitted. The app currently treats these as transient and keeps retrying, leaving the user in a loop. Make terminal quota/plan errors stop the retry path and surface the assistant error, while ordinary transient failures remain retryable. Preserve existing silent prompt-timeout and connection-card behavior. Exercise the actual foreground event handling: terminal message errors followed by an agent-end event promising another retry must stop that session, finalize the assistant error, and clear loading/streaming state without submitting another prompt. Ordinary provider retry events stay active; a transient throttled response can retry after its wait, and successful answers still finalize. No live provider or native process is needed.",
       "agent_timeout_seconds": 720,
-      "dependency_links": [
-        {
-          "source_path": "apps/screenpipe-app-tauri/node_modules",
-          "destination_path": "apps/screenpipe-app-tauri/node_modules"
-        }
-      ],
       "grader": {
         "timeout_seconds": 300,
         "fixtures": [
@@ -89,7 +83,13 @@
           }
         ],
         "command": "cd apps/screenpipe-app-tauri && bun x vitest run --config vitest.config.ts lib/chat/__tests__/eval-terminal-quota.test.ts lib/chat/__tests__/quota-errors.test.ts lib/chat/__tests__/provider-errors.test.ts"
-      }
+      },
+      "grader_dependency_links": [
+        {
+          "source_path": "apps/screenpipe-app-tauri/node_modules",
+          "destination_path": "apps/screenpipe-app-tauri/node_modules"
+        }
+      ]
     },
     {
       "id": "app-timeline-stream-reliability",

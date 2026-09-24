@@ -13,6 +13,18 @@ The current app corpus contains 76 git-mined regressions. See
 [DESIGN.md](./DESIGN.md) for the Anthropic guidance, source contract, and
 history-mining workflow. The companion website manifest uses this same harness.
 
+`app-terminal-quota-retry` exercises the actual foreground event hook with
+synthetic native commands and event delivery. Seven event outcomes cover terminal
+quota/model retry cancellation, finalization, retained transient retries, delayed
+throttling recovery and successful answers; 76 historical helper assertions remain.
+The parent fails three terminal outcomes and preserves 80 assertions; the reference
+passes all 83. A disabled stop condition previously passed the source-name grader.
+Run `bun test evals/coding-agent/calibrate-terminal-quota.test.js` for eight controls
+including disabled/blanket stopping, lost stop effects, equivalent detector naming,
+blanket retry suppression and missing-source setup classification. Runtime links
+are installed only for grading. This does not establish native process termination,
+live billing, isolation or model performance.
+
 `app-acp-billing-saved-recovery` exercises the real foreground event hook,
 provider presentation and saved-message rendering with synthetic native, event,
 storage and network ports. Twelve outcomes cover provider-specific account
