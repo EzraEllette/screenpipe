@@ -9,9 +9,24 @@ This is an agent eval suite, not a unit-test suite. Every case contains:
 - saved prompt, transcript, candidate patch, grader output, runtime fingerprint, and result;
 - repeated-trial reporting with success rate, `pass@k`, and `pass^k`.
 
-The current app corpus contains 76 git-mined regressions. See
+The current app corpus contains 77 git-mined regressions. See
 [DESIGN.md](./DESIGN.md) for the Anthropic guidance, source contract, and
 history-mining workflow. The companion website manifest uses this same harness.
+
+`app-business-capacity-plan-picker` drives the actual account settings component
+with synthetic native, settings and telemetry ports. Eight outcomes cover visible
+capacity plans and prices, exact billing targets, current-plan labeling, the next
+capacity step and preserved login/account navigation. The parent fails six
+intended outcomes and preserves two; the historical fix passes all eight. The
+same outcomes pass on current source using its offline localization test setup.
+Run `bun test evals/coding-agent/calibrate-capacity-plan-picker.test.js` with the
+desktop test dependencies installed. Nine controls include incorrect targets,
+missing navigation, an unused correct module, blanket current-plan labels, lost
+account navigation, equivalent helper/test-id names and query ordering, and
+missing-source setup classification. The grader does not require test IDs or
+private helper names. Fixtures and dependency links are installed only at grading.
+This does not establish live billing, backend proration, native behavior, agent
+isolation or model capability.
 
 `app-terminal-quota-retry` exercises the actual foreground event hook with
 synthetic native commands and event delivery. Seven event outcomes cover terminal

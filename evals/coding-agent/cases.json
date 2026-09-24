@@ -3141,6 +3141,53 @@
         "apps/screenpipe-app-tauri/lib/utils/ai-endpoint-url.ts",
         "apps/screenpipe-app-tauri/lib/utils/validation.ts"
       ]
+    },
+    {
+      "id": "app-business-capacity-plan-picker",
+      "name": "Expose capacity plans and route each selection to its billing target",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "9d7866f0eec57826f3af7660e4c2a224e3f53dbc"
+      },
+      "base_ref": "e86a6d71a79ba302f9a8e6a765e1d4d1342404c3",
+      "oracle_ref": "9d7866f0eec57826f3af7660e4c2a224e3f53dbc",
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/components/settings/account-plan-options.tsx",
+        "apps/screenpipe-app-tauri/components/settings/account-section.tsx"
+      ],
+      "gate": "advisory",
+      "trigger_paths": [
+        "apps/screenpipe-app-tauri/components/settings/account-plan-options.tsx",
+        "apps/screenpipe-app-tauri/components/settings/account-section.tsx"
+      ],
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "billing",
+        "plan-picker"
+      ],
+      "prompt": "Account settings hides Business Max and Ultra behind an unset feature flag. Make all five plan choices visible without enabling a feature flag: Free $0, Basic $25, Business $50, Business Max $100 and Business Ultra $200 per month. Describe Max and Ultra as 2x and 4x daily query/request capacity respectively, retaining the same 400 credits and frontier models, not extra credit allowances. A signed-in Business owner selecting Max must open the screenpipe.com/account/billing page with target_plan=pro_max and interval=month; a Max owner selecting Ultra must use target_plan=pro_ultra and interval=month. These capacity changes must not start a new in-app checkout. Mark each Max or Ultra owner on the matching priced plan as current, without a purchase button for that current plan or a current marker on ordinary Business. Recommend Max as the next step for Business, Ultra for Max, and no next step above Ultra or for team/enterprise accounts. Preserve signed-out stale-account gating: an account without a token, even with a stale cloud subscription flag, must show sign-in guidance and no active subscription. Signed-in subscribers must retain their active account display and working web-account link. Preserve the public AccountSection interface. Exact layout, test ids, CSS, internal helper names, analytics names and URL query ordering are not prescribed. Use synthetic native/provider ports only. This covers account settings presentation and outgoing billing navigation, not live financial operations, backend proration, native behavior or model performance.",
+      "agent_timeout_seconds": 900,
+      "grader_dependency_links": [
+        {
+          "source_path": "apps/screenpipe-app-tauri/node_modules",
+          "destination_path": "apps/screenpipe-app-tauri/node_modules"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/capacity-plan-picker.fixture.tsx.txt",
+            "destination_path": "apps/screenpipe-app-tauri/eval-capacity-plan-picker.test.tsx"
+          },
+          {
+            "local_path": "graders/capacity-plan-picker.config.mjs",
+            "destination_path": "apps/screenpipe-app-tauri/eval-capacity-plan-picker.config.mjs"
+          }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && node node_modules/vitest/vitest.mjs run --config eval-capacity-plan-picker.config.mjs"
+      }
     }
   ]
 }
