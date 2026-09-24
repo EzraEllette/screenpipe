@@ -132,7 +132,7 @@ export function WorkflowTasksPrompt({ active, tasks = desktopTasks, backendReady
       // optimistic all-on/all-off claim or roll a user's off request back on.
       try { setSetup(await tasks.load()); } catch { setSetup(null); }
       setFailedTarget(enabled);
-      setError(ui(enabled ? "Could not enable all tasks. Please try again." : "Could not turn off all tasks. Please try again."));
+      setError(enabled ? ui("Could not enable all tasks. Please try again.") : ui("Could not turn off all tasks. Please try again."));
     } finally {
       enabling.current = false;
       setBusy(false);
