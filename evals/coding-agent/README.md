@@ -9,7 +9,7 @@ This is an agent eval suite, not a unit-test suite. Every case contains:
 - saved prompt, transcript, candidate patch, grader output, runtime fingerprint, and result;
 - repeated-trial reporting with success rate, `pass@k`, and `pass^k`.
 
-The current app corpus contains 75 git-mined regressions. See
+The current app corpus contains 76 git-mined regressions. See
 [DESIGN.md](./DESIGN.md) for the Anthropic guidance, source contract, and
 history-mining workflow. The companion website manifest uses this same harness.
 
@@ -830,3 +830,21 @@ blanket suppression and missing-source setup failure. Set
 dependency links are materialized only for grading. These are corpus checks,
 not model trials, full chat UI or native persistence evidence, or proof of
 execution isolation. No real files, recordings or provider accounts are used.
+
+## Connection-probe response compatibility
+
+`app-connection-probe-response` exercises the public connection-test service with
+synthetic provider responses and real request/error helpers. Sixteen outcomes
+cover streaming-default custom, OpenAI, Ollama and Anthropic gateways, token
+parameter recovery, configured connection identity, JSON compatibility, empty
+messages, error details, reply length and cancellation. The historical parent
+fails five response assertions and preserves eleven outcomes; the source-only
+reference and current service pass all sixteen.
+
+Run `bun test evals/coding-agent/calibrate-connection-probe.test.js` with desktop
+Vitest dependencies installed. Ten controls reject unused fixes, retry/provider
+regressions, constant replies and lost credentials. A valid SSE parser passes
+without requiring a particular request flag. Missing source remains a setup
+error. Hidden fixtures and dependencies are materialized only for grading.
+These are corpus checks, not model trials, settings persistence, native/live
+provider acceptance or proof of execution isolation.

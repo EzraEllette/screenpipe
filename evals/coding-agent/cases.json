@@ -3091,6 +3091,56 @@
         ],
         "command": "\"${BUN_BIN:-bun}\" test evals/coding-agent/graders/voice-transcription-budget.test.js"
       }
+    },
+    {
+      "id": "app-connection-probe-response",
+      "name": "Return valid connection-probe replies from streaming-default gateways",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "9a4950abb4bbcddec07942609297b8d57de5e437"
+      },
+      "base_ref": "22d2053908e55e86d7b84365e3ba508896e63060",
+      "oracle_ref": "9a4950abb4bbcddec07942609297b8d57de5e437",
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/lib/utils/ai-preset-connection.ts",
+        "apps/screenpipe-app-tauri/lib/utils/chat-test-body.ts"
+      ],
+      "gate": "advisory",
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "connection-test",
+        "provider-compatibility",
+        "recovery"
+      ],
+      "prompt": "The public testAiPresetConnection service reports a connection failure for working OpenAI-compatible gateways that default to server-sent events. Restore the actual provider reply for custom, OpenAI, native Ollama and Anthropic connections, including gateways that require max_completion_tokens instead of max_tokens. Preserve configured model, endpoint and provider credentials, a nonnegative finite latency, ordinary JSON replies, existing empty-text message compatibility and the 100-character displayed reply limit. Missing messages, provider authorization errors, array-shaped provider errors and transport failures must remain failures with their meaningful details; caller cancellation must reach the provider request. Any implementation that achieves these outcomes is acceptable, including successful SSE handling. Preserve the public service interface. Use synthetic provider ports only. This covers the connection service and its internal request/error helpers, not settings UI persistence, native networking or live provider acceptance.",
+      "agent_timeout_seconds": 900,
+      "grader_dependency_links": [
+        {
+          "source_path": "apps/screenpipe-app-tauri/node_modules",
+          "destination_path": "apps/screenpipe-app-tauri/node_modules"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/connection-probe.fixture.ts",
+            "destination_path": "apps/screenpipe-app-tauri/eval-connection-probe.test.ts"
+          },
+          {
+            "local_path": "graders/connection-probe.config.mjs",
+            "destination_path": "apps/screenpipe-app-tauri/eval-connection-probe.config.mjs"
+          }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && node node_modules/vitest/vitest.mjs run --config eval-connection-probe.config.mjs"
+      },
+      "trigger_paths": [
+        "apps/screenpipe-app-tauri/lib/utils/ai-preset-connection.ts",
+        "apps/screenpipe-app-tauri/lib/utils/chat-test-body.ts",
+        "apps/screenpipe-app-tauri/lib/utils/ai-endpoint-url.ts",
+        "apps/screenpipe-app-tauri/lib/utils/validation.ts"
+      ]
     }
   ]
 }
