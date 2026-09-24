@@ -121,13 +121,13 @@ function isConnectionLikeError(errorStr: string): boolean {
 
 export function isHostedScreenpipeProvider(provider?: string | null): boolean {
   // screenpipe's own hosted gateway (default chat preset + the Pi agent both
-  // route through api.screenpipe.com). A connection failure here is on us,
-  // not the user's machine.
+  // route through api.screenpipe.com). This identifies the destination, not
+  // whether a connection failure originated at the service or on the network.
   return provider === "screenpipe-cloud" || provider === "pi";
 }
 
 export function buildCloudConnectionMessage(): string {
-  return "Can't reach screenpipe cloud right now — this is usually a brief outage on our end, not your setup. Wait a few seconds and try again.";
+  return "Can't reach screenpipe cloud right now. Wait a few seconds and try again. If it keeps happening, check your internet connection and send feedback so we can investigate.";
 }
 
 export function buildRemoteConnectionMessage(provider?: string | null): string {

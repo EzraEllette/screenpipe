@@ -108,7 +108,7 @@ describe("provider error copy", () => {
     ).toBeNull();
   });
 
-  it("maps screenpipe cloud connection errors to a transient-outage message", () => {
+  it("maps screenpipe cloud connection errors to retry guidance without assigning a cause", () => {
     const msg = buildProviderErrorMessage("Connection error.", {
       provider: "screenpipe-cloud",
       model: "auto",
@@ -116,6 +116,8 @@ describe("provider error copy", () => {
 
     expect(msg).toContain("screenpipe cloud");
     expect(msg?.toLowerCase()).toContain("try again");
+    expect(msg).not.toContain("outage on our end");
+    expect(msg).not.toContain("not your setup");
     // does not blame the user's own machine/setup
     expect(msg?.toLowerCase()).not.toContain("ollama");
   });
@@ -190,7 +192,7 @@ describe("provider error copy", () => {
     });
 
     expect(msg).toContain("screenpipe cloud");
-    expect(msg).toContain("outage on our end");
+    expect(msg).toContain("try again");
     expect(msg).not.toContain("rate-limited");
     expect(msg).not.toContain("upgrade");
   });
