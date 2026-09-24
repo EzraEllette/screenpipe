@@ -367,7 +367,7 @@ mod tests {
 
     #[tokio::test]
     #[cfg(all(target_os = "windows", feature = "directml"))]
-    #[ignore = "downloads the real Parakeet model for native provider acceptance"]
+    #[ignore = "uses the cached real Qwen model for native provider acceptance"]
     async fn real_directml_initialization_failure_and_cpu_recovery_survive_support_collection() {
         let logs = tempfile::tempdir().unwrap();
         let current = logs.path().join("screenpipe-app.2026-09-23.log");
@@ -379,17 +379,15 @@ mod tests {
 
         tracing::subscriber::with_default(subscriber, || {
             tracing::info!("diagnostic contact=private.person@example.com");
-            audiopipe::Model::download_pretrained("parakeet-tdt-0.6b-v3")
-                .expect("the native acceptance harness requires the public Parakeet model");
-            let mut model = audiopipe::Model::from_pretrained_cache_only_with_provider(
-                "parakeet-tdt-0.6b-v3",
-                audiopipe::ParakeetExecutionProvider::DirectMlDevice(i32::MAX),
+            let mut model = audiopipe::Model::from_pretrained_cache_only_with_qwen3_provider(
+                "qwen3-asr-0.6b",
+                audiopipe::Qwen3ExecutionProvider::DirectMlDevice(i32::MAX),
             )
-            .expect("an invalid real DirectML device must recover through real CPU sessions");
+            .expect("an invalid real DirectML device must recover Qwen through real CPU sessions");
             assert_eq!(model.execution_provider(), Some("CPU"));
             model
                 .transcribe(&vec![0.0; 16_000], Default::default())
-                .expect("real CPU inference after provider recovery must complete");
+                .expect("real Qwen CPU inference after provider recovery must complete");
         });
 
         std::fs::rename(
@@ -405,10 +403,11 @@ mod tests {
         println!("redacted real DirectML recovery report:\n{report}");
         assert!(report.contains("DirectML initialization failed"));
         assert!(report.contains("887A0002"));
-        assert!(report.contains("CPU initialization completed"));
-        assert!(report.contains("CPU inference completed"));
+        assert!(
+            report.contains("CPU/mixed inference completed after DirectML initialization recovery")
+        );
         assert!(report.contains("screenpipe restarted"));
-        assert!(!report.contains("parakeet: loading"));
+        assert!(!report.contains("loading Qwen3-ASR from"));
         assert!(!report.contains("private.person"));
         assert!(report.contains("contact=[EMAIL]"));
     }

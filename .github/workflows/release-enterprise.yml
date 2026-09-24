@@ -352,6 +352,10 @@ jobs:
         run: |
           echo "OPENBLAS_PATH=${{ github.workspace }}/apps/screenpipe-app-tauri/src-tauri/openblas" >> $GITHUB_ENV
 
+      - name: Install and stage Vulkan for Whisper
+        shell: pwsh
+        run: ./.github/scripts/setup-vulkan-windows.ps1 -Architecture x64 -InstallSdk -StageRuntimeDirectory apps/screenpipe-app-tauri/src-tauri/onnxruntime-win-x64-1.24.2/lib
+
       - name: Use enterprise config
         shell: bash
         run: cp -p apps/screenpipe-app-tauri/src-tauri/tauri.enterprise.conf.json apps/screenpipe-app-tauri/src-tauri/tauri.conf.json
@@ -447,7 +451,7 @@ jobs:
           GGML_AVX512_BF16: "OFF"
           CMAKE_ARGS: "-DGGML_NATIVE=OFF -DGGML_AVX512=OFF -DGGML_AVX512_VBMI=OFF -DGGML_AVX512_VNNI=OFF -DGGML_AVX512_BF16=OFF"
         with:
-          args: "--target x86_64-pc-windows-msvc --features enterprise-build"
+          args: "--target x86_64-pc-windows-msvc --features enterprise-build,directml,vulkan"
           projectPath: "./apps/screenpipe-app-tauri"
           tauriScript: bunx tauri -v
           retryAttempts: 3
