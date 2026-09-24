@@ -20,6 +20,11 @@ use tracing::{debug, error, info, warn};
 /// Global lock to prevent concurrent reconciliation runs (batch mode + background sweep).
 /// Two simultaneous Whisper sessions will use 200%+ CPU and starve the system.
 static RECONCILIATION_RUNNING: AtomicBool = AtomicBool::new(false);
+// Independent test databases still share the production process-wide guard.
+// Serialize tests that run sweeps so neither can skip the other's recovery.
+#[cfg(test)]
+pub(super) static RECONCILIATION_TEST_LOCK: tokio::sync::Mutex<()> =
+    tokio::sync::Mutex::const_new(());
 static BACKFILL_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 static BACKFILL_LAST_TRIGGERED_MS: AtomicU64 = AtomicU64::new(0);
 
@@ -1842,6 +1847,7 @@ mod tests {
 
     #[tokio::test]
     async fn disabled_runtime_keeps_pending_audio_even_when_an_engine_is_configured() {
+        let _reconciliation = RECONCILIATION_TEST_LOCK.lock().await;
         let dir = tempfile::tempdir().unwrap();
         let db = temp_db(dir.path()).await;
         let path = dir.path().join("Mic (input)_2026-09-23_10-00-00.mp4");
@@ -2411,6 +2417,7 @@ mod tests {
 
     #[tokio::test]
     async fn completed_batch_is_not_retranscribed_or_remerged_after_save_failure() {
+        let _reconciliation = RECONCILIATION_TEST_LOCK.lock().await;
         let _ = tracing_subscriber::fmt()
             .with_max_level(tracing::Level::WARN)
             .with_test_writer()
@@ -2990,6 +2997,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[ignore = "real-model full reconciliation memory plateau regression"]
     async fn cached_parakeet_mlx_post_meeting_backlog_memory_plateaus() {
+        let _reconciliation = RECONCILIATION_TEST_LOCK.lock().await;
         const MODEL_REPO: &str = "mlx-community/parakeet-tdt-0.6b-v3";
         const WARMUP_CALLS: usize = 4;
         // Mirrors the v2.5.151 incident: four immediately-drained capped sweeps

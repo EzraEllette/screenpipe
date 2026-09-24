@@ -699,40 +699,10 @@ jobs:
         shell: pwsh
         run: ./.github/scripts/setup-vulkan-windows.ps1 -Architecture ${{ matrix.target == 'aarch64-pc-windows-msvc' && 'arm64' || 'x64' }} -InstallSdk
 
-      - name: Install Ninja (ARM64)
-        if: matrix.os_type == 'windows' && matrix.target == 'aarch64-pc-windows-msvc'
+      - name: Configure Ninja for Windows native dependencies
+        if: matrix.os_type == 'windows'
         shell: pwsh
-        run: |
-          # The windows-11-arm runner image pre-installs Ninja at C:\Tools\Ninja
-          # but winget is NOT on PATH by default - so blindly calling
-          # `winget install` fails with CommandNotFoundException and kills
-          # the build even though Ninja is already available. Check first,
-          # fall back to winget only if both the pre-installed path AND the
-          # winget CLI are present.
-          $paths = @("C:\Program Files\Ninja", "C:\Tools\Ninja")
-          $found = $paths | Where-Object { Test-Path "$_\ninja.exe" } | Select-Object -First 1
-
-          if (-not $found) {
-            Write-Host "Ninja not found in preinstalled paths, trying winget..."
-            if (Get-Command winget -ErrorAction SilentlyContinue) {
-              winget install Ninja-build.Ninja --accept-package-agreements --accept-source-agreements --silent
-              $found = $paths | Where-Object { Test-Path "$_\ninja.exe" } | Select-Object -First 1
-            } else {
-              Write-Host "winget unavailable on this runner - downloading Ninja release zip"
-              $zip = "$env:RUNNER_TEMP\ninja.zip"
-              Invoke-WebRequest -Uri "https://github.com/ninja-build/ninja/releases/latest/download/ninja-winarm64.zip" -OutFile $zip
-              $dest = "C:\Tools\Ninja"
-              New-Item -ItemType Directory -Force -Path $dest | Out-Null
-              Expand-Archive -Path $zip -DestinationPath $dest -Force
-              $found = $dest
-            }
-          }
-
-          if (-not $found) { throw "Ninja not found and could not be installed" }
-          Write-Host "Using Ninja at: $found"
-          echo $found | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-          $env:Path = "$found;" + $env:Path
-          ninja --version
+        run: ./.github/scripts/setup-ninja-windows.ps1
 
       - name: Verify Windows download support
         if: matrix.os_type == 'windows'

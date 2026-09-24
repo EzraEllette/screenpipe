@@ -2663,6 +2663,9 @@ mod tests {
 
     #[tokio::test]
     async fn pending_cloud_audio_recovers_in_both_modes_after_failure_and_restart() {
+        let _reconciliation = super::super::reconciliation::RECONCILIATION_TEST_LOCK
+            .lock()
+            .await;
         use crate::transcription::deepgram::DeepgramTranscriptionConfig;
         use crate::utils::ffmpeg::write_audio_to_file;
         use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
@@ -2768,6 +2771,7 @@ mod tests {
                 .mount(&server).await;
             // Restart the worker against the same durable pending records.
             let worker = manager.start_reconciliation_handler().await;
+            let cancellation = worker.abort_handle();
             *manager.reconciliation_handle.write().await = Some(worker);
             manager.reconciliation_wakeup.notify_one();
             tokio::time::timeout(Duration::from_secs(10), async {
@@ -2797,6 +2801,13 @@ mod tests {
             .await
             .unwrap();
             manager.stop_internal().await.unwrap();
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while !cancellation.is_finished() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("restarted recovery must stop before releasing the test lock");
             assert_eq!(db.count_audio_transcriptions(id).await.unwrap(), 1);
             assert_eq!(std::fs::read(&path).unwrap(), retained);
             assert!(fresh.exists());
