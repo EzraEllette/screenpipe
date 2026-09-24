@@ -3188,6 +3188,41 @@
         ],
         "command": "cd apps/screenpipe-app-tauri && node node_modules/vitest/vitest.mjs run --config eval-capacity-plan-picker.config.mjs"
       }
+    },
+    {
+      "id": "app-pipe-write-permission-hook",
+      "name": "Enforce pipe write boundaries at the registered tool hook",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "c630f18d186b62ab826f3956e7963a42ce9f9909"
+      },
+      "base_ref": "47b59ce096d37843b4b04f7401e2ec246ca2e5e3",
+      "oracle_ref": "c630f18d186b62ab826f3956e7963a42ce9f9909",
+      "oracle_paths": [
+        "crates/screenpipe-core/assets/extensions/screenpipe-permissions.ts"
+      ],
+      "gate": "advisory",
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "permissions",
+        "pipe-tools"
+      ],
+      "prompt": "A configured pipe can write outside its permitted directory through the extension tool-call hook. Enforce its configured write boundary for built-in write and edit tools, including both tool/name event fields and file_path/path targets, traversal and missing targets. For shell calls, reject an outside target after a permitted first rm or touch operand, runtime-expanded redirect destinations, opaque Python scripts, outside writes inside a nested shell and outside writes after a permitted compound-command segment. Preserve relative file writes, absolute in-directory edits, reads outside the directory, in-directory shell redirects, multiple permitted write targets, literal dollar characters in single-quoted in-directory filenames, read-only shell commands and interpreter version queries. Any implementation achieving these outcomes is acceptable; no helper name, parser architecture or error wording is required. Exercise the actual registered extension hook using synthetic configuration and event inputs. Do not execute the supplied commands or access real user files. This case grades hook decisions for these command forms, not complete shell analysis, native filesystem enforcement, symlink handling or agent isolation.",
+      "agent_timeout_seconds": 900,
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/pipe-write-hook.fixture.ts",
+            "destination_path": "eval-pipe-write-hook.test.ts"
+          }
+        ],
+        "command": "bun test eval-pipe-write-hook.test.ts"
+      },
+      "trigger_paths": [
+        "crates/screenpipe-core/assets/extensions/screenpipe-permissions.ts"
+      ]
     }
   ]
 }

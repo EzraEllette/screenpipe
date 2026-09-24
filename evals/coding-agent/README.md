@@ -9,7 +9,7 @@ This is an agent eval suite, not a unit-test suite. Every case contains:
 - saved prompt, transcript, candidate patch, grader output, runtime fingerprint, and result;
 - repeated-trial reporting with success rate, `pass@k`, and `pass^k`.
 
-The current app corpus contains 77 git-mined regressions. See
+The current app corpus contains 78 git-mined regressions. See
 [DESIGN.md](./DESIGN.md) for the Anthropic guidance, source contract, and
 history-mining workflow. The companion website manifest uses this same harness.
 
@@ -875,3 +875,13 @@ without requiring a particular request flag. Missing source remains a setup
 error. Hidden fixtures and dependencies are materialized only for grading.
 These are corpus checks, not model trials, settings persistence, native/live
 provider acceptance or proof of execution isolation.
+
+## Pipe write permission hook
+
+`app-pipe-write-permission-hook` exercises the actual registered extension hook
+with synthetic permissions and tool events. Eighteen outcomes include outside
+file writes, multi-operand shell writes, expansions and opaque scripts, plus
+permitted writes and reads. No commands are executed. This does not establish
+complete shell analysis, native enforcement, symlink safety or agent isolation.
+Run `bun test evals/coding-agent/calibrate-pipe-write-hook.test.js` for historical,
+current, equivalent-implementation, unused-correct and mutation controls.
