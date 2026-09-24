@@ -55,7 +55,7 @@ use crate::{
     metrics::AudioPipelineMetrics,
     segmentation::segmentation_manager::SegmentationManager,
     transcription::{
-        engine::TranscriptionEngine,
+        engine::{TranscriptionEngine, TranscriptionSession},
         handle_new_transcript,
         stt::{process_audio_input, SAMPLE_RATE},
         whisper::model::get_cached_whisper_model_path,
@@ -1411,7 +1411,15 @@ impl AudioManager {
 
         // Create a single session and reuse it across all segments.
         // WhisperState is reused (whisper_full_with_state clears KV caches internally).
-        let mut session = engine.create_session()?;
+        let mut session = match engine.create_session() {
+            Ok(session) => session,
+            Err(error) => {
+                warn!(
+                    "transcription session unavailable ({error}); audio receiver will continue and recorded audio remains queued for reconciliation"
+                );
+                TranscriptionSession::Disabled
+            }
+        };
         info!("transcription session created (will be reused across segments)");
 
         Ok(tokio::spawn(async move {
@@ -2552,11 +2560,106 @@ impl Drop for AudioManager {
 mod tests {
     use super::*;
     use crate::core::device::{AudioDevice, DeviceType};
+    use std::path::Path;
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
     };
     use tokio::sync::{Barrier, Notify, Semaphore};
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unavailable_whisper_receiver_persists_audio_for_reconciliation_after_reopen() {
+        let tmp = tempfile::tempdir().expect("temp output");
+        let db_path = tmp.path().join("db.sqlite").to_string_lossy().into_owned();
+        let db = Arc::new(
+            DatabaseManager::new(&db_path, Default::default())
+                .await
+                .expect("temp db"),
+        );
+        let manager = AudioManager::new(
+            AudioManagerOptions {
+                is_disabled: true,
+                output_path: Some(tmp.path().to_path_buf()),
+                transcription_engine: Arc::new(AudioTranscriptionEngine::WhisperTiny),
+                audio_capture_mode: AudioCaptureMode::Always,
+                ..Default::default()
+            },
+            db.clone(),
+        )
+        .await
+        .expect("manager without hardware");
+        *manager.engine.write().await = Some(
+            crate::transcription::engine::unavailable_whisper_engine_for_test(
+                "whisper GPU inference failed (device lost); CPU recovery failed (bad model)",
+            ),
+        );
+        let sender = manager.recording_sender.as_ref().clone();
+        let handler = manager
+            .start_audio_receiver_handler()
+            .await
+            .expect("real receiver handler");
+        sender
+            .send(AudioInput {
+                data: Arc::new(vec![0.01; 16_000]),
+                sample_rate: 16_000,
+                channels: 1,
+                device: Arc::new(AudioDevice::new("acceptance mic".into(), DeviceType::Input)),
+                capture_timestamp: chrono::Utc::now().timestamp() as u64,
+            })
+            .expect("synthetic capture");
+
+        let mut persisted = None;
+        for _ in 0..100 {
+            let paths: Vec<String> = sqlx::query_scalar("SELECT file_path FROM audio_chunks")
+                .fetch_all(&db.pool)
+                .await
+                .expect("audio rows");
+            if let Some(path) = paths.into_iter().next() {
+                persisted = Some(path);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let persisted = persisted.expect("receiver persisted an audio_chunks row");
+        assert!(Path::new(&persisted).is_file());
+        let transcript_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audio_transcriptions WHERE audio_chunk_id = (SELECT id FROM audio_chunks WHERE file_path = ?)",
+        )
+        .bind(&persisted)
+        .fetch_one(&db.pool)
+        .await
+        .expect("transcript count");
+        assert_eq!(transcript_count, 0);
+
+        drop(sender);
+        drop(manager); // drops the final recording sender, allowing blocking recv to end
+        handler
+            .await
+            .expect("receiver shutdown after all senders closed");
+        db.close().await;
+        drop(db);
+
+        let reopened = DatabaseManager::new(&db_path, Default::default())
+            .await
+            .expect("reopen db");
+        assert!(reopened
+            .find_audio_chunk_id(&persisted)
+            .await
+            .expect("candidate query")
+            .is_some());
+        let transcript_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audio_transcriptions WHERE audio_chunk_id = (SELECT id FROM audio_chunks WHERE file_path = ?)",
+        )
+        .bind(&persisted)
+        .fetch_one(&reopened.pool)
+        .await
+        .expect("reopened transcript count");
+        assert_eq!(
+            transcript_count, 0,
+            "row remains an untranscribed reconciliation candidate"
+        );
+        reopened.close().await;
+    }
 
     #[tokio::test]
     async fn pending_cloud_audio_recovers_in_both_modes_after_failure_and_restart() {

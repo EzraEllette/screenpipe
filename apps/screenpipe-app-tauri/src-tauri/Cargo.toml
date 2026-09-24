@@ -345,6 +345,9 @@ tauri = { version = "=2.11.2", features = ["test"] }
 # staged_update tests: sign fake update archives with a throwaway key
 minisign = "0.7"
 
+[target.'cfg(windows)'.dev-dependencies]
+audiopipe = { git = "https://github.com/EzraEllette/audiopipe.git", rev = "9a616a4a0d5d663caeb9286a4233cda5899cc126", default-features = false, features = ["parakeet", "directml"] }
+
 
 [package.metadata.cargo-machete]
 # screenpipe-redact: workspace dep added for async PII reconciliation (PR #3188);
@@ -362,6 +365,7 @@ ignored = ["tauri-utils", "screenpipe-redact", "thiserror", "screenpipe-sync", "
 # Pinned by commit (not branch) for reproducible builds; drop once
 # upstream tauri-apps/muda#361 merges and ships in a released muda.
 muda = { git = "https://github.com/screenpipe/muda", rev = "327f3f8198b0ecdc3d58d7be85dfb83b2fa0d05d" }
+
 
 [profile.release]
 codegen-units = 1

@@ -461,6 +461,86 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(all(target_os = "windows", feature = "directml"))]
+    #[ignore = "uses the cached real Qwen model for native provider acceptance"]
+    async fn real_directml_initialization_failure_and_cpu_recovery_survive_support_collection() {
+        let logs = tempfile::tempdir().unwrap();
+        let current = logs.path().join("screenpipe-app.2026-09-23.log");
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_env_filter(tracing_subscriber::EnvFilter::new(crate::LOG_FILTER))
+            .with_writer(std::fs::File::create(&current).unwrap())
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!("diagnostic contact=private.person@example.com");
+            let mut model = audiopipe::Model::from_pretrained_cache_only_with_qwen3_provider(
+                "qwen3-asr-0.6b",
+                audiopipe::Qwen3ExecutionProvider::DirectMlDevice(i32::MAX),
+            )
+            .expect("an invalid real DirectML device must recover Qwen through real CPU sessions");
+            assert_eq!(model.execution_provider(), Some("CPU"));
+            model
+                .transcribe(&vec![0.0; 16_000], Default::default())
+                .expect("real Qwen CPU inference after provider recovery must complete");
+        });
+
+        std::fs::rename(
+            &current,
+            logs.path().join("screenpipe-app.2026-09-23.1.log"),
+        )
+        .unwrap();
+        std::fs::write(&current, "screenpipe restarted after provider recovery\n").unwrap();
+
+        let report = collect_redacted_from_dirs(&[logs.path().to_path_buf()])
+            .await
+            .unwrap();
+        println!("redacted real DirectML recovery report:\n{report}");
+        assert!(report.contains("DirectML initialization failed"));
+        assert!(report.contains("887A0002"));
+        assert!(
+            report.contains("CPU/mixed inference completed after DirectML initialization recovery")
+        );
+        assert!(report.contains("screenpipe restarted"));
+        assert!(!report.contains("loading Qwen3-ASR from"));
+        assert!(!report.contains("private.person"));
+        assert!(report.contains("contact=[EMAIL]"));
+    }
+
+    #[tokio::test]
+    #[cfg(all(target_os = "windows", feature = "directml"))]
+    #[ignore = "requires the real native dependency recycle-recovery log"]
+    async fn real_directml_recycle_recovery_survives_support_collection() {
+        let emitted = std::fs::read(
+            std::env::var("SCREENPIPE_TEST_DIRECTML_RECOVERY_LOG")
+                .expect("run the dependency native recycle failure test first"),
+        )
+        .expect("read actual production-filtered dependency events");
+        assert!(!emitted.is_empty());
+        let logs = tempfile::tempdir().unwrap();
+        let current = logs.path().join("screenpipe-app.2026-09-23.log");
+        std::fs::write(&current, emitted).unwrap();
+        std::fs::rename(
+            &current,
+            logs.path().join("screenpipe-app.2026-09-23.1.log"),
+        )
+        .unwrap();
+        std::fs::write(&current, "screenpipe restarted after provider recovery\n").unwrap();
+        let report = collect_redacted_from_dirs(&[logs.path().to_path_buf()])
+            .await
+            .unwrap();
+        println!("redacted real DirectML recycle recovery report:\n{report}");
+        assert!(report.contains("DirectML session recycle failed"));
+        assert!(report.contains("887A0002"));
+        assert!(report.contains("CPU recovery initialized after DirectML session recycle failure"));
+        assert!(report.contains("CPU inference completed after DirectML initialization recovery"));
+        assert!(report.contains("screenpipe restarted"));
+        assert!(!report.contains("parakeet: loading"));
+        assert!(!report.contains("private.person"));
+        assert!(report.contains("contact=[EMAIL]"));
+    }
+
+    #[tokio::test]
     async fn capture_pause_cause_and_resume_survive_support_collection() {
         // The native focus-warm-pause E2E also asserts these actual messages.
         let dir = tempfile::tempdir().unwrap();

@@ -45,7 +45,7 @@ use crate::metrics::AudioPipelineMetrics;
 use crate::segmentation::segmentation_manager::SegmentationManager;
 use crate::speaker::identify_gate::segment_duration_secs;
 use crate::speaker::segment::{get_segments_without_samples, SpeechSegment};
-use crate::transcription::engine::{TranscriptionEngine, TranscriptionSession};
+use crate::transcription::engine::TranscriptionEngine;
 use crate::transcription::get_or_create_speaker_from_embedding;
 use crate::transcription::{AudioInsertCallback, AudioInsertInfo, TranscriptionDiarizationSegment};
 
@@ -468,12 +468,6 @@ pub async fn reconcile_untranscribed(
                 );
                 continue;
             }
-        };
-
-        // Get whisper state from session for stt function
-        let _whisper_state = match &mut session {
-            TranscriptionSession::Whisper { state, .. } => Some(state),
-            _ => None,
         };
 
         // Transcribe the concatenated audio in one shot using session.

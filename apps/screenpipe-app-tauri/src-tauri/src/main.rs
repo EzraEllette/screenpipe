@@ -39,6 +39,8 @@ use tracing_oslog::OsLogger;
 use updates::start_update_check;
 use window::ShowRewindWindow;
 
+pub(crate) const LOG_FILTER: &str = "info,hyper=error,tower_http=error,whisper_rs=warn,audiopipe=warn,ort=warn,xcap::platform::impl_window=off,xcap::platform::impl_monitor=off,xcap::platform::utils=off";
+
 mod activity_history;
 mod app_panic;
 mod first_run_summary;
@@ -509,7 +511,7 @@ async fn main() {
     windows_ca_bundle::install();
 
     // Detect pre-AVX2 CPUs once, before the engine boots. The exe itself is
-    // baseline-safe; whisper/qwen3 kernels are AVX2-compiled and gated at
+    // baseline-safe; whisper (and non-Windows Qwen) kernels are AVX2-compiled and gated at
     // runtime in screenpipe-audio. This flag drives the "compatibility mode"
     // notice in onboarding via the boot-phase snapshot. tracing isn't
     // initialized yet — eprintln! here, warn! again after logging init.
@@ -517,7 +519,7 @@ async fn main() {
         let cpu = screenpipe_core::cpu_features::snapshot();
         if !cpu.avx2 {
             eprintln!(
-                "screenpipe: cpu lacks AVX2 ({}); running in compatibility mode — local whisper/qwen3 STT disabled",
+                "screenpipe: cpu lacks AVX2 ({}); running in compatibility mode — local Whisper and non-Windows Qwen STT disabled (Windows ONNX Qwen and Parakeet remain available)",
                 cpu.as_log_string()
             );
             health::set_cpu_compat_mode(true);
@@ -1293,8 +1295,6 @@ async fn main() {
             // xcap probes stale monitor / window IDs every refresh and logs
             // ERROR for IDs that don't exist (e.g. after a display unplug).
             // Benign noise that swamps real errors in user feedback logs.
-            const LOG_FILTER: &str = "info,hyper=error,tower_http=error,whisper_rs=warn,audiopipe=warn,ort=warn,xcap::platform::impl_window=off,xcap::platform::impl_monitor=off,xcap::platform::utils=off";
-
             let file_layer = tracing_subscriber::fmt::layer()
                 .with_writer(file_appender)
                 .with_ansi(false)
@@ -1326,7 +1326,7 @@ async fn main() {
             // subscriber is up, so it lands in the log files users send us.
             if !screenpipe_core::cpu_features::has_avx2() {
                 warn!(
-                    "cpu lacks AVX2 ({}); running in compatibility mode — local whisper/qwen3 STT disabled, parakeet/cloud engines still available",
+                    "cpu lacks AVX2 ({}); running in compatibility mode — local Whisper and non-Windows Qwen STT disabled; Windows ONNX Qwen, Parakeet, and cloud engines remain available",
                     screenpipe_core::cpu_features::snapshot().as_log_string()
                 );
             }

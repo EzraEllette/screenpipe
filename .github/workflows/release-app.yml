@@ -209,13 +209,13 @@ jobs:
           - platform: ${{ needs.check_commit.outputs.windows_runner || 'windows-2022' }}
             args: "--target x86_64-pc-windows-msvc"
             pre-build-args: ""
-            tauri-args: "--target x86_64-pc-windows-msvc --features official-build,directml,redact-onnx-directml"
+            tauri-args: "--target x86_64-pc-windows-msvc --features official-build,directml,vulkan,redact-onnx-directml"
             target: x86_64-pc-windows-msvc
             os_type: "windows"
           - platform: ${{ needs.check_commit.outputs.windows_arm_runner || 'windows-11-arm' }}
             args: "--target aarch64-pc-windows-msvc"
             pre-build-args: ""
-            tauri-args: "--target aarch64-pc-windows-msvc --features official-build,directml,redact-onnx-directml"
+            tauri-args: "--target aarch64-pc-windows-msvc --features official-build,directml,vulkan,redact-onnx-directml"
             target: aarch64-pc-windows-msvc
             os_type: "windows"
           - platform: ${{ needs.check_commit.outputs.linux_runner || 'ubuntu-24.04' }}
@@ -665,20 +665,18 @@ jobs:
             Copy-Item "ort-dml/runtimes/win-x64/native/onnxruntime.lib" "$extractDir/lib/"
             Copy-Item "directml/bin/x64-win/DirectML.dll" "$extractDir/lib/"
           } else {
-            # ARM64: MS official CPU build (pyke ships no arm64 prebuilt). Extract
-            # the zip to a scratch dir, then stage a CONTROLLED lib/ containing
-            # exactly onnxruntime.dll + onnxruntime.lib. The tauri resource glob
-            # (onnxruntime*\lib\*.dll) must bundle exactly the same DLL set the
-            # old per-file glob shipped — the MS zip's lib/ has extra DLLs
-            # (providers_shared etc.) that were never bundled and must stay out.
-            $url = "https://github.com/microsoft/onnxruntime/releases/download/v$version/onnxruntime-win-$arch-$version.zip"
-            $zipFile = "onnxruntime-win-$arch-$version.zip"
-            Invoke-WebRequest -Uri $url -OutFile $zipFile
-            7z x $zipFile -oort-mszip -y
+            # Use Microsoft's DirectML NuGets on native ARM64 too.
+            $dmlVersion = '1.15.4'
+            Invoke-WebRequest -Uri "https://www.nuget.org/api/v2/package/Microsoft.ML.OnnxRuntime.DirectML/$version" -OutFile ort-dml.zip
+            Invoke-WebRequest -Uri "https://www.nuget.org/api/v2/package/Microsoft.AI.DirectML/$dmlVersion" -OutFile directml.zip
+            7z x ort-dml.zip -oort-dml -y
+            7z x directml.zip -odirectml -y
             New-Item -ItemType Directory -Force -Path "$extractDir/lib" | Out-Null
-            Copy-Item "ort-mszip/onnxruntime-win-$arch-$version/lib/onnxruntime.dll" "$extractDir/lib/"
-            Copy-Item "ort-mszip/onnxruntime-win-$arch-$version/lib/onnxruntime.lib" "$extractDir/lib/"
+            Copy-Item "ort-dml/runtimes/win-arm64/native/onnxruntime.dll" "$extractDir/lib/"
+            Copy-Item "ort-dml/runtimes/win-arm64/native/onnxruntime.lib" "$extractDir/lib/"
+            Copy-Item "directml/bin/arm64-win/DirectML.dll" "$extractDir/lib/"
           }
+          ./.github/scripts/setup-vulkan-windows.ps1 -Architecture $arch -StageRuntimeDirectory "$extractDir/lib"
           # Import-table (load-time) link against the MS DLL for BOTH arches:
           # pyke's static prebuilt is AVX2-only on x64, and pyke has no arm64
           # build. Load-time linking ≠ ort's `load-dynamic` feature (runtime
@@ -695,6 +693,11 @@ jobs:
           "$libDir"                    | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
           Write-Host "${arch}: ORT_LIB_LOCATION=$libDir (dynamic import link)"
           Get-ChildItem "$extractDir/lib"
+
+      - name: Install Vulkan SDK for Whisper
+        if: matrix.os_type == 'windows'
+        shell: pwsh
+        run: ./.github/scripts/setup-vulkan-windows.ps1 -Architecture ${{ matrix.target == 'aarch64-pc-windows-msvc' && 'arm64' || 'x64' }} -InstallSdk
 
       - name: Install Ninja (ARM64)
         if: matrix.os_type == 'windows' && matrix.target == 'aarch64-pc-windows-msvc'
