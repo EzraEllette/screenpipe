@@ -160,4 +160,6 @@ export type WorkflowsAppProps = {
   /** Explain access only after the user requests an update. */
   onAnalysisUnavailable?: () => void;
   statusNotice?: import("react").ReactNode;
+  /** Host controls beside the model selector, available in every workflow view. */
+  toolbarAccessory?: import("react").ReactNode;
 };
