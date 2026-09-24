@@ -18,16 +18,14 @@ use anyhow::{anyhow, Result};
 use reqwest::Client;
 use screenpipe_core::Language;
 use std::path::PathBuf;
-use std::sync::Arc;
-#[cfg(any(feature = "qwen3-asr", feature = "parakeet", feature = "parakeet-mlx"))]
-use std::sync::Mutex as StdMutex;
+use std::sync::{Arc, Mutex as StdMutex};
 use tracing::{error, info, warn};
 use whisper_rs::{WhisperContext, WhisperState};
 
 async fn load_whisper_context_with_cpu_fallback(
     model_path: PathBuf,
     config: Arc<AudioTranscriptionEngine>,
-) -> Result<Option<Arc<WhisperContext>>> {
+) -> Result<Option<(Arc<WhisperContext>, bool)>> {
     info!("loading whisper model with GPU acceleration...");
     let gpu_path = model_path.clone();
     let gpu_params = create_whisper_context_parameters(config.clone())?;
@@ -36,7 +34,7 @@ async fn load_whisper_context_with_cpu_fallback(
     })
     .await
     {
-        Ok(Ok(context)) => return Ok(Some(context)),
+        Ok(Ok(context)) => return Ok(Some((context, true))),
         Ok(Err(error)) => error.to_string(),
         Err(error) => format!("loading task panicked: {error}"),
     };
@@ -51,7 +49,7 @@ async fn load_whisper_context_with_cpu_fallback(
     })
     .await
     {
-        Ok(Ok(context)) => Ok(Some(context)),
+        Ok(Ok(context)) => Ok(Some((context, false))),
         Ok(Err(cpu_error)) => {
             warn!(
                 "whisper model unavailable on GPU ({}) and CPU ({}); audio capture will continue without transcription",
@@ -131,7 +129,7 @@ pub(crate) fn mlx_active_memory_bytes_for_test() -> usize {
 #[derive(Clone)]
 pub enum TranscriptionEngine {
     Whisper {
-        context: Arc<WhisperContext>,
+        context: Arc<StdMutex<(Option<Arc<WhisperContext>>, bool)>>,
         config: Arc<AudioTranscriptionEngine>,
         languages: Vec<Language>,
         vocabulary: Vec<VocabularyEntry>,
@@ -310,6 +308,7 @@ impl TranscriptionEngine {
                                 MODEL_NAME, provider,
                             ) {
                                 Ok(model) => Ok(model),
+                                Err(error) if error.is_model_not_cached() => Err(error),
                                 Err(gpu_error) => {
                                     warn!("qwen3-asr DirectML initialization failed ({gpu_error}); retrying on CPU");
                                     let recovered = audiopipe::Model::from_pretrained_cache_only_with_qwen3_provider(
@@ -528,7 +527,7 @@ impl TranscriptionEngine {
 
                 info!("whisper model available: {:?}", quantized_path);
 
-                let Some(context) =
+                let Some((context, gpu_active)) =
                     load_whisper_context_with_cpu_fallback(quantized_path, config.clone()).await?
                 else {
                     return Ok(Self::Disabled);
@@ -544,7 +543,7 @@ impl TranscriptionEngine {
                 // stderr harmlessly.
 
                 Ok(Self::Whisper {
-                    context,
+                    context: Arc::new(StdMutex::new((Some(context), gpu_active))),
                     config,
                     languages,
                     vocabulary,
@@ -575,16 +574,43 @@ impl TranscriptionEngine {
                 languages,
                 vocabulary,
             } => {
-                let state = context
+                let (current_context, gpu_active) = {
+                    let shared = context.lock().map_err(|e| anyhow!("whisper context lock: {e}"))?;
+                    (shared.0.clone().ok_or_else(|| anyhow!("whisper CPU recovery is unavailable after provider failure"))?, shared.1)
+                };
+                let (state, session_context, gpu_recovery_attempted) = match current_context
                     .create_state()
-                    .map_err(|e| anyhow!("failed to create whisper state: {}", e))?;
+                {
+                    Ok(state) => (state, current_context, !gpu_active),
+                    Err(error) if !gpu_active => {
+                        return Err(anyhow!("whisper CPU state creation failed after GPU recovery: {error}"));
+                    }
+                    Err(gpu_error) => {
+                        warn!("whisper GPU state creation failed ({gpu_error}); rebuilding the shared context on CPU");
+                        let model_path = get_cached_whisper_model_path(config).ok_or_else(|| anyhow!(
+                                "whisper GPU state creation failed ({gpu_error}); CPU recovery model is not cached"
+                            ))?;
+                        let cpu_params =
+                            create_whisper_context_parameters_with_gpu(config.clone(), false)?;
+                        let cpu_context = Arc::new(WhisperContext::new_with_params(&model_path, cpu_params)
+                                .map_err(|cpu_error| anyhow!("whisper GPU state creation failed ({gpu_error}); CPU context initialization failed ({cpu_error})"))?);
+                        let cpu_state = cpu_context.create_state()
+                                .map_err(|cpu_error| anyhow!("whisper GPU state creation failed ({gpu_error}); CPU state initialization failed ({cpu_error})"))?;
+                        *context
+                            .lock()
+                            .map_err(|e| anyhow!("whisper context lock: {e}"))? =
+                            (Some(cpu_context.clone()), false);
+                        (cpu_state, cpu_context, true)
+                    }
+                };
                 Ok(TranscriptionSession::Whisper {
-                    state,
-                    context: context.clone(),
+                    state: Some(state),
+                    context: Some(session_context),
+                    shared_context: context.clone(),
                     config: config.clone(),
                     languages: languages.clone(),
                     vocabulary: merge_keyterms(vocabulary, extra_keyterms),
-                    gpu_recovery_attempted: false,
+                    gpu_recovery_attempted,
                 })
             }
             #[cfg(feature = "qwen3-asr")]
@@ -637,7 +663,7 @@ impl TranscriptionEngine {
     /// Returns the `WhisperContext` if this is a Whisper engine (for backward compat).
     pub fn whisper_context(&self) -> Option<Arc<WhisperContext>> {
         match self {
-            Self::Whisper { context, .. } => Some(context.clone()),
+            Self::Whisper { context, .. } => context.lock().ok().and_then(|context| context.0.clone()),
             _ => None,
         }
     }
@@ -663,9 +689,10 @@ impl TranscriptionEngine {
 /// for Whisper variants, or shared model handles for other engines.
 pub enum TranscriptionSession {
     Whisper {
-        state: WhisperState,
+        state: Option<WhisperState>,
         #[allow(dead_code)]
-        context: Arc<WhisperContext>,
+        context: Option<Arc<WhisperContext>>,
+        shared_context: Arc<StdMutex<(Option<Arc<WhisperContext>>, bool)>>,
         config: Arc<AudioTranscriptionEngine>,
         languages: Vec<Language>,
         vocabulary: Vec<VocabularyEntry>,
@@ -968,11 +995,21 @@ impl TranscriptionSession {
             Self::Whisper {
                 state,
                 context,
+                shared_context,
                 config,
                 languages,
                 vocabulary,
                 gpu_recovery_attempted,
-            } => match process_with_whisper(audio, languages.clone(), state, vocabulary).await {
+            } => match process_with_whisper(
+                audio,
+                languages.clone(),
+                state.as_mut().ok_or_else(|| {
+                    anyhow!("whisper CPU recovery is unavailable after provider failure")
+                })?,
+                vocabulary,
+            )
+            .await
+            {
                 Ok(text) => Ok(text),
                 Err(gpu_error) => {
                     if *gpu_recovery_attempted {
@@ -980,18 +1017,26 @@ impl TranscriptionSession {
                     }
                     *gpu_recovery_attempted = true;
                     warn!("whisper inference failed ({gpu_error}); rebuilding the session on CPU and retrying the same audio");
+                    // Drop the failed state/context before allocating a second full model.
+                    state.take();
+                    context.take();
+                    shared_context.lock().map_err(|e| anyhow!("whisper context lock: {e}"))?.0.take();
                     let model_path = get_cached_whisper_model_path(config)
                             .ok_or_else(|| anyhow!("whisper CPU recovery model is not cached after GPU failure: {gpu_error}"))?;
                     let cpu_params =
                         create_whisper_context_parameters_with_gpu(config.clone(), false)?;
                     let cpu_context = Arc::new(WhisperContext::new_with_params(&model_path, cpu_params)
                             .map_err(|cpu_error| anyhow!("whisper GPU inference failed ({gpu_error}); CPU context initialization failed ({cpu_error})"))?);
-                    let mut cpu_state = cpu_context.create_state()
+                    let cpu_state = cpu_context.create_state()
                             .map_err(|cpu_error| anyhow!("whisper GPU inference failed ({gpu_error}); CPU state initialization failed ({cpu_error})"))?;
-                    let recovered = process_with_whisper(audio, languages.clone(), &mut cpu_state, vocabulary).await
-                            .map_err(|cpu_error| anyhow!("whisper GPU inference failed ({gpu_error}); CPU inference failed ({cpu_error})"))?;
-                    *state = cpu_state;
-                    *context = cpu_context;
+                    *shared_context
+                        .lock()
+                        .map_err(|e| anyhow!("whisper context lock: {e}"))? =
+                        (Some(cpu_context.clone()), false);
+                    *state = Some(cpu_state);
+                    *context = Some(cpu_context);
+                    let recovered = process_with_whisper(audio, languages.clone(), state.as_mut().expect("CPU state installed"), vocabulary).await
+                            .map_err(|cpu_error| anyhow!("whisper GPU inference failed ({gpu_error}); CPU inference failed ({cpu_error}"))?;
                     warn!("whisper CPU inference completed after GPU inference recovery");
                     Ok(recovered)
                 }

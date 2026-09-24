@@ -55,7 +55,7 @@ use crate::{
     metrics::AudioPipelineMetrics,
     segmentation::segmentation_manager::SegmentationManager,
     transcription::{
-        engine::TranscriptionEngine,
+        engine::{TranscriptionEngine, TranscriptionSession},
         handle_new_transcript,
         stt::{process_audio_input, SAMPLE_RATE},
         whisper::model::get_cached_whisper_model_path,
@@ -1401,7 +1401,15 @@ impl AudioManager {
 
         // Create a single session and reuse it across all segments.
         // WhisperState is reused (whisper_full_with_state clears KV caches internally).
-        let mut session = engine.create_session()?;
+        let mut session = match engine.create_session() {
+            Ok(session) => session,
+            Err(error) => {
+                warn!(
+                    "transcription session unavailable ({error}); audio receiver will continue and recorded audio remains queued for reconciliation"
+                );
+                TranscriptionSession::Disabled
+            }
+        };
         info!("transcription session created (will be reused across segments)");
 
         Ok(tokio::spawn(async move {

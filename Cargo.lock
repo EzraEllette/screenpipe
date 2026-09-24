@@ -290,7 +290,7 @@ dependencies = [
 [[package]]
 name = "antirez-asr-sys"
 version = "0.1.0"
-source = "git+https://github.com/EzraEllette/audiopipe.git?rev=b63f02e41392cd01d5c8d14febfe8b9b94639983#b63f02e41392cd01d5c8d14febfe8b9b94639983"
+source = "git+https://github.com/EzraEllette/audiopipe.git?rev=ada1a5cb308dc259bd7ce8a1b2c781e60be52d1c#ada1a5cb308dc259bd7ce8a1b2c781e60be52d1c"
 dependencies = [
  "cc",
 ]
@@ -746,7 +746,7 @@ dependencies = [
 [[package]]
 name = "audiopipe"
 version = "0.2.0"
-source = "git+https://github.com/EzraEllette/audiopipe.git?rev=b63f02e41392cd01d5c8d14febfe8b9b94639983#b63f02e41392cd01d5c8d14febfe8b9b94639983"
+source = "git+https://github.com/EzraEllette/audiopipe.git?rev=ada1a5cb308dc259bd7ce8a1b2c781e60be52d1c#ada1a5cb308dc259bd7ce8a1b2c781e60be52d1c"
 dependencies = [
  "antirez-asr-sys",
  "half",
@@ -7628,7 +7628,7 @@ checksum = "478e0585659a122aa407eb7e3c0e1fa51b1d8a870038bd29f0cf4a8551eea972"
 [[package]]
 name = "qwen3-asr-sys"
 version = "0.1.0"
-source = "git+https://github.com/EzraEllette/audiopipe.git?rev=b63f02e41392cd01d5c8d14febfe8b9b94639983#b63f02e41392cd01d5c8d14febfe8b9b94639983"
+source = "git+https://github.com/EzraEllette/audiopipe.git?rev=ada1a5cb308dc259bd7ce8a1b2c781e60be52d1c#ada1a5cb308dc259bd7ce8a1b2c781e60be52d1c"
 dependencies = [
  "cc",
  "cmake",

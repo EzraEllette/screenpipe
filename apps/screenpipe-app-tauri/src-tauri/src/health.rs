@@ -71,8 +71,8 @@ pub struct BootPhaseSnapshot {
     /// show "X minutes" on slow migrations.
     pub since_epoch_secs: u64,
     /// True when this CPU lacks AVX2 (pre-2013 x86-64 / Atom-line): local
-    /// whisper/qwen3 STT is disabled at runtime (their kernels are
-    /// AVX2-compiled); parakeet + cloud engines still work. Drives the
+    /// Whisper (and non-Windows Qwen) STT is disabled at runtime because its
+    /// kernels are AVX2-compiled; Windows ONNX Qwen, Parakeet, and cloud engines work. Drives the
     /// "compatibility mode" notice in onboarding/settings.
     pub cpu_compat_mode: bool,
 }

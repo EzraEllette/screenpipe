@@ -356,7 +356,8 @@ pub fn is_engine_unsafe_for_cpu(engine: &str, tier: DeviceTier, has_avx2: bool) 
     // gate in screenpipe-audio's TranscriptionEngine::new exactly, so the
     // store migration moves users off an engine that could never load.
     let non_avx2_x86 = cfg!(target_arch = "x86_64") && !has_avx2;
-    if non_avx2_x86 && (engine.starts_with("whisper") || engine.starts_with("qwen3")) {
+    let qwen_uses_static_kernels = engine.starts_with("qwen3") && !cfg!(target_os = "windows");
+    if non_avx2_x86 && (engine.starts_with("whisper") || qwen_uses_static_kernels) {
         return true;
     }
 
@@ -522,11 +523,10 @@ mod tests {
             DeviceTier::High,
             false
         ));
-        assert!(is_engine_unsafe_for_cpu(
-            "qwen3-asr",
-            DeviceTier::High,
-            false
-        ));
+        assert_eq!(
+            is_engine_unsafe_for_cpu("qwen3-asr", DeviceTier::High, false),
+            !cfg!(target_os = "windows")
+        );
         // parakeet is ONNX (runtime-dispatched MS DLL) — safe without AVX2 off-macOS
         assert!(!is_engine_unsafe_for_cpu(
             "parakeet",
