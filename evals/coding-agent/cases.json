@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "suite": "screenpipe-app-coding-agent-regressions",
-  "dataset_version": "2026-09-24.1",
+  "dataset_version": "2026-09-25.1",
   "suite_type": "regression",
   "owner": "screenpipe engineering",
   "policy": {
@@ -3223,6 +3223,48 @@
       "trigger_paths": [
         "crates/screenpipe-core/assets/extensions/screenpipe-permissions.ts"
       ]
+    },
+    {
+      "id": "app-card-ask-login-hydration",
+      "name": "Preserve an eligible login prompt after account hydration",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "1eb83b93c716ca27d7c91bbd74f886ff8e429872"
+      },
+      "base_ref": "36d84b89d54597c1a672eaa00bbfc653f1873ffc",
+      "oracle_ref": "1eb83b93c716ca27d7c91bbd74f886ff8e429872",
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/components/card-ask-provider.tsx"
+      ],
+      "gate": "advisory",
+      "trigger_paths": [
+        "apps/screenpipe-app-tauri/components/card-ask-provider.tsx",
+        "apps/screenpipe-app-tauri/lib/hooks/use-card-ask.tsx"
+      ],
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "billing",
+        "account-hydration"
+      ],
+      "prompt": "The Home login card prompt can disappear for an entire session when its timing variant resolves before account settings or when a user signs in after Home mounts. For the configured at_login variant, show the existing dialog once an eligible signed-in account without a payment method is available, whether loaded initially or later. Keep it hidden until settings and account identity are available. Preserve once-per-install suppression across unmount and remount with persisted browser storage, suppression for accounts with a payment method, silence in control, silence for a timing variant that does not own login, and silence while the variant is unresolved. Preserve the public CardAskProvider component interface. No particular effect dependencies, private names, data-test attributes, storage representation or modal wording are required. Exercise real provider/controller/dialog behavior with synthetic settings, feature-flag, native-platform and telemetry ports. This is the historical configured login flow; it does not authorize enabling any current rollout or changing payment, recording or native behavior.",
+      "agent_timeout_seconds": 900,
+      "grader_dependency_links": [
+        {
+          "source_path": "apps/screenpipe-app-tauri/node_modules",
+          "destination_path": "apps/screenpipe-app-tauri/node_modules"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/card-login-hydration.fixture.tsx.txt",
+            "destination_path": "apps/screenpipe-app-tauri/components/__tests__/eval-card-login-hydration.test.tsx"
+          }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && NODE_OPTIONS=--localstorage-file=.eval-localstorage node node_modules/vitest/vitest.mjs run --config vitest.config.ts components/__tests__/eval-card-login-hydration.test.tsx --maxWorkers=1 --minWorkers=1"
+      }
     }
   ]
 }

@@ -9,9 +9,22 @@ This is an agent eval suite, not a unit-test suite. Every case contains:
 - saved prompt, transcript, candidate patch, grader output, runtime fingerprint, and result;
 - repeated-trial reporting with success rate, `pass@k`, and `pass^k`.
 
-The current app corpus contains 78 git-mined regressions. See
+The current app corpus contains 79 git-mined regressions. See
 [DESIGN.md](./DESIGN.md) for the Anthropic guidance, source contract, and
 history-mining workflow. The companion website manifest uses this same harness.
+
+`app-card-ask-login-hydration` runs the actual provider, controller and dialog
+with synthetic external ports. Nine outcomes cover initial and delayed account
+loading, post-mount sign-in, once-per-install persistence and suppressed prompts.
+The parent fails two intended outcomes and preserves seven; the reference passes
+nine. Run `bun test evals/coding-agent/calibrate-card-login.test.js` with desktop
+test dependencies installed for eight controls, including unused correct code,
+equivalent private names/test attributes, lost suppression or persistence, and
+missing-source setup classification. Current product provider tests separately
+pass twelve outcomes with current rollout controls. This historical configured
+flow does not authorize enabling a rollout. Graders and dependency links are
+installed only when grading starts; no live checkout, native behavior, execution
+isolation or model capability is established.
 
 `app-business-capacity-plan-picker` drives the actual account settings component
 with synthetic native, settings and telemetry ports. Eight outcomes cover visible
