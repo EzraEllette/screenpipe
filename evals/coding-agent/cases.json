@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "suite": "screenpipe-app-coding-agent-regressions",
-  "dataset_version": "2026-09-25.1",
+  "dataset_version": "2026-09-25.3",
   "suite_type": "regression",
   "owner": "screenpipe engineering",
   "policy": {
@@ -3264,6 +3264,41 @@
           }
         ],
         "command": "cd apps/screenpipe-app-tauri && NODE_OPTIONS=--localstorage-file=.eval-localstorage node node_modules/vitest/vitest.mjs run --config vitest.config.ts components/__tests__/eval-card-login-hydration.test.tsx --maxWorkers=1 --minWorkers=1"
+      }
+    },
+    {
+      "id": "app-complete-free-entitlement-evidence",
+      "name": "Accept complete legacy free evidence while rejecting partial account truth",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "e3adc22d1fbd54a0637a3f2fae7ccb379f72ebd0"
+      },
+      "base_ref": "4cc85bdf22649300f41b2e67d492de649ac124cb",
+      "oracle_ref": "e3adc22d1fbd54a0637a3f2fae7ccb379f72ebd0",
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/lib/app-entitlement.ts"
+      ],
+      "gate": "advisory",
+      "trigger_paths": [
+        "apps/screenpipe-app-tauri/lib/app-entitlement.ts"
+      ],
+      "tags": [
+        "entitlement",
+        "identity",
+        "free-policy",
+        "normalization"
+      ],
+      "prompt": "An authenticated older API response containing a stable account identity and cloud_subscribed=false, with app_entitled, subscription_plan and entitlement omitted, is incorrectly classified as unknown. Normalize that complete legacy denial into verified-free policy, preserving account identity and the supplied session token, without granting paid app access. Partial newer evidence (plan-only or no explicit app-feature boolean) stays unknown; explicit null newer fields must not be treated as legacy omissions. Complete newer free evidence requires explicit cloud_subscribed=false, matching none plan labels, source none, boolean active and app feature evidence, a non-future checked_at, no cloud feature and no future grace. Either true or false app-feature/active values may describe a complete free account; old verified-free evidence remains free offline beyond 72 hours. Missing/null/true cloud denial and subscription,unknown,manual,enterprise,lifetime or dev sources cannot establish free policy. Empty, whitespace-only and null tokens cannot authenticate cached free policy, though cached free classification itself remains valid. Require a nonblank id or clerk_id; preserve clerk identity fallback. Preserve explicit app denial overriding stale paid labels and valid fresh standard,pro and lifetime paid classification. Keep the public normalization/classification interfaces; no private helper name or implementation shape is required. This task covers pure classification, not native recording, UI gates, provider verification or production entitlement safety.",
+      "agent_timeout_seconds": 900,
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/free-evidence.test.ts",
+            "destination_path": "evals/coding-agent/graders/free-evidence.test.ts"
+          }
+        ],
+        "command": "bun test ./evals/coding-agent/graders/free-evidence.test.ts"
       }
     }
   ]

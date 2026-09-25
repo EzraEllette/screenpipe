@@ -9,7 +9,7 @@ This is an agent eval suite, not a unit-test suite. Every case contains:
 - saved prompt, transcript, candidate patch, grader output, runtime fingerprint, and result;
 - repeated-trial reporting with success rate, `pass@k`, and `pass^k`.
 
-The current app corpus contains 79 git-mined regressions. See
+The current app corpus contains 80 git-mined regressions. See
 [DESIGN.md](./DESIGN.md) for the Anthropic guidance, source contract, and
 history-mining workflow. The companion website manifest uses this same harness.
 
@@ -898,3 +898,20 @@ permitted writes and reads. No commands are executed. This does not establish
 complete shell analysis, native enforcement, symlink safety or agent isolation.
 Run `bun test evals/coding-agent/calibrate-pipe-write-hook.test.js` for historical,
 current, equivalent-implementation, unused-correct and mutation controls.
+
+## Complete free entitlement evidence
+
+`app-complete-free-entitlement-evidence` executes the real account normalizer and
+policy interfaces against synthetic account values with a fixed clock. Complete
+legacy denial becomes verified free; partial newer evidence remains unknown.
+Twenty-six outcomes preserve offline free policy, identity/token boundaries,
+explicit denial and valid paid plans. The parent fails ten intended assertions
+and preserves sixteen; the historical fix and current source pass all 26.
+
+Run `bun test evals/coding-agent/calibrate-free-evidence.test.js` for ten controls,
+including unused correct code, equivalent private names, missing cloud/feature
+evidence, whitespace authentication and unsupported sources. Missing source is
+a setup error. Only URL configuration is mocked. The companion paid-plan-label
+case covers a separate omission invariant. Fixtures are installed at grading;
+no UI/native recording, live provider verification, agent isolation or model
+improvement is established.
