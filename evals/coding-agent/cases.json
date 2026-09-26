@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "suite": "screenpipe-app-coding-agent-regressions",
-  "dataset_version": "2026-09-25.3",
+  "dataset_version": "2026-09-26.4",
   "suite_type": "regression",
   "owner": "screenpipe engineering",
   "policy": {
@@ -3299,6 +3299,314 @@
           }
         ],
         "command": "bun test ./evals/coding-agent/graders/free-evidence.test.ts"
+      }
+    },
+    {
+      "id": "ai-gateway-account-standing-provenance",
+      "name": "Keep temporary sign-in locks and stale account IDs distinct from revocation",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "e8732d64bb543cd17b7cd798e74027fcf168573c"
+      },
+      "base_ref": "a9ddc64913d5a0cee60de9a582cb5293298f6ec7",
+      "oracle_ref": "e8732d64bb543cd17b7cd798e74027fcf168573c",
+      "oracle_paths": [
+        "packages/ai-gateway/src/utils/auth.ts",
+        "packages/ai-gateway/src/utils/clerk-standing.ts",
+        "packages/ai-gateway/src/utils/rate-limiter.ts",
+        "packages/ai-gateway/src/types.ts"
+      ],
+      "gate": "advisory",
+      "tags": [
+        "regression",
+        "authentication",
+        "account-standing",
+        "gateway"
+      ],
+      "prompt": "The gateway can refuse an otherwise entitled account because its identity provider temporarily locks new sign-ins, and can treat a stale database account ID as proof of permanent deletion. Repair actual HTTP admission for paid accounts. On GET /anthropic/v1/models, both good and temporarily locked accounts must return 200 with the provider's nonempty model list and exactly one model-list provider call. On that route and POST /v1/chat/completions, a banned account must receive 403 with account_not_in_good_standing and reason banned. A deleted subject verified from this request's signed credential must receive the same 403 error with reason deleted. A provider 404 for a subject obtained only from the website account row must instead return retryable 503 with account_status_unavailable. Preserve the established JSON error envelope. Refused requests must not reach the model provider. Exercise both request-verified and website-row identity paths through the real router, authentication and durable-object admission logic. Identity verification, entitlement/standing responses, provider model listing and durable storage are synthetic ports; other network traffic is refused. Any implementation achieving these outcomes is acceptable, without requiring particular private field names. This case does not cover cryptographic verification, cache migration, live provider behavior, native transcription retries, concurrent admission, model quality or agent isolation.",
+      "agent_timeout_seconds": 900,
+      "grader_dependency_links": [
+        {
+          "source_path": "packages/ai-gateway/node_modules",
+          "destination_path": "packages/ai-gateway/node_modules"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/account-standing.fixture.ts.txt",
+            "destination_path": "packages/ai-gateway/src/test/eval-standing-http.test.ts"
+          }
+        ],
+        "command": "cd packages/ai-gateway && \"${BUN_BIN:-bun}\" test src/test/eval-standing-http.test.ts"
+      }
+    },
+    {
+      "id": "app-attachment-owner-handoff",
+      "name": "Keep asynchronous file attachments with their initiating chat",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "f1bcd5bbbb9d838e471cb73e3ec0e88316ef89e7"
+      },
+      "base_ref": "1f35d982415a6ebb5509dcbd8243772cd8a128b9",
+      "oracle_ref": "f1bcd5bbbb9d838e471cb73e3ec0e88316ef89e7",
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "chat",
+        "attachments",
+        "ownership"
+      ],
+      "prompt": "File attachments can disappear or reach the wrong chat when file reads finish after a pane closes or the foreground chat changes. Fix the attachment hook so a secondary pane file completion remains in its initiating session draft after unmount. A pending foreground read must complete in its original chat, clear its pending entry, and leave the newly selected chat and its local attachment list untouched. Window-level drops must reach only the pane under their pointer, using physical coordinates and device pixel ratio; keep every file in a multiple-file foreground drop. Cancelled pickers must perform no file read or draft creation. Failed reads must clear pending work without adding an attachment or disturbing another draft. Late completion must not recreate a deleted or hidden chat draft. Keep ordinary successful attachment handling working. Checks exercise the actual hook and in-memory chat store with synthetic native dialog/file/document-extraction and locale ports. Native webview delivery, disk persistence, and rendered composer integration are outside this task. Add or update focused tests as needed.",
+      "agent_timeout_seconds": 900,
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/attachment-owner.fixture.tsx.txt",
+            "destination_path": "apps/screenpipe-app-tauri/components/chat/standalone/hooks/eval-attachment-owner.test.tsx"
+          },
+          {
+            "local_path": "graders/attachment-owner.config.mjs",
+            "destination_path": "apps/screenpipe-app-tauri/eval-attachment-owner.config.mjs"
+          },
+          {
+            "local_path": "graders/attachment-owner-locale.ts.txt",
+            "destination_path": "apps/screenpipe-app-tauri/eval-attachment-locale.ts"
+          }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && bun x --no-install vitest run --config eval-attachment-owner.config.mjs"
+      },
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/components/chat/standalone/hooks/use-chat-attachments.ts",
+        "apps/screenpipe-app-tauri/components/chat/standalone/hooks/use-session-draft-field.ts"
+      ],
+      "grader_dependency_links": [
+        {
+          "source_path": "apps/screenpipe-app-tauri/node_modules",
+          "destination_path": "apps/screenpipe-app-tauri/node_modules"
+        }
+      ]
+    },
+    {
+      "id": "ai-gateway-background-request-preservation",
+      "name": "Preserve the complete request when recovering an exhausted background allowance",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "1c0a271403a4128a2238c355e5820b7f18c98eac"
+      },
+      "base_ref": "5eb2bd80952a7302f20f46f561abdbb136950f86",
+      "oracle_ref": "1c0a271403a4128a2238c355e5820b7f18c98eac",
+      "oracle_paths": [
+        "packages/ai-gateway/src/handlers/chat.ts",
+        "packages/ai-gateway/src/services/background-limit-fallback.ts",
+        "packages/ai-gateway/src/index.ts"
+      ],
+      "gate": "advisory",
+      "tags": [
+        "regression",
+        "background",
+        "allowance",
+        "request-integrity"
+      ],
+      "prompt": "An already-authorized background request exhausts its hosted allowance. Its recovery attempt can silently lose developer instructions, older context, tool descriptions and schema metadata, or most of its output budget. Repair the existing chat completion handler so an enabled, configured text-only recovery makes one alternate provider attempt with the complete message sequence, roles, tool-call associations, tool schemas, requested output budget, response format and other request options preserved. Do not mutate the caller request. Preserve the real provider response and streamed tool-call result. A model substitution is allowed; no particular private helper name or provider model is required. A successful primary needs no recovery. Disabled or unconfigured recovery and requests with images or files must retain the original allowance refusal without dropping input. If recovery is unavailable, preserve the original hosted_ai_allowance_exceeded 429 response. Ordinary requests-per-minute throttling must not activate allowance recovery; an empty message list must return 400 before provider work. Tests use the existing handler entrypoint with both legacy and current option spellings, synthetic provider and telemetry ports, and denied external network. Authorization and paid-plan HTTP dispatch, safety-refusal recovery policy, actual provider compatibility, concurrent spend accounting and model quality are outside this case. Add focused tests for the outcomes.",
+      "agent_timeout_seconds": 900,
+      "grader_dependency_links": [
+        {
+          "source_path": "packages/ai-gateway/node_modules",
+          "destination_path": "packages/ai-gateway/node_modules"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/background-request.fixture.ts.txt",
+            "destination_path": "packages/ai-gateway/src/test/eval-background-request.test.ts"
+          }
+        ],
+        "command": "cd packages/ai-gateway && \"${BUN_BIN:-bun}\" test src/test/eval-background-request.test.ts"
+      }
+    },
+    {
+      "id": "app-canvas-preview-persistence",
+      "name": "Keep unaccepted canvas positions out of saved Live Views",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "d8621a14179173c7eb4df82085d9a209251f4454"
+      },
+      "base_ref": "85ae3c99fc1369b7261667cd5c083730d361ea0e",
+      "oracle_ref": "d8621a14179173c7eb4df82085d9a209251f4454",
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/components/settings/brain-overview.tsx"
+      ],
+      "gate": "advisory",
+      "trigger_paths": [
+        "apps/screenpipe-app-tauri/components/settings/brain-overview.tsx",
+        "apps/screenpipe-app-tauri/components/settings/live-view-canvas.tsx",
+        "apps/screenpipe-app-tauri/lib/live-views/canvas-layout.ts"
+      ],
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "canvas",
+        "persistence"
+      ],
+      "prompt": "A Live View with no saved canvas yet can preview an AI-proposed new block before the user accepts it. Canvas viewport changes during that review currently send positions for the unaccepted block to native persistence, which rejects them. Keep previews visible, but send and persist canvas positions only for blocks in the saved view until acceptance. Resetting the zoom and then zooming in during review must successfully persist the viewport without a save-error notification. Preserve the saved block positions and correct view ownership. Keep ordinary viewport editing without proposals working. For an existing canvas, preserve stored notes and allow note-text edits during review without saving the proposed block. Rejecting all proposals must leave the saved view and annotations intact, make no view-definition save, and allow later canvas editing. Accepting all proposals must persist the added block, leave annotations intact and allow later canvas edits with the newly accepted block positions. Preserve the public BrainOverview interface and the synthetic native command boundary. Exact save-call counts, DOM identities, test IDs, CSS and private helper names are not prescribed. Use synthetic data and external ports only; do not perform live model calls or native/customer storage operations.",
+      "agent_timeout_seconds": 900,
+      "grader_dependency_links": [
+        {
+          "source_path": "apps/screenpipe-app-tauri/node_modules",
+          "destination_path": "apps/screenpipe-app-tauri/node_modules"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/canvas-outcome.fixture.tsx.txt",
+            "destination_path": "apps/screenpipe-app-tauri/eval-canvas-outcome.test.tsx"
+          },
+          {
+            "local_path": "graders/canvas-outcome.config.mjs",
+            "destination_path": "apps/screenpipe-app-tauri/eval-canvas-outcome.config.mjs"
+          }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && node node_modules/vitest/vitest.mjs run --config eval-canvas-outcome.config.mjs"
+      }
+    },
+    {
+      "id": "app-onboarding-notification-transport",
+      "name": "Deliver onboarding follow-ups through the app-control server",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "35caddb4562d3bd15fdb0aa3f7928ce20dfed93c",
+        "pull_request": "https://github.com/screenpipe/screenpipe/pull/5844"
+      },
+      "base_ref": "a7d74fb9adf6c9c286ce9cfa33b2e8c9c62135bc",
+      "oracle_ref": "35caddb4562d3bd15fdb0aa3f7928ce20dfed93c",
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/lib/live-views/onboarding-follow-up.ts",
+        "apps/screenpipe-app-tauri/lib/notifications/app-server.ts"
+      ],
+      "gate": "advisory",
+      "trigger_paths": [
+        "apps/screenpipe-app-tauri/lib/live-views/onboarding-follow-up.ts",
+        "apps/screenpipe-app-tauri/lib/notifications/app-server.ts"
+      ],
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "notifications",
+        "retry",
+        "transport"
+      ],
+      "prompt": "An already scheduled onboarding follow-up dispatches its permitted dashboard work but never delivers its notification because notification requests go to the recording engine. Repair the existing runDueOnboardingLiveViewFollowUp default transport. Keep Pipe runs on the engine transport, deduplicate shared Pipe bindings, and POST notifications to the app-control server using its native runtime port; use localhost:11435 if native configuration lookup fails. Preserve the notification link to the originating Live View. Persist sent status only after notification acceptance, and suppress later duplicate delivery. A rejected notification must remain scheduled for a later retry that can recover and persist sent status. If all engine dispatches fail, schedule a retry without sending a notification. A future deadline or a missing view must perform no transport work. Use synthetic native configuration, storage and network ports. This task fixes delivery of an existing scheduled follow-up; it does not authorize new scheduling, activation of paused work, claim completed Pipe results, or change notification wording or notification policy. Native display, engine completion, multi-window concurrency, recording and live service behavior are outside scope.",
+      "agent_timeout_seconds": 900,
+      "grader_dependency_links": [
+        {
+          "source_path": "apps/screenpipe-app-tauri/node_modules",
+          "destination_path": "apps/screenpipe-app-tauri/node_modules"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/notification-transport.fixture.ts.txt",
+            "destination_path": "apps/screenpipe-app-tauri/eval-notification-transport.test.ts"
+          },
+          {
+            "local_path": "graders/notification-transport.config.mjs",
+            "destination_path": "apps/screenpipe-app-tauri/eval-notification-transport.config.mjs"
+          },
+          {
+            "local_path": "graders/notification-localization.fixture.ts.txt",
+            "destination_path": "apps/screenpipe-app-tauri/eval-notification-localization.ts"
+          }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && node node_modules/vitest/vitest.mjs run --config eval-notification-transport.config.mjs"
+      }
+    },
+    {
+      "id": "ai-gateway-lazy-stream-initial-error",
+      "name": "Expose initial lazy-stream failures before successful stream delivery",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "e8ed10afed8400e943c7ab2cb9c7a18f7b83e5b6",
+        "pull_request": "https://github.com/screenpipe/screenpipe/pull/5840"
+      },
+      "base_ref": "bfaeef6183c6b757f9779b25635d3687466f56e3",
+      "oracle_ref": "e8ed10afed8400e943c7ab2cb9c7a18f7b83e5b6",
+      "oracle_paths": [
+        "packages/ai-gateway/src/providers/openai.ts"
+      ],
+      "gate": "advisory",
+      "trigger_paths": [
+        "packages/ai-gateway/src/providers/openai.ts"
+      ],
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "ai-gateway",
+        "streaming",
+        "error-handling"
+      ],
+      "prompt": "An OpenAI-compatible SDK can return a stream successfully and raise its upstream error only when iteration begins. The provider currently turns that initial failure into an already-successful stream, preventing callers from handling it before delivery. Repair the actual OpenAIProvider streaming boundary so initial quota and service-unavailable errors reject before returning a successful stream, preserving their message, status and code. Preserve SDK creation errors as well. Successful streams must deliver the first and later text or tool-call fragments exactly once and in order, preserve tool identity and argument assembly, completion reasons and usage including cached tokens, and end with one [DONE]. Empty upstream streams must complete normally without invented content. After content has begun, later errors must remain SSE errors with original message and numeric status code, network_error completion and [DONE], retaining the partial content. Preserve the input object and outgoing model/messages/stream request. Use synthetic SDK and telemetry ports and no external network. No particular iterator, private helper or priming implementation is required. Caller fallback selection, retired model-routing policy, cancellation, live provider behavior and model quality are outside this task.",
+      "agent_timeout_seconds": 900,
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/gateway-stream-initial-error.test.js",
+            "destination_path": "evals/coding-agent/graders/gateway-stream-initial-error.test.js"
+          }
+        ],
+        "command": "\"${BUN_BIN:-bun}\" test evals/coding-agent/graders/gateway-stream-initial-error.test.js"
+      }
+    },
+    {
+      "id": "ai-gateway-settlement-replay-atomicity",
+      "name": "Apply replayed hosted-AI settlements once without partial accounting",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "d9ff95802e6566a7b3ea3242800aef59cacb9aa0"
+      },
+      "base_ref": "8b455607ffbaef204a6f6a0a62e973bac6211e48",
+      "oracle_ref": "d9ff95802e6566a7b3ea3242800aef59cacb9aa0",
+      "oracle_paths": [
+        "packages/ai-gateway/src/services/cost-tracker.ts",
+        "packages/ai-gateway/src/services/hosted-ai-settlement-ledger.ts"
+      ],
+      "gate": "advisory",
+      "tags": [
+        "accounting",
+        "retry",
+        "concurrency",
+        "ownership"
+      ],
+      "trigger_paths": [
+        "packages/ai-gateway/src/services/cost-tracker.ts",
+        "packages/ai-gateway/src/services/hosted-ai-settlement-ledger.ts"
+      ],
+      "prompt": "The existing hosted-AI logCost entrypoint can apply the same priced request repeatedly and report success after only part of its accounting succeeds. Repair its budgeted text accounting for calls carrying a stable settlement_id. Sequential or concurrent identical replays must return true and apply the account cost and cost_daily request/cost aggregate exactly once. Different IDs still apply independently. Reusing an applied ID with a different cost or account owner must return false without changing either account or the aggregate. A failed dependent aggregate write must return false with no partial account charge; a later successful retry applies once. If the accounting transaction committed but its acknowledgement was lost, an identical retry must succeed without another charge. Zero-cost replays record one request and no spend. Preserve existing legacy calls without settlement_id: each call still accounts independently. Preserve budgeted:false telemetry-only calls and transcription_budgeted:true calls: they retain their repeated telemetry behavior, with unbudgeted calls not charging accounts and speech calls charging only their existing separate transcription account bucket. Exercise the real logCost entrypoint with synthetic local D1 data, never production services. Any implementation meeting these outcomes is acceptable; do not depend on particular helper names or a particular idempotency-table design. This case does not prove request admission, hold release, all global/background/trial budget windows, deployment activation, or provider billing correctness. Add focused tests for these outcomes.",
+      "agent_timeout_seconds": 900,
+      "grader_dependency_links": [
+        {
+          "source_path": "packages/ai-gateway/node_modules",
+          "destination_path": "packages/ai-gateway/node_modules"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/settlement-replay.fixture.ts.txt",
+            "destination_path": "packages/ai-gateway/src/test/eval-settlement-replay.test.ts"
+          }
+        ],
+        "command": "cd packages/ai-gateway && \"${BUN_BIN:-bun}\" test src/test/eval-settlement-replay.test.ts --timeout=10000"
       }
     }
   ]

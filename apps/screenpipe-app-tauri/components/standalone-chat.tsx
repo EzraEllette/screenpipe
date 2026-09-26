@@ -10,11 +10,18 @@ import { deleteConversationFile } from "@/lib/chat-storage";
 import { writeActiveAiPresetId } from "@/lib/active-ai-preset";
 import { useSettings } from "@/lib/hooks/use-settings";
 import { cn } from "@/lib/utils";
+import {
+  hasOpenShortcutBlockingLayer,
+  conflictsWithGlobalShortcut,
+  inAppShortcutLabel,
+  matchesInAppShortcut,
+} from "@/lib/shortcuts";
 import { PanelRightClose, PanelRightOpen } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { SchedulePromptDialog } from "@/components/chat/schedule-prompt-dialog";
 import { AcpSignInDialog, type AcpSignInRequest } from "@/components/chat/standalone/acp-sign-in-dialog";
 import { acpAdapterInfo } from "@/lib/utils/preset-appearance";
+import { ChatLinkBrowserContext } from "@/components/chat/chat-web-link";
 import { BrowserSidebar } from "@/components/browser-sidebar";
 import { toast } from "@/components/ui/use-toast";
 import type { AIPreset, JsonValue } from "@/lib/utils/tauri";
@@ -34,7 +41,10 @@ import { useIsFullscreen } from "@/lib/hooks/use-is-fullscreen";
 import { useChatFilePreview } from "@/lib/hooks/use-chat-file-preview";
 import { useChatInspector } from "@/lib/hooks/use-chat-inspector";
 import { ChatInspectorPopover } from "@/components/chat/chat-inspector";
+import { useSplitChatActions } from "@/components/chat/standalone/hooks/use-split-chat-actions";
+import { SplitChatComposer } from "@/components/chat/standalone/split-chat-composer";
 import { ChatSplitPane } from "@/components/chat/chat-split-pane";
+import { ChatActionsDropdown } from "@/components/chat/chat-action-menu";
 import { ChatTabStrip } from "@/components/chat/chat-tab-strip";
 import { useSqlAutocomplete, useTagAutocomplete } from "@/lib/hooks/use-sql-autocomplete";
 import { loadConversationFile } from "@/lib/chat-storage";
@@ -540,6 +550,8 @@ export function StandaloneChat({
   // so we use this ref's visibility to ignore drops meant for another view
   // (e.g. a meeting note) that would otherwise also stage into the composer.
   const dropRootRef = useRef<HTMLDivElement>(null);
+  const primaryPaneRef = useRef<HTMLDivElement>(null);
+  const attachmentSessionIdRef = useRef<string | null>(null);
 
   const {
     prefillContext,
@@ -569,7 +581,9 @@ export function StandaloneChat({
     showPastedTextInField,
   } = useChatAttachments({
     isEmbedded,
-    dropRootRef,
+    scopeDrops: true,
+    sessionIdRef: attachmentSessionIdRef,
+    dropRootRef: primaryPaneRef,
     inputRef,
     setInput,
     setShowMentionDropdown,
@@ -700,6 +714,7 @@ export function StandaloneChat({
   const [conversationId, setConversationId] = useState<string | null>(
     initialSessionIdRef.current,
   );
+  attachmentSessionIdRef.current = conversationId;
   const isTemporarySideConversation = useChatStore((state) =>
     conversationId
       ? isEphemeralSideConversation(state.sessions[conversationId])
@@ -721,6 +736,30 @@ export function StandaloneChat({
   );
   const splitChatId = useChatStore((state) => state.splitChatId);
   const splitChatPosition = useChatStore((state) => state.splitChatPosition);
+  const paneTitle = useChatStore((state) => state.sessions[conversationId ?? ""]?.title);
+  const splitSession = useChatStore((state) => state.sessions[state.splitChatId ?? ""]);
+  // A file read started in the secondary pane can finish after promotion.
+  // Keep that session's foreground attachment state in sync with the result.
+  useEffect(() => useChatStore.subscribe((state, previous) => {
+    if (!conversationId || state.currentId !== conversationId) return;
+    const next = state.sessions[conversationId]?.composerDraft;
+    const before = previous.sessions[conversationId]?.composerDraft;
+    if (!next || next === before) return;
+    if (next.pastedImages !== before?.pastedImages) setPastedImages(next.pastedImages as string[]);
+    if (next.attachedDocs !== before?.attachedDocs) setAttachedDocs(next.attachedDocs as typeof attachedDocs);
+    if (next.pendingDocs !== before?.pendingDocs) setPendingDocs(next.pendingDocs as typeof pendingDocs);
+  }), [conversationId, setPastedImages, setAttachedDocs, setPendingDocs]);
+  const previousPaneIdRef = useRef(conversationId);
+  React.useLayoutEffect(() => {
+    const previousId = previousPaneIdRef.current;
+    previousPaneIdRef.current = conversationId;
+    const state = useChatStore.getState();
+    // The transport changes owner, not screen position. Commit the pair only
+    // once the incoming transcript and draft have actually been restored.
+    if (previousId && previousId !== conversationId && state.splitChatId === conversationId && state.openChatIds.includes(previousId) && state.sessions[previousId] && !state.sessions[previousId].hidden) {
+      state.actions.setSplitChat(previousId, state.splitChatPosition === "right" ? "left" : "right");
+    }
+  }, [conversationId]);
 
   // Single source of truth for the active chat id (#4719). The panel mints
   // `initialSessionIdRef` and seeds `conversationId` / `piSessionIdRef` from
@@ -789,6 +828,8 @@ export function StandaloneChat({
   const sidePanelHasContent =
     (filePreview?.paths.length ?? 0) > 0 || browserPanelState.hasUrl;
   const sidePanelOpen = browserPanelState.open;
+  const rightPanelShortcut = conflictsWithGlobalShortcut("toggle_right_sidebar", isMac, settings)
+    ? "" : inAppShortcutLabel("toggle_right_sidebar", isMac);
   const inspectorHasContent =
     inspectorOutputs.length > 0 ||
     inspectorSources.length > 0;
@@ -802,14 +843,26 @@ export function StandaloneChat({
   }, [inspectorOpen, setInspectorOpen]);
 
   const toggleBrowserPanel = useCallback(() => {
-    if (sidePanelHasContent) {
-      window.dispatchEvent(
-        new CustomEvent("screenpipe:browser-sidebar-toggle", {
-          detail: { action: "toggle" },
-        }),
-      );
-    }
-  }, [sidePanelHasContent]);
+    window.dispatchEvent(new CustomEvent("screenpipe:browser-sidebar-toggle", {
+      detail: { action: "toggle" },
+    }));
+  }, []);
+
+  useEffect(() => {
+    if (!chatShortcutsEnabled) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (
+        event.defaultPrevented || event.repeat || event.isComposing ||
+        event.getModifierState?.("AltGraph") || hasOpenShortcutBlockingLayer()
+      ) return;
+      if (conflictsWithGlobalShortcut("toggle_right_sidebar", isMac, settings) ||
+          !matchesInAppShortcut(event, "toggle_right_sidebar", isMac)) return;
+      event.preventDefault();
+      toggleBrowserPanel();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [chatShortcutsEnabled, isMac, settings, toggleBrowserPanel]);
 
   const handlePanelStateChange = useCallback(
     (nextState: { hasUrl: boolean; open: boolean }) => {
@@ -2087,20 +2140,57 @@ export function StandaloneChat({
       if (temporarySideId && !targetBelongsToPair) {
         discardTemporarySideConversation(temporarySideId);
       }
-      // Promoting the secondary pane swaps the former primary into its place,
-      // keeping both transcripts visible while the single composer changes
-      // ownership cleanly.
-      if (store.splitChatId === id && conversationId && conversationId !== id) {
-        store.actions.setSplitChat(conversationId);
-      }
-      store.actions.setCurrent(id);
-      await emit("chat-load-conversation", {
-        conversationId: id,
-        targetWindow: "home",
+      const session = store.sessions[id];
+      if (!session || session.hidden || id === conversationId) return;
+      // Await the real restore, including model selection, before a split
+      // composer can send. Event delivery alone does not await its listeners.
+      await loadConversationRef.current({
+        id,
+        title: session.title,
+        messages: [],
+        createdAt: session.createdAt,
+        updatedAt: session.updatedAt,
+        presetId: session.presetId,
+        kind: session.kind,
+        pipeContext: session.pipeContext,
       });
     },
     [conversationId, discardTemporarySideConversation],
   );
+
+  const focusSplitComposer = useCallback(() => inputRef.current?.focus(), [inputRef]);
+  const reportSplitActionError = useCallback(() => {
+    toast({ title: ui("Could not complete this chat action"), description: ui("Your draft is still available. Try again."), variant: "destructive" });
+  }, [uiLanguage]);
+  const splitActions = useSplitChatActions({
+    conversationId,
+    activate: activateChatTab,
+    send: sendComposerMessage,
+    stop: handleStop,
+    control: (action) => {
+      switch (action.type) {
+        case "preset":
+          if (conversationId) useChatStore.getState().actions.patch(conversationId, { presetId: action.preset.id });
+          handleSetActivePreset(action.preset); handlePiRestart(action.preset); break;
+        case "acp": handleAcpConfigDefault(action.change); break;
+        case "reauthenticate": return handleReauthenticate();
+        case "command": return runComposerCommandRef.current?.(action.command);
+        case "steer": return steerMessage(action.text);
+        case "steer-queued": return steerQueuedPrompt(action.prompt);
+      }
+    },
+    canSend: Boolean(canSendChatMessage),
+    preparing: codingWorkspace.isLoading,
+    input,
+    focus: focusSplitComposer,
+    onError: reportSplitActionError,
+  });
+  const splitPolicy = continuousPipeChatPolicy({
+    conversationId: splitChatId,
+    pipes,
+    pipesLoaded: !pipesLoading && !pipesError,
+  });
+  const splitPreset = availableAiPresets.find((preset) => preset.id === splitSession?.presetId) ?? activePreset;
 
   const startDurableNewConversation = useCallback(async () => {
     const store = useChatStore.getState();
@@ -2201,6 +2291,7 @@ export function StandaloneChat({
   }, [addSelectedTextToChat, conversationId, discardTemporarySideConversation, focusComposerAtEnd, setInput, startNewConversation, uiLanguage]);
 
   return (
+    <ChatLinkBrowserContext.Provider value={conversationId}>
     <div ref={dropRootRef} className={cn("flex flex-col bg-background", className ?? "h-screen")} data-testid="section-home">
       <StandaloneChatHeader
         className={className}
@@ -2208,7 +2299,8 @@ export function StandaloneChat({
           hideInlineHistory ? (
             <ChatTabStrip
               activeId={conversationId}
-              onActivate={activateChatTab}
+              shortcutsEnabled={chatShortcutsEnabled}
+              onActivate={(id) => activateChatTab(id).catch(reportSplitActionError)}
               onNewChat={startDurableNewConversation}
               onClose={discardTemporarySideConversation}
               renameConversation={renameConversation}
@@ -2236,6 +2328,7 @@ export function StandaloneChat({
         onNewChat={startDurableNewConversation}
         rightActions={
           <div className="relative z-20 flex items-center gap-1">
+            {hideInlineHistory && <ChatActionsDropdown conversationId={conversationId} />}
             <ChatInspectorPopover
               open={inspectorOpen}
               onOpenChange={setInspectorOpen}
@@ -2250,20 +2343,15 @@ export function StandaloneChat({
                 onMouseDown={(e) => e.stopPropagation()}
                 onClick={(e) => {
                   e.stopPropagation();
-                  if (sidePanelHasContent) {
-                    toggleBrowserPanel();
-                  } else {
-                    window.dispatchEvent(
-                      new CustomEvent("screenpipe:browser-sidebar-new-tab"),
-                    );
-                  }
+                  toggleBrowserPanel();
                 }}
                 className={cn(
                   "h-7 w-7",
                   sidePanelOpen && "bg-muted ring-2 ring-primary ring-offset-1 ring-offset-background",
                 )}
-                title={sidePanelHasContent ? ui("Toggle side panel") : ui("Open browser tab")}
-                aria-label={sidePanelHasContent ? ui("Toggle side panel") : ui("Open browser tab")}
+                title={`${ui("Toggle right sidebar")}${rightPanelShortcut ? ` (${rightPanelShortcut})` : ""}`}
+                aria-keyshortcuts={rightPanelShortcut ? (isMac ? "Alt+Meta+B" : "Control+Alt+B") : undefined}
+                aria-label={ui("Toggle right sidebar")}
                 aria-pressed={sidePanelOpen}
               >
                 {sidePanelOpen ? (
@@ -2278,7 +2366,13 @@ export function StandaloneChat({
       />
 
       <div className="flex-1 flex min-h-0" data-browser-panel-host>
-      <div className="relative flex-1 flex flex-col min-w-0" data-firstrun-target="messages">
+      <div ref={primaryPaneRef} className={cn("relative flex-1 basis-0 flex flex-col min-w-0", splitChatId && splitChatId !== conversationId && "min-w-[280px]")} data-firstrun-target="messages" data-chat-pane-id={conversationId}>
+      {splitChatId && splitChatId !== conversationId ? (
+        <header className="flex h-10 shrink-0 items-center gap-2 border-b border-border/50 px-3">
+          <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-foreground" aria-hidden />
+          <span className="min-w-0 truncate text-xs font-medium">{paneTitle && paneTitle !== "untitled" ? paneTitle : ui("New chat")}</span>
+        </header>
+      ) : null}
       <ChatMainPane
         firstRunLearningEnabled={firstRunLearningEnabled}
         hideInlineHistory={hideInlineHistory}
@@ -2421,7 +2515,7 @@ export function StandaloneChat({
             isLoading || isStreaming
               ? ui("Message will be queued...")
               : homeCardPromptPreview ?? undefined,
-          canChat: Boolean(canSendChatMessage) && !codingWorkspace.isLoading,
+          canChat: Boolean(canSendChatMessage) && !codingWorkspace.isLoading && !splitActions.pendingId,
           isLoading,
           isStreaming,
           isEmbedded,
@@ -2514,15 +2608,35 @@ export function StandaloneChat({
             try { localStorage.setItem("screenpipe_connect_banner_dismissed", "true"); } catch {}
           },
         }}
-        onStop={handleStop}
+        onStop={() => { if (!splitActions.pendingId) void handleStop(); }}
       />
       </div> {/* End of chat column */}
 
       {splitChatId && splitChatId !== conversationId ? (
         <ChatSplitPane
+          key={splitChatId}
           sessionId={splitChatId}
           side={splitChatPosition}
-          onPromote={activateChatTab}
+          pending={splitActions.pendingId === splitChatId}
+          composer={<SplitChatComposer
+            key={splitChatId} sessionId={splitChatId} title={splitSession?.title || ui("New chat")}
+            pending={!!splitActions.pendingId} isMac={isMac} isEmbedded={isEmbedded} enabled={chatShortcutsEnabled}
+            disabledReason={splitPolicy?.replyDisabledReason || (splitSession?.kind === "pipe-run" ? ui("This is an automation run. Open the chat to continue.") : undefined)}
+            onSend={id => void splitActions.run(id, "send")} onStop={id => void splitActions.run(id, "stop")}
+            onControl={(id, action) => void splitActions.run(id, action)}
+            onOpenConversation={id => openMentionConversationRef.current?.(id)}
+            onOpenImageViewer={(images, index) => imageViewerProps.onChange({ images, index })}
+            filterData={{ appTagMap, tagMentionSuggestions, staticMentionSuggestions: localizeDefinitions(STATIC_MENTION_SUGGESTIONS, uiMessages), appMentionSuggestions, allTagMentionSuggestions, tagMentionSections, appsLoading, tagsLoading, connections, isWindows }}
+            modelControls={{
+              settings: { ...settings, aiPresets: splitSession?.ephemeral ? filterEphemeralSideConversationPresets(availableAiPresets) : availableAiPresets },
+              activePreset: splitPreset, activePipeExecution: null, currentQueueSessionId: splitChatId,
+              // The shared selector calls onPresetSaved for both selection and edits.
+              onSelectPreset: () => {},
+              onPresetSaved: preset => { void splitActions.run(splitChatId, { type: "preset", preset }); },
+              onAcpConfigDefault: change => { void splitActions.run(splitChatId, { type: "acp", change }); },
+              onReauthenticate: () => { void splitActions.run(splitChatId, { type: "reauthenticate" }); },
+            }}
+          />}
           onClose={() => useChatStore.getState().actions.setSplitChat(null)}
         />
       ) : null}
@@ -2532,9 +2646,10 @@ export function StandaloneChat({
           state). The actual page is rendered by a Tauri WebviewWindow
           positioned over the placeholder div inside this component. */}
       <BrowserSidebar
+        outputs={inspectorOutputs}
         conversationId={conversationId}
         additionalReservedWidth={
-          splitChatId && splitChatId !== conversationId ? 320 : 0
+          splitChatId && splitChatId !== conversationId ? 280 : 0
         }
         // Session id the agent process runs under (the value tagged as the
         // navigation `owner` via x-screenpipe-session). Lets the sidebar reveal
@@ -2570,5 +2685,6 @@ export function StandaloneChat({
       />
 
     </div>
+    </ChatLinkBrowserContext.Provider>
   );
 }

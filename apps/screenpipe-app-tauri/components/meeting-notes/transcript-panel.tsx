@@ -162,6 +162,8 @@ export interface SpeakerBlock {
   // audio preview and call /speakers/reassign.
   firstAudioChunkId: number;
   firstAudioFilePath: string;
+  firstAudioStartTimeSecs?: number | null;
+  captureDirection?: string;
 }
 
 const REFRESH_LIVE_MS = 30_000;
@@ -342,12 +344,11 @@ export function filterBackgroundCoveredByLiveFinals(
   });
 }
 
-/** Prefer clean system audio when the microphone hears the same nearby words. */
-export function filterLiveCrossDeviceEchoes(
+/** Hide cached live copies already present in saved rows of the same device. */
+export function filterLiveAlreadySaved(
   chunks: MeetingAudioChunk[],
   liveBlocks: LiveTranscriptBlock[],
 ): LiveTranscriptBlock[] {
-  const echoWindowMs = 6_000;
   const durableWindowMs = 15_000;
   const durableBlocks = chunks
     .map((chunk) => ({
@@ -357,12 +358,6 @@ export function filterLiveCrossDeviceEchoes(
       text: normalizeForDedupe(chunk.transcription ?? ""),
     }))
     .filter((block) => block.timestamp > 0 && block.text.length > 0);
-  const outputBlocks = liveBlocks
-    .filter((block) => block.deviceType.toLowerCase() === "output")
-    .map((block) => ({
-      timestamp: timestampMs(block.capturedAt),
-      words: normalizeForDedupe(block.text).split(" ").filter(Boolean),
-    }));
 
   return liveBlocks.filter((block) => {
     const normalized = normalizeForDedupe(block.text);
@@ -381,22 +376,6 @@ export function filterLiveCrossDeviceEchoes(
     );
     if (normalized && alreadyDurable) return false;
 
-    if (block.deviceType.toLowerCase() === "input") {
-      const nearbyOutputWords = new Set(
-        outputBlocks
-          .filter(
-            (output) => Math.abs(output.timestamp - timestamp) <= echoWindowMs,
-          )
-          .flatMap((output) => output.words),
-      );
-      const words = normalized.split(" ").filter(Boolean);
-      const covered =
-        words.length > 0
-          ? words.filter((word) => nearbyOutputWords.has(word)).length /
-            words.length
-          : 0;
-      if (covered >= 0.6) return false;
-    }
     return true;
   });
 }
@@ -421,6 +400,14 @@ function compareBlocks(a: SpeakerBlock, b: SpeakerBlock): number {
   return a.key.localeCompare(b.key);
 }
 
+function displaySpeakerName(block: SpeakerBlock): string {
+  if (!/^speaker(?:[ _]\d+)?$/i.test(block.speakerName.trim())) return block.speakerName;
+  // A provider's speaker numbers restart on each stream. Avoid presenting
+  // unrelated input/output labels as the same identified person.
+  const source = block.captureDirection === "input" ? "Microphone" : block.captureDirection === "output" ? "Meeting audio" : "Unidentified";
+  return `${source} · ${block.speakerName}`;
+}
+
 function groupBySpeaker(chunks: MeetingAudioChunk[]): SpeakerBlock[] {
   const out: SpeakerBlock[] = [];
   for (const c of sortChunks(chunks)) {
@@ -440,7 +427,7 @@ function groupBySpeaker(chunks: MeetingAudioChunk[]): SpeakerBlock[] {
     const sameSpeaker = last?.speakerKey === speakerKey;
     // Glue if same speaker AND within 30s of last segment — keeps long pauses
     // as paragraph breaks even when the same person is still talking.
-    if (sameSpeaker && ts - last.endMs < 30_000) {
+    if (sameSpeaker && c.audioFilePath === last.firstAudioFilePath && ts - last.endMs < 30_000) {
       last.text = `${last.text} ${text}`;
       last.endMs = ts;
       last.segmentCount += 1;
@@ -458,6 +445,8 @@ function groupBySpeaker(chunks: MeetingAudioChunk[]): SpeakerBlock[] {
         final: true,
         firstAudioChunkId: c.audioChunkId,
         firstAudioFilePath: c.audioFilePath,
+        firstAudioStartTimeSecs: c.audioStartTimeSecs,
+        captureDirection: c.deviceType.toLowerCase(),
       });
     }
   }
@@ -481,6 +470,7 @@ export function liveBlockToSpeakerBlock(
         : block.deviceType.toLowerCase() === "input"
           ? "me"
           : "speaker"),
+    captureDirection: block.deviceType.toLowerCase(),
     speakerKey: block.sessionSpeakerId
       ? `session:${block.sessionSpeakerId}`
       : `stream:${block.deviceName}:${block.deviceType}:${block.speakerName?.trim() || "unknown"}`,
@@ -789,7 +779,7 @@ export function TranscriptPanel({
     [authoritativeChunks],
   );
   const visibleLiveBlocks = useMemo(
-    () => filterLiveCrossDeviceEchoes(authoritativeChunks, liveBlocks),
+    () => filterLiveAlreadySaved(authoritativeChunks, liveBlocks),
     [authoritativeChunks, liveBlocks],
   );
   const visibleLiveSpeakerBlocks = useMemo(
@@ -1344,7 +1334,7 @@ export const SpeakerParagraph = React.memo(function SpeakerParagraph({
               >
                 <User className="h-3 w-3 text-muted-foreground/70 self-center" />
                 <span data-testid="transcript-speaker">
-                  {block.speakerName}
+                  {displaySpeakerName(block)}
                 </span>
               </span>
             </SpeakerAssignPopover>
@@ -1356,7 +1346,7 @@ export const SpeakerParagraph = React.memo(function SpeakerParagraph({
               )}
             >
               <User className="h-3 w-3 text-muted-foreground/70 self-center" />
-              <span data-testid="transcript-speaker">{block.speakerName}</span>
+              <span data-testid="transcript-speaker">{displaySpeakerName(block)}</span>
             </span>
           )}
           <span
@@ -1423,7 +1413,9 @@ export const SpeakerParagraph = React.memo(function SpeakerParagraph({
       </div>
       {showPlayer && block.firstAudioFilePath && (
         <div className="mt-2 max-w-xl">
-          <MediaComponent filePath={block.firstAudioFilePath} />
+          <MediaComponent filePath={block.firstAudioFilePath}
+            startTimeSecs={block.firstAudioStartTimeSecs ?? undefined}
+            customDescription={ui("Meeting audio") + " · " + formatClock(block.startMs)} />
         </div>
       )}
     </li>
@@ -1441,6 +1433,7 @@ export function coalesceFinalSpeakerRuns(
     if (
       previous?.final &&
       block.final &&
+      previous.firstAudioFilePath === block.firstAudioFilePath &&
       isSpeakerContinuation(previous, block)
     ) {
       previous.text = `${previous.text} ${block.text}`;

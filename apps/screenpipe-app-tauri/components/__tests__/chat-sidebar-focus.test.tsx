@@ -159,11 +159,13 @@ describe("Recents provider filtering", () => {
   });
 
   it.each([
+    ["screenpipe", "Screenpipe", "/images/screenpipe.png"],
     ["codex", "Codex", "/images/codex.svg"],
     ["claude-code", "Claude", "/images/claude-ai.svg"],
   ] as const)("shows the %s mark in the source picker", (source, label, icon) => {
+    const option = visibleRecentSourceOptions().find((option) => option.source === source)!;
     const { container } = render(
-      <RecentsSourceFilterLabel source={source} label={label} />,
+      <RecentsSourceFilterLabel {...option} />,
     );
 
     expect(screen.getByText(label)).toBeVisible();
@@ -289,7 +291,7 @@ describe("menu letter shortcuts", () => {
 
     fireEvent.contextMenu(screen.getByTestId("chat-row-chat-focus-test"));
     const branchItem = await screen.findByText("Branch in new chat");
-    expect(branchItem.closest('[role="menuitem"]')).toHaveAttribute("data-shortcut", "b");
+    expect(branchItem.closest('[role="menuitem"]')).toHaveAttribute("data-chat-shortcut", "branch_chat");
 
     fireEvent.click(branchItem);
 

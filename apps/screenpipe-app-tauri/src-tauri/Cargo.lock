@@ -2751,19 +2751,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "crossbeam"
-version = "0.8.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1137cd7e7fc0fb5d3c5a8678be38ec56e819125d8d7907411fe24ccb943faca8"
-dependencies = [
- "crossbeam-channel",
- "crossbeam-deque",
- "crossbeam-epoch",
- "crossbeam-queue",
- "crossbeam-utils",
-]
-
-[[package]]
 name = "crossbeam-channel"
 version = "0.5.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11221,7 +11208,7 @@ dependencies = [
 
 [[package]]
 name = "screenpipe-app"
-version = "2.7.72"
+version = "2.7.76"
 dependencies = [
  "aes 0.8.4",
  "aes-gcm 0.10.3",
@@ -11348,6 +11335,7 @@ dependencies = [
  "urlencoding",
  "uuid",
  "webview2-com",
+ "whisper-rs",
  "windows 0.58.0",
  "windows-core 0.61.2",
  "windows-icons",
@@ -11368,10 +11356,10 @@ dependencies = [
  "cidre 0.15.1",
  "clap",
  "cpal",
- "crossbeam",
  "dashmap",
  "dirs 6.0.0",
  "env_logger",
+ "flume 0.11.1",
  "futures",
  "hf-hub 0.3.2",
  "hound",

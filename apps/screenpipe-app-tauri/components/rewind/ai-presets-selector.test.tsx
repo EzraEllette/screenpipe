@@ -590,3 +590,91 @@ describe("AIPresetsSelector preset deletion", () => {
     ).not.toBeInTheDocument();
   });
 });
+
+describe("AIPresetsSelector preset copy", () => {
+  const cloudPreset: AIPreset = {
+    ...originalPreset,
+    id: "screenpipe",
+    model: "auto",
+  };
+
+  beforeEach(() => {
+    mocks.settings.listeners.clear();
+    mocks.updateSettings.mockClear();
+    mocks.acpEnabled.current = false;
+    mocks.settings.current = {
+      aiPresets: [cloudPreset],
+      user: { token: "test-token", cloud_subscribed: true },
+    };
+  });
+
+  it("opens copy as a new preset, not an edit of the original", () => {
+    render(<AIPresetsSelector compact showModelOnly />);
+
+    fireEvent.click(screen.getByRole("combobox"));
+    fireEvent.click(screen.getByRole("button", { name: "Duplicate screenpipe" }));
+
+    const dialog = screen.getByRole("dialog", { name: "Duplicate Preset" });
+    expect(within(dialog).getByRole("heading", { name: "Duplicate AI" })).toBeInTheDocument();
+    expect(within(dialog).getByDisplayValue("screenpipe 2")).toBeEnabled();
+    expect(within(dialog).getByRole("button", { name: "create copy" })).toBeInTheDocument();
+    expect(within(dialog).queryByText(/edit/i)).not.toBeInTheDocument();
+  });
+
+  it("saves a copy as a new preset and leaves the original unchanged", async () => {
+    render(
+      <>
+        <AIPresetsSelector compact showModelOnly />
+        <Toaster />
+      </>,
+    );
+
+    fireEvent.click(screen.getByRole("combobox"));
+    fireEvent.click(screen.getByRole("button", { name: "Duplicate screenpipe" }));
+    fireEvent.click(screen.getByRole("button", { name: "create copy" }));
+
+    await waitFor(() =>
+      expect(mocks.settings.current.aiPresets.map((p: AIPreset) => p.id)).toEqual([
+        "screenpipe",
+        "screenpipe 2",
+      ]),
+    );
+    expect(mocks.settings.current.aiPresets[0]).toEqual(cloudPreset);
+    expect(mocks.settings.current.aiPresets[1]).toMatchObject({
+      provider: "screenpipe-cloud",
+      model: "auto",
+      defaultPreset: false,
+    });
+    expect(await screen.findByTestId("toast-success")).toHaveTextContent("Preset copied");
+  });
+
+  it("keeps edit labeled as an edit with the saved name locked", () => {
+    render(<AIPresetsSelector compact showModelOnly />);
+
+    fireEvent.click(screen.getByRole("combobox"));
+    fireEvent.click(screen.getByRole("button", { name: "Edit screenpipe" }));
+
+    const dialog = screen.getByRole("dialog", { name: "Edit Preset" });
+    expect(within(dialog).getByRole("heading", { name: "Edit AI" })).toBeInTheDocument();
+    expect(within(dialog).getByDisplayValue("screenpipe")).toBeDisabled();
+    expect(within(dialog).getByRole("button", { name: "save changes" })).toBeInTheDocument();
+  });
+
+  it("opens edit as an edit after a copy was cancelled", () => {
+    render(<AIPresetsSelector compact showModelOnly />);
+
+    fireEvent.click(screen.getByRole("combobox"));
+    fireEvent.click(screen.getByRole("button", { name: "Duplicate screenpipe" }));
+    fireEvent.click(
+      within(screen.getByRole("dialog", { name: "Duplicate Preset" })).getByRole("button", {
+        name: "Close",
+      }),
+    );
+
+    fireEvent.click(screen.getByRole("combobox"));
+    fireEvent.click(screen.getByRole("button", { name: "Edit screenpipe" }));
+
+    const dialog = screen.getByRole("dialog", { name: "Edit Preset" });
+    expect(within(dialog).getByRole("button", { name: "save changes" })).toBeInTheDocument();
+  });
+});
