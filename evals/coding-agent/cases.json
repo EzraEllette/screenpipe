@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "suite": "screenpipe-app-coding-agent-regressions",
-  "dataset_version": "2026-09-26.5",
+  "dataset_version": "2026-09-26.8",
   "suite_type": "regression",
   "owner": "screenpipe engineering",
   "policy": {
@@ -3643,6 +3643,50 @@
           }
         ],
         "command": "cd apps/screenpipe-app-tauri && \"${BUN_BIN:-bun}\" ../../evals/coding-agent/graders/stale-policy.mjs"
+      }
+    },
+    {
+      "id": "app-public-hosted-ai-allowance",
+      "name": "Keep actual hosted text admission inside public included credits",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "a448803c30e4220d60e8d55003a796b425d9e349"
+      },
+      "base_ref": "f073b89db6894546cf72fddfb2ce39cbe86dfec6",
+      "oracle_ref": "a448803c30e4220d60e8d55003a796b425d9e349",
+      "oracle_paths": [
+        "packages/ai-gateway/src/services/hosted-ai-cost-controls.ts",
+        "packages/ai-gateway/src/services/hosted-ai-policy.ts"
+      ],
+      "gate": "advisory",
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "billing",
+        "admission",
+        "concurrency"
+      ],
+      "trigger_paths": [
+        "packages/ai-gateway/src/services/cost-cap.ts",
+        "packages/ai-gateway/src/services/hosted-ai-cost-controls.ts"
+      ],
+      "prompt": "The existing hosted text reserveDailyCostCap entrypoint can admit spending beyond the public included-credit ceiling when private controls are permissive. Repair actual local-D1 request reservation. With synthetic private request/daily/monthly and trial windows set to10 USD, a request whose estimated hold would cross the public monthly ceiling must return allowed:false and429 with monthly_cost_limit_exceeded, without changing existing spend or leaving a reservation. Public monthly provider-cost ceilings are Free0.10USD, Basic1.50USD and Business/BusinessMax/BusinessUltra4USD; an active Business trial has a4USD total ceiling and must similarly refuse with trial_cost_limit_exceeded. A request with room for two estimated holds must still be admitted for every listed plan/period, persist its positive hold in the existing usage ledger, preserve prior spend, and release exactly that hold through releaseDailyCostReservation. Two simultaneous Basic requests with room for only one-and-a-half holds must admit exactly one; the other must receive429, and releasing the accepted hold must restore prior ledger state. Do not prescribe a specific monthly-versus-temporary-capacity error code for that concurrent refusal. Preserve a stricter private0.80USD monthly ceiling, and fail closed with503/cost_control_unavailable and no hold for malformed private configuration. Use the existing entrypoint, ledger and release interface with a fixed clock and synthetic workerd D1. No particular private helper name, SQL formatting or algorithm is required. This case does not execute HTTP authentication/entitlement, provider dispatch, final cost settlement, global or background windows, incident resets, deployment activation, real financial operations, native behavior, execution isolation or model trials.",
+      "agent_timeout_seconds": 900,
+      "grader_dependency_links": [
+        {
+          "source_path": "packages/ai-gateway/node_modules",
+          "destination_path": "packages/ai-gateway/node_modules"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/public-allowance.fixture.ts.txt",
+            "destination_path": "packages/ai-gateway/src/services/eval-public-allowance.test.ts"
+          }
+        ],
+        "command": "cd packages/ai-gateway && bun test src/services/eval-public-allowance.test.ts"
       }
     }
   ]

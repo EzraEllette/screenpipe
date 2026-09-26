@@ -1023,3 +1023,11 @@ grading time; dependency links do not establish agent isolation. Current product
 tests separately cover additional ledger windows. This case does not establish
 HTTP admission, hold release, every budget window, deployed migrations, actual
 provider billing or model performance.
+
+`app-public-hosted-ai-allowance` exercises actual request reservations against
+local workerd D1. Fifteen outcomes check public monthly/trial ceilings, healthy
+releasable holds, concurrent admission, stricter private limits and malformed
+configuration. Run `bun test evals/coding-agent/calibrate-public-allowance.test.js`
+with gateway dependencies available. This does not execute HTTP entitlement,
+provider delivery, final settlement, production activation, native behavior,
+agent isolation or model trials. Fixtures and dependencies are added at grading.
