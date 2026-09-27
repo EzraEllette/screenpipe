@@ -1031,3 +1031,13 @@ configuration. Run `bun test evals/coding-agent/calibrate-public-allowance.test.
 with gateway dependencies available. This does not execute HTTP entitlement,
 provider delivery, final settlement, production activation, native behavior,
 agent isolation or model trials. Fixtures and dependencies are added at grading.
+
+`app-reservation-admission-proof` executes reservation and exact release against
+local workerd D1 with synthetic write-result faults. Zero or missing change
+metadata must not deny stored reservations; positive metadata must not fabricate
+admission. Seven outcomes include concurrency, full capacity, sibling retention
+and write failure. The parent fails five and preserves two; reference/current
+pass seven. Run `bun test evals/coding-agent/calibrate-admission-proof.test.js`
+for ten controls, including an equivalent row-reading method. This is not HTTP
+authentication, provider execution, settlement, production fault prevalence,
+agent isolation or a model trial.

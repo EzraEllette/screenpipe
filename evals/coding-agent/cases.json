@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "suite": "screenpipe-app-coding-agent-regressions",
-  "dataset_version": "2026-09-26.8",
+  "dataset_version": "2026-09-27.1",
   "suite_type": "regression",
   "owner": "screenpipe engineering",
   "policy": {
@@ -3687,6 +3687,48 @@
           }
         ],
         "command": "cd packages/ai-gateway && bun test src/services/eval-public-allowance.test.ts"
+      }
+    },
+    {
+      "id": "app-reservation-admission-proof",
+      "name": "Use persisted reservation evidence despite ambiguous write metadata",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "a5749d6d922fec0f642720dbb9a0cbbc3719ea82"
+      },
+      "base_ref": "7a1462b5d0684f5ad4a7c5059f8070ee8a8f2eb6",
+      "oracle_ref": "a5749d6d922fec0f642720dbb9a0cbbc3719ea82",
+      "oracle_paths": [
+        "packages/ai-gateway/src/services/cost-cap.ts"
+      ],
+      "gate": "advisory",
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "billing",
+        "admission",
+        "concurrency"
+      ],
+      "trigger_paths": [
+        "packages/ai-gateway/src/services/cost-cap.ts"
+      ],
+      "prompt": "Repair the existing reserveDailyCostCap request-admission boundary. A successful local-D1 write may store a reservation while its change-count metadata is zero or absent. Healthy requests in those conditions must be admitted with a positive stored hold matching the returned key, account and reserved amount, and releaseDailyCostReservation must remove exactly that hold. Conversely, positive change-count metadata is not sufficient when no row was inserted: a full account with three active interactive reservations must reject the next request with 429 and preserve every existing hold; a reported successful write that stores nothing must refuse with 429 or 503. With a configured interactive limit of three, six concurrent requests under ambiguous write metadata must yield exactly three allowed responses and three 429 responses, matching exactly three stored holds. Preserve ordinary healthy admission and exact release without deleting sibling reservations; a storage write exception must refuse with 503 and leave no hold. The fixture uses a fixed clock, synthetic Business requests for gpt-5.6-luna, the existing usage ledger, and real local workerd D1 with faults restricted to write execution or returned metadata. Keep the public reservation/release entrypoints; no specific private name, SQL formatting or row-reading method is required. This case does not test HTTP authentication, provider dispatch, actual settlement, production D1 fault prevalence, global or background limits, native behavior, execution isolation or model capability.",
+      "agent_timeout_seconds": 900,
+      "grader_dependency_links": [
+        {
+          "source_path": "packages/ai-gateway/node_modules",
+          "destination_path": "packages/ai-gateway/node_modules"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/admission-proof.fixture.ts.txt",
+            "destination_path": "packages/ai-gateway/src/services/eval-admission-proof.test.ts"
+          }
+        ],
+        "command": "cd packages/ai-gateway && bun test src/services/eval-admission-proof.test.ts"
       }
     }
   ]
