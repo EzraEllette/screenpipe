@@ -1974,7 +1974,7 @@ dependencies = [
 [[package]]
 name = "cpal"
 version = "0.15.3"
-source = "git+https://github.com/screenpipe/cpal.git?rev=e7edfa174466e87a467d1a58e3a4aec233ff8a21#e7edfa174466e87a467d1a58e3a4aec233ff8a21"
+source = "git+https://github.com/screenpipe/cpal.git?rev=aa6b20a265bd1d9e240f11db26824b531546395b#aa6b20a265bd1d9e240f11db26824b531546395b"
 dependencies = [
  "alsa",
  "cidre 0.15.1",
@@ -8635,10 +8635,10 @@ dependencies = [
  "clap",
  "cpal",
  "criterion",
- "crossbeam",
  "dashmap",
  "dirs 6.0.0",
  "env_logger",
+ "flume 0.11.1",
  "futures",
  "hf-hub 0.3.2",
  "hound",

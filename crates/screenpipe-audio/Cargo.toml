@@ -26,7 +26,7 @@ uuid = { workspace = true }
 
 # Cross-platform audio capture. Tracks screenpipe/cpal main, which carries
 # the Windows WASAPI AEC and macOS VoiceProcessingIO patches.
-cpal = { git = "https://github.com/screenpipe/cpal.git", rev = "e7edfa174466e87a467d1a58e3a4aec233ff8a21" }
+cpal = { git = "https://github.com/screenpipe/cpal.git", rev = "aa6b20a265bd1d9e240f11db26824b531546395b" }
 
 # Wav encoding
 hound = { workspace = true }
@@ -78,8 +78,8 @@ screenpipe-db = { path = "../screenpipe-db" }
 # failure it got instead of string-matching the Display output.
 sqlx = { workspace = true }
 
-# crossbeam
-crossbeam = { workspace = true }
+# Async-aware bounded channels shared by recording and transcription tasks.
+flume = { version = "0.11.1", default-features = false, features = ["async"] }
 dashmap = { workspace = true }
 
 # Directories
@@ -201,7 +201,11 @@ default = ["pulseaudio"]
 metal = ["whisper-rs/metal", "audiopipe?/metal", "audiopipe?/coreml"]
 cuda = ["whisper-rs/cuda"]
 directml = ["audiopipe?/directml"]
-vulkan = ["audiopipe?/vulkan-ggml", "whisper-rs/vulkan"]
+# Windows Qwen and Parakeet use ONNX/DirectML. Enabling audiopipe's GGML
+# Vulkan backend also links a second native GGML implementation into the app;
+# its independently configured CPU backend can contain builder-host AVX-512
+# instructions. Keep Vulkan scoped to Whisper, the only product path using it.
+vulkan = ["whisper-rs/vulkan"]
 pulseaudio = ["dep:libpulse-binding", "dep:libpulse-simple-binding"]
 qwen3-asr = ["dep:audiopipe", "audiopipe?/qwen3-asr", "audiopipe?/qwen3-asr-antirez-blas"]
 parakeet = ["dep:audiopipe"]

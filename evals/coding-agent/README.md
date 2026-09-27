@@ -13,6 +13,16 @@ The current app corpus contains 80 git-mined regressions. See
 [DESIGN.md](./DESIGN.md) for the Anthropic guidance, source contract, and
 history-mining workflow. The companion website manifest uses this same harness.
 
+`app-consumer-stale-managed-settings` runs actual settings read, write and reset
+operations, the write queue and build-authority gate against synthetic native,
+store, React rendering and external ports. Confirmed consumer builds release stale
+policy; enterprise builds and failed IPC preserve it. Twelve outcomes include
+ordinary edits without cached policy. The parent fails three consumer outcomes
+and preserves nine; the reference and current source pass twelve.
+Run `bun test evals/coding-agent/calibrate-stale-policy.test.js` for calibration.
+The task concerns persisted frontend choices, not actual native recording,
+migration authority, store encryption, IPC delivery, isolation or model quality.
+
 `app-card-ask-login-hydration` runs the actual provider, controller and dialog
 with synthetic external ports. Nine outcomes cover initial and delayed account
 loading, post-mount sign-in, once-per-install persistence and suppressed prompts.
@@ -915,3 +925,119 @@ a setup error. Only URL configuration is mocked. The companion paid-plan-label
 case covers a separate omission invariant. Fixtures are installed at grading;
 no UI/native recording, live provider verification, agent isolation or model
 improvement is established.
+
+## Account-standing provenance
+
+`ai-gateway-account-standing-provenance` exercises the real gateway HTTP router,
+authentication and durable-object admission logic. Twelve synthetic scenarios
+cover temporary sign-in locks, proven deletion versus a stale website account ID,
+banned accounts, preserved model discovery and refusal before provider work.
+With explicit denial reason checks, the historical parent fails ten complete
+outcomes and preserves two; the reference
+passes all twelve. This does not establish live identity verification, cache
+migration, native retry behavior, concurrency safety or model improvement.
+
+Run `bun test evals/coding-agent/calibrate-account-standing.test.js` for the
+known-broken/correct, unused fix, permissive admission, blanket refusal, equivalent
+private field and missing-source controls. Dependency setup errors are separate
+from intended behavior failures. Use the shared runner's `--verify` for the case.
+
+### Attachment owner handoff
+
+`app-attachment-owner-handoff` exercises the actual attachment hook and in-memory chat store across delayed file reads, pane unmount, foreground navigation, pointer-scoped drops, cancellation and read failure. Hidden/deleted owners stay absent and ordinary multiple-file attachment survives. Native file/dialog/extraction and locale ports are synthetic; this does not establish native delivery, disk persistence or full composer integration. Run `bun test evals/coding-agent/calibrate-attachment-owner.test.js` with the desktop test dependencies available. Historical verification and mutation calibration are not model trials or an isolation claim.
+
+### Background allowance request preservation
+
+`ai-gateway-background-request-preservation` drives the existing chat handler through synthetic provider ports. Thirteen outcomes preserve message roles, context, tool schemas, output budgets, response formats and streamed tool results during enabled allowance recovery, plus successful-primary and refusal behavior. Parent verification fails four intended outcomes and preserves nine; the historical fix passes thirteen. Run `bun test evals/coding-agent/calibrate-background-request.test.js`. Paid-plan HTTP admission, safety-refusal policy, actual provider compatibility, concurrent accounting, execution isolation and model performance remain separate. Fixtures and dependency links are installed only when grading starts.
+
+
+## Unaccepted canvas positions
+
+`app-canvas-preview-persistence` renders the real overview and canvas against
+synthetic native, generation and settings ports. Five outcomes check a fresh
+canvas during proposal review, normal editing, existing annotations, rejection
+and acceptance. The parent fails the unaccepted-position assertion and preserves
+four outcomes; the reference and current component pass all five. Native writes
+are copied at invocation and complete asynchronously; stored effects are checked
+without requiring exact call counts, DOM identity or private names.
+
+Run `bun test evals/coding-agent/calibrate-canvas-outcome.test.js` with desktop
+test dependencies installed. Controls cover unused correct code, blanket write
+suppression, dropped annotations and blocked acceptance; equivalent private names
+and test attributes pass. Missing source is a setup error. Hidden fixtures and
+dependencies are installed only at grading. This does not establish native
+storage, browser geometry, agent isolation or model performance.
+
+## Onboarding notification transport
+
+`app-onboarding-notification-transport` exercises the existing follow-up
+orchestration, activation storage, time helper and app-control client with
+synthetic native and transport ports. Six outcomes cover runtime-port delivery,
+configuration fallback, refusal followed by retry, replay suppression, failed
+engine dispatch, future deadlines and missing views. It observes the default
+transport rather than injecting a replacement notification helper. The historical
+parent fails three delivery outcomes and preserves three; the reference and
+current source pass all six.
+
+Run `bun test evals/coding-agent/calibrate-notification-transport.test.js` with
+desktop dependencies installed. Fixtures and dependency links are materialized
+only when grading begins. These checks do not establish native notification
+display, completed Pipe results, policy authority to start work, multi-window
+concurrency, execution isolation or model performance. The task covers an already
+scheduled follow-up and does not authorize activating paused work.
+
+## Lazy streaming errors
+
+`ai-gateway-lazy-stream-initial-error` exercises the actual OpenAI-compatible
+provider with synthetic SDK iterables and inert telemetry. Initial lazy quota
+and service failures reject before a successful stream is returned. Five nearby
+outcomes preserve SDK creation errors, text, tool fragments and usage, empty
+streams, and SSE errors after partial delivery. The parent fails the two initial
+error outcomes and preserves five; the reference and current provider pass seven.
+
+Run `bun test evals/coding-agent/calibrate-stream-initial-error.test.js` for nine
+controls, including unused correct code, equivalent iterator names, lost or
+repeated first chunks, incorrect later error status and missing-source setup
+classification. No dependencies or build caches are linked by this case. Fixtures
+are materialized at grading time. This does not establish caller fallback
+selection, cancellation, live provider behavior, execution isolation or model
+performance, and does not reinstate historical Argus routing policy.
+
+## Hosted-AI settlement replay
+
+`ai-gateway-settlement-replay-atomicity` exercises the existing `logCost`
+entrypoint against synthetic local workerd D1. Ten outcomes cover concurrent
+replay, independent requests, conflicting cost/ownership, atomic rollback,
+lost commit acknowledgement, zero cost and preserved legacy, unbudgeted and
+speech accounting. The parent fails six intended outcomes and preserves four;
+the reference and current source pass ten.
+
+Run `bun test evals/coding-agent/calibrate-settlement-replay.test.js` with
+Miniflare `3.20250718.3` available in `packages/ai-gateway/node_modules`.
+Ten calibration controls include an unused corrected implementation, blanket
+success, collapsed request identities, ignored cost conflicts and non-atomic
+writes. Equivalent private names pass; missing source is a setup error.
+The case checks account and aggregate effects without requiring a particular
+ledger table or helper design. Fixtures and dependency links appear only at
+grading time; dependency links do not establish agent isolation. Current product
+tests separately cover additional ledger windows. This case does not establish
+HTTP admission, hold release, every budget window, deployed migrations, actual
+provider billing or model performance.
+
+`app-public-hosted-ai-allowance` exercises actual request reservations against
+local workerd D1. Fifteen outcomes check public monthly/trial ceilings, healthy
+releasable holds, concurrent admission, stricter private limits and malformed
+configuration. Run `bun test evals/coding-agent/calibrate-public-allowance.test.js`
+with gateway dependencies available. This does not execute HTTP entitlement,
+provider delivery, final settlement, production activation, native behavior,
+agent isolation or model trials. Fixtures and dependencies are added at grading.
+
+`app-reservation-admission-proof` executes reservation and exact release against
+local workerd D1 with synthetic write-result faults. Zero or missing change
+metadata must not deny stored reservations; positive metadata must not fabricate
+admission. Seven outcomes include concurrency, full capacity, sibling retention
+and write failure. The parent fails five and preserves two; reference/current
+pass seven. Run `bun test evals/coding-agent/calibrate-admission-proof.test.js`
+for ten controls, including an equivalent row-reading method. This is not HTTP
+authentication, provider execution, settlement, production fault prevalence,
+agent isolation or a model trial.

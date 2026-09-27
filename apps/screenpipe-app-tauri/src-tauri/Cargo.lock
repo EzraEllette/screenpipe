@@ -2609,7 +2609,7 @@ dependencies = [
 [[package]]
 name = "cpal"
 version = "0.15.3"
-source = "git+https://github.com/screenpipe/cpal.git?rev=e7edfa174466e87a467d1a58e3a4aec233ff8a21#e7edfa174466e87a467d1a58e3a4aec233ff8a21"
+source = "git+https://github.com/screenpipe/cpal.git?rev=aa6b20a265bd1d9e240f11db26824b531546395b#aa6b20a265bd1d9e240f11db26824b531546395b"
 dependencies = [
  "alsa",
  "cidre 0.15.1",
@@ -2748,19 +2748,6 @@ dependencies = [
  "chrono",
  "nom 7.1.3",
  "once_cell",
-]
-
-[[package]]
-name = "crossbeam"
-version = "0.8.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1137cd7e7fc0fb5d3c5a8678be38ec56e819125d8d7907411fe24ccb943faca8"
-dependencies = [
- "crossbeam-channel",
- "crossbeam-deque",
- "crossbeam-epoch",
- "crossbeam-queue",
- "crossbeam-utils",
 ]
 
 [[package]]
@@ -11221,7 +11208,7 @@ dependencies = [
 
 [[package]]
 name = "screenpipe-app"
-version = "2.7.71"
+version = "2.7.76"
 dependencies = [
  "aes 0.8.4",
  "aes-gcm 0.10.3",
@@ -11348,6 +11335,7 @@ dependencies = [
  "urlencoding",
  "uuid",
  "webview2-com",
+ "whisper-rs",
  "windows 0.58.0",
  "windows-core 0.61.2",
  "windows-icons",
@@ -11368,10 +11356,10 @@ dependencies = [
  "cidre 0.15.1",
  "clap",
  "cpal",
- "crossbeam",
  "dashmap",
  "dirs 6.0.0",
  "env_logger",
+ "flume 0.11.1",
  "futures",
  "hf-hub 0.3.2",
  "hound",

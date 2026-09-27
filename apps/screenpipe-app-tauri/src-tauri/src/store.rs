@@ -1733,6 +1733,8 @@ pub struct AIPreset {
     pub model: String,
     #[serde(rename = "defaultPreset")]
     pub default_preset: bool,
+    #[serde(rename = "enterpriseManaged", default)]
+    pub enterprise_managed: bool,
     #[serde(rename = "apiKey")]
     pub api_key: Option<String>,
     #[serde(rename = "maxContextChars")]
@@ -1755,6 +1757,7 @@ impl Default for AIPreset {
             url: "https://api.screenpipe.com/v1".to_string(),
             model: "qwen/qwen3.5-flash-02-23".to_string(),
             default_preset: false,
+            enterprise_managed: false,
             api_key: None,
             max_context_chars: 512000,
             max_tokens: 4096,
@@ -2028,6 +2031,7 @@ Rules:
             url: "https://api.screenpipe.com/v1".to_string(),
             model: "auto".to_string(),
             default_preset: true,
+            enterprise_managed: false,
             api_key: None,
             max_context_chars: 128000,
             max_tokens: 4096,
@@ -5473,6 +5477,40 @@ mod tests {
         let preset = &sanitized_acp["aiPresets"][0];
         assert_eq!(preset["provider"].as_str(), Some("acp"));
         assert_eq!(preset["acpAgent"]["id"].as_str(), Some("codex-acp"));
+    }
+
+    #[test]
+    fn enterprise_managed_preset_survives_settings_persistence() {
+        let settings: SettingsStore = serde_json::from_value(json!({
+            "aiPresets": [
+                {
+                    "id": "company-assistant",
+                    "provider": "anthropic",
+                    "model": "company-model",
+                    "defaultPreset": true,
+                    "enterpriseManaged": true
+                },
+                {
+                    "id": "employee-assistant",
+                    "provider": "anthropic",
+                    "model": "employee-model"
+                }
+            ]
+        }))
+        .expect("settings with managed and legacy employee presets should deserialize");
+
+        // Native saves serialize the typed settings, which must retain the
+        // marker the frontend uses when employee-created presets are disabled.
+        let saved = serde_json::to_value(settings).expect("settings should serialize");
+        assert_eq!(saved["aiPresets"][0]["enterpriseManaged"], json!(true));
+        assert_eq!(saved["aiPresets"][0]["defaultPreset"], json!(true));
+        assert_ne!(saved["aiPresets"][1]["enterpriseManaged"], json!(true));
+
+        let reloaded: SettingsStore =
+            serde_json::from_value(saved).expect("saved settings should reload");
+        let saved_again = serde_json::to_value(reloaded).expect("settings should serialize again");
+        assert_eq!(saved_again["aiPresets"][0]["enterpriseManaged"], json!(true));
+        assert_ne!(saved_again["aiPresets"][1]["enterpriseManaged"], json!(true));
     }
 
     #[test]

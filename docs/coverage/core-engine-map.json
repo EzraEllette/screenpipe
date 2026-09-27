@@ -778,6 +778,7 @@
         "tests/meeting_end_generation_test.rs",
         "tests/meeting_end_reason_test.rs",
         "tests/meeting_transcript_dedup_test.rs",
+        "tests/meeting_playback_regression_test.rs",
         "tests/output_audio_liveness_test.rs",
         "tests/single_open_meeting_invariant_test.rs",
         "tests/speaker_benchmark.rs",

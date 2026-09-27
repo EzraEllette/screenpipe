@@ -3159,7 +3159,7 @@ async writeBrowserLogs(entries: BrowserLogEntry[]) : Promise<void> {
 
 /** user-defined types **/
 
-export type AIPreset = { id: string; prompt: string; provider: AIProviderType; acpAgent?: AcpAgentPresetConfig | null; url?: string; model?: string; defaultPreset: boolean; apiKey: string | null; maxContextChars: number; maxTokens?: number }
+export type AIPreset = { id: string; prompt: string; provider: AIProviderType; acpAgent?: AcpAgentPresetConfig | null; url?: string; model?: string; defaultPreset: boolean; enterpriseManaged?: boolean; apiKey: string | null; maxContextChars: number; maxTokens?: number }
 export type AIProviderType = "openai" | "openai-chatgpt" | "native-ollama" | "custom" | "screenpipe-cloud" | "acp" | "pi" | "anthropic"
 export type AcpAgentConfig = {
 /**
@@ -3275,8 +3275,8 @@ error: string | null;
 sinceEpochSecs: number;
 /**
  * True when this CPU lacks AVX2 (pre-2013 x86-64 / Atom-line): local
- * whisper/qwen3 STT is disabled at runtime (their kernels are
- * AVX2-compiled); parakeet + cloud engines still work. Drives the
+ * Whisper (and non-Windows Qwen) STT is disabled at runtime because its
+ * kernels are AVX2-compiled; Windows ONNX Qwen, Parakeet, and cloud engines work. Drives the
  * "compatibility mode" notice in onboarding/settings.
  */
 cpuCompatMode: boolean }
