@@ -1041,3 +1041,20 @@ pass seven. Run `bun test evals/coding-agent/calibrate-admission-proof.test.js`
 for ten controls, including an equivalent row-reading method. This is not HTTP
 authentication, provider execution, settlement, production fault prevalence,
 agent isolation or a model trial.
+
+## Provider spend-cap guidance
+
+`ai-gateway-provider-cap-guidance` invokes the existing chat handler with
+synthetic provider and telemetry ports. Nine outcomes cover JSON and streaming
+cap errors, exhausted chains, successful fallback, intact input, healthy replies,
+malformed images, empty input, authentication failures and ordinary throttling.
+The parent fails three guidance outcomes and preserves six; reference/current
+pass nine. Fallback already works in the parent.
+
+Run `bun test evals/coding-agent/calibrate-provider-cap-guidance.test.js` with
+gateway dependencies available. Eleven controls include unused correct code,
+raw error leakage, blanket classification, lost fallback/tools, duplicate alerts,
+equivalent private names/prose and missing-source setup classification. Fixtures
+and dependency links are added at grading time. This does not establish HTTP
+authentication, accounting, actual provider availability, complete log redaction,
+execution isolation or model performance.

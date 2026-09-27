@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "suite": "screenpipe-app-coding-agent-regressions",
-  "dataset_version": "2026-09-27.1",
+  "dataset_version": "2026-09-27.2",
   "suite_type": "regression",
   "owner": "screenpipe engineering",
   "policy": {
@@ -3730,6 +3730,48 @@
         ],
         "command": "cd packages/ai-gateway && bun test src/services/eval-admission-proof.test.ts"
       }
+    },
+    {
+      "id": "ai-gateway-provider-cap-guidance",
+      "name": "Explain provider spend-cap outages without blaming client input",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "4e6c53848e337eacb8e5eff18843604800be05d8",
+        "pull_request": "https://github.com/screenpipe/screenpipe/pull/5653"
+      },
+      "base_ref": "6b8f11c0c1ed933f4db6342d9b38c6160572cdff",
+      "oracle_ref": "4e6c53848e337eacb8e5eff18843604800be05d8",
+      "oracle_paths": [
+        "packages/ai-gateway/src/handlers/chat.ts"
+      ],
+      "gate": "advisory",
+      "trigger_paths": [
+        "packages/ai-gateway/src/handlers/chat.ts"
+      ],
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "provider-error",
+        "preserved-behavior"
+      ],
+      "prompt": "Repair the existing chat-completions handler when a provider rejects work with HTTP 400 because its organization API usage limit has been reached. For explicit single-model JSON and streaming requests, and when every model in an explicit fallback chain has this cap, retain the 400 response but explain the provider capacity/usage limit and recovery through retrying later, a reset time or a different provider. Do not return nested provider error JSON, provider request identifiers, or blame malformed tools or unsupported parameters. Suppress redundant exception reports for this known provider cap while retaining failed-model health records. Preserve a successful fallback response, its original messages/tools and the caller request; fallback already works in the broken revision. Preserve healthy explicit replies, malformed-image client errors, rejection of empty messages before provider work, provider authentication failures with 401 and their API-key detail, and ordinary 429 throttling with retry guidance rather than a provider-cap explanation. Keep the public handler entrypoint. Grade observable response and provider/telemetry effects, not private helper names or exact advisory wording. Tests use synthetic provider and telemetry ports, no live requests. HTTP authentication, budget accounting, actual provider availability, log redaction beyond returned error payloads and execution isolation are outside this case.",
+      "agent_timeout_seconds": 900,
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/provider-cap-guidance.fixture.ts.txt",
+            "destination_path": "packages/ai-gateway/src/test/eval-provider-cap.test.ts"
+          }
+        ],
+        "command": "cd packages/ai-gateway && \"${BUN_BIN:-bun}\" --no-env-file test src/test/eval-provider-cap.test.ts"
+      },
+      "grader_dependency_links": [
+        {
+          "source_path": "packages/ai-gateway/node_modules",
+          "destination_path": "packages/ai-gateway/node_modules"
+        }
+      ]
     }
   ]
 }
