@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "suite": "screenpipe-app-coding-agent-regressions",
-  "dataset_version": "2026-09-27.2",
+  "dataset_version": "2026-09-27.3",
   "suite_type": "regression",
   "owner": "screenpipe engineering",
   "policy": {
@@ -348,10 +348,10 @@
       "name": "Distinguish pipe-store failures from an empty catalog",
       "source": {
         "kind": "git_regression",
-        "fix_commit": "8dbf6e47b"
+        "fix_commit": "8dbf6e47bac2bd033eaca3d7da649fce585b1c5f"
       },
-      "base_ref": "8dbf6e47b^",
-      "oracle_ref": "8dbf6e47b",
+      "base_ref": "e541a77536ccf33cd9668f18aad065a95bd19d42",
+      "oracle_ref": "8dbf6e47bac2bd033eaca3d7da649fce585b1c5f",
       "tags": [
         "regression",
         "escaped-failure",
@@ -359,23 +359,27 @@
         "error-state",
         "retry"
       ],
-      "prompt": "When the pipe store request fails, the app renders the same empty state as a successfully loaded catalog with no pipes. Surface a clear load-error state with a working retry action, keep genuine empty results distinct, and recover to the normal store after a successful retry without stale error UI.",
+      "prompt": "When the pipe store request fails, the app renders the same empty state as a successfully loaded catalog with no pipes. Show a clear load-error state and a working retry for network failures, unsuccessful HTTP responses, and error payloads. Keep successful empty catalogs distinct, including bare arrays and lists wrapped in data or pipes. A successful retry to either populated or empty results must clear stale error and retry UI. Preserve the installed-tasks tab and successful catalog content. Wording and internal cache implementation may vary.",
       "agent_timeout_seconds": 900,
-      "dependency_links": [
+      "grader": {
+        "timeout_seconds": 300,
+        "fixtures": [
+          {
+            "local_path": "graders/pipe-store-error.fixture.tsx.txt",
+            "destination_path": "apps/screenpipe-app-tauri/components/__tests__/pipe-store-error-state.test.tsx"
+          }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && node node_modules/vitest/vitest.mjs run --config vitest.config.ts components/__tests__/pipe-store-error-state.test.tsx --maxWorkers=1 --minWorkers=1"
+      },
+      "grader_dependency_links": [
         {
           "source_path": "apps/screenpipe-app-tauri/node_modules",
           "destination_path": "apps/screenpipe-app-tauri/node_modules"
         }
       ],
-      "grader": {
-        "timeout_seconds": 300,
-        "fixtures": [
-          {
-            "source_path": "apps/screenpipe-app-tauri/components/__tests__/pipe-store-error-state.test.tsx"
-          }
-        ],
-        "command": "cd apps/screenpipe-app-tauri && bun x vitest run --config vitest.config.ts components/__tests__/pipe-store-error-state.test.tsx"
-      }
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/components/pipe-store.tsx"
+      ]
     },
     {
       "id": "app-learning-handoff-always-finishes",

@@ -13,6 +13,19 @@ The current app corpus contains 80 git-mined regressions. See
 [DESIGN.md](./DESIGN.md) for the Anthropic guidance, source contract, and
 history-mining workflow. The companion website manifest uses this same harness.
 
+`app-pipe-store-load-error` renders the actual store component with synthetic
+network, cache and native ports. Ten outcomes distinguish payload, HTTP and
+network failures from genuine empty catalogs and verify retries to populated
+and empty results without stale error UI. The parent fails six error outcomes
+and preserves four catalog outcomes; the reference and current component pass
+ten. The earlier grader accepted an empty-catalog denial mutant. Run
+`bun test evals/coding-agent/calibrate-pipe-store-error.test.js` for nine controls,
+including that bypass, equivalent copy/cache strategy, unused correct code,
+disabled retry, blanket errors and missing-source setup classification.
+Fixtures and dependency links are installed only when grading starts. This
+checks rendered behavior with controlled ports, not real cache coherence,
+native registry delivery, complete localization, isolation or model capability.
+
 `app-consumer-stale-managed-settings` runs actual settings read, write and reset
 operations, the write queue and build-authority gate against synthetic native,
 store, React rendering and external ports. Confirmed consumer builds release stale
