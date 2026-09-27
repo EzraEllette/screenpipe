@@ -1151,6 +1151,7 @@ impl DatabaseManager {
 	        SELECT
 	            at.timestamp,
 	            at.transcription,
+            at.transcription_engine = 'live' AS is_live,
             at.device as audio_device,
             at.is_input_device,
             ac.file_path as audio_path,
@@ -1180,16 +1181,17 @@ impl DatabaseManager {
             // stretch on the timeline even though the in-app Meeting view (which already
             // UNIONs both tables) shows it. Columns are aliased to match audio_query so the
             // same row-processing path below handles both. There is no audio file / chunk for
-            // a live segment, so audio_path='' and audio_chunk_id=-1 (transcript-only entry).
+            // a live segment, so audio_path='' and a unique negative audio_chunk_id (transcript-only entry).
             let live_query = format!(
                 r#"
 	        SELECT
 	            mts.captured_at AS timestamp,
 	            mts.transcript AS transcription,
+            1 AS is_live,
             mts.device_name AS audio_device,
             CASE WHEN mts.device_type = 'input' THEN 1 ELSE 0 END AS is_input_device,
             '' AS audio_path,
-            -1 AS audio_chunk_id,
+            -mts.id AS audio_chunk_id,
             NULL AS start_time,
             NULL AS end_time,
             mts.speaker_name AS speaker_name,
@@ -1330,14 +1332,23 @@ impl DatabaseManager {
 
                 // Calculate audio time range
                 // start_time and end_time are offsets in seconds from the audio timestamp
-                let audio_start = if let Some(start) = start_offset {
+                let is_live = row.try_get::<bool, _>("is_live").unwrap_or(false);
+                let audio_start = if is_live {
+                    audio_timestamp
+                } else if let Some(start) = start_offset {
                     audio_timestamp + chrono::Duration::milliseconds((start * 1000.0) as i64)
                 } else {
                     audio_timestamp
                 };
 
                 let audio_end = if let Some(end) = end_offset {
-                    audio_timestamp + chrono::Duration::milliseconds((end * 1000.0) as i64)
+                    let remaining = if is_live {
+                        end - start_offset.unwrap_or(0.0)
+                    } else {
+                        end
+                    };
+                    audio_timestamp
+                        + chrono::Duration::milliseconds((remaining.max(0.0) * 1000.0) as i64)
                 } else {
                     // If no end_time, use duration_secs to calculate end
                     let duration: f64 = row.try_get("duration_secs").unwrap_or(5.0);
@@ -1350,6 +1361,7 @@ impl DatabaseManager {
 
                 // Create the audio entry once
                 let audio_entry = AudioEntry {
+                    captured_at: Some(audio_start),
                     transcription: row.get("transcription"),
                     device_name: row.get("audio_device"),
                     is_input: row.get("is_input_device"),

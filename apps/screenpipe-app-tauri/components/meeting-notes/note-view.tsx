@@ -2660,11 +2660,11 @@ export function NoteView({
                 )}
               >
                 {isLive && captureState?.severity !== "warning" ? (
-                  // Live waveform driven by the polled device levels — motion
-                  // (not color) carries the "listening" state. A flat line
-                  // means armed but hearing nothing yet.
+                  // Keep listening while capture continues, including silence
+                  // and transcription backlog. Waiting severity alone does not
+                  // mean the recorder stopped.
                   <ListeningSticks
-                    active={captureState?.severity !== "waiting"}
+                    active={captureState?.recordingContinues ?? true}
                     level={audioLevelToMeterValue(
                       maxAudioDeviceLevel(audioStatusDevices),
                     )}

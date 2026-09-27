@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "suite": "screenpipe-app-coding-agent-regressions",
-  "dataset_version": "2026-09-25.5",
+  "dataset_version": "2026-09-27.1",
   "suite_type": "regression",
   "owner": "screenpipe engineering",
   "policy": {
@@ -3427,6 +3427,308 @@
           }
         ],
         "command": "cd packages/ai-gateway && \"${BUN_BIN:-bun}\" test src/test/eval-background-request.test.ts"
+      }
+    },
+    {
+      "id": "app-canvas-preview-persistence",
+      "name": "Keep unaccepted canvas positions out of saved Live Views",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "d8621a14179173c7eb4df82085d9a209251f4454"
+      },
+      "base_ref": "85ae3c99fc1369b7261667cd5c083730d361ea0e",
+      "oracle_ref": "d8621a14179173c7eb4df82085d9a209251f4454",
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/components/settings/brain-overview.tsx"
+      ],
+      "gate": "advisory",
+      "trigger_paths": [
+        "apps/screenpipe-app-tauri/components/settings/brain-overview.tsx",
+        "apps/screenpipe-app-tauri/components/settings/live-view-canvas.tsx",
+        "apps/screenpipe-app-tauri/lib/live-views/canvas-layout.ts"
+      ],
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "canvas",
+        "persistence"
+      ],
+      "prompt": "A Live View with no saved canvas yet can preview an AI-proposed new block before the user accepts it. Canvas viewport changes during that review currently send positions for the unaccepted block to native persistence, which rejects them. Keep previews visible, but send and persist canvas positions only for blocks in the saved view until acceptance. Resetting the zoom and then zooming in during review must successfully persist the viewport without a save-error notification. Preserve the saved block positions and correct view ownership. Keep ordinary viewport editing without proposals working. For an existing canvas, preserve stored notes and allow note-text edits during review without saving the proposed block. Rejecting all proposals must leave the saved view and annotations intact, make no view-definition save, and allow later canvas editing. Accepting all proposals must persist the added block, leave annotations intact and allow later canvas edits with the newly accepted block positions. Preserve the public BrainOverview interface and the synthetic native command boundary. Exact save-call counts, DOM identities, test IDs, CSS and private helper names are not prescribed. Use synthetic data and external ports only; do not perform live model calls or native/customer storage operations.",
+      "agent_timeout_seconds": 900,
+      "grader_dependency_links": [
+        {
+          "source_path": "apps/screenpipe-app-tauri/node_modules",
+          "destination_path": "apps/screenpipe-app-tauri/node_modules"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/canvas-outcome.fixture.tsx.txt",
+            "destination_path": "apps/screenpipe-app-tauri/eval-canvas-outcome.test.tsx"
+          },
+          {
+            "local_path": "graders/canvas-outcome.config.mjs",
+            "destination_path": "apps/screenpipe-app-tauri/eval-canvas-outcome.config.mjs"
+          }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && node node_modules/vitest/vitest.mjs run --config eval-canvas-outcome.config.mjs"
+      }
+    },
+    {
+      "id": "app-onboarding-notification-transport",
+      "name": "Deliver onboarding follow-ups through the app-control server",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "35caddb4562d3bd15fdb0aa3f7928ce20dfed93c",
+        "pull_request": "https://github.com/screenpipe/screenpipe/pull/5844"
+      },
+      "base_ref": "a7d74fb9adf6c9c286ce9cfa33b2e8c9c62135bc",
+      "oracle_ref": "35caddb4562d3bd15fdb0aa3f7928ce20dfed93c",
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/lib/live-views/onboarding-follow-up.ts",
+        "apps/screenpipe-app-tauri/lib/notifications/app-server.ts"
+      ],
+      "gate": "advisory",
+      "trigger_paths": [
+        "apps/screenpipe-app-tauri/lib/live-views/onboarding-follow-up.ts",
+        "apps/screenpipe-app-tauri/lib/notifications/app-server.ts"
+      ],
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "notifications",
+        "retry",
+        "transport"
+      ],
+      "prompt": "An already scheduled onboarding follow-up dispatches its permitted dashboard work but never delivers its notification because notification requests go to the recording engine. Repair the existing runDueOnboardingLiveViewFollowUp default transport. Keep Pipe runs on the engine transport, deduplicate shared Pipe bindings, and POST notifications to the app-control server using its native runtime port; use localhost:11435 if native configuration lookup fails. Preserve the notification link to the originating Live View. Persist sent status only after notification acceptance, and suppress later duplicate delivery. A rejected notification must remain scheduled for a later retry that can recover and persist sent status. If all engine dispatches fail, schedule a retry without sending a notification. A future deadline or a missing view must perform no transport work. Use synthetic native configuration, storage and network ports. This task fixes delivery of an existing scheduled follow-up; it does not authorize new scheduling, activation of paused work, claim completed Pipe results, or change notification wording or notification policy. Native display, engine completion, multi-window concurrency, recording and live service behavior are outside scope.",
+      "agent_timeout_seconds": 900,
+      "grader_dependency_links": [
+        {
+          "source_path": "apps/screenpipe-app-tauri/node_modules",
+          "destination_path": "apps/screenpipe-app-tauri/node_modules"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/notification-transport.fixture.ts.txt",
+            "destination_path": "apps/screenpipe-app-tauri/eval-notification-transport.test.ts"
+          },
+          {
+            "local_path": "graders/notification-transport.config.mjs",
+            "destination_path": "apps/screenpipe-app-tauri/eval-notification-transport.config.mjs"
+          },
+          {
+            "local_path": "graders/notification-localization.fixture.ts.txt",
+            "destination_path": "apps/screenpipe-app-tauri/eval-notification-localization.ts"
+          }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && node node_modules/vitest/vitest.mjs run --config eval-notification-transport.config.mjs"
+      }
+    },
+    {
+      "id": "ai-gateway-lazy-stream-initial-error",
+      "name": "Expose initial lazy-stream failures before successful stream delivery",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "e8ed10afed8400e943c7ab2cb9c7a18f7b83e5b6",
+        "pull_request": "https://github.com/screenpipe/screenpipe/pull/5840"
+      },
+      "base_ref": "bfaeef6183c6b757f9779b25635d3687466f56e3",
+      "oracle_ref": "e8ed10afed8400e943c7ab2cb9c7a18f7b83e5b6",
+      "oracle_paths": [
+        "packages/ai-gateway/src/providers/openai.ts"
+      ],
+      "gate": "advisory",
+      "trigger_paths": [
+        "packages/ai-gateway/src/providers/openai.ts"
+      ],
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "ai-gateway",
+        "streaming",
+        "error-handling"
+      ],
+      "prompt": "An OpenAI-compatible SDK can return a stream successfully and raise its upstream error only when iteration begins. The provider currently turns that initial failure into an already-successful stream, preventing callers from handling it before delivery. Repair the actual OpenAIProvider streaming boundary so initial quota and service-unavailable errors reject before returning a successful stream, preserving their message, status and code. Preserve SDK creation errors as well. Successful streams must deliver the first and later text or tool-call fragments exactly once and in order, preserve tool identity and argument assembly, completion reasons and usage including cached tokens, and end with one [DONE]. Empty upstream streams must complete normally without invented content. After content has begun, later errors must remain SSE errors with original message and numeric status code, network_error completion and [DONE], retaining the partial content. Preserve the input object and outgoing model/messages/stream request. Use synthetic SDK and telemetry ports and no external network. No particular iterator, private helper or priming implementation is required. Caller fallback selection, retired model-routing policy, cancellation, live provider behavior and model quality are outside this task.",
+      "agent_timeout_seconds": 900,
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/gateway-stream-initial-error.test.js",
+            "destination_path": "evals/coding-agent/graders/gateway-stream-initial-error.test.js"
+          }
+        ],
+        "command": "\"${BUN_BIN:-bun}\" test evals/coding-agent/graders/gateway-stream-initial-error.test.js"
+      }
+    },
+    {
+      "id": "ai-gateway-settlement-replay-atomicity",
+      "name": "Apply replayed hosted-AI settlements once without partial accounting",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "d9ff95802e6566a7b3ea3242800aef59cacb9aa0"
+      },
+      "base_ref": "8b455607ffbaef204a6f6a0a62e973bac6211e48",
+      "oracle_ref": "d9ff95802e6566a7b3ea3242800aef59cacb9aa0",
+      "oracle_paths": [
+        "packages/ai-gateway/src/services/cost-tracker.ts",
+        "packages/ai-gateway/src/services/hosted-ai-settlement-ledger.ts"
+      ],
+      "gate": "advisory",
+      "tags": [
+        "accounting",
+        "retry",
+        "concurrency",
+        "ownership"
+      ],
+      "trigger_paths": [
+        "packages/ai-gateway/src/services/cost-tracker.ts",
+        "packages/ai-gateway/src/services/hosted-ai-settlement-ledger.ts"
+      ],
+      "prompt": "The existing hosted-AI logCost entrypoint can apply the same priced request repeatedly and report success after only part of its accounting succeeds. Repair its budgeted text accounting for calls carrying a stable settlement_id. Sequential or concurrent identical replays must return true and apply the account cost and cost_daily request/cost aggregate exactly once. Different IDs still apply independently. Reusing an applied ID with a different cost or account owner must return false without changing either account or the aggregate. A failed dependent aggregate write must return false with no partial account charge; a later successful retry applies once. If the accounting transaction committed but its acknowledgement was lost, an identical retry must succeed without another charge. Zero-cost replays record one request and no spend. Preserve existing legacy calls without settlement_id: each call still accounts independently. Preserve budgeted:false telemetry-only calls and transcription_budgeted:true calls: they retain their repeated telemetry behavior, with unbudgeted calls not charging accounts and speech calls charging only their existing separate transcription account bucket. Exercise the real logCost entrypoint with synthetic local D1 data, never production services. Any implementation meeting these outcomes is acceptable; do not depend on particular helper names or a particular idempotency-table design. This case does not prove request admission, hold release, all global/background/trial budget windows, deployment activation, or provider billing correctness. Add focused tests for these outcomes.",
+      "agent_timeout_seconds": 900,
+      "grader_dependency_links": [
+        {
+          "source_path": "packages/ai-gateway/node_modules",
+          "destination_path": "packages/ai-gateway/node_modules"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/settlement-replay.fixture.ts.txt",
+            "destination_path": "packages/ai-gateway/src/test/eval-settlement-replay.test.ts"
+          }
+        ],
+        "command": "cd packages/ai-gateway && \"${BUN_BIN:-bun}\" test src/test/eval-settlement-replay.test.ts --timeout=10000"
+      }
+    },
+    {
+      "id": "app-consumer-stale-managed-settings",
+      "name": "Release stale managed settings only on confirmed consumer builds",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "9712ee210f7efc7f85e98bcc1e80c4c4173450dc"
+      },
+      "base_ref": "335ca8d842d1ac0311c038a72a5c3bf084081340",
+      "oracle_ref": "9712ee210f7efc7f85e98bcc1e80c4c4173450dc",
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/lib/hooks/use-settings.tsx",
+        "apps/screenpipe-app-tauri/lib/hooks/use-is-enterprise-build.ts"
+      ],
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "privacy",
+        "settings"
+      ],
+      "prompt": "Consumer and enterprise installations can share a settings store. A confirmed consumer build currently keeps enforcing stale enterpriseManagedSettings, silently undoing personal choices. Repair actual settings loading, updating and resetting so an authoritative native consumer result releases the stale managed values and durably removes that cached policy. Loading must preserve the existing personal screenshot and font choices. Writes must persist new choices, survive reload and retain unrelated settings. Reset must restore ordinary defaults without restoring the stale policy. An enterprise build or failed native build check must continue enforcing and retaining managed screenshot and font values on read, write and reset; unrelated settings must remain editable. With no cached policy, ordinary edits must still persist in all three situations. Exercise the real settings provider and store actions, their queued disk-write completion and reload using synthetic native, storage and external ports. Do not perform native builds, network operations or actual user-file writes. This case checks frontend persistence and its build-authority gate; it does not authorize recording, migration, changes to native policy ownership or real device enforcement. No helper name or implementation structure is required.",
+      "agent_timeout_seconds": 1200,
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/stale-policy.test.js",
+            "destination_path": "evals/coding-agent/graders/stale-policy.test.js"
+          },
+          {
+            "local_path": "graders/stale-policy.mjs",
+            "destination_path": "evals/coding-agent/graders/stale-policy.mjs"
+          }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && \"${BUN_BIN:-bun}\" ../../evals/coding-agent/graders/stale-policy.mjs"
+      }
+    },
+    {
+      "id": "app-public-hosted-ai-allowance",
+      "name": "Keep actual hosted text admission inside public included credits",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "a448803c30e4220d60e8d55003a796b425d9e349"
+      },
+      "base_ref": "f073b89db6894546cf72fddfb2ce39cbe86dfec6",
+      "oracle_ref": "a448803c30e4220d60e8d55003a796b425d9e349",
+      "oracle_paths": [
+        "packages/ai-gateway/src/services/hosted-ai-cost-controls.ts",
+        "packages/ai-gateway/src/services/hosted-ai-policy.ts"
+      ],
+      "gate": "advisory",
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "billing",
+        "admission",
+        "concurrency"
+      ],
+      "trigger_paths": [
+        "packages/ai-gateway/src/services/cost-cap.ts",
+        "packages/ai-gateway/src/services/hosted-ai-cost-controls.ts"
+      ],
+      "prompt": "The existing hosted text reserveDailyCostCap entrypoint can admit spending beyond the public included-credit ceiling when private controls are permissive. Repair actual local-D1 request reservation. With synthetic private request/daily/monthly and trial windows set to10 USD, a request whose estimated hold would cross the public monthly ceiling must return allowed:false and429 with monthly_cost_limit_exceeded, without changing existing spend or leaving a reservation. Public monthly provider-cost ceilings are Free0.10USD, Basic1.50USD and Business/BusinessMax/BusinessUltra4USD; an active Business trial has a4USD total ceiling and must similarly refuse with trial_cost_limit_exceeded. A request with room for two estimated holds must still be admitted for every listed plan/period, persist its positive hold in the existing usage ledger, preserve prior spend, and release exactly that hold through releaseDailyCostReservation. Two simultaneous Basic requests with room for only one-and-a-half holds must admit exactly one; the other must receive429, and releasing the accepted hold must restore prior ledger state. Do not prescribe a specific monthly-versus-temporary-capacity error code for that concurrent refusal. Preserve a stricter private0.80USD monthly ceiling, and fail closed with503/cost_control_unavailable and no hold for malformed private configuration. Use the existing entrypoint, ledger and release interface with a fixed clock and synthetic workerd D1. No particular private helper name, SQL formatting or algorithm is required. This case does not execute HTTP authentication/entitlement, provider dispatch, final cost settlement, global or background windows, incident resets, deployment activation, real financial operations, native behavior, execution isolation or model trials.",
+      "agent_timeout_seconds": 900,
+      "grader_dependency_links": [
+        {
+          "source_path": "packages/ai-gateway/node_modules",
+          "destination_path": "packages/ai-gateway/node_modules"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/public-allowance.fixture.ts.txt",
+            "destination_path": "packages/ai-gateway/src/services/eval-public-allowance.test.ts"
+          }
+        ],
+        "command": "cd packages/ai-gateway && bun test src/services/eval-public-allowance.test.ts"
+      }
+    },
+    {
+      "id": "app-reservation-admission-proof",
+      "name": "Use persisted reservation evidence despite ambiguous write metadata",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "a5749d6d922fec0f642720dbb9a0cbbc3719ea82"
+      },
+      "base_ref": "7a1462b5d0684f5ad4a7c5059f8070ee8a8f2eb6",
+      "oracle_ref": "a5749d6d922fec0f642720dbb9a0cbbc3719ea82",
+      "oracle_paths": [
+        "packages/ai-gateway/src/services/cost-cap.ts"
+      ],
+      "gate": "advisory",
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "billing",
+        "admission",
+        "concurrency"
+      ],
+      "trigger_paths": [
+        "packages/ai-gateway/src/services/cost-cap.ts"
+      ],
+      "prompt": "Repair the existing reserveDailyCostCap request-admission boundary. A successful local-D1 write may store a reservation while its change-count metadata is zero or absent. Healthy requests in those conditions must be admitted with a positive stored hold matching the returned key, account and reserved amount, and releaseDailyCostReservation must remove exactly that hold. Conversely, positive change-count metadata is not sufficient when no row was inserted: a full account with three active interactive reservations must reject the next request with 429 and preserve every existing hold; a reported successful write that stores nothing must refuse with 429 or 503. With a configured interactive limit of three, six concurrent requests under ambiguous write metadata must yield exactly three allowed responses and three 429 responses, matching exactly three stored holds. Preserve ordinary healthy admission and exact release without deleting sibling reservations; a storage write exception must refuse with 503 and leave no hold. The fixture uses a fixed clock, synthetic Business requests for gpt-5.6-luna, the existing usage ledger, and real local workerd D1 with faults restricted to write execution or returned metadata. Keep the public reservation/release entrypoints; no specific private name, SQL formatting or row-reading method is required. This case does not test HTTP authentication, provider dispatch, actual settlement, production D1 fault prevalence, global or background limits, native behavior, execution isolation or model capability.",
+      "agent_timeout_seconds": 900,
+      "grader_dependency_links": [
+        {
+          "source_path": "packages/ai-gateway/node_modules",
+          "destination_path": "packages/ai-gateway/node_modules"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/admission-proof.fixture.ts.txt",
+            "destination_path": "packages/ai-gateway/src/services/eval-admission-proof.test.ts"
+          }
+        ],
+        "command": "cd packages/ai-gateway && bun test src/services/eval-admission-proof.test.ts"
       }
     }
   ]
