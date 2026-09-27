@@ -1078,3 +1078,22 @@ equivalent private names/prose and missing-source setup classification. Fixtures
 and dependency links are added at grading time. This does not establish HTTP
 authentication, accounting, actual provider availability, complete log redaction,
 execution isolation or model performance.
+
+## Active IP quota retention
+
+`ai-gateway-active-ip-quota-retention` runs the actual runtime maintenance entrypoint
+and its SQL against an in-memory SQLite database through a sequential D1 adapter.
+Eight outcomes cover active counts with stale update metadata, reset-date boundaries,
+expired rows with recent metadata, repeated cleanup, other usage tiers, bounded
+backlog cleanup and preserved aggregates. The parent fails four intended outcomes
+and preserves four; the historical reference and current maintenance pass eight.
+The current usage writer also refreshes update timestamps. This case preserves
+legacy or delayed metadata handling, not a claim that every current write is stale.
+
+Run `bun test evals/coding-agent/calibrate-ip-quota-retention.test.js` for nine controls:
+broken/reference/current, unused correct code, equivalent SQL/private bindings,
+no-op cleanup, blanket removal, an unbounded batch and missing-source setup failure.
+Set `EVAL_CALIBRATION_RESULTS_DIR` to retain the per-control logs. No installed
+packages are needed, and the hidden fixture is materialized only at grading.
+These outcomes do not prove workerd/D1 concurrency or atomicity, deployed cron
+delivery, full quota admission, agent isolation or model improvement.

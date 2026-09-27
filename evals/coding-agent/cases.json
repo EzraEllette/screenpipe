@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "suite": "screenpipe-app-coding-agent-regressions",
-  "dataset_version": "2026-09-27.3",
+  "dataset_version": "2026-09-27.4",
   "suite_type": "regression",
   "owner": "screenpipe engineering",
   "policy": {
@@ -3776,6 +3776,42 @@
           "destination_path": "packages/ai-gateway/node_modules"
         }
       ]
+    },
+    {
+      "id": "ai-gateway-active-ip-quota-retention",
+      "name": "Preserve active IP quotas during runtime cleanup",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "6b92dc24ee785857a06a2d39188c8831e98e865f"
+      },
+      "base_ref": "a687dbcb28d83d0691c169fe10aa2863297a0820",
+      "oracle_ref": "6b92dc24ee785857a06a2d39188c8831e98e865f",
+      "oracle_paths": [
+        "packages/ai-gateway/src/services/runtime-state-maintenance.ts"
+      ],
+      "gate": "advisory",
+      "trigger_paths": [
+        "packages/ai-gateway/src/services/runtime-state-maintenance.ts",
+        "packages/ai-gateway/src/services/usage-tracker.ts"
+      ],
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "quota",
+        "preserved-behavior"
+      ],
+      "prompt": "Repair runtime-state cleanup so active IP usage counters are not erased when their update metadata is stale. For ip_tracking rows, retain last_reset dates from seven days ago onward, including the exact seven-day boundary and future dates, preserving the entire row and daily count. Remove older reset dates even when updated_at is recent. Repeating cleanup must neither reset active counts nor resurrect expired rows. Preserve the separate updated_at-based seven-day retention for free_chat_in_flight_v1, free_chat_turn_v2:* and free_chat_budget_v2:* rows, and ninety-day retention for ordinary usage. A single invocation must make progress while deleting no more than 5000 expired IP rows. Retain existing ninety-day aggregate cleanup and one-hour model-health cleanup, including recent data. Keep the public pruneRuntimeState entrypoint. Grade observable stored rows using real SQLite executing production SQL through a sequential synthetic D1 adapter, not SQL spelling, private names, statement counts or helper architecture. This case does not establish native capture, live D1 atomicity/concurrency, cron delivery, current gateway admission policy or execution isolation.",
+      "agent_timeout_seconds": 900,
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/ip-quota-retention.fixture.ts.txt",
+            "destination_path": "packages/ai-gateway/src/test/eval-ip-quota-retention.test.ts"
+          }
+        ],
+        "command": "cd packages/ai-gateway && \"${BUN_BIN:-bun}\" --no-env-file test src/test/eval-ip-quota-retention.test.ts"
+      }
     }
   ]
 }
