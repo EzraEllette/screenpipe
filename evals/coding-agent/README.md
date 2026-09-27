@@ -201,6 +201,12 @@ with zero tests are also reported as `error`, with a
 therefore cannot certify a regression. Plain failed assertions and successful
 commands containing diagnostic words retain their previous outcomes.
 
+Playwright component-test missing-input and missing-export builds are
+`playwright_ct_build_error` when the planned and unrun counts match and the build
+failure diagnostic is complete. Assertions, partial execution, successful exits
+and incomplete diagnostics retain their previous outcomes. The controls use
+synthetic paths and symbols; no private application source is embedded.
+
 This is bounded diagnostic recognition, not universal error attribution. Unknown
 setup/compiler failures, including other test frameworks, may still be ordinary
 nonzero exits. Inspect logs before promoting a case; preserve command exit codes
@@ -209,10 +215,11 @@ change, caused it. Report error counts and inspect candidate-caused errors befor
 comparing model success rates. No isolation or model-quality claim follows.
 
 Run the synthetic runner controls with `bun test ./evals/coding-agent/run.test.ts`.
-Fifty end-to-end controls cover baseline/reference timeouts and signals,
+Fifty-seven end-to-end controls cover baseline/reference timeouts and signals,
 missing ESM/CommonJS modules, Node/Bun syntax and Bun import errors, Vitest
 collection failures (including alias imports and Vite resolve-import diagnostics), missing PostCSS-plugin startup
 failures, Rust/Cargo compilation failures and assertions quoting compiler output,
+Playwright component-test Vite builds that leave all discovered tests unrun,
 quoted diagnostics followed by real assertions, unavailable or non-executable
 commands, genuine failures, assertions quoting diagnostic words or complete diagnostic blocks,
 already-passing baselines and exclusion of known setup/process errors from scores.

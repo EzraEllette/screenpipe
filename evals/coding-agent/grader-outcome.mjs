@@ -14,6 +14,20 @@ export function classifyGraderError(grader) {
   // stdout. Use the last summary so diagnostic text printed by a test cannot
   // hide a later genuine assertion failure. Unknown formats still need review.
   const stdout = (grader.stdout ?? "").replace(/\x1b\[[0-9;]*m/g, "");
+  // Playwright CT can discover tests and then fail its Vite build before any
+  // test runs. Require matching planned/unrun counts, a known build diagnostic
+  // and the build terminator. Executed outcomes or assertion headers must win
+  // even when their messages quote these diagnostics.
+  const planned = stdout.match(/^Running ([1-9]\d*) tests? using [1-9]\d* workers?\s*$/m)?.[1];
+  const unrun = stdout.match(/^\s*([1-9]\d*) did not run\s*$/m)?.[1];
+  const noExecutedPlaywright = !/^\s*[1-9]\d* (?:passed|failed|skipped|flaky|timed out)\b/m.test(stdout);
+  const noAssertion = !/^(?:\s*Error: expect\(|\s*AssertionError(?: \[[^\]]+\])?:)/m.test(stdout + "\n" + stderr);
+  if (planned && unrun === planned && noExecutedPlaywright && noAssertion &&
+      /^✗ Build failed in /m.test(stderr) &&
+      (/^Error: \[vite:load-fallback\] Could not load [^\n]+: ENOENT:/m.test(stdout) ||
+       /^RollupError: [^\n]+ is not exported by [^\n]+, imported by /m.test(stdout))) {
+    return "playwright_ct_build_error";
+  }
   const summary = [...stdout.matchAll(/^\s*Tests\s+(.+)$/gm)].at(-1)?.[1]?.trim();
   if (summary === "no tests" && /^\s*Test Files\s+\d+ failed/m.test(stdout) &&
       /Failed Suites [1-9]/.test(stderr) &&
