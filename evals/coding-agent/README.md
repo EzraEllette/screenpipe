@@ -13,6 +13,18 @@ The current app corpus contains 80 git-mined regressions. See
 [DESIGN.md](./DESIGN.md) for the Anthropic guidance, source contract, and
 history-mining workflow. The companion website manifest uses this same harness.
 
+`app-settings-restart-persistence` runs the actual settings provider, write queue
+and update banner with synthetic React, storage and native restart ports. Four
+outcomes cover a delayed save, another edit during the drain, failed-save refusal
+with recovery, and an idle restart. The parent fails three and preserves one;
+the reference and current source pass four. Run
+`bun test evals/coding-agent/calibrate-settings-restart.test.js` for nine controls,
+including unawaited drain, swallowed failures, unused correct code, blanket
+restart denial and missing-source classification. The fixture is installed only
+when grading begins. This checks the persisted snapshot at the macOS/Linux
+handoff, not OS durability, encryption, native installation, Windows behavior,
+cross-window synchronization, isolation or model performance.
+
 `app-pipe-store-load-error` renders the actual store component with synthetic
 network, cache and native ports. Ten outcomes distinguish payload, HTTP and
 network failures from genuine empty catalogs and verify retries to populated

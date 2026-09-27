@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "suite": "screenpipe-app-coding-agent-regressions",
-  "dataset_version": "2026-09-27.4",
+  "dataset_version": "2026-09-27.5",
   "suite_type": "regression",
   "owner": "screenpipe engineering",
   "policy": {
@@ -3811,6 +3811,39 @@
           }
         ],
         "command": "cd packages/ai-gateway && \"${BUN_BIN:-bun}\" --no-env-file test src/test/eval-ip-quota-retention.test.ts"
+      }
+    },
+    {
+      "id": "app-settings-restart-persistence",
+      "name": "Persist accepted settings before update restart",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "46402fe054406730ef291fc7de18a7ded6f975ce"
+      },
+      "base_ref": "4e7b00fdb6317594150daefacb60d69eab8baaba",
+      "oracle_ref": "46402fe054406730ef291fc7de18a7ded6f975ce",
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/lib/hooks/use-settings.tsx",
+        "apps/screenpipe-app-tauri/components/update-banner.tsx"
+      ],
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "settings",
+        "update",
+        "persistence"
+      ],
+      "prompt": "A user enables Auto-update and immediately chooses Restart to update, but the restarted app can retain the old setting. Repair the actual settings persistence and update-banner flow so accepted writes finish saving before the macOS/Linux native restart handoff. Include another settings edit accepted while the first save is pending: both changes must be saved before the handoff. A failed save must prevent the handoff and leave the banner usable; a later successful save must allow a retry. Restart with no pending writes must still proceed and preserve already saved Auto-update and font-size settings. No particular helper names, queue structure or private implementation is required. Native installation, OS persistence guarantees, encryption, Windows update behavior and cross-window synchronization are outside this task.",
+      "agent_timeout_seconds": 1200,
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/settings-restart-persistence.test.js",
+            "destination_path": "evals/coding-agent/graders/settings-restart-persistence.test.js"
+          }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && \"${BUN_BIN:-bun}\" test ../../evals/coding-agent/graders/settings-restart-persistence.test.js"
       }
     }
   ]
