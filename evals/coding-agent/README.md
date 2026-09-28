@@ -13,6 +13,44 @@ The current app corpus contains 80 git-mined regressions. See
 [DESIGN.md](./DESIGN.md) for the Anthropic guidance, source contract, and
 history-mining workflow. The companion website manifest uses this same harness.
 
+`app-chat-foreground-save-ownership` runs the real foreground event hook and
+React lifecycle with synthetic event, persistence and native ports. Four outcomes
+cover switches to new and existing empty sessions, stable-session saves and empty
+events. The parent fails both switched saves and preserves two outcomes; the
+reference and current source pass four. Run
+`bun test evals/coding-agent/calibrate-foreground-save.test.js` for eight controls,
+including an equivalent callback-refresh solution, unused correct code, disabled
+saves, wrong destinations and missing-source setup classification. The persistence
+port follows the existing save callback contract and serializes synthetic records.
+This does not test actual filesystem durability, full session-switch integration,
+concurrent/background saves, native event delivery, isolation or model quality.
+Fixtures and dependency links are installed only when grading starts.
+
+`app-settings-restart-persistence` runs the actual settings provider, write queue
+and update banner with synthetic React, storage and native restart ports. Four
+outcomes cover a delayed save, another edit during the drain, failed-save refusal
+with recovery, and an idle restart. The parent fails three and preserves one;
+the reference and current source pass four. Run
+`bun test evals/coding-agent/calibrate-settings-restart.test.js` for nine controls,
+including unawaited drain, swallowed failures, unused correct code, blanket
+restart denial and missing-source classification. The fixture is installed only
+when grading begins. This checks the persisted snapshot at the macOS/Linux
+handoff, not OS durability, encryption, native installation, Windows behavior,
+cross-window synchronization, isolation or model performance.
+
+`app-pipe-store-load-error` renders the actual store component with synthetic
+network, cache and native ports. Ten outcomes distinguish payload, HTTP and
+network failures from genuine empty catalogs and verify retries to populated
+and empty results without stale error UI. The parent fails six error outcomes
+and preserves four catalog outcomes; the reference and current component pass
+ten. The earlier grader accepted an empty-catalog denial mutant. Run
+`bun test evals/coding-agent/calibrate-pipe-store-error.test.js` for nine controls,
+including that bypass, equivalent copy/cache strategy, unused correct code,
+disabled retry, blanket errors and missing-source setup classification.
+Fixtures and dependency links are installed only when grading starts. This
+checks rendered behavior with controlled ports, not real cache coherence,
+native registry delivery, complete localization, isolation or model capability.
+
 `app-consumer-stale-managed-settings` runs actual settings read, write and reset
 operations, the write queue and build-authority gate against synthetic native,
 store, React rendering and external ports. Confirmed consumer builds release stale
@@ -188,6 +226,12 @@ with zero tests are also reported as `error`, with a
 therefore cannot certify a regression. Plain failed assertions and successful
 commands containing diagnostic words retain their previous outcomes.
 
+Playwright component-test missing-input and missing-export builds are
+`playwright_ct_build_error` when the planned and unrun counts match and the build
+failure diagnostic is complete. Assertions, partial execution, successful exits
+and incomplete diagnostics retain their previous outcomes. The controls use
+synthetic paths and symbols; no private application source is embedded.
+
 This is bounded diagnostic recognition, not universal error attribution. Unknown
 setup/compiler failures, including other test frameworks, may still be ordinary
 nonzero exits. Inspect logs before promoting a case; preserve command exit codes
@@ -196,10 +240,11 @@ change, caused it. Report error counts and inspect candidate-caused errors befor
 comparing model success rates. No isolation or model-quality claim follows.
 
 Run the synthetic runner controls with `bun test ./evals/coding-agent/run.test.ts`.
-Fifty end-to-end controls cover baseline/reference timeouts and signals,
+Fifty-seven end-to-end controls cover baseline/reference timeouts and signals,
 missing ESM/CommonJS modules, Node/Bun syntax and Bun import errors, Vitest
 collection failures (including alias imports and Vite resolve-import diagnostics), missing PostCSS-plugin startup
 failures, Rust/Cargo compilation failures and assertions quoting compiler output,
+Playwright component-test Vite builds that leave all discovered tests unrun,
 quoted diagnostics followed by real assertions, unavailable or non-executable
 commands, genuine failures, assertions quoting diagnostic words or complete diagnostic blocks,
 already-passing baselines and exclusion of known setup/process errors from scores.
@@ -1041,3 +1086,69 @@ pass seven. Run `bun test evals/coding-agent/calibrate-admission-proof.test.js`
 for ten controls, including an equivalent row-reading method. This is not HTTP
 authentication, provider execution, settlement, production fault prevalence,
 agent isolation or a model trial.
+
+## Provider spend-cap guidance
+
+`ai-gateway-provider-cap-guidance` invokes the existing chat handler with
+synthetic provider and telemetry ports. Nine outcomes cover JSON and streaming
+cap errors, exhausted chains, successful fallback, intact input, healthy replies,
+malformed images, empty input, authentication failures and ordinary throttling.
+The parent fails three guidance outcomes and preserves six; reference/current
+pass nine. Fallback already works in the parent.
+
+Run `bun test evals/coding-agent/calibrate-provider-cap-guidance.test.js` with
+gateway dependencies available. Eleven controls include unused correct code,
+raw error leakage, blanket classification, lost fallback/tools, duplicate alerts,
+equivalent private names/prose and missing-source setup classification. Fixtures
+and dependency links are added at grading time. This does not establish HTTP
+authentication, accounting, actual provider availability, complete log redaction,
+execution isolation or model performance.
+
+## Active IP quota retention
+
+`ai-gateway-active-ip-quota-retention` runs the actual runtime maintenance entrypoint
+and its SQL against an in-memory SQLite database through a sequential D1 adapter.
+Eight outcomes cover active counts with stale update metadata, reset-date boundaries,
+expired rows with recent metadata, repeated cleanup, other usage tiers, bounded
+backlog cleanup and preserved aggregates. The parent fails four intended outcomes
+and preserves four; the historical reference and current maintenance pass eight.
+The current usage writer also refreshes update timestamps. This case preserves
+legacy or delayed metadata handling, not a claim that every current write is stale.
+
+Run `bun test evals/coding-agent/calibrate-ip-quota-retention.test.js` for nine controls:
+broken/reference/current, unused correct code, equivalent SQL/private bindings,
+no-op cleanup, blanket removal, an unbounded batch and missing-source setup failure.
+Set `EVAL_CALIBRATION_RESULTS_DIR` to retain the per-control logs. No installed
+packages are needed, and the hidden fixture is materialized only at grading.
+These outcomes do not prove workerd/D1 concurrency or atomicity, deployed cron
+delivery, full quota admission, agent isolation or model improvement.
+
+## Settings identity refusal
+
+`app-settings-telemetry-identity` renders the real SettingsProvider with synthetic
+settings, native and PostHog ports. Five outcomes cover explicit user refusal,
+runtime refusal, a pending runtime decision, opted-in account identity and
+unmounting before version completion. The historical parent fails four and
+preserves one; reference and current source pass five.
+
+Run `bun test evals/coding-agent/calibrate-telemetry-identity.test.js` for eight
+controls, including unused correct source, blanket suppression, ignored user
+preference, equivalent private names and missing-source setup classification.
+Fixtures and dependencies are installed only when grading starts. This does not
+establish native environment parsing, actual capture delivery, unknown preference
+or failed IPC policy, execution isolation or model performance.
+
+`app-chat-timeline-offset` renders the actual MarkdownBlock and Markdown parser with synthetic native/store ports. Twelve outcomes cover raw and encoded offsets, captured instants, timestamp precedence over start_time, invalid timestamps and preserved frame/artifact/web links. Run `bun test evals/coding-agent/calibrate-chat-timeline-offset.test.js` for grader controls. This is not native event delivery, OS deeplink handling, frame retrieval, sub-millisecond precision, execution isolation or a model trial. Graders and dependency links are installed only when grading begins.
+
+`app-local-api-authority` runs the actual localFetch wrapper, global fetch
+interceptor and shared notification action executor with synthetic native config
+and transport. Twenty-four outcomes cover deceptive URL authorities, configured
+ports, document-relative URLs, notification refusal and preserved local auth,
+request bodies, explicit auth, disabled auth and key-refresh retry. The parent
+fails fourteen and preserves ten; reference/current pass all twenty-four.
+Run `bun test evals/coding-agent/calibrate-local-api-authority.test.js` for eight
+controls, including equivalent helper names, inactive correct code, blanket auth
+suppression, missing notification guards and missing-source setup classification.
+Fixtures/dependencies are installed only at grading. This does not establish
+native transport, redirects/cookies, toast component behavior, server authorization,
+agent isolation or model performance.

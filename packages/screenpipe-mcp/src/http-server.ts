@@ -201,11 +201,13 @@ function makeFetchAPI(screenpipePort: number, client: () => McpClient) {
     /\/+$/,
     "",
   );
+  const apiKey = process.env.SCREENPIPE_LOCAL_API_KEY || process.env.SCREENPIPE_API_KEY;
   return async (endpoint: string, options: RequestInit = {}): Promise<Response> =>
     fetch(`${base}${endpoint}`, {
       ...options,
       headers: {
         "Content-Type": "application/json",
+        ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
         "x-screenpipe-client": "mcp",
         "x-screenpipe-agent": client(),
         ...options.headers,

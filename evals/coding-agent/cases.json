@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "suite": "screenpipe-app-coding-agent-regressions",
-  "dataset_version": "2026-09-27.1",
+  "dataset_version": "2026-09-28.1",
   "suite_type": "regression",
   "owner": "screenpipe engineering",
   "policy": {
@@ -348,10 +348,10 @@
       "name": "Distinguish pipe-store failures from an empty catalog",
       "source": {
         "kind": "git_regression",
-        "fix_commit": "8dbf6e47b"
+        "fix_commit": "8dbf6e47bac2bd033eaca3d7da649fce585b1c5f"
       },
-      "base_ref": "8dbf6e47b^",
-      "oracle_ref": "8dbf6e47b",
+      "base_ref": "e541a77536ccf33cd9668f18aad065a95bd19d42",
+      "oracle_ref": "8dbf6e47bac2bd033eaca3d7da649fce585b1c5f",
       "tags": [
         "regression",
         "escaped-failure",
@@ -359,23 +359,27 @@
         "error-state",
         "retry"
       ],
-      "prompt": "When the pipe store request fails, the app renders the same empty state as a successfully loaded catalog with no pipes. Surface a clear load-error state with a working retry action, keep genuine empty results distinct, and recover to the normal store after a successful retry without stale error UI.",
+      "prompt": "When the pipe store request fails, the app renders the same empty state as a successfully loaded catalog with no pipes. Show a clear load-error state and a working retry for network failures, unsuccessful HTTP responses, and error payloads. Keep successful empty catalogs distinct, including bare arrays and lists wrapped in data or pipes. A successful retry to either populated or empty results must clear stale error and retry UI. Preserve the installed-tasks tab and successful catalog content. Wording and internal cache implementation may vary.",
       "agent_timeout_seconds": 900,
-      "dependency_links": [
+      "grader": {
+        "timeout_seconds": 300,
+        "fixtures": [
+          {
+            "local_path": "graders/pipe-store-error.fixture.tsx.txt",
+            "destination_path": "apps/screenpipe-app-tauri/components/__tests__/pipe-store-error-state.test.tsx"
+          }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && node node_modules/vitest/vitest.mjs run --config vitest.config.ts components/__tests__/pipe-store-error-state.test.tsx --maxWorkers=1 --minWorkers=1"
+      },
+      "grader_dependency_links": [
         {
           "source_path": "apps/screenpipe-app-tauri/node_modules",
           "destination_path": "apps/screenpipe-app-tauri/node_modules"
         }
       ],
-      "grader": {
-        "timeout_seconds": 300,
-        "fixtures": [
-          {
-            "source_path": "apps/screenpipe-app-tauri/components/__tests__/pipe-store-error-state.test.tsx"
-          }
-        ],
-        "command": "cd apps/screenpipe-app-tauri && bun x vitest run --config vitest.config.ts components/__tests__/pipe-store-error-state.test.tsx"
-      }
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/components/pipe-store.tsx"
+      ]
     },
     {
       "id": "app-learning-handoff-always-finishes",
@@ -3729,6 +3733,294 @@
           }
         ],
         "command": "cd packages/ai-gateway && bun test src/services/eval-admission-proof.test.ts"
+      }
+    },
+    {
+      "id": "ai-gateway-provider-cap-guidance",
+      "name": "Explain provider spend-cap outages without blaming client input",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "4e6c53848e337eacb8e5eff18843604800be05d8",
+        "pull_request": "https://github.com/screenpipe/screenpipe/pull/5653"
+      },
+      "base_ref": "6b8f11c0c1ed933f4db6342d9b38c6160572cdff",
+      "oracle_ref": "4e6c53848e337eacb8e5eff18843604800be05d8",
+      "oracle_paths": [
+        "packages/ai-gateway/src/handlers/chat.ts"
+      ],
+      "gate": "advisory",
+      "trigger_paths": [
+        "packages/ai-gateway/src/handlers/chat.ts"
+      ],
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "provider-error",
+        "preserved-behavior"
+      ],
+      "prompt": "Repair the existing chat-completions handler when a provider rejects work with HTTP 400 because its organization API usage limit has been reached. For explicit single-model JSON and streaming requests, and when every model in an explicit fallback chain has this cap, retain the 400 response but explain the provider capacity/usage limit and recovery through retrying later, a reset time or a different provider. Do not return nested provider error JSON, provider request identifiers, or blame malformed tools or unsupported parameters. Suppress redundant exception reports for this known provider cap while retaining failed-model health records. Preserve a successful fallback response, its original messages/tools and the caller request; fallback already works in the broken revision. Preserve healthy explicit replies, malformed-image client errors, rejection of empty messages before provider work, provider authentication failures with 401 and their API-key detail, and ordinary 429 throttling with retry guidance rather than a provider-cap explanation. Keep the public handler entrypoint. Grade observable response and provider/telemetry effects, not private helper names or exact advisory wording. Tests use synthetic provider and telemetry ports, no live requests. HTTP authentication, budget accounting, actual provider availability, log redaction beyond returned error payloads and execution isolation are outside this case.",
+      "agent_timeout_seconds": 900,
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/provider-cap-guidance.fixture.ts.txt",
+            "destination_path": "packages/ai-gateway/src/test/eval-provider-cap.test.ts"
+          }
+        ],
+        "command": "cd packages/ai-gateway && \"${BUN_BIN:-bun}\" --no-env-file test src/test/eval-provider-cap.test.ts"
+      },
+      "grader_dependency_links": [
+        {
+          "source_path": "packages/ai-gateway/node_modules",
+          "destination_path": "packages/ai-gateway/node_modules"
+        }
+      ]
+    },
+    {
+      "id": "ai-gateway-active-ip-quota-retention",
+      "name": "Preserve active IP quotas during runtime cleanup",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "6b92dc24ee785857a06a2d39188c8831e98e865f"
+      },
+      "base_ref": "a687dbcb28d83d0691c169fe10aa2863297a0820",
+      "oracle_ref": "6b92dc24ee785857a06a2d39188c8831e98e865f",
+      "oracle_paths": [
+        "packages/ai-gateway/src/services/runtime-state-maintenance.ts"
+      ],
+      "gate": "advisory",
+      "trigger_paths": [
+        "packages/ai-gateway/src/services/runtime-state-maintenance.ts",
+        "packages/ai-gateway/src/services/usage-tracker.ts"
+      ],
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "quota",
+        "preserved-behavior"
+      ],
+      "prompt": "Repair runtime-state cleanup so active IP usage counters are not erased when their update metadata is stale. For ip_tracking rows, retain last_reset dates from seven days ago onward, including the exact seven-day boundary and future dates, preserving the entire row and daily count. Remove older reset dates even when updated_at is recent. Repeating cleanup must neither reset active counts nor resurrect expired rows. Preserve the separate updated_at-based seven-day retention for free_chat_in_flight_v1, free_chat_turn_v2:* and free_chat_budget_v2:* rows, and ninety-day retention for ordinary usage. A single invocation must make progress while deleting no more than 5000 expired IP rows. Retain existing ninety-day aggregate cleanup and one-hour model-health cleanup, including recent data. Keep the public pruneRuntimeState entrypoint. Grade observable stored rows using real SQLite executing production SQL through a sequential synthetic D1 adapter, not SQL spelling, private names, statement counts or helper architecture. This case does not establish native capture, live D1 atomicity/concurrency, cron delivery, current gateway admission policy or execution isolation.",
+      "agent_timeout_seconds": 900,
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/ip-quota-retention.fixture.ts.txt",
+            "destination_path": "packages/ai-gateway/src/test/eval-ip-quota-retention.test.ts"
+          }
+        ],
+        "command": "cd packages/ai-gateway && \"${BUN_BIN:-bun}\" --no-env-file test src/test/eval-ip-quota-retention.test.ts"
+      }
+    },
+    {
+      "id": "app-settings-restart-persistence",
+      "name": "Persist accepted settings before update restart",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "46402fe054406730ef291fc7de18a7ded6f975ce"
+      },
+      "base_ref": "4e7b00fdb6317594150daefacb60d69eab8baaba",
+      "oracle_ref": "46402fe054406730ef291fc7de18a7ded6f975ce",
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/lib/hooks/use-settings.tsx",
+        "apps/screenpipe-app-tauri/components/update-banner.tsx"
+      ],
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "settings",
+        "update",
+        "persistence"
+      ],
+      "prompt": "A user enables Auto-update and immediately chooses Restart to update, but the restarted app can retain the old setting. Repair the actual settings persistence and update-banner flow so accepted writes finish saving before the macOS/Linux native restart handoff. Include another settings edit accepted while the first save is pending: both changes must be saved before the handoff. A failed save must prevent the handoff and leave the banner usable; a later successful save must allow a retry. Restart with no pending writes must still proceed and preserve already saved Auto-update and font-size settings. No particular helper names, queue structure or private implementation is required. Native installation, OS persistence guarantees, encryption, Windows update behavior and cross-window synchronization are outside this task.",
+      "agent_timeout_seconds": 1200,
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/settings-restart-persistence.test.js",
+            "destination_path": "evals/coding-agent/graders/settings-restart-persistence.test.js"
+          }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && \"${BUN_BIN:-bun}\" test ../../evals/coding-agent/graders/settings-restart-persistence.test.js"
+      }
+    },
+    {
+      "id": "app-chat-foreground-save-ownership",
+      "name": "Keep foreground event saves within the active conversation",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "a5230a0d7a993a1a9a20781ca5abd6ace69e77b4"
+      },
+      "base_ref": "4c2f43f5c7b519dab72564a66541e4078a38963f",
+      "oracle_ref": "a5230a0d7a993a1a9a20781ca5abd6ace69e77b4",
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/components/chat/standalone/hooks/use-pi-foreground-events.ts"
+      ],
+      "gate": "advisory",
+      "trigger_paths": [
+        "apps/screenpipe-app-tauri/components/chat/standalone/hooks/use-pi-foreground-events.ts",
+        "apps/screenpipe-app-tauri/components/hooks/use-chat-conversations.ts"
+      ],
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "chat",
+        "persistence",
+        "session-ownership"
+      ],
+      "prompt": "After switching the foreground chat session, an echoed user message can replace the previous conversation's saved messages. Fix the foreground event path so a nonempty user message-start saves its user row and one assistant placeholder into the active session only, whether that target is new or already exists as an empty conversation. Preserve the previous conversation's contents and avoid creating extra conversation records. Preserve ordinary stable-session saves. An empty user event after switching must neither write a conversation nor add visible messages. Keep the public hooks and save callback interfaces compatible. This task covers the real React foreground event lifecycle with synthetic event, storage and native ports; it does not require native filesystem execution. No particular private helper name, callback-refresh strategy or implementation is prescribed.",
+      "agent_timeout_seconds": 900,
+      "grader_dependency_links": [
+        {
+          "source_path": "apps/screenpipe-app-tauri/node_modules",
+          "destination_path": "apps/screenpipe-app-tauri/node_modules"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/foreground-save-ownership.fixture.tsx.txt",
+            "destination_path": "apps/screenpipe-app-tauri/eval-stale-session.test.tsx"
+          }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && node node_modules/vitest/vitest.mjs run --config vitest.config.ts eval-stale-session.test.tsx"
+      }
+    },
+    {
+      "id": "app-settings-telemetry-identity",
+      "name": "Respect runtime and user refusal before settings identity effects",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "d57b2fb92d84f45a2b2374146a7fc0300ae95def"
+      },
+      "base_ref": "0bae3b170b3cd603381df4278d5e6311ba857734",
+      "oracle_ref": "d57b2fb92d84f45a2b2374146a7fc0300ae95def",
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/lib/hooks/use-settings.tsx",
+        "apps/screenpipe-app-tauri/lib/telemetry-env.ts"
+      ],
+      "gate": "advisory",
+      "trigger_paths": [
+        "apps/screenpipe-app-tauri/lib/hooks/use-settings.tsx",
+        "apps/screenpipe-app-tauri/lib/telemetry-env.ts"
+      ],
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "privacy",
+        "telemetry",
+        "async-lifecycle"
+      ],
+      "prompt": "The settings provider can alias and identify an account even when the saved analytics preference is explicitly disabled or the native runtime reports telemetry disabled. Repair the actual SettingsProvider identity effect. Neither alias nor identify may run for either refusal, or while the native runtime decision is pending. Once that decision permits telemetry and the user explicitly opted in, preserve account aliasing and identification by the Clerk account ID, including the saved email and stable per-install analytics ID. Unmounting the provider while the app-version lookup is pending must prevent a late identify call. Keep the existing public provider/settings interfaces and native command contract compatible. Tests use actual React lifecycle with synthetic native, settings-store and PostHog ports. No particular private helper or gating structure is required. Native environment parsing, capture transport, unknown preferences and failed IPC policy are outside this task.",
+      "agent_timeout_seconds": 900,
+      "grader_dependency_links": [
+        {
+          "source_path": "apps/screenpipe-app-tauri/node_modules",
+          "destination_path": "apps/screenpipe-app-tauri/node_modules"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/telemetry-identity.fixture.tsx.txt",
+            "destination_path": "apps/screenpipe-app-tauri/eval-telemetry-caller.test.tsx"
+          }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && node node_modules/vitest/vitest.mjs run --config vitest.config.ts eval-telemetry-caller.test.tsx"
+      }
+    },
+    {
+      "id": "app-chat-timeline-offset",
+      "name": "Preserve captured instants when opening chat timeline citations",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "e6df687c7f674fbdda546925be17e1115a8f2fa1"
+      },
+      "base_ref": "afcee637bb263ada9ac34911052f693553c4333a",
+      "oracle_ref": "e6df687c7f674fbdda546925be17e1115a8f2fa1",
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/components/chat/markdown-block.tsx",
+        "apps/screenpipe-app-tauri/lib/timeline-deeplink.ts",
+        "apps/screenpipe-app-tauri/lib/timeline-navigation.ts"
+      ],
+      "trigger_paths": [
+        "apps/screenpipe-app-tauri/components/chat/markdown-block.tsx",
+        "apps/screenpipe-app-tauri/lib/timeline-deeplink.ts",
+        "apps/screenpipe-app-tauri/lib/timeline-navigation.ts"
+      ],
+      "gate": "advisory",
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "chat",
+        "timeline",
+        "navigation"
+      ],
+      "prompt": "Clicking an AI chat timeline citation can silently do nothing when its ISO timestamp has a raw positive timezone offset. Repair the rendered MarkdownBlock click path so timestamp links preserve the captured instant to millisecond precision across raw +00:00 and nonzero positive offsets, percent-encoded offsets, negative offsets and Z timestamps. Support start_time links, with timestamp taking precedence when both are present. Valid links must update pending timeline navigation, show the Main window and emit the existing navigate-to-timestamp event for the same instant; semantically equivalent timestamp formatting is allowed. Invalid timestamps must produce no navigation or viewer effects. Preserve frame navigation, local artifact in-chat preview callbacks and ordinary web-link destinations. Keep public component and native event/command contracts compatible. No particular parser or private helper is required. The task concerns chat clicks with actual React/Markdown rendering and synthetic native/store ports; native event delivery, the separate OS deeplink handler, timeline frame retrieval and sub-millisecond precision are outside this task.",
+      "agent_timeout_seconds": 900,
+      "grader_dependency_links": [
+        {
+          "source_path": "apps/screenpipe-app-tauri/node_modules",
+          "destination_path": "apps/screenpipe-app-tauri/node_modules"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/chat-timeline-offset.fixture.tsx.txt",
+            "destination_path": "apps/screenpipe-app-tauri/components/chat/eval-timeline-offset.test.tsx"
+          }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && node node_modules/vitest/vitest.mjs run --config vitest.config.ts components/chat/eval-timeline-offset.test.tsx"
+      }
+    },
+    {
+      "id": "app-local-api-authority",
+      "name": "Keep local API credentials within the configured authority",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "107d957aca3523cd309f56d93bd5ab20ce6519bf"
+      },
+      "base_ref": "ebeef3e7249ebcc2d1a9d1824c3b2fb68a1cfacb",
+      "oracle_ref": "107d957aca3523cd309f56d93bd5ab20ce6519bf",
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/lib/api.ts",
+        "apps/screenpipe-app-tauri/lib/notifications/actions.ts"
+      ],
+      "trigger_paths": [
+        "apps/screenpipe-app-tauri/lib/api.ts",
+        "apps/screenpipe-app-tauri/lib/notifications/actions.ts"
+      ],
+      "gate": "advisory",
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "privacy",
+        "credentials",
+        "notifications"
+      ],
+      "prompt": "The local API fetch wrapper and global fetch interceptor can attach the local bearer key to an external URL, and the shared notification API action executor can dispatch to an external target. Repair these actual request paths. Only HTTP localhost or 127.0.0.1 at the configured API port may receive automatically supplied local authentication; do not mistake URL credentials, host suffixes or path/query text for authority. localFetch must continue passing absolute non-local URLs through without adding its key. Resolve localFetch relative paths against the configured local API, and global fetch relative paths against document.baseURI. Preserve authenticated local requests, disabled authentication, explicit caller Authorization, and a local401 key-refresh retry. Shared notification API actions must refuse non-local targets (including protocol-relative URLs) with a rejected operation and zero transport calls, while preserving local POST method/body. Check non-default configured ports and wrong-protocol/wrong-port targets. Use existing public entrypoints and contracts; no particular helper or parser is required. This task covers the actual JavaScript wrapper/interceptor/shared action executor with synthetic native configuration and transport, not the separate toast component, browser redirects/cookies, native network delivery or server authorization.",
+      "agent_timeout_seconds": 900,
+      "grader_dependency_links": [
+        {
+          "source_path": "apps/screenpipe-app-tauri/node_modules",
+          "destination_path": "apps/screenpipe-app-tauri/node_modules"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/local-api-authority.fixture.ts.txt",
+            "destination_path": "apps/screenpipe-app-tauri/lib/eval-local-api-authority.test.ts"
+          }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && node node_modules/vitest/vitest.mjs run --config vitest.config.ts lib/eval-local-api-authority.test.ts"
       }
     }
   ]
