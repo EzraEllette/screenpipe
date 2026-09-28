@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "suite": "screenpipe-app-coding-agent-regressions",
-  "dataset_version": "2026-09-27.5",
+  "dataset_version": "2026-09-28.1",
   "suite_type": "regression",
   "owner": "screenpipe engineering",
   "policy": {
@@ -3844,6 +3844,49 @@
           }
         ],
         "command": "cd apps/screenpipe-app-tauri && \"${BUN_BIN:-bun}\" test ../../evals/coding-agent/graders/settings-restart-persistence.test.js"
+      }
+    },
+    {
+      "id": "app-chat-foreground-save-ownership",
+      "name": "Keep foreground event saves within the active conversation",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "a5230a0d7a993a1a9a20781ca5abd6ace69e77b4"
+      },
+      "base_ref": "4c2f43f5c7b519dab72564a66541e4078a38963f",
+      "oracle_ref": "a5230a0d7a993a1a9a20781ca5abd6ace69e77b4",
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/components/chat/standalone/hooks/use-pi-foreground-events.ts"
+      ],
+      "gate": "advisory",
+      "trigger_paths": [
+        "apps/screenpipe-app-tauri/components/chat/standalone/hooks/use-pi-foreground-events.ts",
+        "apps/screenpipe-app-tauri/components/hooks/use-chat-conversations.ts"
+      ],
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "chat",
+        "persistence",
+        "session-ownership"
+      ],
+      "prompt": "After switching the foreground chat session, an echoed user message can replace the previous conversation's saved messages. Fix the foreground event path so a nonempty user message-start saves its user row and one assistant placeholder into the active session only, whether that target is new or already exists as an empty conversation. Preserve the previous conversation's contents and avoid creating extra conversation records. Preserve ordinary stable-session saves. An empty user event after switching must neither write a conversation nor add visible messages. Keep the public hooks and save callback interfaces compatible. This task covers the real React foreground event lifecycle with synthetic event, storage and native ports; it does not require native filesystem execution. No particular private helper name, callback-refresh strategy or implementation is prescribed.",
+      "agent_timeout_seconds": 900,
+      "grader_dependency_links": [
+        {
+          "source_path": "apps/screenpipe-app-tauri/node_modules",
+          "destination_path": "apps/screenpipe-app-tauri/node_modules"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/foreground-save-ownership.fixture.tsx.txt",
+            "destination_path": "apps/screenpipe-app-tauri/eval-stale-session.test.tsx"
+          }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && node node_modules/vitest/vitest.mjs run --config vitest.config.ts eval-stale-session.test.tsx"
       }
     }
   ]

@@ -13,6 +13,19 @@ The current app corpus contains 80 git-mined regressions. See
 [DESIGN.md](./DESIGN.md) for the Anthropic guidance, source contract, and
 history-mining workflow. The companion website manifest uses this same harness.
 
+`app-chat-foreground-save-ownership` runs the real foreground event hook and
+React lifecycle with synthetic event, persistence and native ports. Four outcomes
+cover switches to new and existing empty sessions, stable-session saves and empty
+events. The parent fails both switched saves and preserves two outcomes; the
+reference and current source pass four. Run
+`bun test evals/coding-agent/calibrate-foreground-save.test.js` for eight controls,
+including an equivalent callback-refresh solution, unused correct code, disabled
+saves, wrong destinations and missing-source setup classification. The persistence
+port follows the existing save callback contract and serializes synthetic records.
+This does not test actual filesystem durability, full session-switch integration,
+concurrent/background saves, native event delivery, isolation or model quality.
+Fixtures and dependency links are installed only when grading starts.
+
 `app-settings-restart-persistence` runs the actual settings provider, write queue
 and update banner with synthetic React, storage and native restart ports. Four
 outcomes cover a delayed save, another edit during the drain, failed-save refusal
