@@ -1152,3 +1152,20 @@ suppression, missing notification guards and missing-source setup classification
 Fixtures/dependencies are installed only at grading. This does not establish
 native transport, redirects/cookies, toast component behavior, server authorization,
 agent isolation or model performance.
+
+### Untrusted chat HTML
+
+`app-chat-raw-html-sanitization` renders the historical MarkdownBlock with
+synthetic native/browser ports. Both message roles reject active embedded, form,
+style and base elements, inline styles and unsafe URL attributes. Six nearby
+outcomes preserve formatting, fragments, web navigation and local previews.
+Anchor IDs may use any working scheme; the grader does not demand a sanitizer
+library or private helper. The workspace chat package resolves from the tested
+commit, while installed external dependencies are matched across arms.
+
+Run `bun test evals/coding-agent/calibrate-chat-html-outcomes.test.js` with
+frontend dependencies including `rehype-sanitize` 6 installed. Controls include
+parent/reference/current, an equivalent anchor scheme, unused fix, bypass, empty
+output, one-role-only repair, dropped safe HTML, styles, broken fragments and
+missing-source setup failure. These are corpus/grader checks, not agent trials,
+a full browser exploit defense or proof of execution isolation.

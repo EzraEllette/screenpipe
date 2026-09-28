@@ -4022,6 +4022,56 @@
         ],
         "command": "cd apps/screenpipe-app-tauri && node node_modules/vitest/vitest.mjs run --config vitest.config.ts lib/eval-local-api-authority.test.ts"
       }
+    },
+    {
+      "id": "app-chat-raw-html-sanitization",
+      "name": "Keep untrusted chat HTML inert without losing safe formatting",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "bd90b1b682fabce2e938bda0f0cd2ae6fb74aba3"
+      },
+      "base_ref": "ba342ea4889862cea52adae856225dd60d1a8eaf",
+      "oracle_ref": "bd90b1b682fabce2e938bda0f0cd2ae6fb74aba3",
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/components/chat/markdown-block.tsx"
+      ],
+      "trigger_paths": [
+        "apps/screenpipe-app-tauri/components/chat/markdown-block.tsx"
+      ],
+      "gate": "advisory",
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "chat",
+        "untrusted-html",
+        "preserved-behavior"
+      ],
+      "prompt": "Chat messages can turn untrusted HTML into active embedded content inside the application. Repair the rendered MarkdownBlock for both user and assistant messages. Embedded iframes, forms/password inputs, meta refresh, object/embed content, style sheets and base URL elements must not survive as live elements. Remove inline styling from otherwise allowed formatting, and neutralize javascript URLs in links and image long descriptions. Keep the surrounding ordinary message text. Preserve collapsible details with their summary and nested Markdown emphasis, kbd/sub/sup/b/i/u/mark/small formatting, ordinary safe images, and bold text with its styling removed. GFM footnotes and raw in-page anchors must still resolve to their rendered targets; no particular ID prefix is required. Preserve ordinary web-link clicks in the owning chat browser, and local file links routed through the supplied in-chat preview callback without opening a separate viewer. Keep the public component and native port contracts compatible. No particular sanitizer or internal implementation is required. This task checks actual React/Markdown rendering with synthetic native/browser ports; it does not establish a complete browser exploit defense, native isolation or external navigation security.",
+      "agent_timeout_seconds": 900,
+      "grader_dependency_links": [
+        {
+          "source_path": "apps/screenpipe-app-tauri/node_modules",
+          "destination_path": "apps/screenpipe-app-tauri/node_modules"
+        },
+        {
+          "source_path": "apps/screenpipe-app-tauri/node_modules",
+          "destination_path": "packages/workflows-ui/node_modules"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/chat-html-outcomes.fixture.tsx.txt",
+            "destination_path": "apps/screenpipe-app-tauri/components/chat/eval-html-outcome.test.tsx"
+          },
+          {
+            "local_path": "graders/chat-html-outcomes.config.mjs",
+            "destination_path": "apps/screenpipe-app-tauri/eval-html.config.mjs"
+          }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && node node_modules/vitest/vitest.mjs run --config eval-html.config.mjs components/chat/eval-html-outcome.test.tsx"
+      }
     }
   ]
 }
