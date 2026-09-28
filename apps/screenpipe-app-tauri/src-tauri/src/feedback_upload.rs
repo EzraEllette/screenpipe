@@ -1149,6 +1149,40 @@ mod tests {
         .await;
     }
 
+    #[tokio::test]
+    async fn migration_search_failure_reaches_support_after_collection_and_redaction() {
+        use screenpipe_db::{storage, DatabaseManager};
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("db.sqlite");
+        let db = DatabaseManager::new(source.to_str().unwrap(), Default::default())
+            .await
+            .unwrap();
+        db.execute_raw_sql_write(
+            "INSERT INTO frames(id,timestamp,full_text) VALUES(1,'2026-09-28','private history'); DROP TABLE frames_fts;",
+        )
+        .await
+        .unwrap();
+        db.close().await;
+        let error = storage::migrate(root.path(), Default::default(), Default::default())
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("no such table: frames_fts"),
+            "{error}"
+        );
+        assert!(source.is_file());
+        assert!(!root.path().join("storage-migration.json").exists());
+        assert_migration_failure_uploaded(
+            root.path(),
+            &[
+                "no such table: frames_fts",
+                "\"failure_stage\": \"sampling_source_search\"",
+                "\"status\": \"failed\"",
+            ],
+        )
+        .await;
+    }
+
     async fn wait_for_migration_failure(root: &std::path::Path) {
         timeout(Duration::from_secs(3), async {
             loop {
