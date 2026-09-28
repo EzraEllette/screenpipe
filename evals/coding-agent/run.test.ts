@@ -28,6 +28,13 @@ test("process and setup failures cannot prove a regression or count as scored fa
     git("commit", "-qam", "Synthetic reference state");
     const fix = git("rev-parse", "HEAD");
     const controls = [
+      { id: "baseline-playwright-load", baseline: "error", oracle: "pass", valid: false },
+      { id: "reference-playwright-export", baseline: "fail", oracle: "error", valid: false },
+      { id: "baseline-playwright-export-ansi", baseline: "error", oracle: "pass", valid: false },
+      { id: "playwright-quoted-assertion", baseline: "fail", oracle: "pass", valid: true },
+      { id: "playwright-partial-run", baseline: "fail", oracle: "pass", valid: true },
+      { id: "playwright-incomplete-diagnostic", baseline: "fail", oracle: "pass", valid: true },
+      { id: "both-pass-playwright-diagnostic", baseline: "pass", oracle: "pass", valid: false },
       { id: "baseline-vitest-resolve", baseline: "error", oracle: "pass", valid: false },
       { id: "reference-vitest-resolve", baseline: "fail", oracle: "error", valid: false },
       { id: "baseline-vitest-resolve-ansi", baseline: "error", oracle: "pass", valid: false },
@@ -86,7 +93,20 @@ import assert from "node:assert/strict";
 const broken = readFileSync("state.txt", "utf8") === "broken";
 const id = process.env.SCREENPIPE_EVAL_CASE_ID;
 const affected = id.startsWith("baseline-") ? broken : !broken;
-if ((id.endsWith("vitest-resolve") && affected) || (id === "baseline-vitest-resolve-ansi" && broken) ||
+if (((id === "baseline-playwright-load" || id === "reference-playwright-export" || id === "baseline-playwright-export-ansi") && affected) ||
+    (["playwright-quoted-assertion", "playwright-partial-run", "playwright-incomplete-diagnostic"].includes(id) && broken) || id === "both-pass-playwright-diagnostic") {
+  let output = "Running 7 tests using 1 worker\\n";
+  output += id === "baseline-playwright-load"
+    ? "Error: [vite:load-fallback] Could not load /synthetic/missing: ENOENT: no such file or directory\\n"
+    : 'RollupError: component.tsx (1:2): "MissingIcon" is not exported by "icons/index.mjs", imported by "component.tsx".\\n';
+  output += "  7 did not run\\n";
+  if (id === "playwright-partial-run") output += "  1 failed\\n";
+  if (id === "playwright-quoted-assertion") output += "Error: expect(locator).toBeVisible() failed\\n";
+  process.stdout.write(id.endsWith("-ansi") ? "\\x1b[31m" + output + "\\x1b[0m" : output);
+  if (id !== "playwright-incomplete-diagnostic") process.stderr.write("✗ Build failed in 1.2s\\n");
+  process.exit(id === "both-pass-playwright-diagnostic" ? 0 : 1);
+} else if (id === "reference-playwright-export" && broken) assert.fail("synthetic broken behavior");
+else if ((id.endsWith("vitest-resolve") && affected) || (id === "baseline-vitest-resolve-ansi" && broken) ||
     (["vitest-assertion-with-quoted-resolve", "node-assertion-with-quoted-resolve", "resolve-without-test-summary"].includes(id) && broken) || id === "both-pass-resolve-diagnostic") {
   const summary = "Test Files 1 failed (1)\\nTests no tests\\n";
   if (id !== "resolve-without-test-summary") process.stdout.write(id.endsWith("-ansi") ? "\\x1b[31m" + summary + "\\x1b[0m" : summary);
@@ -206,7 +226,7 @@ else process.exit(id === "intended-failure" && broken ? 1 : 0);
         if (control.id.endsWith("timeout")) expect(errored.grader_error).toContain("ETIMEDOUT");
       }
     }
-    const scored = invoke("scoring", "--mode", "baseline", "--case", "baseline-signal,baseline-missing-module,baseline-rust-compile,baseline-vitest-bun-build,baseline-vitest-resolve");
+    const scored = invoke("scoring", "--mode", "baseline", "--case", "baseline-signal,baseline-missing-module,baseline-rust-compile,baseline-vitest-bun-build,baseline-vitest-resolve,baseline-playwright-load,baseline-playwright-export-ansi");
     expect(scored.error).toBeUndefined();
     expect(scored.status).toBe(0);
     const summary = JSON.parse(readFileSync(join(repo, "scoring/summary.json"), "utf8"));
@@ -215,3 +235,25 @@ else process.exit(id === "intended-failure" && broken ? 1 : 0);
     rmSync(repo, { recursive: true, force: true });
   }
 }, 90_000);
+
+test("Playwright build classification requires complete unexecuted evidence", async () => {
+  const { classifyGraderError } = await import("./grader-outcome.mjs");
+  const build = {
+    status: 1,
+    stdout: 'Running 7 tests using 1 worker\nRollupError: widget.tsx (1:2): "MissingIcon" is not exported by "icons/index.mjs", imported by "widget.tsx".\n  7 did not run\n',
+    stderr: "✗ Build failed in 1.2s\n",
+  };
+  expect(classifyGraderError(build)).toBe("playwright_ct_build_error");
+  for (const stdout of [
+    build.stdout.replace("7 did not run", "6 did not run"),
+    build.stdout.replace("Running 7 tests using 1 worker\n", ""),
+    build.stdout.replace("  7 did not run\n", ""),
+    build.stdout + "  1 passed (1s)\n",
+    build.stdout + "  1 failed\n",
+    build.stdout + "  1 timed out\n",
+    build.stdout + "Error: expect(locator).toBeVisible() failed\n",
+  ]) expect(classifyGraderError({ ...build, stdout })).toBeNull();
+  expect(classifyGraderError({ ...build, stderr: "" })).toBeNull();
+  expect(classifyGraderError({ ...build, stderr: build.stderr + "AssertionError: real behavior failed\n" })).toBeNull();
+  expect(classifyGraderError({ ...build, status: 0 })).toBeNull();
+});

@@ -141,6 +141,17 @@ The server exposes:
 | `--listen-on-lan` | Bind `0.0.0.0` so other devices on the LAN can connect. Requires `--api-key`. | off (binds `127.0.0.1`) |
 | `--api-key <secret>` | Bearer token required for non-loopback requests (`Authorization: Bearer <secret>`). Loopback always allowed. | none |
 
+When the Screenpipe API requires authentication, set `SCREENPIPE_LOCAL_API_KEY`
+in the HTTP server's environment (`SCREENPIPE_API_KEY` is the fallback). Obtain
+it with `screenpipe auth token`, and keep it out of client configuration and
+chat. The server uses this key for upstream API requests, including retrieval
+telemetry. `--api-key` is a separate credential for callers connecting to MCP;
+it is never forwarded to the Screenpipe API.
+
+```bash
+SCREENPIPE_LOCAL_API_KEY="$(screenpipe auth token)" npx -y screenpipe-mcp --http
+```
+
 **Connecting a remote MCP client:**
 
 Point any MCP client that supports HTTP transport at the `/mcp` endpoint:
