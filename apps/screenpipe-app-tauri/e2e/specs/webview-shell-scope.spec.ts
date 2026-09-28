@@ -1,7 +1,7 @@
 // screenpipe — AI that knows everything you've seen, said, or heard
 // https://screenpipe.com
 
-import { existsSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openHomeWindow, waitForAppReady } from "../helpers/test-utils.js";
@@ -36,8 +36,12 @@ async function invoke(command: string, args: Record<string, unknown>): Promise<I
 
 // `program` is the scope entry's `name`, not the binary: the shell plugin
 // looks the name up in the capability scope before it spawns anything.
-function execute(program: string, args: string[]): Promise<InvokeResult> {
-  return invoke("plugin:shell|execute", { program, args, options: {} });
+function execute(
+  program: string,
+  args: string[],
+  options: Record<string, unknown> = {},
+): Promise<InvokeResult> {
+  return invoke("plugin:shell|execute", { program, args, options });
 }
 
 function expectScopeRejection(result: InvokeResult): void {
@@ -77,6 +81,29 @@ describe("Webview shell scope", function () {
     expectScopeRejection(await execute("open", ["-h"]));
     expect((await execute("open-app", ["-a", "Terminal"])).ok).toBe(false);
     expect((await execute("open-reveal", ["-R", "-a"])).ok).toBe(false);
+  });
+
+  it("does not resolve an allowed launcher through the caller's PATH", async function () {
+    if (process.platform !== "darwin") this.skip();
+    const directory = mkdtempSync(join(tmpdir(), "screenpipe-shell-path-"));
+    const executable = join(directory, "open");
+    const executed = `${executable}.executed`;
+    try {
+      writeFileSync(
+        executable,
+        '#!/bin/sh\nprintf "unexpected PATH lookup\\n" > "$0.executed"\n',
+        { mode: 0o700 },
+      );
+      // A missing target lets the real open report an error without opening Finder.
+      const result = await execute("open-reveal", ["-R", join(directory, "missing")], {
+        env: { PATH: directory },
+      });
+      expect(result.failure).toBe("");
+      expect(result.ok).toBe(true);
+      expect(existsSync(executed)).toBe(false);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   it("can still check whether Claude and Cursor are installed on macOS", async function () {

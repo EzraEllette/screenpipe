@@ -78,6 +78,14 @@ describe("webview shell scope", () => {
     expect(unrestricted.map((e) => e.name)).toEqual([]);
   });
 
+  it("pins system launchers so a caller cannot replace them through PATH", () => {
+    const launchers = shellEntries().filter((e) => !e.sidecar);
+    expect(launchers.length).toBeGreaterThan(0);
+    for (const launcher of launchers) {
+      expect(launcher.cmd, launcher.name).toBe("/usr/bin/open");
+    }
+  });
+
   it("has a scope entry for every Command.create call in the frontend", () => {
     const names = new Set(shellEntries().map((e) => e.name));
     const calls = ["app", "components", "lib"]

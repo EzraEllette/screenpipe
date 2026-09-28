@@ -2964,7 +2964,7 @@
       "criticality": "high",
       "confidence": "strong",
       "ux": "command",
-      "notes": "Calls the shell plugin from a real app webview. The removed exec-sh, sh, cmd and any-argument open entries are rejected by the capability scope, and the macOS Claude/Cursor install check still reaches fs exists."
+      "notes": "Calls the shell plugin from a real app webview. The removed exec-sh, sh, cmd and any-argument open entries are rejected by the capability scope. On macOS, a caller-supplied PATH cannot replace the system launcher, and the Claude/Cursor install check still reaches fs exists."
     },
     {
       "spec": "window-activation.spec.ts",
