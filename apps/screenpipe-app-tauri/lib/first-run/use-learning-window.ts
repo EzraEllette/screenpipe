@@ -55,14 +55,7 @@ export type LearningWindowOptions = {
 export function useLearningWindow(
   _options: LearningWindowOptions = {},
 ): LearningWindowView {
-  const [state, setState] = useState<FirstRunLearningState>(() => {
-    const stored = readLearningWindow();
-    // A ready card is a one-session announcement, not a replacement for the
-    // normal Home starter on every later app launch. The chat remains durable.
-    return stored.phase === "ready" && stored.readyShownAt
-      ? markLearningDone()
-      : stored;
-  });
+  const [state, setState] = useState<FirstRunLearningState>(readLearningWindow);
   const [capturedApps, setCapturedApps] = useState<FirstRunCapturedApp[]>([]);
   const [remainingMs, setRemainingMs] = useState(() =>
     learningWindowRemainingMs(readLearningWindow().startedAt),
@@ -155,7 +148,16 @@ export function useLearningWindow(
 
   const markSummaryOpened = useCallback(() => setState(markLearningSummaryOpened()), []);
   const markSummaryRendered = useCallback(async () => {
-    if (activationState !== "summary") return;
+    if (readLearningWindow().phase !== "ready") return;
+    // A restored chat can render before the first status poll resolves. Read
+    // the persisted gate before retiring it so treatment keeps its summary.
+    const native = await commands.getOnboardingStatus();
+    if (native.status !== "ok") throw new Error(native.error);
+    const renderedActivation = trialActivationState(native.data.currentStep);
+    if (renderedActivation !== "summary") {
+      if (renderedActivation !== "paywall") setState(markLearningDone());
+      return;
+    }
     await commands.setOnboardingStep(TRIAL_ACTIVATION_PAYWALL_STEP);
     posthog.capture("first_run_summary_rendered", {
       experiment: "first-summary-card-trial-v1",
@@ -163,7 +165,7 @@ export function useLearningWindow(
       eligible_new_install: true,
     });
     setActivationState("paywall");
-  }, [activationState]);
+  }, []);
   // Notification persistence is native; retained for the existing view contract.
   const markNotificationSent = useCallback(() => {}, []);
   const markReadyShown = useCallback(() => {
