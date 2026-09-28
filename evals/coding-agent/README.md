@@ -1169,3 +1169,18 @@ parent/reference/current, an equivalent anchor scheme, unused fix, bypass, empty
 output, one-role-only repair, dropped safe HTML, styles, broken fragments and
 missing-source setup failure. These are corpus/grader checks, not agent trials,
 a full browser exploit defense or proof of execution isolation.
+
+`ai-gateway-trusted-runner-admission` runs the actual HTTP entrypoint, authentication,
+Free-plan gates, chat handler and provider adapter with synthetic external ports.
+Fourteen outcomes cover successful machine and paid-human replies, forged or
+unconfigured credentials, Free background refusal, unknown plans, rate limits
+and invalid input. The parent fails five outcomes and preserves nine; the
+reference and current source pass fourteen. Twelve calibration controls reject
+partial fixes, header/prefix bypasses, unused correct code, fabricated success
+and blanket refusal, and accept an equivalent guard expression. Run
+`bun test evals/coding-agent/calibrate-trusted-runner.test.js` with gateway
+dependencies installed. The fetch boundary is installed before SDK imports,
+which can capture fetch at initialization. Graders and dependency links are
+installed only after the trajectory. These checks do not establish JWT
+cryptography, live inference, concurrent spend safety, complete current billing
+integration, agent isolation or model performance.

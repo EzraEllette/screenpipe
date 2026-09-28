@@ -4072,6 +4072,46 @@
         ],
         "command": "cd apps/screenpipe-app-tauri && node node_modules/vitest/vitest.mjs run --config eval-html.config.mjs components/chat/eval-html-outcome.test.tsx"
       }
+    },
+    {
+      "id": "ai-gateway-trusted-runner-admission",
+      "name": "Admit verified machine chat while preserving access refusals",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "25716cb17c4a11a75377df02b830891cc83229db"
+      },
+      "base_ref": "2168f5a3e118c28b79f6ba2ab15fff437c9cec33",
+      "oracle_ref": "25716cb17c4a11a75377df02b830891cc83229db",
+      "oracle_paths": [
+        "packages/ai-gateway/src/index.ts",
+        "packages/ai-gateway/src/services/free-chat-limit.ts"
+      ],
+      "gate": "advisory",
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "access",
+        "machine-identity",
+        "background"
+      ],
+      "prompt": "A trusted backend runner supplies the configured service bearer but hosted chat rejects it because it has no human user ID. Repair the existing POST /v1/chat/completions path so that exact configured machine credential can complete both interactive and background requests for its requested paid model. The actual chat/provider path must make one successful request carrying the original user message and requested model, then return the provider answer. Preserve successful paid human chat. Missing, incorrect, public-user-ID, unsupported-scheme and unconfigured service credentials must return 401 before provider work, even with runner-like device, workload and background headers. A verified Free human background request must remain 403; missing human plan truth must remain 503. Machine and paid-human rate-limit refusals must remain 429 without provider work. A machine request with an empty model or empty message list must return 400 without provider work. Use synthetic credentials, entitlement, rate-limit, storage and provider ports only. Do not assume any particular private helper or guard structure. This case exercises authentication through HTTP dispatch and provider-response propagation, not JWT cryptography, live inference, SQL/concurrent spend accounting, full current entitlement integration, agent isolation or model quality.",
+      "agent_timeout_seconds": 900,
+      "grader_dependency_links": [
+        {
+          "source_path": "packages/ai-gateway/node_modules",
+          "destination_path": "packages/ai-gateway/node_modules"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/trusted-runner-admission.fixture.ts.txt",
+            "destination_path": "packages/ai-gateway/src/test/eval-trusted-runner.test.ts"
+          }
+        ],
+        "command": "cd packages/ai-gateway && \"${BUN_BIN:-bun}\" test src/test/eval-trusted-runner.test.ts"
+      }
     }
   ]
 }
