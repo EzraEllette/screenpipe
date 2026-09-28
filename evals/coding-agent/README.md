@@ -1139,3 +1139,16 @@ establish native environment parsing, actual capture delivery, unknown preferenc
 or failed IPC policy, execution isolation or model performance.
 
 `app-chat-timeline-offset` renders the actual MarkdownBlock and Markdown parser with synthetic native/store ports. Twelve outcomes cover raw and encoded offsets, captured instants, timestamp precedence over start_time, invalid timestamps and preserved frame/artifact/web links. Run `bun test evals/coding-agent/calibrate-chat-timeline-offset.test.js` for grader controls. This is not native event delivery, OS deeplink handling, frame retrieval, sub-millisecond precision, execution isolation or a model trial. Graders and dependency links are installed only when grading begins.
+
+`app-local-api-authority` runs the actual localFetch wrapper, global fetch
+interceptor and shared notification action executor with synthetic native config
+and transport. Twenty-four outcomes cover deceptive URL authorities, configured
+ports, document-relative URLs, notification refusal and preserved local auth,
+request bodies, explicit auth, disabled auth and key-refresh retry. The parent
+fails fourteen and preserves ten; reference/current pass all twenty-four.
+Run `bun test evals/coding-agent/calibrate-local-api-authority.test.js` for eight
+controls, including equivalent helper names, inactive correct code, blanket auth
+suppression, missing notification guards and missing-source setup classification.
+Fixtures/dependencies are installed only at grading. This does not establish
+native transport, redirects/cookies, toast component behavior, server authorization,
+agent isolation or model performance.

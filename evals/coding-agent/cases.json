@@ -3978,6 +3978,50 @@
         ],
         "command": "cd apps/screenpipe-app-tauri && node node_modules/vitest/vitest.mjs run --config vitest.config.ts components/chat/eval-timeline-offset.test.tsx"
       }
+    },
+    {
+      "id": "app-local-api-authority",
+      "name": "Keep local API credentials within the configured authority",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "107d957aca3523cd309f56d93bd5ab20ce6519bf"
+      },
+      "base_ref": "ebeef3e7249ebcc2d1a9d1824c3b2fb68a1cfacb",
+      "oracle_ref": "107d957aca3523cd309f56d93bd5ab20ce6519bf",
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/lib/api.ts",
+        "apps/screenpipe-app-tauri/lib/notifications/actions.ts"
+      ],
+      "trigger_paths": [
+        "apps/screenpipe-app-tauri/lib/api.ts",
+        "apps/screenpipe-app-tauri/lib/notifications/actions.ts"
+      ],
+      "gate": "advisory",
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "privacy",
+        "credentials",
+        "notifications"
+      ],
+      "prompt": "The local API fetch wrapper and global fetch interceptor can attach the local bearer key to an external URL, and the shared notification API action executor can dispatch to an external target. Repair these actual request paths. Only HTTP localhost or 127.0.0.1 at the configured API port may receive automatically supplied local authentication; do not mistake URL credentials, host suffixes or path/query text for authority. localFetch must continue passing absolute non-local URLs through without adding its key. Resolve localFetch relative paths against the configured local API, and global fetch relative paths against document.baseURI. Preserve authenticated local requests, disabled authentication, explicit caller Authorization, and a local401 key-refresh retry. Shared notification API actions must refuse non-local targets (including protocol-relative URLs) with a rejected operation and zero transport calls, while preserving local POST method/body. Check non-default configured ports and wrong-protocol/wrong-port targets. Use existing public entrypoints and contracts; no particular helper or parser is required. This task covers the actual JavaScript wrapper/interceptor/shared action executor with synthetic native configuration and transport, not the separate toast component, browser redirects/cookies, native network delivery or server authorization.",
+      "agent_timeout_seconds": 900,
+      "grader_dependency_links": [
+        {
+          "source_path": "apps/screenpipe-app-tauri/node_modules",
+          "destination_path": "apps/screenpipe-app-tauri/node_modules"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/local-api-authority.fixture.ts.txt",
+            "destination_path": "apps/screenpipe-app-tauri/lib/eval-local-api-authority.test.ts"
+          }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && node node_modules/vitest/vitest.mjs run --config vitest.config.ts lib/eval-local-api-authority.test.ts"
+      }
     }
   ]
 }
