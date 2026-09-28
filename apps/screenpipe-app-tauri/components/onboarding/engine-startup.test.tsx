@@ -276,6 +276,8 @@ describe("onboarding engine startup", () => {
   });
 
   it("retries a rejected capture start after the native condition recovers", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const infoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
     mocks.startCapture
       .mockResolvedValueOnce({
         status: "error",
@@ -293,12 +295,20 @@ describe("onboarding engine startup", () => {
         { status: 503 },
       ),
     );
-    vi.spyOn(console, "error").mockImplementation(() => {});
-
     render(<EngineStartup handleNextSlide={mocks.handleNextSlide} />);
 
     await waitFor(() => expect(mocks.startCapture).toHaveBeenCalledTimes(2));
     expect(mocks.stopCapture).not.toHaveBeenCalled();
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "stage=ensure_capture_session outcome=failed cause=Deepgram requires an API key",
+      ),
+    );
+    expect(infoSpy).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "stage=ensure_capture_session outcome=recovered originating_cause=Deepgram requires an API key",
+      ),
+    );
     await waitFor(
       () => expect(mocks.handleNextSlide).toHaveBeenCalledTimes(1),
       { timeout: 2000 },

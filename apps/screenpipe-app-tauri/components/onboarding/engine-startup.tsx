@@ -186,6 +186,7 @@ export default function EngineStartup({ handleNextSlide }: EngineStartupProps) {
   const mountTimeRef = useRef(Date.now());
   const captureSetupPromiseRef = useRef<Promise<void> | null>(null);
   const captureSetupInFlightRef = useRef(false);
+  const captureSetupFailureRef = useRef<string | null>(null);
   // Once per mount: the health poll used to swallow its own failure, which is
   // how a 95%-to-11% collapse produced no telemetry at all.
   const hasReportedPollFailureRef = useRef(false);
@@ -243,6 +244,20 @@ export default function EngineStartup({ handleNextSlide }: EngineStartupProps) {
       try {
         const startResult = await commands.startCapture();
         if (startResult.status === "error") throw new Error(startResult.error);
+        if (captureSetupFailureRef.current) {
+          console.info(
+            `onboarding_engine_capture_start stage=ensure_capture_session outcome=recovered originating_cause=${captureSetupFailureRef.current}`,
+          );
+          captureSetupFailureRef.current = null;
+        }
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : String(error ?? "unknown error");
+        captureSetupFailureRef.current = message;
+        console.error(
+          `onboarding_engine_capture_start stage=ensure_capture_session outcome=failed cause=${message}`,
+        );
+        throw error;
       } finally {
         captureSetupInFlightRef.current = false;
       }
