@@ -3932,6 +3932,52 @@
         ],
         "command": "cd apps/screenpipe-app-tauri && node node_modules/vitest/vitest.mjs run --config vitest.config.ts eval-telemetry-caller.test.tsx"
       }
+    },
+    {
+      "id": "app-chat-timeline-offset",
+      "name": "Preserve captured instants when opening chat timeline citations",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "e6df687c7f674fbdda546925be17e1115a8f2fa1"
+      },
+      "base_ref": "afcee637bb263ada9ac34911052f693553c4333a",
+      "oracle_ref": "e6df687c7f674fbdda546925be17e1115a8f2fa1",
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/components/chat/markdown-block.tsx",
+        "apps/screenpipe-app-tauri/lib/timeline-deeplink.ts",
+        "apps/screenpipe-app-tauri/lib/timeline-navigation.ts"
+      ],
+      "trigger_paths": [
+        "apps/screenpipe-app-tauri/components/chat/markdown-block.tsx",
+        "apps/screenpipe-app-tauri/lib/timeline-deeplink.ts",
+        "apps/screenpipe-app-tauri/lib/timeline-navigation.ts"
+      ],
+      "gate": "advisory",
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "chat",
+        "timeline",
+        "navigation"
+      ],
+      "prompt": "Clicking an AI chat timeline citation can silently do nothing when its ISO timestamp has a raw positive timezone offset. Repair the rendered MarkdownBlock click path so timestamp links preserve the captured instant to millisecond precision across raw +00:00 and nonzero positive offsets, percent-encoded offsets, negative offsets and Z timestamps. Support start_time links, with timestamp taking precedence when both are present. Valid links must update pending timeline navigation, show the Main window and emit the existing navigate-to-timestamp event for the same instant; semantically equivalent timestamp formatting is allowed. Invalid timestamps must produce no navigation or viewer effects. Preserve frame navigation, local artifact in-chat preview callbacks and ordinary web-link destinations. Keep public component and native event/command contracts compatible. No particular parser or private helper is required. The task concerns chat clicks with actual React/Markdown rendering and synthetic native/store ports; native event delivery, the separate OS deeplink handler, timeline frame retrieval and sub-millisecond precision are outside this task.",
+      "agent_timeout_seconds": 900,
+      "grader_dependency_links": [
+        {
+          "source_path": "apps/screenpipe-app-tauri/node_modules",
+          "destination_path": "apps/screenpipe-app-tauri/node_modules"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/chat-timeline-offset.fixture.tsx.txt",
+            "destination_path": "apps/screenpipe-app-tauri/components/chat/eval-timeline-offset.test.tsx"
+          }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && node node_modules/vitest/vitest.mjs run --config vitest.config.ts components/chat/eval-timeline-offset.test.tsx"
+      }
     }
   ]
 }

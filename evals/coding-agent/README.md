@@ -1137,3 +1137,5 @@ preference, equivalent private names and missing-source setup classification.
 Fixtures and dependencies are installed only when grading starts. This does not
 establish native environment parsing, actual capture delivery, unknown preference
 or failed IPC policy, execution isolation or model performance.
+
+`app-chat-timeline-offset` renders the actual MarkdownBlock and Markdown parser with synthetic native/store ports. Twelve outcomes cover raw and encoded offsets, captured instants, timestamp precedence over start_time, invalid timestamps and preserved frame/artifact/web links. Run `bun test evals/coding-agent/calibrate-chat-timeline-offset.test.js` for grader controls. This is not native event delivery, OS deeplink handling, frame retrieval, sub-millisecond precision, execution isolation or a model trial. Graders and dependency links are installed only when grading begins.
