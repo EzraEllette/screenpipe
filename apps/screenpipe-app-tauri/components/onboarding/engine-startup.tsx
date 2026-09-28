@@ -239,7 +239,7 @@ export default function EngineStartup({ handleNextSlide }: EngineStartupProps) {
     if (captureSetupPromiseRef.current) return captureSetupPromiseRef.current;
 
     captureSetupInFlightRef.current = true;
-    captureSetupPromiseRef.current = (async () => {
+    const captureSetupAttempt = (async () => {
       try {
         const startResult = await commands.startCapture();
         if (startResult.status === "error") throw new Error(startResult.error);
@@ -247,8 +247,18 @@ export default function EngineStartup({ handleNextSlide }: EngineStartupProps) {
         captureSetupInFlightRef.current = false;
       }
     })();
+    captureSetupPromiseRef.current = captureSetupAttempt;
 
-    return captureSetupPromiseRef.current;
+    // Cache a successful session for the rest of this mount, but let a later
+    // healthy poll retry after a recoverable native/configuration failure.
+    // Guard by identity so an older rejection cannot clear a newer attempt.
+    captureSetupAttempt.catch(() => {
+      if (captureSetupPromiseRef.current === captureSetupAttempt) {
+        captureSetupPromiseRef.current = null;
+      }
+    });
+
+    return captureSetupAttempt;
   }, []);
 
   // Assigned during render, per the ref-mirror rule in CLAUDE.md.

@@ -275,6 +275,36 @@ describe("onboarding engine startup", () => {
     expect(await screen.findByText(/engine failed to start/i)).toBeInTheDocument();
   });
 
+  it("retries a rejected capture start after the native condition recovers", async () => {
+    mocks.startCapture
+      .mockResolvedValueOnce({
+        status: "error",
+        error: "Deepgram requires an API key",
+      })
+      .mockResolvedValue({ status: "ok", data: null });
+    mocks.localFetch.mockImplementation(async () =>
+      new Response(
+        JSON.stringify({
+          status: "degraded",
+          status_code: 503,
+          frame_status: "not_started",
+          audio_status: "not_started",
+        }),
+        { status: 503 },
+      ),
+    );
+    vi.spyOn(console, "error").mockImplementation(() => {});
+
+    render(<EngineStartup handleNextSlide={mocks.handleNextSlide} />);
+
+    await waitFor(() => expect(mocks.startCapture).toHaveBeenCalledTimes(2));
+    expect(mocks.stopCapture).not.toHaveBeenCalled();
+    await waitFor(
+      () => expect(mocks.handleNextSlide).toHaveBeenCalledTimes(1),
+      { timeout: 2000 },
+    );
+  });
+
   it("ensures capture after native startup becomes reachable", async () => {
     mocks.localFetch
       .mockRejectedValueOnce(new Error("engine not listening yet"))
