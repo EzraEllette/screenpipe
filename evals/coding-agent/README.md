@@ -1122,3 +1122,18 @@ Set `EVAL_CALIBRATION_RESULTS_DIR` to retain the per-control logs. No installed
 packages are needed, and the hidden fixture is materialized only at grading.
 These outcomes do not prove workerd/D1 concurrency or atomicity, deployed cron
 delivery, full quota admission, agent isolation or model improvement.
+
+## Settings identity refusal
+
+`app-settings-telemetry-identity` renders the real SettingsProvider with synthetic
+settings, native and PostHog ports. Five outcomes cover explicit user refusal,
+runtime refusal, a pending runtime decision, opted-in account identity and
+unmounting before version completion. The historical parent fails four and
+preserves one; reference and current source pass five.
+
+Run `bun test evals/coding-agent/calibrate-telemetry-identity.test.js` for eight
+controls, including unused correct source, blanket suppression, ignored user
+preference, equivalent private names and missing-source setup classification.
+Fixtures and dependencies are installed only when grading starts. This does not
+establish native environment parsing, actual capture delivery, unknown preference
+or failed IPC policy, execution isolation or model performance.

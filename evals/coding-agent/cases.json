@@ -3888,6 +3888,50 @@
         ],
         "command": "cd apps/screenpipe-app-tauri && node node_modules/vitest/vitest.mjs run --config vitest.config.ts eval-stale-session.test.tsx"
       }
+    },
+    {
+      "id": "app-settings-telemetry-identity",
+      "name": "Respect runtime and user refusal before settings identity effects",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "d57b2fb92d84f45a2b2374146a7fc0300ae95def"
+      },
+      "base_ref": "0bae3b170b3cd603381df4278d5e6311ba857734",
+      "oracle_ref": "d57b2fb92d84f45a2b2374146a7fc0300ae95def",
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/lib/hooks/use-settings.tsx",
+        "apps/screenpipe-app-tauri/lib/telemetry-env.ts"
+      ],
+      "gate": "advisory",
+      "trigger_paths": [
+        "apps/screenpipe-app-tauri/lib/hooks/use-settings.tsx",
+        "apps/screenpipe-app-tauri/lib/telemetry-env.ts"
+      ],
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "privacy",
+        "telemetry",
+        "async-lifecycle"
+      ],
+      "prompt": "The settings provider can alias and identify an account even when the saved analytics preference is explicitly disabled or the native runtime reports telemetry disabled. Repair the actual SettingsProvider identity effect. Neither alias nor identify may run for either refusal, or while the native runtime decision is pending. Once that decision permits telemetry and the user explicitly opted in, preserve account aliasing and identification by the Clerk account ID, including the saved email and stable per-install analytics ID. Unmounting the provider while the app-version lookup is pending must prevent a late identify call. Keep the existing public provider/settings interfaces and native command contract compatible. Tests use actual React lifecycle with synthetic native, settings-store and PostHog ports. No particular private helper or gating structure is required. Native environment parsing, capture transport, unknown preferences and failed IPC policy are outside this task.",
+      "agent_timeout_seconds": 900,
+      "grader_dependency_links": [
+        {
+          "source_path": "apps/screenpipe-app-tauri/node_modules",
+          "destination_path": "apps/screenpipe-app-tauri/node_modules"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/telemetry-identity.fixture.tsx.txt",
+            "destination_path": "apps/screenpipe-app-tauri/eval-telemetry-caller.test.tsx"
+          }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && node node_modules/vitest/vitest.mjs run --config vitest.config.ts eval-telemetry-caller.test.tsx"
+      }
     }
   ]
 }
