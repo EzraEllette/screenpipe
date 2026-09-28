@@ -31,6 +31,7 @@ import {
   beginLearningWindow,
   markLearningReady,
   markLearningReadyShown,
+  markLearningSummaryOpened,
   readLearningWindow,
 } from "./learning-window";
 
@@ -96,7 +97,7 @@ describe("native first-run summary projection", () => {
     );
   });
 
-  it("retires a ready card that was already shown before restart", async () => {
+  it("preserves an unread ready card even if an older version stamped it shown", async () => {
     beginLearningWindow();
     markLearningReady("first-run-native-chat");
     markLearningReadyShown("2026-08-27T07:05:00.000Z");
@@ -106,8 +107,75 @@ describe("native first-run summary projection", () => {
 
     const { result } = renderHook(() => useLearningWindow());
 
-    await waitFor(() => expect(result.current.phase).toBe("done"));
+    await waitFor(() => expect(mocks.getOnboardingStatus).toHaveBeenCalled());
+    expect(result.current.phase).toBe("ready");
+    expect(readLearningWindow().chatId).toBe("first-run-native-chat");
+  });
+
+  it("preserves an open request across remounts until the summary renders", async () => {
+    mocks.getOnboardingStatus.mockResolvedValue(
+      nativeStatus("ready", "first-run-native-chat"),
+    );
+    const first = renderHook(() => useLearningWindow());
+    await waitFor(() => expect(first.result.current.phase).toBe("ready"));
+    act(() => first.result.current.markSummaryOpened());
+    first.unmount();
+
+    const restored = renderHook(() => useLearningWindow());
+    expect(restored.result.current.phase).toBe("ready");
+    await act(async () => restored.result.current.markSummaryRendered());
     expect(readLearningWindow().phase).toBe("done");
+    expect(mocks.setOnboardingStep).not.toHaveBeenCalled();
+    restored.unmount();
+
+    const consumed = renderHook(() => useLearningWindow());
+    await act(async () => {});
+    expect(consumed.result.current.phase).toBe("done");
+  });
+
+  it("keeps an explicit dismissal retired after remounting", async () => {
+    mocks.getOnboardingStatus.mockResolvedValue(
+      nativeStatus("ready", "first-run-native-chat"),
+    );
+    const first = renderHook(() => useLearningWindow());
+    await waitFor(() => expect(first.result.current.phase).toBe("ready"));
+    act(() => first.result.current.dismiss());
+    first.unmount();
+
+    const restored = renderHook(() => useLearningWindow());
+    await act(async () => {});
+    expect(restored.result.current.phase).toBe("done");
+  });
+
+  it("retains a treatment summary when it renders before the initial status poll", async () => {
+    beginLearningWindow();
+    markLearningReady("first-run-native-chat");
+    markLearningSummaryOpened();
+    mocks.getOnboardingStatus
+      .mockReturnValueOnce(new Promise(() => {}))
+      .mockResolvedValue(nativeStatus("ready", "first-run-native-chat", "trial-activation-v1-summary"));
+    const { result } = renderHook(() => useLearningWindow());
+
+    await act(async () => result.current.markSummaryRendered());
+
+    expect(result.current.activationState).toBe("paywall");
+    expect(readLearningWindow().phase).toBe("ready");
+    expect(readLearningWindow().summaryOpenedAt).not.toBeNull();
+  });
+
+  it("retains the saved summary behind a persisted treatment paywall", async () => {
+    beginLearningWindow();
+    markLearningReady("first-run-native-chat");
+    markLearningSummaryOpened();
+    mocks.getOnboardingStatus.mockResolvedValue(
+      nativeStatus("ready", "first-run-native-chat", "trial-activation-v1-paywall"),
+    );
+    const { result } = renderHook(() => useLearningWindow());
+
+    await act(async () => result.current.markSummaryRendered());
+
+    expect(readLearningWindow().phase).toBe("ready");
+    expect(mocks.setOnboardingStep).not.toHaveBeenCalled();
   });
 
   it("persists the paywall only after the treatment summary reports a render", async () => {

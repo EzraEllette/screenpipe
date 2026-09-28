@@ -1702,7 +1702,7 @@ function HomeContent() {
                   hideInlineHistory
                   chatShortcutsEnabled={!workflowsActive && activeSection === "home"}
                   sidebarCollapsed={sidebarCollapsed}
-                  firstRunLearningEnabled
+                  firstRunLearningEnabled={!workflowsActive && activeSection === "home"}
                 />
               </div>
             )}
