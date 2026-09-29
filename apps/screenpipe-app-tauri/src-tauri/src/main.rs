@@ -2298,6 +2298,7 @@ async fn main() {
 
             crate::monitor_events::start(app_handle.clone());
             crate::meeting_live_notes::start(app_handle.clone());
+            calendar::reminders::start(app_handle.clone());
             crate::meeting_stall_notifications::start(app_handle.clone());
             crate::db_recovery_notifications::start(app_handle.clone());
             crate::disk_pressure_notifications::start(app_handle.clone());

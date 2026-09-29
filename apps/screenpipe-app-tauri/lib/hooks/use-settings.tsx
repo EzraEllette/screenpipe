@@ -501,6 +501,10 @@ export type Settings = SettingsStore & {
 		displayChanges?: boolean;
 		/** Live-note prompt when a meeting is detected. Default true. */
 		meetingLiveNotes?: boolean;
+		/** Calendar join reminders; missing inherits meetingLiveNotes. */
+		meetingReminders?: boolean;
+		/** Seconds before start, clamped to 1–1800 by the scheduler. Default 30. */
+		meetingReminderLeadSeconds?: number;
 		/** OS notification when a meeting starts but no audio frames arrive within 60s. Default true. */
 		audioCaptureStalled?: boolean;
 		/** In-app /notify when audio is captured but no live transcript arrives within 60s. Default true. */
