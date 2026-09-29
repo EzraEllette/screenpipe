@@ -362,7 +362,9 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 			const owner = env.RATE_LIMITER.idFromName(`workflow-voice:${authResult.userId}`);
 			const headers = new Headers(request.headers);
 			headers.set('x-voice-account', authResult.userId);
-			const response = await env.RATE_LIMITER.get(owner).fetch(new Request('https://internal/workflow-voice', { method: request.method, headers, body: request.body }));
+			const upstream = await env.RATE_LIMITER.get(owner).fetch(new Request('https://internal/workflow-voice', { method: request.method, headers, body: request.body }));
+			// Fetch responses have immutable headers in the Workers runtime.
+			const response = new Response(upstream.body, upstream);
 			response.headers.set('Cache-Control', 'no-store');
 			return addCorsHeaders(response);
 		}
