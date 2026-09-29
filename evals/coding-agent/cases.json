@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "suite": "screenpipe-app-coding-agent-regressions",
-  "dataset_version": "2026-09-28.1",
+  "dataset_version": "2026-09-29",
   "suite_type": "regression",
   "owner": "screenpipe engineering",
   "policy": {
@@ -4146,6 +4146,44 @@
           }
         ],
         "command": "cargo test --offline --locked -p screenpipe-db --test eval_migration_unicode -- --test-threads=1"
+      }
+    },
+    {
+      "id": "app-trial-upgrade-expiration",
+      "name": "Paid upgrade replaces stale trial state",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "29f4477d049b37b295184e50016a4c16c31fa452"
+      },
+      "base_ref": "e57c61cd78ffd6bf6519af5e08cfcca668826066",
+      "oracle_ref": "29f4477d049b37b295184e50016a4c16c31fa452",
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/components/settings/account-section.tsx",
+        "apps/screenpipe-app-tauri/components/plan-expiration-notice.tsx",
+        "apps/screenpipe-app-tauri/lib/app-entitlement.ts"
+      ],
+      "gate": "advisory",
+      "tags": [
+        "trial",
+        "entitlement"
+      ],
+      "prompt": "Account settings can continue showing a profile-trial countdown after billing activates a subscription. Make the displayed and saved account state agree with the verified subscription entitlement. A subscription entitlement must suppress leftover profile-trial expiry, while an active manual trial must retain its countdown and billing navigation. After checkout is confirmed active, persist the cleared trial expiry and refreshed subscription entitlement, preserving account identity and the signed-in token. An unconfirmed checkout must retain the manual trial and expiry. Preserve the active Business account and its cloud settings, the active Basic badge with cloud controls locked, login-first behavior without an active badge or enabled cloud controls for signed-out or tokenless accounts, and routing existing Basic upgrades to billing without a duplicate checkout. Use synthetic service responses for tests. The task concerns Account settings; do not change product policy or native capture.",
+      "agent_timeout_seconds": 1200,
+      "grader_dependency_links": [
+        {
+          "source_path": "apps/screenpipe-app-tauri/node_modules",
+          "destination_path": "apps/screenpipe-app-tauri/node_modules"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 180,
+        "fixtures": [
+          {
+            "local_path": "graders/trial-upgrade.fixture.tsx.txt",
+            "destination_path": "apps/screenpipe-app-tauri/components/settings/__tests__/eval-trial-upgrade.test.tsx"
+          }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && node node_modules/vitest/vitest.mjs run --config vitest.config.ts components/settings/__tests__/eval-trial-upgrade.test.tsx --maxWorkers=1 --minWorkers=1"
       }
     }
   ]

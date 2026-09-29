@@ -1208,3 +1208,25 @@ establish native rollout authority, cohort/stop controls, recovery-copy deletion
 policy, all interruption paths, live recording continuity, execution isolation
 or model performance. See [the rollout review](MIGRATION-ROLLOUT-REVIEW.md) for the
 separate authority requirements.
+
+## Trial state after a paid upgrade
+
+`app-trial-upgrade-expiration` runs the historical Account component with a fixed
+clock and synthetic settings, billing, entitlement-refresh and native event ports.
+Nine outcomes cover stale trial notice suppression, saved expiry and entitlement
+after confirmed checkout, unconfirmed checkout preservation, manual-trial billing,
+Basic account behavior and signed-out/tokenless accounts. The parent fails two
+intended outcomes and preserves seven; the reference passes all nine.
+
+Run `bun test evals/coding-agent/calibrate-trial-upgrade.test.js` for nine controls.
+Equivalent DOM attributes and split persistence writes pass. Unused correct code,
+blanket countdown suppression, retained expiry, missing refresh and unconfirmed
+activation fail. Missing active source is a Vitest collection error. The grader
+checks visible account behavior and the settings port's final snapshot, without
+requiring test IDs or a particular sequence of persistence calls.
+
+Only the Account, expiration component and entitlement helper are oracle paths.
+Home integration, real settings durability, live billing/refresh delivery and
+current full application integration are outside this case. Dependencies and the
+fixture are materialized only for grading. No model trial or enforced-isolation
+claim follows from this verification.
