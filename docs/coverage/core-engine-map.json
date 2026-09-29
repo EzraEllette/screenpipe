@@ -342,6 +342,7 @@
         "src/routes/time.rs",
         "src/routes/timezone.rs",
         "src/routes/websocket.rs",
+        "src/search_only.rs",
         "src/server.rs",
         "tests/router_contract_test.rs",
         "tests/tags_test.rs",

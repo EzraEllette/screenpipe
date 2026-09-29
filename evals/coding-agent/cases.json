@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "suite": "screenpipe-app-coding-agent-regressions",
-  "dataset_version": "2026-09-29",
+  "dataset_version": "2026-09-29.7",
   "suite_type": "regression",
   "owner": "screenpipe engineering",
   "policy": {
@@ -4184,6 +4184,86 @@
           }
         ],
         "command": "cd apps/screenpipe-app-tauri && node node_modules/vitest/vitest.mjs run --config vitest.config.ts components/settings/__tests__/eval-trial-upgrade.test.tsx --maxWorkers=1 --minWorkers=1"
+      }
+    },
+    {
+      "id": "app-capture-start-rejection-recovery",
+      "name": "Retry capture startup after a transient refusal",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "e5a3f4859b9a9bc99867597c649e4c1767b69f29"
+      },
+      "base_ref": "0acfbf0da25f2ab007931c68c61335b300c47200",
+      "oracle_ref": "e5a3f4859b9a9bc99867597c649e4c1767b69f29",
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/components/onboarding/engine-startup.tsx"
+      ],
+      "gate": "advisory",
+      "tags": [
+        "onboarding",
+        "capture",
+        "retry"
+      ],
+      "prompt": "Onboarding can remain stuck after a transient native capture-start failure even after the underlying condition recovers. Allow a later readiness check to retry a failed start, whether the native call returns an error or rejects. Advance exactly once after recovery. With promptly settling synthetic native and health responses, keep completion within 2.5 seconds; once a delayed successful native call settles, advance within one more second. Preserve one in-flight native startup at a time, wait for it before advancing, and reuse an already successful session without stopping capture or respawning a listening engine. Persistent startup refusal must show the original refusal reason, retain the failure screen and must not advance. Successful native initialization may advance when media is intentionally idle, including disabled screenshots, or when the local health endpoint requires authentication. An unrelated health response must not establish capture readiness. Use synthetic native and health ports for tests; do not change recording permission policy or perform live capture. No particular helper, promise layout, log text or telemetry schema is required.",
+      "agent_timeout_seconds": 1200,
+      "grader_dependency_links": [
+        {
+          "source_path": "apps/screenpipe-app-tauri/node_modules",
+          "destination_path": "apps/screenpipe-app-tauri/node_modules"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 180,
+        "fixtures": [
+          {
+            "local_path": "graders/capture-recovery.fixture.tsx.txt",
+            "destination_path": "apps/screenpipe-app-tauri/components/onboarding/eval-capture-recovery.test.tsx"
+          }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && node node_modules/vitest/vitest.mjs run --config vitest.config.ts components/onboarding/eval-capture-recovery.test.tsx --maxWorkers=1 --minWorkers=1"
+      }
+    },
+    {
+      "id": "app-auth-verification-schedule",
+      "name": "Keep session verification on schedule across account refreshes",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "89c104ce80f4dbebe23323d6dabab2fc873ecd0c"
+      },
+      "base_ref": "b3ac026dbef83a15dc6f93deb98883609ea1320d",
+      "oracle_ref": "89c104ce80f4dbebe23323d6dabab2fc873ecd0c",
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/lib/auth-guard.tsx"
+      ],
+      "gate": "advisory",
+      "trigger_paths": [
+        "apps/screenpipe-app-tauri/lib/auth-guard.tsx",
+        "apps/screenpipe-app-tauri/lib/hooks/use-settings.tsx"
+      ],
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "auth",
+        "scheduling",
+        "session-preservation"
+      ],
+      "prompt": "Account refreshes and unrelated settings renders can repeatedly restart or postpone desktop session verification. Keep the startup check at five seconds and periodic checks every ten minutes from the start of each token session, even when refresh callbacks change. Use the latest refresh callback. Changing the account token must start a fresh schedule and cancel the old one. Stop checks on sign-out and unmount, while preserving rendered children. Preserve eager verification on visible focus or visibility changes with a 30-second cooldown, and suppress it while hidden. A current-session 401 must clear the full saved account and native cloud token. Permission errors and transient network failures must preserve the account, and an old account's delayed 401 must never clear a newly selected account.",
+      "agent_timeout_seconds": 900,
+      "grader_dependency_links": [
+        {
+          "source_path": "apps/screenpipe-app-tauri/node_modules",
+          "destination_path": "apps/screenpipe-app-tauri/node_modules"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 90,
+        "fixtures": [
+          {
+            "local_path": "graders/auth-schedule.fixture.tsx.txt",
+            "destination_path": "apps/screenpipe-app-tauri/lib/auth-schedule.eval.test.tsx"
+          }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && bun x vitest run --config vitest.config.ts lib/auth-schedule.eval.test.tsx --maxWorkers=1 --minWorkers=1"
       }
     }
   ]

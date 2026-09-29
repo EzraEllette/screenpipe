@@ -4078,6 +4078,9 @@ impl PipeManager {
         // Mark as running
         {
             let mut running = self.running.lock().await;
+            if crate::background_work::is_suspended() {
+                return Err(anyhow!("Screenpipe is serving saved history after Quit"));
+            }
             if running.contains_key(name) {
                 return Err(anyhow!(
                     "pipe '{}' is already running — you may already be executing inside this pipe. \
@@ -4719,6 +4722,9 @@ impl PipeManager {
             // Mark as running
             {
                 let mut running = self.running.lock().await;
+                if crate::background_work::is_suspended() {
+                    return Err(anyhow!("Screenpipe is serving saved history after Quit"));
+                }
                 if running.contains_key(name) {
                     return Err(anyhow!(
                         "pipe '{}' is already running — you may already be executing inside this pipe. \
@@ -6834,7 +6840,7 @@ impl PipeManager {
                     let handle = ExecutionHandle::new(shared_pid.clone());
                     let claimed = {
                         let mut active = running.lock().await;
-                        if active.contains_key(name) {
+                        if crate::background_work::is_suspended() || active.contains_key(name) {
                             false
                         } else {
                             active.insert(name.clone(), handle.clone());
@@ -7006,14 +7012,56 @@ impl PipeManager {
                         // for low latency but still take a permit from a separate,
                         // higher-capacity semaphore so a burst can't spawn
                         // unbounded concurrent agent subprocesses.
-                        let _permit = if !is_event_triggered {
-                            semaphore
-                                .acquire()
-                                .await
-                                .expect("execution semaphore closed")
+                        let capacity = if !is_event_triggered {
+                            &semaphore
                         } else {
-                            event_sem.acquire().await.expect("event semaphore closed")
+                            &event_sem
                         };
+                        let permit = tokio::select! {
+                            biased;
+                            _ = run_handle.wait_for_stop() => None,
+                            permit = capacity.acquire() => Some(permit.expect("execution semaphore closed")),
+                        };
+                        // A queued Stop must not wait for preceding runs, model
+                        // setup, or the rate-limit spacing between scheduled runs.
+                        // No subprocess or execution row exists yet on this path.
+                        if permit.is_none()
+                            || stop_requested.load(std::sync::atomic::Ordering::SeqCst)
+                            || crate::background_work::is_suspended()
+                        {
+                            if let Some(ref token) = pipe_token {
+                                cleanup_pipe_token(token, token_registry_ref.as_ref());
+                            }
+                            if let (Some((event, key)), Some(ref store)) =
+                                (&claim_for_release, &store_ref)
+                            {
+                                if let Err(error) =
+                                    store.release_event_run(&pipe_name, event, key).await
+                                {
+                                    warn!("scheduler: could not release cancelled event claim for '{}': {}", pipe_name, error);
+                                }
+                            }
+                            queued_ref.lock().await.remove(&pipe_name);
+                            run_handle.mark_finished();
+                            running_ref.lock().await.remove(&pipe_name);
+                            // Source watchers need a failed completion to retry
+                            // an unprocessed delivery after recording resumes.
+                            emit_pipe_completed_with_delivery(
+                                &pipe_name,
+                                false,
+                                0.0,
+                                source_delivery_id,
+                            );
+                            if let Some(ref cb) = on_complete {
+                                cb(&pipe_name, None, &trigger, false, 0.0, Some("cancelled"));
+                            }
+                            info!(
+                                "scheduler: cancelled queued pipe '{}' before execution",
+                                pipe_name
+                            );
+                            return;
+                        };
+                        let _permit = permit;
 
                         // Count concurrent event-triggered runs (drops on every
                         // exit path); the peak feeds the pipe_scheduled_run
@@ -11433,6 +11481,118 @@ mod tests {
         assert_eq!(shared_pid.load(Ordering::SeqCst), STOP_REQUESTED_PID);
         assert!(stop_requested.load(Ordering::SeqCst));
         assert!(pm.running.lock().await.contains_key("demo"));
+    }
+
+    #[tokio::test]
+    async fn stop_notification_covers_pending_and_waiting_stops() {
+        for stop_first in [true, false] {
+            let handle = ExecutionHandle::new(Arc::new(std::sync::atomic::AtomicU32::new(0)));
+            if stop_first {
+                handle.request_stop();
+            }
+            let waiter = handle.clone();
+            let waiting = tokio::spawn(async move { waiter.wait_for_stop().await });
+            tokio::task::yield_now().await;
+            if !stop_first {
+                assert!(!waiting.is_finished());
+                handle.request_stop();
+            }
+            tokio::time::timeout(std::time::Duration::from_secs(1), waiting)
+                .await
+                .expect("stop notification was lost")
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn stopped_scheduled_queue_drains_without_launching_or_waiting_for_active_run() {
+        let temp = tempfile::tempdir().unwrap();
+        let pipes_dir = temp.path().join("pipes");
+        for index in 0..7 {
+            let dir = pipes_dir.join(format!("queued-{index}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("pipe.md"),
+                "---\nschedule: every 1h\nagent: mock\nmodel: test\n---\nTest queued cancellation.\n",
+            )
+            .unwrap();
+            std::fs::write(dir.join(EVENT_TRIGGER_CONTEXT_FILE), "{\"items\":[]}").unwrap();
+        }
+        let executor = Arc::new(SourceContextExecutor {
+            contexts: std::sync::Mutex::new(Vec::new()),
+            release: tokio::sync::Semaphore::new(0),
+        });
+        let mut executors: HashMap<String, Arc<dyn AgentExecutor>> = HashMap::new();
+        executors.insert("mock".into(), executor.clone());
+        let mut manager = PipeManager::new(pipes_dir, executors, None, 0);
+        manager.load_pipes().await.unwrap();
+        manager.start_scheduler().await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while manager.running.lock().await.len() != 7
+                || executor.contexts.lock().unwrap().len() != 1
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("one active run and six queued runs");
+        let queued: Vec<_> = manager
+            .running
+            .lock()
+            .await
+            .iter()
+            .filter(|(name, _)| name.as_str() != "queued-0")
+            .map(|(name, handle)| (name.clone(), handle.clone()))
+            .collect();
+        let mut completed =
+            screenpipe_events::subscribe_to_event::<serde_json::Value>("pipe_completed:queued-1");
+        for (name, _) in &queued {
+            assert_eq!(
+                manager.stop_pipe(name).await.unwrap(),
+                PipeStopStatus::StopPending
+            );
+        }
+        // The first executor deliberately retains its permit. All cancelled
+        // followers must disappear without entering that executor at all.
+        let drained = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while manager.running.lock().await.len() != 1 {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        manager.stop_scheduler().await;
+        executor.release.add_permits(1);
+        assert!(
+            drained.is_ok(),
+            "cancelled queue still waits for the active run"
+        );
+        assert!(queued.iter().all(|(_, handle)| handle.is_finished()));
+        let cancellation =
+            tokio::time::timeout(std::time::Duration::from_secs(1), completed.next())
+                .await
+                .expect("queued cancellation must notify completion consumers")
+                .unwrap();
+        assert_eq!(cancellation.data["success"], false);
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !manager.running.lock().await.is_empty() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(executor.contexts.lock().unwrap().len(), 1);
+        // Cancellation must release the shared admission slot for a later,
+        // explicitly requested run after reopening Screenpipe.
+        manager.start_pipe_background("queued-1").await.unwrap();
+        executor.release.add_permits(1);
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !manager.running.lock().await.is_empty() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(executor.contexts.lock().unwrap().len(), 2);
     }
 
     #[tokio::test]

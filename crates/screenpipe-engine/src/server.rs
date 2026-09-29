@@ -1433,7 +1433,7 @@ impl SCServer {
         // (bundled sidecar → install dirs → PATH).
         {
             let wa_lock = wa.lock().await;
-            if wa_lock.has_session() {
+            if wa_lock.has_session() && !screenpipe_core::background_work::is_suspended() {
                 tracing::info!("whatsapp: found existing session, auto-reconnecting...");
                 if let Err(e) = wa_lock.start_pairing("").await {
                     tracing::warn!("whatsapp: auto-reconnect failed: {:?}", e);
@@ -1531,6 +1531,7 @@ impl SCServer {
             )
             .layer(Extension(crate::routes::workflows::WorkflowCatalogSource(self.workflow_catalog_dir.clone())))
             .with_state(app_state.clone())
+            .layer(axum::middleware::from_fn(crate::search_only::history_only))
             .layer(axum::middleware::from_fn_with_state(
                 app_state.clone(),
                 crate::routes::search::storage_snapshot_middleware,

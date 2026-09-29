@@ -2882,6 +2882,9 @@ pub async fn pi_start_inner(
     coding_workspace: Option<crate::coding_workspace::CodingWorkspaceLaunch>,
 ) -> Result<PiInfo, String> {
     info!("pi_start stage=requested session='{}'", session_id);
+    if crate::search_only::is_active() {
+        return Err("Open Screenpipe before starting an agent.".into());
+    }
     let assistant_context = if session_id.starts_with("__title:workflow-assistant-") {
         Some(crate::workflows_runtime::assistant_agent_context(&app).await?)
     } else { None };
@@ -3067,6 +3070,9 @@ pub async fn pi_start_inner(
 
     info!("pi_start stage=waiting_for_pool session='{}'", sid);
     let mut pool = state.0.lock().await;
+    if crate::search_only::is_active() {
+        return Err("Open Screenpipe before starting an agent.".into());
+    }
     info!("pi_start stage=pool_acquired session='{}'", sid);
 
     // Stop existing instance for this session if running

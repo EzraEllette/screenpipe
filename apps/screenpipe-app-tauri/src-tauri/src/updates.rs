@@ -70,7 +70,12 @@ fn configured_updater(app: &tauri::AppHandle) -> Result<tauri_plugin_updater::Up
     Ok(builder.build()?)
 }
 
-async fn stop_before_update(app: &tauri::AppHandle) {
+async fn stop_before_update(app: &tauri::AppHandle) -> Result<(), String> {
+    let search_only = crate::search_only::is_active();
+    crate::search_only::prepare_restart().map_err(|error| {
+        UPDATE_RESTART_STARTED.store(false, Ordering::SeqCst);
+        error
+    })?;
     match bounded_teardown(
         PRE_EXIT_TEARDOWN_TIMEOUT,
         stop_screenpipe(app.state::<RecordingState>(), app.clone()),
@@ -78,12 +83,24 @@ async fn stop_before_update(app: &tauri::AppHandle) {
     .await
     {
         TeardownOutcome::Completed => {}
+        outcome if search_only => {
+            let error = format!("search-only shutdown did not complete: {outcome:?}");
+            UPDATE_RESTART_STARTED.store(false, Ordering::SeqCst);
+            crate::search_only::cancel_restart();
+            crate::search_only::recover_after_failed_update(app.clone());
+            crate::update_diagnostics::record(
+                "search_shutdown_failed",
+                &format!("cause={error}; outcome=update_deferred"),
+            );
+            return Err(error);
+        }
         TeardownOutcome::Failed(error) => warn!("update teardown failed (continuing): {error}"),
         TeardownOutcome::TimedOut => warn!(
             "update teardown exceeded {}s — continuing with the update",
             PRE_EXIT_TEARDOWN_TIMEOUT.as_secs()
         ),
     }
+    Ok(())
 }
 
 #[cfg(target_os = "windows")]
@@ -100,13 +117,17 @@ async fn install_windows_update(
     crate::store::persist_store_before_restart(app).map_err(std::io::Error::other)?;
     let recording = app.state::<RecordingState>();
     let wants_recording = recording.capture_intended();
-    stop_before_update(app).await;
+    stop_before_update(app)
+        .await
+        .map_err(std::io::Error::other)?;
     save_pre_update_version(app, update.body.clone());
     record_update_attempt(app, &update.version);
     // The NSIS handoff exits this process. Keep native startup excluded until
     // that exit; an install error drops the guard so startup can continue.
     UPDATE_RESTART_STARTED.store(true, Ordering::SeqCst);
     if let Err(error) = update.install(bytes) {
+        crate::search_only::cancel_restart();
+        crate::search_only::recover_after_failed_update(app.clone());
         UPDATE_RESTART_STARTED.store(false, Ordering::SeqCst);
         recording.set_capture_intent(wants_recording);
         crate::update_diagnostics::record(
@@ -119,7 +140,7 @@ async fn install_windows_update(
         return Err(error);
     }
     std::mem::forget(restart);
-    crate::process_exit::request_app_relaunch(
+    crate::process_exit::request_prepared_app_relaunch(
         app.clone(),
         "windows update restart",
         Duration::from_millis(250),
@@ -595,25 +616,28 @@ pub async fn restart_for_update(
     }) {
         record_update_attempt(&app, &to_version);
     }
-    if persistent_version.is_some() {
-        request_persistent_update_for_restart()?;
-    }
 
     info!("banner restart: gate passed, shutting down for update");
 
-    // Non-fatal AND time-bounded: a wedged capture/audio teardown must not
-    // stall the relaunch (2026-06-26 MacBook Air: VisionManager hung 10s →
-    // ~57s frozen before the update applied). server_core.rs retries the
-    // port bind if the next boot races teardown.
-    stop_before_update(&app).await;
+    // Recording-mode recovery still permits a bounded teardown timeout.
+    // Search-only mode defers the update if the database owner cannot drain.
+    stop_before_update(&app).await?;
+    if persistent_version.is_some() {
+        if let Err(error) = request_persistent_update_for_restart() {
+            UPDATE_RESTART_STARTED.store(false, Ordering::SeqCst);
+            crate::search_only::cancel_restart();
+            crate::search_only::recover_after_failed_update(app.clone());
+            return Err(error);
+        }
+    }
 
     // Off-thread so the IPC reply flushes before runtime teardown.
     // Keep the reservation until process exit, including that IPC delay.
     std::mem::forget(restart);
     if persistent_version.is_some() {
-        crate::process_exit::request_app_quit(app.clone());
+        crate::process_exit::request_full_app_quit(app.clone());
     } else {
-        crate::process_exit::request_app_relaunch(
+        crate::process_exit::request_prepared_app_relaunch(
             app.clone(),
             "banner update restart",
             Duration::from_millis(250),
@@ -1499,7 +1523,28 @@ impl UpdatesManager {
                         }
                     };
                     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-                    let result = update.download_and_install(on_chunk, || {}).await;
+                    let result = match update.download(on_chunk, || {}).await {
+                        Ok(bytes) => {
+                            // Verify the download before stopping the one server.
+                            // Preserve recording-mode update recovery behavior.
+                            let stopped = if crate::search_only::is_active() {
+                                stop_before_update(&self.app).await.map_err(std::io::Error::other)
+                            } else { Ok(()) };
+                            match stopped {
+                                Ok(()) => {
+                                    let installed = update.install(bytes);
+                                    // Linux replaces the executable in place;
+                                    // the current process continues serving until
+                                    // the later automatic or user-driven restart.
+                                    crate::search_only::cancel_restart();
+                                    crate::search_only::recover_after_failed_update(self.app.clone());
+                                    installed
+                                }
+                                Err(error) => Err(error.into()),
+                            }
+                        }
+                        Err(error) => Err(error),
+                    };
 
                     match &result {
                         Ok(_) => break result,
@@ -1703,15 +1748,22 @@ impl UpdatesManager {
                 let persistent_update =
                     enterprise_route == EnterpriseUpdateRoute::PersistentPackage;
 
+                stop_before_update(&self.app)
+                    .await
+                    .map_err(std::io::Error::other)?;
                 if persistent_update {
-                    request_persistent_update_for_restart().map_err(std::io::Error::other)?;
+                    if let Err(error) = request_persistent_update_for_restart() {
+                        UPDATE_RESTART_STARTED.store(false, Ordering::SeqCst);
+                        crate::search_only::cancel_restart();
+                        crate::search_only::recover_after_failed_update(self.app.clone());
+                        return Err(std::io::Error::other(error).into());
+                    }
                 }
-                stop_before_update(&self.app).await;
                 std::mem::forget(restart);
                 if persistent_update {
-                    crate::process_exit::request_app_quit(self.app.clone());
+                    crate::process_exit::request_full_app_quit(self.app.clone());
                 } else {
-                    crate::process_exit::request_app_relaunch(
+                    crate::process_exit::request_prepared_app_relaunch(
                         self.app.clone(),
                         "auto-update restart",
                         Duration::from_millis(0),

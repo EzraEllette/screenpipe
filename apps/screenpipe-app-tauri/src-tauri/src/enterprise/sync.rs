@@ -1288,6 +1288,9 @@ pub async fn run_sync_burst(
     let mut include_snapshot = true;
 
     loop {
+        if crate::search_only::is_active() {
+            break;
+        }
         let page = run_one_sync_inner(cfg, cursor, local, http, include_snapshot, None).await?;
         include_snapshot = false;
         let more_pending = page.may_have_more();
@@ -2067,6 +2070,14 @@ pub async fn run(
     ));
 
     loop {
+        // The independent native policy watcher and support-log poller remain
+        // available while optional data uploads are suspended.
+        if crate::search_only::is_active() {
+            if sleep_or_shutdown(SYNC_INTERVAL, &mut shutdown).await {
+                break;
+            }
+            continue;
+        }
         // Re-resolve before touching local telemetry. Auth rejection recovers
         // and reruns resolution before any local read; other failures preserve
         // the last safe mode.

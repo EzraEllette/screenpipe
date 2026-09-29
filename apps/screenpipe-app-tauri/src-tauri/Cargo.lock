@@ -11208,7 +11208,7 @@ dependencies = [
 
 [[package]]
 name = "screenpipe-app"
-version = "2.7.79"
+version = "2.7.81"
 dependencies = [
  "aes 0.8.4",
  "aes-gcm 0.10.3",
@@ -11522,6 +11522,7 @@ dependencies = [
  "screenpipe-cpu-features",
  "screenpipe-events",
  "screenpipe-fs",
+ "screenpipe-resource",
  "screenpipe-secrets",
  "screenpipe-sync",
  "screenpipe-vault",

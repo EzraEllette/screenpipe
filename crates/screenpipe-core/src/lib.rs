@@ -28,6 +28,7 @@
 //! header before trusting details).
 
 pub mod agents;
+pub use screenpipe_resource::background_work;
 pub mod connections;
 pub mod display_topology;
 // Runtime CPU-feature detection lives in its own leaf crate so that

@@ -361,6 +361,20 @@ pub fn force_app_relaunch(app: AppHandle, status: i32) -> ! {
 /// Request a relaunch from async/UI code while allowing IPC replies and logs to
 /// flush briefly before the current process is force-exited.
 pub fn request_app_relaunch(app: AppHandle, reason: &'static str, delay: Duration) {
+    if let Err(error) = crate::search_only::prepare_restart() {
+        warn!("relaunch deferred: could not preserve recording mode: {error}");
+        return;
+    }
+    request_prepared_app_relaunch(app, reason, delay);
+}
+
+/// Updater callers already persisted the session before draining the server.
+/// Do not introduce another fallible write after committing the installer.
+pub(crate) fn request_prepared_app_relaunch(
+    app: AppHandle,
+    reason: &'static str,
+    delay: Duration,
+) {
     QUIT_REQUESTED.store(true, Ordering::SeqCst);
 
     std::thread::spawn(move || {
@@ -559,7 +573,7 @@ fn hide_app_to_tray(app: &AppHandle) {
 ///
 /// Only user-initiated quit paths (app menu Cmd+Q, tray Quit, dock Quit via
 /// `ExitRequested`) go through here — programmatic paths (updater restart,
-/// relaunch) call [`request_app_quit`] / [`request_app_relaunch`] directly so
+/// relaunch) call [`request_full_app_quit`] / [`request_app_relaunch`] directly so
 /// they never block on a dialog.
 #[cfg(target_os = "macos")]
 pub fn confirm_and_request_app_quit(app: AppHandle) {
@@ -710,8 +724,18 @@ pub fn confirm_and_request_app_quit(app: AppHandle) {
     request_app_quit(app);
 }
 
-/// Shared quit entry point for tray menu, app menu (Cmd+Q), etc.
+/// User Quit may retain search. Programmatic exit, OS logout, and updater
+/// handoffs continue through the existing full-exit path.
 pub fn request_app_quit(app: AppHandle) {
+    if crate::search_only::keep_after_quit(&app) {
+        crate::search_only::request_enter(app);
+    } else {
+        request_full_app_quit(app);
+    }
+}
+
+/// Full exit for confirmed opt-out Quit, updater handoffs, and failed teardown.
+pub(crate) fn request_full_app_quit(app: AppHandle) {
     if crate::db_recovery_notifications::recovery_active() {
         info!("Quit ignored while protected database recovery is active");
         crate::db_recovery_notifications::notify_recovery_quit_blocked();

@@ -1230,3 +1230,36 @@ Home integration, real settings durability, live billing/refresh delivery and
 current full application integration are outside this case. Dependencies and the
 fixture are materialized only for grading. No model trial or enforced-isolation
 claim follows from this verification.
+
+## Capture startup retry
+
+`app-capture-start-rejection-recovery` runs the actual onboarding component with
+synthetic native, health and clock ports. Eight outcomes cover returned and thrown
+startup failures, successful-session reuse, pending-session serialization, permanent
+refusal, idle media, authenticated health and unrelated health responses. The
+parent fails both recovery outcomes and preserves six; reference and current source
+pass eight.
+
+Run `bun test evals/coding-agent/calibrate-capture-recovery.test.js` with desktop
+test dependencies installed. Ten controls include unused corrected code, fabricated
+startup success, overlapping attempts, premature advancement, capture disruption,
+equivalent private bindings and missing-source classification. Hidden fixtures
+and dependency links appear only at grading. This checks the React/native-command
+boundary; it does not establish native capture, permission delivery, full UI
+unmount/skip recovery, migration authority, agent isolation or model performance.
+
+## Session verification schedule
+
+`app-auth-verification-schedule` runs the actual React auth guard with synthetic
+settings, native credential and clock ports. Twelve outcomes cover stable startup
+and periodic checks, callback refresh, token changes, sign-out, focus cooldown,
+hidden windows, unmount and session-expiry ownership. The parent fails three
+scheduling outcomes and preserves nine; reference and current source pass twelve.
+
+Run `bun test evals/coding-agent/calibrate-auth-schedule.test.js` for thirteen
+controls. A recursive timer implementation passes; unused fixed code, disabled
+checks, stale callbacks, lost token resets, cross-account logout and missing native
+credential cleanup fail. Missing source is a collection error. Fixtures and
+dependencies are installed only when grading starts. This checks the React port
+boundary, not live account refresh, native credential persistence, recording,
+execution isolation or model performance.

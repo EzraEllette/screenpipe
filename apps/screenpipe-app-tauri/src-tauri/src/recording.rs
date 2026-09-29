@@ -387,7 +387,10 @@ impl RecordingState {
         // An explicit start owns the lifecycle now; an explicit stop must not
         // be undone by a later background account refresh.
         self.deferred_account_start.cancel();
-        self.wants_recording.store(on, Ordering::SeqCst);
+        self.wants_recording.store(
+            on && !crate::search_only::capture_paused() && !crate::search_only::is_active(),
+            Ordering::SeqCst,
+        );
     }
 
     /// Whether capture is currently intended to be running.
@@ -558,7 +561,7 @@ pub async fn stop_capture(
 
     let mut capture_guard = state.capture.lock().await;
     if let Some(session) = capture_guard.take() {
-        session.stop().await;
+        session.stop_checked().await?;
         info!("Capture session stopped");
     } else {
         debug!("No capture session running");
@@ -769,12 +772,34 @@ pub async fn start_capture(
     state: State<'_, RecordingState>,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
+    start_capture_inner(state, app, true).await
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) async fn restart_capture_after_permission(
+    state: State<'_, RecordingState>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    start_capture_inner(state, app, false).await
+}
+
+async fn start_capture_inner(
+    state: State<'_, RecordingState>,
+    app: tauri::AppHandle,
+    explicit_resume: bool,
+) -> Result<(), String> {
     if crate::storage_migration::is_running(&app) {
         return Err("Storage migration is running. Recording resumes when it finishes.".into());
     }
     info!("Starting capture session");
     let store = SettingsStore::get(&app).ok().flatten().unwrap_or_default();
     require_recording_access(&app, &store)?;
+
+    if explicit_resume {
+        crate::search_only::resume_capture()?;
+    } else if crate::search_only::capture_paused() {
+        return Err("Recording was stopped by Quit; explicit resume is required.".into());
+    }
 
     // Capture is now intended to run (tray/shortcut start, mic-grant reinit, …)
     // — record it so the health watchdog will respawn a crashed engine instead
@@ -790,6 +815,9 @@ pub async fn start_capture(
     // they observe the installed session and return success only after capture
     // is actually running, so their webviews cannot toast success prematurely.
     let mut capture_guard = state.capture.lock().await;
+    if !state.capture_intended() {
+        return Err("Recording was stopped while capture startup was pending.".into());
+    }
     if capture_guard.is_some() {
         info!("Capture session already running");
         return Ok(());
