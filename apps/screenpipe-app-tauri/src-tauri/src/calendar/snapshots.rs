@@ -8,17 +8,31 @@
 use super::CalendarEventItem;
 use std::collections::BTreeMap;
 use std::sync::{Mutex, OnceLock};
+use tokio::sync::watch;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub(crate) enum CalendarSource {
     Native,
     Google,
     Ics,
 }
 
-#[derive(Default)]
-struct CalendarSnapshots {
-    sources: BTreeMap<CalendarSource, Vec<CalendarEventItem>>,
+#[derive(Clone, Default)]
+pub(super) struct CalendarSnapshots {
+    pub(super) sources: BTreeMap<CalendarSource, Vec<CalendarEventItem>>,
+}
+
+// A watch retains the latest complete snapshot across scheduler startup and
+// lag. The public event bus remains unchanged for meeting detection.
+fn updates() -> &'static watch::Sender<CalendarSnapshots> {
+    static UPDATES: OnceLock<watch::Sender<CalendarSnapshots>> = OnceLock::new();
+    UPDATES.get_or_init(|| watch::channel(CalendarSnapshots::default()).0)
+}
+
+pub(super) fn subscribe() -> watch::Receiver<CalendarSnapshots> {
+    updates().subscribe()
 }
 
 impl CalendarSnapshots {
@@ -44,6 +58,7 @@ pub(crate) fn publish_calendar_events(
         .lock()
         .map_err(|_| anyhow::anyhow!("calendar snapshot lock poisoned"))?;
     let merged = snapshots.replace(source, events);
+    updates().send_replace(snapshots.clone());
     // Keep publication inside the lock. Otherwise concurrent providers could
     // publish an older merged snapshot after a newer one. This is a bounded,
     // synchronous event-bus send; no network/OS calls occur under this lock.
