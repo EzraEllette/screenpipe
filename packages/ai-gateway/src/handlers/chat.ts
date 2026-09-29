@@ -36,14 +36,14 @@ import { getHostedAiCapacityUpgrade } from '../services/hosted-ai-policy';
 // Exported so tests can pin that every chain entry has a MODEL_PRICING match
 // (otherwise served-model cost rows fall into the unknown-model estimate).
 export const AUTO_WATERFALL = [
-  'gpt-5.6-luna',
+  'gpt-6-luna',
   'claude-sonnet-5',
   'gpt-5.4-mini',
 ];
 
 // Vision-capable models for requests containing images
 export const AUTO_WATERFALL_VISION = [
-  'gpt-5.6-luna',
+  'gpt-6-luna',
   'claude-sonnet-5',
   'gpt-5.4-mini',
 ];
@@ -51,7 +51,7 @@ export const AUTO_WATERFALL_VISION = [
 // Background waterfall — for pipes, summaries, and suggestions. All entries
 // support tools; the second entry crosses providers for outage resilience.
 export const AUTO_WATERFALL_BACKGROUND = [
-  'gpt-5.6-luna',
+  'gpt-6-luna',
   'claude-sonnet-5',
   'gpt-5.4-mini',
 ];
@@ -61,12 +61,13 @@ export const AUTO_WATERFALL_BACKGROUND = [
 // the difficulty router's premium tier heads. Keep this list and its attempt cap
 // in sync with the conservative reservation in free-chat-limit.ts.
 export const FREE_PREVIEW_WATERFALL = [
-  'gpt-5.6-luna',
+  'gpt-6-luna',
   'gpt-5.4-mini',
 ];
 export const FREE_PREVIEW_MAX_UPSTREAM_ATTEMPTS = 2;
 
 const NON_FRONTIER_FALLBACK_MODELS = new Set([
+  'gpt-6-luna',
   'gpt-5.6-luna',
   'gpt-5.4-mini',
   'gpt-5.4-nano',
@@ -92,6 +93,7 @@ function isGeminiModel(model: string): boolean {
 export const MODEL_FALLBACKS: Record<string, string[]> = {
   'claude-fable-5': ['claude-opus-5', 'claude-sonnet-5', 'gpt-5.4-mini'],
   'claude-opus-5': ['claude-sonnet-5', 'gpt-5.4-mini'],
+  'gpt-6-luna': ['claude-sonnet-5', 'gpt-5.4-mini'],
   'gpt-5.6-luna': ['claude-sonnet-5', 'gpt-5.4-mini'],
   'claude-sonnet-5': ['gpt-5.4-mini'],
   'gpt-5.4-mini': ['claude-sonnet-5'],
@@ -897,7 +899,7 @@ export async function handleChatCompletions(
     isFrontierModel(body.model)
   ) {
     if (String((env as any)?.PIPE_FRONTIER_POLICY ?? 'downgrade').toLowerCase() === 'reject') {
-      return errorResponse(body, 403, `"${body.model}" (a frontier model) isn't available for scheduled pipes / background tasks. Use "auto", GPT-5.6 Luna, or GPT-5.4 mini.`);
+      return errorResponse(body, 403, `"${body.model}" (a frontier model) isn't available for scheduled pipes / background tasks. Use "auto", GPT-6 Luna, or GPT-5.4 mini.`);
     }
     const fallback = String((env as any)?.PIPE_FRONTIER_FALLBACK ?? 'auto');
     body = { ...body, model: fallback };
