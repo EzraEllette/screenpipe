@@ -1277,9 +1277,8 @@ fn finish_gcal_snapshot(
         anyhow::bail!("incomplete Google Calendar snapshot: {error}");
     }
     if lists.is_empty() {
-        return Err(first_err.unwrap_or_else(|| {
-            anyhow::anyhow!("no Google Calendar account could be queried")
-        }));
+        return Err(first_err
+            .unwrap_or_else(|| anyhow::anyhow!("no Google Calendar account could be queried")));
     }
     Ok(merge_gcal_events(lists))
 }
@@ -1328,7 +1327,8 @@ async fn gcal_fetch_pages(
         let resp: Value = page.send().await?.error_for_status()?.json().await?;
         let items = resp["items"].as_array().cloned().unwrap_or_default();
         events.extend(
-            items.into_iter()
+            items
+                .into_iter()
                 .filter(google_calendar_event_is_available)
                 .map(|item| google_calendar_event_json(&item, calendar_label)),
         );
@@ -4313,21 +4313,51 @@ mod tests {
 
     #[test]
     fn reminder_google_calendar_excludes_cancelled_and_self_declined_events() {
-        assert!(!google_calendar_event_is_available(&json!({"status": "cancelled"})));
-        assert!(!google_calendar_event_is_available(&json!({"attendees": [{"self": true, "responseStatus": "declined"}]})));
-        assert!(google_calendar_event_is_available(&json!({"attendees": [{"self": false, "responseStatus": "declined"}]})));
+        assert!(!google_calendar_event_is_available(
+            &json!({"status": "cancelled"})
+        ));
+        assert!(!google_calendar_event_is_available(
+            &json!({"attendees": [{"self": true, "responseStatus": "declined"}]})
+        ));
+        assert!(google_calendar_event_is_available(
+            &json!({"attendees": [{"self": false, "responseStatus": "declined"}]})
+        ));
         for response in ["accepted", "tentative", "needsAction"] {
-            assert!(google_calendar_event_is_available(&json!({"attendees": [{"self": true, "responseStatus": response}]})));
+            assert!(google_calendar_event_is_available(
+                &json!({"attendees": [{"self": true, "responseStatus": response}]})
+            ));
         }
     }
 
     #[test]
     fn reminder_google_snapshot_rejects_partial_results_without_clearing_calendars() {
-        let events = vec![vec![json!({"id": "healthy", "start": "2026-09-29T19:00:00Z"})]];
-        assert_eq!(finish_gcal_snapshot(events.clone(), Some(anyhow::anyhow!("offline")), false).unwrap().len(), 1);
-        let error = finish_gcal_snapshot(events, Some(GcalAuthError { message: "account needs auth".into() }.into()), true).unwrap_err();
-        assert_eq!(gcal_events_error_response(&error).0, StatusCode::INTERNAL_SERVER_ERROR);
-        assert!(finish_gcal_snapshot(vec![vec![]], None, true).unwrap().is_empty());
+        let events = vec![vec![
+            json!({"id": "healthy", "start": "2026-09-29T19:00:00Z"}),
+        ]];
+        assert_eq!(
+            finish_gcal_snapshot(events.clone(), Some(anyhow::anyhow!("offline")), false)
+                .unwrap()
+                .len(),
+            1
+        );
+        let error = finish_gcal_snapshot(
+            events,
+            Some(
+                GcalAuthError {
+                    message: "account needs auth".into(),
+                }
+                .into(),
+            ),
+            true,
+        )
+        .unwrap_err();
+        assert_eq!(
+            gcal_events_error_response(&error).0,
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert!(finish_gcal_snapshot(vec![vec![]], None, true)
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]
@@ -4339,21 +4369,34 @@ mod tests {
                 "items": [{"id": "two", "summary": "second page"}]
             })))
             .with_priority(2)
-            .mount(&server).await;
+            .mount(&server)
+            .await;
         Mock::given(wiremock::matchers::method("GET"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "items": [{"id": "one"}], "nextPageToken": "second"
             })))
             .with_priority(3)
-            .mount(&server).await;
+            .mount(&server)
+            .await;
         let client = reqwest::Client::new();
-        let events = gcal_fetch_pages(client.get(server.uri()), "Work").await.unwrap();
-        assert_eq!(events.iter().map(|e| e["id"].as_str().unwrap()).collect::<Vec<_>>(), vec!["one", "two"]);
+        let events = gcal_fetch_pages(client.get(server.uri()), "Work")
+            .await
+            .unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .map(|e| e["id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["one", "two"]
+        );
         Mock::given(query_param("pageToken", "second"))
             .respond_with(ResponseTemplate::new(503))
             .with_priority(1)
-            .mount(&server).await;
-        assert!(gcal_fetch_pages(client.get(server.uri()), "Work").await.is_err());
+            .mount(&server)
+            .await;
+        assert!(gcal_fetch_pages(client.get(server.uri()), "Work")
+            .await
+            .is_err());
     }
 
     #[test]

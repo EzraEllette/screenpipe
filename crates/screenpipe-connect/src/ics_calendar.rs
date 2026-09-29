@@ -467,9 +467,14 @@ mod tests {
     #[test]
     fn reminder_cancelled_ics_event_is_absent_from_the_next_snapshot() {
         let feed = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:cancelled\r\nDTSTART:20260929T190000Z\r\nDTEND:20260929T193000Z\r\nSTATUS:CANCELLED\r\nURL:https://meet.google.com/abc-defg-hij\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
-        let now = DateTime::parse_from_rfc3339("2026-09-29T18:00:00Z").unwrap().with_timezone(&Utc);
+        let now = DateTime::parse_from_rfc3339("2026-09-29T18:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
         assert!(parse_ics_to_events(feed, "Work", now, 1, 2).is_empty());
-        assert_eq!(parse_ics_to_events(&feed.replace("CANCELLED", "CONFIRMED"), "Work", now, 1, 2).len(), 1);
+        assert_eq!(
+            parse_ics_to_events(&feed.replace("CANCELLED", "CONFIRMED"), "Work", now, 1, 2).len(),
+            1
+        );
     }
 
     fn test_key() -> [u8; 32] {

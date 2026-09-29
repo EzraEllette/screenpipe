@@ -245,10 +245,14 @@ impl ScreenpipeCalendar {
     }
 }
 
-fn calendar_event_is_available(status: eventkit::EventStatus, attendees: &[eventkit::ParticipantInfo]) -> bool {
+fn calendar_event_is_available(
+    status: eventkit::EventStatus,
+    attendees: &[eventkit::ParticipantInfo],
+) -> bool {
     status != eventkit::EventStatus::Canceled
-        && !attendees.iter().any(|attendee| attendee.is_current_user
-            && attendee.status == eventkit::ParticipantStatus::Declined)
+        && !attendees.iter().any(|attendee| {
+            attendee.is_current_user && attendee.status == eventkit::ParticipantStatus::Declined
+        })
 }
 
 impl Default for ScreenpipeCalendar {
@@ -302,15 +306,30 @@ mod tests {
     #[test]
     fn reminder_calendar_eligibility_uses_the_current_users_response() {
         let mut attendee = eventkit::ParticipantInfo {
-            name: None, URL: None, role: eventkit::ParticipantRole::Required,
-            status: eventkit::ParticipantStatus::Declined, is_current_user: false,
+            name: None,
+            URL: None,
+            role: eventkit::ParticipantRole::Required,
+            status: eventkit::ParticipantStatus::Declined,
+            is_current_user: false,
         };
-        assert!(calendar_event_is_available(eventkit::EventStatus::Confirmed, &[attendee.clone()]));
+        assert!(calendar_event_is_available(
+            eventkit::EventStatus::Confirmed,
+            &[attendee.clone()]
+        ));
         attendee.is_current_user = true;
-        assert!(!calendar_event_is_available(eventkit::EventStatus::Confirmed, &[attendee.clone()]));
+        assert!(!calendar_event_is_available(
+            eventkit::EventStatus::Confirmed,
+            &[attendee.clone()]
+        ));
         attendee.status = eventkit::ParticipantStatus::Accepted;
-        assert!(calendar_event_is_available(eventkit::EventStatus::Confirmed, &[attendee]));
-        assert!(!calendar_event_is_available(eventkit::EventStatus::Canceled, &[]));
+        assert!(calendar_event_is_available(
+            eventkit::EventStatus::Confirmed,
+            &[attendee]
+        ));
+        assert!(!calendar_event_is_available(
+            eventkit::EventStatus::Canceled,
+            &[]
+        ));
     }
 
     #[test]
