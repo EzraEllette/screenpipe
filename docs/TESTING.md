@@ -298,7 +298,7 @@ commits: `d9d43d31`, `620c89a5`, `14acf6f0`
 
 commits: `94531265`, `d794176a`, `9070639c`, `0378cab1`, `4a3313d3`, `7ffdd4f1`, `1b36f62d`
 
-- [ ] **Quit keeps search available (default On)** — tray, dock, and Cmd+Q stop screen/audio/UI capture and destroy webviews. A saved-history request still succeeds through the same API; attempts to start capture or workflows fail. Reopen into the same PID with capture paused, then explicitly resume. Repeat after sleep/wake and an update restart. Check idle CPU/memory and that recording devices and child agents are released.
+- [ ] **Quit keeps search available (default On)** — preserve the existing recording-aware Quit / Minimize to Tray / Cancel dialog for tray, dock, and Cmd+Q. Cancel changes nothing; Minimize retains recording and the tray. Confirmed Quit stops screen/audio/UI capture, destroys webviews, and hides the tray and dock. A saved-history request still succeeds through the same API; attempts to start capture or workflows fail. Reopen into the same PID with capture paused and the tray restored, then explicitly resume. Repeat after sleep/wake and an update restart. Check idle CPU/memory and that recording devices and child agents are released.
 - [ ] **clean quit via tray (Keep search available after quitting Off)** — right-click tray → Quit. all processes terminate. no orphaned ffmpeg/bun processes. Explicit Off survives restart; OS logout/shutdown exits regardless of the setting.
 - [ ] **clean quit via dock** — right-click dock → Quit. same as above.
 - [ ] **clean quit via Cmd+Q** — same verification.

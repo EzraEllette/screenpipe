@@ -573,7 +573,7 @@ fn hide_app_to_tray(app: &AppHandle) {
 ///
 /// Only user-initiated quit paths (app menu Cmd+Q, tray Quit, dock Quit via
 /// `ExitRequested`) go through here — programmatic paths (updater restart,
-/// relaunch) call [`request_app_quit`] / [`request_app_relaunch`] directly so
+/// relaunch) call [`request_full_app_quit`] / [`request_app_relaunch`] directly so
 /// they never block on a dialog.
 #[cfg(target_os = "macos")]
 pub fn confirm_and_request_app_quit(app: AppHandle) {
@@ -593,7 +593,7 @@ pub fn confirm_and_request_app_quit(app: AppHandle) {
         .unwrap_or(false);
     if !recording_active {
         info!("Quit requested with no active recording — skipping confirmation");
-        request_user_quit(app);
+        request_app_quit(app);
         return;
     }
 
@@ -709,7 +709,7 @@ fn show_quit_alert(app: &AppHandle, show_minimize: bool, message: &str) {
         QUIT_CONFIRM_SHOWING.store(false, Ordering::SeqCst);
 
         match response {
-            FIRST_BUTTON => request_user_quit(app.clone()),
+            FIRST_BUTTON => request_app_quit(app.clone()),
             SECOND_BUTTON if show_minimize => {
                 info!("Quit dialog: minimizing to tray instead");
                 hide_app_to_tray(app);
@@ -721,21 +721,21 @@ fn show_quit_alert(app: &AppHandle, show_minimize: bool, message: &str) {
 
 #[cfg(not(target_os = "macos"))]
 pub fn confirm_and_request_app_quit(app: AppHandle) {
-    request_user_quit(app);
+    request_app_quit(app);
 }
 
 /// User Quit may retain search. Programmatic exit, OS logout, and updater
 /// handoffs continue through the existing full-exit path.
-pub(crate) fn request_user_quit(app: AppHandle) {
+pub fn request_app_quit(app: AppHandle) {
     if crate::search_only::keep_after_quit(&app) {
         crate::search_only::request_enter(app);
     } else {
-        request_app_quit(app);
+        request_full_app_quit(app);
     }
 }
 
-/// Shared quit entry point for tray menu, app menu (Cmd+Q), etc.
-pub fn request_app_quit(app: AppHandle) {
+/// Full exit for confirmed opt-out Quit, updater handoffs, and failed teardown.
+pub(crate) fn request_full_app_quit(app: AppHandle) {
     if crate::db_recovery_notifications::recovery_active() {
         info!("Quit ignored while protected database recovery is active");
         crate::db_recovery_notifications::notify_recovery_quit_blocked();

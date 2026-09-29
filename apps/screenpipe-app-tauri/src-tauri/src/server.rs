@@ -681,7 +681,7 @@ async fn e2e_search_only_state(State(state): State<ServerState>) -> impl IntoRes
 #[cfg(feature = "e2e")]
 async fn e2e_search_only_quit(State(state): State<ServerState>) -> impl IntoResponse {
     // The same action chosen by the native Quit confirmation's first button.
-    crate::process_exit::request_user_quit(state.app_handle);
+    crate::process_exit::request_app_quit(state.app_handle);
     Json(serde_json::json!({"accepted": true}))
 }
 

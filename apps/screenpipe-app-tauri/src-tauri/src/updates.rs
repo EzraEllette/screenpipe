@@ -635,7 +635,7 @@ pub async fn restart_for_update(
     // Keep the reservation until process exit, including that IPC delay.
     std::mem::forget(restart);
     if persistent_version.is_some() {
-        crate::process_exit::request_app_quit(app.clone());
+        crate::process_exit::request_full_app_quit(app.clone());
     } else {
         crate::process_exit::request_prepared_app_relaunch(
             app.clone(),
@@ -1761,7 +1761,7 @@ impl UpdatesManager {
                 }
                 std::mem::forget(restart);
                 if persistent_update {
-                    crate::process_exit::request_app_quit(self.app.clone());
+                    crate::process_exit::request_full_app_quit(self.app.clone());
                 } else {
                     crate::process_exit::request_prepared_app_relaunch(
                         self.app.clone(),

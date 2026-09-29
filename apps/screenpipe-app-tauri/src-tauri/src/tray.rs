@@ -395,9 +395,6 @@ async fn run_tray_recording_action(
     let state = app.state::<RecordingState>();
     match action {
         TrayRecordingAction::Start => {
-            if crate::search_only::is_active() {
-                crate::headless::wake_from_tray(app);
-            }
             let data_dir = crate::db_recovery_notifications::effective_recovery_data_dir(app)?;
             let database_path = data_dir.join("db.sqlite");
             match tray_start_route_with(|| database_has_confirmed_damage(&database_path))? {
@@ -1069,6 +1066,16 @@ pub fn setup_tray(app: &AppHandle, update_item: Option<&tauri::menu::MenuItem<Wr
         // intentionally omit the self-update menu item, but they still need the
         // poller or the startup "Starting…" menu is never rebuilt.
         setup_tray_menu_updater(app.clone(), update_item);
+    }
+    sync_search_visibility(app)?;
+    Ok(())
+}
+
+/// Confirmed Quit leaves no tray UI. Reopening restores the same tray item.
+/// Call on the main thread, including after a search-only updater relaunch.
+pub(crate) fn sync_search_visibility(app: &AppHandle) -> Result<()> {
+    if let Some(tray) = app.tray_by_id("screenpipe_main") {
+        tray.set_visible(!crate::search_only::is_active())?;
     }
     Ok(())
 }

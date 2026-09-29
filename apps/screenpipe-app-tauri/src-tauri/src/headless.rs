@@ -155,6 +155,7 @@ fn mark_dormant(app: &AppHandle) {
 }
 
 fn enter_on_main_thread(app: &AppHandle) -> Result<(), String> {
+    crate::tray::sync_search_visibility(app).map_err(|error| error.to_string())?;
     if let Err(error) = app.global_shortcut().unregister_all() {
         warn!("headless: failed to unregister global shortcuts: {error}");
     }
@@ -248,6 +249,10 @@ pub fn wake_from_tray(app: &AppHandle) -> bool {
     crate::search_only::wake();
     if !UI_DORMANT.swap(false, Ordering::SeqCst) {
         return false;
+    }
+
+    if let Err(error) = crate::tray::sync_search_visibility(app) {
+        warn!("headless: failed to restore tray visibility: {error}");
     }
 
     #[cfg(target_os = "macos")]

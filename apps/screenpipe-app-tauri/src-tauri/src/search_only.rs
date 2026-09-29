@@ -243,7 +243,7 @@ pub fn request_enter(app: AppHandle) {
                     "search_only_stop_slow",
                     "cause=quit_transition_timeout; outcome=full_exit",
                 );
-                crate::process_exit::request_app_quit(app);
+                crate::process_exit::request_full_app_quit(app);
                 return;
             }
         };
@@ -272,7 +272,7 @@ pub fn request_enter(app: AppHandle) {
                     &format!("cause={error}; outcome=full_exit"),
                 );
                 // Quit must stop capture even if retaining search fails.
-                crate::process_exit::request_app_quit(app);
+                crate::process_exit::request_full_app_quit(app);
                 return;
             }
         }
