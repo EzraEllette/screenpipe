@@ -20,6 +20,45 @@ afterEach(async () => {
 });
 
 describe('local AI gateway harness', () => {
+	test('preserves voice responses across the real Durable Object fetch boundary', async () => {
+		const harness = await startHarness({
+			outboundResponse: async (request) => {
+				if (request.url === 'https://screenpipe.com/api/user') {
+					return Response.json({ success: true, user: {
+						id: 'synthetic-voice-user', cloud_subscribed: true, subscription_plan: 'pro', app_entitled: true,
+						entitlement: { active: true, plan: 'pro', features: { app: true, cloud: true } },
+					} });
+				}
+				if (request.url === 'https://api.openai.com/v1/live/sessions') {
+					return Response.json({ session: { id: 'synthetic-call' },
+						transport: { type: 'webrtc', sdp: 'v=0\r\nsynthetic-answer' } });
+				}
+				if (request.url === 'https://api.openai.com/v1/live/sessions/synthetic-call/hangup') {
+					return new Response(null, { status: 204 });
+				}
+			},
+		});
+		const voice = (body: unknown, method = 'POST') => harness.fetch('/workflow-voice', {
+			method, headers: { Authorization: 'Bearer eyJ.synthetic-voice-token', 'Content-Type': 'application/json' },
+			body: JSON.stringify(body),
+		});
+		const invalid = await voice({});
+		expect(invalid.status).toBe(400);
+		expect(await invalid.json()).toEqual({ error: 'Invalid voice request.' });
+		const connected = await voice({ sdp: 'v=0\r\nsynthetic-offer', title: 'Synthetic workflow', questions: [] });
+		expect(connected.status).toBe(201);
+		const call = await connected.json() as { call_token: string; sdp: string };
+		expect(call.sdp).toBe('v=0\r\nsynthetic-answer');
+		const closed = await voice({ call_token: call.call_token }, 'DELETE');
+		expect(closed.status).toBe(204);
+		expect(await closed.text()).toBe('');
+		for (const response of [invalid, connected, closed]) {
+			expect(response.headers.get('Cache-Control')).toBe('no-store');
+			expect(response.headers.get('Access-Control-Allow-Origin')).toBe('*');
+		}
+		harness.assertNoUnexpectedOutboundRequests();
+	});
+
 	test('retains Auto decisions and monotonic fallback in the real Durable Object runtime', async () => {
 		const harness = await startHarness({ routerMode: 'heuristic' });
 		const object = await harness.rateLimiterObject('synthetic-auto-turn');

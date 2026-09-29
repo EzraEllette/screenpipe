@@ -194,6 +194,7 @@ export class LocalGatewayHarness {
 					...jsonBindings(options.privateCostControls),
 					...(options.ttsStatus !== undefined ? { TTS_ENABLED: 'true', ELEVENLABS_VOICE_ID: 'fictionalVoice123', ELEVENLABS_USD_PER_CHARACTER: '0.0001' } : {}),
 					OPENAI_API_KEY: 'screenpipe-local-e2e-only',
+					ADMIN_SECRET: 'screenpipe-local-e2e-admin-only',
 					AI_GATEWAY_SERVICE_TOKEN: LOCAL_GATEWAY_SERVICE_TOKEN,
 					MODEL_GATING_ENABLED: 'true',
 					PIPE_FRONTIER_POLICY: 'reject',
