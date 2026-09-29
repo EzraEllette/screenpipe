@@ -222,6 +222,40 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn activity_preview_failure_survives_support_collection_and_redaction() {
+        let dir = tempfile::tempdir().unwrap();
+        let current = dir.path().join("screenpipe-app.2026-09-29.log");
+        let file = std::fs::File::create(&current).unwrap();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(std::sync::Mutex::new(file))
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            crate::commands::write_browser_log(
+                "warn".into(),
+                "[first-run] activity preview request failed: HTTP 503; preview retained, retry backs off".into(),
+            );
+            tracing::error!("activity summary: frame summary query failed: encountered unexpected or invalid data: frame storage: payload read deadline exceeded");
+            tracing::info!("contact=private-person@example.com");
+        });
+        tokio::fs::rename(&current, dir.path().join("screenpipe-app.2026-09-29.1.log"))
+            .await
+            .unwrap();
+        tokio::fs::write(&current, "INFO recorder restarted\n")
+            .await
+            .unwrap();
+        let report = collect_redacted_from_dirs(&[dir.path().to_path_buf()])
+            .await
+            .unwrap();
+        assert!(report.contains("activity preview request failed: HTTP 503"));
+        assert!(report.contains("preview retained, retry backs off"));
+        assert!(report.contains("activity summary: frame summary query failed"));
+        assert!(report.contains("payload read deadline exceeded"));
+        assert!(report.contains("recorder restarted"));
+        assert!(!report.contains("private-person@example.com"));
+    }
+
+    #[tokio::test]
     async fn audio_pending_failure_survives_rotation_collection_and_redaction() {
         // The audio regression compares this fixture with the real failed
         // completion path, including the originating SQLite error.
