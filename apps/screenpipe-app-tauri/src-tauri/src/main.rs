@@ -125,6 +125,7 @@ mod provider_automations;
 mod recording;
 mod remote_support_logs;
 mod remote_sync_commands;
+mod search_only;
 mod secrets;
 mod server;
 mod server_core;
@@ -1071,6 +1072,9 @@ async fn main() {
             // during setup; normal subsequent launches retain Home behavior.
             let login_duplicate = should_suppress_startup_handoff(&args_clone);
             if !crate::enterprise_policy::is_app_ui_hidden() && !login_duplicate {
+                if crate::search_only::is_active() {
+                    crate::headless::wake_from_tray(&app_for_closure);
+                }
                 match deep_link::handoff_window(deep_link_url.as_deref()) {
                     deep_link::HandoffWindow::AppEntry => {
                         let _ = ShowRewindWindow::Onboarding.show(&app_for_closure);
@@ -1386,6 +1390,7 @@ async fn main() {
                 );
                 std::io::Error::other(e)
             })?;
+            let search_only_startup = crate::search_only::initialize();
 
             #[cfg(feature = "e2e")]
             e2e::seeds::apply_settings(app.handle(), &mut store);
@@ -1661,14 +1666,14 @@ async fn main() {
 
             // Enterprise hidden-UI deployments always run headless with the
             // recorder only, regardless of user settings or onboarding state.
-            let headless_startup = app_ui_hidden
+            let headless_startup = search_only_startup || app_ui_hidden
                 || crate::headless::should_start_dormant(
                     store.headless,
                     onboarding_store.is_completed,
                 );
             crate::headless::initialize(
                 headless_startup,
-                app_ui_hidden || (store.headless && store.headless_record_only),
+                search_only_startup || app_ui_hidden || (store.headless && store.headless_record_only),
             );
             if from_autostart {
                 info!("launched from OS startup enrollment; starting in background");
@@ -1780,7 +1785,7 @@ async fn main() {
             // Uses retry loop because CGPreflightScreenCaptureAccess can return false
             // transiently on startup before TCC fully initializes.
             #[cfg(target_os = "macos")]
-            if onboarding_store.is_completed || app_ui_hidden {
+            if !search_only_startup && (onboarding_store.is_completed || app_ui_hidden) {
                 let mut screen_ok = false;
                 let mut mic_ok = false;
                 for attempt in 0..3 {
@@ -1993,7 +1998,8 @@ async fn main() {
                             // `no-recording`, or by user choice in the future)
                             // the SCK code path is never exercised, so we can
                             // boot the server + HTTP API + DB without TCC.
-                            if !disable_vision && !permissions_check.screen_recording.permitted() {
+                            if wants_recording.load(std::sync::atomic::Ordering::SeqCst)
+                                && !disable_vision && !permissions_check.screen_recording.permitted() {
                                 warn!("Screen recording permission not granted: {:?}. Server will not start.", permissions_check.screen_recording);
                                 // Flip the recording state to a terminal Error
                                 // value so the tray stops showing "Starting…"
@@ -2010,7 +2016,8 @@ async fn main() {
                                 return;
                             }
 
-                            if !disable_audio && !permissions_check.microphone.permitted() {
+                            if wants_recording.load(std::sync::atomic::Ordering::SeqCst)
+                                && !disable_audio && !permissions_check.microphone.permitted() {
                                 warn!("Microphone permission not granted: {:?}. Audio recording will not work.", permissions_check.microphone);
                             }
 
@@ -2574,6 +2581,9 @@ async fn main() {
                     // Defer off the event stack so run handler stays panic-free.
                     // Showing Onboarding is the app-entry gate: it focuses setup
                     // while incomplete and routes to Home once complete.
+                    if crate::search_only::is_active() {
+                        crate::headless::wake_from_tray(app_handle.app_handle());
+                    }
                     if crate::enterprise_policy::is_app_ui_hidden() || crate::headless::is_dormant()
                     {
                         return;

@@ -4415,7 +4415,11 @@ headless?: boolean;
  * When true, headless mode skips scheduled pipe runs so only recording
  * and the local server continue in the background.
  */
-headlessRecordOnly?: boolean }
+headlessRecordOnly?: boolean;
+/**
+ * Quit stops capture and closes the UI while the existing process serves history.
+ */
+keepSearchAvailableAfterQuit?: boolean }
 export type ShowRewindWindow = "Main" | { Home: { page: string | null } } | { Search: { query: string | null } } | "Onboarding" | "Chat" | "PermissionRecovery"
 export type StartExportRecordingResponse = { jobId: string }
 export type StorageMigrationActivity = { root: string | null; busy: boolean; recovering: boolean; message: string; error: string | null; elapsed_seconds: number; completed_records: number | null; total_records: number | null; bytes_saved: number | null; available_bytes: number | null; completed: boolean }
