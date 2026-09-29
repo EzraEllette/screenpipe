@@ -4719,6 +4719,9 @@ impl PipeManager {
             // Mark as running
             {
                 let mut running = self.running.lock().await;
+                if crate::background_work::is_suspended() {
+                    return Err(anyhow!("Screenpipe is serving saved history after Quit"));
+                }
                 if running.contains_key(name) {
                     return Err(anyhow!(
                         "pipe '{}' is already running — you may already be executing inside this pipe. \

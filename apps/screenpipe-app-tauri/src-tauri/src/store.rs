@@ -1633,6 +1633,10 @@ pub struct SettingsStore {
     /// and the local server continue in the background.
     #[serde(rename = "headlessRecordOnly", default)]
     pub headless_record_only: bool,
+
+    /// Quit stops capture and closes the UI while the existing process serves history.
+    #[serde(rename = "keepSearchAvailableAfterQuit", default = "default_true")]
+    pub keep_search_available_after_quit: bool,
 }
 
 fn generate_device_id() -> String {
@@ -2183,6 +2187,7 @@ Rules:
             minimize_to_tray_on_close: false,
             headless: false,
             headless_record_only: false,
+            keep_search_available_after_quit: true,
             extra: remote_control,
         }
     }
@@ -3572,6 +3577,19 @@ mod tests {
         .unwrap();
 
         assert!(settings.auto_update);
+    }
+
+    #[test]
+    fn search_after_quit_defaults_on_and_preserves_explicit_opt_out() {
+        assert!(SettingsStore::default().keep_search_available_after_quit);
+        let missing: SettingsStore = serde_json::from_value(json!({"aiPresets": []})).unwrap();
+        assert!(missing.keep_search_available_after_quit);
+        let opted_out: SettingsStore = serde_json::from_value(json!({
+            "aiPresets": [], "keepSearchAvailableAfterQuit": false
+        })).unwrap();
+        assert!(!opted_out.keep_search_available_after_quit);
+        let round_trip: SettingsStore = serde_json::from_value(serde_json::to_value(opted_out).unwrap()).unwrap();
+        assert!(!round_trip.keep_search_available_after_quit);
     }
 
     #[test]

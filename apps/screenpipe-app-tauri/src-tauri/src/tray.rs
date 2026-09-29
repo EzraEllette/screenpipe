@@ -395,6 +395,9 @@ async fn run_tray_recording_action(
     let state = app.state::<RecordingState>();
     match action {
         TrayRecordingAction::Start => {
+            if crate::search_only::is_active() {
+                crate::headless::wake_from_tray(app);
+            }
             let data_dir = crate::db_recovery_notifications::effective_recovery_data_dir(app)?;
             let database_path = data_dir.join("db.sqlite");
             match tray_start_route_with(|| database_has_confirmed_damage(&database_path))? {

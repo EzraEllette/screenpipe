@@ -361,6 +361,20 @@ pub fn force_app_relaunch(app: AppHandle, status: i32) -> ! {
 /// Request a relaunch from async/UI code while allowing IPC replies and logs to
 /// flush briefly before the current process is force-exited.
 pub fn request_app_relaunch(app: AppHandle, reason: &'static str, delay: Duration) {
+    if let Err(error) = crate::search_only::prepare_restart() {
+        warn!("relaunch deferred: could not preserve recording mode: {error}");
+        return;
+    }
+    request_prepared_app_relaunch(app, reason, delay);
+}
+
+/// Updater callers already persisted the session before draining the server.
+/// Do not introduce another fallible write after committing the installer.
+pub(crate) fn request_prepared_app_relaunch(
+    app: AppHandle,
+    reason: &'static str,
+    delay: Duration,
+) {
     QUIT_REQUESTED.store(true, Ordering::SeqCst);
 
     std::thread::spawn(move || {
@@ -579,7 +593,7 @@ pub fn confirm_and_request_app_quit(app: AppHandle) {
         .unwrap_or(false);
     if !recording_active {
         info!("Quit requested with no active recording — skipping confirmation");
-        request_app_quit(app);
+        request_user_quit(app);
         return;
     }
 
@@ -695,7 +709,7 @@ fn show_quit_alert(app: &AppHandle, show_minimize: bool, message: &str) {
         QUIT_CONFIRM_SHOWING.store(false, Ordering::SeqCst);
 
         match response {
-            FIRST_BUTTON => request_app_quit(app.clone()),
+            FIRST_BUTTON => request_user_quit(app.clone()),
             SECOND_BUTTON if show_minimize => {
                 info!("Quit dialog: minimizing to tray instead");
                 hide_app_to_tray(app);
@@ -707,7 +721,17 @@ fn show_quit_alert(app: &AppHandle, show_minimize: bool, message: &str) {
 
 #[cfg(not(target_os = "macos"))]
 pub fn confirm_and_request_app_quit(app: AppHandle) {
-    request_app_quit(app);
+    request_user_quit(app);
+}
+
+/// User Quit may retain search. Programmatic exit, OS logout, and updater
+/// handoffs continue through the existing full-exit path.
+pub(crate) fn request_user_quit(app: AppHandle) {
+    if crate::search_only::keep_after_quit(&app) {
+        crate::search_only::request_enter(app);
+    } else {
+        request_app_quit(app);
+    }
 }
 
 /// Shared quit entry point for tray menu, app menu (Cmd+Q), etc.

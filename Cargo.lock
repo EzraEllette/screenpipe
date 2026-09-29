@@ -8832,6 +8832,7 @@ dependencies = [
  "screenpipe-cpu-features",
  "screenpipe-events",
  "screenpipe-fs",
+ "screenpipe-resource",
  "screenpipe-secrets",
  "screenpipe-sync",
  "screenpipe-vault",
