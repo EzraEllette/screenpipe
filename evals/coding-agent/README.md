@@ -1230,3 +1230,20 @@ Home integration, real settings durability, live billing/refresh delivery and
 current full application integration are outside this case. Dependencies and the
 fixture are materialized only for grading. No model trial or enforced-isolation
 claim follows from this verification.
+
+## Capture startup retry
+
+`app-capture-start-rejection-recovery` runs the actual onboarding component with
+synthetic native, health and clock ports. Eight outcomes cover returned and thrown
+startup failures, successful-session reuse, pending-session serialization, permanent
+refusal, idle media, authenticated health and unrelated health responses. The
+parent fails both recovery outcomes and preserves six; reference and current source
+pass eight.
+
+Run `bun test evals/coding-agent/calibrate-capture-recovery.test.js` with desktop
+test dependencies installed. Ten controls include unused corrected code, fabricated
+startup success, overlapping attempts, premature advancement, capture disruption,
+equivalent private bindings and missing-source classification. Hidden fixtures
+and dependency links appear only at grading. This checks the React/native-command
+boundary; it does not establish native capture, permission delivery, full UI
+unmount/skip recovery, migration authority, agent isolation or model performance.
