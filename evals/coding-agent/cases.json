@@ -4112,6 +4112,41 @@
         ],
         "command": "cd packages/ai-gateway && \"${BUN_BIN:-bun}\" test src/test/eval-trusted-runner.test.ts"
       }
+    },
+    {
+      "id": "app-migration-unicode-search-probe",
+      "name": "Preserve Unicode history during explicitly requested storage conversion",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "72e09b7dd7425fcb0387715d42782704f9de677a"
+      },
+      "base_ref": "1a8e311dc8b82725449cd59ae80f814d03bf5c62",
+      "oracle_ref": "72e09b7dd7425fcb0387715d42782704f9de677a",
+      "oracle_paths": [
+        "crates/screenpipe-db/src/storage/lifecycle.rs"
+      ],
+      "gate": "advisory",
+      "trigger_paths": [
+        "crates/screenpipe-db/src/storage/lifecycle.rs"
+      ],
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "migration",
+        "data-preservation"
+      ],
+      "prompt": "An explicitly requested offline storage conversion fails on otherwise valid histories containing control characters, diagram glyphs or non-Latin text. Make these histories convert successfully, including symbol-only histories, while retaining exact frame payloads and search results after reopening the converted store. Preserve ordinary-text conversion, frame counts, a verified completion receipt, absence of an unfinished journal, and storage-integrity verification. Do not silently bypass genuine missing source search-index errors: refuse those conversions while retaining the original frame contents and leaving no success receipt or unfinished journal. Low disk headroom and external readers must likewise preserve the original history on refusal; once the external reader releases its transaction, explicit retry must succeed with payloads intact. Exercise actual temporary SQLite histories and reopened storage. No particular helper, token-extraction algorithm or internal call path is required. This task concerns conversion correctness only; it does not authorize automatic migration, broaden recording or migration permissions, alter pause/cohort/stop controls, delete retained recovery copies, contact live services, or publish releases. Preserve public storage interfaces.",
+      "agent_timeout_seconds": 1800,
+      "grader": {
+        "timeout_seconds": 180,
+        "fixtures": [
+          {
+            "local_path": "graders/migration-unicode.rs",
+            "destination_path": "crates/screenpipe-db/tests/eval_migration_unicode.rs"
+          }
+        ],
+        "command": "cargo test --offline --locked -p screenpipe-db --test eval_migration_unicode -- --test-threads=1"
+      }
     }
   ]
 }
