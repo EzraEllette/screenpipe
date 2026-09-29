@@ -1247,3 +1247,19 @@ equivalent private bindings and missing-source classification. Hidden fixtures
 and dependency links appear only at grading. This checks the React/native-command
 boundary; it does not establish native capture, permission delivery, full UI
 unmount/skip recovery, migration authority, agent isolation or model performance.
+
+## Session verification schedule
+
+`app-auth-verification-schedule` runs the actual React auth guard with synthetic
+settings, native credential and clock ports. Twelve outcomes cover stable startup
+and periodic checks, callback refresh, token changes, sign-out, focus cooldown,
+hidden windows, unmount and session-expiry ownership. The parent fails three
+scheduling outcomes and preserves nine; reference and current source pass twelve.
+
+Run `bun test evals/coding-agent/calibrate-auth-schedule.test.js` for thirteen
+controls. A recursive timer implementation passes; unused fixed code, disabled
+checks, stale callbacks, lost token resets, cross-account logout and missing native
+credential cleanup fail. Missing source is a collection error. Fixtures and
+dependencies are installed only when grading starts. This checks the React port
+boundary, not live account refresh, native credential persistence, recording,
+execution isolation or model performance.
