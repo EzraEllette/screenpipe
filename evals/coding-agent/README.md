@@ -1184,3 +1184,27 @@ which can capture fetch at initialization. Graders and dependency links are
 installed only after the trajectory. These checks do not establish JWT
 cryptography, live inference, concurrent spend safety, complete current billing
 integration, agent isolation or model performance.
+
+## Unicode migration search probes
+
+`app-migration-unicode-search-probe` converts temporary synthetic SQLite histories
+through the actual storage API. Seven outcomes cover control characters, diagram
+glyphs, non-Latin text, symbol-only and ordinary histories, missing-index refusal,
+low-disk refusal and external-reader refusal followed by explicit retry. The
+historical parent fails three conversion outcomes and preserves four; the fix
+passes all seven. Reopened payloads, search results, frame counts, completion state
+and storage verification are checked without requiring a tokenization helper.
+
+Run `bun test evals/coding-agent/calibrate-migration-unicode.test.js` for the
+parent/reference, equivalent implementation, unused fix, skipped search checks,
+lost payloads, fabricated success and missing-source controls. Calibration uses
+an ordinary task-local target directory and independent temporary databases.
+The corpus case has no dependency or build-cache links, and its fixture is
+installed only when grading starts. Its offline Cargo command has a 180-second
+limit. Compilation and setup errors cannot establish the intended regression.
+
+This case tests explicitly requested offline conversion correctness. It does not
+establish native rollout authority, cohort/stop controls, recovery-copy deletion
+policy, all interruption paths, live recording continuity, execution isolation
+or model performance. See [the rollout review](MIGRATION-ROLLOUT-REVIEW.md) for the
+separate authority requirements.
