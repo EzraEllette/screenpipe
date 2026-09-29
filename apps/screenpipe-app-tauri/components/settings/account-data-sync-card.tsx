@@ -72,9 +72,8 @@ export function AccountDataSyncCard(props: Props) {
           />
         </div>
         <p id="data-sync-setup" className="text-xs text-muted-foreground">
-          Turning this on enables sync for your account and this device. No
-          website setup needed. Turn it on in the app on each device you want to
-          sync.
+          Turning this on enables sync for your account and this device. Turn it
+          on in the app on each device you want to sync.
         </p>
         {props.error && (
           <div role="alert" className="space-y-2 text-sm text-destructive">
