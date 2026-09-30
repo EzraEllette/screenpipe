@@ -1263,3 +1263,5 @@ credential cleanup fail. Missing source is a collection error. Fixtures and
 dependencies are installed only when grading starts. This checks the React port
 boundary, not live account refresh, native credential persistence, recording,
 execution isolation or model performance.
+
+The bounded first-run preview case exercises the actual hook with synthetic native status, activity reads and clock. Its calibration command is `bun test evals/coding-agent/calibrate-bounded-preview.test.js`. This checks corpus outcomes and grader controls; it does not execute native history queries or measure agent performance.

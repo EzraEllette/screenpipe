@@ -4265,6 +4265,44 @@
         ],
         "command": "cd apps/screenpipe-app-tauri && bun x vitest run --config vitest.config.ts lib/auth-schedule.eval.test.tsx --maxWorkers=1 --minWorkers=1"
       }
+    },
+    {
+      "id": "app-bounded-first-run-preview",
+      "name": "Bound native-authorized first-run activity previews",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "dd652a6dc5db63832e8b7b913af8151c502608cc"
+      },
+      "base_ref": "34fb4aec4995c3b0874db8565c198df9283968e0",
+      "oracle_ref": "dd652a6dc5db63832e8b7b913af8151c502608cc",
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "onboarding",
+        "polling",
+        "cancellation"
+      ],
+      "prompt": "The first-run activity preview can repeatedly query history from restored browser state, overlap slow reads and continue after native summary generation takes over. Fix the actual learning-window hook. Preview reads require a completed native onboarding status in its learning phase and the native start time. Restored state alone, pending native status, idle/writing phases and an expired window must not authorize reads. Keep one read in flight; after a successful completion, wait the existing three-second preview interval before the next read. A null read must back off to six seconds, then twelve seconds for the next consecutive null result. The existing learning deadline must not restart after navigation or reload. Cancel pending reads when the hook unmounts, the existing deadline expires or native generation starts writing, and ignore late results without changing the preview or starting more reads. Successful previews must still display their returned app counts and minutes and use the native time window. Preserve native ready-chat restoration, unread/open summaries across reload, explicit dismissal across remount, native writing projection and the summary-first trial paywall transition only after rendering. A restored summary behind an already persisted treatment paywall must remain saved. Tests exercise the actual hook and storage helpers with synthetic native status/event, analytics, clock and activity-read ports. Native recording, SQL history queries and server generation are outside this task. Add or update focused tests as needed.",
+      "agent_timeout_seconds": 900,
+      "grader": {
+        "timeout_seconds": 90,
+        "fixtures": [
+          {
+            "local_path": "graders/bounded-preview.fixture.ts.txt",
+            "destination_path": "apps/screenpipe-app-tauri/lib/first-run/eval-bounded-preview.test.ts"
+          }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && bun x --no-install vitest run --config vitest.config.ts lib/first-run/eval-bounded-preview.test.ts --maxWorkers=1 --minWorkers=1"
+      },
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/lib/first-run/use-learning-window.ts"
+      ],
+      "grader_dependency_links": [
+        {
+          "source_path": "apps/screenpipe-app-tauri/node_modules",
+          "destination_path": "apps/screenpipe-app-tauri/node_modules"
+        }
+      ]
     }
   ]
 }
