@@ -1265,3 +1265,23 @@ boundary, not live account refresh, native credential persistence, recording,
 execution isolation or model performance.
 
 The bounded first-run preview case exercises the actual hook with synthetic native status, activity reads and clock. Its calibration command is `bun test evals/coding-agent/calibrate-bounded-preview.test.js`. This checks corpus outcomes and grader controls; it does not execute native history queries or measure agent performance.
+
+
+### Gateway response-lifetime accounting
+
+`app-gateway-response-lifetime-cost-settlement` exercises the real HTTP handler
+and daily cost writer with synthetic provider and database ports. Both JSON and
+SSE responses must retain exactly one write with actual input, output, and cached
+input counts through request completion. Three nearby outcomes preserve tool
+responses and unauthenticated rejection. The parent loses two deferred writes;
+the historical fix passes all five outcomes. Twelve calibration controls include
+synchronous JSON accounting, equivalent background scheduling, detached work,
+unused fixed code, missing writes, lost cached counts, reordered SQL, and a missing-module
+infrastructure failure. Run `bun test evals/coding-agent/calibrate-cost-lifetime.test.js`.
+
+The simulated lifetime ends after the handler, response body, and registered work
+complete; the database operation completes on a later scheduler turn. Actual SQL executes
+against an in-memory SQLite ledger; assertions inspect the resulting row. This is
+not native Workers termination, live D1 durability, retry or concurrent billing
+coverage. Hidden fixtures and dependency links appear only at grading time;
+execution isolation and model performance remain unproven.

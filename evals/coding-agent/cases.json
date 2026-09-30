@@ -4303,6 +4303,44 @@
           "destination_path": "apps/screenpipe-app-tauri/node_modules"
         }
       ]
+    },
+    {
+      "id": "app-gateway-response-lifetime-cost-settlement",
+      "name": "Retain completed gateway usage through request lifetime",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "7a320188f55127d91762c336483adcd3336a46a6"
+      },
+      "base_ref": "1f7880caf6b4c0faa0f4e9805f8002f794f4d0d2",
+      "oracle_ref": "7a320188f55127d91762c336483adcd3336a46a6",
+      "oracle_paths": [
+        "packages/ai-gateway/src/index.ts"
+      ],
+      "gate": "advisory",
+      "tags": [
+        "regression",
+        "billing",
+        "gateway",
+        "request-lifetime"
+      ],
+      "prompt": "Successful authorized chat completions can return their answer while their deferred usage recording is lost when the request lifetime ends. Repair the existing gateway HTTP handler so successful JSON and SSE completions retain exactly one daily usage record with the actual input, output, and cached-input token counts. Preserve the successful status and tool-call response body for both formats, and continue rejecting unauthenticated requests without recording cost. Work may finish before the response completes or be retained as background work; no specific helper or scheduling API is required. Tests use the real handler and cost-recording source with synthetic provider, authentication, rate-limit, and database ports. The database write completes on a later scheduler turn and survives only while the handler/body or registered execution-lifetime work remains active. External network is denied. Missing usage, provider failure, retries, quota reservations, concurrency, runtime termination behavior, live D1 durability, and model quality are outside this case. Add focused tests.",
+      "agent_timeout_seconds": 900,
+      "grader_dependency_links": [
+        {
+          "source_path": "packages/ai-gateway/node_modules",
+          "destination_path": "packages/ai-gateway/node_modules"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/cost-lifetime.fixture.ts.txt",
+            "destination_path": "packages/ai-gateway/src/test/eval-cost-lifetime.test.ts"
+          }
+        ],
+        "command": "cd packages/ai-gateway && \"${BUN_BIN:-bun}\" test src/test/eval-cost-lifetime.test.ts"
+      }
     }
   ]
 }
