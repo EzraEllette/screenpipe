@@ -1344,3 +1344,27 @@ against an in-memory SQLite ledger; assertions inspect the resulting row. This i
 not native Workers termination, live D1 durability, retry or concurrent billing
 coverage. Hidden fixtures and dependency links appear only at grading time;
 execution isolation and model performance remain unproven.
+
+## Recording resume controls
+
+`app-recording-global-device-resume` renders the actual `RecordingStatus`
+component with real Radix popover and tooltip controls in jsdom. Synthetic API
+and callback ports observe global session resume separately from per-device
+resume. Eight outcomes cover both resume modes, global pause, mixed device
+states, legacy monitors without IDs, missing callbacks and request-failure
+rollback. The parent fails three resume outcomes and preserves five; applying
+only the historical component fix passes all eight.
+
+Run `bun test evals/coding-agent/calibrate-recording-resume.test.js` with the
+frontend dependencies installed. Eleven controls include the current component,
+an equivalent private-name change, unused correct code, reversed mode routing,
+broken pause, lost rollback and missing-source classification. A separate
+current-only check preserves disabled-capture settings recovery; that newer
+prop is not required by the historical task. The grading config uses a plain
+translation port, so translation delivery is outside this evidence.
+
+This case covers frontend decisions and synthetic effect boundaries. It does
+not establish Home callback wiring, native recording resumption, operating-system
+capture, agent isolation or model improvement. The hidden fixture and dependency
+link are installed only after the trajectory ends. No evaluated agent runs in
+calibration or baseline/reference verification.

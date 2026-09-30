@@ -4549,6 +4549,55 @@
         ],
         "command": "cd apps/screenpipe-app-tauri && node node_modules/vitest/vitest.mjs run --config eval-model-catalog.config.mjs"
       }
+    },
+    {
+      "id": "app-recording-global-device-resume",
+      "name": "Resume globally stopped recording and individually paused devices",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "cdc3afb06cf62a6570cd196d1e9d0df87742498e"
+      },
+      "base_ref": "66936aa58874d10020132c80b679d42f47a63a3e",
+      "oracle_ref": "cdc3afb06cf62a6570cd196d1e9d0df87742498e",
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/components/recording-status.tsx"
+      ],
+      "gate": "advisory",
+      "trigger_paths": [
+        "apps/screenpipe-app-tauri/components/recording-status.tsx"
+      ],
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "recording",
+        "user-pause"
+      ],
+      "prompt": "The recording status popover has no working resume-all action when every device is paused. Preserve the RecordingStatus public interface and provide an accessible resume-all control. When the entire session is globally paused, resume through onResumeRecording once without issuing individual device requests. When the session is running but every device is individually paused, resume those devices through their existing POST /vision/device/start (monitor_id) and /audio/device/start (device_name) routes without invoking global callbacks. Keep pause-all routed through onPauseRecording for active or mixed device states. A legacy monitor without an id must issue no device request, while eligible audio devices still resume. Hide the global control when neither callback exists; when globally paused without a resume callback, the unavailable resume action must be disabled or absent. Preserve individual device request failure rollback. Keep the observable action names pause all recording, resume all recording, and resume accessible to assistive technology. No particular private function names, test attributes, or implementation structure are required. This task covers the historical frontend control and its synthetic callback/API boundaries, not native recording, the Home wiring, current rollout activation, or operating-system capture.",
+      "agent_timeout_seconds": 900,
+      "grader_dependency_links": [
+        {
+          "source_path": "apps/screenpipe-app-tauri/node_modules",
+          "destination_path": "apps/screenpipe-app-tauri/node_modules"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/recording-resume.fixture.tsx.txt",
+            "destination_path": "apps/screenpipe-app-tauri/.eval-hidden/recording-resume.test.tsx"
+          },
+          {
+            "local_path": "graders/recording-resume-config.mjs.txt",
+            "destination_path": "apps/screenpipe-app-tauri/.eval-hidden/recording-resume.config.mjs"
+          },
+          {
+            "local_path": "graders/recording-resume-translation.ts.txt",
+            "destination_path": "apps/screenpipe-app-tauri/.eval-hidden/recording-resume-translation.ts"
+          }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && node node_modules/vitest/vitest.mjs run --config .eval-hidden/recording-resume.config.mjs"
+      }
     }
   ]
 }
