@@ -4502,6 +4502,53 @@
         ],
         "command": "cd apps/screenpipe-app-tauri && node node_modules/vitest/vitest.mjs run --config eval-running-pipes.config.mjs"
       }
+    },
+    {
+      "id": "app-model-catalog-session-freshness",
+      "name": "Keep model catalogs tied to the current hydrated session",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "757808f1043865752a05013e1a77973ce880f6f7",
+        "pull_request": "https://github.com/screenpipe/screenpipe/pull/5139"
+      },
+      "base_ref": "074e5512469da7a74fa08711484a5b7f859706fb",
+      "oracle_ref": "757808f1043865752a05013e1a77973ce880f6f7",
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/lib/hooks/use-pi-models.ts"
+      ],
+      "gate": "advisory",
+      "trigger_paths": [
+        "apps/screenpipe-app-tauri/lib/hooks/use-pi-models.ts"
+      ],
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "session",
+        "stale-response",
+        "model-catalog"
+      ],
+      "prompt": "The model picker can load before settings hydrate and later replace a new session\u2019s catalog with an older request. Fix the existing usePiModels hook. Do not request models until settings are loaded. Once loaded, support anonymous requests and include the current bearer token when present; refresh after token changes. Keep the last successful catalog visible during refresh and after HTTP or network failures. Responses from an abandoned session, including delayed response bodies, must never replace the current catalog or clear a newer request\u2019s loading state. Unloading settings must invalidate pending work and report no loading. Preserve the existing hook interface, model metadata, name fallback to ID, and first-occurrence deduplication by model ID. This task concerns React behavior with controlled settings and HTTP ports; native credential persistence is outside scope.",
+      "agent_timeout_seconds": 1200,
+      "grader_dependency_links": [
+        {
+          "source_path": "apps/screenpipe-app-tauri/node_modules",
+          "destination_path": "apps/screenpipe-app-tauri/node_modules"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/model-catalog.fixture.tsx.txt",
+            "destination_path": "apps/screenpipe-app-tauri/eval-model-catalog.test.tsx"
+          },
+          {
+            "local_path": "graders/model-catalog.config.mjs",
+            "destination_path": "apps/screenpipe-app-tauri/eval-model-catalog.config.mjs"
+          }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && node node_modules/vitest/vitest.mjs run --config eval-model-catalog.config.mjs"
+      }
     }
   ]
 }

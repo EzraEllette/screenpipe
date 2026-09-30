@@ -13,6 +13,18 @@ The current app corpus contains 80 git-mined regressions. See
 [DESIGN.md](./DESIGN.md) for the Anthropic guidance, source contract, and
 history-mining workflow. The companion website manifest uses this same harness.
 
+`app-model-catalog-session-freshness` runs the actual model-catalog hook with
+synthetic settings and HTTP ports. Ten outcomes cover hydration, token changes,
+late responses and bodies, loading ownership, failure recovery and preserved
+anonymous access and metadata. The parent fails five outcomes and preserves five;
+the reference and current hook pass ten. Run
+`bun test evals/coding-agent/calibrate-model-catalog.test.js` for eleven controls,
+including equivalent guards, unused correct code, stale state, empty catalogs,
+lost metadata and missing-source classification. The current check also runs the
+actual gateway URL adapter with synthetic native ports. Fixtures and dependency
+links appear only at grading. This does not establish native credential security,
+live entitlement delivery, execution isolation or model improvement.
+
 `app-shared-running-pipes-lifecycle` mounts the actual React hook and Zustand
 store with synthetic HTTP/event ports and timers. Ten outcomes cover overlapping
 consumers, final unmount, remount, delayed fetch and event-bus completion, pipe
