@@ -1999,6 +1999,11 @@ mod shutdown_storage_tests {
                 "engine_started",
                 "old and new recording payloads verified after database reopen",
             );
+            crate::process_exit::configure_relaunch_home(
+                &mut std::process::Command::new("unused-test-replacement"),
+                Some(false),
+                root.path(),
+            );
             // Simulate app-log rotation/restart and enough noisy logs to fill
             // the normal five-file support limit. Lifecycle evidence persists.
             for day in 1..=7 {
@@ -2017,6 +2022,7 @@ mod shutdown_storage_tests {
             assert!(report.contains("cleanup continues and database reopen must wait"));
             assert!(report.contains("shutdown_completed"));
             assert!(report.contains("engine_started"));
+            assert!(report.contains("relaunch_window_state: home_visible=Some(false)"));
             assert!(!report.contains("hunter2"));
         }
     }

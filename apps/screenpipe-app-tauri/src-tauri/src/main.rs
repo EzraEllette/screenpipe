@@ -467,6 +467,7 @@ macro_rules! define_specta_builder {
 
 #[tokio::main]
 async fn main() {
+    let relaunch_home_visible = process_exit::take_relaunch_home_visibility();
     // Handle private ACP subprocess modes before Tauri initializes. The
     // protocol host lives in core; desktop contributes only schedule projection.
     if let Some(exit_code) = screenpipe_core::agents::acp::run_hidden_mode(Arc::new(
@@ -1679,18 +1680,27 @@ async fn main() {
                 info!("launched from OS startup enrollment; starting in background");
             }
 
-            // Show onboarding/home unless managed background agent, or login
-            // autostart (tray + server only; UI via tray/dock/shortcut).
+            // Recovery and update restarts preserve Home visibility; explicit
+            // restarts show Home, and login-autostart defaults to background.
             // Incomplete onboarding still shows so required enterprise access
             // can finish; an authenticated login launch skips Home below.
+            let restart_home_visible = relaunch_home_visible
+                .or_else(|| updates::update_startup_home_visibility(&app_handle));
             if app_ui_hidden {
                 info!("enterprise: hidden UI mode active, skipping startup app windows");
             } else if headless_startup {
                 info!("headless: starting with UI dormant; use the tray to open screenpipe");
             } else if !onboarding_store.is_completed {
                 let _ = ShowRewindWindow::Onboarding.show(&app.handle());
-            } else if from_autostart {
-                info!("autostart: skipping Home window (background login launch)");
+            } else if !restart_home_visible.unwrap_or(!from_autostart) {
+                info!("background launch: skipping Home window (restart_home_visible={restart_home_visible:?}, autostart={from_autostart})");
+                if restart_home_visible == Some(false) {
+                    recording::recovery_log::append(
+                        &db_relaunch::active_data_dir(),
+                        "startup_window_restore",
+                        "outcome=home_kept_closed",
+                    );
+                }
             } else {
                 let _ = ShowRewindWindow::Home { page: None }.show(&app.handle());
             }

@@ -1411,6 +1411,7 @@ mod tests {
                 "target=99.0.0",
                 "relaunch_observed",
                 "running=1.0.0",
+                "home_visible=Some(false)",
                 "outcome=Failed",
             ] {
                 assert!(bundle.contains(expected), "missing {expected}: {bundle}");
