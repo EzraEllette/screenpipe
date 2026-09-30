@@ -13,6 +13,18 @@ The current app corpus contains 80 git-mined regressions. See
 [DESIGN.md](./DESIGN.md) for the Anthropic guidance, source contract, and
 history-mining workflow. The companion website manifest uses this same harness.
 
+`app-workflow-sharing-entry-consent` renders the real workspace prompt and sharing
+controls with synthetic settings, consent-service and native-token ports. Nine
+outcomes cover independent entry, backend readiness, account hydration/switching,
+notice persistence, reconnects and preserved explicit consent and schedule actions.
+The parent fails six entry outcomes and preserves three; the reference and current
+source pass nine. Run `bun test evals/coding-agent/calibrate-sharing-entry.test.js`
+for eleven controls, including equivalent conditions, unused correct code, local
+consent granted by skipping, missing account notices and lost positive consent.
+Missing source remains a setup error. Fixtures and dependency links are installed
+only at grading. This does not establish server enforcement, native durability,
+real uploads, execution isolation or model improvement.
+
 `app-workflow-voice-immutable-response` runs the actual gateway and Durable Object
 in the existing local Workers harness, with local D1 and synthetic account and
 voice-provider replies. The parent returns 500 instead of the intended 400;

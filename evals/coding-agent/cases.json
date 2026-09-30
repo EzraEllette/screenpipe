@@ -4379,6 +4379,49 @@
         ],
         "command": "cd packages/ai-gateway && WRANGLER_SEND_METRICS=false \"${BUN_BIN:-bun}\" test src/test/eval-workflow-voice-response.test.ts --timeout 45000"
       }
+    },
+    {
+      "id": "app-workflow-sharing-entry-consent",
+      "name": "Offer independent account-scoped workflow sharing consent",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "05b3f08ae1574c728ba7af952b12bdc954df1e06"
+      },
+      "base_ref": "97adca652c426d95bcb192c76013852158446804",
+      "oracle_ref": "05b3f08ae1574c728ba7af952b12bdc954df1e06",
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/components/workflows/workflow-tasks-prompt.tsx"
+      ],
+      "gate": "advisory",
+      "trigger_paths": [
+        "apps/screenpipe-app-tauri/components/workflows/workflow-tasks-prompt.tsx",
+        "apps/screenpipe-app-tauri/components/workflows/workflow-sharing-controls.tsx"
+      ],
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "privacy",
+        "consent",
+        "account-boundary"
+      ],
+      "prompt": "Entering Workflows does not offer the optional sharing choice when automatic updates are off or the recorder is still connecting. Make the real workspace prompt and sharing controls offer an authenticated account its unseen sharing notice independently of recorder readiness and update allowance. Merely opening or skipping must not grant sharing, change redaction/recording preferences, or enable schedules. Skipping records the current notice for that account while preserving other accounts; returning to Workflows must not repeat it. Wait for account hydration, offer a fresh choice when switching to an unseen account, and close on sign-out. An unanswered choice must survive recorder disconnect/reconnect. Preserve no prompt or service work while Workflows is inactive, and no prompt for an already-seen account. Preserve explicit successful sharing through the existing consent service, including both sharing and training permission, account/epoch persistence and cloud redaction without changing recording preferences. An unavailable account must not be allowed to grant sharing and must still be able to skip. After skipping, normal schedule confirmation must enable updates without reopening sharing or granting it. Keep public component and service contracts compatible; preserve existing accessible action labels. No particular hook structure is required. Tests execute both real React components with synthetic settings, consent-service and native-token ports. Server consent enforcement, durable native settings and real data upload are outside this task.",
+      "agent_timeout_seconds": 900,
+      "grader_dependency_links": [
+        {
+          "source_path": "apps/screenpipe-app-tauri/node_modules",
+          "destination_path": "apps/screenpipe-app-tauri/node_modules"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 90,
+        "fixtures": [
+          {
+            "local_path": "graders/sharing-entry.fixture.tsx.txt",
+            "destination_path": "apps/screenpipe-app-tauri/components/workflows/eval-sharing-entry.test.tsx"
+          }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && node node_modules/vitest/vitest.mjs run --config vitest.config.ts components/workflows/eval-sharing-entry.test.tsx --maxWorkers=1 --minWorkers=1"
+      }
     }
   ]
 }
