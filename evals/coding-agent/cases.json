@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "suite": "screenpipe-app-coding-agent-regressions",
-  "dataset_version": "2026-09-30-capture-cadence",
+  "dataset_version": "2026-09-30-running-pipes-lifecycle",
   "suite_type": "regression",
   "owner": "screenpipe engineering",
   "policy": {
@@ -4454,6 +4454,53 @@
           }
         ],
         "command": "cd apps/screenpipe-app-tauri && \"${BUN_BIN:-bun}\" test ../../evals/coding-agent/graders/capture-cadence.test.js"
+      }
+    },
+    {
+      "id": "app-shared-running-pipes-lifecycle",
+      "name": "Stop abandoned running-pipe trackers without disrupting active consumers",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "94b670bc0cc3fd09a7b3fa02e1ae7fe93586599a",
+        "pull_request": "https://github.com/screenpipe/screenpipe/pull/5116"
+      },
+      "base_ref": "9df282bf7daa7efb2e4e23759b7752eee445cefd",
+      "oracle_ref": "94b670bc0cc3fd09a7b3fa02e1ae7fe93586599a",
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/lib/hooks/use-running-pipes.ts"
+      ],
+      "gate": "advisory",
+      "trigger_paths": [
+        "apps/screenpipe-app-tauri/lib/hooks/use-running-pipes.ts"
+      ],
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "lifecycle",
+        "shared-state",
+        "stale-response"
+      ],
+      "prompt": "The running-pipes sidebar tracker keeps polling and listening after its final consumer unmounts. Fix the existing useRunningPipes hook so active consumers share one tracker, removing one consumer preserves the others, and removing the last stops polling and event subscriptions. A later mount must refresh its state. Fetches and event-bus setup that finish after their original mount was abandoned must not start background work, overwrite a newer mount, or cancel the newer tracker. Preserve the existing 30-second recovery poll, recovery after temporary HTTP failures, running-only filtering, start-time ordering, pipe event updates and terminal removal; unrelated or malformed session events must remain ignored. Keep the existing hook interface. This task concerns React lifecycle with controlled HTTP and event ports, not native event delivery.",
+      "agent_timeout_seconds": 1200,
+      "grader_dependency_links": [
+        {
+          "source_path": "apps/screenpipe-app-tauri/node_modules",
+          "destination_path": "apps/screenpipe-app-tauri/node_modules"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/running-pipes-lifecycle.fixture.tsx.txt",
+            "destination_path": "apps/screenpipe-app-tauri/eval-running-pipes.test.tsx"
+          },
+          {
+            "local_path": "graders/running-pipes-lifecycle.config.mjs",
+            "destination_path": "apps/screenpipe-app-tauri/eval-running-pipes.config.mjs"
+          }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && node node_modules/vitest/vitest.mjs run --config eval-running-pipes.config.mjs"
       }
     }
   ]

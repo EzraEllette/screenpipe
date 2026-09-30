@@ -13,6 +13,16 @@ The current app corpus contains 80 git-mined regressions. See
 [DESIGN.md](./DESIGN.md) for the Anthropic guidance, source contract, and
 history-mining workflow. The companion website manifest uses this same harness.
 
+`app-shared-running-pipes-lifecycle` mounts the actual React hook and Zustand
+store with synthetic HTTP/event ports and timers. Ten outcomes cover overlapping
+consumers, final unmount, remount, delayed fetch and event-bus completion, pipe
+events, filtering and poll recovery. The parent fails six lifecycle outcomes and
+preserves four; the reference and current source pass ten. Run
+`bun test evals/coding-agent/calibrate-running-pipes.test.js` for calibration.
+The fixture and runtime links appear only at grading. This does not establish
+native event delivery, real-server behavior, memory usage, execution isolation or
+model improvement.
+
 `app-capture-cadence-durable-before-restart` drives the actual recording-settings
 change/apply callbacks, local write queue and apply bar with synthetic hook state,
 settings storage and native ports. Four outcomes cover a delayed save, a later
