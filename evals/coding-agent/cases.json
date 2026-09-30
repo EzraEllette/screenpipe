@@ -4341,6 +4341,44 @@
         ],
         "command": "cd packages/ai-gateway && \"${BUN_BIN:-bun}\" test src/test/eval-cost-lifetime.test.ts"
       }
+    },
+    {
+      "id": "app-workflow-voice-immutable-response",
+      "name": "Preserve workflow voice responses across Workers fetch",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "d9c66f9bb4143fde99331a1b29dc58ff86cfc580"
+      },
+      "base_ref": "b09141e87b263098d12394901f799220c53b247c",
+      "oracle_ref": "d9c66f9bb4143fde99331a1b29dc58ff86cfc580",
+      "oracle_paths": [
+        "packages/ai-gateway/src/index.ts"
+      ],
+      "gate": "advisory",
+      "tags": [
+        "regression",
+        "gateway",
+        "voice",
+        "workers"
+      ],
+      "prompt": "The authenticated workflow voice endpoint returns an internal error while forwarding Durable Object responses. Repair the actual gateway boundary so an invalid voice request retains its 400 JSON error, a valid session creation retains 201 with the provider SDP and a usable call token, and terminating that session retains empty 204. All three responses must include no-store and permissive CORS headers. Preserve one synthetic provider session creation and one termination, and reject a service-only caller with 401 before provider work. Tests run the existing local gateway harness with a real Workers Durable Object boundary, local D1, and synthetic account/provider replies; unexpected outbound requests are refused. Any implementation preserving these observable outcomes is valid. No live provider, deployment, billing safety, concurrency, native audio, runtime isolation or model-quality claim is required. Add focused tests.",
+      "agent_timeout_seconds": 900,
+      "grader_dependency_links": [
+        {
+          "source_path": "packages/ai-gateway/node_modules",
+          "destination_path": "packages/ai-gateway/node_modules"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 90,
+        "fixtures": [
+          {
+            "local_path": "graders/workflow-voice-response.fixture.ts.txt",
+            "destination_path": "packages/ai-gateway/src/test/eval-workflow-voice-response.test.ts"
+          }
+        ],
+        "command": "cd packages/ai-gateway && WRANGLER_SEND_METRICS=false \"${BUN_BIN:-bun}\" test src/test/eval-workflow-voice-response.test.ts --timeout 45000"
+      }
     }
   ]
 }

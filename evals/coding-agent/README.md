@@ -13,6 +13,20 @@ The current app corpus contains 80 git-mined regressions. See
 [DESIGN.md](./DESIGN.md) for the Anthropic guidance, source contract, and
 history-mining workflow. The companion website manifest uses this same harness.
 
+`app-workflow-voice-immutable-response` runs the actual gateway and Durable Object
+in the existing local Workers harness, with local D1 and synthetic account and
+voice-provider replies. The parent returns 500 instead of the intended 400;
+the reference preserves invalid-request JSON, session creation and empty session
+termination, with cache and CORS headers. Service-only rejection is preserved.
+Run `bun test evals/coding-agent/calibrate-workflow-voice-response.test.js` for ten
+controls, including equivalent response reconstruction, unused correct code,
+lost status/body/headers and missing-source setup classification. Install the
+gateway dependencies, including Miniflare and Wrangler, before verification.
+Wrangler only bundles with `--dry-run`; no deployment or real provider call runs.
+Fixtures and runtime links are installed only when grading starts. This is local
+Workers evidence, not production delivery, billing safety, agent isolation or
+model improvement.
+
 `app-chat-foreground-save-ownership` runs the real foreground event hook and
 React lifecycle with synthetic event, persistence and native ports. Four outcomes
 cover switches to new and existing empty sessions, stable-session saves and empty
