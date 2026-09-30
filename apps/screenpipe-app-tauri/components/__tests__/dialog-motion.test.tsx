@@ -68,28 +68,28 @@ async function animationsFor(className: string, state: "open" | "closed") {
   return animations;
 }
 
+const openDialog = (
+  <Dialog open>
+    <DialogContent>
+      <DialogTitle>Title</DialogTitle>
+      <DialogDescription>Description</DialogDescription>
+    </DialogContent>
+  </Dialog>
+);
+
+const openAlertDialog = (
+  <AlertDialog open>
+    <AlertDialogContent>
+      <AlertDialogTitle>Title</AlertDialogTitle>
+      <AlertDialogDescription>Description</AlertDialogDescription>
+    </AlertDialogContent>
+  </AlertDialog>
+);
+
 describe("dialog motion", () => {
   it.each([
-    [
-      "Dialog",
-      "dialog",
-      <Dialog open>
-        <DialogContent>
-          <DialogTitle>Title</DialogTitle>
-          <DialogDescription>Description</DialogDescription>
-        </DialogContent>
-      </Dialog>,
-    ],
-    [
-      "AlertDialog",
-      "alertdialog",
-      <AlertDialog open>
-        <AlertDialogContent>
-          <AlertDialogTitle>Title</AlertDialogTitle>
-          <AlertDialogDescription>Description</AlertDialogDescription>
-        </AlertDialogContent>
-      </AlertDialog>,
-    ],
+    ["Dialog", "dialog", openDialog],
+    ["AlertDialog", "alertdialog", openAlertDialog],
   ] as const)("%s opens and closes with a 150ms fade that never moves it", async (_, role, ui) => {
     // docs/DESIGN.md: dialogs use a 150ms fade. Animating only opacity is also
     // what keeps them centered; a keyframe that writes `transform` replaces the
