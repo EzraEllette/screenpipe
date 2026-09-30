@@ -932,7 +932,7 @@ async fn main() {
                     let audio_capture_enabled = store::SettingsStore::get(&app)
                         .ok()
                         .flatten()
-                        .map(|settings| !settings.recording.disable_audio)
+                        .map(|settings| permissions::microphone_required(&settings.recording))
                         .unwrap_or(true);
                     if !MIC_FOCUS_RECOVERY.should_restart_capture(
                         permission_granted,
@@ -1791,7 +1791,7 @@ async fn main() {
                 for attempt in 0..3 {
                     let startup_perms = permissions::do_permissions_check(false);
                     screen_ok = startup_perms.screen_recording.permitted();
-                    mic_ok = startup_perms.microphone.permitted();
+                    mic_ok = !permissions::microphone_required(&store.recording) || startup_perms.microphone.permitted();
                     if screen_ok && mic_ok {
                         break;
                     }
@@ -1989,7 +1989,6 @@ async fn main() {
 
                             // Permissions check
                             let permissions_check = permissions::do_permissions_check(false);
-                            let disable_audio = store_clone.recording.disable_audio;
                             let disable_vision = store_clone.recording.disable_vision;
 
                             // Only block server start on missing screen-recording
@@ -2017,7 +2016,7 @@ async fn main() {
                             }
 
                             if wants_recording.load(std::sync::atomic::Ordering::SeqCst)
-                                && !disable_audio && !permissions_check.microphone.permitted() {
+                                && permissions::microphone_required(&store_clone.recording) && !permissions_check.microphone.permitted() {
                                 warn!("Microphone permission not granted: {:?}. Audio recording will not work.", permissions_check.microphone);
                             }
 

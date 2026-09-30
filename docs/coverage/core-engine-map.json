@@ -318,6 +318,7 @@
         "src/pipe_stream.rs",
         "src/routes/activity_summary.rs",
         "src/routes/activity_summary_key_text_tests.rs",
+        "src/routes/activity_summary_hybrid_tests.rs",
         "src/routes/activity_ledger.rs",
         "src/routes/artifacts.rs",
         "src/routes/connect_broker.rs",

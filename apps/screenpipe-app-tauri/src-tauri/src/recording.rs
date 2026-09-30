@@ -1488,7 +1488,7 @@ async fn spawn_screenpipe_after_migration(
         return Err(error.to_string());
     }
 
-    if state.capture_intended() && !disable_audio && !permissions_check.microphone.permitted() {
+    if state.capture_intended() && crate::permissions::microphone_required(&store.recording) && !permissions_check.microphone.permitted() {
         warn!(
             "Microphone permission not granted: {:?}. Audio recording will not work.",
             permissions_check.microphone
