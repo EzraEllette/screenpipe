@@ -41,33 +41,35 @@ function composer(
   return <ComposerInputBox input={input} mentions={mentions} />;
 }
 
-// jsdom has no layout. Model 60 characters per line, the placeholder filling an
-// empty box (as Chromium and WebKit measure it), one more line when the chip indent pushes
-// the text over, a box held at its CSS max-height once the text is taller, and
-// zero width while hidden.
-let visible = true;
+// jsdom has no layout. Model 10px per character (60 per line at the default
+// 600px width), the placeholder filling an empty box (as Chromium and WebKit
+// measure it), one more line when the chip indent pushes the text over, a box
+// held at its CSS max-height once the text is taller, and zero width while hidden.
+let width = 600;
 const layout: Record<string, (this: HTMLTextAreaElement) => number> = {
   scrollHeight() {
     const text = this.value || this.placeholder;
-    const rows = text.split("\n").reduce((sum, line) => sum + Math.max(1, Math.ceil(line.length / 60)), 0);
+    const perLine = width / 10;
+    const rows = text.split("\n").reduce((sum, line) => sum + Math.max(1, Math.ceil(line.length / perLine)), 0);
     return (rows + (this.style.textIndent ? 1 : 0)) * LINE_HEIGHT + PADDING;
   },
   clientHeight() {
     return Math.min(parseFloat(this.style.height) || 0, MAX_HEIGHT);
   },
   offsetWidth() {
-    return visible ? 600 : 0;
+    return width;
   },
 };
 
 beforeEach(() => {
-  visible = true;
+  width = 600;
   for (const [name, get] of Object.entries(layout)) {
     Object.defineProperty(HTMLTextAreaElement.prototype, name, { configurable: true, get });
   }
 });
 
 afterEach(() => {
+  vi.unstubAllGlobals();
   for (const name of Object.keys(layout)) {
     delete (HTMLTextAreaElement.prototype as unknown as Record<string, unknown>)[name];
   }
@@ -103,9 +105,50 @@ describe("ComposerInputBox", () => {
     expect(textarea.style.height).toBe("82px");
 
     // Chat stays mounted but hidden behind another page.
-    visible = false;
+    width = 0;
     rerender(composer("one\ntwo\nthree\nfour"));
     expect(textarea.style.height).toBe("82px");
+  });
+
+  it("refits a frame after its width changes", () => {
+    // The shared test setup's ResizeObserver never fires; capture the callback
+    // and the frame it schedules so the test can run them.
+    let resized: () => void = () => {};
+    vi.stubGlobal("ResizeObserver", class {
+      constructor(callback: () => void) { resized = callback; }
+      observe() {}
+      disconnect() {}
+    });
+    const frames = new Map<number, FrameRequestCallback>();
+    let nextFrame = 0;
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      frames.set(++nextFrame, callback);
+      return nextFrame;
+    });
+    vi.stubGlobal("cancelAnimationFrame", (id: number) => frames.delete(id));
+    const runFrames = () => {
+      for (const [id, callback] of frames) {
+        frames.delete(id);
+        callback(0);
+      }
+    };
+
+    const { container } = render(composer("x".repeat(100)));
+    const textarea = container.querySelector("textarea")!;
+    expect(textarea.style.height).toBe("60px");
+
+    // e.g. the window narrows or a split view opens: the same text wraps onto
+    // more lines. The height changes a frame later, not inside the callback.
+    width = 300;
+    resized();
+    expect(textarea.style.height).toBe("60px");
+    runFrames();
+    expect(textarea.style.height).toBe("104px");
+
+    width = 600;
+    resized();
+    runFrames();
+    expect(textarea.style.height).toBe("60px");
   });
 
   it("refits when a connection chip rewraps the same text", () => {
