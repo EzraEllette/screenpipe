@@ -114,6 +114,19 @@ test("all Windows native dependency builds select the shared Ninja setup", () =>
   expect(readFileSync(join(root, ".github/scripts/setup-ninja-windows.ps1"), "utf8")).toContain('"CMAKE_GENERATOR=Ninja"');
 });
 
+test("Windows CLI compiles through the short target path without moving smoke probe outputs", () => {
+  const job = readYaml(".github/workflows/release-cli.yml").jobs["build-windows"];
+  const build = job.steps.find((step: any) => step.name === "Build CLI");
+  expect(build.env.CARGO_TARGET_DIR).toBe("C:/t");
+  const junction = job.steps.find((step: any) => step.name === "Shorten target dir to avoid MAX_PATH");
+  expect(junction.run).toContain('$shortDir = "C:\\t"');
+  expect(junction.run).toContain("mklink /J $targetDir $shortDir");
+  expect(job.env?.CARGO_TARGET_DIR).toBeUndefined();
+  const smoke = job.steps.find((step: any) => step.name === "Build + run ort-smoke natively; stage for the SDE job");
+  expect(smoke.env?.CARGO_TARGET_DIR).toBeUndefined();
+  expect(smoke.run).toContain('.github/ci/ort-smoke/target/debug/ort-smoke.exe');
+});
+
 test("completion reports every platform even if one is failed or skipped", () => {
   const gate = enterprise.jobs["enterprise-complete"];
   expect(gate.if).toBe("always()");

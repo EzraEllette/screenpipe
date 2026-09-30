@@ -389,6 +389,9 @@ jobs:
 
       - name: Build CLI
         env:
+          # Cargo must pass the short path to CMake; the target junction alone
+          # leaves nested Vulkan compiler probes using the long checkout path.
+          CARGO_TARGET_DIR: "C:/t"
           CARGO_PROFILE_RELEASE_STRIP: "none"
           CARGO_PROFILE_RELEASE_PANIC: "abort"
           CARGO_PROFILE_RELEASE_INCREMENTAL: "false"
