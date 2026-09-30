@@ -3,7 +3,7 @@
 
 "use client";
 
-import React, { forwardRef, memo, useLayoutEffect, useRef } from "react";
+import React, { forwardRef, memo, useEffect, useLayoutEffect, useRef } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { ChevronDown } from "lucide-react";
@@ -94,23 +94,52 @@ export const ChatMarkdown = memo(function ChatMarkdown({ text, streaming = false
 });
 
 type ComposerTextAreaProps = React.TextareaHTMLAttributes<HTMLTextAreaElement> & {
-  autoGrow?: boolean;
   onSend?: () => void;
 };
 
+// Height follows the text up to the stylesheet's max-height, and only a box held
+// there scrolls. Measuring with overflow hidden keeps a passing scrollbar from
+// narrowing the wrap width.
+function fitToContent(element: HTMLTextAreaElement) {
+  // A hidden field measures zero; keep the last height until it is shown again.
+  if (!element.offsetWidth) return;
+  element.style.overflowY = "hidden";
+  element.style.height = "auto";
+  // An empty box keeps its natural height. Browsers count placeholder text in
+  // scrollHeight, and a long placeholder (e.g. a hovered Home card's prompt)
+  // must not resize the box.
+  if (!element.value) return;
+  element.style.height = `${element.scrollHeight}px`;
+  element.style.overflowY = element.scrollHeight > element.clientHeight ? "auto" : "hidden";
+}
+
 /** The same input primitive used by the standalone Chat composer and its embeds. */
 export const ComposerTextArea = forwardRef<HTMLTextAreaElement, ComposerTextAreaProps>(function ComposerTextArea({
-  autoGrow = true, onSend, onKeyDown, onCompositionStart, onCompositionEnd, ...props
+  onSend, onKeyDown, onCompositionStart, onCompositionEnd, ...props
 }, forwardedRef) {
   const input = useRef<HTMLTextAreaElement | null>(null);
   const composing = useRef(false);
+  // Runs for every value, including text set by code rather than typed, and
+  // when an indent or padding change rewraps the same text.
   useLayoutEffect(() => {
-    if (!autoGrow || !input.current) return;
+    if (input.current) fitToContent(input.current);
+  }, [props.value, props.className, props.style?.textIndent]);
+  // A new width rewraps the text. Refit a frame later so the height change
+  // happens outside the observer callback.
+  useEffect(() => {
     const element = input.current;
-    element.style.height = "auto";
-    element.style.height = Math.max(42, Math.min(element.scrollHeight, 160)) + "px";
-    element.style.overflowY = element.scrollHeight > 160 ? "auto" : "hidden";
-  }, [props.value, autoGrow]);
+    if (!element) return;
+    let width = element.offsetWidth;
+    let frame = 0;
+    const observer = new ResizeObserver(() => {
+      if (element.offsetWidth === width) return;
+      width = element.offsetWidth;
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => fitToContent(element));
+    });
+    observer.observe(element);
+    return () => { observer.disconnect(); cancelAnimationFrame(frame); };
+  }, []);
   return <textarea {...props}
     ref={(element) => { input.current = element; if (typeof forwardedRef === "function") forwardedRef(element); else if (forwardedRef) forwardedRef.current = element; }}
     onCompositionStart={(event) => { composing.current = true; onCompositionStart?.(event); }}
