@@ -118,6 +118,8 @@ test("Windows CLI compiles through the short target path without moving smoke pr
   const job = readYaml(".github/workflows/release-cli.yml").jobs["build-windows"];
   const build = job.steps.find((step: any) => step.name === "Build CLI");
   expect(build.env.CARGO_TARGET_DIR).toBe("C:/t");
+  expect(build.env.CMAKE_GENERATOR).toBe("Ninja Multi-Config");
+  expect(build.env.CMAKE_CONFIGURATION_TYPES.split(";")).toEqual(["Debug", "Release", "RelWithDebInfo", "MinSizeRel"]);
   const junction = job.steps.find((step: any) => step.name === "Shorten target dir to avoid MAX_PATH");
   expect(junction.run).toContain('$shortDir = "C:\\t"');
   expect(junction.run).toContain("mklink /J $targetDir $shortDir");

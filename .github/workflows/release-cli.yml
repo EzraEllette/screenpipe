@@ -392,6 +392,10 @@ jobs:
           # Cargo must pass the short path to CMake; the target junction alone
           # leaves nested Vulkan compiler probes using the long checkout path.
           CARGO_TARGET_DIR: "C:/t"
+          # libsamplerate-sys searches build/<profile> on MSVC. Multi-config
+          # Ninja preserves that layout; opt-level="s" requires MinSizeRel.
+          CMAKE_GENERATOR: "Ninja Multi-Config"
+          CMAKE_CONFIGURATION_TYPES: "Debug;Release;RelWithDebInfo;MinSizeRel"
           CARGO_PROFILE_RELEASE_STRIP: "none"
           CARGO_PROFILE_RELEASE_PANIC: "abort"
           CARGO_PROFILE_RELEASE_INCREMENTAL: "false"
