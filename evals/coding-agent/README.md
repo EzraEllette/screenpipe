@@ -13,6 +13,17 @@ The current app corpus contains 80 git-mined regressions. See
 [DESIGN.md](./DESIGN.md) for the Anthropic guidance, source contract, and
 history-mining workflow. The companion website manifest uses this same harness.
 
+`app-capture-cadence-durable-before-restart` drives the actual recording-settings
+change/apply callbacks, local write queue and apply bar with synthetic hook state,
+settings storage and native ports. Four outcomes cover a delayed save, a later
+accepted edit, failed-save recovery and Auto cadence. The parent fails three and
+preserves one; the reference and current caller pass four. Run
+`bun test evals/coding-agent/calibrate-capture-cadence.test.js` for calibration.
+The grader checks saved values at both capture handoffs. It does not execute
+React mount effects, a browser DOM, native persistence, pause/authorization
+policy or real capture. Fixtures are installed only at grading. This is not
+execution-isolation evidence or a model trial.
+
 `app-workflow-sharing-entry-consent` renders the real workspace prompt and sharing
 controls with synthetic settings, consent-service and native-token ports. Nine
 outcomes cover independent entry, backend readiness, account hydration/switching,
