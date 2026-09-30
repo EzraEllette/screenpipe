@@ -27,8 +27,12 @@ try {
     await run(patcher, repo);
     const runtime = join(root, "node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js");
     const patched = await readFile(runtime, "utf8");
+    const serializer = join(root, "node_modules/@earendil-works/pi-coding-agent/dist/core/compaction/utils.js");
+    const patchedSerializer = await readFile(serializer, "utf8");
+    const summarizer = join(root, "node_modules/@earendil-works/pi-coding-agent/dist/core/compaction/compaction.js");
+    const patchedSummarizer = await readFile(summarizer, "utf8");
     await run(patcher, repo);
-    if (await readFile(runtime, "utf8") !== patched) {
+    if (await readFile(runtime, "utf8") !== patched || await readFile(serializer, "utf8") !== patchedSerializer || await readFile(summarizer, "utf8") !== patchedSummarizer) {
       throw new Error("Pi compaction patch changed an already-patched runtime");
     }
   }
