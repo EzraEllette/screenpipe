@@ -589,8 +589,8 @@ pub struct RecordingSettings {
     )]
     pub ignored_urls: Vec<UrlRule>,
 
-    /// Strict browser hostname allowlist. When non-empty, native apps and
-    /// browser windows without a positively detected matching URL are skipped.
+    /// Strict browser hostname allowlist. Browser windows without a positively
+    /// detected matching URL are skipped; native apps follow app/window rules.
     #[serde(
         rename = "includedUrls",
         default,
