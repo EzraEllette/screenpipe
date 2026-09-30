@@ -402,6 +402,15 @@ export class LocalGatewayHarness {
 		};
 	}
 
+	async readInferenceTelemetry() {
+		if (!this.database) throw new Error('local AI gateway database is not ready');
+		const [costs, health] = await Promise.all([
+			this.database.prepare('SELECT model, SUM(requests) AS requests, SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens, SUM(estimated_cost_usd) AS cost FROM cost_daily GROUP BY model').all(),
+			this.database.prepare('SELECT model, outcome, SUM(requests) AS requests FROM model_health_window GROUP BY model, outcome').all(),
+		]);
+		return { costs: costs.results, health: health.results };
+	}
+
 	assertNoUnexpectedOutboundRequests(): void {
 		const unexpected = this.unexpectedOutboundRequests;
 		if (unexpected.length > 0) {
