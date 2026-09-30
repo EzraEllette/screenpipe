@@ -105,6 +105,12 @@ test("all Windows native dependency builds select the shared Ninja setup", () =>
     (step: any) => step.name === "Configure Ninja for Windows native dependencies",
   );
   expect(enterpriseStep.run).toBe("./.github/scripts/setup-ninja-windows.ps1");
+  const cliSteps = readYaml(".github/workflows/release-cli.yml").jobs["build-windows"].steps;
+  const cliNinjaIndex = cliSteps.findIndex((step: any) => step.name === "Configure Ninja for Windows native dependencies");
+  expect(cliNinjaIndex).toBeGreaterThan(-1);
+  expect(cliSteps[cliNinjaIndex].run).toBe("./.github/scripts/setup-ninja-windows.ps1");
+  expect(cliSteps[cliNinjaIndex].shell).toBe("pwsh");
+  expect(cliNinjaIndex).toBeLessThan(cliSteps.findIndex((step: any) => step.name === "Build CLI"));
   expect(readFileSync(join(root, ".github/scripts/setup-ninja-windows.ps1"), "utf8")).toContain('"CMAKE_GENERATOR=Ninja"');
 });
 

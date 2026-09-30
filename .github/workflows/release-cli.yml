@@ -372,6 +372,10 @@ jobs:
           bun scripts/setup_openblas.js
           "OPENBLAS_PATH=${{ github.workspace }}/apps/screenpipe-app-tauri/src-tauri/openblas" | Out-File -FilePath $env:GITHUB_ENV -Append
 
+      - name: Configure Ninja for Windows native dependencies
+        shell: pwsh
+        run: ./.github/scripts/setup-ninja-windows.ps1
+
       - name: Shorten target dir to avoid MAX_PATH
         shell: pwsh
         run: |
