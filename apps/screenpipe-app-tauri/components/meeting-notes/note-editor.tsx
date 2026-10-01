@@ -16,12 +16,41 @@ import HardBreak from "@tiptap/extension-hard-break";
 import Image from "@tiptap/extension-image";
 import { TaskItem, TaskList } from "@tiptap/extension-list";
 import { Markdown } from "tiptap-markdown";
+import { DOMSerializer, type DOMOutputSpec } from "@tiptap/pm/model";
 import { cn } from "@/lib/utils";
-import { imageFileToDataUrl, isNoteImageFile } from "./image-utils";
+import { tauriFetchWithDeadline } from "@/lib/http/tauri-fetch";
+import {
+  imageFileToDataUrl,
+  isNoteImageFile,
+  readBlobAsDataUrl,
+  resizeImageDataUrl,
+} from "./image-utils";
 import { FormatToolbar, SlashCommandMenu } from "./editor-menus";
 import { useGT } from "gt-react";
 import { useUiLocale as useLocale } from "@/lib/i18n/provider";
 
+
+// Notes show only images they carry as data: URLs. Anything else, such as a
+// remote image an AI summary wrote, would load as soon as the note renders
+// and hand its URL to that server, so it shows as its alt text instead. The
+// markdown keeps the original, so nothing is lost when the note saves.
+function isEmbeddedImageSource(src: unknown): src is string {
+  return typeof src === "string" && src.startsWith("data:image/");
+}
+
+function blockedImageSpec(attrs: Record<string, unknown>): DOMOutputSpec {
+  const src = String(attrs.src ?? "");
+  const alt = typeof attrs.alt === "string" && attrs.alt ? attrs.alt : src;
+  return [
+    "div",
+    {
+      class:
+        "meeting-note-image-blocked my-2 truncate rounded border border-dashed border-border px-2 py-1 text-xs text-muted-foreground",
+      title: src,
+    },
+    alt,
+  ];
+}
 
 /**
  * Image extension with resize enabled and custom markdown serialization.
@@ -60,11 +89,22 @@ const ResizableImage = Image.extend({
     };
   },
 
+  renderHTML(props) {
+    if (!isEmbeddedImageSource(props.node.attrs.src)) {
+      return blockedImageSpec(props.node.attrs);
+    }
+    return this.parent!(props);
+  },
+
   addNodeView() {
     const parentNodeView = this.parent?.();
     if (!parentNodeView) return null;
 
     return (props) => {
+      if (!isEmbeddedImageSource(props.node.attrs.src)) {
+        return { dom: DOMSerializer.renderSpec(document, blockedImageSpec(props.node.attrs)).dom };
+      }
+
       const nodeView = (parentNodeView as Function)(props);
       const wrapper = (nodeView as any).wrapper as HTMLElement | undefined;
       if (!wrapper) return nodeView;
@@ -299,7 +339,7 @@ function NoteEditor(
   const insertImages = useCallback(
     (imageSources: string[], at?: { clientX: number; clientY: number }) => {
       const editor = editorRef.current;
-      const images = imageSources.filter(isPasteableImageSource);
+      const images = imageSources.filter(isEmbeddedImageSource);
       if (!editor || images.length === 0) return;
 
       const content = images.flatMap((src) => [
@@ -354,7 +394,9 @@ function NoteEditor(
       }
 
       const imageSources =
-        dataUrls.length > 0 ? dataUrls : payload.htmlImageSources;
+        dataUrls.length > 0
+          ? dataUrls
+          : await embedPastedImageSources(payload.htmlImageSources);
       insertImages(imageSources);
     },
     [insertImages],
@@ -585,6 +627,44 @@ export function meetingNotePasteTextContent(
   }
 
   return plainTextToEditorContent(text);
+}
+
+const PASTED_IMAGE_TIMEOUT_MS = 15_000;
+const MAX_PASTED_IMAGE_BYTES = 20 * 1024 * 1024;
+
+/**
+ * Copies images pasted from a web page into the note. Notes show only images
+ * they carry themselves, so a pasted web image is downloaded once, at paste
+ * time, by the user's own action. A source that does not come back as an
+ * image is dropped.
+ */
+export async function embedPastedImageSources(sources: string[]): Promise<string[]> {
+  const embedded = await Promise.all(
+    sources.map(async (src) => {
+      if (isEmbeddedImageSource(src)) return src;
+      try {
+        const response = await tauriFetchWithDeadline(
+          src,
+          { method: "GET" },
+          { timeoutMs: PASTED_IMAGE_TIMEOUT_MS },
+        );
+        if (
+          !response.ok ||
+          Number(response.headers.get("content-length")) > MAX_PASTED_IMAGE_BYTES
+        ) {
+          return null;
+        }
+        const image = await response.blob();
+        if (!image.type.startsWith("image/") || image.size > MAX_PASTED_IMAGE_BYTES) {
+          return null;
+        }
+        return await resizeImageDataUrl(await readBlobAsDataUrl(image));
+      } catch {
+        return null;
+      }
+    }),
+  );
+  return embedded.filter((src): src is string => src !== null);
 }
 
 export function imageSourcesFromHtml(html: string): string[] {

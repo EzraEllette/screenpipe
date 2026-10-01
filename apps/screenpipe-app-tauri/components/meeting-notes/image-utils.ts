@@ -42,7 +42,7 @@ export function imageMimeFromName(name: string): string | null {
 
 export async function imageFileToDataUrl(file: File): Promise<string | null> {
   if (!isNoteImageFile(file)) return null;
-  const raw = await readFileAsDataUrl(file);
+  const raw = await readBlobAsDataUrl(file);
   return resizeImageDataUrl(raw);
 }
 
@@ -99,11 +99,11 @@ export function resizeImageDataUrl(dataUrl: string): Promise<string> {
   });
 }
 
-function readFileAsDataUrl(file: File): Promise<string> {
+export function readBlobAsDataUrl(blob: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(String(reader.result ?? ""));
     reader.onerror = () => reject(reader.error ?? new Error("failed to read image"));
-    reader.readAsDataURL(file);
+    reader.readAsDataURL(blob);
   });
 }

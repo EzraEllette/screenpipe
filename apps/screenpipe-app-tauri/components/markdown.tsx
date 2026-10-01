@@ -6,6 +6,7 @@ import ReactMarkdown, { defaultUrlTransform, Options } from 'react-markdown'
 import { commands } from "@/lib/utils/tauri";
 import { MediaComponent } from "@/components/rewind/media";
 import { LocalMarkdownImage } from "@/components/markdown/local-markdown-image";
+import { ImageAltText } from "@/components/markdown/image-alt-text";
 import { imageMimeFromName } from "@/components/meeting-notes/image-utils";
 import { isMediaFilePath, normalizeLocalMediaMarkdown, normalizeMediaFilePath } from "@/lib/utils/media-file-path";
 
@@ -55,12 +56,15 @@ export function resolveLocalPathFromMarkdownUrl(url: string): string | null {
   return null;
 }
 
-// Media paths go to the native file reader, so a URL that merely ends in
-// .mp4 is not enough: it must be a local path, or home-relative (`~/clip.mp4`,
-// which the reader expands).
+// Media paths go to the native file reader, so a URL that merely ends in .mp4
+// is not enough. MediaComponent reads normalizeMediaFilePath(url), which
+// decodes the URL and can pull a path out of a longer string, so check that
+// exact path: it must be absolute, a drive path, or home-relative
+// (`~/clip.mp4`, which the reader expands). A second leading slash or
+// backslash is a network share on Windows.
 function isLocalMediaPath(url: string): boolean {
-  if (!isMediaFilePath(url)) return false;
-  return /^~[\\/]/.test(unwrapMarkdownUrl(url)) || resolveLocalPathFromMarkdownUrl(url) !== null;
+  const path = normalizeMediaFilePath(url);
+  return isMediaFilePath(path) && /^(?:\/|~[\\/]|[A-Za-z]:[\\/])(?![\\/])/.test(path);
 }
 
 export function createScreenpipeUrlTransform(allowedHosts: readonly string[]) {
@@ -186,13 +190,11 @@ export function createMediaAwareMarkdownComponents(
       return <a href={href} {...props}>{children}</a>;
     },
     img({ src, alt }) {
-      if (!src) return null;
-
-      if (isLocalMediaPath(src)) {
+      if (src && isLocalMediaPath(src)) {
         return <MediaComponent filePath={src} className="my-2" />;
       }
 
-      const localPath = resolveLocalPathFromMarkdownUrl(src);
+      const localPath = src ? resolveLocalPathFromMarkdownUrl(src) : null;
       if (localPath && imageMimeFromName(localPath)) {
         return (
           <LocalMarkdownImage
@@ -203,18 +205,15 @@ export function createMediaAwareMarkdownComponents(
         );
       }
 
-      // Markdown here is often written by an AI or a pipe working from
-      // captured screens, pages and files, so outside content can steer its
-      // image URLs. A remote image loads as soon as it renders and hands its
-      // URL to that server, so only local files render as images; anything
-      // else shows its alt text (same rule as announcement-body.tsx). A
+      // Only local files render as images; anything else, including a src the
+      // url transform blanked, shows its alt text (see ImageAltText). A
       // caller's img never receives the src, so it cannot load it either.
       const CustomImage = base.img;
       if (CustomImage) {
         return <CustomImage alt={alt} />;
       }
 
-      return alt ? <span>{alt}</span> : null;
+      return <ImageAltText alt={alt} />;
     },
     code({ className, children, ...props }) {
       const content = String(children).replace(/\n$/, "");

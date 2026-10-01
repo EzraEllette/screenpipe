@@ -19,11 +19,15 @@ vi.mock("@/lib/utils/tauri", () => ({
   },
 }));
 
-vi.mock("@/components/rewind/media", () => ({
-  MediaComponent: ({ filePath }: { filePath: string }) => (
-    <div data-testid="media-component">{filePath}</div>
-  ),
-}));
+// Shows the exact path the real MediaComponent hands to the native reader.
+vi.mock("@/components/rewind/media", async () => {
+  const { normalizeMediaFilePath } = await import("@/lib/utils/media-file-path");
+  return {
+    MediaComponent: ({ filePath }: { filePath: string }) => (
+      <div data-testid="media-component">{normalizeMediaFilePath(filePath)}</div>
+    ),
+  };
+});
 
 import {
   MemoizedReactMarkdown,
@@ -110,6 +114,21 @@ describe("MemoizedReactMarkdown local images", () => {
     expect(getMediaFileMock).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["javascript:", "![remote chart](javascript:alert(1))"],
+    ["data:", "![remote chart](data:image/png;base64,iVBORw0KGgo=)"],
+    ["blob:", "![remote chart](blob:https://example.com/0b1c)"],
+  ])("keeps the alt text of a %s image whose src the url transform removes", (_name, markdown) => {
+    const { container } = render(
+      <MemoizedReactMarkdown urlTransform={chatUrlTransform}>
+        {`before ${markdown} after`}
+      </MemoizedReactMarkdown>,
+    );
+
+    expect(container).toHaveTextContent("before remote chart after");
+    expect(container.querySelector("img")).toBeNull();
+  });
+
   it("does not load remote images without a url transform or alt text", () => {
     // Daily summaries and meeting notes use react-markdown's default transform.
     const { container } = render(
@@ -132,6 +151,24 @@ describe("MemoizedReactMarkdown local images", () => {
     ["remote media code", "`https://example.com/a.mp4`", () => screen.getByText("https://example.com/a.mp4")],
     ["network-share media image", "![clip](//host/share/a.mp4)", () => screen.getByText("clip")],
     ["network-share media code", "`\\\\host\\share\\a.mp4`", () => screen.getByText("\\\\host\\share\\a.mp4")],
+    // `~/` + a share: the native reader's home join would yield the share.
+    [
+      "home-relative network-share code",
+      "`~/\\\\host\\share\\a.mp4`",
+      () => screen.getByText("~/\\\\host\\share\\a.mp4"),
+    ],
+    // The reader extracts a path from the string; here that is the share.
+    [
+      "network share after a quote in a link",
+      '[clip](</tmp/x"//host/share/a.mp4>)',
+      () => screen.getByRole("link", { name: "clip" }),
+    ],
+    ["network share after a quote in an image", '![clip](</tmp/x"//host/share/a.mp4>)', () => screen.getByText("clip")],
+    [
+      "network share on a second code line",
+      "```\n/tmp/x\n//host/share/a.mp4\n```",
+      () => expect(document.querySelector("code")).toHaveTextContent("//host/share/a.mp4"),
+    ],
   ])("keeps %s away from the native media reader", (_name, markdown, expectOrdinaryForm) => {
     render(
       <MemoizedReactMarkdown urlTransform={chatUrlTransform}>
@@ -147,7 +184,7 @@ describe("MemoizedReactMarkdown local images", () => {
     ["absolute", "![clip](/Users/me/a.mp4)", "/Users/me/a.mp4"],
     ["home-relative code", "`~/Downloads/clip.mp4`", "~/Downloads/clip.mp4"],
     ["Windows", "![clip](C:\\Users\\me\\a.mp4)", "C:\\Users\\me\\a.mp4"],
-    ["file URL link", "[clip](file:///Users/me/a.mp4)", "file:///Users/me/a.mp4"],
+    ["file URL link", "[clip](file:///Users/me/a.mp4)", "/Users/me/a.mp4"],
   ])("still plays %s local media", (_name, markdown, path) => {
     render(
       <MemoizedReactMarkdown urlTransform={chatUrlTransform}>
@@ -155,9 +192,7 @@ describe("MemoizedReactMarkdown local images", () => {
       </MemoizedReactMarkdown>,
     );
 
-    // Markdown percent-encodes backslashes; MediaComponent decodes them.
-    const filePath = screen.getByTestId("media-component").textContent ?? "";
-    expect(decodeURIComponent(filePath)).toBe(path);
+    expect(screen.getByTestId("media-component")).toHaveTextContent(path);
   });
 
   it("recognizes Windows absolute image paths as local files", () => {
