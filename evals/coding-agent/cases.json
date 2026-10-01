@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "suite": "screenpipe-app-coding-agent-regressions",
-  "dataset_version": "2026-09-30-running-pipes-lifecycle",
+  "dataset_version": "2026-10-01-audio-off-permissions",
   "suite_type": "regression",
   "owner": "screenpipe engineering",
   "policy": {
@@ -4598,6 +4598,55 @@
         ],
         "command": "cd apps/screenpipe-app-tauri && node node_modules/vitest/vitest.mjs run --config .eval-hidden/recording-resume.config.mjs"
       }
+    },
+    {
+      "id": "app-permission-recovery-audio-policy",
+      "name": "Respect audio-off policy in permission interfaces",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "7d176bc2ed68cf331a83d0be76e1859cbabb06e1"
+      },
+      "base_ref": "4340a80723e50ff2192d6f3543a79ff7d6dd5462",
+      "oracle_ref": "7d176bc2ed68cf331a83d0be76e1859cbabb06e1",
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "permissions",
+        "privacy",
+        "onboarding"
+      ],
+      "prompt": "Audio-disabled users still encounter microphone prompts in permission recovery, onboarding and the status banner. Make these interfaces respect disableAudio and an audioCaptureMode of disabled, case-insensitively. Recovery must withhold the microphone action until settings finish loading. Audio-off users must still be able to repair denied accessibility and screen access, including a screen denial alongside a denied microphone. Remove an existing microphone banner immediately when audio is turned off. In onboarding, do not query or offer the unneeded microphone permission, advance while settings are loading, or complete after unmount. If audio is re-enabled before delayed completion, require a fresh microphone permission result, including when a previous result was granted; complete once after all required permissions are granted. Preserve ordinary audio-on microphone requests and the recovery wheel: only the first denied permission is actionable, granting it enables the next, and already granted rows stay inactive. Keep existing public permission-row identifiers and accessible action labels compatible. The checks render the actual three interfaces with synthetic settings and native command ports. Native recording restart, pause enforcement, OS permissions and deployment are outside this case. Keep the change scoped to these permission behaviors.",
+      "agent_timeout_seconds": 900,
+      "grader": {
+        "timeout_seconds": 180,
+        "fixtures": [
+          {
+            "local_path": "graders/audio-policy-recovery.fixture.tsx.txt",
+            "destination_path": "apps/screenpipe-app-tauri/app/permission-recovery/audio-policy.eval.test.tsx"
+          },
+          {
+            "local_path": "graders/audio-policy-onboarding.fixture.tsx.txt",
+            "destination_path": "apps/screenpipe-app-tauri/components/onboarding/audio-policy.eval.test.tsx"
+          },
+          {
+            "local_path": "graders/audio-policy-banner.fixture.tsx.txt",
+            "destination_path": "apps/screenpipe-app-tauri/components/status/audio-policy.eval.test.tsx"
+          }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && NODE_OPTIONS=--localstorage-file=.eval-localstorage node node_modules/vitest/vitest.mjs run --config vitest.config.ts app/permission-recovery/audio-policy.eval.test.tsx components/onboarding/audio-policy.eval.test.tsx components/status/audio-policy.eval.test.tsx --pool=forks --poolOptions.forks.singleFork=true"
+      },
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/app/permission-recovery/page.tsx",
+        "apps/screenpipe-app-tauri/components/onboarding/permissions-step.tsx",
+        "apps/screenpipe-app-tauri/components/status/permission-banner.tsx",
+        "apps/screenpipe-app-tauri/lib/utils/permission-requirements.ts"
+      ],
+      "grader_dependency_links": [
+        {
+          "source_path": "apps/screenpipe-app-tauri/node_modules",
+          "destination_path": "apps/screenpipe-app-tauri/node_modules"
+        }
+      ]
     }
   ]
 }

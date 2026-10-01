@@ -13,6 +13,19 @@ The current app corpus contains 80 git-mined regressions. See
 [DESIGN.md](./DESIGN.md) for the Anthropic guidance, source contract, and
 history-mining workflow. The companion website manifest uses this same harness.
 
+`app-permission-recovery-audio-policy` renders permission recovery, onboarding
+and the status banner with synthetic settings and native command ports. Fourteen
+outcomes cover audio-off policy, loading, policy changes during delayed completion,
+unmount and ordinary audio-on requests. The parent fails eight outcomes and
+preserves six; the historical fix and current source pass fourteen. Run
+`bun test evals/coding-agent/calibrate-audio-policy.test.js` for nine controls,
+including an equivalent policy implementation, unused correct interfaces and
+blanket microphone requirements or suppression. Explicit DOM cleanup keeps tests
+independent. Fixtures and dependency links appear only at grading. Native pause
+and recording behavior, OS permission enforcement, execution isolation and model
+improvement are outside this evidence. Partial collection failures still need log
+inspection; a nonzero process exit alone does not establish a behavior regression.
+
 `app-model-catalog-session-freshness` runs the actual model-catalog hook with
 synthetic settings and HTTP ports. Ten outcomes cover hydration, token changes,
 late responses and bodies, loading ownership, failure recovery and preserved
