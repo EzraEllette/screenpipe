@@ -33,3 +33,5 @@ test('equivalent audio policy implementation passes',()=>passes(grade('equivalen
 test('always requiring microphone is rejected',()=>fails(grade('always-required',item.oracle_ref,cwd=>helperBody(cwd,'return true;'))),60000);
 test('never requiring microphone violates preserved audio-on behavior',()=>fails(grade('never-required',item.oracle_ref,cwd=>helperBody(cwd,'return false;'))),60000);
 test('missing interfaces are an infrastructure error',()=>{const r=grade('missing',item.oracle_ref,cwd=>{for(const p of item.oracle_paths.slice(0,3))rmSync(join(cwd,p));});expect(r.status).toBe(1);expect(classifyGraderError(r)).toBe('vitest_collection_error')},60000);
+
+test('one missing interface remains infrastructure when neighboring suites pass',()=>{const r=grade('missing-one',item.oracle_ref,cwd=>rmSync(join(cwd,item.oracle_paths[0])));expect(r.status).toBe(1);expect(r.stdout).toContain('7 passed');expect(r.stdout).not.toMatch(/Tests\s+.*[1-9]\d* failed/);expect(classifyGraderError(r)).toBe('vitest_collection_error')},60000);

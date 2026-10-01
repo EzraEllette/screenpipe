@@ -18,13 +18,17 @@ and the status banner with synthetic settings and native command ports. Fourteen
 outcomes cover audio-off policy, loading, policy changes during delayed completion,
 unmount and ordinary audio-on requests. The parent fails eight outcomes and
 preserves six; the historical fix and current source pass fourteen. Run
-`bun test evals/coding-agent/calibrate-audio-policy.test.js` for nine controls,
+`bun test evals/coding-agent/calibrate-audio-policy.test.js` for ten controls,
 including an equivalent policy implementation, unused correct interfaces and
 blanket microphone requirements or suppression. Explicit DOM cleanup keeps tests
 independent. Fixtures and dependency links appear only at grading. Native pause
 and recording behavior, OS permission enforcement, execution isolation and model
-improvement are outside this evidence. Partial collection failures still need log
-inspection; a nonzero process exit alone does not establish a behavior regression.
+improvement are outside this evidence. Recognized Vitest collection failures stay
+infrastructure errors when neighboring suites pass or skip. Executed test failures
+and assertion headers retain their behavior classification. The shared runner's
+`bun test evals/coding-agent/run.test.ts` controls cover both verification arms
+and exclusion from scored trials. Unknown diagnostics still need log inspection;
+a nonzero process exit alone does not establish a behavior regression.
 
 `app-model-catalog-session-freshness` runs the actual model-catalog hook with
 synthetic settings and HTTP ports. Ten outcomes cover hydration, token changes,
