@@ -4714,6 +4714,50 @@
         ],
         "command": "\"${BUN_BIN:-bun}\" test evals/coding-agent/graders/gateway-auth-log-privacy.test.js"
       }
+    },
+    {
+      "id": "app-search-focus-lifecycle",
+      "name": "Suspend hidden search focus work and preserve reopening",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "27fef88bae7c56bb6bce58e98d8b97c28d7f7aac"
+      },
+      "base_ref": "073c54cba78b42719b909733fe151083baff3fed",
+      "oracle_ref": "27fef88bae7c56bb6bce58e98d8b97c28d7f7aac",
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/app/search/page.tsx"
+      ],
+      "gate": "advisory",
+      "trigger_paths": [
+        "apps/screenpipe-app-tauri/app/search/page.tsx",
+        "apps/screenpipe-app-tauri/components/rewind/hooks/use-search-focus.ts",
+        "apps/screenpipe-app-tauri/lib/hooks/use-event-listener.ts"
+      ],
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "search",
+        "lifecycle",
+        "focus"
+      ],
+      "prompt": "The retained search webview keeps reclaiming input focus while hidden. Fix the React search-page lifecycle: a page opened at /search?prewarm=1 must remain inactive until the native search-reset event; search-hidden must suspend focus work, even before the first show. An ordinary /search open must still focus the input and recover focus from a non-input element while visible. Reopening after hiding must restore usable focus and the supplied query, including Unicode and URL-special characters; a null or absent reset query clears the old query. Preserve result navigation with its timestamp, frame ID and search context, explicit native window-close handoff, and removal of listeners and focus work on unmount. Preserve public component/hook interfaces and any intentional recent-chat cache warming. This task covers the actual page and focus hook with synthetic native events and a small search-view shell, not native window-server execution or the full search-results UI. No particular mount strategy or private helper is prescribed.",
+      "agent_timeout_seconds": 900,
+      "grader_dependency_links": [
+        {
+          "source_path": "apps/screenpipe-app-tauri/node_modules",
+          "destination_path": "apps/screenpipe-app-tauri/node_modules"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/search-focus-lifecycle.fixture.tsx.txt",
+            "destination_path": "apps/screenpipe-app-tauri/eval-search-lifecycle.test.tsx"
+          }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && node node_modules/vitest/vitest.mjs run --config vitest.config.ts eval-search-lifecycle.test.tsx"
+      }
     }
   ]
 }

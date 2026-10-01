@@ -9,6 +9,19 @@ This is an agent eval suite, not a unit-test suite. Every case contains:
 - saved prompt, transcript, candidate patch, grader output, runtime fingerprint, and result;
 - repeated-trial reporting with success rate, `pass@k`, and `pass^k`.
 
+`app-search-focus-lifecycle` runs the actual search page, focus hook and DOM
+listener hook with synthetic native events and a small search-view shell. Ten
+outcomes cover hidden prewarm, hide/show cycles, focus recovery, query resets,
+navigation, close and unmount. The parent fails three hidden-focus outcomes and
+preserves seven; the historical page fix and current source pass ten. Run
+`bun test evals/coding-agent/calibrate-search-focus.test.js` for twelve controls,
+including a mounted-but-inactive equivalent, unused correct code, blanket
+inactivity, ignored hide events and lost query/focus/handoff behavior. Missing
+source is a setup failure. Fixtures and runtime links appear only at grading.
+This does not execute the full search modal, native window events, macOS focus,
+real IPC, execution isolation or model trials. Current cache prewarm is checked
+separately and is allowed while the view is hidden.
+
 The current app corpus contains 80 git-mined regressions. See
 [DESIGN.md](./DESIGN.md) for the Anthropic guidance, source contract, and
 history-mining workflow. The companion website manifest uses this same harness.
