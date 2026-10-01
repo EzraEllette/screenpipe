@@ -26,10 +26,8 @@ export function resolveLocalPathFromMarkdownUrl(url: string): string | null {
   const urlWithoutFragment = raw.split("#", 1)[0] ?? raw;
 
   let candidate = urlWithoutFragment;
-  let wasFileUri = false;
 
   if (/^file:\/\//i.test(candidate)) {
-    wasFileUri = true;
     const withoutScheme = candidate.replace(/^file:\/\//i, "");
     candidate = `/${withoutScheme.replace(/^\/+/, "")}`;
   }
@@ -44,7 +42,9 @@ export function resolveLocalPathFromMarkdownUrl(url: string): string | null {
     candidate = candidate.slice(1);
   }
 
-  if (candidate.startsWith("/") && (wasFileUri || !candidate.startsWith("//"))) {
+  // A second leading slash or backslash is a network share on Windows
+  // (//host/share, /\host\share); reading it would contact that host.
+  if (/^\/(?![\\/])/.test(candidate)) {
     return candidate;
   }
 
@@ -53,6 +53,14 @@ export function resolveLocalPathFromMarkdownUrl(url: string): string | null {
   }
 
   return null;
+}
+
+// Media paths go to the native file reader, so a URL that merely ends in
+// .mp4 is not enough: it must be a local path, or home-relative (`~/clip.mp4`,
+// which the reader expands).
+function isLocalMediaPath(url: string): boolean {
+  if (!isMediaFilePath(url)) return false;
+  return /^~[\\/]/.test(unwrapMarkdownUrl(url)) || resolveLocalPathFromMarkdownUrl(url) !== null;
 }
 
 export function createScreenpipeUrlTransform(allowedHosts: readonly string[]) {
@@ -166,7 +174,7 @@ export function createMediaAwareMarkdownComponents(
   return {
     ...base,
     a({ href, children, ...props }) {
-      if (href && isMediaFilePath(href)) {
+      if (href && isLocalMediaPath(href)) {
         return <MediaComponent filePath={href} className="my-2" />;
       }
 
@@ -177,10 +185,10 @@ export function createMediaAwareMarkdownComponents(
 
       return <a href={href} {...props}>{children}</a>;
     },
-    img({ src, alt, ...props }) {
+    img({ src, alt }) {
       if (!src) return null;
 
-      if (isMediaFilePath(src)) {
+      if (isLocalMediaPath(src)) {
         return <MediaComponent filePath={src} className="my-2" />;
       }
 
@@ -195,25 +203,22 @@ export function createMediaAwareMarkdownComponents(
         );
       }
 
+      // Markdown here is often written by an AI or a pipe working from
+      // captured screens, pages and files, so outside content can steer its
+      // image URLs. A remote image loads as soon as it renders and hands its
+      // URL to that server, so only local files render as images; anything
+      // else shows its alt text (same rule as announcement-body.tsx). A
+      // caller's img never receives the src, so it cannot load it either.
       const CustomImage = base.img;
       if (CustomImage) {
-        return <CustomImage src={src} alt={alt} {...props} />;
+        return <CustomImage alt={alt} />;
       }
 
-      return (
-        // eslint-disable-next-line @next/next/no-img-element
-        <img
-          src={src}
-          alt={alt || ""}
-          className="max-w-full h-auto rounded-md my-2 border border-border"
-          loading="lazy"
-          {...props}
-        />
-      );
+      return alt ? <span>{alt}</span> : null;
     },
     code({ className, children, ...props }) {
       const content = String(children).replace(/\n$/, "");
-      if (isMediaFilePath(content.trim())) {
+      if (isLocalMediaPath(content.trim())) {
         return <MediaComponent filePath={content.trim()} className="my-2" />;
       }
 

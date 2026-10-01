@@ -90,18 +90,74 @@ describe("MemoizedReactMarkdown local images", () => {
     expect(container.querySelector("img")).toBeNull();
   });
 
-  it("leaves remote https images on their original src", () => {
-    render(
+  // A remote image loads the moment it renders and sends its URL to that
+  // server, so markdown shows the alt text instead of fetching anything.
+  it.each([
+    ["https", "![remote chart](https://example.com/pipe.png?d=secret)"],
+    ["http", "![remote chart](http://example.com/pipe.png)"],
+    ["protocol-relative", "![remote chart](//example.com/pipe.png)"],
+    ["reference-style", "![remote chart][r]\n\n[r]: https://example.com/pipe.png"],
+    ["relative", "![remote chart](pipe.png)"],
+  ])("shows %s images as alt text without loading them", (_name, markdown) => {
+    const { container } = render(
       <MemoizedReactMarkdown urlTransform={chatUrlTransform}>
-        {"![remote](https://example.com/pipe.png)"}
+        {markdown}
       </MemoizedReactMarkdown>,
     );
 
-    expect(screen.getByAltText("remote")).toHaveAttribute(
-      "src",
-      "https://example.com/pipe.png",
-    );
+    expect(screen.getByText("remote chart")).toBeInTheDocument();
+    expect(container.querySelector("img")).toBeNull();
     expect(getMediaFileMock).not.toHaveBeenCalled();
+  });
+
+  it("does not load remote images without a url transform or alt text", () => {
+    // Daily summaries and meeting notes use react-markdown's default transform.
+    const { container } = render(
+      <MemoizedReactMarkdown>
+        {"before ![](https://example.com/pipe.png) after ![remote chart](https://example.com/b.png)"}
+      </MemoizedReactMarkdown>,
+    );
+
+    expect(container).toHaveTextContent("before after remote chart");
+    expect(container.querySelector("img")).toBeNull();
+  });
+
+  it.each([
+    ["remote media image", "![clip](https://example.com/a.mp4)", () => screen.getByText("clip")],
+    [
+      "remote media link",
+      "[clip](https://example.com/a.mp4)",
+      () => expect(screen.getByRole("link", { name: "clip" })).toHaveAttribute("href", "https://example.com/a.mp4"),
+    ],
+    ["remote media code", "`https://example.com/a.mp4`", () => screen.getByText("https://example.com/a.mp4")],
+    ["network-share media image", "![clip](//host/share/a.mp4)", () => screen.getByText("clip")],
+    ["network-share media code", "`\\\\host\\share\\a.mp4`", () => screen.getByText("\\\\host\\share\\a.mp4")],
+  ])("keeps %s away from the native media reader", (_name, markdown, expectOrdinaryForm) => {
+    render(
+      <MemoizedReactMarkdown urlTransform={chatUrlTransform}>
+        {markdown}
+      </MemoizedReactMarkdown>,
+    );
+
+    expectOrdinaryForm();
+    expect(screen.queryByTestId("media-component")).toBeNull();
+  });
+
+  it.each([
+    ["absolute", "![clip](/Users/me/a.mp4)", "/Users/me/a.mp4"],
+    ["home-relative code", "`~/Downloads/clip.mp4`", "~/Downloads/clip.mp4"],
+    ["Windows", "![clip](C:\\Users\\me\\a.mp4)", "C:\\Users\\me\\a.mp4"],
+    ["file URL link", "[clip](file:///Users/me/a.mp4)", "file:///Users/me/a.mp4"],
+  ])("still plays %s local media", (_name, markdown, path) => {
+    render(
+      <MemoizedReactMarkdown urlTransform={chatUrlTransform}>
+        {markdown}
+      </MemoizedReactMarkdown>,
+    );
+
+    // Markdown percent-encodes backslashes; MediaComponent decodes them.
+    const filePath = screen.getByTestId("media-component").textContent ?? "";
+    expect(decodeURIComponent(filePath)).toBe(path);
   });
 
   it("recognizes Windows absolute image paths as local files", () => {
@@ -111,6 +167,22 @@ describe("MemoizedReactMarkdown local images", () => {
       ),
     ).toBe("C:\\Users\\Hugo\\.screenpipe\\data\\missing.jpg");
   });
+
+  it.each([
+    ["/tmp/x.png", "/tmp/x.png"],
+    ["file:///tmp/x.png", "/tmp/x.png"],
+    ["file:///C:/Users/me/x.png", "C:/Users/me/x.png"],
+  ])("accepts local path %s", (url, path) => {
+    expect(resolveLocalPathFromMarkdownUrl(url)).toBe(path);
+  });
+
+  // Windows reads these as network shares, which contacts the named host.
+  it.each(["//host/share/x.png", "/\\host\\share\\x.png", "file:///%2F%2Fhost/x.png"])(
+    "rejects network-share path %s",
+    (url) => {
+      expect(resolveLocalPathFromMarkdownUrl(url)).toBeNull();
+    },
+  );
 
   it("keeps file:// image URLs so the local loader still receives a path", () => {
     expect(chatUrlTransform("file:///tmp/waterfall-light.gif")).toBe(

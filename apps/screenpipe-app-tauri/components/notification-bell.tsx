@@ -461,6 +461,9 @@ export function NotificationInboxPanel({
                                   {children}
                                 </a>
                               ),
+                              // Bodies come from pipes; a remote image would load on
+                              // render and send its URL out, so show the alt text.
+                              img: ({ alt }) => (alt ? <span>{alt}</span> : null),
                             }}
                           >
                             {entry.body}
@@ -537,6 +540,7 @@ export function NotificationInboxPanel({
                                 {children}
                               </a>
                             ),
+                            img: ({ alt }) => (alt ? <span>{alt}</span> : null),
                           }}
                         >{entry.body}</ReactMarkdown>
                       </div>

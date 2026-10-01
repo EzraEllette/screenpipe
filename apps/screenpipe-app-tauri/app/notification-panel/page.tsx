@@ -660,6 +660,9 @@ export default function NotificationPanelPage() {
                     </>
                   );
                 },
+                // Bodies come from pipes; a remote image would load on render
+                // and send its URL out, so show the alt text instead.
+                img: ({ alt }) => (alt ? <span>{alt}</span> : null),
               }}
             >
               {payload.body}
