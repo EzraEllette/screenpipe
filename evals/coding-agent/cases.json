@@ -4683,6 +4683,37 @@
         ],
         "command": "\"${BUN_BIN:-bun}\" test evals/coding-agent/graders/openai-tool-choice.test.js"
       }
+    },
+    {
+      "id": "ai-gateway-auth-log-privacy",
+      "name": "Keep gateway authentication credentials and identities out of logs",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "33d5637dda01c704e5436f0be477effbd18c1e4b"
+      },
+      "base_ref": "45105b5ee837501d0c10020a016b16ca2c4c4083",
+      "oracle_ref": "33d5637dda01c704e5436f0be477effbd18c1e4b",
+      "oracle_paths": [
+        "packages/ai-gateway/src/utils/auth.ts"
+      ],
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "privacy",
+        "authentication"
+      ],
+      "prompt": "Gateway authentication writes credentials and account details to operational logs. Repair verifyClerkToken and validateAuth so successful and rejected verification, verified-account lookup, legacy website-token validation and provider exceptions do not log raw credentials, account IDs, email addresses, secret keys or upstream error details. Generic diagnostics or silence are both acceptable. Preserve actual token verification with the supplied verifier key, successful verified and legacy paid/free account tiers and canonical identity, Bearer and Token support, and anonymous access with the supplied device identity when credentials are missing, invalid, rejected or unavailable. Missing credentials must not trigger verification or account lookup. Use synthetic credentials only. This task does not require preserving public-identifier authentication or any particular log message or implementation structure.",
+      "agent_timeout_seconds": 900,
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/gateway-auth-log-privacy.test.js",
+            "destination_path": "evals/coding-agent/graders/gateway-auth-log-privacy.test.js"
+          }
+        ],
+        "command": "\"${BUN_BIN:-bun}\" test evals/coding-agent/graders/gateway-auth-log-privacy.test.js"
+      }
     }
   ]
 }

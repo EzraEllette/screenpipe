@@ -13,6 +13,21 @@ The current app corpus contains 80 git-mined regressions. See
 [DESIGN.md](./DESIGN.md) for the Anthropic guidance, source contract, and
 history-mining workflow. The companion website manifest uses this same harness.
 
+`ai-gateway-auth-log-privacy` runs the actual authentication entry points with
+synthetic Clerk and account-service replies. Eight checks reject credentials,
+account identifiers, emails and upstream error details in console output;
+four nearby outcomes preserve verified and legacy access and anonymous fallback.
+The broken parent fails eight checks and preserves four. The auth-only historical
+fix and current source pass all twelve. Run
+`bun test evals/coding-agent/calibrate-auth-log-privacy.test.js` for eleven
+controls, including equivalent diagnostics, silence, unused correct source,
+raw-value logging, blanket access/denial and missing-source classification.
+Fixtures are installed only when grading begins. This does not test real JWT
+cryptography, the HTTP router, external log sinks, native model policy, execution
+isolation or model capability. Public-identifier authentication from the historical
+source is superseded and is not required by this case.
+
+
 `app-permission-recovery-audio-policy` renders permission recovery, onboarding
 and the status banner with synthetic settings and native command ports. Fourteen
 outcomes cover audio-off policy, loading, policy changes during delayed completion,
