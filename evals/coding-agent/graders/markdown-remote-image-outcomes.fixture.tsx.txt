@@ -194,6 +194,27 @@ describe("meeting note editor", () => {
     expect(markdownOf()).toContain("https://example.com/raw.png?d=secret");
   });
 
+  it("keeps an image an AI summary wrote when the note is copied and pasted back", async () => {
+    const element = mountNote([
+      "before",
+      "",
+      '<img src="https://example.com/chart.png?d=secret" alt="sales chart" width="40" height="30" />',
+      "",
+      "after",
+    ].join("\n"));
+    const view = editor!.view;
+    // What the editor puts on the clipboard, then a cut and a paste.
+    const { dom } = view.serializeForClipboard(view.state.doc.slice(0, view.state.doc.content.size));
+    editor!.commands.clearContent();
+    expect(markdownOf()).not.toContain("chart.png");
+    view.pasteHTML(dom.innerHTML, new Event("paste") as ClipboardEvent);
+    await settle();
+    expect(element).toHaveTextContent("sales chart");
+    expect(element).toHaveTextContent("after");
+    expect(remoteImages(element)).toEqual([]);
+    expect(markdownOf()).toContain("https://example.com/chart.png?d=secret");
+  });
+
   it("does not load a remote image that arrives with a later update", async () => {
     const element = mountNote("notes");
     editor!.commands.setContent("before\n\n![sales chart](https://example.com/late.png?d=secret)\n\nafter");

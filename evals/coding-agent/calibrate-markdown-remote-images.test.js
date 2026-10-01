@@ -11,6 +11,8 @@ const markdown = `${app}/components/markdown.tsx`, block = `${app}/components/ch
 const notes = `${app}/components/meeting-notes/note-editor.tsx`;
 // The first fix: markdown images only, with a raw-string media gate.
 const PREVIOUS_FIX = '7ee2e6ef078200f9781a98c39347d7c8f48c7663';
+// The second fix: notes blocked remote images, but a copied one pasted back as text.
+const SECOND_FIX = '359ac0c2512578a972ba07c09e895725d5021b6c';
 const root = mkdtempSync(join(tmpdir(), 'markdown-remote-images-calibration-')), archives = new Map();
 const receipts = process.env.SCREENPIPE_EVAL_CALIBRATION_RECEIPTS;
 afterAll(() => rmSync(root, {recursive: true, force: true}));
@@ -39,10 +41,11 @@ function grade(name, ref = item.oracle_ref, mutate = () => {}) {
 }
 // Behavior failures surface as chai AssertionErrors or jest-dom matcher errors.
 const BEHAVIOR_FAILURE = /AssertionError|Error: expect\(/;
-function passes(r) { expect(r.status).toBe(0); expect(r.stdout).toContain('63 passed'); expect(r.stdout+r.stderr).not.toMatch(/Unhandled|Uncaught/); }
+function passes(r) { expect(r.status).toBe(0); expect(r.stdout).toContain('64 passed'); expect(r.stdout+r.stderr).not.toMatch(/Unhandled|Uncaught/); }
 function fails(r) { expect(r.status).toBe(1); expect(r.stderr).toMatch(BEHAVIOR_FAILURE); expect(r.stdout+r.stderr).not.toMatch(/Unhandled|Uncaught|Failed to resolve import|Failed to load url|Cannot find module/); }
-test('parent fails fifty-six remote outcomes and preserves seven local files', () => { const r = grade('parent', item.base_ref); fails(r); expect(r.stdout).toContain('56 failed | 7 passed'); }, 120000);
-test('previous markdown-only fix fails media-path, alt-text and note outcomes', () => { const r = grade('previous-fix', PREVIOUS_FIX); fails(r); expect(r.stdout).toContain('15 failed | 48 passed'); }, 120000);
+test('parent fails fifty-seven remote outcomes and preserves seven local files', () => { const r = grade('parent', item.base_ref); fails(r); expect(r.stdout).toContain('57 failed | 7 passed'); }, 120000);
+test('previous markdown-only fix fails media-path, alt-text and note outcomes', () => { const r = grade('previous-fix', PREVIOUS_FIX); fails(r); expect(r.stdout).toContain('16 failed | 48 passed'); }, 120000);
+test('second fix fails only the note copy outcome', () => { const r = grade('second-fix', SECOND_FIX); fails(r); expect(r.stdout).toContain('1 failed | 63 passed'); expect(r.stderr).toContain('copied and pasted back'); }, 120000);
 test('historical reference passes every outcome', () => passes(grade('reference')), 120000);
 test('current caller passes every outcome', () => passes(grade('current', 'HEAD')), 120000);
 test('equivalent alt-text element passes', () => passes(grade('equivalent', item.oracle_ref, cwd => replace(cwd, markdown, 'return <ImageAltText alt={alt} />;', 'return alt ? <em>{alt}</em> : null;'))), 120000);
