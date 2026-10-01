@@ -1385,3 +1385,15 @@ not establish Home callback wiring, native recording resumption, operating-syste
 capture, agent isolation or model improvement. The hidden fixture and dependency
 link are installed only after the trajectory ends. No evaluated agent runs in
 calibration or baseline/reference verification.
+
+## OpenAI streaming tool policy regression
+
+`app-openai-stream-tool-choice` executes the historical OpenAI provider with a synthetic SDK transport. The broken parent loses explicit tool choices on four streams and the unsupported-usage retry; seven neighboring outcomes still pass. The provider-only historical repair and current source pass all twelve checks.
+
+The grader checks caller-selected policy, tool schemas, model/messages, input preservation, retry behavior, native tool fragments, content, usage and stream termination. Eleven calibration controls include equivalent code, an unused repair, forced policies, lost schemas/fragments and a missing-source setup error.
+
+```sh
+bun test evals/coding-agent/calibrate-openai-tool-choice.test.js
+```
+
+This covers the provider boundary with synthetic transport. It does not establish model adherence, actual tool execution, gateway authentication, native Pi policy, agent isolation or model gains. The existing GLM case covers response conversion and remains separate.

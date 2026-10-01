@@ -4647,6 +4647,42 @@
           "destination_path": "apps/screenpipe-app-tauri/node_modules"
         }
       ]
+    },
+    {
+      "id": "app-openai-stream-tool-choice",
+      "name": "Preserve explicit tool-selection policy on OpenAI streams and retries",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "33d5637dda01c704e5436f0be477effbd18c1e4b"
+      },
+      "base_ref": "45105b5ee837501d0c10020a016b16ca2c4c4083",
+      "oracle_ref": "33d5637dda01c704e5436f0be477effbd18c1e4b",
+      "oracle_paths": [
+        "packages/ai-gateway/src/providers/openai.ts"
+      ],
+      "gate": "advisory",
+      "trigger_paths": [
+        "packages/ai-gateway/src/providers/openai.ts"
+      ],
+      "tags": [
+        "regression",
+        "gateway",
+        "tool-policy",
+        "streaming",
+        "preserved-behavior"
+      ],
+      "agent_timeout_seconds": 1200,
+      "prompt": "Streaming requests through the OpenAI provider lose the caller's tool-selection policy, although ordinary completions preserve it. Repair the existing provider behavior so required, auto, none and named-function tool_choice values reach the provider unchanged on streaming and non-streaming requests. An unspecified choice must remain unspecified, including requests without tools. Preserve the selected model, messages, exact tool schemas and input object. If an OpenAI-compatible server rejects stream_options.include_usage, the supported retry must omit that option while retaining the original tools and tool choice. Preserve streamed content, native tool-call identity/name/arguments, tool_calls finish reason, prompt/completion/total/cached usage and exactly one completion terminator. Do not change routing/model policy or authentication. Use synthetic SDK transport without live API calls or executing tools; no specific implementation shape is required. This task concerns provider request/response behavior, not native Pi configuration, model adherence to the tool policy or full gateway authentication.",
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/openai-tool-choice.test.js",
+            "destination_path": "evals/coding-agent/graders/openai-tool-choice.test.js"
+          }
+        ],
+        "command": "\"${BUN_BIN:-bun}\" test evals/coding-agent/graders/openai-tool-choice.test.js"
+      }
     }
   ]
 }
