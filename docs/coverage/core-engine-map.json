@@ -786,6 +786,7 @@
         "tests/speaker_benchmark.rs",
         "tests/speaker_delete_test.rs",
         "tests/speaker_reassignment_test.rs",
+        "tests/speaker_identity_eval.rs",
         "tests/timeline_live_meeting_index_test.rs",
         "tests/timeline_live_meeting_test.rs",
         "tests/untranscribed_chunks_test.rs"
