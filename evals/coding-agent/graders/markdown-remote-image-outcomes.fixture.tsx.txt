@@ -1,0 +1,144 @@
+// screenpipe — AI that knows everything you've seen, said, or heard
+// https://screenpipe.com
+
+import { act, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { MarkdownBlock } from "./markdown-block";
+import { MemoizedReactMarkdown } from "@/components/markdown";
+
+const GIF = "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
+
+const { readMediaMock, ownedBrowserNavigateMock, copyTextToClipboardMock, openViewerWindowMock, showWindowMock } =
+  vi.hoisted(() => ({
+    // Synthetic native media reader: the only way a local file reaches the page.
+    readMediaMock: vi.fn(async (_path: string) => ({
+      status: "ok" as const,
+      data: { data: "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7", mimeType: "image/gif" },
+    })),
+    ownedBrowserNavigateMock: vi.fn(async () => ({ status: "ok" as const, data: null })),
+    copyTextToClipboardMock: vi.fn(async () => ({ status: "ok" as const, data: null })),
+    openViewerWindowMock: vi.fn(async () => ({ status: "ok" as const })),
+    showWindowMock: vi.fn(async () => ({ status: "ok" as const })),
+  }));
+
+vi.mock("@/lib/utils/tauri", () => ({
+  commands: {
+    getMediaFile: readMediaMock,
+    ownedBrowserNavigate: ownedBrowserNavigateMock,
+    copyTextToClipboard: copyTextToClipboardMock,
+    openViewerWindow: openViewerWindowMock,
+    showWindow: showWindowMock,
+  },
+}));
+vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn(async () => undefined) }));
+vi.mock("@/components/ui/use-toast", () => ({ toast: vi.fn() }));
+vi.mock("@tauri-apps/api/event", () => ({ emit: vi.fn(async () => undefined) }));
+vi.mock("@/lib/hooks/use-timeline-store", () => ({
+  useTimelineStore: { getState: () => ({ setPendingNavigation: vi.fn() }) },
+}));
+vi.mock("@/lib/notifications/actions", () => ({ routeNotificationDeeplink: vi.fn(async () => undefined) }));
+
+vi.hoisted(() => { globalThis.fetch = (() => { throw new Error("Eval network denied"); }) as typeof fetch; });
+
+type Renderer = (text: string) => HTMLElement;
+const chatAssistant: Renderer = (text) => render(<MarkdownBlock text={text} isUser={false} />).container;
+const chatUser: Renderer = (text) => render(<MarkdownBlock text={text} isUser />).container;
+const shared: Renderer = (text) => render(<MemoizedReactMarkdown>{text}</MemoizedReactMarkdown>).container;
+const CHAT: [string, Renderer][] = [["chat assistant", chatAssistant], ["chat user", chatUser]];
+const RENDERERS: [string, Renderer][] = [...CHAT, ["shared markdown", shared]];
+
+// Elements that make the webview request something as soon as they render.
+// Local images arrive as blob: URLs after the native reader returns bytes.
+function fetchingElements(container: HTMLElement): string[] {
+  return [...container.querySelectorAll("img, picture, source, video, audio, [srcset]")]
+    .filter((element) => !(element.tagName === "IMG" && element.getAttribute("src")?.startsWith("blob:")))
+    .map((element) => element.outerHTML);
+}
+
+async function settle() {
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+}
+
+beforeEach(() => {
+  let next = 0;
+  URL.createObjectURL = vi.fn(() => `blob:eval-${++next}`);
+  URL.revokeObjectURL = vi.fn();
+});
+afterEach(() => { vi.clearAllMocks(); });
+
+const BLOCKED_MARKDOWN: [string, string, string][] = [
+  ["https image", "![remote chart](https://example.com/x.png?d=secret)", "remote chart"],
+  ["http image", "![remote chart](http://example.com/x.png)", "remote chart"],
+  ["protocol-relative image", "![remote chart](//example.com/x.png)", "remote chart"],
+  ["reference-style image", "![remote chart][r]\n\n[r]: https://example.com/x.png", "remote chart"],
+  ["relative image", "![remote chart](chart.png)", "remote chart"],
+  ["network-share image", "![share chart](/\\host\\share\\x.png)", "share chart"],
+  ["remote media image", "![clip](https://example.com/a.mp4)", "clip"],
+  ["remote media link", "[clip](https://example.com/a.mp4)", "clip"],
+  ["remote media code", "`https://example.com/a.mp4`", "https://example.com/a.mp4"],
+  ["network-share media image", "![clip](//host/share/a.mp4)", "clip"],
+  ["network-share media code", "`\\\\host\\share\\a.mp4`", "\\\\host\\share\\a.mp4"],
+];
+
+describe("remote markdown sources", () => {
+  describe.each(RENDERERS)("%s", (_renderer, renderMarkdown) => {
+    it.each(BLOCKED_MARKDOWN)("does not load a %s and keeps its text", async (_case, markdown, text) => {
+      const container = renderMarkdown(`before\n\n${markdown}\n\nafter`);
+      await settle();
+      expect(container).toHaveTextContent("before");
+      expect(container).toHaveTextContent(text);
+      expect(container).toHaveTextContent("after");
+      expect(fetchingElements(container)).toEqual([]);
+      expect(readMediaMock).not.toHaveBeenCalled();
+    });
+  });
+
+  describe.each(CHAT)("%s raw HTML", (renderer, renderChat) => {
+    it.each([
+      ["remote img", `<img src="https://example.com/x.png?d=secret" alt="remote chart">`],
+      ["protocol-relative img", `<img src="//example.com/x.png" alt="remote chart">`],
+    ])("does not load a %s and keeps its alt text", async (_case, html) => {
+      const container = renderChat(`before\n\n${html}\n\nafter`);
+      await settle();
+      expect(container).toHaveTextContent("before");
+      expect(container).toHaveTextContent("remote chart");
+      expect(container).toHaveTextContent("after");
+      expect(fetchingElements(container)).toEqual([]);
+      expect(readMediaMock).not.toHaveBeenCalled();
+    });
+
+    it("keeps a picture source from replacing the local image beside it", async () => {
+      const path = `/tmp/eval-picture-${renderer.replace(/\W/g, "-")}.gif`;
+      const container = renderChat(
+        `before\n\n<picture><source srcset="https://example.com/x.png?d=secret"><img src="${path}" alt="pic"></picture>\n\nafter`,
+      );
+      expect(await screen.findByAltText("pic")).toHaveAttribute("src", expect.stringMatching(/^blob:/));
+      expect(readMediaMock).toHaveBeenCalledWith(path);
+      expect(container).toHaveTextContent("before");
+      expect(container).toHaveTextContent("after");
+      expect(fetchingElements(container)).toEqual([]);
+    });
+  });
+});
+
+describe("local markdown files", () => {
+  it.each([
+    ["absolute image in chat", chatAssistant, "![local chart](/tmp/eval-absolute.gif)", "/tmp/eval-absolute.gif"],
+    ["file URL image in chat", chatAssistant, "![local chart](file:///tmp/eval-file-url.gif)", "/tmp/eval-file-url.gif"],
+    ["Windows image in chat", chatAssistant, "![local chart](C:\\Users\\me\\eval-windows.gif)", "C:\\Users\\me\\eval-windows.gif"],
+    ["absolute image in shared markdown", shared, "![local chart](/tmp/eval-shared.gif)", "/tmp/eval-shared.gif"],
+  ] as [string, Renderer, string, string][])("still shows an %s through the native reader", async (_case, renderMarkdown, markdown, path) => {
+    renderMarkdown(markdown);
+    expect(await screen.findByAltText("local chart")).toHaveAttribute("src", expect.stringMatching(/^blob:/));
+    expect(readMediaMock).toHaveBeenCalledWith(path);
+  });
+
+  it.each([
+    ["absolute media image in chat", chatAssistant, "![clip](/Users/me/eval-absolute.mp4)", "/Users/me/eval-absolute.mp4"],
+    ["home-relative media code in chat", chatAssistant, "`~/Downloads/eval-home.mp4`", "~/Downloads/eval-home.mp4"],
+    ["absolute media link in shared markdown", shared, "[clip](/Users/me/eval-shared.mp4)", "/Users/me/eval-shared.mp4"],
+  ] as [string, Renderer, string, string][])("still reads %s through the native reader", async (_case, renderMarkdown, markdown, path) => {
+    renderMarkdown(markdown);
+    await waitFor(() => expect(readMediaMock).toHaveBeenCalledWith(path));
+  });
+});

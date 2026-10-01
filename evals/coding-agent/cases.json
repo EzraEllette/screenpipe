@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "suite": "screenpipe-app-coding-agent-regressions",
-  "dataset_version": "2026-10-01-audio-off-permissions",
+  "dataset_version": "2026-10-01-markdown-remote-images",
   "suite_type": "regression",
   "owner": "screenpipe engineering",
   "policy": {
@@ -4071,6 +4071,61 @@
           }
         ],
         "command": "cd apps/screenpipe-app-tauri && node node_modules/vitest/vitest.mjs run --config eval-html.config.mjs components/chat/eval-html-outcome.test.tsx"
+      }
+    },
+    {
+      "id": "app-markdown-remote-images",
+      "name": "Render only local images and media from untrusted Markdown",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "7ee2e6ef078200f9781a98c39347d7c8f48c7663"
+      },
+      "base_ref": "7274f29b6b1bb940332b4e912b9cfcb20d591d3d",
+      "oracle_ref": "7ee2e6ef078200f9781a98c39347d7c8f48c7663",
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/components/markdown.tsx",
+        "apps/screenpipe-app-tauri/components/chat/markdown-block.tsx",
+        "apps/screenpipe-app-tauri/app/notification-panel/page.tsx",
+        "apps/screenpipe-app-tauri/components/notification-bell.tsx"
+      ],
+      "trigger_paths": [
+        "apps/screenpipe-app-tauri/components/markdown.tsx",
+        "apps/screenpipe-app-tauri/components/chat/markdown-block.tsx"
+      ],
+      "gate": "advisory",
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "chat",
+        "markdown",
+        "privacy",
+        "preserved-behavior"
+      ],
+      "prompt": "Rendered Markdown makes the application load remote resources the moment a message renders. Chat replies and summaries are built from captured outside content, so a steered reply can put private data in an image URL that leaks without any click. Repair the chat MarkdownBlock for both user and assistant messages and the shared MemoizedReactMarkdown renderer. Only local files may display as images or media: absolute paths, file URLs and Windows drive paths for images, plus home-relative paths for media, must still be read through the supplied native media port and displayed. No other image source (http, https, protocol-relative, relative, reference-style, raw HTML img, or picture/source srcset) may produce an element that loads it; keep its alt text visible instead. Media images, links and inline code that name a remote URL or a network-share path must never reach the native media reader; keep their alt text, link or code visible. Keep the surrounding message text. Keep the public component and native port contracts compatible. No particular sanitizer, helper or internal implementation is required. This task checks actual React/Markdown rendering with synthetic native ports; it does not establish webview CSP, mermaid or rich-text editor behavior, native file access policy or network isolation.",
+      "agent_timeout_seconds": 900,
+      "grader_dependency_links": [
+        {
+          "source_path": "apps/screenpipe-app-tauri/node_modules",
+          "destination_path": "apps/screenpipe-app-tauri/node_modules"
+        },
+        {
+          "source_path": "apps/screenpipe-app-tauri/node_modules",
+          "destination_path": "packages/workflows-ui/node_modules"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 90,
+        "fixtures": [
+          {
+            "local_path": "graders/markdown-remote-image-outcomes.fixture.tsx.txt",
+            "destination_path": "apps/screenpipe-app-tauri/components/chat/eval-remote-image-outcome.test.tsx"
+          },
+          {
+            "local_path": "graders/markdown-remote-image-outcomes.config.mjs",
+            "destination_path": "apps/screenpipe-app-tauri/eval-remote-images.config.mjs"
+          }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && node node_modules/vitest/vitest.mjs run --config eval-remote-images.config.mjs components/chat/eval-remote-image-outcome.test.tsx"
       }
     },
     {

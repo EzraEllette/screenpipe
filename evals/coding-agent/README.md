@@ -1274,6 +1274,24 @@ output, one-role-only repair, dropped safe HTML, styles, broken fragments and
 missing-source setup failure. These are corpus/grader checks, not agent trials,
 a full browser exploit defense or proof of execution isolation.
 
+### Remote Markdown images
+
+`app-markdown-remote-images` renders the actual chat MarkdownBlock (both roles)
+and the shared MemoizedReactMarkdown with a synthetic native media port. Forty-six
+outcomes check that remote, protocol-relative, relative, reference-style, raw
+`<img>` and `<picture><source srcset>` images, and remote or network-share media,
+create no element that loads them and never reach the media reader, while their
+alt text, link or code stays visible. Local absolute, file-URL, Windows and
+home-relative files still render through the native reader. The parent fails
+thirty-nine outcomes and preserves seven; the fix and current source pass all.
+
+Run `bun test evals/coding-agent/calibrate-markdown-remote-images.test.js`.
+Controls include parent/reference/current, an equivalent alt-text element, a
+restored remote `<img>` fallback, re-allowed picture/source, an extension-only
+media check, network shares treated as local, blanket image removal, unused
+correct source and missing-source setup failure. Webview CSP, mermaid, the note
+editor, native file policy and execution isolation are outside this evidence.
+
 `ai-gateway-trusted-runner-admission` runs the actual HTTP entrypoint, authentication,
 Free-plan gates, chat handler and provider adapter with synthetic external ports.
 Fourteen outcomes cover successful machine and paid-human replies, forged or
