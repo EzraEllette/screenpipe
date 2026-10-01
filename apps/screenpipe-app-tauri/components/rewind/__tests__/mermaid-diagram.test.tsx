@@ -27,11 +27,12 @@ describe("MermaidDiagram", () => {
   });
 
   it("shows the diagram as an image, never as live markup in the app", async () => {
-    renderMermaidSvgMock.mockResolvedValue(SVG_WITH_REMOTE_IMAGE);
+    renderMermaidSvgMock.mockResolvedValue({ svg: SVG_WITH_REMOTE_IMAGE, text: "Capture" });
 
     const { container } = render(<MermaidDiagram chart={"  flowchart LR\n  A --> B  "} />);
 
-    const image = await screen.findByRole("img", { name: "Diagram" });
+    // The diagram's own text stays available to screen readers.
+    const image = await screen.findByRole("img", { name: "Diagram: Capture" });
     expect(image.getAttribute("src")).toMatch(/^data:image\/svg\+xml;charset=utf-8,%3Csvg/);
     expect(decodeURIComponent(image.getAttribute("src")!)).toContain("Capture");
     expect(renderMermaidSvgMock).toHaveBeenCalledWith(

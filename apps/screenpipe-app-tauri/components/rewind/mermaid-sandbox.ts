@@ -27,17 +27,27 @@ import { SANDBOX_CSP } from "@/lib/utils/html-sandbox";
  * diagrams rendered then came out empty.
  */
 
-let frameMermaid: Promise<Mermaid> | null = null;
+let mermaidSource: Promise<string> | null = null;
+let frameMermaid: Promise<{ frame: HTMLIFrameElement; mermaid: Mermaid }> | null = null;
 let renderQueue: Promise<unknown> = Promise.resolve();
 let nextDiagramId = 0;
 
-function loadFrameMermaid(): Promise<Mermaid> {
-  frameMermaid ??= (async () => {
+function loadMermaidSource(): Promise<string> {
+  mermaidSource ??= (async () => {
     // One of the app's own static files.
     const response = await fetch(new URL("mermaid/dist/mermaid.min.js", import.meta.url));
     if (!response.ok) throw new Error(`Failed to load Mermaid (${response.status})`);
-    const source = await response.text();
+    return response.text();
+  })();
+  mermaidSource.catch(() => {
+    mermaidSource = null;
+  });
+  return mermaidSource;
+}
 
+function loadFrameMermaid(): Promise<{ frame: HTMLIFrameElement; mermaid: Mermaid }> {
+  frameMermaid ??= (async () => {
+    const source = await loadMermaidSource();
     const frame = document.createElement("iframe");
     frame.setAttribute("sandbox", "allow-scripts allow-same-origin");
     frame.setAttribute("aria-hidden", "true");
@@ -60,7 +70,7 @@ function loadFrameMermaid(): Promise<Mermaid> {
       frame.remove();
       throw new Error("Failed to load Mermaid");
     }
-    return mermaid;
+    return { frame, mermaid };
   })();
   frameMermaid.catch(() => {
     frameMermaid = null;
@@ -68,9 +78,16 @@ function loadFrameMermaid(): Promise<Mermaid> {
   return frameMermaid;
 }
 
+export interface MermaidImage {
+  /** The diagram as XML for an `<img>`. */
+  svg: string;
+  /** The diagram's own text, for screen readers: an image hides it. */
+  text: string;
+}
+
 // An <img> parses SVG as XML and needs a size of its own: give it Mermaid's
 // natural size so it scales down like the inline SVG did.
-function svgForImage(svg: string): string {
+function svgForImage(svg: string): MermaidImage {
   // DOMParser documents are inert, so nothing in the SVG loads here.
   const root = new DOMParser().parseFromString(svg, "text/html").querySelector("svg");
   if (!root) throw new Error("Mermaid returned no diagram");
@@ -80,24 +97,46 @@ function svgForImage(svg: string): string {
     root.setAttribute("height", String(height));
     root.style.removeProperty("max-width");
   }
-  return new XMLSerializer().serializeToString(root);
+  // Label by label: textContent would run "Alice" and "Bob" together.
+  const words: string[] = [];
+  const walker = root.ownerDocument.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    const word = node.nodeValue?.trim();
+    if (word && node.parentElement?.localName !== "style") words.push(word);
+  }
+  return {
+    svg: new XMLSerializer().serializeToString(root),
+    text: words.join(" ").replace(/\s+/g, " "),
+  };
 }
 
 /**
- * Renders `chart` with `config` and returns the SVG as XML for an `<img>`.
- * Renders run one at a time because each one sets Mermaid's global config.
+ * Renders `chart` with `config` for display through an `<img>`. Renders run
+ * one at a time because each one sets Mermaid's global config.
  */
-export function renderMermaidSvg(chart: string, config: Record<string, unknown>): Promise<string> {
+export function renderMermaidSvg(
+  chart: string,
+  config: Record<string, unknown>,
+): Promise<MermaidImage> {
   const render = renderQueue.then(async () => {
-    const mermaid = await loadFrameMermaid();
-    mermaid.initialize({
-      ...config,
-      startOnLoad: false,
-      securityLevel: "strict",
-      suppressErrorRendering: true,
-    });
-    const { svg } = await mermaid.render(`mermaid-${nextDiagramId++}`, chart);
-    return svgForImage(svg);
+    const { frame, mermaid } = await loadFrameMermaid();
+    try {
+      mermaid.initialize({
+        ...config,
+        startOnLoad: false,
+        securityLevel: "strict",
+        suppressErrorRendering: true,
+      });
+      const { svg } = await mermaid.render(`mermaid-${nextDiagramId++}`, chart);
+      return svgForImage(svg);
+    } catch (error) {
+      // A failed render can leave Mermaid's global state broken (one bad
+      // theme colour failed every later diagram), so the next render starts
+      // from a fresh frame.
+      frame.remove();
+      frameMermaid = null;
+      throw error;
+    }
   });
   renderQueue = render.catch(() => undefined);
   return render;

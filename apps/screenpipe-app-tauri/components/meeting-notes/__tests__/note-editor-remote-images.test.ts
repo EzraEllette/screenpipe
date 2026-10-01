@@ -17,7 +17,11 @@ vi.mock("../image-utils", async (importOriginal) => ({
   resizeImageDataUrl: async (dataUrl: string) => dataUrl,
 }));
 
-import { createMeetingNoteEditorExtensions, embedPastedImageSources } from "../note-editor";
+import {
+  createMeetingNoteEditorExtensions,
+  droppedWebImageSources,
+  embedPastedImageSources,
+} from "../note-editor";
 
 const EMBEDDED = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
 
@@ -63,7 +67,8 @@ describe("meeting note remote images", () => {
 
     const blocked = [...mounted.element.querySelectorAll(".meeting-note-image-blocked")];
     expect(blocked.map((node) => node.textContent)).toEqual(["sales chart", "raw chart"]);
-    expect(blocked.map((node) => node.getAttribute("title"))).toEqual([
+    // Hovering shows where the image would have come from.
+    expect(blocked.map((node) => node.querySelector("[title]")?.getAttribute("title"))).toEqual([
       "https://example.com/chart.png?d=secret",
       "https://example.com/raw.png?d=secret",
     ]);
@@ -94,6 +99,49 @@ describe("meeting note remote images", () => {
       "https://example.com/no-alt.png",
     );
     expect(mounted.element.querySelector("img")).toBeNull();
+  });
+
+  it("keeps a blocked image when it is cut and pasted back", () => {
+    const mounted = mountEditor(
+      [
+        "Summary",
+        "",
+        '<img src="https://example.com/chart.png?d=secret" alt="sales chart" title="Q3" width="40" height="30" />',
+        "",
+        "Next steps",
+      ].join("\n"),
+    );
+    editor = mounted.editor;
+    const original = getMarkdown(editor);
+    const view = editor.view;
+    let imagePos = -1;
+    view.state.doc.descendants((node, pos) => {
+      if (node.type.name === "image") imagePos = pos;
+    });
+
+    // What ProseMirror puts on the clipboard for the chip, then a cut.
+    const { dom } = view.serializeForClipboard(view.state.doc.slice(imagePos, imagePos + 1));
+    editor.commands.deleteRange({ from: imagePos, to: imagePos + 1 });
+    expect(getMarkdown(editor)).not.toContain("chart.png");
+
+    editor.commands.setTextSelection(imagePos);
+    view.pasteHTML(dom.innerHTML, new Event("paste") as ClipboardEvent);
+
+    expect(getMarkdown(editor)).toBe(original);
+    expect(mounted.element.querySelector(".meeting-note-image-blocked")).toHaveTextContent("sales chart");
+    expect(mounted.element.querySelector("img")).toBeNull();
+  });
+
+  it("does not turn pasted web markup into an image just because it has a similar attribute", () => {
+    const mounted = mountEditor("");
+    editor = mounted.editor;
+
+    editor.view.pasteHTML(
+      '<div data-image-src="https://example.com/lazy.png">a caption</div>',
+      new Event("paste") as ClipboardEvent,
+    );
+
+    expect(getMarkdown(editor)).toBe("a caption");
   });
 
   it("does not put a remote image in serialized HTML either", () => {
@@ -138,16 +186,66 @@ describe("embedPastedImageSources", () => {
   it.each([
     ["is not an image", () => imageResponse("text/html")],
     ["fails", () => new Response("nope", { status: 404, headers: { "content-type": "image/png" } })],
-    ["is too large", () => imageResponse("image/png", { "content-length": String(50 * 1024 * 1024) })],
   ])("drops a pasted image whose download %s", async (_name, response) => {
     tauriFetchMock.mockResolvedValue(response());
 
     expect(await embedPastedImageSources(["https://example.com/x.png", EMBEDDED])).toEqual([EMBEDDED]);
   });
 
+  it("stops reading a download that grows past the size limit", async () => {
+    // No content-length, and it never ends.
+    let cancelled = false;
+    let chunksServed = 0;
+    const chunk = new Uint8Array(8 * 1024 * 1024);
+    const endless = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        chunksServed += 1;
+        controller.enqueue(chunk);
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    tauriFetchMock.mockResolvedValue(
+      new Response(endless, { status: 200, headers: { "content-type": "image/png" } }),
+    );
+
+    expect(await embedPastedImageSources(["https://example.com/endless.png"])).toEqual([]);
+    expect(cancelled).toBe(true);
+    expect(chunksServed).toBeLessThanOrEqual(5);
+  });
+
   it("drops a pasted image that cannot be downloaded", async () => {
     tauriFetchMock.mockRejectedValue(new Error("offline"));
 
     expect(await embedPastedImageSources(["https://example.com/x.png"])).toEqual([]);
+  });
+});
+
+describe("droppedWebImageSources", () => {
+  function transfer(html: string, text = "", files: File[] = []) {
+    return {
+      files,
+      getData: (format: string) => (format === "text/html" ? html : format === "text/plain" ? text : ""),
+    };
+  }
+
+  it.each([
+    ["an image", '<img src="https://example.com/a.png">', "https://example.com/a.png"],
+    ["a linked image", '<a href="https://example.com/page"><img src="https://example.com/a.png"></a>', "https://example.com/page"],
+  ])("embeds %s dragged from a web page", (_name, html, text) => {
+    expect(droppedWebImageSources(transfer(html, text))).toEqual(["https://example.com/a.png"]);
+  });
+
+  it("leaves a dragged selection with text to the editor", () => {
+    expect(
+      droppedWebImageSources(transfer('<p>quarterly numbers</p><img src="https://example.com/a.png">')),
+    ).toEqual([]);
+  });
+
+  it("leaves dropped files and plain text to their own handling", () => {
+    const file = new File([new Uint8Array([1])], "shot.png", { type: "image/png" });
+    expect(droppedWebImageSources(transfer('<img src="https://example.com/a.png">', "", [file]))).toEqual([]);
+    expect(droppedWebImageSources(transfer("", "just text"))).toEqual([]);
   });
 });

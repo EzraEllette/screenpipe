@@ -38,17 +38,27 @@ function isEmbeddedImageSource(src: unknown): src is string {
   return typeof src === "string" && src.startsWith("data:image/");
 }
 
+// The chip carries the image's attributes so that copying it (to move it, or
+// into another note) pastes back as the same image, not as its alt text.
+const BLOCKED_IMAGE_ATTRS = ["src", "alt", "title", "width", "height"] as const;
+
 function blockedImageSpec(attrs: Record<string, unknown>): DOMOutputSpec {
   const src = String(attrs.src ?? "");
-  const alt = typeof attrs.alt === "string" && attrs.alt ? attrs.alt : src;
+  const label = typeof attrs.alt === "string" && attrs.alt ? attrs.alt : src;
+  const carried: Record<string, string> = {};
+  for (const name of BLOCKED_IMAGE_ATTRS) {
+    const value = attrs[name];
+    if (value != null && value !== "") carried[`data-blocked-image-${name}`] = String(value);
+  }
   return [
     "div",
     {
       class:
         "meeting-note-image-blocked my-2 truncate rounded border border-dashed border-border px-2 py-1 text-xs text-muted-foreground",
-      title: src,
+      ...carried,
     },
-    alt,
+    // On the span: a title on the div would be read back as the image's title.
+    ["span", { title: src }, label],
   ];
 }
 
@@ -87,6 +97,22 @@ const ResizableImage = Image.extend({
         },
       },
     };
+  },
+
+  parseHTML() {
+    return [
+      ...(this.parent?.() ?? []),
+      {
+        tag: "div[data-blocked-image-src]",
+        getAttrs: (element) =>
+          Object.fromEntries(
+            BLOCKED_IMAGE_ATTRS.map((name) => [
+              name,
+              element.getAttribute(`data-blocked-image-${name}`),
+            ]),
+          ),
+      },
+    ];
   },
 
   renderHTML(props) {
@@ -429,11 +455,21 @@ function NoteEditor(
         void insertClipboardPaste(payload);
         return true;
       },
-      handleDrop(_view, event) {
+      handleDrop(view, event) {
         const files = imageFilesFromTransfer(event.dataTransfer);
-        if (files.length === 0) return false;
+        if (files.length > 0) {
+          event.preventDefault();
+          void insertImageFiles(files);
+          return true;
+        }
+        // An image dragged in from a web page names its remote address; embed
+        // it the way a paste does. Drags within the note (view.dragging) move
+        // their nodes as usual.
+        const webImages = view.dragging ? [] : droppedWebImageSources(event.dataTransfer);
+        if (webImages.length === 0) return false;
         event.preventDefault();
-        void insertImageFiles(files);
+        const at = { clientX: event.clientX, clientY: event.clientY };
+        void embedPastedImageSources(webImages).then((images) => insertImages(images, at));
         return true;
       },
     },
@@ -633,10 +669,10 @@ const PASTED_IMAGE_TIMEOUT_MS = 15_000;
 const MAX_PASTED_IMAGE_BYTES = 20 * 1024 * 1024;
 
 /**
- * Copies images pasted from a web page into the note. Notes show only images
- * they carry themselves, so a pasted web image is downloaded once, at paste
- * time, by the user's own action. A source that does not come back as an
- * image is dropped.
+ * Copies images pasted or dropped from a web page into the note. Notes show
+ * only images they carry themselves, so a web image is downloaded once, by
+ * the user's own action. A source that does not come back as an image is
+ * dropped.
  */
 export async function embedPastedImageSources(sources: string[]): Promise<string[]> {
   const embedded = await Promise.all(
@@ -648,23 +684,50 @@ export async function embedPastedImageSources(sources: string[]): Promise<string
           { method: "GET" },
           { timeoutMs: PASTED_IMAGE_TIMEOUT_MS },
         );
-        if (
-          !response.ok ||
-          Number(response.headers.get("content-length")) > MAX_PASTED_IMAGE_BYTES
-        ) {
+        const type = response.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase() ?? "";
+        const bytes =
+          response.ok && type.startsWith("image/")
+            ? await readAtMost(response, MAX_PASTED_IMAGE_BYTES)
+            : null;
+        if (!bytes) {
+          await response.body?.cancel().catch(() => undefined);
           return null;
         }
-        const image = await response.blob();
-        if (!image.type.startsWith("image/") || image.size > MAX_PASTED_IMAGE_BYTES) {
-          return null;
-        }
-        return await resizeImageDataUrl(await readBlobAsDataUrl(image));
+        return await resizeImageDataUrl(await readBlobAsDataUrl(new Blob(bytes, { type })));
       } catch {
         return null;
       }
     }),
   );
   return embedded.filter((src): src is string => src !== null);
+}
+
+// Reads the body, giving up past `limit` bytes so a huge or endless response
+// cannot fill memory before the timeout.
+async function readAtMost(response: Response, limit: number): Promise<BlobPart[] | null> {
+  const reader = response.body?.getReader();
+  if (!reader) return null;
+  const chunks: BlobPart[] = [];
+  let size = 0;
+  for (let read = await reader.read(); !read.done; read = await reader.read()) {
+    size += read.value.byteLength;
+    if (size > limit) {
+      await reader.cancel();
+      return null;
+    }
+    chunks.push(read.value);
+  }
+  return chunks;
+}
+
+/**
+ * The remote images to embed for a drop from another app: a dragged image,
+ * alone or inside a link. A dragged selection with text drops as usual.
+ */
+export function droppedWebImageSources(transfer: ImageTransferLike | null): string[] {
+  const payload = meetingNotePastePayloadFromTransfer(transfer);
+  if (!payload || payload.files.length > 0) return [];
+  return htmlHasReadableText(htmlWithoutImages(payload.html)) ? [] : payload.htmlImageSources;
 }
 
 export function imageSourcesFromHtml(html: string): string[] {

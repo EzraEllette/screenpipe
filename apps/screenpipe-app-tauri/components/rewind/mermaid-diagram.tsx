@@ -130,7 +130,7 @@ interface MermaidDiagramProps {
 export function MermaidDiagram({ chart, className }: MermaidDiagramProps) {
 
   const ui = useGT();
-  const [svgSrc, setSvgSrc] = useState<string>("");
+  const [image, setImage] = useState<{ src: string; text: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isDark, setIsDark] = useState<boolean>(() =>
     typeof document !== "undefined" &&
@@ -157,13 +157,16 @@ export function MermaidDiagram({ chart, className }: MermaidDiagramProps) {
       try {
         const theme = isDark ? SCREENPIPE_THEME_DARK : SCREENPIPE_THEME;
         // Rendered in a no-network sandbox; see mermaid-sandbox.ts.
-        const renderedSvg = await renderMermaidSvg(chart.trim(), theme);
-        const styled = renderedSvg.replace(
+        const rendered = await renderMermaidSvg(chart.trim(), theme);
+        const styled = rendered.svg.replace(
           /<svg([^>]*)>/,
           `<svg$1><style>${themeStyle(isDark)}</style>`,
         );
         if (cancelled) return;
-        setSvgSrc(`data:image/svg+xml;charset=utf-8,${encodeURIComponent(styled)}`);
+        setImage({
+          src: `data:image/svg+xml;charset=utf-8,${encodeURIComponent(styled)}`,
+          text: rendered.text,
+        });
         setError(null);
       } catch (err) {
         if (cancelled) return;
@@ -191,9 +194,13 @@ export function MermaidDiagram({ chart, className }: MermaidDiagramProps) {
   // diagram stays inert outside the sandbox too.
   return (
     <div className={`not-prose my-4 overflow-x-auto ${className || ""}`}>
-      {svgSrc && (
+      {image && (
         // eslint-disable-next-line @next/next/no-img-element
-        <img src={svgSrc} alt={ui("Diagram")} className="h-auto max-w-full" />
+        <img
+          src={image.src}
+          alt={image.text ? ui("Diagram: {value1}", { value1: image.text }) : ui("Diagram")}
+          className="h-auto max-w-full"
+        />
       )}
     </div>
   );

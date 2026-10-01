@@ -15,9 +15,11 @@ window.mermaid = {
   },
   render: function (id, chart) {
     window.mermaidCalls.documents.push(document);
+    if (chart === "bad") return Promise.reject(new Error("Unsupported color format"));
     return Promise.resolve({
       svg: '<svg id="' + id + '" width="100%" style="max-width: 200px;" viewBox="0 0 200 100">' +
-        '<foreignObject><div>' + chart + '<br></div></foreignObject></svg>'
+        '<style>.node { fill: red; }</style>' +
+        '<foreignObject><div>' + chart + '<br></div></foreignObject><text>end</text></svg>'
     });
   }
 };`;
@@ -43,7 +45,7 @@ describe("renderMermaidSvg", () => {
   it("runs Mermaid inside a frame that carries the no-network CSP", async () => {
     const { renderMermaidSvg } = await import("../mermaid-sandbox");
 
-    const svg = await renderMermaidSvg("hello", { theme: "dark", securityLevel: "loose" });
+    const { svg, text } = await renderMermaidSvg("hello", { theme: "dark", securityLevel: "loose" });
 
     expect(String(fetchMock.mock.calls[0]?.[0])).toMatch(/mermaid\/dist\/mermaid\.min\.js$/);
     const frame = document.querySelector("iframe")!;
@@ -71,6 +73,8 @@ describe("renderMermaidSvg", () => {
     expect(parsed.documentElement.getAttribute("height")).toBe("100");
     expect(parsed.documentElement.getAttribute("style") ?? "").not.toContain("max-width");
     expect(parsed.documentElement.textContent).toContain("hello");
+    // The label text, without the stylesheet, for screen readers.
+    expect(text).toBe("hello end");
   });
 
   it("loads Mermaid once and applies each render's own config", async () => {
@@ -88,11 +92,27 @@ describe("renderMermaidSvg", () => {
     expect(calls.configs.map((config) => config.theme)).toEqual(["default", "dark"]);
   });
 
+  it("starts the next render from a fresh frame after a render fails", async () => {
+    const { renderMermaidSvg } = await import("../mermaid-sandbox");
+
+    await expect(renderMermaidSvg("bad", {})).rejects.toThrow("Unsupported color format");
+    const failedFrame = document.querySelector("iframe");
+    expect(failedFrame).toBeNull();
+    await expect(renderMermaidSvg("good", {})).resolves.toMatchObject({ text: "good end" });
+
+    const frames = document.querySelectorAll("iframe");
+    expect(frames).toHaveLength(1);
+    const calls = (frames[0]!.contentWindow as FrameWindow).mermaidCalls;
+    expect(calls.documents).toEqual([frames[0]!.contentDocument]);
+    // The bundle itself is fetched once.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("reports a bundle that fails to load and tries again next time", async () => {
     const { renderMermaidSvg } = await import("../mermaid-sandbox");
     fetchMock.mockResolvedValueOnce(new Response("missing", { status: 404 }));
 
     await expect(renderMermaidSvg("a", {})).rejects.toThrow("Failed to load Mermaid (404)");
-    await expect(renderMermaidSvg("b", {})).resolves.toContain("b");
+    await expect(renderMermaidSvg("b", {})).resolves.toMatchObject({ text: "b end" });
   });
 });
