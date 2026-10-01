@@ -902,6 +902,8 @@ async fn main() {
         last_spawn_epoch: Arc::new(AtomicU64::new(0)),
         wants_recording: Arc::new(AtomicBool::new(false)),
         deferred_account_start: Default::default(),
+        #[cfg(feature = "enterprise-build")]
+        authorization_recovery: Default::default(),
         interrupted_meeting: Arc::new(tokio::sync::Mutex::new(None)),
         cloud_token: Arc::new(arc_swap::ArcSwap::new(Arc::new(initial_cloud_token))),
         history_access: screenpipe_engine::history_access::HistoryAccessPolicy::unrestricted(),
