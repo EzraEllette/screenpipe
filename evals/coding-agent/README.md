@@ -1276,21 +1276,32 @@ a full browser exploit defense or proof of execution isolation.
 
 ### Remote Markdown images
 
-`app-markdown-remote-images` renders the actual chat MarkdownBlock (both roles)
-and the shared MemoizedReactMarkdown with a synthetic native media port. Forty-six
+`app-markdown-remote-images` renders the actual chat MarkdownBlock (both roles),
+the shared MemoizedReactMarkdown and the meeting note editor built from
+`createMeetingNoteEditorExtensions`, with a synthetic native media port. Sixty-three
 outcomes check that remote, protocol-relative, relative, reference-style, raw
 `<img>` and `<picture><source srcset>` images, and remote or network-share media,
 create no element that loads them and never reach the media reader, while their
-alt text, link or code stays visible. Local absolute, file-URL, Windows and
+alt text, link or code stays visible. Network-share media includes a home-relative
+path that resolves to a share and local-looking strings from which the reader
+would take a share path; images whose source is removed for safety keep their alt
+text. In a meeting note, remote images an AI summary wrote or a later update
+brings do not load, keep their alt text and stay in the note's Markdown, while
+embedded data: images still show. Local absolute, file-URL, Windows and
 home-relative files still render through the native reader. The parent fails
-thirty-nine outcomes and preserves seven; the fix and current source pass all.
+fifty-six outcomes and preserves seven; the first, markdown-only fix fails
+fifteen; the fix and current source pass all.
 
 Run `bun test evals/coding-agent/calibrate-markdown-remote-images.test.js`.
-Controls include parent/reference/current, an equivalent alt-text element, a
-restored remote `<img>` fallback, re-allowed picture/source, an extension-only
-media check, network shares treated as local, blanket image removal, unused
-correct source and missing-source setup failure. Webview CSP, mermaid, the note
-editor, native file policy and execution isolation are outside this evidence.
+Controls include parent/reference/current, the first fix, an equivalent alt-text
+element, a restored remote `<img>` fallback, re-allowed picture/source, an
+extension-only media check, a media check that allows a second leading
+separator, network shares treated as local, blanket image removal, a note editor
+that renders any source or deletes remote images from the note, unused correct
+source and missing-source setup failure. Webview CSP, Mermaid diagrams (jsdom
+cannot lay them out; unit tests and browser checks cover the no-network frame),
+pasting into notes, native file policy and execution isolation are outside this
+evidence.
 
 `ai-gateway-trusted-runner-admission` runs the actual HTTP entrypoint, authentication,
 Free-plan gates, chat handler and provider adapter with synthetic external ports.

@@ -8,6 +8,9 @@ import { tmpdir } from 'node:os';
 const repo = resolve(import.meta.dir, '../..'), app = 'apps/screenpipe-app-tauri';
 const item = JSON.parse(readFileSync(join(import.meta.dir, 'cases.json'), 'utf8')).cases.find(c => c.id === 'app-markdown-remote-images');
 const markdown = `${app}/components/markdown.tsx`, block = `${app}/components/chat/markdown-block.tsx`;
+const notes = `${app}/components/meeting-notes/note-editor.tsx`;
+// The first fix: markdown images only, with a raw-string media gate.
+const PREVIOUS_FIX = '7ee2e6ef078200f9781a98c39347d7c8f48c7663';
 const root = mkdtempSync(join(tmpdir(), 'markdown-remote-images-calibration-')), archives = new Map();
 const receipts = process.env.SCREENPIPE_EVAL_CALIBRATION_RECEIPTS;
 afterAll(() => rmSync(root, {recursive: true, force: true}));
@@ -36,17 +39,22 @@ function grade(name, ref = item.oracle_ref, mutate = () => {}) {
 }
 // Behavior failures surface as chai AssertionErrors or jest-dom matcher errors.
 const BEHAVIOR_FAILURE = /AssertionError|Error: expect\(/;
-function passes(r) { expect(r.status).toBe(0); expect(r.stdout).toContain('46 passed'); expect(r.stdout+r.stderr).not.toMatch(/Unhandled|Uncaught/); }
+function passes(r) { expect(r.status).toBe(0); expect(r.stdout).toContain('63 passed'); expect(r.stdout+r.stderr).not.toMatch(/Unhandled|Uncaught/); }
 function fails(r) { expect(r.status).toBe(1); expect(r.stderr).toMatch(BEHAVIOR_FAILURE); expect(r.stdout+r.stderr).not.toMatch(/Unhandled|Uncaught|Failed to resolve import|Failed to load url|Cannot find module/); }
-test('parent fails thirty-nine remote outcomes and preserves seven local files', () => { const r = grade('parent', item.base_ref); fails(r); expect(r.stdout).toContain('39 failed | 7 passed'); }, 120000);
+test('parent fails fifty-six remote outcomes and preserves seven local files', () => { const r = grade('parent', item.base_ref); fails(r); expect(r.stdout).toContain('56 failed | 7 passed'); }, 120000);
+test('previous markdown-only fix fails media-path, alt-text and note outcomes', () => { const r = grade('previous-fix', PREVIOUS_FIX); fails(r); expect(r.stdout).toContain('15 failed | 48 passed'); }, 120000);
 test('historical reference passes every outcome', () => passes(grade('reference')), 120000);
 test('current caller passes every outcome', () => passes(grade('current', 'HEAD')), 120000);
-test('equivalent alt-text element passes', () => passes(grade('equivalent', item.oracle_ref, cwd => replace(cwd, markdown, 'return alt ? <span>{alt}</span> : null;', 'return alt ? <em>{alt}</em> : null;'))), 120000);
-test('plain remote img fallback fails', () => fails(grade('img-fallback', item.oracle_ref, cwd => replace(cwd, markdown, 'return alt ? <span>{alt}</span> : null;', 'return <img src={src} alt={alt || ""} />;'))), 120000);
+test('equivalent alt-text element passes', () => passes(grade('equivalent', item.oracle_ref, cwd => replace(cwd, markdown, 'return <ImageAltText alt={alt} />;', 'return alt ? <em>{alt}</em> : null;'))), 120000);
+test('plain remote img fallback fails', () => fails(grade('img-fallback', item.oracle_ref, cwd => replace(cwd, markdown, 'return <ImageAltText alt={alt} />;', 'return <img src={src} alt={alt || ""} />;'))), 120000);
 test('re-allowed picture and source fail', () => fails(grade('picture', item.oracle_ref, cwd => replace(cwd, block, '...(defaultSchema.tagNames ?? []).filter((tag) => tag !== "picture" && tag !== "source"),', '...(defaultSchema.tagNames ?? []),'))), 120000);
-test('extension-only media gate fails', () => fails(grade('media-gate', item.oracle_ref, cwd => replace(cwd, markdown, 'return /^~[\\\\/]/.test(unwrapMarkdownUrl(url)) || resolveLocalPathFromMarkdownUrl(url) !== null;', 'return true;'))), 120000);
+const MEDIA_GATE = 'return isMediaFilePath(path) && /^(?:\\/|~[\\\\/]|[A-Za-z]:[\\\\/])(?![\\\\/])/.test(path);';
+test('extension-only media gate fails', () => fails(grade('media-gate', item.oracle_ref, cwd => replace(cwd, markdown, MEDIA_GATE, 'return isMediaFilePath(path);'))), 120000);
+test('media gate that allows a second leading separator fails', () => fails(grade('share-prefix', item.oracle_ref, cwd => replace(cwd, markdown, MEDIA_GATE, MEDIA_GATE.replace('(?![\\\\/])', '')))), 120000);
 test('network-share paths treated as local fail', () => fails(grade('network-share', item.oracle_ref, cwd => replace(cwd, markdown, 'if (/^\\/(?![\\\\/])/.test(candidate)) {', 'if (candidate.startsWith("/")) {'))), 120000);
-test('blanket image removal fails preserved local files', () => fails(grade('no-images', item.oracle_ref, cwd => replace(cwd, markdown, '    img({ src, alt }) {\n      if (!src) return null;', '    img({ src, alt }) {\n      if (src || !src) return null;'))), 120000);
+test('blanket image removal fails preserved local files', () => fails(grade('no-images', item.oracle_ref, cwd => replace(cwd, markdown, '    img({ src, alt }) {\n      if (src && isLocalMediaPath(src)) {', '    img({ src, alt }) {\n      if (src || !src) return null;\n      if (src && isLocalMediaPath(src)) {'))), 120000);
+test('note editor that renders any image source fails', () => fails(grade('note-any-image', item.oracle_ref, cwd => replace(cwd, notes, 'return typeof src === "string" && src.startsWith("data:image/");', 'return typeof src === "string";'))), 120000);
+test('note editor that deletes remote images from the note fails', () => fails(grade('note-drops-images', item.oracle_ref, cwd => replace(cwd, notes, '  renderHTML(props) {', '  parseHTML() {\n    return [{ tag: \'img[src^="data:"]\' }];\n  },\n\n  renderHTML(props) {'))), 120000);
 test('unused correct renderer cannot hide broken active caller', () => fails(grade('unused', item.oracle_ref, cwd => {
   writeFileSync(join(cwd, `${app}/unused-correct-markdown.tsx`), readFileSync(join(cwd, markdown)));
   writeFileSync(join(cwd, markdown), execFileSync('git', ['show', `${item.base_ref}:${markdown}`], {cwd: repo}));

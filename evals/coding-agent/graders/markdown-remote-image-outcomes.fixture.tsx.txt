@@ -3,8 +3,10 @@
 
 import { act, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { Editor } from "@tiptap/core";
 import { MarkdownBlock } from "./markdown-block";
 import { MemoizedReactMarkdown } from "@/components/markdown";
+import { createMeetingNoteEditorExtensions } from "@/components/meeting-notes/note-editor";
 
 const GIF = "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
 
@@ -78,6 +80,14 @@ const BLOCKED_MARKDOWN: [string, string, string][] = [
   ["remote media code", "`https://example.com/a.mp4`", "https://example.com/a.mp4"],
   ["network-share media image", "![clip](//host/share/a.mp4)", "clip"],
   ["network-share media code", "`\\\\host\\share\\a.mp4`", "\\\\host\\share\\a.mp4"],
+  // Home-relative, but the reader would join home with an absolute share path.
+  ["home-relative network-share media code", "`~/\\\\host\\share\\a.mp4`", "~/\\\\host\\share\\a.mp4"],
+  // Local-looking prefixes the reader would not read: it takes the share after them.
+  ["network share after a quote in a media link", '[clip](</tmp/x"//host/share/a.mp4>)', "clip"],
+  ["network share on a second line of a media code block", "```\n/tmp/x\n//host/share/a.mp4\n```", "//host/share/a.mp4"],
+  // Sources removed for safety still leave their alt text.
+  ["data: image", "![remote chart](data:image/png;base64,iVBORw0KGgo=)", "remote chart"],
+  ["javascript: image", "![remote chart](javascript:alert(1))", "remote chart"],
 ];
 
 describe("remote markdown sources", () => {
@@ -140,5 +150,56 @@ describe("local markdown files", () => {
   ] as [string, Renderer, string, string][])("still reads %s through the native reader", async (_case, renderMarkdown, markdown, path) => {
     renderMarkdown(markdown);
     await waitFor(() => expect(readMediaMock).toHaveBeenCalledWith(path));
+  });
+});
+
+// The meeting note editor shows notes that an AI meeting summary writes.
+describe("meeting note editor", () => {
+  const EMBEDDED = `data:image/gif;base64,${GIF}`;
+  let editor: Editor | null = null;
+  afterEach(() => { editor?.destroy(); editor = null; document.body.innerHTML = ""; });
+
+  function mountNote(markdown: string) {
+    const element = document.createElement("div");
+    document.body.appendChild(element);
+    editor = new Editor({ element, extensions: createMeetingNoteEditorExtensions(""), content: markdown });
+    return element;
+  }
+  const remoteImages = (element: HTMLElement) =>
+    fetchingElements(element).filter((html) => !html.includes(EMBEDDED));
+  const markdownOf = () => (editor!.storage as unknown as { markdown: { getMarkdown(): string } }).markdown.getMarkdown();
+
+  it("does not load images an AI summary wrote, keeps their alt text and keeps them in the note", async () => {
+    const element = mountNote([
+      "before",
+      "",
+      "![sales chart](https://example.com/chart.png?d=secret)",
+      "",
+      '<img src="https://example.com/raw.png?d=secret" alt="raw chart" width="40" height="40" />',
+      "",
+      `![pasted screenshot](${EMBEDDED})`,
+      "",
+      "after",
+    ].join("\n"));
+    await settle();
+    expect(element).toHaveTextContent("before");
+    expect(element).toHaveTextContent("sales chart");
+    expect(element).toHaveTextContent("raw chart");
+    expect(element).toHaveTextContent("after");
+    expect(remoteImages(element)).toEqual([]);
+    // An image the note carries itself still shows.
+    expect(element.querySelector(`img[src="${EMBEDDED}"]`)).not.toBeNull();
+    // Viewing or saving the note loses nothing.
+    expect(markdownOf()).toContain("https://example.com/chart.png?d=secret");
+    expect(markdownOf()).toContain("https://example.com/raw.png?d=secret");
+  });
+
+  it("does not load a remote image that arrives with a later update", async () => {
+    const element = mountNote("notes");
+    editor!.commands.setContent("before\n\n![sales chart](https://example.com/late.png?d=secret)\n\nafter");
+    await settle();
+    expect(element).toHaveTextContent("sales chart");
+    expect(element).toHaveTextContent("after");
+    expect(remoteImages(element)).toEqual([]);
   });
 });
