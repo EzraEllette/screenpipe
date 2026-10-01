@@ -468,6 +468,109 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn direct_backfill_capacity_failure_drains_and_retries_without_advancing_history() {
+        let _guard = crate::enterprise_policy::sync_streams_test_lock();
+        crate::enterprise_policy::set_sync_streams(
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            "off".into(),
+            "all".into(),
+        );
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/ticket"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true, "method": "PUT", "upload_url": format!("{}/blob", server.uri()), "headers": {}
+            }))).mount(&server).await;
+        Mock::given(method("PUT"))
+            .and(path("/blob"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        let full = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let is_full = full.clone();
+        Mock::given(method("POST")).and(path("/complete"))
+            .and(header("x-screenpipe-backfill", "1"))
+            .respond_with(move |_: &wiremock::Request| {
+                if is_full.load(Ordering::SeqCst) {
+                    ResponseTemplate::new(429).set_body_json(serde_json::json!({"error":"screenshot queue is full; retry after the device syncs","code":"frame_queue_full"}))
+                } else { ResponseTemplate::new(200) }
+            }).mount(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/api/enterprise/frame-requests"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"frame_ids":[1]})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/enterprise/frame-uploads"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"stored":[1],"failed":[]})),
+            )
+            .mount(&server)
+            .await;
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut cfg = cfg(&dir, &server);
+        cfg.upload_mode =
+            EnterpriseUploadMode::DirectReadable(enterprise_upload::DirectUploadConfig {
+                ticket_url: format!("{}/ticket", server.uri()),
+                complete_url: format!("{}/complete", server.uri()),
+                pinned_hosts: vec![],
+            });
+        let local = Local {
+            reads: AtomicUsize::new(0),
+            fail_ui: false,
+        };
+        let request = request();
+        let mut cursor = request.initial_cursor();
+        let initial = cursor.last_frame_ts.clone();
+        let http = enterprise_http_client();
+        let error = run_one_sync_inner(&cfg, &mut cursor, &local, &http, false, Some(&request))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("frame_queue_full"));
+        assert_eq!(cursor.last_frame_ts, initial);
+        assert_eq!(cursor.boundary.backfill_records, None);
+        assert!(!cfg.cursor_path.exists());
+        // This is the production order after a failed historical pass: screenshot
+        // fulfillment remains reachable, then the same page retries next tick.
+        let drained = fulfill_frame_requests(&cfg, &local, &http).await;
+        assert_eq!(drained.requested, 1);
+        full.store(false, Ordering::SeqCst);
+        run_one_sync_inner(&cfg, &mut cursor, &local, &http, false, Some(&request))
+            .await
+            .unwrap();
+        assert_eq!(cursor.boundary.backfill_records, Some(500));
+        assert_eq!(
+            Cursor::load(&cfg.cursor_path).last_frame_ts,
+            cursor.last_frame_ts
+        );
+        let requests = server.received_requests().await.unwrap();
+        let completions: Vec<serde_json::Value> = requests
+            .iter()
+            .filter(|r| r.url.path() == "/complete")
+            .map(|r| serde_json::from_slice(&r.body).unwrap())
+            .collect();
+        assert!(completions.len() >= 2);
+        assert_eq!(completions.first().unwrap(), completions.last().unwrap());
+        crate::enterprise_policy::set_sync_streams(
+            true,
+            false,
+            true,
+            true,
+            true,
+            true,
+            "off".into(),
+            "cited".into(),
+        );
+    }
+
+    #[tokio::test]
     async fn backfill_wrong_device_and_cancelled_request_never_read_local_data() {
         let server = MockServer::start().await;
         let dir = tempfile::TempDir::new().unwrap();

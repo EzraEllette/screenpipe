@@ -1169,6 +1169,7 @@ async fn run_one_sync_inner(
                 body,
                 counts,
                 enterprise_upload::direct_upload_cursors(&next_cursor),
+                backfill.is_some(),
             );
             drop(admission);
             upload.await?;
@@ -4538,7 +4539,7 @@ pub(crate) mod tests {
     async fn direct_upload_completion_auto_cites_only_readable_all_images() {
         let _guard = crate::enterprise_policy::sync_streams_test_lock();
         let _restore = RestoreDefaultSyncStreams;
-        for readable in [false, true] {
+        for (readable, historical) in [(false, false), (true, false), (true, true)] {
             for frame_mode in ["off", "cited", "all"] {
                 let mode_json = format!(
                     "\"mode\":\"{}\"",
@@ -4624,9 +4625,16 @@ pub(crate) mod tests {
                     vec![vec![]],
                 );
                 let http = reqwest::Client::new();
-                let report = run_one_sync(&cfg, &mut cursor, &local, &http)
-                    .await
-                    .unwrap();
+                let replay: Option<backfill::BackfillRequest> = historical.then(|| serde_json::from_value(serde_json::json!({
+                    "id": "11111111-1111-1111-1111-111111111111",
+                    "license_id": "22222222-2222-2222-2222-222222222222",
+                    "device_id": cfg.device_id,
+                    "start_at": "2026-05-07T09:00:00Z", "end_at": "2026-05-07T11:00:00Z", "streams": ["frames"]
+                })).unwrap());
+                let report =
+                    run_one_sync_inner(&cfg, &mut cursor, &local, &http, false, replay.as_ref())
+                        .await
+                        .unwrap();
 
                 assert_eq!(report.frames, 1);
                 assert_eq!(
@@ -4638,6 +4646,15 @@ pub(crate) mod tests {
                     .iter()
                     .find(|r| r.url.path() == "/complete")
                     .unwrap();
+                assert_eq!(
+                    complete.headers.contains_key("x-screenpipe-backfill"),
+                    historical
+                );
+                for request in &requests {
+                    if request.url.path() == "/blob" {
+                        assert!(!request.headers.contains_key("x-screenpipe-backfill"));
+                    }
+                }
                 let body: serde_json::Value = serde_json::from_slice(&complete.body).unwrap();
                 if readable && frame_mode == "all" {
                     assert_eq!(body["frame_ids"], serde_json::json!([1]));
