@@ -167,6 +167,29 @@ describe("ComposerInputBox", () => {
     expect(textarea.style.height).toBe("38px");
   });
 
+  it("holds the surrounding layout while it measures", () => {
+    const { container, rerender } = render(composer("one\ntwo\nthree"));
+    const textarea = container.querySelector("textarea")!;
+    const parent = textarea.parentElement!;
+    parent.getBoundingClientRect = () => ({ height: 82 }) as DOMRect;
+    // The collapse to "auto" while measuring must not shrink the parent, or
+    // WebKit clamps the transcript scrolled above the composer.
+    let parentMinHeightWhileMeasuring = "";
+    const measure = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "scrollHeight")!.get!;
+    Object.defineProperty(textarea, "scrollHeight", {
+      configurable: true,
+      get() {
+        parentMinHeightWhileMeasuring = parent.style.minHeight;
+        return measure.call(this);
+      },
+    });
+
+    rerender(composer("one\ntwo\nthree!"));
+
+    expect(parentMinHeightWhileMeasuring).toBe("82px");
+    expect(parent.style.minHeight).toBe("");
+  });
+
   it("never grows an empty box for a long placeholder", () => {
     // e.g. a hovered Home card's prompt, or "… is running. Reply after this run finishes."
     const longPlaceholder = "List every meeting I had today with its decisions, owners and deadlines, then flag follow-ups.";

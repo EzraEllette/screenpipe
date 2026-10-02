@@ -103,14 +103,23 @@ type ComposerTextAreaProps = React.TextareaHTMLAttributes<HTMLTextAreaElement> &
 function fitToContent(element: HTMLTextAreaElement) {
   // A hidden field measures zero; keep the last height until it is shown again.
   if (!element.offsetWidth) return;
+  // Measuring collapses the box for a moment. Hold the parent's height so the
+  // layout around it does not shrink too: WebKit clamps a scrolled transcript
+  // above it during that collapse and the newest lines drop out of view. This
+  // assumes the parent does not stretch the field to its own height.
+  const parent = element.parentElement;
+  const parentMinHeight = parent?.style.minHeight ?? "";
+  if (parent) parent.style.minHeight = `${parent.getBoundingClientRect().height}px`;
   element.style.overflowY = "hidden";
   element.style.height = "auto";
   // An empty box keeps its natural height. Browsers count placeholder text in
   // scrollHeight, and a long placeholder (e.g. a hovered Home card's prompt)
   // must not resize the box.
-  if (!element.value) return;
-  element.style.height = `${element.scrollHeight}px`;
-  element.style.overflowY = element.scrollHeight > element.clientHeight ? "auto" : "hidden";
+  if (element.value) {
+    element.style.height = `${element.scrollHeight}px`;
+    element.style.overflowY = element.scrollHeight > element.clientHeight ? "auto" : "hidden";
+  }
+  if (parent) parent.style.minHeight = parentMinHeight;
 }
 
 /** The same input primitive used by the standalone Chat composer and its embeds. */
