@@ -39,6 +39,11 @@ vi.mock("@/lib/hooks/use-timeline-store", () => ({
   useTimelineStore: { getState: () => ({ setPendingNavigation: vi.fn() }) },
 }));
 vi.mock("@/lib/notifications/actions", () => ({ routeNotificationDeeplink: vi.fn(async () => undefined) }));
+// Synthetic native HTTP port: every download fails, as one behind a login does.
+const { nativeHttpMock } = vi.hoisted(() => ({
+  nativeHttpMock: vi.fn(async () => { throw new Error("Eval native download denied"); }),
+}));
+vi.mock("@tauri-apps/plugin-http", () => ({ fetch: nativeHttpMock }));
 // The note's formatting menus play no part in what the note shows.
 vi.mock("@/components/meeting-notes/editor-menus", () => ({ FormatToolbar: () => null, SlashCommandMenu: () => null }));
 
@@ -103,6 +108,27 @@ describe("remote markdown sources", () => {
       expect(fetchingElements(container)).toEqual([]);
       expect(readMediaMock).not.toHaveBeenCalled();
     });
+
+    it("keeps the address of a remote image that has no alt text", async () => {
+      const container = renderMarkdown("before\n\n![](https://example.com/x.png?d=secret)\n\nafter");
+      await settle();
+      expect(container).toHaveTextContent("before");
+      expect(container).toHaveTextContent("https://example.com/x.png?d=secret");
+      expect(container).toHaveTextContent("after");
+      expect(fetchingElements(container)).toEqual([]);
+      expect(readMediaMock).not.toHaveBeenCalled();
+    });
+
+    it("keeps the alt text and path of a local image that can't be read", async () => {
+      readMediaMock.mockResolvedValueOnce({ status: "error", error: "File does not exist" } as never);
+      const container = renderMarkdown("before\n\n![local chart](/tmp/eval-missing.gif)\n\nafter");
+      await waitFor(() => expect(container).toHaveTextContent("/tmp/eval-missing.gif"));
+      expect(container).toHaveTextContent("before");
+      expect(container).toHaveTextContent("local chart");
+      expect(container).toHaveTextContent("after");
+      expect(readMediaMock).toHaveBeenCalledWith("/tmp/eval-missing.gif");
+      expect(fetchingElements(container)).toEqual([]);
+    });
   });
 
   describe.each(CHAT)("%s raw HTML", (renderer, renderChat) => {
@@ -149,6 +175,13 @@ describe("local markdown files", () => {
     ["absolute media image in chat", chatAssistant, "![clip](/Users/me/eval-absolute.mp4)", "/Users/me/eval-absolute.mp4"],
     ["home-relative media code in chat", chatAssistant, "`~/Downloads/eval-home.mp4`", "~/Downloads/eval-home.mp4"],
     ["absolute media link in shared markdown", shared, "[clip](/Users/me/eval-shared.mp4)", "/Users/me/eval-shared.mp4"],
+    // Markdown escapes a backslash as `\\`; only two at the very start make a network share.
+    [
+      "Windows recording link with doubled backslashes in chat",
+      chatAssistant,
+      "[call](C:\\\\Users\\\\me\\\\Mic (Realtek Audio) (input)_2026-05-25_21-42-22.mp4)",
+      "C:\\Users\\me\\Mic (Realtek Audio) (input)_2026-05-25_21-42-22.mp4",
+    ],
   ] as [string, Renderer, string, string][])("still reads %s through the native reader", async (_case, renderMarkdown, markdown, path) => {
     renderMarkdown(markdown);
     await waitFor(() => expect(readMediaMock).toHaveBeenCalledWith(path));
@@ -256,6 +289,24 @@ describe("meeting note editor", () => {
     // The embedded image keeps its alt text and size.
     expect(note.container.querySelector(`img[src="${EMBEDDED}"]`)).toHaveAttribute("alt", "whiteboard");
     expect(note.lastSaved()).toContain('width="40"');
+  });
+
+  it("keeps a pasted web image that can't be downloaded in the note as its address", async () => {
+    const note = await renderNoteEditor("before");
+    const html = '<p>pasted text</p><img src="https://example.com/web.png?d=secret" alt="web chart">';
+    const paste = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(paste, "clipboardData", {
+      value: {
+        files: [], items: [], types: ["text/html", "text/plain"],
+        getData: (type: string) => (type === "text/html" ? html : type === "text/plain" ? "pasted text" : ""),
+      },
+    });
+    fireEvent(note.editable, paste);
+    await waitFor(() => expect(note.lastSaved()).toContain("https://example.com/web.png?d=secret"));
+    await settle();
+    expect(note.container).toHaveTextContent("before");
+    expect(note.container).toHaveTextContent("pasted text");
+    expect(fetchingElements(note.container)).toEqual([]);
   });
 
   it("does not load a remote image that arrives with a later update", async () => {

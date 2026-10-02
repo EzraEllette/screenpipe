@@ -8,7 +8,8 @@ import { tmpdir } from 'node:os';
 const repo = resolve(import.meta.dir, '../..'), app = 'apps/screenpipe-app-tauri';
 const item = JSON.parse(readFileSync(join(import.meta.dir, 'cases.json'), 'utf8')).cases.find(c => c.id === 'app-markdown-remote-images');
 const markdown = `${app}/components/markdown.tsx`, block = `${app}/components/chat/markdown-block.tsx`;
-const notes = `${app}/components/meeting-notes/note-editor.tsx`;
+const notes = `${app}/components/meeting-notes/note-editor.tsx`, mediaPaths = `${app}/lib/utils/media-file-path.ts`;
+const localImage = `${app}/components/markdown/local-markdown-image.tsx`;
 // The first fix: markdown images only, with a raw-string media gate.
 const PREVIOUS_FIX = '7ee2e6ef078200f9781a98c39347d7c8f48c7663';
 // The second fix: notes blocked remote images, but a copied one pasted back as text.
@@ -17,6 +18,10 @@ const SECOND_FIX = '359ac0c2512578a972ba07c09e895725d5021b6c';
 // renamed and resized its embedded images, and a later update could keep
 // showing an old picture where a blocked image now was.
 const THIRD_FIX = 'bbf239eaa5626876e48b30e8cc04b1e4c1187c1e';
+// The fourth fix: pasting part of a note kept its images, but an image with no
+// alt text, a local image that could not be read and a pasted web image that
+// failed to download left nothing behind.
+const FOURTH_FIX = '72c1f9685ce74bc2f696c8373cb568ca0392ae67';
 const root = mkdtempSync(join(tmpdir(), 'markdown-remote-images-calibration-')), archives = new Map();
 const receipts = process.env.SCREENPIPE_EVAL_CALIBRATION_RECEIPTS;
 afterAll(() => rmSync(root, {recursive: true, force: true}));
@@ -45,26 +50,34 @@ function grade(name, ref = item.oracle_ref, mutate = () => {}) {
 }
 // Behavior failures surface as chai AssertionErrors or jest-dom matcher errors.
 const BEHAVIOR_FAILURE = /AssertionError|Error: expect\(/;
-function passes(r) { expect(r.status).toBe(0); expect(r.stdout).toContain('64 passed'); expect(r.stdout+r.stderr).not.toMatch(/Unhandled|Uncaught/); }
+function passes(r) { expect(r.status).toBe(0); expect(r.stdout).toContain('72 passed'); expect(r.stdout+r.stderr).not.toMatch(/Unhandled|Uncaught/); }
 function fails(r) { expect(r.status).toBe(1); expect(r.stderr).toMatch(BEHAVIOR_FAILURE); expect(r.stdout+r.stderr).not.toMatch(/Unhandled|Uncaught|Failed to resolve import|Failed to load url|Cannot find module/); }
-test('parent fails fifty-seven remote outcomes and preserves seven local files', () => { const r = grade('parent', item.base_ref); fails(r); expect(r.stdout).toContain('57 failed | 7 passed'); }, 120000);
-test('previous markdown-only fix fails media-path, alt-text and note outcomes', () => { const r = grade('previous-fix', PREVIOUS_FIX); fails(r); expect(r.stdout).toContain('16 failed | 48 passed'); }, 120000);
+test('parent fails sixty-four remote outcomes and preserves eight local files', () => { const r = grade('parent', item.base_ref); fails(r); expect(r.stdout).toContain('64 failed | 8 passed'); }, 120000);
+test('previous markdown-only fix fails media-path, alt-text, note and visible-fallback outcomes', () => { const r = grade('previous-fix', PREVIOUS_FIX); fails(r); expect(r.stdout).toContain('23 failed | 49 passed'); }, 120000);
 const NOTE_OUTCOMES = ['copied and pasted into a note', 'arrives with a later update'];
-test('second fix fails the note copy and later-update outcomes', () => { const r = grade('second-fix', SECOND_FIX); fails(r); expect(r.stdout).toContain('2 failed | 62 passed'); for (const name of NOTE_OUTCOMES) expect(r.stderr).toContain(name); }, 120000);
-test('third fix fails the note copy and later-update outcomes', () => { const r = grade('third-fix', THIRD_FIX); fails(r); expect(r.stdout).toContain('2 failed | 62 passed'); for (const name of NOTE_OUTCOMES) expect(r.stderr).toContain(name); }, 120000);
+const VISIBLE_OUTCOMES = ['remote image that has no alt text', "local image that can't be read", "can't be downloaded in the note as its address"];
+test('second fix fails the note copy, later-update and visible-fallback outcomes', () => { const r = grade('second-fix', SECOND_FIX); fails(r); expect(r.stdout).toContain('9 failed | 63 passed'); for (const name of [...NOTE_OUTCOMES, ...VISIBLE_OUTCOMES]) expect(r.stderr).toContain(name); }, 120000);
+test('third fix fails the note copy, later-update and visible-fallback outcomes', () => { const r = grade('third-fix', THIRD_FIX); fails(r); expect(r.stdout).toContain('9 failed | 63 passed'); for (const name of [...NOTE_OUTCOMES, ...VISIBLE_OUTCOMES]) expect(r.stderr).toContain(name); }, 120000);
+test('fourth fix fails the vanishing image outcomes', () => { const r = grade('fourth-fix', FOURTH_FIX); fails(r); expect(r.stdout).toContain('7 failed | 65 passed'); for (const name of VISIBLE_OUTCOMES) expect(r.stderr).toContain(name); }, 120000);
 test('historical reference passes every outcome', () => passes(grade('reference')), 120000);
 test('current caller passes every outcome', () => passes(grade('current', 'HEAD')), 120000);
-test('equivalent alt-text element passes', () => passes(grade('equivalent', item.oracle_ref, cwd => replace(cwd, markdown, 'return <ImageAltText alt={alt} />;', 'return alt ? <em>{alt}</em> : null;'))), 120000);
-test('plain remote img fallback fails', () => fails(grade('img-fallback', item.oracle_ref, cwd => replace(cwd, markdown, 'return <ImageAltText alt={alt} />;', 'return <img src={src} alt={alt || ""} />;'))), 120000);
+const WEB_IMAGE_FALLBACK = 'return <OutsideLinkOnly inside={alt || src}>{link(src, alt || src)}</OutsideLinkOnly>;';
+test('equivalent plain-text address passes', () => passes(grade('equivalent', item.oracle_ref, cwd => replace(cwd, markdown, WEB_IMAGE_FALLBACK, 'return <em>{alt || src}</em>;'))), 120000);
+test('plain remote img fallback fails', () => fails(grade('img-fallback', item.oracle_ref, cwd => replace(cwd, markdown, WEB_IMAGE_FALLBACK, 'return <img src={src} alt={alt || ""} />;'))), 120000);
+test('alt-text-only fallback fails images with no alt text', () => { const r = grade('alt-only', item.oracle_ref, cwd => replace(cwd, markdown, WEB_IMAGE_FALLBACK, 'return <ImageAltText alt={alt} />;')); fails(r); expect(r.stderr).toContain(VISIBLE_OUTCOMES[0]); }, 120000);
+test('unreadable local image that shows nothing fails', () => { const r = grade('local-unreadable', item.oracle_ref, cwd => replace(cwd, localImage, '  if (!loaded.src) return <>{fallback}</>;\n', '  if (!loaded.src) return null;\n')); fails(r); expect(r.stderr).toContain(VISIBLE_OUTCOMES[1]); }, 120000);
 test('re-allowed picture and source fail', () => fails(grade('picture', item.oracle_ref, cwd => replace(cwd, block, '...(defaultSchema.tagNames ?? []).filter((tag) => tag !== "picture" && tag !== "source"),', '...(defaultSchema.tagNames ?? []),'))), 120000);
-const MEDIA_GATE = 'return isMediaFilePath(path) && /^(?:\\/|~[\\\\/]|[A-Za-z]:[\\\\/])(?![\\\\/])/.test(path);';
-test('extension-only media gate fails', () => fails(grade('media-gate', item.oracle_ref, cwd => replace(cwd, markdown, MEDIA_GATE, 'return isMediaFilePath(path);'))), 120000);
-test('media gate that allows a second leading separator fails', () => fails(grade('share-prefix', item.oracle_ref, cwd => replace(cwd, markdown, MEDIA_GATE, MEDIA_GATE.replace('(?![\\\\/])', '')))), 120000);
+const MEDIA_GATE = 'const LOCAL_PATH_PREFIX = /^(?:\\/(?![\\\\/])|~[\\\\/](?![\\\\/])|[A-Z]:[\\\\/])/i;';
+test('extension-only media gate fails', () => fails(grade('media-gate', item.oracle_ref, cwd => replace(cwd, mediaPaths, '    LOCAL_PATH_PREFIX.test(unwrapped) &&\n', ''))), 120000);
+test('media gate that allows a second leading separator fails', () => fails(grade('share-prefix', item.oracle_ref, cwd => replace(cwd, mediaPaths, MEDIA_GATE, MEDIA_GATE.replaceAll('(?![\\\\/])', '')))), 120000);
+test('media gate that accepts Windows network paths fails', () => fails(grade('share-media', item.oracle_ref, cwd => replace(cwd, mediaPaths, MEDIA_GATE, 'const LOCAL_PATH_PREFIX = /^(?:\\/(?!\\/)|~[\\\\/]|[A-Z]:[\\\\/]|\\\\\\\\)/i;'))), 120000);
+test('media gate that reads a doubled backslash after a drive as a share fails', () => { const r = grade('drive-doubled', item.oracle_ref, cwd => replace(cwd, mediaPaths, MEDIA_GATE, 'const LOCAL_PATH_PREFIX = /^(?:\\/|~[\\\\/]|[A-Z]:[\\\\/])(?![\\\\/])/i;')); fails(r); expect(r.stderr).toContain('doubled backslashes'); }, 120000);
 test('network-share paths treated as local fail', () => fails(grade('network-share', item.oracle_ref, cwd => replace(cwd, markdown, 'if (/^\\/(?![\\\\/])/.test(candidate)) {', 'if (candidate.startsWith("/")) {'))), 120000);
-test('blanket image removal fails preserved local files', () => fails(grade('no-images', item.oracle_ref, cwd => replace(cwd, markdown, '    img({ src, alt }) {\n      if (src && isLocalMediaPath(src)) {', '    img({ src, alt }) {\n      if (src || !src) return null;\n      if (src && isLocalMediaPath(src)) {'))), 120000);
+test('blanket image removal fails preserved local files', () => fails(grade('no-images', item.oracle_ref, cwd => replace(cwd, markdown, '    img({ src, alt }) {\n', '    img({ src, alt }) {\n      if (src || !src) return null;\n'))), 120000);
 test('note editor that renders any image source fails', () => fails(grade('note-any-image', item.oracle_ref, cwd => replace(cwd, notes, 'return typeof src === "string" && src.startsWith("data:image/");', 'return typeof src === "string";'))), 120000);
 test('note editor that deletes remote images from the note fails', () => fails(grade('note-drops-images', item.oracle_ref, cwd => replace(cwd, notes, '  renderHTML(props) {', '  parseHTML() {\n    return [{ tag: \'img[src^="data:"]\' }];\n  },\n\n  renderHTML(props) {'))), 120000);
 test('note editor that takes over pastes of embedded images fails', () => fails(grade('note-paste-takeover', item.oracle_ref, cwd => replace(cwd, notes, 'htmlImageSources.every(isEmbeddedImageSource)', 'htmlImageSources.length === 0'))), 120000);
+test('note paste that drops images it could not download fails', () => { const r = grade('note-drops-failed', item.oracle_ref, cwd => replace(cwd, notes, 'imageSources.filter(isPasteableImageSource)', 'imageSources.filter(isEmbeddedImageSource)')); fails(r); expect(r.stderr).toContain(VISIBLE_OUTCOMES[2]); }, 120000);
 test('note image view reused for a different source fails', () => fails(grade('note-stale-view', item.oracle_ref, cwd => replace(cwd, notes, 'node.attrs.src === props.node.attrs.src && Boolean(parentUpdate?.(node, ...rest))', 'Boolean(parentUpdate?.(node, ...rest))'))), 120000);
 test('unused correct renderer cannot hide broken active caller', () => fails(grade('unused', item.oracle_ref, cwd => {
   writeFileSync(join(cwd, `${app}/unused-correct-markdown.tsx`), readFileSync(join(cwd, markdown)));
