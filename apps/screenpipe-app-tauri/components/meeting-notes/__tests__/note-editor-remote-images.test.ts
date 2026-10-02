@@ -19,7 +19,6 @@ vi.mock("../image-utils", async (importOriginal) => ({
 
 import {
   createMeetingNoteEditorExtensions,
-  droppedWebImageSources,
   embedPastedImageSources,
 } from "../note-editor";
 
@@ -89,6 +88,26 @@ describe("meeting note remote images", () => {
 
     expect(mounted.element.querySelector(".meeting-note-image-blocked")).toHaveTextContent("chart");
     expect(mounted.element.querySelector("img")).toBeNull();
+  });
+
+  it("shows a chip when a note update puts a remote image where an embedded one was", () => {
+    const mounted = mountEditor(`before\n\n![pasted screenshot](${EMBEDDED})\n\nafter`);
+    editor = mounted.editor;
+
+    editor.commands.setContent("before\n\n![sales chart](https://example.com/chart.png?d=secret)\n\nafter");
+
+    expect(mounted.element.querySelector(".meeting-note-image-blocked")).toHaveTextContent("sales chart");
+    expect(mounted.element.querySelector("img")).toBeNull();
+  });
+
+  it("shows the new picture when a note update swaps an embedded image", () => {
+    const other = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+    const mounted = mountEditor(`before\n\n![first](${EMBEDDED})\n\nafter`);
+    editor = mounted.editor;
+
+    editor.commands.setContent(`before\n\n![second](${other})\n\nafter`);
+
+    expect(mounted.element.querySelector("img")?.getAttribute("src")).toBe(other);
   });
 
   it("shows the address of a remote image that has no alt text", () => {
@@ -219,33 +238,5 @@ describe("embedPastedImageSources", () => {
     tauriFetchMock.mockRejectedValue(new Error("offline"));
 
     expect(await embedPastedImageSources(["https://example.com/x.png"])).toEqual([]);
-  });
-});
-
-describe("droppedWebImageSources", () => {
-  function transfer(html: string, text = "", files: File[] = []) {
-    return {
-      files,
-      getData: (format: string) => (format === "text/html" ? html : format === "text/plain" ? text : ""),
-    };
-  }
-
-  it.each([
-    ["an image", '<img src="https://example.com/a.png">', "https://example.com/a.png"],
-    ["a linked image", '<a href="https://example.com/page"><img src="https://example.com/a.png"></a>', "https://example.com/page"],
-  ])("embeds %s dragged from a web page", (_name, html, text) => {
-    expect(droppedWebImageSources(transfer(html, text))).toEqual(["https://example.com/a.png"]);
-  });
-
-  it("leaves a dragged selection with text to the editor", () => {
-    expect(
-      droppedWebImageSources(transfer('<p>quarterly numbers</p><img src="https://example.com/a.png">')),
-    ).toEqual([]);
-  });
-
-  it("leaves dropped files and plain text to their own handling", () => {
-    const file = new File([new Uint8Array([1])], "shot.png", { type: "image/png" });
-    expect(droppedWebImageSources(transfer('<img src="https://example.com/a.png">', "", [file]))).toEqual([]);
-    expect(droppedWebImageSources(transfer("", "just text"))).toEqual([]);
   });
 });

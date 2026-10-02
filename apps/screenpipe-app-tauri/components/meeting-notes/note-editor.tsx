@@ -132,6 +132,14 @@ const ResizableImage = Image.extend({
       }
 
       const nodeView = (parentNodeView as Function)(props);
+      // Tiptap's resizable view accepts any image as an update but keeps its
+      // picture, so when the note changes underneath it (an AI summary
+      // rewriting the note) the old picture would stay on screen in place of
+      // a different image or a blocked one. Redraw unless the source is the same.
+      const parentUpdate = nodeView.update?.bind(nodeView);
+      nodeView.update = (node: { attrs: { src?: unknown } }, ...rest: unknown[]) =>
+        node.attrs.src === props.node.attrs.src && Boolean(parentUpdate?.(node, ...rest));
+
       const wrapper = (nodeView as any).wrapper as HTMLElement | undefined;
       if (!wrapper) return nodeView;
 
@@ -362,8 +370,9 @@ function NoteEditor(
   // onUpdate handler).
   onChangeRef.current = onChange;
 
-  const insertImages = useCallback(
-    (imageSources: string[], at?: { clientX: number; clientY: number }) => {
+  // Inserts the images at `pos`, or in place of the selection.
+  const insertImagesAt = useCallback(
+    (imageSources: string[], pos?: number) => {
       const editor = editorRef.current;
       const images = imageSources.filter(isEmbeddedImageSource);
       if (!editor || images.length === 0) return;
@@ -373,15 +382,6 @@ function NoteEditor(
         { type: "paragraph" },
       ]);
 
-      // When the caller passes drop coordinates, drop the image where the user
-      // released it instead of at the stale caret. posAtCoords returns null for
-      // points outside the document (e.g. padding below the text), in which case
-      // we fall back to the caret.
-      const pos =
-        at != null
-          ? editor.view.posAtCoords({ left: at.clientX, top: at.clientY })?.pos
-          : undefined;
-
       if (pos != null) {
         editor.chain().focus().insertContentAt(pos, content).run();
       } else {
@@ -389,6 +389,21 @@ function NoteEditor(
       }
     },
     [uiLanguage],
+  );
+
+  const insertImages = useCallback(
+    (imageSources: string[], at?: { clientX: number; clientY: number }) => {
+      // When the caller passes drop coordinates, drop the image where the user
+      // released it instead of at the stale caret. posAtCoords returns null for
+      // points outside the document (e.g. padding below the text), in which case
+      // we fall back to the caret.
+      const pos =
+        at != null
+          ? editorRef.current?.view.posAtCoords({ left: at.clientX, top: at.clientY })?.pos
+          : undefined;
+      insertImagesAt(imageSources, pos);
+    },
+    [insertImagesAt],
   );
 
   const insertImageFiles = useCallback(
@@ -408,9 +423,15 @@ function NoteEditor(
       const editor = editorRef.current;
       if (!editor) return;
 
+      // The paste replaces the selection now. Its images, which may still need
+      // converting or downloading, go after the caret once ready, so they
+      // never replace what the text left selected (such as a pasted rule) or
+      // what the user selects in the meantime.
       const textContent = meetingNotePasteTextContent(payload);
       if (textContent) {
         editor.chain().focus().insertContent(textContent).run();
+      } else {
+        editor.chain().focus().deleteSelection().run();
       }
 
       const dataUrls: string[] = [];
@@ -423,9 +444,9 @@ function NoteEditor(
         dataUrls.length > 0
           ? dataUrls
           : await embedPastedImageSources(payload.htmlImageSources);
-      insertImages(imageSources);
+      insertImagesAt(imageSources, editorRef.current?.state.selection.to);
     },
-    [insertImages],
+    [insertImagesAt],
   );
 
   useImperativeHandle(ref, () => ({ insertImages }), [insertImages]);
@@ -455,21 +476,11 @@ function NoteEditor(
         void insertClipboardPaste(payload);
         return true;
       },
-      handleDrop(view, event) {
+      handleDrop(_view, event) {
         const files = imageFilesFromTransfer(event.dataTransfer);
-        if (files.length > 0) {
-          event.preventDefault();
-          void insertImageFiles(files);
-          return true;
-        }
-        // An image dragged in from a web page names its remote address; embed
-        // it the way a paste does. Drags within the note (view.dragging) move
-        // their nodes as usual.
-        const webImages = view.dragging ? [] : droppedWebImageSources(event.dataTransfer);
-        if (webImages.length === 0) return false;
+        if (files.length === 0) return false;
         event.preventDefault();
-        const at = { clientX: event.clientX, clientY: event.clientY };
-        void embedPastedImageSources(webImages).then((images) => insertImages(images, at));
+        void insertImageFiles(files);
         return true;
       },
     },
@@ -641,7 +652,10 @@ export function meetingNotePastePayloadFromTransfer(
   const text = transferData(transfer, "text/plain");
   const htmlImageSources = imageSourcesFromHtml(html);
 
-  if (files.length === 0 && htmlImageSources.length === 0) return null;
+  // Content whose images are already embedded, such as part of a note, pastes
+  // through the editor as usual, which keeps their order, alt text and size,
+  // and keeps blocked image chips.
+  if (files.length === 0 && htmlImageSources.every(isEmbeddedImageSource)) return null;
 
   return { files, html, text, htmlImageSources };
 }
@@ -669,10 +683,9 @@ const PASTED_IMAGE_TIMEOUT_MS = 15_000;
 const MAX_PASTED_IMAGE_BYTES = 20 * 1024 * 1024;
 
 /**
- * Copies images pasted or dropped from a web page into the note. Notes show
- * only images they carry themselves, so a web image is downloaded once, by
- * the user's own action. A source that does not come back as an image is
- * dropped.
+ * Copies images pasted from a web page into the note. Notes show only images
+ * they carry themselves, so a web image is downloaded once, by the user's own
+ * action. A source that does not come back as an image is dropped.
  */
 export async function embedPastedImageSources(sources: string[]): Promise<string[]> {
   const embedded = await Promise.all(
@@ -718,16 +731,6 @@ async function readAtMost(response: Response, limit: number): Promise<BlobPart[]
     chunks.push(read.value);
   }
   return chunks;
-}
-
-/**
- * The remote images to embed for a drop from another app: a dragged image,
- * alone or inside a link. A dragged selection with text drops as usual.
- */
-export function droppedWebImageSources(transfer: ImageTransferLike | null): string[] {
-  const payload = meetingNotePastePayloadFromTransfer(transfer);
-  if (!payload || payload.files.length > 0) return [];
-  return htmlHasReadableText(htmlWithoutImages(payload.html)) ? [] : payload.htmlImageSources;
 }
 
 export function imageSourcesFromHtml(html: string): string[] {
