@@ -88,4 +88,47 @@ describe("stored input capture defaults", () => {
     expect(state.settings!.disableClipboardCapture).toBe(true);
     expect(state.settings!.disableKeyboardCapture).toBe(true);
   });
+
+  it.each([true, false])("fills missing PII defaults for enterprise=%s", async (enterprise) => {
+    state.enterprise = enterprise;
+    delete state.settings!.asyncPiiRedaction;
+    delete state.settings!.asyncImagePiiRedaction;
+    delete state.settings!.piiBackend;
+    const { result } = await loadSettings();
+    expect(result.current.settings.asyncPiiRedaction).toBe(enterprise);
+    expect(result.current.settings.asyncImagePiiRedaction).toBe(enterprise);
+    expect(result.current.settings.piiBackend).toBe(enterprise ? "tinfoil" : "local");
+    expect(state.settings!.asyncPiiRedaction).toBe(enterprise);
+    expect(state.settings!.asyncImagePiiRedaction).toBe(enterprise);
+    expect(state.settings!.piiBackend).toBe(enterprise ? "tinfoil" : "local");
+  });
+
+  it("keeps saved local/off choices until an explicit enterprise reset", async () => {
+    const { result } = await loadSettings();
+    expect(result.current.settings.asyncPiiRedaction).toBe(false);
+    expect(result.current.settings.asyncImagePiiRedaction).toBe(false);
+    expect(result.current.settings.piiBackend).toBe("local");
+    await act(async () => { await result.current.resetSetting("piiBackend"); });
+    expect(state.settings!.piiBackend).toBe("tinfoil");
+    expect(state.settings!.asyncPiiRedaction).toBe(false);
+    await act(async () => { await result.current.resetSettings(); });
+    expect(state.settings!.usePiiRemoval).toBe(true);
+    expect(state.settings!.asyncPiiRedaction).toBe(true);
+    expect(state.settings!.asyncImagePiiRedaction).toBe(true);
+    expect(state.settings!.piiBackend).toBe("tinfoil");
+  });
+
+  it("keeps managed local/off settings through an enterprise reset", async () => {
+    state.settings!.enterpriseManagedSettings = {
+      usePiiRemoval: false, asyncPiiRedaction: false,
+      asyncImagePiiRedaction: false, piiBackend: "local",
+    };
+    const { result } = await loadSettings();
+    await act(async () => { await result.current.resetSettings(); });
+    expect(state.settings!.usePiiRemoval).toBe(false);
+    expect(state.settings!.asyncPiiRedaction).toBe(false);
+    expect(state.settings!.asyncImagePiiRedaction).toBe(false);
+    expect(state.settings!.piiBackend).toBe("local");
+  });
+
 });

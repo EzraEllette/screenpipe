@@ -746,11 +746,8 @@ let DEFAULT_SETTINGS: Settings = {
 			monitorIds: ["default"],
 			audioDevices: ["default"],
 			useSystemDefaultAudio: true,
-			// Default ON (#3819): this is the lightweight hot-path regex redaction
-			// in screenpipe-core (emails, phone numbers, SSNs, card numbers, API
-			// keys, etc.) — NOT the heavy async AI model (asyncPiiRedaction stays
-			// off, so no ~2.8GB model download). Privacy-by-default for new installs;
-			// existing users keep whatever they already chose.
+			// Basic regex redaction stays on for new desktop installs.
+			// Enterprise AI defaults are selected in createDefaultSettingsObject.
 			usePiiRemoval: true,
 			port: 3030,
 			dataDir: "default",
@@ -903,6 +900,9 @@ export function createDefaultSettingsObject(isEnterprise = false): Settings {
 	return Object.assign({}, DEFAULT_SETTINGS, {
 		disableClipboardCapture: !isEnterprise,
 		disableKeyboardCapture: !isEnterprise,
+		asyncPiiRedaction: isEnterprise,
+		asyncImagePiiRedaction: isEnterprise,
+		piiBackend: isEnterprise ? "tinfoil" : "local",
 	});
 }
 
@@ -1109,11 +1109,14 @@ function createSettingsStore() {
 		const store = await getStore();
 		const settings = await store.get<Settings>("settings");
 		// Existing explicit choices do not need a build-identity lookup.
-		const needsCaptureDefaults = !settings
+		const needsBuildDefaults = !settings
 			|| settings.disableClipboardCapture === undefined
-			|| settings.disableKeyboardCapture === undefined;
+			|| settings.disableKeyboardCapture === undefined
+			|| settings.asyncPiiRedaction === undefined
+			|| settings.asyncImagePiiRedaction === undefined
+			|| settings.piiBackend === undefined;
 		const defaults = createDefaultSettingsObject(
-			needsCaptureDefaults ? await resolveEnterpriseBuild() : false,
+			needsBuildDefaults ? await resolveEnterpriseBuild() : false,
 		);
 		if (!settings) {
 			return defaults;
@@ -1123,11 +1126,16 @@ function createSettingsStore() {
 		await hydrateCloudToken(settings);
 
 		let needsUpdate = normalizeSettingsArrays(settings);
-		for (const key of ["disableClipboardCapture", "disableKeyboardCapture"] as const) {
+		for (const key of ["disableClipboardCapture", "disableKeyboardCapture", "asyncPiiRedaction", "asyncImagePiiRedaction"] as const) {
 			if (settings[key] === undefined) {
 				settings[key] = defaults[key];
 				needsUpdate = true;
 			}
+		}
+
+		if (settings.piiBackend === undefined) {
+			settings.piiBackend = defaults.piiBackend;
+			needsUpdate = true;
 		}
 
 		// Migration: Ensure existing users have deviceId for free tier tracking
