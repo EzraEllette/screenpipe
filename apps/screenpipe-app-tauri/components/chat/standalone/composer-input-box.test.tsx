@@ -99,6 +99,23 @@ describe("ComposerInputBox", () => {
     expect(textarea.style.overflowY).toBe("auto");
   });
 
+  it("does not scroll for a 1px rounding difference", () => {
+    const { container, rerender } = render(composer("short"));
+    const textarea = container.querySelector("textarea")!;
+    // WebKit under page zoom can report the content 1px taller than the height
+    // it was just given.
+    Object.defineProperty(textarea, "clientHeight", {
+      configurable: true,
+      get(this: HTMLTextAreaElement) {
+        return Math.min(parseFloat(this.style.height) || 0, MAX_HEIGHT) - 1;
+      },
+    });
+
+    rerender(composer("one\ntwo\nthree"));
+    expect(textarea.style.height).toBe("82px");
+    expect(textarea.style.overflowY).toBe("hidden");
+  });
+
   it("keeps its height while hidden instead of collapsing", () => {
     const { container, rerender } = render(composer("one\ntwo\nthree"));
     const textarea = container.querySelector("textarea")!;

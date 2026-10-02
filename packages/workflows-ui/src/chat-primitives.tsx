@@ -117,7 +117,8 @@ function fitToContent(element: HTMLTextAreaElement) {
   // must not resize the box.
   if (element.value) {
     element.style.height = `${element.scrollHeight}px`;
-    element.style.overflowY = element.scrollHeight > element.clientHeight ? "auto" : "hidden";
+    // WebKit can round scrollHeight 1px past the height just set (page zoom).
+    element.style.overflowY = element.scrollHeight - element.clientHeight > 1 ? "auto" : "hidden";
   }
   if (parent) parent.style.minHeight = parentMinHeight;
 }
