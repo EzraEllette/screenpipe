@@ -158,11 +158,7 @@ describe("MemoizedReactMarkdown local images", () => {
       () => screen.getByText("~/\\\\host\\share\\a.mp4"),
     ],
     // The reader extracts a path from the string; here that is the share.
-    [
-      "network share after a quote in a link",
-      '[clip](</tmp/x"//host/share/a.mp4>)',
-      () => screen.getByRole("link", { name: "clip" }),
-    ],
+    ["network share after a quote in a link", '[clip](</tmp/x"//host/share/a.mp4>)', () => screen.getByText("clip")],
     ["network share after a quote in an image", '![clip](</tmp/x"//host/share/a.mp4>)', () => screen.getByText("clip")],
     [
       "network share on a second code line",

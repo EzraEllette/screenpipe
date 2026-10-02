@@ -102,6 +102,8 @@ mod livetext;
 mod livetext_ffi;
 mod enterprise_persistence;
 mod meeting_export;
+mod workflow_video;
+mod workflow_video_cli;
 mod meeting_live_notes;
 mod meeting_stall_notifications;
 mod oauth;
@@ -467,6 +469,17 @@ macro_rules! define_specta_builder {
 
 #[tokio::main]
 async fn main() {
+    // Invoked by the scoped video tool, before any application side effects.
+    let arguments: Vec<String> = std::env::args().collect();
+    if arguments.get(1).is_some_and(|arg| arg == "--render-workflow-video") {
+        let result = match arguments.get(2).filter(|_| arguments.len() == 3) {
+            Some(project) => workflow_video_cli::run(std::path::Path::new(project)).await,
+            None => Err("Expected one video project directory".into()),
+        };
+        if let Err(error) = &result { println!("{}", serde_json::json!({"error":error})); }
+        std::process::exit(if result.is_ok() { 0 } else { 1 });
+    }
+
     let relaunch_home_visible = process_exit::take_relaunch_home_visibility();
     // Handle private ACP subprocess modes before Tauri initializes. The
     // protocol host lives in core; desktop contributes only schedule projection.
@@ -902,6 +915,8 @@ async fn main() {
         last_spawn_epoch: Arc::new(AtomicU64::new(0)),
         wants_recording: Arc::new(AtomicBool::new(false)),
         deferred_account_start: Default::default(),
+        #[cfg(feature = "enterprise-build")]
+        authorization_recovery: Default::default(),
         interrupted_meeting: Arc::new(tokio::sync::Mutex::new(None)),
         cloud_token: Arc::new(arc_swap::ArcSwap::new(Arc::new(initial_cloud_token))),
         history_access: screenpipe_engine::history_access::HistoryAccessPolicy::unrestricted(),

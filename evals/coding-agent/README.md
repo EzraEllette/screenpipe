@@ -22,6 +22,17 @@ This does not execute the full search modal, native window events, macOS focus,
 real IPC, execution isolation or model trials. Current cache prewarm is checked
 separately and is allowed while the view is hidden.
 
+`app-mixed-note-paste` mounts the actual React and TipTap meeting-note editor
+with synthetic image conversion and inert menus/localization. Five outcomes cover
+mixed text/image paste, ordinary text, image-only files and HTML, and a delayed
+image after a keyed meeting switch. The parent loses mixed-paste text; four nearby
+outcomes pass. The historical fix and current source pass all five. Run
+`bun test evals/coding-agent/calibrate-note-paste.test.js` for calibration,
+including unused correct code, equivalent paragraph construction, lost text or
+images, blanket paste refusal and missing-source classification. Fixtures and
+dependency links appear only when grading begins. This does not execute native
+clipboard delivery, image encoding, disk autosave, agent isolation or model trials.
+
 The current app corpus contains 80 git-mined regressions. See
 [DESIGN.md](./DESIGN.md) for the Anthropic guidance, source contract, and
 history-mining workflow. The companion website manifest uses this same harness.

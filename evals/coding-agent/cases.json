@@ -4821,6 +4821,49 @@
         ],
         "command": "cd apps/screenpipe-app-tauri && node node_modules/vitest/vitest.mjs run --config vitest.config.ts eval-search-lifecycle.test.tsx"
       }
+    },
+    {
+      "id": "app-mixed-note-paste",
+      "name": "Preserve text when pasting an image into meeting notes",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "7c4e89fb03d9e39f680a440bef37152f9207fd2e"
+      },
+      "base_ref": "46fe476a01841e3b20b4ded99d87d6abd20dcfbc",
+      "oracle_ref": "7c4e89fb03d9e39f680a440bef37152f9207fd2e",
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/components/meeting-notes/note-editor.tsx"
+      ],
+      "gate": "advisory",
+      "trigger_paths": [
+        "apps/screenpipe-app-tauri/components/meeting-notes/note-editor.tsx",
+        "apps/screenpipe-app-tauri/components/meeting-notes/image-utils.ts"
+      ],
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "meeting-notes",
+        "clipboard",
+        "data-loss"
+      ],
+      "prompt": "Pasting a clipboard image together with readable text into a meeting note loses the text. Fix the actual editor paste path so the resulting document and emitted markdown retain both the image and the accompanying text. Preserve ordinary text paste, image-only file paste, and HTML-only image paste without duplicating the image URL as visible text. If the meeting changes while an image is being converted, the old paste must not insert into the newly keyed note. Preserve public editor interfaces. Checks mount the real React and TipTap editor with synthetic image conversion, inert menus and localization; native clipboard delivery, image encoding and disk autosave are outside this task. Any implementation satisfying these outcomes is accepted.",
+      "agent_timeout_seconds": 900,
+      "grader_dependency_links": [
+        {
+          "source_path": "apps/screenpipe-app-tauri/node_modules",
+          "destination_path": "apps/screenpipe-app-tauri/node_modules"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/mixed-note-paste.fixture.tsx.txt",
+            "destination_path": "apps/screenpipe-app-tauri/eval-mixed-note-paste.test.tsx"
+          }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && node node_modules/vitest/vitest.mjs run --config vitest.config.ts eval-mixed-note-paste.test.tsx"
+      }
     }
   ]
 }
