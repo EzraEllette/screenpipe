@@ -4845,6 +4845,47 @@
         ],
         "command": "cd apps/screenpipe-app-tauri && \"${BUN_BIN:-bun}\" --no-env-file test eval-chat-repeat-identity.test.ts"
       }
+    },
+    {
+      "id": "app-ocr-derived-copy-retry",
+      "name": "Redact persisted OCR words and retain retry after failed writes",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "e5600a3376e55806fd70ac406f2f5e353358fdc4",
+        "pull_request": "https://github.com/screenpipe/screenpipe/pull/4631"
+      },
+      "base_ref": "a2e58a5c9d323219dee86d8623221065c120d19d",
+      "oracle_ref": "e5600a3376e55806fd70ac406f2f5e353358fdc4",
+      "oracle_paths": [
+        "crates/screenpipe-redact/src/lib.rs",
+        "crates/screenpipe-redact/src/ocr_json.rs",
+        "crates/screenpipe-redact/src/worker/columns.rs",
+        "crates/screenpipe-redact/src/worker/mod.rs",
+        "crates/screenpipe-redact/src/worker/tables.rs"
+      ],
+      "gate": "advisory",
+      "trigger_paths": [
+        "crates/screenpipe-redact/src/**"
+      ],
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "privacy",
+        "ocr",
+        "durable-retry"
+      ],
+      "prompt": "The background redaction worker can finish a frame while the same sensitive text survives in its persisted per-word OCR JSON. Fix the actual worker so single-token sensitive values are scrubbed from both full_text and text_json, for map-producing and spanless redactors. Keep the OCR blocks, their order, all geometry and metadata, clean words and surrounding non-sensitive full text intact; replace sensitive words without discarding their blocks or emptying the word. OCR redaction must still occur when optional window-title and browser-URL redaction is disabled, and those opted-out fields must stay unchanged. Clean frames must finish processing without text or geometry changes. If SQLite rejects an OCR update, preserve the original full-text retry source and leave its completion marker unset. After that write failure clears and the worker is restarted on the same database, finish redaction successfully. Use the existing public Worker and redactor interfaces; no particular helper, replacement label, JSON formatting, detection count or write strategy is required. The task concerns background reconciliation of existing rows with the full-text, OCR and per-copy completion columns available. It does not require old-row backfill, whitespace-split entity reconstruction, a schema migration or capture-path changes. Preserve recording authorization and pause controls; do not block or discard captures to satisfy redaction work. Do not contact live model services.",
+      "agent_timeout_seconds": 1800,
+      "grader": {
+        "timeout_seconds": 180,
+        "fixtures": [
+          {
+            "local_path": "graders/ocr-derived-copy.rs",
+            "destination_path": "crates/screenpipe-redact/tests/eval_ocr_derived.rs"
+          }
+        ],
+        "command": "cargo test --locked -p screenpipe-redact --test eval_ocr_derived -- --test-threads=1"
+      }
     }
   ]
 }
