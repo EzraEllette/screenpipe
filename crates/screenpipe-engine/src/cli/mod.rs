@@ -2778,6 +2778,7 @@ mod tests {
                     "balanced"
                 }
             );
+            assert_eq!(settings.capture_max_width, 0);
             assert!(settings.use_all_monitors);
             assert!(settings.monitor_ids.is_empty());
         }
