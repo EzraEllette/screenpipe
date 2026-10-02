@@ -1436,3 +1436,17 @@ bun test evals/coding-agent/calibrate-openai-tool-choice.test.js
 ```
 
 This covers the provider boundary with synthetic transport. It does not establish model adherence, actual tool execution, gateway authentication, native Pi policy, agent isolation or model gains. The existing GLM case covers response conversion and remains separate.
+
+## Repeated chat prompts
+
+`app-chat-repeat-prompt-identity` runs the actual sidebar selector with synthetic
+in-memory records. Independent sends and legacy records stay separate; true
+message copies still collapse. Twelve outcomes also preserve wrappers, branches,
+pipe runs, the existing creation window, visible survivors and input records.
+
+Run `bun test evals/coding-agent/calibrate-chat-repeat-identity.test.js` with
+frontend dependencies installed. Controls include an equivalent identity encoding,
+unused correct code, disabled deduplication, identity-field omissions, a hidden
+survivor and missing-source classification. Fixtures and dependency links appear
+only at grading. This does not execute disk history/search, metadata transport,
+a mounted sidebar, native delivery, agent isolation or model trials.

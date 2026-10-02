@@ -4801,6 +4801,50 @@
         ],
         "command": "cd apps/screenpipe-app-tauri && node node_modules/vitest/vitest.mjs run --config vitest.config.ts eval-mixed-note-paste.test.tsx"
       }
+    },
+    {
+      "id": "app-chat-repeat-prompt-identity",
+      "name": "Keep independent same-prompt chats visible in the sidebar",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "c2051b6d02bed075e3acc97a9dc6d89c55b58db3"
+      },
+      "base_ref": "4c2f43f5c7b519dab72564a66541e4078a38963f",
+      "oracle_ref": "c2051b6d02bed075e3acc97a9dc6d89c55b58db3",
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/lib/chat-dedup.ts",
+        "apps/screenpipe-app-tauri/lib/stores/chat-store.ts"
+      ],
+      "gate": "advisory",
+      "trigger_paths": [
+        "apps/screenpipe-app-tauri/lib/chat-dedup.ts",
+        "apps/screenpipe-app-tauri/lib/stores/chat-store.ts"
+      ],
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "chat",
+        "sidebar",
+        "identity"
+      ],
+      "prompt": "Starting two chats with the same opening prompt can make one disappear from the sidebar. Repair the existing in-memory sidebar selection behavior. Independent sends must remain separate, including messages with different IDs at the same timestamp or the same ID at different timestamps. Preserve legacy conversations when a first user message lacks its ID or timestamp. Actual cross-window copies of the same first user message should still collapse within the existing thirty-minute creation window, including copies whose text carries connections context. Keep the copy with a completed reply instead of a Processing... placeholder; a visible copy must survive a hidden twin. Preserve distinct text, pipe runs, branches and conversations outside the creation window. Return the surviving records intact without mutating the input records or deleting stored conversations. Preserve the existing public selector interface. This task concerns in-memory sidebar selection; disk history/search and native UI transport are outside scope.",
+      "agent_timeout_seconds": 1200,
+      "grader_dependency_links": [
+        {
+          "source_path": "apps/screenpipe-app-tauri/node_modules",
+          "destination_path": "apps/screenpipe-app-tauri/node_modules"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/chat-repeat-identity.fixture.ts.txt",
+            "destination_path": "apps/screenpipe-app-tauri/eval-chat-repeat-identity.test.ts"
+          }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && \"${BUN_BIN:-bun}\" --no-env-file test eval-chat-repeat-identity.test.ts"
+      }
     }
   ]
 }
