@@ -37,6 +37,13 @@ describe("MemoizedReactMarkdown web links", () => {
     },
   );
 
+  it("opens a web media image, which renders as a link, outside the app window", () => {
+    const link = renderLink("![clip](https://example.com/clip.mp4)");
+    expect(link.getAttribute("href")).toBe("https://example.com/clip.mp4");
+    expect(link.getAttribute("target")).toBe("_blank");
+    expect(link.getAttribute("rel")).toBe("noopener noreferrer");
+  });
+
   it.each(["screenpipe://frame/123", "#notes"])("leaves %s to the app", (href) => {
     const link = renderLink(`[in app](${href})`);
     expect(link.getAttribute("href")).toBe(href);
