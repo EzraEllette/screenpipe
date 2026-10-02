@@ -787,7 +787,8 @@ mod tests {
             .map(|path| std::fs::read_to_string(path).unwrap())
             .unwrap_or_else(|_| {
                 "[Pi] LLM error via message_end : Connection error. [transport_code=ECONNRESET]\n\
-                 [Pi] Auto-retry failed: Connection error. [transport_code=ECONNRESET]\n"
+                 [Pi] Auto-retry failed: Connection error. [transport_code=ECONNRESET]\n\
+                 pipe 'daily-summary' error: The system cannot find the file specified. (os error 2)\n"
                     .into()
             });
         let current = logs.path().join("screenpipe-app.2026-10-01.log");
@@ -827,6 +828,9 @@ mod tests {
         let report = String::from_utf8_lossy(&upload.body);
         assert!(report.contains("LLM error via message_end : Connection error. [transport_code=ECONNRESET]"));
         assert!(report.contains("Auto-retry failed: Connection error. [transport_code=ECONNRESET]"));
+        assert!(report.contains(
+            "pipe 'daily-summary' error: The system cannot find the file specified. (os error 2)"
+        ));
         assert!(!report.contains("private-person"));
         assert!(!report.contains("hunter2"));
     }

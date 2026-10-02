@@ -8,7 +8,7 @@
 //! Pi is installed via bun and executed as a subprocess in "print" mode (`pi -p`).
 
 use super::{install_spawned_pid, AgentExecutor, AgentOutput, ExecutionHandle};
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 use arc_swap::ArcSwap;
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -32,25 +32,18 @@ fn prepare_pi_prompt_input(
     // Pi 0.84.1 treats piped stdin as the initial user message without adding
     // attachment markup. A seeked tempfile avoids both the Windows command-line
     // limit and the deadlock risk of writing a large prompt into a child pipe.
-    let mut user_prompt = tempfile::tempfile().context("failed to create pi user prompt input")?;
-    user_prompt
-        .write_all(prompt.as_bytes())
-        .context("failed to write pi user prompt input")?;
-    user_prompt
-        .seek(std::io::SeekFrom::Start(0))
-        .context("failed to rewind pi user prompt input")?;
+    let mut user_prompt = tempfile::tempfile()?;
+    user_prompt.write_all(prompt.as_bytes())?;
+    user_prompt.seek(std::io::SeekFrom::Start(0))?;
 
     // Pi resolves an existing --append-system-prompt value as a UTF-8 file.
     // Keep the named file alive until the child exits so the user/system roles
     // and the system-prefix caching boundary remain unchanged.
     let system_prompt = pipe_system_prompt
         .map(|prompt| -> Result<_> {
-            let mut file = tempfile::NamedTempFile::new()
-                .context("failed to create pi system prompt input")?;
-            file.write_all(prompt.as_bytes())
-                .context("failed to write pi system prompt input")?;
-            file.flush()
-                .context("failed to flush pi system prompt input")?;
+            let mut file = tempfile::NamedTempFile::new()?;
+            file.write_all(prompt.as_bytes())?;
+            file.flush()?;
             Ok(file)
         })
         .transpose()?;
@@ -1928,7 +1921,7 @@ impl PiExecutor {
         #[cfg(windows)]
         cmd.creation_flags(BACKGROUND_SPAWN_FLAGS);
 
-        let child = cmd.spawn().context("failed to launch pi")?;
+        let child = cmd.spawn()?;
         let pid = child.id();
 
         #[cfg(windows)]
@@ -2100,7 +2093,7 @@ impl PiExecutor {
         #[cfg(windows)]
         cmd.creation_flags(BACKGROUND_SPAWN_FLAGS);
 
-        let mut child = cmd.spawn().context("failed to launch pi")?;
+        let mut child = cmd.spawn()?;
         let pid = child.id();
 
         #[cfg(windows)]
@@ -4660,6 +4653,35 @@ mod tests {
             std::fs::read_to_string(second_path).unwrap(),
             "second system"
         );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn pi_launch_error_display_preserves_windows_io_cause() {
+        let missing = std::env::temp_dir().join(format!(
+            "screenpipe-missing-pi-{}-{}.exe",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut command = build_async_command(missing.to_str().unwrap());
+        let io_error = match command.spawn() {
+            Ok(mut child) => {
+                let _ = child.kill().await;
+                panic!("unexpectedly launched missing pi executable")
+            }
+            Err(error) => error,
+        };
+        assert_eq!(io_error.raw_os_error(), Some(2));
+
+        // Scheduler logging and execution history both use ordinary Display.
+        // Raw propagation must therefore retain the Windows OS text there.
+        let expected = io_error.to_string();
+        let persisted_error = anyhow::Error::from(io_error).to_string();
+        assert_eq!(persisted_error, expected);
+        assert!(persisted_error.contains("os error 2"));
     }
 
     #[test]
