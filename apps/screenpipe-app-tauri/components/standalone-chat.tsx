@@ -2453,6 +2453,7 @@ export function StandaloneChat({
         }}
         messageListProps={{
           ...messageListProps,
+          activeAcpAgentId: activePreset?.provider === "acp" ? activePreset.acpAgent?.id : null,
           onAddSelectedTextToChat: addSelectedTextToChat,
           onAskSelectedTextInSideChat:
             isTemporarySideConversation || !activePreset || activePreset.provider === "acp"

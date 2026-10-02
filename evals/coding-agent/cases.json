@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "suite": "screenpipe-app-coding-agent-regressions",
-  "dataset_version": "2026-09-30-running-pipes-lifecycle",
+  "dataset_version": "2026-10-01-audio-off-permissions",
   "suite_type": "regression",
   "owner": "screenpipe engineering",
   "policy": {
@@ -4501,6 +4501,305 @@
           }
         ],
         "command": "cd apps/screenpipe-app-tauri && node node_modules/vitest/vitest.mjs run --config eval-running-pipes.config.mjs"
+      }
+    },
+    {
+      "id": "app-model-catalog-session-freshness",
+      "name": "Keep model catalogs tied to the current hydrated session",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "757808f1043865752a05013e1a77973ce880f6f7",
+        "pull_request": "https://github.com/screenpipe/screenpipe/pull/5139"
+      },
+      "base_ref": "074e5512469da7a74fa08711484a5b7f859706fb",
+      "oracle_ref": "757808f1043865752a05013e1a77973ce880f6f7",
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/lib/hooks/use-pi-models.ts"
+      ],
+      "gate": "advisory",
+      "trigger_paths": [
+        "apps/screenpipe-app-tauri/lib/hooks/use-pi-models.ts"
+      ],
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "session",
+        "stale-response",
+        "model-catalog"
+      ],
+      "prompt": "The model picker can load before settings hydrate and later replace a new session\u2019s catalog with an older request. Fix the existing usePiModels hook. Do not request models until settings are loaded. Once loaded, support anonymous requests and include the current bearer token when present; refresh after token changes. Keep the last successful catalog visible during refresh and after HTTP or network failures. Responses from an abandoned session, including delayed response bodies, must never replace the current catalog or clear a newer request\u2019s loading state. Unloading settings must invalidate pending work and report no loading. Preserve the existing hook interface, model metadata, name fallback to ID, and first-occurrence deduplication by model ID. This task concerns React behavior with controlled settings and HTTP ports; native credential persistence is outside scope.",
+      "agent_timeout_seconds": 1200,
+      "grader_dependency_links": [
+        {
+          "source_path": "apps/screenpipe-app-tauri/node_modules",
+          "destination_path": "apps/screenpipe-app-tauri/node_modules"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/model-catalog.fixture.tsx.txt",
+            "destination_path": "apps/screenpipe-app-tauri/eval-model-catalog.test.tsx"
+          },
+          {
+            "local_path": "graders/model-catalog.config.mjs",
+            "destination_path": "apps/screenpipe-app-tauri/eval-model-catalog.config.mjs"
+          }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && node node_modules/vitest/vitest.mjs run --config eval-model-catalog.config.mjs"
+      }
+    },
+    {
+      "id": "app-recording-global-device-resume",
+      "name": "Resume globally stopped recording and individually paused devices",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "cdc3afb06cf62a6570cd196d1e9d0df87742498e"
+      },
+      "base_ref": "66936aa58874d10020132c80b679d42f47a63a3e",
+      "oracle_ref": "cdc3afb06cf62a6570cd196d1e9d0df87742498e",
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/components/recording-status.tsx"
+      ],
+      "gate": "advisory",
+      "trigger_paths": [
+        "apps/screenpipe-app-tauri/components/recording-status.tsx"
+      ],
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "recording",
+        "user-pause"
+      ],
+      "prompt": "The recording status popover has no working resume-all action when every device is paused. Preserve the RecordingStatus public interface and provide an accessible resume-all control. When the entire session is globally paused, resume through onResumeRecording once without issuing individual device requests. When the session is running but every device is individually paused, resume those devices through their existing POST /vision/device/start (monitor_id) and /audio/device/start (device_name) routes without invoking global callbacks. Keep pause-all routed through onPauseRecording for active or mixed device states. A legacy monitor without an id must issue no device request, while eligible audio devices still resume. Hide the global control when neither callback exists; when globally paused without a resume callback, the unavailable resume action must be disabled or absent. Preserve individual device request failure rollback. Keep the observable action names pause all recording, resume all recording, and resume accessible to assistive technology. No particular private function names, test attributes, or implementation structure are required. This task covers the historical frontend control and its synthetic callback/API boundaries, not native recording, the Home wiring, current rollout activation, or operating-system capture.",
+      "agent_timeout_seconds": 900,
+      "grader_dependency_links": [
+        {
+          "source_path": "apps/screenpipe-app-tauri/node_modules",
+          "destination_path": "apps/screenpipe-app-tauri/node_modules"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/recording-resume.fixture.tsx.txt",
+            "destination_path": "apps/screenpipe-app-tauri/.eval-hidden/recording-resume.test.tsx"
+          },
+          {
+            "local_path": "graders/recording-resume-config.mjs.txt",
+            "destination_path": "apps/screenpipe-app-tauri/.eval-hidden/recording-resume.config.mjs"
+          },
+          {
+            "local_path": "graders/recording-resume-translation.ts.txt",
+            "destination_path": "apps/screenpipe-app-tauri/.eval-hidden/recording-resume-translation.ts"
+          }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && node node_modules/vitest/vitest.mjs run --config .eval-hidden/recording-resume.config.mjs"
+      }
+    },
+    {
+      "id": "app-permission-recovery-audio-policy",
+      "name": "Respect audio-off policy in permission interfaces",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "7d176bc2ed68cf331a83d0be76e1859cbabb06e1"
+      },
+      "base_ref": "4340a80723e50ff2192d6f3543a79ff7d6dd5462",
+      "oracle_ref": "7d176bc2ed68cf331a83d0be76e1859cbabb06e1",
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "permissions",
+        "privacy",
+        "onboarding"
+      ],
+      "prompt": "Audio-disabled users still encounter microphone prompts in permission recovery, onboarding and the status banner. Make these interfaces respect disableAudio and an audioCaptureMode of disabled, case-insensitively. Recovery must withhold the microphone action until settings finish loading. Audio-off users must still be able to repair denied accessibility and screen access, including a screen denial alongside a denied microphone. Remove an existing microphone banner immediately when audio is turned off. In onboarding, do not query or offer the unneeded microphone permission, advance while settings are loading, or complete after unmount. If audio is re-enabled before delayed completion, require a fresh microphone permission result, including when a previous result was granted; complete once after all required permissions are granted. Preserve ordinary audio-on microphone requests and the recovery wheel: only the first denied permission is actionable, granting it enables the next, and already granted rows stay inactive. Keep existing public permission-row identifiers and accessible action labels compatible. The checks render the actual three interfaces with synthetic settings and native command ports. Native recording restart, pause enforcement, OS permissions and deployment are outside this case. Keep the change scoped to these permission behaviors.",
+      "agent_timeout_seconds": 900,
+      "grader": {
+        "timeout_seconds": 180,
+        "fixtures": [
+          {
+            "local_path": "graders/audio-policy-recovery.fixture.tsx.txt",
+            "destination_path": "apps/screenpipe-app-tauri/app/permission-recovery/audio-policy.eval.test.tsx"
+          },
+          {
+            "local_path": "graders/audio-policy-onboarding.fixture.tsx.txt",
+            "destination_path": "apps/screenpipe-app-tauri/components/onboarding/audio-policy.eval.test.tsx"
+          },
+          {
+            "local_path": "graders/audio-policy-banner.fixture.tsx.txt",
+            "destination_path": "apps/screenpipe-app-tauri/components/status/audio-policy.eval.test.tsx"
+          }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && NODE_OPTIONS=--localstorage-file=.eval-localstorage node node_modules/vitest/vitest.mjs run --config vitest.config.ts app/permission-recovery/audio-policy.eval.test.tsx components/onboarding/audio-policy.eval.test.tsx components/status/audio-policy.eval.test.tsx --pool=forks --poolOptions.forks.singleFork=true"
+      },
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/app/permission-recovery/page.tsx",
+        "apps/screenpipe-app-tauri/components/onboarding/permissions-step.tsx",
+        "apps/screenpipe-app-tauri/components/status/permission-banner.tsx",
+        "apps/screenpipe-app-tauri/lib/utils/permission-requirements.ts"
+      ],
+      "grader_dependency_links": [
+        {
+          "source_path": "apps/screenpipe-app-tauri/node_modules",
+          "destination_path": "apps/screenpipe-app-tauri/node_modules"
+        }
+      ]
+    },
+    {
+      "id": "app-openai-stream-tool-choice",
+      "name": "Preserve explicit tool-selection policy on OpenAI streams and retries",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "33d5637dda01c704e5436f0be477effbd18c1e4b"
+      },
+      "base_ref": "45105b5ee837501d0c10020a016b16ca2c4c4083",
+      "oracle_ref": "33d5637dda01c704e5436f0be477effbd18c1e4b",
+      "oracle_paths": [
+        "packages/ai-gateway/src/providers/openai.ts"
+      ],
+      "gate": "advisory",
+      "trigger_paths": [
+        "packages/ai-gateway/src/providers/openai.ts"
+      ],
+      "tags": [
+        "regression",
+        "gateway",
+        "tool-policy",
+        "streaming",
+        "preserved-behavior"
+      ],
+      "agent_timeout_seconds": 1200,
+      "prompt": "Streaming requests through the OpenAI provider lose the caller's tool-selection policy, although ordinary completions preserve it. Repair the existing provider behavior so required, auto, none and named-function tool_choice values reach the provider unchanged on streaming and non-streaming requests. An unspecified choice must remain unspecified, including requests without tools. Preserve the selected model, messages, exact tool schemas and input object. If an OpenAI-compatible server rejects stream_options.include_usage, the supported retry must omit that option while retaining the original tools and tool choice. Preserve streamed content, native tool-call identity/name/arguments, tool_calls finish reason, prompt/completion/total/cached usage and exactly one completion terminator. Do not change routing/model policy or authentication. Use synthetic SDK transport without live API calls or executing tools; no specific implementation shape is required. This task concerns provider request/response behavior, not native Pi configuration, model adherence to the tool policy or full gateway authentication.",
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/openai-tool-choice.test.js",
+            "destination_path": "evals/coding-agent/graders/openai-tool-choice.test.js"
+          }
+        ],
+        "command": "\"${BUN_BIN:-bun}\" test evals/coding-agent/graders/openai-tool-choice.test.js"
+      }
+    },
+    {
+      "id": "ai-gateway-auth-log-privacy",
+      "name": "Keep gateway authentication credentials and identities out of logs",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "33d5637dda01c704e5436f0be477effbd18c1e4b"
+      },
+      "base_ref": "45105b5ee837501d0c10020a016b16ca2c4c4083",
+      "oracle_ref": "33d5637dda01c704e5436f0be477effbd18c1e4b",
+      "oracle_paths": [
+        "packages/ai-gateway/src/utils/auth.ts"
+      ],
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "privacy",
+        "authentication"
+      ],
+      "prompt": "Gateway authentication writes credentials and account details to operational logs. Repair verifyClerkToken and validateAuth so successful and rejected verification, verified-account lookup, legacy website-token validation and provider exceptions do not log raw credentials, account IDs, email addresses, secret keys or upstream error details. Generic diagnostics or silence are both acceptable. Preserve actual token verification with the supplied verifier key, successful verified and legacy paid/free account tiers and canonical identity, Bearer and Token support, and anonymous access with the supplied device identity when credentials are missing, invalid, rejected or unavailable. Missing credentials must not trigger verification or account lookup. Use synthetic credentials only. This task does not require preserving public-identifier authentication or any particular log message or implementation structure.",
+      "agent_timeout_seconds": 900,
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/gateway-auth-log-privacy.test.js",
+            "destination_path": "evals/coding-agent/graders/gateway-auth-log-privacy.test.js"
+          }
+        ],
+        "command": "\"${BUN_BIN:-bun}\" test evals/coding-agent/graders/gateway-auth-log-privacy.test.js"
+      }
+    },
+    {
+      "id": "app-search-focus-lifecycle",
+      "name": "Suspend hidden search focus work and preserve reopening",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "27fef88bae7c56bb6bce58e98d8b97c28d7f7aac"
+      },
+      "base_ref": "073c54cba78b42719b909733fe151083baff3fed",
+      "oracle_ref": "27fef88bae7c56bb6bce58e98d8b97c28d7f7aac",
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/app/search/page.tsx"
+      ],
+      "gate": "advisory",
+      "trigger_paths": [
+        "apps/screenpipe-app-tauri/app/search/page.tsx",
+        "apps/screenpipe-app-tauri/components/rewind/hooks/use-search-focus.ts",
+        "apps/screenpipe-app-tauri/lib/hooks/use-event-listener.ts"
+      ],
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "search",
+        "lifecycle",
+        "focus"
+      ],
+      "prompt": "The retained search webview keeps reclaiming input focus while hidden. Fix the React search-page lifecycle: a page opened at /search?prewarm=1 must remain inactive until the native search-reset event; search-hidden must suspend focus work, even before the first show. An ordinary /search open must still focus the input and recover focus from a non-input element while visible. Reopening after hiding must restore usable focus and the supplied query, including Unicode and URL-special characters; a null or absent reset query clears the old query. Preserve result navigation with its timestamp, frame ID and search context, explicit native window-close handoff, and removal of listeners and focus work on unmount. Preserve public component/hook interfaces and any intentional recent-chat cache warming. This task covers the actual page and focus hook with synthetic native events and a small search-view shell, not native window-server execution or the full search-results UI. No particular mount strategy or private helper is prescribed.",
+      "agent_timeout_seconds": 900,
+      "grader_dependency_links": [
+        {
+          "source_path": "apps/screenpipe-app-tauri/node_modules",
+          "destination_path": "apps/screenpipe-app-tauri/node_modules"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/search-focus-lifecycle.fixture.tsx.txt",
+            "destination_path": "apps/screenpipe-app-tauri/eval-search-lifecycle.test.tsx"
+          }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && node node_modules/vitest/vitest.mjs run --config vitest.config.ts eval-search-lifecycle.test.tsx"
+      }
+    },
+    {
+      "id": "app-mixed-note-paste",
+      "name": "Preserve text when pasting an image into meeting notes",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "7c4e89fb03d9e39f680a440bef37152f9207fd2e"
+      },
+      "base_ref": "46fe476a01841e3b20b4ded99d87d6abd20dcfbc",
+      "oracle_ref": "7c4e89fb03d9e39f680a440bef37152f9207fd2e",
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/components/meeting-notes/note-editor.tsx"
+      ],
+      "gate": "advisory",
+      "trigger_paths": [
+        "apps/screenpipe-app-tauri/components/meeting-notes/note-editor.tsx",
+        "apps/screenpipe-app-tauri/components/meeting-notes/image-utils.ts"
+      ],
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "meeting-notes",
+        "clipboard",
+        "data-loss"
+      ],
+      "prompt": "Pasting a clipboard image together with readable text into a meeting note loses the text. Fix the actual editor paste path so the resulting document and emitted markdown retain both the image and the accompanying text. Preserve ordinary text paste, image-only file paste, and HTML-only image paste without duplicating the image URL as visible text. If the meeting changes while an image is being converted, the old paste must not insert into the newly keyed note. Preserve public editor interfaces. Checks mount the real React and TipTap editor with synthetic image conversion, inert menus and localization; native clipboard delivery, image encoding and disk autosave are outside this task. Any implementation satisfying these outcomes is accepted.",
+      "agent_timeout_seconds": 900,
+      "grader_dependency_links": [
+        {
+          "source_path": "apps/screenpipe-app-tauri/node_modules",
+          "destination_path": "apps/screenpipe-app-tauri/node_modules"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/mixed-note-paste.fixture.tsx.txt",
+            "destination_path": "apps/screenpipe-app-tauri/eval-mixed-note-paste.test.tsx"
+          }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && node node_modules/vitest/vitest.mjs run --config vitest.config.ts eval-mixed-note-paste.test.tsx"
       }
     }
   ]
