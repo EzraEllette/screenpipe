@@ -1436,3 +1436,34 @@ bun test evals/coding-agent/calibrate-openai-tool-choice.test.js
 ```
 
 This covers the provider boundary with synthetic transport. It does not establish model adherence, actual tool execution, gateway authentication, native Pi policy, agent isolation or model gains. The existing GLM case covers response conversion and remains separate.
+
+## Repeated chat prompts
+
+`app-chat-repeat-prompt-identity` runs the actual sidebar selector with synthetic
+in-memory records. Independent sends and legacy records stay separate; true
+message copies still collapse. Twelve outcomes also preserve wrappers, branches,
+pipe runs, the existing creation window, visible survivors and input records.
+
+Run `bun test evals/coding-agent/calibrate-chat-repeat-identity.test.js` with
+frontend dependencies installed. Controls include an equivalent identity encoding,
+unused correct code, disabled deduplication, identity-field omissions, a hidden
+survivor and missing-source classification. Fixtures and dependency links appear
+only at grading. This does not execute disk history/search, metadata transport,
+a mounted sidebar, native delivery, agent isolation or model trials.
+
+## OCR derived-copy retry
+
+`app-ocr-derived-copy-retry` runs the real native redaction worker against a
+temporary SQLite database and local regex redactors. Five outcomes cover map
+and spanless OCR scrubbing, geometry and clean-text preservation, optional-column
+opt-outs, and a rejected OCR write followed by a worker restart and successful
+retry. The fixture is installed only when grading starts. No dependency or build
+cache links are declared. The hidden grader accepts replacement labels and JSON
+formatting that preserve the required behavior.
+
+The case supplies a synthetic schema with the relevant completion columns. It
+does not verify migrations, process death or database reopening, capture
+continuity, old-row backfill, whitespace-split entities, live model providers,
+agent isolation or model capability. Run the shared runner with
+`--case app-ocr-derived-copy-retry --verify`; compilation and extraction failures
+must remain infrastructure errors, not evidence of the historical defect.
