@@ -1,12 +1,12 @@
 // screenpipe — AI that knows everything you've seen, said, or heard
 // https://screenpipe.com
 
-import { act, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { Editor } from "@tiptap/core";
 import { MarkdownBlock } from "./markdown-block";
 import { MemoizedReactMarkdown } from "@/components/markdown";
-import { createMeetingNoteEditorExtensions } from "@/components/meeting-notes/note-editor";
+import { createMeetingNoteEditorExtensions, NoteEditor } from "@/components/meeting-notes/note-editor";
 
 const GIF = "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
 
@@ -39,6 +39,8 @@ vi.mock("@/lib/hooks/use-timeline-store", () => ({
   useTimelineStore: { getState: () => ({ setPendingNavigation: vi.fn() }) },
 }));
 vi.mock("@/lib/notifications/actions", () => ({ routeNotificationDeeplink: vi.fn(async () => undefined) }));
+// The note's formatting menus play no part in what the note shows.
+vi.mock("@/components/meeting-notes/editor-menus", () => ({ FormatToolbar: () => null, SlashCommandMenu: () => null }));
 
 vi.hoisted(() => { globalThis.fetch = (() => { throw new Error("Eval network denied"); }) as typeof fetch; });
 
@@ -158,12 +160,39 @@ describe("meeting note editor", () => {
   const EMBEDDED = `data:image/gif;base64,${GIF}`;
   let editor: Editor | null = null;
   afterEach(() => { editor?.destroy(); editor = null; document.body.innerHTML = ""; });
+  // jsdom has no layout; the note scrolls its caret into view after edits.
+  beforeAll(() => {
+    Range.prototype.getClientRects = () => [] as unknown as DOMRectList;
+    Range.prototype.getBoundingClientRect = () => ({ x: 0, y: 0, top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0 }) as DOMRect;
+    vi.spyOn(window, "scrollBy").mockImplementation(() => {});
+  });
+  afterAll(() => {
+    delete (Range.prototype as Partial<Range>).getClientRects;
+    delete (Range.prototype as Partial<Range>).getBoundingClientRect;
+    vi.mocked(window.scrollBy).mockRestore();
+  });
 
   function mountNote(markdown: string) {
     const element = document.createElement("div");
     document.body.appendChild(element);
     editor = new Editor({ element, extensions: createMeetingNoteEditorExtensions(""), content: markdown });
     return element;
+  }
+  // The note editor component as the meeting view uses it.
+  async function renderNoteEditor(value: string) {
+    const saved = vi.fn();
+    const { container, rerender } = render(<NoteEditor value={value} onChange={saved} />);
+    const editable = await waitFor(() => {
+      const element = container.querySelector<HTMLElement>("[contenteditable]");
+      if (!element) throw new Error("note editor did not mount");
+      return element;
+    });
+    return {
+      container,
+      editable,
+      lastSaved: () => saved.mock.calls.at(-1)?.[0] as string | undefined,
+      update: (next: string) => rerender(<NoteEditor value={next} onChange={saved} />),
+    };
   }
   const remoteImages = (element: HTMLElement) =>
     fetchingElements(element).filter((html) => !html.includes(EMBEDDED));
@@ -194,33 +223,48 @@ describe("meeting note editor", () => {
     expect(markdownOf()).toContain("https://example.com/raw.png?d=secret");
   });
 
-  it("keeps an image an AI summary wrote when the note is copied and pasted back", async () => {
-    const element = mountNote([
+  it("keeps every image when a note is copied and pasted into a note", async () => {
+    mountNote([
       "before",
       "",
-      '<img src="https://example.com/chart.png?d=secret" alt="sales chart" width="40" height="30" />',
+      "![sales chart](https://example.com/chart.png?d=secret)",
       "",
-      "after",
+      `<img src="${EMBEDDED}" alt="whiteboard" width="40" height="30" />`,
     ].join("\n"));
-    const view = editor!.view;
-    // What the editor puts on the clipboard, then a cut and a paste.
-    const { dom } = view.serializeForClipboard(view.state.doc.slice(0, view.state.doc.content.size));
-    editor!.commands.clearContent();
-    expect(markdownOf()).not.toContain("chart.png");
-    view.pasteHTML(dom.innerHTML, new Event("paste") as ClipboardEvent);
+    // A copy through the editor's own clipboard handling.
+    const clipboard = new Map<string, string>();
+    editor!.commands.selectAll();
+    const copy = new Event("copy", { bubbles: true, cancelable: true });
+    Object.defineProperty(copy, "clipboardData", {
+      value: { clearData: () => clipboard.clear(), setData: (type: string, data: string) => clipboard.set(type, data), getData: (type: string) => clipboard.get(type) ?? "" },
+    });
+    editor!.view.dom.dispatchEvent(copy);
+    expect(clipboard.get("text/html")).toBeTruthy();
+
+    // Pasted into the note editor as a browser delivers a paste.
+    const note = await renderNoteEditor("");
+    const paste = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(paste, "clipboardData", {
+      value: { files: [], items: [], types: [...clipboard.keys()], getData: (type: string) => clipboard.get(type) ?? "" },
+    });
+    fireEvent(note.editable, paste);
+    await waitFor(() => expect(note.lastSaved()).toContain("https://example.com/chart.png?d=secret"));
     await settle();
-    expect(element).toHaveTextContent("sales chart");
-    expect(element).toHaveTextContent("after");
-    expect(remoteImages(element)).toEqual([]);
-    expect(markdownOf()).toContain("https://example.com/chart.png?d=secret");
+    expect(note.container).toHaveTextContent("before");
+    expect(note.container).toHaveTextContent("sales chart");
+    expect(remoteImages(note.container)).toEqual([]);
+    // The embedded image keeps its alt text and size.
+    expect(note.container.querySelector(`img[src="${EMBEDDED}"]`)).toHaveAttribute("alt", "whiteboard");
+    expect(note.lastSaved()).toContain('width="40"');
   });
 
   it("does not load a remote image that arrives with a later update", async () => {
-    const element = mountNote("notes");
-    editor!.commands.setContent("before\n\n![sales chart](https://example.com/late.png?d=secret)\n\nafter");
+    const note = await renderNoteEditor(`before\n\n![pasted screenshot](${EMBEDDED})\n\nafter`);
+    note.update("before\n\n![sales chart](https://example.com/late.png?d=secret)\n\nafter");
     await settle();
-    expect(element).toHaveTextContent("sales chart");
-    expect(element).toHaveTextContent("after");
-    expect(remoteImages(element)).toEqual([]);
+    expect(note.container).toHaveTextContent("sales chart");
+    expect(note.container).toHaveTextContent("after");
+    // The earlier embedded image is gone too; nothing may show in its place.
+    expect(fetchingElements(note.container)).toEqual([]);
   });
 });

@@ -13,6 +13,10 @@ const notes = `${app}/components/meeting-notes/note-editor.tsx`;
 const PREVIOUS_FIX = '7ee2e6ef078200f9781a98c39347d7c8f48c7663';
 // The second fix: notes blocked remote images, but a copied one pasted back as text.
 const SECOND_FIX = '359ac0c2512578a972ba07c09e895725d5021b6c';
+// The third fix: a copied blocked image pasted back, but pasting part of a note
+// renamed and resized its embedded images, and a later update could keep
+// showing an old picture where a blocked image now was.
+const THIRD_FIX = 'bbf239eaa5626876e48b30e8cc04b1e4c1187c1e';
 const root = mkdtempSync(join(tmpdir(), 'markdown-remote-images-calibration-')), archives = new Map();
 const receipts = process.env.SCREENPIPE_EVAL_CALIBRATION_RECEIPTS;
 afterAll(() => rmSync(root, {recursive: true, force: true}));
@@ -45,7 +49,9 @@ function passes(r) { expect(r.status).toBe(0); expect(r.stdout).toContain('64 pa
 function fails(r) { expect(r.status).toBe(1); expect(r.stderr).toMatch(BEHAVIOR_FAILURE); expect(r.stdout+r.stderr).not.toMatch(/Unhandled|Uncaught|Failed to resolve import|Failed to load url|Cannot find module/); }
 test('parent fails fifty-seven remote outcomes and preserves seven local files', () => { const r = grade('parent', item.base_ref); fails(r); expect(r.stdout).toContain('57 failed | 7 passed'); }, 120000);
 test('previous markdown-only fix fails media-path, alt-text and note outcomes', () => { const r = grade('previous-fix', PREVIOUS_FIX); fails(r); expect(r.stdout).toContain('16 failed | 48 passed'); }, 120000);
-test('second fix fails only the note copy outcome', () => { const r = grade('second-fix', SECOND_FIX); fails(r); expect(r.stdout).toContain('1 failed | 63 passed'); expect(r.stderr).toContain('copied and pasted back'); }, 120000);
+const NOTE_OUTCOMES = ['copied and pasted into a note', 'arrives with a later update'];
+test('second fix fails the note copy and later-update outcomes', () => { const r = grade('second-fix', SECOND_FIX); fails(r); expect(r.stdout).toContain('2 failed | 62 passed'); for (const name of NOTE_OUTCOMES) expect(r.stderr).toContain(name); }, 120000);
+test('third fix fails the note copy and later-update outcomes', () => { const r = grade('third-fix', THIRD_FIX); fails(r); expect(r.stdout).toContain('2 failed | 62 passed'); for (const name of NOTE_OUTCOMES) expect(r.stderr).toContain(name); }, 120000);
 test('historical reference passes every outcome', () => passes(grade('reference')), 120000);
 test('current caller passes every outcome', () => passes(grade('current', 'HEAD')), 120000);
 test('equivalent alt-text element passes', () => passes(grade('equivalent', item.oracle_ref, cwd => replace(cwd, markdown, 'return <ImageAltText alt={alt} />;', 'return alt ? <em>{alt}</em> : null;'))), 120000);
@@ -58,6 +64,8 @@ test('network-share paths treated as local fail', () => fails(grade('network-sha
 test('blanket image removal fails preserved local files', () => fails(grade('no-images', item.oracle_ref, cwd => replace(cwd, markdown, '    img({ src, alt }) {\n      if (src && isLocalMediaPath(src)) {', '    img({ src, alt }) {\n      if (src || !src) return null;\n      if (src && isLocalMediaPath(src)) {'))), 120000);
 test('note editor that renders any image source fails', () => fails(grade('note-any-image', item.oracle_ref, cwd => replace(cwd, notes, 'return typeof src === "string" && src.startsWith("data:image/");', 'return typeof src === "string";'))), 120000);
 test('note editor that deletes remote images from the note fails', () => fails(grade('note-drops-images', item.oracle_ref, cwd => replace(cwd, notes, '  renderHTML(props) {', '  parseHTML() {\n    return [{ tag: \'img[src^="data:"]\' }];\n  },\n\n  renderHTML(props) {'))), 120000);
+test('note editor that takes over pastes of embedded images fails', () => fails(grade('note-paste-takeover', item.oracle_ref, cwd => replace(cwd, notes, 'htmlImageSources.every(isEmbeddedImageSource)', 'htmlImageSources.length === 0'))), 120000);
+test('note image view reused for a different source fails', () => fails(grade('note-stale-view', item.oracle_ref, cwd => replace(cwd, notes, 'node.attrs.src === props.node.attrs.src && Boolean(parentUpdate?.(node, ...rest))', 'Boolean(parentUpdate?.(node, ...rest))'))), 120000);
 test('unused correct renderer cannot hide broken active caller', () => fails(grade('unused', item.oracle_ref, cwd => {
   writeFileSync(join(cwd, `${app}/unused-correct-markdown.tsx`), readFileSync(join(cwd, markdown)));
   writeFileSync(join(cwd, markdown), execFileSync('git', ['show', `${item.base_ref}:${markdown}`], {cwd: repo}));
