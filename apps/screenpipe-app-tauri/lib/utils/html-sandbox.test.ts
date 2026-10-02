@@ -156,8 +156,22 @@ describe("withoutLinkElements", () => {
     ['<lin<link>k rel="preconnect" href="https://a.example">x', "x"],
     ['<link title=">" rel="preconnect" href="https://a.example">x', '" rel="preconnect" href="https://a.example">x'],
     ["<linkish>kept</linkish>", "<linkish>kept</linkish>"],
+    ["<link/rel=preconnect href=//a.example>x", "x"],
+    ["<link\trel=preconnect\fhref=//a.example>x", "x"],
+    ["<link>x", "x"],
   ])("removes every link from %j", (input, expected) => {
     expect(withoutLinkElements(input)).toBe(expected);
+  });
+
+  it.each([
+    // A custom element whose name starts with link-.
+    '<link-card href="/a">Docs</link-card><p>after</p>',
+    // Script that only mentions links. Removing up to the next ">" would eat
+    // the </script> and blank the page.
+    "<script>for(var i=0;i<link.length;i++){}</script><h1>Report</h1>",
+    "<script>const parts = html.split('<link');</script><h1>Report</h1>",
+  ])("leaves %j alone", (input) => {
+    expect(withoutLinkElements(input)).toBe(input);
   });
 });
 

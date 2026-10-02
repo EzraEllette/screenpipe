@@ -16,6 +16,15 @@ window.mermaid = {
     window.mermaidCalls.documents.push(document);
     if (chart === "bad") return Promise.reject(new Error("Unsupported color format"));
     if (chart === "never") return new Promise(function () {});
+    if (chart === "image shape") {
+      // Mermaid sizes an image shape from its decoded picture.
+      var picture = new Image();
+      picture.src = "https://evil.example/shape.png";
+      return picture.decode().then(function () {
+        window.mermaidCalls.decoded = picture.src;
+        return { svg: '<svg viewBox="0 0 10 10"><text>image shape</text></svg>' };
+      });
+    }
     return Promise.resolve({
       svg: '<svg id="' + id + '" width="100%" style="max-width: 200px;" viewBox="0 0 200 100">' +
         '<style>.node { fill: red; }</style>' +
@@ -25,7 +34,7 @@ window.mermaid = {
 };`;
 
 type FrameWindow = Window & {
-  mermaidCalls: { configs: Array<Record<string, unknown>>; documents: Document[] };
+  mermaidCalls: { configs: Array<Record<string, unknown>>; documents: Document[]; decoded?: string };
 };
 
 describe("renderMermaidSvg", () => {
@@ -121,6 +130,32 @@ describe("renderMermaidSvg", () => {
       await expect(next).resolves.toMatchObject({ text: "next end" });
     } finally {
       vi.useRealTimers();
+    }
+  });
+
+  it("draws an image shape whose picture the CSP blocks from a blank stand-in", async () => {
+    // jsdom decodes nothing. Give each new frame the browser's behavior: the
+    // CSP refuses a web picture, so its decode rejects; a data: picture decodes.
+    const observer = new MutationObserver(() => {
+      const frame = document.querySelector("iframe");
+      const FrameImage = (frame?.contentWindow as unknown as typeof globalThis | null)?.HTMLImageElement;
+      if (!FrameImage || FrameImage.prototype.decode) return;
+      FrameImage.prototype.decode = function (this: HTMLImageElement) {
+        return this.src.startsWith("data:")
+          ? Promise.resolve()
+          : Promise.reject(new Error("The source image cannot be decoded."));
+      };
+    });
+    observer.observe(document.body, { childList: true });
+    try {
+      const { renderMermaidSvg } = await import("../mermaid-sandbox");
+
+      await expect(renderMermaidSvg("image shape", {})).resolves.toMatchObject({ text: "image shape" });
+
+      const frame = document.querySelector("iframe")!;
+      expect((frame.contentWindow as FrameWindow).mermaidCalls.decoded).toMatch(/^data:image\/png;base64,/);
+    } finally {
+      observer.disconnect();
     }
   });
 

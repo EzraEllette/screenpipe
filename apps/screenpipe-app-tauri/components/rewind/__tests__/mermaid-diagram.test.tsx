@@ -42,7 +42,9 @@ describe("MermaidDiagram", () => {
     // The remote URLs exist only inside the inert image data.
     expect(container.querySelectorAll("svg, foreignObject, image")).toHaveLength(0);
     expect(container.querySelectorAll("img")).toHaveLength(1);
-    expect(container.innerHTML).not.toContain("https://evil.example");
+    expect(decodeURIComponent(image.getAttribute("src")!)).toContain("https://evil.example/label.png");
+    image.removeAttribute("src");
+    expect(container.innerHTML).not.toContain("evil.example");
   });
 
   it("shows the source when the diagram cannot be drawn", async () => {

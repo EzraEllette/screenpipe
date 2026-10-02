@@ -71,6 +71,15 @@ describe("remote images in rendered content", () => {
     ).toEqual(REVIEWED_MARKDOWN_RENDERERS);
   });
 
+  it("parses raw HTML in markdown only where the chat sanitizer follows", () => {
+    expect(
+      filesImporting("rehype-raw"),
+      "Raw HTML in markdown brings tags the img component never sees, such as " +
+        "<video poster>. Render it through MarkdownBlock in components/chat/markdown-block.tsx, " +
+        "which sanitizes what rehype-raw parses, or sanitize it the same way and add it here.",
+    ).toEqual(["components/chat/markdown-block.tsx"]);
+  });
+
   it("never loads Mermaid into the app window", () => {
     expect(
       filesImporting("mermaid"),

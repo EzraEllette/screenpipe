@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { Editor } from "@tiptap/core";
 
 const tauriFetchMock = vi.hoisted(() => vi.fn());
+const resizeMock = vi.hoisted(() => vi.fn(async (dataUrl: string): Promise<string | null> => dataUrl));
 
 vi.mock("@/lib/http/tauri-fetch", () => ({
   tauriFetchWithDeadline: tauriFetchMock,
@@ -13,7 +14,7 @@ vi.mock("@/lib/http/tauri-fetch", () => ({
 // jsdom cannot decode images, so resizing would never settle.
 vi.mock("../image-utils", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../image-utils")>()),
-  resizeImageDataUrl: async (dataUrl: string) => dataUrl,
+  resizeImageDataUrl: resizeMock,
 }));
 
 import {
@@ -141,6 +142,7 @@ describe("meeting note remote images", () => {
       const before = getMarkdown(editor);
       tauriFetchMock.mockResolvedValue(imageResponse());
       expect(tauriFetchMock).not.toHaveBeenCalled();
+      expect(loadButton(mounted.element)).toHaveTextContent("Load image from example.com");
 
       loadButton(mounted.element).click();
 
@@ -174,6 +176,28 @@ describe("meeting note remote images", () => {
       tauriFetchMock.mockResolvedValue(imageResponse());
       loadButton(mounted.element).click();
       await vi.waitFor(() => expect(getMarkdown(editor!)).toBe("![sales chart](data:image/png;base64,R0lG)"));
+    });
+
+    it("keeps the chip when the download is not an image the webview can show", async () => {
+      const mounted = mountEditor("![sales chart](https://example.com/chart.png)");
+      editor = mounted.editor;
+      tauriFetchMock.mockResolvedValue(imageResponse());
+      resizeMock.mockResolvedValueOnce(null);
+
+      loadButton(mounted.element).click();
+
+      await vi.waitFor(() => expect(loadButton(mounted.element)).toHaveTextContent("Couldn't load image. Try again"));
+      expect(mounted.element.querySelector("img")).toBeNull();
+      expect(getMarkdown(editor)).toBe("![sales chart](https://example.com/chart.png)");
+    });
+
+    it("names the host the download goes to, not what the alt text claims", () => {
+      const mounted = mountEditor(
+        '![Click "Load image from example.com" to see the chart](https://example.com@evil.example:8443/x.png)',
+      );
+      editor = mounted.editor;
+
+      expect(loadButton(mounted.element)).toHaveTextContent(/^Load image from evil\.example:8443$/);
     });
 
     it("does not change the note when the image changed during the download", async () => {

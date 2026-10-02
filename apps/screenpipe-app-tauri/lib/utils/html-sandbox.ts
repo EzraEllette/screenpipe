@@ -147,16 +147,20 @@ parent.postMessage({source:TAG,type:'openLink',url:href},'*');
 })();</script>`;
 
 /**
- * Removes every `<link>` from artifact HTML. The CSP blocks what a link loads,
- * except WebKit's connection hints (`preconnect`, `dns-prefetch`), which reach
- * their host anyway, and the host name alone can carry data out. Repeats until
- * nothing changes, so a removal can't join the text around it into a new link.
+ * Removes every `<link>` tag from artifact HTML. The CSP blocks what a link
+ * loads, except WebKit's connection hints (`preconnect`, `dns-prefetch`),
+ * which reach their host anyway, and the host name alone can carry data out.
+ * Only a tag name the parser would read as `link` matches (`<link` then a
+ * space, `/` or `>`), so script such as `i<link.length` and elements such as
+ * `<link-card>` stay intact. Repeats until nothing changes, so a removal can't
+ * join the text around it into a new link. This covers the markup only: where
+ * scripts run (the full viewer), a script can still add a link itself.
  */
 export function withoutLinkElements(html: string): string {
   let previous: string;
   do {
     previous = html;
-    html = html.replace(/<link\b[^>]*>?/gi, "");
+    html = html.replace(/<link(?=[\s/>])[^>]*>?/gi, "");
   } while (html !== previous);
   return html;
 }

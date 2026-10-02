@@ -836,7 +836,8 @@ export function NoteView({
         const images: string[] = [];
         for (const path of imagePaths) {
           const raw = imageBytesToDataUrl(path, await readFile(path));
-          if (raw) images.push(await resizeImageDataUrl(raw));
+          const image = raw && (await resizeImageDataUrl(raw));
+          if (image) images.push(image);
         }
         if (images.length === 0) return;
         const { x, y } = toClient(pos);

@@ -44,15 +44,19 @@ function isWebImageSource(src: unknown): src is string {
 }
 
 export interface MeetingNoteImageLabels {
-  /** The button that downloads a blocked web image into the note. */
-  load: string;
+  /**
+   * The button that downloads a blocked web image into the note. It names the
+   * host the download goes to: the alt text beside it was written by whoever
+   * wrote the note, and could ask for the click.
+   */
+  load: (host: string) => string;
   loading: string;
   /** The same button after a download failed. */
   retry: string;
 }
 
 const ENGLISH_IMAGE_LABELS: MeetingNoteImageLabels = {
-  load: "Load image",
+  load: (host) => `Load image from ${host}`,
   loading: "Loading image…",
   retry: "Couldn't load image. Try again",
 };
@@ -81,6 +85,14 @@ function blockedImageSpec(attrs: Record<string, unknown>): DOMOutputSpec {
   ];
 }
 
+function imageHost(src: string): string {
+  try {
+    return new URL(src).host;
+  } catch {
+    return src;
+  }
+}
+
 // How the note shows an image it doesn't carry. A web image gets a button
 // that downloads it into the note once the user asks, the way a paste does;
 // the note then shows it like any embedded image. Nothing loads before that.
@@ -88,13 +100,14 @@ function blockedImageView(props: NodeViewRendererProps, labels: MeetingNoteImage
   const dom = DOMSerializer.renderSpec(document, blockedImageSpec(props.node.attrs)).dom as HTMLElement;
   const src = props.node.attrs.src;
   if (!isWebImageSource(src)) return { dom };
+  const loadLabel = labels.load(imageHost(src));
 
   const button = document.createElement("button");
   button.type = "button";
   button.dataset.imageLoad = "";
   button.className =
-    "shrink-0 cursor-pointer rounded px-1.5 py-0.5 font-medium text-foreground underline-offset-2 hover:underline disabled:cursor-default disabled:no-underline disabled:text-muted-foreground";
-  button.textContent = labels.load;
+    "min-w-0 cursor-pointer text-left [overflow-wrap:anywhere] rounded px-1.5 py-0.5 font-medium text-foreground underline-offset-2 hover:underline disabled:cursor-default disabled:no-underline disabled:text-muted-foreground";
+  button.textContent = loadLabel;
   // Keep the caret where it was.
   button.addEventListener("mousedown", (event) => event.preventDefault());
   button.addEventListener("click", async () => {
@@ -106,7 +119,7 @@ function blockedImageView(props: NodeViewRendererProps, labels: MeetingNoteImage
     // The note turned read-only meanwhile (a summary is being written into
     // it), so it takes no edit; the chip offers the download again.
     if (!props.editor.isEditable) {
-      button.textContent = labels.load;
+      button.textContent = loadLabel;
       return;
     }
     const pos = props.getPos();
@@ -170,6 +183,9 @@ const ResizableImage = Image.extend<ImageOptions & { labels: MeetingNoteImageLab
               `![${state.esc(alt || "")}](${(src || "").replace(/[()]/g, "\\$&")}${title ? ` "${title.replace(/"/g, '\\"')}"` : ""})`,
             );
           }
+          // A block image ends its block, or the next block (a heading,
+          // a list) is glued onto the image's line and turns into text.
+          state.closeBlock(node);
         },
         parse: {
           // markdown-it handles both ![alt](src) and <img> natively
@@ -562,7 +578,7 @@ function NoteEditor(
     immediatelyRender: false,
     editable: !readOnly,
     extensions: createMeetingNoteEditorExtensions(placeholder ?? "", {
-      load: ui("Load image"),
+      load: (host) => ui("Load image from {host}", { host }),
       loading: ui("Loading image…"),
       retry: ui("Couldn't load image. Try again"),
     }),
