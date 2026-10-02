@@ -10,6 +10,7 @@ import {
   isHtmlFileName,
   looksLikeFullHtmlDocument,
   shouldRenderHtmlByDefault,
+  withoutLinkElements,
   wrapHtmlForSandbox,
 } from "./html-sandbox";
 
@@ -147,6 +148,19 @@ describe("SANDBOX_CSP", () => {
   });
 });
 
+describe("withoutLinkElements", () => {
+  it.each([
+    ['<link rel="preconnect" href="https://a.example">', ""],
+    ["<LINK rel=dns-prefetch href=//a.example>x", "x"],
+    // Removing the inner one must not join the rest into a new link.
+    ['<lin<link>k rel="preconnect" href="https://a.example">x', "x"],
+    ['<link title=">" rel="preconnect" href="https://a.example">x', '" rel="preconnect" href="https://a.example">x'],
+    ["<linkish>kept</linkish>", "<linkish>kept</linkish>"],
+  ])("removes every link from %j", (input, expected) => {
+    expect(withoutLinkElements(input)).toBe(expected);
+  });
+});
+
 describe("wrapHtmlForSandbox", () => {
   it("injects the CSP as the first head child for a full document", () => {
     const out = wrapHtmlForSandbox(
@@ -171,7 +185,8 @@ describe("wrapHtmlForSandbox", () => {
   it("wraps a bare fragment into a document", () => {
     const out = wrapHtmlForSandbox("<h1>chart</h1><script>1</script>");
     expect(out.toLowerCase()).toContain("<!doctype html>");
-    expect(out).toContain("<body><h1>chart</h1>");
+    // The parser opens the body for it, right after our head.
+    expect(out).toMatch(/<\/head><h1>chart<\/h1><script>1<\/script>$/);
     expect(out).toContain(SANDBOX_CSP);
   });
 

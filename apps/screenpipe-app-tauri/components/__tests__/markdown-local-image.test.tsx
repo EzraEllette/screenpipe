@@ -33,7 +33,9 @@ import {
   MemoizedReactMarkdown,
   chatUrlTransform,
   resolveLocalPathFromMarkdownUrl,
+  rewriteLocalMarkdownLinksForChat,
 } from "@/components/markdown";
+import { LocalMarkdownImage } from "@/components/markdown/local-markdown-image";
 
 const TINY_GIF_B64 =
   "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
@@ -78,40 +80,115 @@ describe("MemoizedReactMarkdown local images", () => {
     expect(blob.type).toBe("image/gif");
   });
 
-  it("renders nothing instead of a broken icon when the local file cannot be read", async () => {
+  it("shows the alt text and path instead of a broken icon when the local file cannot be read", async () => {
     getMediaFileMock.mockRejectedValue(new Error("File does not exist"));
 
     const { container } = render(
       <MemoizedReactMarkdown>
-        {"![missing](/tmp/missing.jpg)"}
+        {"before ![missing](/tmp/missing.jpg) after"}
       </MemoizedReactMarkdown>,
     );
 
-    await waitFor(() => {
-      expect(getMediaFileMock).toHaveBeenCalledWith("/tmp/missing.jpg");
-    });
-    expect(screen.queryByAltText("missing")).not.toBeInTheDocument();
+    await waitFor(() => expect(container).toHaveTextContent("before missing /tmp/missing.jpg after"));
+    expect(getMediaFileMock).toHaveBeenCalledWith("/tmp/missing.jpg");
+    expect(container.querySelector("code")).toHaveTextContent("/tmp/missing.jpg");
     expect(container.querySelector("img")).toBeNull();
   });
 
+  it("shows the path of an unreadable local file that has no alt text", async () => {
+    getMediaFileMock.mockRejectedValue(new Error("File does not exist"));
+
+    const { container } = render(<MemoizedReactMarkdown>{"![](/tmp/missing.jpg)"}</MemoizedReactMarkdown>);
+
+    await waitFor(() => expect(container.querySelector("code")).toHaveTextContent("/tmp/missing.jpg"));
+    expect(container.querySelector("img")).toBeNull();
+  });
+
+  it("shows an unreadable file: image as its address, not a link that opens nothing", async () => {
+    getMediaFileMock.mockRejectedValue(new Error("File does not exist"));
+
+    const { container } = render(
+      <MemoizedReactMarkdown urlTransform={chatUrlTransform}>
+        {"![missing](file:///tmp/missing%20shot.jpg)"}
+      </MemoizedReactMarkdown>,
+    );
+
+    await waitFor(() => expect(container.querySelector("code")).toHaveTextContent("file:///tmp/missing shot.jpg"));
+    expect(getMediaFileMock).toHaveBeenCalledWith("/tmp/missing shot.jpg");
+    expect(container).toHaveTextContent("missing file:///tmp/missing shot.jpg");
+    expect(container.querySelector("a")).toBeNull();
+  });
+
+  it("shows a local image that couldn't be read once it can, after another image used its place", async () => {
+    getMediaFileMock
+      .mockRejectedValueOnce(new Error("File does not exist"))
+      .mockResolvedValue({ data: TINY_GIF_B64, mimeType: "image/gif" });
+    let nextUrl = 0;
+    URL.createObjectURL = vi.fn(() => `blob:local-${nextUrl++}`);
+    URL.revokeObjectURL = vi.fn();
+    const image = (path: string) => <LocalMarkdownImage path={path} alt="shot" fallback={<code>{path}</code>} />;
+
+    const { container, rerender } = render(image("/tmp/a.gif"));
+    await waitFor(() => expect(container.querySelector("code")).toHaveTextContent("/tmp/a.gif"));
+    rerender(image("/tmp/b.gif"));
+    await waitFor(() => expect(screen.getByAltText("shot")).toHaveAttribute("src", "blob:local-0"));
+    rerender(image("/tmp/a.gif"));
+    // Never the other path's picture while this one loads.
+    expect(container.querySelector("img")).toBeNull();
+
+    await waitFor(() => expect(screen.getByAltText("shot")).toHaveAttribute("src", "blob:local-1"));
+    expect(container.querySelector("code")).toBeNull();
+    expect(getMediaFileMock.mock.calls.map(([path]) => path)).toEqual(["/tmp/a.gif", "/tmp/b.gif", "/tmp/a.gif"]);
+  });
+
   // A remote image loads the moment it renders and sends its URL to that
-  // server, so markdown shows the alt text instead of fetching anything.
+  // server, so markdown shows a link to it instead, which opens only when
+  // clicked.
   it.each([
-    ["https", "![remote chart](https://example.com/pipe.png?d=secret)"],
-    ["http", "![remote chart](http://example.com/pipe.png)"],
-    ["protocol-relative", "![remote chart](//example.com/pipe.png)"],
-    ["reference-style", "![remote chart][r]\n\n[r]: https://example.com/pipe.png"],
-    ["relative", "![remote chart](pipe.png)"],
-  ])("shows %s images as alt text without loading them", (_name, markdown) => {
+    ["https", "![remote chart](https://example.com/pipe.png?d=secret)", "https://example.com/pipe.png?d=secret"],
+    ["http", "![remote chart](http://example.com/pipe.png)", "http://example.com/pipe.png"],
+    ["protocol-relative", "![remote chart](//example.com/pipe.png)", "//example.com/pipe.png"],
+    ["reference-style", "![remote chart][r]\n\n[r]: https://example.com/pipe.png", "https://example.com/pipe.png"],
+  ])("shows %s images as a link without loading them", (_name, markdown, href) => {
     const { container } = render(
       <MemoizedReactMarkdown urlTransform={chatUrlTransform}>
         {markdown}
       </MemoizedReactMarkdown>,
     );
 
-    expect(screen.getByText("remote chart")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "remote chart" })).toHaveAttribute("href", href);
     expect(container.querySelector("img")).toBeNull();
     expect(getMediaFileMock).not.toHaveBeenCalled();
+  });
+
+  it("shows a relative image as its alt text and address", () => {
+    const { container } = render(
+      <MemoizedReactMarkdown urlTransform={chatUrlTransform}>
+        {"![remote chart](pipe.png)"}
+      </MemoizedReactMarkdown>,
+    );
+
+    expect(container).toHaveTextContent("remote chart pipe.png");
+    expect(screen.queryByRole("link")).toBeNull();
+    expect(container.querySelector("img")).toBeNull();
+    expect(getMediaFileMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps an image inside a link as the link's words, not a second link", () => {
+    // A README badge: the image is the link's only content.
+    const { container } = render(
+      <MemoizedReactMarkdown urlTransform={chatUrlTransform}>
+        {"[![build](https://img.example.com/badge.svg)](https://example.com/ci) and [![](https://img.example.com/b.svg)](https://example.com/b)"}
+      </MemoizedReactMarkdown>,
+    );
+
+    const links = screen.getAllByRole("link");
+    expect(links.map((link) => [link.getAttribute("href"), link.textContent])).toEqual([
+      ["https://example.com/ci", "build"],
+      ["https://example.com/b", "https://img.example.com/b.svg"],
+    ]);
+    expect(container.querySelector("a a")).toBeNull();
+    expect(container.querySelector("img")).toBeNull();
   });
 
   it.each([
@@ -137,7 +214,12 @@ describe("MemoizedReactMarkdown local images", () => {
       </MemoizedReactMarkdown>,
     );
 
-    expect(container).toHaveTextContent("before after remote chart");
+    // An image with no alt text is named by its address, so it doesn't vanish.
+    expect(container).toHaveTextContent("before https://example.com/pipe.png after remote chart");
+    expect(screen.getByRole("link", { name: "https://example.com/pipe.png" })).toHaveAttribute(
+      "href",
+      "https://example.com/pipe.png",
+    );
     expect(container.querySelector("img")).toBeNull();
   });
 
@@ -189,6 +271,25 @@ describe("MemoizedReactMarkdown local images", () => {
     );
 
     expect(screen.getByTestId("media-component")).toHaveTextContent(path);
+  });
+
+  // Markdown escapes a backslash as `\\`, so chat may write a Windows path
+  // either way. Only two separators at the very start make a network share.
+  const recording = String.raw`C:\Users\me\.screenpipe\data\Mic (Realtek Audio) (input)_2026-05-25_21-42-22.mp4`;
+  const escapedRecording = recording.replaceAll("\\", "\\\\");
+  it.each([
+    ["link", `[call](${escapedRecording})`, recording],
+    ["image", `![call](${escapedRecording})`, recording],
+    ["link with no spaces", String.raw`[clip](C:\\Users\\me\\clip.mp4)`, String.raw`C:\Users\me\clip.mp4`],
+  ])("plays a Windows recording written with doubled backslashes as a %s", (_name, markdown, path) => {
+    render(
+      <MemoizedReactMarkdown urlTransform={chatUrlTransform}>
+        {rewriteLocalMarkdownLinksForChat(markdown)}
+      </MemoizedReactMarkdown>,
+    );
+
+    expect(screen.getByTestId("media-component").textContent).toBe(path);
+    expect(document.querySelector("a")).toBeNull();
   });
 
   it("recognizes Windows absolute image paths as local files", () => {

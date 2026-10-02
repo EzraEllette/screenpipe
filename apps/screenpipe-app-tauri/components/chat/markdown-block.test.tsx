@@ -248,6 +248,14 @@ describe("MarkdownBlock", () => {
     expect(getMediaFileMock).not.toHaveBeenCalled();
   });
 
+  it("keeps an image address with a line break in it on its line", () => {
+    const { container } = render(<MarkdownBlock text="see ![a](rel%0Aname.png) here" isUser={false} />);
+
+    expect(container.querySelector("p")).toHaveTextContent("see a rel name.png here");
+    expect(container.querySelector("p code")).toHaveTextContent("rel name.png");
+    expect(container.querySelector("pre, button")).toBeNull();
+  });
+
   it("never plays a different file than a chat link names", () => {
     const { container } = render(
       <MarkdownBlock

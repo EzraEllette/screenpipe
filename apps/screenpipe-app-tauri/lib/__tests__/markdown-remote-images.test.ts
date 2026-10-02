@@ -15,6 +15,7 @@ import { relative, resolve } from "node:path";
 // MemoizedReactMarkdown (components/markdown.tsx) renders only local files as
 // images; each other direct react-markdown renderer overrides or excludes img.
 const REVIEWED_MARKDOWN_RENDERERS = [
+  "../../packages/workflows-ui/src/chat-primitives.tsx", // img renders nothing
   "app/notification-panel/page.tsx", // img shows alt text
   "components/announcement-body.tsx", // img shows alt text
   "components/markdown.tsx", // MemoizedReactMarkdown: local files only
@@ -44,14 +45,19 @@ function frontendSourceFiles(directory: string): string[] {
   });
 }
 
-function filesImporting(pkg: string): string[] {
+// The app's own source and the workflow UI package it bundles, as paths from
+// the app folder.
+function filesMatching(pattern: RegExp): string[] {
   const root = process.cwd();
-  const pattern = runtimeImportOf(pkg);
-  return ["app", "components", "lib"]
+  return ["app", "components", "lib", "../../packages/workflows-ui/src"]
     .flatMap((dir) => frontendSourceFiles(resolve(root, dir)))
     .filter((file) => pattern.test(readFileSync(file, "utf8")))
     .map((file) => relative(root, file).replaceAll("\\", "/"))
     .sort();
+}
+
+function filesImporting(pkg: string): string[] {
+  return filesMatching(runtimeImportOf(pkg));
 }
 
 describe("remote images in rendered content", () => {
@@ -85,6 +91,18 @@ describe("remote images in rendered content", () => {
         "editor's image extension, which shows only data: images, or give the " +
         "new one the same rule and add it here.",
     ).toEqual(["components/meeting-notes/note-editor.tsx"]);
+  });
+
+  it("gives every frame that shows HTML the no-network policy", () => {
+    const framesWithoutPolicy = filesMatching(/\bsrcdoc\s*=|setAttribute\(\s*["']srcdoc/i).filter(
+      (file) => !/\b(?:SANDBOX_CSP|wrapHtmlForSandbox)\b/.test(readFileSync(resolve(process.cwd(), file), "utf8")),
+    );
+    expect(
+      framesWithoutPolicy,
+      "HTML in a frame loads its images, stylesheets and fonts as soon as it " +
+        "renders. Start the document with SANDBOX_CSP from lib/utils/html-sandbox.ts, " +
+        "or render it with wrapHtmlForSandbox.",
+    ).toEqual([]);
   });
 
   it.each([

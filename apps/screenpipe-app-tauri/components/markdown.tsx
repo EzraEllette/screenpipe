@@ -1,6 +1,6 @@
 // screenpipe — AI that knows everything you've seen, said, or heard
 // https://screenpipe.com
-import { FC, isValidElement, memo, type ReactNode } from 'react'
+import { createContext, FC, isValidElement, memo, useContext, type ReactNode } from 'react'
 import ReactMarkdown, { defaultUrlTransform, Options } from 'react-markdown'
 import { commands } from "@/lib/utils/tauri";
 import { MediaComponent } from "@/components/rewind/media";
@@ -60,18 +60,6 @@ export function resolveLocalPathFromMarkdownUrl(url: string): string | null {
   }
 
   return null;
-}
-
-// Media paths go to the native file reader. MediaComponent reads
-// normalizeMediaFilePath(url), so check that exact path: it must be absolute,
-// a drive path, or home-relative (`~/clip.mp4`, which the reader expands), and
-// not a network share: on Windows a share path (`\\host\share`, `//host/share`,
-// `/\host\share`, `~/\\host\share`) makes the reader contact that host.
-function isLocalMediaPath(url: string): boolean {
-  return (
-    isMediaFilePath(url) &&
-    /^(?:\/|~[\\/]|[A-Za-z]:[\\/])(?![\\/])/.test(normalizeMediaFilePath(url))
-  );
 }
 
 export function createScreenpipeUrlTransform(allowedHosts: readonly string[]) {
@@ -153,7 +141,8 @@ export function rewriteLocalMarkdownLinksForChat(text: string): string {
   return rewriteLocalMediaLinksForChat(text).replace(
     /(!?)\[([^\]\n]+)\]\((<[^>\n]+>|[^)\n]+)\)/g,
     (match, sigil: string, label: string, rawUrl: string) => {
-      if (sigil === "!") {
+      // An image, or one a link is wrapped around (`[![shot](/a.png)](…)`).
+      if (sigil === "!" || label.includes("![")) {
         return match;
       }
 
@@ -174,8 +163,10 @@ export function rewriteLocalMarkdownLinksForChat(text: string): string {
 type MarkdownComponents = NonNullable<Options["components"]>;
 
 // A web address (`https:`, `mailto:`, `//host`) that opens by itself. Requiring
-// two letters before the colon keeps a Windows drive (`C:`) from matching.
-const WEB_ADDRESS = /^(?:[a-z][a-z\d+.-]+:|\/\/)/i;
+// two letters before the colon keeps a Windows drive (`C:`) from matching. A
+// `file:` address names a file, not a page: clicking one does nothing on macOS,
+// and on Windows `file://host/share` could reach out to that host.
+const WEB_ADDRESS = /^(?!file:)(?:[a-z][a-z\d+.-]+:|\/\/)/i;
 
 // The words a node renders, such as a link's label.
 function textOf(node: ReactNode): string {
@@ -192,28 +183,37 @@ function normalizeMarkdownChildren(children: Options["children"]): Options["chil
   return children;
 }
 
+// True inside a link's words. A link there would nest in it, and one click
+// would open both.
+const InsideLink = createContext(false);
+
+function OutsideLinkOnly({ children, inside }: { children: ReactNode; inside: ReactNode }) {
+  return <>{useContext(InsideLink) ? inside : children}</>;
+}
+
 export function createMediaAwareMarkdownComponents(
   components: Options["components"],
 ): MarkdownComponents {
   const base = components ?? {};
 
-  // A media name with nothing to play reads the way inline code does here.
-  const mediaNameAsText = (address: string) => {
-    const name = decodeLinkAddress(address);
+  // An address with nothing to show reads the way inline code does here, on
+  // its line: a decoded line break would make it a code block.
+  const addressAsCode = (address: string) => {
+    const name = decodeLinkAddress(address).replace(/[\r\n]+/g, " ");
     const CustomCode = base.code;
     return CustomCode ? <CustomCode>{name}</CustomCode> : <code>{name}</code>;
   };
 
-  // A media link or image with nothing to play keeps its words (an image's
+  // A link or image with nothing to play or show keeps its words (an image's
   // alt text) and shows the address it named, alone if the words are empty or
   // that address. Nothing in the app opens a relative address, so leaving it
   // a link would do nothing when clicked.
-  const mediaLinkAsText = (address: string, words: ReactNode) => {
+  const addressAsText = (address: string, words: ReactNode) => {
     const said = textOf(words).trim();
     return !said || said === decodeLinkAddress(address).trim() ? (
-      mediaNameAsText(address)
+      addressAsCode(address)
     ) : (
-      <>{words} {mediaNameAsText(address)}</>
+      <>{words} {addressAsCode(address)}</>
     );
   };
 
@@ -225,31 +225,37 @@ export function createMediaAwareMarkdownComponents(
     return <a href={href} {...props}>{children}</a>;
   };
 
+  // An image that doesn't show keeps its alt text and where it pointed, so it
+  // never vanishes without a trace. A web address becomes a link, which opens
+  // only when clicked.
+  const imageAsText = (src: string | undefined, alt: string | undefined) => {
+    // The url transform removed an unsafe address; there is none to show.
+    if (!src) return <ImageAltText alt={alt} />;
+    if (!WEB_ADDRESS.test(src)) return addressAsText(src, alt);
+    return <OutsideLinkOnly inside={alt || src}>{link(src, alt || src)}</OutsideLinkOnly>;
+  };
+
   return {
     ...base,
     a({ href, children, ...props }) {
-      if (href && isLocalMediaPath(href)) {
+      if (href && isMediaFilePath(href)) {
         return (
           <MediaComponent
             filePath={href}
             className="my-2"
-            fallback={mediaLinkAsText(href, children)}
+            fallback={addressAsText(href, children)}
           />
         );
       }
       if (href && isMediaAddress(href) && !WEB_ADDRESS.test(href)) {
-        return mediaLinkAsText(href, children);
+        return addressAsText(href, children);
       }
-      return link(href, children, props);
+      return link(href, <InsideLink.Provider value>{children}</InsideLink.Provider>, props);
     },
     img({ src, alt }) {
-      // An <img> can't show audio or video, so a media address plays, opens
-      // as a web link, or reads as text.
-      if (src && isLocalMediaPath(src)) {
-        return <MediaComponent filePath={src} className="my-2" fallback={mediaLinkAsText(src, alt)} />;
-      }
-      if (src && isMediaAddress(src)) {
-        return WEB_ADDRESS.test(src) ? link(src, alt || src) : mediaLinkAsText(src, alt);
+      // An <img> can't show audio or video, so a local media file plays.
+      if (src && isMediaFilePath(src)) {
+        return <MediaComponent filePath={src} className="my-2" fallback={imageAsText(src, alt)} />;
       }
 
       const localPath = src ? resolveLocalPathFromMarkdownUrl(src) : null;
@@ -259,19 +265,23 @@ export function createMediaAwareMarkdownComponents(
             path={localPath}
             alt={alt}
             className="max-w-full h-auto rounded-md my-2 border border-border"
+            fallback={imageAsText(src, alt)}
           />
         );
       }
 
-      // Only local files render as images; anything else, including a src the
-      // url transform blanked, shows its alt text (see ImageAltText). A
-      // caller's img never receives the src, so it cannot load it either.
+      // Media that can't play isn't a picture: it keeps its link or address
+      // even where a caller hides images.
+      if (src && isMediaAddress(src)) return imageAsText(src, alt);
+
+      // Only local files render as images. A caller's img never receives the
+      // src, so it cannot load it either.
       const CustomImage = base.img;
       if (CustomImage) {
         return <CustomImage alt={alt} />;
       }
 
-      return <ImageAltText alt={alt} />;
+      return imageAsText(src, alt);
     },
     code({ className, children, ...props }) {
       const CustomCode = base.code;
@@ -282,7 +292,7 @@ export function createMediaAwareMarkdownComponents(
       );
 
       const content = String(children).replace(/\n$/, "").trim();
-      if (isLocalMediaPath(content)) {
+      if (isMediaFilePath(content)) {
         return <MediaComponent filePath={content} className="my-2" fallback={codeText} />;
       }
       return codeText;
