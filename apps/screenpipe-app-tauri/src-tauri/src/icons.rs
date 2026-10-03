@@ -173,7 +173,16 @@ fn windows_app_icon(app_name: &str, app_path: Option<String>) -> Result<Option<A
             .ok_or_else(|| "app_path is None and could not find executable path".to_string())?,
     };
 
-    let image_buffer = get_icon_by_path(&path).map_err(|e| e.to_string())?;
+    // One icon read at a time: when the first reads in a process overlap, about
+    // 1 in 7 fail with "Failed to get icon info", and none do when serialized.
+    static ICON_READS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let image_buffer = {
+        let _one_at_a_time = ICON_READS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        get_icon_by_path(&path)
+    }
+    .map_err(|e| e.to_string())?;
 
     let mut data = Vec::new();
     {
