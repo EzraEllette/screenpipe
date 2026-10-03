@@ -76,6 +76,7 @@ describe("effort slider", () => {
     expect(slider).toHaveAttribute("aria-valuemax", "2");
     // A position alone is not a value: screen readers get the name too.
     expect(slider).toHaveAttribute("aria-valuetext", "High");
+    expect(screen.getByTestId("effort-thumb")).toBeInTheDocument();
   });
 
   it("moves with the keyboard, and stops at both ends", () => {
@@ -243,23 +244,19 @@ describe("effort slider", () => {
     expect(animated.length).toBe(2);
   });
 
-  it("survives a value the steps do not contain", () => {
-    // An adapter can advertise a current value outside what it listed, or an
-    // empty one. The dial sits on the first step, and that step is still a
-    // real choice the user can make.
+  it("names a value the steps do not contain, and still takes a step", () => {
+    // An adapter can report a value outside what it listed (renamed between
+    // versions) or none at all. The dial must not claim it is the first step,
+    // and that step must still be a choice the user can make.
     const onValueChange = vi.fn();
-    render(
-      <ComposerEffortSlider
-        label="effort"
-        testId="effort"
-        steps={STEPS}
-        value=""
-        onValueChange={onValueChange}
-      />,
-    );
+    const props = { label: "effort", testId: "effort", steps: STEPS, onValueChange };
+    const { rerender } = render(<ComposerEffortSlider {...props} value="xhigh" />);
     const slider = layOut(screen.getByTestId("effort"));
-    expect(slider).toHaveAttribute("aria-valuenow", "0");
+    expect(screen.getByTestId("effort-value")).toHaveTextContent("xhigh");
+    expect(slider).toHaveAttribute("aria-valuetext", "xhigh");
+    expect(screen.queryByTestId("effort-thumb")).not.toBeInTheDocument();
 
+    rerender(<ComposerEffortSlider {...props} value="" />);
     press(slider, 6);
     release(slider, 6);
     fireEvent.keyDown(slider, { key: "Home" });

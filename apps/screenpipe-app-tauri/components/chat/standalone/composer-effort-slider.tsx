@@ -64,25 +64,23 @@ export function ComposerEffortSlider({
   const labelId = useId();
   const trackRef = useRef<HTMLDivElement>(null);
   const lastIndex = steps.length - 1;
-  const indexOf = (stepValue: string) =>
-    Math.max(
-      0,
-      steps.findIndex((step) => step.value === stepValue),
-    );
 
   // The step under the pointer while dragging; committed on release.
   const [dragIndex, setDragIndex] = useState<number | null>(null);
   // Glide only for changes made here.
   const [animate, setAnimate] = useState(false);
 
-  const valueIndex = indexOf(value);
+  // -1 when the value is none of the steps, e.g. an adapter's renamed or unset
+  // value. The dial then names the raw value and shows no thumb, rather than
+  // claiming the first step.
+  const valueIndex = steps.findIndex((step) => step.value === value);
   // Disabling the dial drops a drag in progress.
   const dragging = dragIndex !== null && !disabled;
   const shownIndex = dragging ? dragIndex : valueIndex;
   const shown = steps[shownIndex];
 
   // Single step would divide by zero and has nothing to slide between.
-  const percent = lastIndex > 0 ? (shownIndex / lastIndex) * 100 : 0;
+  const percent = lastIndex > 0 ? (Math.max(0, shownIndex) / lastIndex) * 100 : 0;
   // The thumb travels across `track - thumbWidth` so it never overhangs either
   // end. Ticks use the same interpolation rather than an even spread, or the
   // thumb would sit beside its own tick everywhere except the two ends.
@@ -91,7 +89,7 @@ export function ComposerEffortSlider({
   // Nearest step to a pointer position, measured on the thumb's travel.
   const indexAt = (clientX: number) => {
     const rect = trackRef.current?.getBoundingClientRect();
-    if (!rect || rect.width <= THUMB_WIDTH_PX || lastIndex <= 0) return shownIndex;
+    if (!rect || rect.width <= THUMB_WIDTH_PX || lastIndex <= 0) return Math.max(0, shownIndex);
     const fraction =
       (clientX - rect.left - THUMB_WIDTH_PX / 2) / (rect.width - THUMB_WIDTH_PX);
     return Math.min(lastIndex, Math.max(0, Math.round(fraction * lastIndex)));
@@ -136,7 +134,7 @@ export function ComposerEffortSlider({
         aria-labelledby={labelId}
         aria-valuemin={0}
         aria-valuemax={lastIndex}
-        aria-valuenow={shownIndex}
+        aria-valuenow={Math.max(0, shownIndex)}
         aria-valuetext={shown?.name ?? value}
         aria-disabled={disabled || undefined}
         data-testid={testId}
@@ -190,6 +188,9 @@ export function ComposerEffortSlider({
         }}
         className={cn(
           "group/effort relative mt-1.5 flex h-7 w-full touch-none select-none items-center outline-none",
+          // The thumb carries the focus ring; with no thumb the track does.
+          !shown &&
+            "focus-visible:ring-1 focus-visible:ring-signal focus-visible:ring-offset-1 focus-visible:ring-offset-background",
           disabled
             ? "cursor-not-allowed opacity-50"
             : dragging
@@ -231,18 +232,21 @@ export function ComposerEffortSlider({
         {/* Thumb. Sharp-cornered on purpose; fills with ink while held, the
             same inversion hover uses elsewhere, and carries the focus ring so
             keyboard focus shows where the value is. */}
-        <div
-          className={cn(
-            "absolute h-5 border border-foreground",
-            dragging ? "cursor-grabbing bg-foreground" : "bg-background",
-            !disabled && !dragging && "cursor-grab",
-            "group-focus-visible/effort:ring-1 group-focus-visible/effort:ring-signal group-focus-visible/effort:ring-offset-1 group-focus-visible/effort:ring-offset-background",
-            animate &&
-              "transition-[left,background-color] duration-150 ease-out motion-reduce:transition-none",
-          )}
-          style={{ left: offsetFor(percent), width: THUMB_WIDTH_PX }}
-          aria-hidden
-        />
+        {shown && (
+          <div
+            data-testid={testId ? `${testId}-thumb` : undefined}
+            className={cn(
+              "absolute h-5 border border-foreground",
+              dragging ? "cursor-grabbing bg-foreground" : "bg-background",
+              !disabled && !dragging && "cursor-grab",
+              "group-focus-visible/effort:ring-1 group-focus-visible/effort:ring-signal group-focus-visible/effort:ring-offset-1 group-focus-visible/effort:ring-offset-background",
+              animate &&
+                "transition-[left,background-color] duration-150 ease-out motion-reduce:transition-none",
+            )}
+            style={{ left: offsetFor(percent), width: THUMB_WIDTH_PX }}
+            aria-hidden
+          />
+        )}
       </div>
     </div>
   );
