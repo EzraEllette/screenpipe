@@ -134,13 +134,13 @@ pub async fn get_app_icon(
     use windows_icons::get_icon_by_path;
 
     async fn find_exe_path(app_name: &str) -> Option<String> {
-        if let Some(path) = get_exe_by_reg_key(app_name) {
+        if let Some(path) = search_blocking(app_name, get_exe_by_reg_key).await {
             return Some(path);
         }
         if let Some(path) = get_exe_by_appx(app_name).await {
             return Some(path);
         }
-        get_exe_from_potential_path(app_name)
+        search_blocking(app_name, get_exe_from_potential_path).await
     }
 
     let path = match app_path {
@@ -281,19 +281,18 @@ fn powershell_exe() -> std::path::PathBuf {
         .join("powershell.exe")
 }
 
-/// Runs `command` and returns its stdout, or `None` if it fails to start or is
-/// still running after `timeout`. The child is killed whenever this future ends
-/// early, so a stuck process can't outlive the timeout.
-#[cfg(any(target_os = "windows", test))]
-async fn stdout_within(
-    mut command: tokio::process::Command,
-    timeout: std::time::Duration,
-) -> Option<Vec<u8>> {
-    let output = tokio::time::timeout(timeout, command.kill_on_drop(true).output())
+/// Runs a registry or folder search on a blocking thread, so a slow disk or many
+/// icon requests at once can't stall the async runtime that serves the app.
+#[cfg(target_os = "windows")]
+async fn search_blocking(
+    app_name: &str,
+    search: impl FnOnce(&str) -> Option<String> + Send + 'static,
+) -> Option<String> {
+    let app_name = app_name.to_string();
+    tokio::task::spawn_blocking(move || search(&app_name))
         .await
-        .ok()?
-        .ok()?;
-    Some(output.stdout)
+        .ok()
+        .flatten()
 }
 
 /// Returns the first `.exe` under `dir` whose file name contains `name_lower`
@@ -455,6 +454,12 @@ type AppxListing =
 #[cfg(target_os = "windows")]
 const APPX_PACKAGES_TTL: std::time::Duration = std::time::Duration::from_secs(300);
 
+/// How long an empty list is reused. Windows always has some packages, so an empty
+/// list means PowerShell failed or timed out, and it shouldn't hide every Store
+/// app's icon for the whole TTL.
+#[cfg(target_os = "windows")]
+const APPX_RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Deep enough for packaged desktop apps under `VFS\ProgramFilesX64\<vendor>\...`.
 #[cfg(any(target_os = "windows", test))]
 const APPX_EXE_DEPTH: usize = 8;
@@ -468,19 +473,26 @@ static APPX_PACKAGES: std::sync::Mutex<Option<(std::time::Instant, AppxListing)>
 /// the packages, and the name is matched here.
 #[cfg(target_os = "windows")]
 async fn get_exe_by_appx(app_name: &str) -> Option<String> {
-    let packages =
-        cached_appx_packages(&APPX_PACKAGES, APPX_PACKAGES_TTL, list_appx_packages).await;
-    find_appx_exe(&packages, app_name)
+    let packages = cached_appx_packages(
+        &APPX_PACKAGES,
+        APPX_PACKAGES_TTL,
+        APPX_RETRY_AFTER,
+        list_appx_packages,
+    )
+    .await;
+    search_blocking(app_name, move |name| find_appx_exe(&packages, name)).await
 }
 
 /// Returns the package list in `slot`, starting a new listing if there is none or
-/// it is older than `ttl`. The listing runs as its own task: a caller that gives
-/// up doesn't cancel it, and callers that arrive meanwhile wait for the same one.
-/// So `list` runs at most once per `ttl`, however many icons are requested.
+/// it is older than `ttl`, or than `retry_after` if it came back empty. The listing
+/// runs as its own task: a caller that gives up doesn't cancel it, and callers that
+/// arrive meanwhile wait for the same one. So `list` runs at most once per `ttl`
+/// while it works, however many icons are requested.
 #[cfg(any(target_os = "windows", test))]
 async fn cached_appx_packages<F>(
     slot: &std::sync::Mutex<Option<(std::time::Instant, AppxListing)>>,
     ttl: std::time::Duration,
+    retry_after: std::time::Duration,
     list: impl FnOnce() -> F,
 ) -> std::sync::Arc<AppxPackages>
 where
@@ -492,9 +504,13 @@ where
         let mut slot = slot
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        match slot.as_ref() {
-            Some((started, listing)) if started.elapsed() < ttl => listing.clone(),
-            _ => {
+        let reusable = slot.as_ref().filter(|(started, listing)| {
+            let failed = matches!(listing.peek(), Some(packages) if packages.is_empty());
+            started.elapsed() < if failed { retry_after } else { ttl }
+        });
+        match reusable {
+            Some((_, listing)) => listing.clone(),
+            None => {
                 let task = tokio::spawn(list());
                 let listing = async move { std::sync::Arc::new(task.await.unwrap_or_default()) }
                     .boxed()
@@ -507,24 +523,26 @@ where
     listing.await
 }
 
-/// Lists installed Store packages. The script is fixed and reads no input. An
-/// empty list (PowerShell failed or took too long) is cached like any other, so a
-/// broken PowerShell isn't retried on every icon request.
+/// Lists installed Store packages. The script is fixed and reads no input. Returns
+/// an empty list if PowerShell fails or is still running after 20 s, and kills it
+/// then so a stuck PowerShell can't outlive the timeout.
 #[cfg(target_os = "windows")]
 async fn list_appx_packages() -> AppxPackages {
     const CREATE_NO_WINDOW: u32 = 0x08000000;
-    const SCRIPT: &str =
-        r#"Get-AppxPackage | ForEach-Object { $_.Name + "`t" + $_.InstallLocation }"#;
+    // Windows PowerShell writes to a pipe in the console code page, which turns
+    // non-ASCII characters in a folder into other bytes or `?`.
+    const SCRIPT: &str = r#"[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); Get-AppxPackage | ForEach-Object { $_.Name + "`t" + $_.InstallLocation }"#;
 
     let mut command = tokio::process::Command::new(powershell_exe());
     command
         .args(["-NoProfile", "-NonInteractive", "-WindowStyle", "hidden"])
         .args(["-Command", SCRIPT])
-        .creation_flags(CREATE_NO_WINDOW);
-    stdout_within(command, std::time::Duration::from_secs(20))
-        .await
-        .map(|stdout| parse_appx_packages(&stdout))
-        .unwrap_or_default()
+        .creation_flags(CREATE_NO_WINDOW)
+        .kill_on_drop(true);
+    match tokio::time::timeout(std::time::Duration::from_secs(20), command.output()).await {
+        Ok(Ok(output)) => parse_appx_packages(&output.stdout),
+        _ => AppxPackages::new(),
+    }
 }
 
 /// Parses `name<TAB>install folder` lines, skipping packages without a folder.
@@ -1128,16 +1146,21 @@ mod appx_tests {
 
     fn counting_listing(
         listings: &Arc<AtomicUsize>,
+        packages: AppxPackages,
     ) -> impl FnOnce() -> BoxFuture<'static, AppxPackages> {
         let listings = listings.clone();
         move || {
             async move {
                 listings.fetch_add(1, Ordering::SeqCst);
                 tokio::time::sleep(Duration::from_millis(200)).await;
-                vec![("Pkg".to_string(), PathBuf::from("/pkg"))]
+                packages
             }
             .boxed()
         }
+    }
+
+    fn one_package() -> AppxPackages {
+        vec![("Pkg".to_string(), PathBuf::from("/pkg"))]
     }
 
     /// Random names and aborted requests used to start PowerShell every time.
@@ -1145,18 +1168,21 @@ mod appx_tests {
     async fn abandoned_and_concurrent_callers_share_one_listing() {
         let slot = Mutex::new(None);
         let listings = Arc::new(AtomicUsize::new(0));
-        let ttl = Duration::from_secs(60);
+        // A listing still running isn't treated as failed, even with no retry delay.
+        let (ttl, retry_after) = (Duration::from_secs(60), Duration::ZERO);
+        let cached = || {
+            cached_appx_packages(
+                &slot,
+                ttl,
+                retry_after,
+                counting_listing(&listings, one_package()),
+            )
+        };
 
-        let abandoned = tokio::time::timeout(
-            Duration::from_millis(20),
-            cached_appx_packages(&slot, ttl, counting_listing(&listings)),
-        )
-        .await;
+        let abandoned = tokio::time::timeout(Duration::from_millis(20), cached()).await;
         assert!(abandoned.is_err());
 
-        let callers =
-            (0..50).map(|_| cached_appx_packages(&slot, ttl, counting_listing(&listings)));
-        for packages in futures::future::join_all(callers).await {
+        for packages in futures::future::join_all((0..50).map(|_| cached())).await {
             assert_eq!(packages[0].0, "Pkg");
         }
         assert_eq!(listings.load(Ordering::SeqCst), 1);
@@ -1167,9 +1193,25 @@ mod appx_tests {
         let slot = Mutex::new(None);
         let listings = Arc::new(AtomicUsize::new(0));
         for _ in 0..2 {
-            cached_appx_packages(&slot, Duration::ZERO, counting_listing(&listings)).await;
+            let list = counting_listing(&listings, one_package());
+            cached_appx_packages(&slot, Duration::ZERO, Duration::ZERO, list).await;
         }
         assert_eq!(listings.load(Ordering::SeqCst), 2);
+    }
+
+    /// An empty list means PowerShell failed, so it's replaced after `retry_after`
+    /// instead of hiding every Store app's icon for the whole TTL.
+    #[tokio::test]
+    async fn lists_again_soon_after_a_failed_listing() {
+        let slot = Mutex::new(None);
+        let listings = Arc::new(AtomicUsize::new(0));
+        let (ttl, retry_after) = (Duration::from_secs(60), Duration::ZERO);
+        for packages in [vec![], vec![], one_package(), one_package()] {
+            let list = counting_listing(&listings, packages);
+            cached_appx_packages(&slot, ttl, retry_after, list).await;
+        }
+        // Both empty lists were replaced; the working one was kept.
+        assert_eq!(listings.load(Ordering::SeqCst), 3);
     }
 }
 
@@ -1258,91 +1300,5 @@ mod windows_icon_tests {
             let _ = get_app_icon(&name, None).await;
             assert!(!marker.exists(), "app name ran as code: {name}");
         }
-    }
-}
-
-#[cfg(all(test, unix))]
-mod stdout_within_tests {
-    use super::stdout_within;
-    use std::path::Path;
-    use std::time::{Duration, Instant};
-
-    /// A child that writes its pid to `pid_file`, then sleeps for a minute.
-    fn sleeper(pid_file: &Path) -> tokio::process::Command {
-        let mut command = tokio::process::Command::new("sh");
-        command
-            .args(["-c", r#"echo $$ > "$1"; exec sleep 60"#, "sh"])
-            .arg(pid_file);
-        command
-    }
-
-    async fn read_pid(pid_file: &Path) -> String {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            if let Ok(pid) = std::fs::read_to_string(pid_file) {
-                if pid.ends_with('\n') {
-                    return pid.trim().to_string();
-                }
-            }
-            assert!(Instant::now() < deadline, "sleeper never wrote its pid");
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    }
-
-    /// Waits up to 5 s for `pid` to exit. A killed zombie awaiting reaping counts.
-    async fn exits(pid: &str) -> bool {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while Instant::now() < deadline {
-            let ps = std::process::Command::new("ps")
-                .args(["-o", "stat=", "-p", pid])
-                .output()
-                .unwrap();
-            let stat = String::from_utf8_lossy(&ps.stdout);
-            if stat.trim().is_empty() || stat.trim().starts_with('Z') {
-                return true;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-        false
-    }
-
-    #[tokio::test]
-    async fn returns_stdout() {
-        let mut command = tokio::process::Command::new("sh");
-        command.args(["-c", "echo icon"]);
-        assert_eq!(
-            stdout_within(command, Duration::from_secs(10)).await,
-            Some(b"icon\n".to_vec())
-        );
-    }
-
-    #[tokio::test]
-    async fn kills_the_child_on_timeout() {
-        let dir = tempfile::tempdir().unwrap();
-        let pid_file = dir.path().join("pid");
-
-        let started = Instant::now();
-        let stdout = stdout_within(sleeper(&pid_file), Duration::from_secs(1)).await;
-        assert_eq!(stdout, None);
-        assert!(started.elapsed() < Duration::from_secs(5));
-
-        let pid = read_pid(&pid_file).await;
-        assert!(exits(&pid).await, "child {pid} outlived the timeout");
-    }
-
-    /// An aborted `fetch` or `<img>` drops the `/app-icon` handler mid-lookup.
-    #[tokio::test]
-    async fn kills_the_child_when_the_caller_gives_up() {
-        let dir = tempfile::tempdir().unwrap();
-        let pid_file = dir.path().join("pid");
-
-        let pid = tokio::select! {
-            _ = stdout_within(sleeper(&pid_file), Duration::from_secs(60)) => {
-                panic!("sleeper finished early")
-            }
-            pid = read_pid(&pid_file) => pid,
-        };
-        // `select!` has dropped the unfinished lookup.
-        assert!(exits(&pid).await, "child {pid} outlived its caller");
     }
 }

@@ -554,8 +554,9 @@ const MAX_APP_ICON_NAME_CHARS: usize = 256;
 /// is a path as that path, so this check is what stops a page from pointing the
 /// icon lookups at any file or a network share (`/net/host/x`, `\\host\share\x`);
 /// don't loosen it. A name needs a letter or digit because the Windows lookup
-/// ignores punctuation, so `-` would match every installed app. The length cap
-/// bounds the miss-cache key.
+/// ignores punctuation and would match a name like `-` to any app. That lookup
+/// stays loose for short names (`a`, `.exe`), which can only pick a wrong icon.
+/// The length cap bounds the miss-cache key.
 fn is_valid_app_icon_name(name: &str) -> bool {
     name.chars().any(char::is_alphanumeric)
         && name.chars().count() <= MAX_APP_ICON_NAME_CHARS
