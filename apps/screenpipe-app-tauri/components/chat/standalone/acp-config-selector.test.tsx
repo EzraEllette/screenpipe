@@ -404,7 +404,7 @@ describe("ACP config trigger", () => {
     );
 
     fireEvent.click(screen.getByTestId("acp-config-trigger"));
-    fireEvent.click(document.querySelector('[data-effort-step="high"]') as HTMLElement);
+    fireEvent.keyDown(screen.getByTestId("acp-effort-slider"), { key: "End" });
 
     expect(onPersistDefault).toHaveBeenCalledWith({
       optionId: "reasoning_effort",

@@ -11,11 +11,15 @@ export type PiThinkingLevel = {
   piLevel: string | null;
   /** True when Pi is running but its model doesn't support thinking (level "off"). */
   piThinkingUnsupported: boolean;
+  /** Bumps on every report, even one repeating the same level. A repeat can
+   *  still be news: it confirms a requested change was clamped back. */
+  piLevelRevision: number;
 };
 
 export function usePiThinkingLevel(sessionId: string | null): PiThinkingLevel {
   const [piLevel, setPiLevel] = useState<string | null>(null);
   const [piThinkingUnsupported, setPiThinkingUnsupported] = useState(false);
+  const [piLevelRevision, setPiLevelRevision] = useState(0);
 
   useEffect(() => {
     if (!sessionId) return;
@@ -43,6 +47,7 @@ export function usePiThinkingLevel(sessionId: string | null): PiThinkingLevel {
       if (p.type === "thinking_level_changed" && typeof p.level === "string") {
         setPiLevel(p.level as string);
         setPiThinkingUnsupported(p.level === "off");
+        setPiLevelRevision((revision) => revision + 1);
         return;
       }
 
@@ -52,6 +57,7 @@ export function usePiThinkingLevel(sessionId: string | null): PiThinkingLevel {
         if (typeof level === "string") {
           setPiLevel(level);
           setPiThinkingUnsupported(level === "off");
+          setPiLevelRevision((revision) => revision + 1);
         }
         return;
       }
@@ -71,5 +77,5 @@ export function usePiThinkingLevel(sessionId: string | null): PiThinkingLevel {
     };
   }, [sessionId]);
 
-  return { piLevel, piThinkingUnsupported };
+  return { piLevel, piThinkingUnsupported, piLevelRevision };
 }
