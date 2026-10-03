@@ -189,6 +189,9 @@ export function ComposerEffortSlider({
           if (disabled) return;
           const key = event.key;
           if (key === "Escape" && dragging) {
+            // In a popover, Escape also closes it, but the dial stays mounted
+            // through the fade-out. Dropping the drag here keeps a release
+            // during the fade from committing it.
             event.preventDefault();
             setDragIndex(null);
           } else if (key === "ArrowRight" || key === "ArrowUp" || key === "PageUp") {

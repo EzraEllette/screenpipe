@@ -5,10 +5,8 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
-import { Gauge } from "lucide-react";
 import { commands } from "@/lib/utils/tauri";
 import { usePiThinkingLevel } from "@/lib/hooks/use-pi-thinking-level";
-import { ComposerSettingsPopover } from "@/components/chat/standalone/composer-settings-popover";
 import { ComposerEffortSlider } from "@/components/chat/standalone/composer-effort-slider";
 import { useGT } from "gt-react";
 import { msg, useMessages } from "gt-react";
@@ -32,16 +30,6 @@ const THINKING_LEVELS: ThinkingLevelOption[] = [
 
 function isValidLevel(v: string): v is ThinkingLevel {
   return (VALID_LEVELS as readonly string[]).includes(v);
-}
-
-// The last level this window showed. The dial is remounted every time its
-// popover opens; starting here instead of a fixed default keeps it from opening
-// on the wrong step and visibly correcting itself once settings load.
-let lastShownLevel: ThinkingLevel | null = null;
-
-/** Test hook: forget the level remembered across mounts. */
-export function resetThinkingLevelMemoryForTests() {
-  lastShownLevel = null;
 }
 
 export interface ThinkingLevelControl {
@@ -74,9 +62,7 @@ export function useThinkingLevel({
   /** False for presets that don't run through Pi. */
   enabled?: boolean;
 }): ThinkingLevelControl {
-  const [level, setShownLevel] = useState<ThinkingLevel>(
-    () => lastShownLevel ?? "medium",
-  );
+  const [level, setShownLevel] = useState<ThinkingLevel>("medium");
   const { piLevel, piThinkingUnsupported, piLevelRevision } = usePiThinkingLevel(
     enabled ? sessionId : null,
   );
@@ -98,11 +84,6 @@ export function useThinkingLevel({
   // last one is what sticks.
   const nextWriteRef = useRef<{ level: ThinkingLevel; live: boolean } | null>(null);
   const writingRef = useRef(false);
-
-  const show = useCallback((next: ThinkingLevel) => {
-    lastShownLevel = next;
-    setShownLevel(next);
-  }, []);
 
   const flushWrites = useCallback(async () => {
     if (writingRef.current) return;
@@ -133,9 +114,16 @@ export function useThinkingLevel({
     }
   }, []);
 
-  // Seed from settings.json, the level new sessions start with. A fallback
-  // only: the session's report and the user's choice both outrank it.
+  // Each chat starts over. A choice made before its session existed is
+  // already persisted and the session reads it on start, so the session's
+  // report is the answer. Until it reports, show settings.json, the level new
+  // sessions start with; it is re-read per chat because another window or
+  // pane may have changed it.
   useEffect(() => {
+    sessionReportedRef.current = false;
+    awaitingReportRef.current = false;
+    deferredRef.current = null;
+    choiceRef.current = null;
     if (!enabled) return;
     let cancelled = false;
     commands
@@ -143,23 +131,13 @@ export function useThinkingLevel({
       .then((result) => {
         if (cancelled || result.status !== "ok" || !isValidLevel(result.data)) return;
         if (choiceRef.current !== null || sessionReportedRef.current) return;
-        show(result.data);
+        setShownLevel(result.data);
       })
       .catch(() => {});
     return () => {
       cancelled = true;
     };
-  }, [enabled, show]);
-
-  // A different session runs its own level. A choice made before it existed
-  // is already persisted and the session reads it on start, so its report is
-  // the answer from here.
-  useEffect(() => {
-    sessionReportedRef.current = false;
-    awaitingReportRef.current = false;
-    deferredRef.current = null;
-    choiceRef.current = null;
-  }, [sessionId]);
+  }, [enabled, sessionId]);
 
   useEffect(() => {
     if (!piLevel || !isValidLevel(piLevel)) return;
@@ -171,8 +149,8 @@ export function useThinkingLevel({
       choiceRef.current = null;
       awaitingReportRef.current = false;
     }
-    show(piLevel);
-  }, [piLevel, piLevelRevision, show]);
+    setShownLevel(piLevel);
+  }, [piLevel, piLevelRevision]);
 
   // Apply a mid-reply change as soon as the reply ends.
   const wasStreamingRef = useRef(streaming);
@@ -190,99 +168,42 @@ export function useThinkingLevel({
       if (!enabled || piThinkingUnsupported) return;
       choiceRef.current = next;
       awaitingReportRef.current = false;
-      show(next); // optimistic, always immediate
+      setShownLevel(next); // optimistic, always immediate
       const hasSession = !!sessionIdRef.current;
       const midReply = hasSession && streamingRef.current;
       deferredRef.current = midReply ? next : null;
       nextWriteRef.current = { level: next, live: hasSession && !midReply };
       void flushWrites();
     },
-    [enabled, piThinkingUnsupported, show, flushWrites],
+    [enabled, piThinkingUnsupported, flushWrites],
   );
 
   return { level, setLevel, unsupported: piThinkingUnsupported };
 }
 
-function ThinkingLevelDial({ control }: { control: ThinkingLevelControl }) {
+/** The effort dial for a host that owns a {@link useThinkingLevel}. */
+export function ThinkingLevelSlider({ control }: { control: ThinkingLevelControl }) {
   const uiMessages = useMessages();
   const ui = useGT();
-  return (
-    <ComposerEffortSlider
-      label={ui("Effort")}
-      testId="thinking-level-slider"
-      value={control.level}
-      disabled={control.unsupported}
-      steps={localizeDefinitions(THINKING_LEVELS, uiMessages).map((level) => ({
-        value: level.value,
-        name: level.label,
-      }))}
-      onValueChange={(value) => {
-        if (isValidLevel(value)) control.setLevel(value);
-      }}
-    />
-  );
-}
-
-/** The effort dial for a host that already owns a {@link useThinkingLevel}. */
-export function ThinkingLevelSlider({ control }: { control: ThinkingLevelControl }) {
-  const ui = useGT();
-  const disabledReason = control.unsupported ? "Model doesn't support thinking" : null;
+  const disabledReason = control.unsupported ? ui("Model doesn't support thinking") : null;
   return (
     <div
       data-testid="thinking-level-inline"
       title={disabledReason || ui("Thinking level: controls reasoning depth")}
     >
-      <ThinkingLevelDial control={control} />
+      <ComposerEffortSlider
+        label={ui("Effort")}
+        testId="thinking-level-slider"
+        value={control.level}
+        disabled={control.unsupported}
+        steps={localizeDefinitions(THINKING_LEVELS, uiMessages).map((level) => ({
+          value: level.value,
+          name: level.label,
+        }))}
+        onValueChange={(value) => {
+          if (isValidLevel(value)) control.setLevel(value);
+        }}
+      />
     </div>
-  );
-}
-
-interface ThinkingLevelSelectorProps {
-  /** True while Pi is streaming or loading — live changes wait for it to end. */
-  streaming?: boolean;
-  sessionId?: string | null;
-  /** Embed the effort dial in an existing model popover instead of rendering a
-   *  second composer trigger. */
-  embedded?: boolean;
-}
-
-/** Self-contained dial that owns its own state. Hosts that show the dial in a
- *  popover should own {@link useThinkingLevel} and render
- *  {@link ThinkingLevelSlider} instead, so state outlives the popover. */
-export function ThinkingLevelSelector({
-  streaming = false,
-  sessionId = null,
-  embedded = false,
-}: ThinkingLevelSelectorProps) {
-
-  const uiMessages = useMessages();
-  const ui = useGT();
-  const control = useThinkingLevel({ sessionId, streaming });
-  const [isOpen, setIsOpen] = useState(false);
-
-  if (embedded) return <ThinkingLevelSlider control={control} />;
-
-  const currentLabel =
-    localizeDefinitions(THINKING_LEVELS, uiMessages).find((l) => l.value === control.level)
-      ?.label ?? control.level;
-  const disabledReason = control.unsupported ? "Model doesn't support thinking" : null;
-
-  // Same shell the ACP agent control uses, so switching preset does not
-  // rearrange the composer row. The trigger keeps naming the active level.
-  return (
-    <ComposerSettingsPopover
-      label={currentLabel}
-      title={disabledReason || ui("Thinking level: controls reasoning depth")}
-      ariaLabel={ui("Thinking level: {value1}", { value1: currentLabel })}
-      triggerTestId="thinking-level-trigger"
-      contentTestId="thinking-level-popover"
-      triggerIcon={Gauge}
-      iconOnly
-      open={isOpen}
-      onOpenChange={setIsOpen}
-      disabled={control.unsupported}
-    >
-      <ThinkingLevelDial control={control} />
-    </ComposerSettingsPopover>
   );
 }

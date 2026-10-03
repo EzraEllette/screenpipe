@@ -5,19 +5,16 @@
 /**
  * Pi's thinking level has three sources that arrive in any order: the user's
  * choice, the running session's report, and the default saved in
- * settings.json. Users saw the dial open on the wrong step and slide, and saw
- * choices revert. These tests pin which source wins and that a choice reaches
- * the session even when the popover showing the dial has closed.
+ * settings.json. Users saw choices revert. These tests pin which source wins
+ * and that a choice reaches the session even when the popover showing the
+ * dial has closed. Reopening the popover is covered at the composer, in
+ * composer-controls-row.effort.test.tsx.
  */
 
 import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, renderHook, screen } from "@testing-library/react";
-import {
-  ThinkingLevelSelector,
-  resetThinkingLevelMemoryForTests,
-  useThinkingLevel,
-} from "./thinking-level-selector";
+import { ThinkingLevelSlider, useThinkingLevel } from "./thinking-level-selector";
 
 type Report = { piLevel: string | null; piThinkingUnsupported: boolean; piLevelRevision: number };
 
@@ -62,7 +59,6 @@ function report(level: string) {
 const flush = () => act(async () => {});
 
 beforeEach(() => {
-  resetThinkingLevelMemoryForTests();
   mocks.report = { piLevel: null, piThinkingUnsupported: false, piLevelRevision: 0 };
   mocks.getLevel.mockReset().mockResolvedValue({ status: "ok", data: "medium" });
   mocks.setLevel.mockReset().mockResolvedValue(ok);
@@ -72,19 +68,6 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("thinking level", () => {
-  it("reopens on the level last shown instead of sliding in from a default", async () => {
-    mocks.getLevel.mockResolvedValue({ status: "ok", data: "low" });
-    const first = renderHook(() => useThinkingLevel({ sessionId: null }));
-    await flush();
-    expect(first.result.current.level).toBe("low");
-    first.unmount();
-
-    // Settings are slow this time; the first frame must already be right.
-    mocks.getLevel.mockReturnValue(new Promise(() => {}));
-    const reopened = renderHook(() => useThinkingLevel({ sessionId: null }));
-    expect(reopened.result.current.level).toBe("low");
-  });
-
   it("lets the running session outrank a slow settings read", async () => {
     const settings = deferred<{ status: string; data: string }>();
     mocks.getLevel.mockReturnValue(settings.promise);
@@ -189,9 +172,28 @@ describe("thinking level", () => {
     expect(mocks.setLevel).not.toHaveBeenCalled();
   });
 
+  it("re-reads the saved level for a chat whose session hasn't reported", async () => {
+    report("high");
+    const { result, rerender } = renderHook(({ id }) => useThinkingLevel({ sessionId: id }), {
+      initialProps: { id: "s1" },
+    });
+    await flush();
+    expect(result.current.level).toBe("high");
+
+    // Another window or pane saved "low"; the next chat's session isn't running.
+    mocks.getLevel.mockResolvedValue({ status: "ok", data: "low" });
+    mocks.report = { piLevel: null, piThinkingUnsupported: false, piLevelRevision: mocks.report.piLevelRevision };
+    rerender({ id: "s2" });
+    await flush();
+    expect(result.current.level).toBe("low");
+  });
+
   it("keeps taking changes while one is being applied", async () => {
     // It used to go inert during a write and silently drop the next change.
-    render(<ThinkingLevelSelector embedded sessionId="s1" />);
+    function Dial() {
+      return <ThinkingLevelSlider control={useThinkingLevel({ sessionId: "s1" })} />;
+    }
+    render(<Dial />);
     await flush();
     mocks.setLevel.mockReturnValueOnce(new Promise(() => {}));
     const slider = screen.getByTestId("thinking-level-slider");
