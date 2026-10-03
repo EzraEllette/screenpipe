@@ -1,0 +1,25 @@
+// screenpipe — AI that knows everything you've seen, said, or heard
+// https://screenpipe.com
+import {test,expect,mock,beforeEach,afterEach} from 'bun:test';
+let callback:any; let saved:any[]=[]; let enabled=true; let sessions:any={};let unmount:any;
+globalThis.fetch=async()=>{throw new Error('Unexpected network');};
+const register=(fn:any)=>{callback=fn;return()=>{callback=undefined;};};
+mock.module('./lib/events/bus',()=>({mountAgentEventBus:async()=>{},registerDefault:register,registerObserver:register}));
+mock.module('@/lib/chat-storage',()=>({loadConversationFile:async()=>null,saveConversationFile:async(c:any)=>{saved.push(structuredClone(c));},conversationMetaFromJson:(c:any)=>c}));
+mock.module('@/lib/stores/chat-store',()=>({useChatStore:{getState:()=>({sessions,actions:{upsert:(c:any)=>{sessions[c.id]=c;}}})},sessionRecordFromMeta:(c:any)=>c}));
+mock.module('@/lib/hooks/use-settings',()=>({getStore:async()=>({get:async()=>({chatHistory:{historyEnabled:enabled}})})}));
+mock.module('@/components/settings/pipes-section',()=>({cleanPipeStdout:()=>{throw new Error('Unexpected plain-output fallback');}}));
+const recorder=await import('./lib/events/pipe-run-recorder');
+const sid='pipe:synthetic-review:42';
+async function emit(event:any,source='pipe',sessionId=sid){await callback({source,sessionId,event});}
+const start=async()=>{await emit({type:'message_start',message:{role:'user',content:'Summarize synthetic notes.'}});await emit({type:'message_start',message:{role:'assistant'}});await emit({type:'message_update',assistantMessageEvent:{type:'text_delta',delta:'First result.'}});};
+beforeEach(async()=>{saved=[];enabled=true;sessions={};unmount=await recorder.mountPipeRunRecorder();expect(typeof callback).toBe('function');});
+afterEach(()=>unmount());
+test('intermediate turn does not save incomplete run',async()=>{await start();await emit({type:'turn_end'});expect(saved).toHaveLength(0);});
+test('terminal save retains prompt and both turns',async()=>{await start();await emit({type:'turn_end'});await emit({type:'message_start',message:{role:'assistant'}});await emit({type:'message_update',assistantMessageEvent:{type:'text_delta',delta:'Second result.'}});await emit({type:'agent_end'});expect(saved).toHaveLength(1);const text=saved[0].messages.map((m:any)=>m.content).join('\n');expect(text).toContain('Summarize synthetic notes.');expect(text).toContain('First result.');expect(text).toContain('Second result.');});
+test('ordinary agent_end saves',async()=>{await start();await emit({type:'agent_end'});expect(saved).toHaveLength(1);expect(saved[0].pipeContext.executionId).toBe(42);});
+test('pipe_done saves',async()=>{await start();await emit({type:'pipe_done'});expect(saved).toHaveLength(1);});
+test('disabled history suppresses persistence',async()=>{enabled=false;await start();await emit({type:'agent_end'});expect(saved).toHaveLength(0);});
+test('foreign source never saves',async()=>{await emit({type:'agent_end',messages:[{role:'assistant',content:'other'}]},'pi');expect(saved).toHaveLength(0);});
+test('foreground pipe writer is preserved',async()=>{sessions[sid]={kind:'pipe-watch',messages:[{role:'assistant',content:'owned'}]};await start();await emit({type:'agent_end'});expect(saved).toHaveLength(0);expect(sessions[sid].messages[0].content).toBe('owned');});
+test('duplicate terminal does not overwrite',async()=>{await start();await emit({type:'agent_end'});await emit({type:'pipe_done'});expect(saved).toHaveLength(1);});

@@ -5045,6 +5045,42 @@
         ],
         "command": "bun --no-env-file test packages/ai-gateway/eval-wif-token-retry.test.ts"
       }
+    },
+    {
+      "id": "app-pipe-run-terminal-preservation",
+      "name": "Keep complete pipe transcripts across intermediate turns",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "4f58c512232267cc66eb5bf76846107afff11931"
+      },
+      "base_ref": "523615534af1bc9174d777ba917a3603354a164f",
+      "oracle_ref": "4f58c512232267cc66eb5bf76846107afff11931",
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/lib/events/pipe-run-recorder.ts"
+      ],
+      "gate": "advisory",
+      "trigger_paths": [
+        "apps/screenpipe-app-tauri/lib/events/pipe-run-recorder.ts",
+        "apps/screenpipe-app-tauri/lib/pipe-ndjson-to-chat.ts"
+      ],
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "data-preservation",
+        "pipe-history"
+      ],
+      "prompt": "The pipe-run recorder can save an incomplete conversation between model turns, losing later output. Repair the actual mounted recorder so intermediate turn_end events do not persist an incomplete run. When agent_end or pipe_done finishes a run, save one complete conversation containing its original user prompt and all streamed assistant turns. Preserve ordinary single-turn completion, the execution identity in saved pipeContext, rejection of non-pipe events, disabled chat-history settings, and the foreground pipe-watch writer's ownership. Repeated terminal events must not overwrite the saved conversation. Keep the public mount/unmount lifecycle and normal event-envelope contract; no particular terminal guard or internal helper is required. Use synthetic events and intercepted storage/settings/bus ports. Native delivery, actual disk durability, crash recovery, continued-chat merging, and presentation labels are outside this historical task.",
+      "agent_timeout_seconds": 900,
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/pipe-run-terminal.fixture.ts.txt",
+            "destination_path": "apps/screenpipe-app-tauri/eval-pipe-run-terminal.test.ts"
+          }
+        ],
+        "command": "bun --no-env-file test apps/screenpipe-app-tauri/eval-pipe-run-terminal.test.ts"
+      }
     }
   ]
 }
