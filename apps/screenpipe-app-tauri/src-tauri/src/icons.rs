@@ -1,3 +1,6 @@
+// screenpipe — AI that knows everything you've seen, said, or heard
+// https://screenpipe.com
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -149,10 +152,7 @@ pub async fn get_app_icon(
         if let Some(path) = get_exe_by_appx(app_name).await {
             return Some(path);
         }
-        if let Some(path) = get_exe_from_potential_path(app_name).await {
-            return Some(path);
-        }
-        None
+        get_exe_from_potential_path(app_name)
     }
 
     let path = match app_path {
@@ -293,6 +293,58 @@ fn powershell_exe() -> std::path::PathBuf {
         .join("powershell.exe")
 }
 
+/// Runs a fixed PowerShell script and returns the first non-empty line it prints.
+///
+/// `app_name` reaches the script only as `$env:SCREENPIPE_ICON_APP_NAME`. PowerShell
+/// reads an environment value as data, so a name like `x$(calc)` stays text. The
+/// name comes from `/app-icon`, which any web page can call, so never build a
+/// script from it: `&'static str` keeps every script a compile-time constant.
+#[cfg(target_os = "windows")]
+async fn run_powershell(script: &'static str, app_name: &str) -> Option<String> {
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    let _permit = SEMAPHORE.acquire().await.ok()?;
+    let output = tokio::process::Command::new(powershell_exe())
+        .args(["-NoProfile", "-WindowStyle", "hidden", "-Command", script])
+        .env("SCREENPIPE_ICON_APP_NAME", app_name)
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .await
+        .ok()?;
+
+    std::str::from_utf8(&output.stdout)
+        .ok()?
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(str::to_string)
+}
+
+/// Returns the first `.exe` under `dir` whose file name contains `name_lower`
+/// (case-insensitive), descending at most `max_depth` folder levels. Junctions and
+/// symlinked folders are not followed.
+#[cfg(any(target_os = "windows", test))]
+fn find_exe(dir: &std::path::Path, name_lower: &str, max_depth: usize) -> Option<String> {
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_dir() {
+            if max_depth > 0 {
+                if let Some(found) = find_exe(&entry.path(), name_lower, max_depth - 1) {
+                    return Some(found);
+                }
+            }
+            continue;
+        }
+        let file_name = entry.file_name().to_string_lossy().to_lowercase();
+        if file_name.ends_with(".exe") && file_name.contains(name_lower) {
+            return Some(entry.path().to_string_lossy().into_owned());
+        }
+    }
+    None
+}
+
 /// Strip dots, dashes, underscores and spaces so "screenpi.pe" matches "screenpipe",
 /// "wezterm-gui" matches "wezterm", etc.
 #[cfg(target_os = "windows")]
@@ -318,8 +370,7 @@ fn names_match(folder: &str, search: &str) -> bool {
 }
 
 #[cfg(target_os = "windows")]
-async fn get_exe_from_potential_path(app_name: &str) -> Option<String> {
-    const CREATE_NO_WINDOW: u32 = 0x08000000;
+fn get_exe_from_potential_path(app_name: &str) -> Option<String> {
     let app_name = app_name.strip_suffix(".exe").unwrap_or(&app_name);
 
     let app_lower = app_name.to_lowercase();
@@ -409,136 +460,41 @@ async fn get_exe_from_potential_path(app_name: &str) -> Option<String> {
         }
     }
 
-    let potential_paths = [
-        (
-            r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs",
-            true,
-        ),
-        (r"C:\Windows\", false),
-    ];
-    for (path, recursive) in &potential_paths {
-        let command = if *recursive {
-            format!(
-                r#"
-                    Get-ChildItem -Path "{}" -Filter "*{}*.exe" -Recurse | ForEach-Object {{ $_.FullName }}
-                    "#,
-                path, app_name
-            )
-        } else {
-            format!(
-                r#"
-                    Get-ChildItem -Path "{}" -Filter "*{}*.exe" | ForEach-Object {{ $_.FullName }}
-                    "#,
-                path, app_name
-            )
-        };
-
-        let _permit = SEMAPHORE.acquire().await.unwrap();
-
-        let output = tokio::process::Command::new(powershell_exe())
-            .arg("-NoProfile")
-            .arg("-WindowStyle")
-            .arg("hidden")
-            .arg("-Command")
-            .arg(command)
-            .creation_flags(CREATE_NO_WINDOW)
-            .output()
-            .await
-            .ok()?;
-
-        if output.status.success() {
-            let stdout = std::str::from_utf8(&output.stdout).ok()?;
-            if !stdout.is_empty() {
-                return stdout.lines().next().map(str::to_string);
-            }
-        }
-    }
-    None
+    // Start Menu (a few levels deep), then system tools such as notepad.exe.
+    find_exe(
+        std::path::Path::new(r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs"),
+        &app_lower,
+        4,
+    )
+    .or_else(|| find_exe(std::path::Path::new(r"C:\Windows"), &app_lower, 0))
 }
 
+/// Finds the app among installed Store (Appx/MSIX) packages and returns the first
+/// matching `.exe` in the package folder. One PowerShell process; the name is
+/// matched as plain text (no wildcards) and tried without, then with, spaces.
 #[cfg(target_os = "windows")]
 async fn get_exe_by_appx(app_name: &str) -> Option<String> {
-    use std::str;
+    const SCRIPT: &str = r#"
+$name = $env:SCREENPIPE_ICON_APP_NAME
+$compact = $name -replace ' ', ''
+$pkg = Get-AppxPackage |
+    Where-Object { $_.Name.IndexOf($compact, [StringComparison]::OrdinalIgnoreCase) -ge 0 } |
+    Select-Object -First 1
+if ($pkg -and $pkg.InstallLocation) {
+    foreach ($term in (@($compact, $name) | Select-Object -Unique)) {
+        $exe = Get-ChildItem -LiteralPath $pkg.InstallLocation -Filter ('*' + $term + '*.exe') -Recurse -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+        if ($exe) { $exe.FullName; break }
+    }
+}
+"#;
 
-    const CREATE_NO_WINDOW: u32 = 0x08000000;
-    let app_name = app_name.strip_suffix(".exe").unwrap_or(&app_name);
-    let app_name_withoutspace = app_name.replace(" ", "");
-
-    let _permit = SEMAPHORE.acquire().await.unwrap();
-
-    let output = tokio::process::Command::new(powershell_exe())
-        .arg("-NoProfile")
-        .arg("-WindowStyle")
-        .arg("hidden")
-        .arg("-Command")
-        .arg(format!(
-            r#"Get-AppxPackage | Where-Object {{ $_.Name -like "*{}*" }}"#,
-            app_name_withoutspace
-        ))
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .await
-        .ok()?;
-
-    if !output.status.success() {
+    let app_name = app_name.strip_suffix(".exe").unwrap_or(app_name);
+    if app_name.trim().is_empty() {
+        // An empty search term would match the first installed package.
         return None;
     }
-
-    let stdout = str::from_utf8(&output.stdout).ok()?;
-    let package_name = stdout
-        .lines()
-        .find(|line| line.contains("PackageFullName"))
-        .and_then(|line| line.split(':').nth(1))
-        .map(str::trim)?;
-
-    let exe_output = tokio::process::Command::new(powershell_exe())
-        .arg("-NoProfile")
-        .arg("-WindowStyle")
-        .arg("hidden")
-        .arg("-Command")
-        .arg(format!(
-            r#"
-                        Get-ChildItem -Path "C:\Program Files\WindowsApps\{}\*" -Filter "*{}*.exe" -Recurse | ForEach-Object {{ $_.FullName }}
-                    "#,
-            package_name,
-            app_name_withoutspace
-        ))
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .await
-        .ok()?;
-
-    if exe_output.status.success() {
-        let exe_stdout = str::from_utf8(&exe_output.stdout).ok()?;
-        if !exe_stdout.is_empty() {
-            return exe_stdout.lines().next().map(str::to_string);
-        }
-    }
-    // second attempt with space if the first attempt couldn't find exe
-    let exe_output = tokio::process::Command::new(powershell_exe())
-        .arg("-NoProfile")
-        .arg("-WindowStyle")
-        .arg("hidden")
-        .arg("-Command")
-        .arg(format!(
-            r#"
-                        Get-ChildItem -Path "C:\Program Files\WindowsApps\{}\*" -Filter "*{}*.exe" -Recurse | ForEach-Object {{ $_.FullName }}
-                    "#,
-            package_name,
-            app_name
-        ))
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .await
-        .ok()?;
-
-    if exe_output.status.success() {
-        let exe_stdout = str::from_utf8(&exe_output.stdout).ok()?;
-        if !exe_stdout.is_empty() {
-            return exe_stdout.lines().next().map(str::to_string);
-        }
-    }
-    None
+    run_powershell(SCRIPT, app_name).await
 }
 
 #[cfg(target_os = "linux")]
@@ -966,4 +922,97 @@ pub fn list_installed_apps() -> Vec<String> {
     }
 
     names.into_iter().collect()
+}
+
+#[cfg(test)]
+mod find_exe_tests {
+    use super::find_exe;
+    use std::path::Path;
+
+    fn touch(path: &Path) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, b"").unwrap();
+    }
+
+    #[test]
+    fn finds_exe_case_insensitively_within_depth() {
+        let root = tempfile::tempdir().unwrap();
+        let exe = root
+            .path()
+            .join("Vendor")
+            .join("bin")
+            .join("WezTerm-GUI.EXE");
+        touch(&exe);
+
+        assert_eq!(
+            find_exe(root.path(), "wezterm", 2),
+            Some(exe.to_string_lossy().into_owned())
+        );
+        assert_eq!(find_exe(root.path(), "wezterm", 1), None);
+        assert_eq!(find_exe(root.path(), "wezterm", 0), None);
+    }
+
+    #[test]
+    fn ignores_files_that_are_not_exe() {
+        let root = tempfile::tempdir().unwrap();
+        for name in ["notepad.txt", "notepad.exe.bak", "notepad.lnk"] {
+            touch(&root.path().join(name));
+        }
+        assert_eq!(find_exe(root.path(), "notepad", 0), None);
+
+        let exe = root.path().join("notepad.exe");
+        touch(&exe);
+        assert_eq!(
+            find_exe(root.path(), "notepad", 0),
+            Some(exe.to_string_lossy().into_owned())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn does_not_follow_symlinked_folders() {
+        let target = tempfile::tempdir().unwrap();
+        touch(&target.path().join("app.exe"));
+        let root = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(target.path(), root.path().join("link")).unwrap();
+
+        assert_eq!(find_exe(root.path(), "app", 3), None);
+    }
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod windows_powershell_tests {
+    use super::{get_exe_by_appx, run_powershell};
+
+    #[tokio::test]
+    async fn powershell_reads_the_app_name_as_text() {
+        for name in ["$(1+1)", "a`b", "a;b", "a\"b", "'a'"] {
+            let echoed = run_powershell(
+                "Write-Output ('[' + $env:SCREENPIPE_ICON_APP_NAME + ']')",
+                name,
+            )
+            .await;
+            assert_eq!(echoed, Some(format!("[{name}]")));
+        }
+    }
+
+    #[tokio::test]
+    async fn appx_lookup_never_runs_the_app_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("ran");
+        let create = format!("New-Item -ItemType File -Path '{}'", marker.display());
+        // Each name created `marker` when the lookup pasted it into PowerShell
+        // source. U+201C is a curly quote PowerShell treats like `"`.
+        let payloads = [
+            format!("x$({create})"),
+            format!("x\"; {create}; \""),
+            format!("x\u{201C}; {create}; \u{201C}"),
+            format!("x'; {create}; '"),
+            format!("x; {create}"),
+        ];
+        for name in payloads {
+            let _ = get_exe_by_appx(&name).await;
+            assert!(!marker.exists(), "app name ran as code: {name}");
+        }
+    }
 }
