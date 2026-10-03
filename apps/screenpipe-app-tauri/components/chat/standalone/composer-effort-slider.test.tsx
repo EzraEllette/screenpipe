@@ -80,15 +80,22 @@ describe("effort slider", () => {
 
   it("moves with the keyboard, and stops at both ends", () => {
     const onValueChange = vi.fn();
-    render(
-      <ComposerEffortSlider
-        label="effort"
-        testId="effort"
-        steps={STEPS}
-        value="low"
-        onValueChange={onValueChange}
-      />,
-    );
+    function Owner() {
+      const [value, setValue] = React.useState("low");
+      return (
+        <ComposerEffortSlider
+          label="effort"
+          testId="effort"
+          steps={STEPS}
+          value={value}
+          onValueChange={(next) => {
+            onValueChange(next);
+            setValue(next);
+          }}
+        />
+      );
+    }
+    render(<Owner />);
     const slider = screen.getByTestId("effort");
 
     fireEvent.keyDown(slider, { key: "ArrowRight" });
@@ -188,68 +195,6 @@ describe("effort slider", () => {
     expect(onValueChange).not.toHaveBeenCalled();
   });
 
-  it("holds the chosen step while the owner applies it", () => {
-    // Owners such as an ACP adapter confirm a change asynchronously. Until the
-    // new value arrives the dial must not jump back to the old step.
-    const onValueChange = vi.fn();
-    const { rerender } = render(
-      <ComposerEffortSlider
-        label="effort"
-        testId="effort"
-        steps={STEPS}
-        value="low"
-        onValueChange={onValueChange}
-      />,
-    );
-    const slider = layOut(screen.getByTestId("effort"));
-
-    press(slider, 106);
-    release(slider, 106);
-    rerender(
-      <ComposerEffortSlider
-        label="effort"
-        testId="effort"
-        steps={STEPS}
-        value="low"
-        disabled
-        onValueChange={onValueChange}
-      />,
-    );
-    expect(screen.getByTestId("effort-value")).toHaveTextContent("High");
-
-    rerender(
-      <ComposerEffortSlider
-        label="effort"
-        testId="effort"
-        steps={STEPS}
-        value="high"
-        onValueChange={onValueChange}
-      />,
-    );
-    expect(screen.getByTestId("effort-value")).toHaveTextContent("High");
-  });
-
-  it("returns to the real value when the owner's change does not land", () => {
-    const { rerender } = render(
-      <ComposerEffortSlider
-        label="effort"
-        testId="effort"
-        steps={STEPS}
-        value="low"
-        onValueChange={() => {}}
-      />,
-    );
-    const slider = layOut(screen.getByTestId("effort"));
-
-    press(slider, 106);
-    release(slider, 106);
-    const props = { label: "effort", testId: "effort", steps: STEPS, value: "low", onValueChange: () => {} };
-    rerender(<ComposerEffortSlider {...props} disabled />);
-    // Finished without the value changing: it failed, so show what is real.
-    rerender(<ComposerEffortSlider {...props} />);
-    expect(screen.getByTestId("effort-value")).toHaveTextContent("Low");
-  });
-
   it("is inert while a change is in flight", () => {
     const onValueChange = vi.fn();
     render(
@@ -269,6 +214,20 @@ describe("effort slider", () => {
     expect(onValueChange).not.toHaveBeenCalled();
   });
 
+  it("drops a drag when it is disabled mid-way", () => {
+    const onValueChange = vi.fn();
+    const props = { label: "effort", testId: "effort", steps: STEPS, value: "low", onValueChange };
+    const { rerender } = render(<ComposerEffortSlider {...props} />);
+    const slider = layOut(screen.getByTestId("effort"));
+
+    press(slider, 6);
+    drag(slider, 106);
+    rerender(<ComposerEffortSlider {...props} disabled />);
+    expect(screen.getByTestId("effort-value")).toHaveTextContent("Low");
+    release(slider, 106);
+    expect(onValueChange).not.toHaveBeenCalled();
+  });
+
   it("lands in place on its own and glides only for the user", () => {
     // Reopening the popover used to show the thumb sliding in from another
     // step. A value the user didn't just choose must not animate.
@@ -285,17 +244,26 @@ describe("effort slider", () => {
   });
 
   it("survives a value the steps do not contain", () => {
-    // An adapter can advertise a current value outside what it listed.
+    // An adapter can advertise a current value outside what it listed, or an
+    // empty one. The dial sits on the first step, and that step is still a
+    // real choice the user can make.
+    const onValueChange = vi.fn();
     render(
       <ComposerEffortSlider
         label="effort"
         testId="effort"
         steps={STEPS}
-        value="nonsense"
-        onValueChange={() => {}}
+        value=""
+        onValueChange={onValueChange}
       />,
     );
-    expect(screen.getByTestId("effort")).toHaveAttribute("aria-valuenow", "0");
+    const slider = layOut(screen.getByTestId("effort"));
+    expect(slider).toHaveAttribute("aria-valuenow", "0");
+
+    press(slider, 6);
+    release(slider, 6);
+    fireEvent.keyDown(slider, { key: "Home" });
+    expect(onValueChange.mock.calls).toEqual([["low"], ["low"]]);
   });
 });
 

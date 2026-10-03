@@ -38,8 +38,10 @@ export function usePiThinkingLevel(sessionId: string | null): PiThinkingLevel {
     const unregister = registerObserver(({ sessionId: eventSessionId, event }) => {
       if (eventSessionId !== sessionId) return;
 
-      // Pi emits thinking_level_changed whenever the level is set (via RPC or model switch).
-      // This fires immediately after set_thinking_level RPC — no need for a follow-up get_state.
+      // Pi emits thinking_level_changed only when the level actually changes
+      // (a set, or a model switch clamping it). A set that keeps the level, or
+      // clamps a choice back to it, emits nothing, so useThinkingLevel asks
+      // for state after every set and counts reports rather than values.
       if (event.type === "thinking_level_changed" && typeof event.level === "string") {
         setPiLevel(event.level);
         setPiThinkingUnsupported(event.level === "off");

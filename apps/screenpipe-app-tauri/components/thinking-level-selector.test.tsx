@@ -163,6 +163,29 @@ describe("thinking level", () => {
     ]);
   });
 
+  it("sends a queued change to the chat it was made in", async () => {
+    const { result, rerender } = renderHook(({ id }) => useThinkingLevel({ sessionId: id }), {
+      initialProps: { id: "s1" },
+    });
+    await flush();
+    const first = deferred<typeof ok>();
+    mocks.setLevel.mockReturnValueOnce(first.promise);
+
+    act(() => {
+      result.current.setLevel("low");
+      result.current.setLevel("high");
+    });
+    // The chat changes while "high" waits behind the first write.
+    rerender({ id: "s2" });
+    first.resolve(ok);
+    await flush();
+    expect(mocks.setLevel.mock.calls).toEqual([
+      ["s1", "low"],
+      ["s1", "high"],
+    ]);
+    expect(mocks.requestState).not.toHaveBeenCalledWith("s2");
+  });
+
   it("stays idle for presets that don't run through Pi", async () => {
     const { result } = renderHook(() => useThinkingLevel({ sessionId: "s1", enabled: false }));
     await flush();

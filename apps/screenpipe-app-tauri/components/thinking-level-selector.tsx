@@ -81,8 +81,12 @@ export function useThinkingLevel({
   // Chosen mid-reply; sent to the session when the reply ends.
   const deferredRef = useRef<ThinkingLevel | null>(null);
   // One write at a time, latest wins, so quick changes land in order and the
-  // last one is what sticks.
-  const nextWriteRef = useRef<{ level: ThinkingLevel; live: boolean } | null>(null);
+  // last one is what sticks. Each carries the session it was chosen in (null
+  // to only persist), so a write still queued when the chat changes can't
+  // land in the next one.
+  const nextWriteRef = useRef<{ level: ThinkingLevel; sessionId: string | null } | null>(
+    null,
+  );
   const writingRef = useRef(false);
 
   const flushWrites = useCallback(async () => {
@@ -90,16 +94,19 @@ export function useThinkingLevel({
     writingRef.current = true;
     try {
       while (nextWriteRef.current) {
-        const { level: target, live } = nextWriteRef.current;
+        const { level: target, sessionId: targetSession } = nextWriteRef.current;
         nextWriteRef.current = null;
         // Always persists to settings.json; with a session it is also applied
         // live. Without one it only persists, which is what a chat that hasn't
         // started yet or a mid-reply change needs.
-        const targetSession = live ? sessionIdRef.current : null;
         const result = await commands
           .piSetThinkingLevel(targetSession, target)
           .catch((error: unknown) => ({ status: "error" as const, error: String(error) }));
-        if (nextWriteRef.current || !targetSession) continue;
+        // The rest tracks the session's answer, which only the chat that
+        // made the choice is waiting for.
+        if (nextWriteRef.current || !targetSession || targetSession !== sessionIdRef.current) {
+          continue;
+        }
         if (result.status === "error") {
           console.error("failed to set thinking level:", result.error);
           // The session didn't take it; let its own report decide what shows.
@@ -158,7 +165,7 @@ export function useThinkingLevel({
     const wasStreaming = wasStreamingRef.current;
     wasStreamingRef.current = streaming;
     if (!wasStreaming || streaming || deferredRef.current === null) return;
-    nextWriteRef.current = { level: deferredRef.current, live: true };
+    nextWriteRef.current = { level: deferredRef.current, sessionId: sessionIdRef.current };
     deferredRef.current = null;
     void flushWrites();
   }, [streaming, flushWrites]);
@@ -169,10 +176,10 @@ export function useThinkingLevel({
       choiceRef.current = next;
       awaitingReportRef.current = false;
       setShownLevel(next); // optimistic, always immediate
-      const hasSession = !!sessionIdRef.current;
-      const midReply = hasSession && streamingRef.current;
+      const session = sessionIdRef.current;
+      const midReply = !!session && streamingRef.current;
       deferredRef.current = midReply ? next : null;
-      nextWriteRef.current = { level: next, live: hasSession && !midReply };
+      nextWriteRef.current = { level: next, sessionId: midReply ? null : session };
       void flushWrites();
     },
     [enabled, piThinkingUnsupported, flushWrites],
