@@ -550,19 +550,21 @@ const APP_ICON_MISS_TTL: std::time::Duration = std::time::Duration::from_secs(30
 const APP_ICON_MISS_CAP: usize = 1024;
 const MAX_APP_ICON_NAME_CHARS: usize = 256;
 
-/// Whether `name` could be an app or executable name. macOS resolves a name that
-/// is a path as that path, so this check is what stops a page from pointing the
-/// icon lookups at any file or a network share (`/net/host/x`, `\\host\share\x`);
-/// don't loosen it. A name needs a letter or digit because the Windows lookup
-/// ignores punctuation and would match a name like `-` to any app. That lookup
-/// stays loose for short names (`a`, `.exe`), which can only pick a wrong icon.
-/// The length cap bounds the miss-cache key.
+/// Whether `name` could be an app or executable name. macOS resolves a name with
+/// a `/` as a path, so rejecting `/` and `\` is what stops a page from pointing
+/// the icon lookups at any file or a network share (`/net/host/x`,
+/// `\\host\share\x`); don't loosen it. Other punctuation such as `:` or `?` makes
+/// no path on any platform, and real app names use it ("Halo: Reach"). A name
+/// needs a letter or digit because the Windows lookup ignores punctuation and
+/// would match a name like `-` to any app. That lookup stays loose for short
+/// names (`a`, `.exe`), which can only pick a wrong icon. The length cap bounds
+/// the miss-cache key.
 fn is_valid_app_icon_name(name: &str) -> bool {
     name.chars().any(char::is_alphanumeric)
         && name.chars().count() <= MAX_APP_ICON_NAME_CHARS
-        && !name.chars().any(|c| {
-            c.is_control() || matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*')
-        })
+        && !name
+            .chars()
+            .any(|c| c.is_control() || c == '/' || c == '\\')
 }
 
 fn remember_app_icon_miss(
@@ -898,10 +900,10 @@ curl -X POST http://localhost:11435/notify \
 #[cfg(test)]
 mod tests {
     use super::{
-        focus_handoff_matches_current_exe, get_app_icon_handler,
-        is_allowed_browser_extension_origin, is_allowed_local_host, is_allowed_local_origin,
-        is_valid_app_icon_name, remember_app_icon_miss, with_control_server_boundary,
-        APP_ICON_MISS_CAP, MAX_APP_ICON_NAME_CHARS,
+        focus_handoff_matches_current_exe, is_allowed_browser_extension_origin,
+        is_allowed_local_host, is_allowed_local_origin, is_valid_app_icon_name,
+        remember_app_icon_miss, with_control_server_boundary, APP_ICON_MISS_CAP,
+        MAX_APP_ICON_NAME_CHARS,
     };
     use axum::{
         body::Body,
@@ -996,8 +998,10 @@ mod tests {
             "wezterm-gui.exe",
             "Microsoft Teams (work or school)",
             "org.gnome.Nautilus",
+            "Halo: The Master Chief Collection",
+            "What? <Beta> \"Edition\" | *",
             // `$` is legal in file names. Validation is not the injection barrier;
-            // icons.rs never passes the name to PowerShell.
+            // icons.rs never passes the name to another program.
             "x$(calc)",
         ] {
             assert!(is_valid_app_icon_name(name), "should accept {name:?}");
@@ -1006,7 +1010,7 @@ mod tests {
     }
 
     #[test]
-    fn app_icon_rejects_paths_wildcards_and_oversized_names() {
+    fn app_icon_rejects_paths_and_oversized_names() {
         let too_long = "a".repeat(MAX_APP_ICON_NAME_CHARS + 1);
         for name in [
             "",
@@ -1020,10 +1024,6 @@ mod tests {
             r"\\evil.com\share\a",
             "a/b",
             "../etc",
-            "a\"b",
-            "*",
-            "a?b",
-            "C:",
             "x\u{7}",
             "x\ny",
         ] {
@@ -1046,6 +1046,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn app_icon_route_ignores_path_and_rejects_bad_names() {
+        use super::get_app_icon_handler;
         use axum::body::HttpBody;
 
         let app = with_control_server_boundary(
