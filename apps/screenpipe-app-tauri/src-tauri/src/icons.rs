@@ -123,40 +123,57 @@ pub async fn get_app_icon(
     }
 }
 
+/// Windows icon lookups that may run at once.
+#[cfg(target_os = "windows")]
+static ICON_LOOKUPS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
+
+/// Runs `lookup` on a blocking thread once `limit` has a free slot. A blocking
+/// thread keeps running after its request is dropped, so the slot is held until
+/// `lookup` returns, not until the caller stops waiting. Otherwise lookups that
+/// hang (a stuck Store listing) would take a new thread for every request until
+/// the runtime's shared blocking pool ran out.
+#[cfg(any(target_os = "windows", test))]
+async fn run_limited<T: Send + 'static>(
+    limit: &'static tokio::sync::Semaphore,
+    lookup: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, String> {
+    let slot = limit.acquire().await.map_err(|e| e.to_string())?;
+    tokio::task::spawn_blocking(move || {
+        let _slot = slot;
+        lookup()
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
 #[cfg(target_os = "windows")]
 pub async fn get_app_icon(
     app_name: &str,
     app_path: Option<String>,
 ) -> Result<Option<AppIcon>, String> {
+    // The searches read the registry and walk folders, and the icon is read from
+    // the file, so all of it runs on a blocking thread rather than the async
+    // runtime that serves the app's other requests.
+    let app_name = app_name.to_string();
+    run_limited(&ICON_LOOKUPS, move || windows_app_icon(&app_name, app_path)).await?
+}
+
+#[cfg(target_os = "windows")]
+fn windows_app_icon(app_name: &str, app_path: Option<String>) -> Result<Option<AppIcon>, String> {
     use image::codecs::png::PngEncoder;
     use image::{ExtendedColorType, ImageEncoder};
     use std::io::Cursor;
     use windows_icons::get_icon_by_path;
 
-    /// The searches read the registry and walk folders, so they run on a blocking
-    /// thread rather than the async runtime that serves the app's other requests.
-    async fn find_exe_path(app_name: &str) -> Option<String> {
-        let app_name = app_name.to_string();
-        tokio::task::spawn_blocking(move || {
-            get_exe_by_reg_key(&app_name)
-                .or_else(|| get_exe_by_appx(&app_name))
-                .or_else(|| get_exe_from_potential_path(&app_name))
-        })
-        .await
-        .ok()
-        .flatten()
-    }
-
     let path = match app_path {
         Some(p) => p,
-        None => find_exe_path(app_name)
-            .await
+        None => get_exe_by_reg_key(app_name)
+            .or_else(|| get_exe_by_appx(app_name))
+            .or_else(|| get_exe_from_potential_path(app_name))
             .ok_or_else(|| "app_path is None and could not find executable path".to_string())?,
     };
 
-    let image_buffer = async { get_icon_by_path(&path) }
-        .await
-        .map_err(|e| e.to_string())?;
+    let image_buffer = get_icon_by_path(&path).map_err(|e| e.to_string())?;
 
     let mut data = Vec::new();
     {
@@ -485,10 +502,12 @@ fn list_appx_packages() -> windows::core::Result<AppxPackages> {
     use windows::Management::Deployment::{PackageManager, PackageTypes};
 
     // An empty security ID means the current user, which needs no admin rights.
+    // `First()` rather than `into_iter()`, which unwraps the same call and would
+    // panic if it failed.
     let packages = PackageManager::new()?
-        .FindPackagesByUserSecurityIdWithPackageTypes(&HSTRING::new(), PackageTypes::Main)?;
+        .FindPackagesByUserSecurityIdWithPackageTypes(&HSTRING::new(), PackageTypes::Main)?
+        .First()?;
     Ok(packages
-        .into_iter()
         .filter_map(|package| {
             let name = package.Id().ok()?.Name().ok()?.to_string();
             let folder = package.InstalledPath().ok()?.to_string();
@@ -1125,6 +1144,43 @@ mod appx_tests {
             "Pkg"
         );
         assert_eq!(listings.load(Ordering::SeqCst), 3);
+    }
+}
+
+#[cfg(test)]
+mod run_limited_tests {
+    use super::run_limited;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{mpsc, Arc};
+    use std::time::Duration;
+    use tokio::sync::Semaphore;
+
+    #[tokio::test]
+    async fn hung_lookups_hold_their_slots_after_the_request_is_dropped() {
+        static LIMIT: Semaphore = Semaphore::const_new(2);
+        let started = Arc::new(AtomicUsize::new(0));
+        let mut releases = Vec::new();
+
+        // Ten requests whose lookups hang, each dropped after a short wait, as when
+        // a client gives up on a request.
+        for _ in 0..10 {
+            let (release, released) = mpsc::channel::<()>();
+            releases.push(release);
+            let started = started.clone();
+            let hung = run_limited(&LIMIT, move || {
+                started.fetch_add(1, Ordering::SeqCst);
+                let _ = released.recv();
+            });
+            assert!(tokio::time::timeout(Duration::from_millis(50), hung)
+                .await
+                .is_err());
+        }
+        assert_eq!(started.load(Ordering::SeqCst), 2);
+
+        // Once the hung lookups return, their slots are free again.
+        drop(releases);
+        assert_eq!(run_limited(&LIMIT, || 7).await, Ok(7));
+        assert_eq!(started.load(Ordering::SeqCst), 2);
     }
 }
 
