@@ -124,18 +124,6 @@ pub async fn get_app_icon(
 }
 
 #[cfg(target_os = "windows")]
-use lazy_static::lazy_static;
-#[cfg(target_os = "windows")]
-use std::sync::Arc;
-#[cfg(target_os = "windows")]
-use tokio::sync::Semaphore;
-
-#[cfg(target_os = "windows")]
-lazy_static! {
-    static ref SEMAPHORE: Arc<Semaphore> = Arc::new(Semaphore::new(5));
-}
-
-#[cfg(target_os = "windows")]
 pub async fn get_app_icon(
     app_name: &str,
     app_path: Option<String>,
@@ -293,41 +281,9 @@ fn powershell_exe() -> std::path::PathBuf {
         .join("powershell.exe")
 }
 
-/// Longest a PowerShell lookup may run. A stuck `Get-AppxPackage` would otherwise
-/// hold a semaphore slot forever, and every later icon miss would wait behind it.
-#[cfg(target_os = "windows")]
-const POWERSHELL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-
-/// Runs a fixed PowerShell script and returns the first non-empty line it prints.
-///
-/// `app_name` reaches the script only as `$env:SCREENPIPE_ICON_APP_NAME`. PowerShell
-/// reads an environment value as data, so a name like `x$(calc)` stays text. The
-/// name comes from `/app-icon`, which any web page can call, so never build a
-/// script from it: `&'static str` keeps every script a compile-time constant.
-#[cfg(target_os = "windows")]
-async fn run_powershell(script: &'static str, app_name: &str) -> Option<String> {
-    const CREATE_NO_WINDOW: u32 = 0x08000000;
-
-    let _permit = SEMAPHORE.acquire().await.ok()?;
-    let mut command = tokio::process::Command::new(powershell_exe());
-    command
-        .args(["-NoProfile", "-WindowStyle", "hidden", "-Command", script])
-        .env("SCREENPIPE_ICON_APP_NAME", app_name)
-        .creation_flags(CREATE_NO_WINDOW);
-    let stdout = stdout_within(command, POWERSHELL_TIMEOUT).await?;
-
-    std::str::from_utf8(&stdout)
-        .ok()?
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .map(str::to_string)
-}
-
 /// Runs `command` and returns its stdout, or `None` if it fails to start or is
 /// still running after `timeout`. The child is killed whenever this future ends
-/// early: on timeout, or when an HTTP client gives up and its handler is dropped.
-/// Otherwise an abandoned lookup frees its semaphore slot while the process runs on.
+/// early, so a stuck process can't outlive the timeout.
 #[cfg(any(target_os = "windows", test))]
 async fn stdout_within(
     mut command: tokio::process::Command,
@@ -341,19 +297,19 @@ async fn stdout_within(
 }
 
 /// Returns the first `.exe` under `dir` whose file name contains `name_lower`
-/// (case-insensitive), descending at most `max_depth` folder levels. Junctions and
-/// symlinked folders are not followed.
+/// (case-insensitive), descending at most `max_depth` folder levels. A folder's
+/// own files win over its subfolders', as with `Get-ChildItem -Recurse`. Junctions
+/// and symlinked folders are not followed.
 #[cfg(any(target_os = "windows", test))]
 fn find_exe(dir: &std::path::Path, name_lower: &str, max_depth: usize) -> Option<String> {
+    let mut subfolders = Vec::new();
     for entry in std::fs::read_dir(dir).ok()?.flatten() {
         let Ok(file_type) = entry.file_type() else {
             continue;
         };
         if file_type.is_dir() {
             if max_depth > 0 {
-                if let Some(found) = find_exe(&entry.path(), name_lower, max_depth - 1) {
-                    return Some(found);
-                }
+                subfolders.push(entry.path());
             }
             continue;
         }
@@ -362,7 +318,9 @@ fn find_exe(dir: &std::path::Path, name_lower: &str, max_depth: usize) -> Option
             return Some(entry.path().to_string_lossy().into_owned());
         }
     }
-    None
+    subfolders
+        .iter()
+        .find_map(|folder| find_exe(folder, name_lower, max_depth - 1))
 }
 
 /// Strip dots, dashes, underscores and spaces so "screenpi.pe" matches "screenpipe",
@@ -484,32 +442,123 @@ fn get_exe_from_potential_path(app_name: &str) -> Option<String> {
     .or_else(|| find_exe(std::path::Path::new(r"C:\Windows"), &app_lower, 0))
 }
 
-/// Finds the app among installed Store (Appx/MSIX) packages and returns the first
-/// matching `.exe` in the package folder. One PowerShell process; the name is
-/// matched as plain text (no wildcards) and tried without, then with, spaces.
+/// Installed Store (Appx/MSIX) packages as (package name, install folder), in
+/// `Get-AppxPackage` order.
+#[cfg(any(target_os = "windows", test))]
+type AppxPackages = Vec<(String, std::path::PathBuf)>;
+
+#[cfg(any(target_os = "windows", test))]
+type AppxListing =
+    futures::future::Shared<futures::future::BoxFuture<'static, std::sync::Arc<AppxPackages>>>;
+
+/// How long a Store package list is reused, so new installs still show up.
+#[cfg(target_os = "windows")]
+const APPX_PACKAGES_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Deep enough for packaged desktop apps under `VFS\ProgramFilesX64\<vendor>\...`.
+#[cfg(any(target_os = "windows", test))]
+const APPX_EXE_DEPTH: usize = 8;
+
+#[cfg(target_os = "windows")]
+static APPX_PACKAGES: std::sync::Mutex<Option<(std::time::Instant, AppxListing)>> =
+    std::sync::Mutex::new(None);
+
+/// Finds the app among installed Store packages. `/app-icon` accepts any name
+/// from any web page, so the name never reaches PowerShell: one fixed script lists
+/// the packages, and the name is matched here.
 #[cfg(target_os = "windows")]
 async fn get_exe_by_appx(app_name: &str) -> Option<String> {
-    const SCRIPT: &str = r#"
-$name = $env:SCREENPIPE_ICON_APP_NAME
-$compact = $name -replace ' ', ''
-$pkg = Get-AppxPackage |
-    Where-Object { $_.Name.IndexOf($compact, [StringComparison]::OrdinalIgnoreCase) -ge 0 } |
-    Select-Object -First 1
-if ($pkg -and $pkg.InstallLocation) {
-    foreach ($term in (@($compact, $name) | Select-Object -Unique)) {
-        $exe = Get-ChildItem -LiteralPath $pkg.InstallLocation -Filter ('*' + $term + '*.exe') -Recurse -ErrorAction SilentlyContinue |
-            Select-Object -First 1
-        if ($exe) { $exe.FullName; break }
-    }
+    let packages =
+        cached_appx_packages(&APPX_PACKAGES, APPX_PACKAGES_TTL, list_appx_packages).await;
+    find_appx_exe(&packages, app_name)
 }
-"#;
 
-    let app_name = app_name.strip_suffix(".exe").unwrap_or(app_name);
-    if app_name.trim().is_empty() {
-        // An empty search term would match the first installed package.
+/// Returns the package list in `slot`, starting a new listing if there is none or
+/// it is older than `ttl`. The listing runs as its own task: a caller that gives
+/// up doesn't cancel it, and callers that arrive meanwhile wait for the same one.
+/// So `list` runs at most once per `ttl`, however many icons are requested.
+#[cfg(any(target_os = "windows", test))]
+async fn cached_appx_packages<F>(
+    slot: &std::sync::Mutex<Option<(std::time::Instant, AppxListing)>>,
+    ttl: std::time::Duration,
+    list: impl FnOnce() -> F,
+) -> std::sync::Arc<AppxPackages>
+where
+    F: std::future::Future<Output = AppxPackages> + Send + 'static,
+{
+    use futures::FutureExt;
+
+    let listing = {
+        let mut slot = slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match slot.as_ref() {
+            Some((started, listing)) if started.elapsed() < ttl => listing.clone(),
+            _ => {
+                let task = tokio::spawn(list());
+                let listing = async move { std::sync::Arc::new(task.await.unwrap_or_default()) }
+                    .boxed()
+                    .shared();
+                *slot = Some((std::time::Instant::now(), listing.clone()));
+                listing
+            }
+        }
+    };
+    listing.await
+}
+
+/// Lists installed Store packages. The script is fixed and reads no input. An
+/// empty list (PowerShell failed or took too long) is cached like any other, so a
+/// broken PowerShell isn't retried on every icon request.
+#[cfg(target_os = "windows")]
+async fn list_appx_packages() -> AppxPackages {
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    const SCRIPT: &str =
+        r#"Get-AppxPackage | ForEach-Object { $_.Name + "`t" + $_.InstallLocation }"#;
+
+    let mut command = tokio::process::Command::new(powershell_exe());
+    command
+        .args(["-NoProfile", "-NonInteractive", "-WindowStyle", "hidden"])
+        .args(["-Command", SCRIPT])
+        .creation_flags(CREATE_NO_WINDOW);
+    stdout_within(command, std::time::Duration::from_secs(20))
+        .await
+        .map(|stdout| parse_appx_packages(&stdout))
+        .unwrap_or_default()
+}
+
+/// Parses `name<TAB>install folder` lines, skipping packages without a folder.
+#[cfg(any(target_os = "windows", test))]
+fn parse_appx_packages(stdout: &[u8]) -> AppxPackages {
+    String::from_utf8_lossy(stdout)
+        .lines()
+        .filter_map(|line| {
+            let (name, folder) = line.trim().split_once('\t')?;
+            Some((name.to_string(), std::path::PathBuf::from(folder)))
+        })
+        .collect()
+}
+
+/// Picks the first package whose name contains the app name (spaces removed, any
+/// case), then the first `.exe` in its folder named like the app, trying the name
+/// without and then with spaces.
+#[cfg(any(target_os = "windows", test))]
+fn find_appx_exe(packages: &AppxPackages, app_name: &str) -> Option<String> {
+    let lower = app_name.to_lowercase();
+    let name = lower.strip_suffix(".exe").unwrap_or(&lower);
+    let compact = name.replace(' ', "");
+    if compact.is_empty() {
+        // An empty search term would match every package.
         return None;
     }
-    run_powershell(SCRIPT, app_name).await
+    let (_, folder) = packages
+        .iter()
+        .find(|(package, _)| package.to_lowercase().contains(&compact))?;
+    let found = find_exe(folder, &compact, APPX_EXE_DEPTH);
+    if found.is_some() || name == compact {
+        return found;
+    }
+    find_exe(folder, name, APPX_EXE_DEPTH)
 }
 
 #[cfg(target_os = "linux")]
@@ -983,6 +1032,23 @@ mod find_exe_tests {
         );
     }
 
+    #[test]
+    fn prefers_an_exe_in_the_folder_over_one_in_a_subfolder() {
+        let root = tempfile::tempdir().unwrap();
+        // Several subfolders, so at least one is listed before `app.exe` whatever
+        // order the filesystem returns.
+        for folder in ["a-helpers", "bin", "helpers", "x64", "z-tools"] {
+            touch(&root.path().join(folder).join("app-helper.exe"));
+        }
+        let exe = root.path().join("app.exe");
+        touch(&exe);
+
+        assert_eq!(
+            find_exe(root.path(), "app", 2),
+            Some(exe.to_string_lossy().into_owned())
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn does_not_follow_symlinked_folders() {
@@ -995,55 +1061,201 @@ mod find_exe_tests {
     }
 }
 
-#[cfg(all(test, target_os = "windows"))]
-mod windows_powershell_tests {
-    use super::{get_exe_by_appx, run_powershell};
+#[cfg(test)]
+mod appx_tests {
+    use super::{cached_appx_packages, find_appx_exe, parse_appx_packages, AppxPackages};
+    use futures::future::{BoxFuture, FutureExt};
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
-    #[tokio::test]
-    async fn powershell_reads_the_app_name_as_text() {
-        for name in ["$(1+1)", "a`b", "a;b", "a\"b", "'a'"] {
-            let echoed = run_powershell(
-                "Write-Output ('[' + $env:SCREENPIPE_ICON_APP_NAME + ']')",
-                name,
-            )
-            .await;
-            assert_eq!(echoed, Some(format!("[{name}]")));
+    fn touch(path: &std::path::Path) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, b"").unwrap();
+    }
+
+    #[test]
+    fn parses_name_and_folder_lines() {
+        let stdout = b"Microsoft.WindowsCalculator\tC:\\Program Files\\WindowsApps\\Calc_x64\r\n\
+            Microsoft.NoFolder\t\r\n\
+            \r\n\
+            Microsoft.WindowsTerminal\tC:\\Apps\\Terminal\r\n";
+        assert_eq!(
+            parse_appx_packages(stdout),
+            vec![
+                (
+                    "Microsoft.WindowsCalculator".to_string(),
+                    PathBuf::from(r"C:\Program Files\WindowsApps\Calc_x64")
+                ),
+                (
+                    "Microsoft.WindowsTerminal".to_string(),
+                    PathBuf::from(r"C:\Apps\Terminal")
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn finds_the_exe_of_the_first_matching_package() {
+        let root = tempfile::tempdir().unwrap();
+        let store = root.path().join("store");
+        let calc = root.path().join("calc");
+        touch(&store.join("WinStore.App.exe"));
+        let calc_exe = calc.join("VFS").join("bin").join("Calculator.exe");
+        touch(&calc_exe);
+        let packages: AppxPackages = vec![
+            ("Microsoft.WindowsStore".into(), store),
+            ("Microsoft.WindowsCalculator".into(), calc),
+        ];
+
+        let found = Some(calc_exe.to_string_lossy().into_owned());
+        assert_eq!(find_appx_exe(&packages, "Calculator"), found);
+        assert_eq!(find_appx_exe(&packages, "Calculator.EXE"), found);
+        // The package matches without spaces; the exe is named with them.
+        let spaced = root.path().join("calc").join("Windows Calculator.exe");
+        touch(&spaced);
+        std::fs::remove_file(&calc_exe).unwrap();
+        assert_eq!(
+            find_appx_exe(&packages, "Windows Calculator"),
+            Some(spaced.to_string_lossy().into_owned())
+        );
+
+        assert_eq!(find_appx_exe(&packages, "Slack"), None);
+        assert_eq!(find_appx_exe(&packages, " "), None);
+        assert_eq!(find_appx_exe(&packages, ".exe"), None);
+    }
+
+    fn counting_listing(
+        listings: &Arc<AtomicUsize>,
+    ) -> impl FnOnce() -> BoxFuture<'static, AppxPackages> {
+        let listings = listings.clone();
+        move || {
+            async move {
+                listings.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                vec![("Pkg".to_string(), PathBuf::from("/pkg"))]
+            }
+            .boxed()
         }
     }
 
+    /// Random names and aborted requests used to start PowerShell every time.
     #[tokio::test]
-    async fn appx_lookup_never_runs_the_app_name() {
-        let dir = tempfile::tempdir().unwrap();
-        let marker = dir.path().join("ran");
-        // The pre-fix lookup removed spaces before pasting the name into
-        // PowerShell source, so only a payload without spaces ran there. The
-        // marker path may contain spaces, so the payload reads it from an
-        // environment variable that PowerShell inherits from this process.
-        std::env::set_var("SCREENPIPE_ICON_TEST_MARKER", &marker);
-        let no_spaces = "x$(ni($env:SCREENPIPE_ICON_TEST_MARKER))";
+    async fn abandoned_and_concurrent_callers_share_one_listing() {
+        let slot = Mutex::new(None);
+        let listings = Arc::new(AtomicUsize::new(0));
+        let ttl = Duration::from_secs(60);
 
-        // Control: pasted into the pre-fix script, the payload creates the marker.
-        let old_script =
-            format!(r#"Get-AppxPackage | Where-Object {{ $_.Name -like "*{no_spaces}*" }}"#);
-        std::process::Command::new(super::powershell_exe())
-            .args(["-NoProfile", "-Command", &old_script])
+        let abandoned = tokio::time::timeout(
+            Duration::from_millis(20),
+            cached_appx_packages(&slot, ttl, counting_listing(&listings)),
+        )
+        .await;
+        assert!(abandoned.is_err());
+
+        let callers =
+            (0..50).map(|_| cached_appx_packages(&slot, ttl, counting_listing(&listings)));
+        for packages in futures::future::join_all(callers).await {
+            assert_eq!(packages[0].0, "Pkg");
+        }
+        assert_eq!(listings.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn lists_again_once_the_list_is_stale() {
+        let slot = Mutex::new(None);
+        let listings = Arc::new(AtomicUsize::new(0));
+        for _ in 0..2 {
+            cached_appx_packages(&slot, Duration::ZERO, counting_listing(&listings)).await;
+        }
+        assert_eq!(listings.load(Ordering::SeqCst), 2);
+    }
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod windows_icon_tests {
+    use super::{find_appx_exe, find_exe, get_app_icon, get_exe_by_appx, powershell_exe};
+
+    #[tokio::test]
+    async fn resolves_a_store_app() {
+        let packages = super::list_appx_packages().await;
+        assert!(!packages.is_empty(), "Get-AppxPackage listed nothing");
+        // Any app whose exe is named after its package, such as
+        // ShellExperienceHost.exe in Microsoft.Windows.ShellExperienceHost.
+        let (name, exe) = packages
+            .iter()
+            .filter_map(|(_, folder)| std::fs::read_dir(folder).ok())
+            .flat_map(|entries| entries.flatten())
+            .filter_map(|entry| {
+                let file = entry.file_name().to_string_lossy().to_lowercase();
+                file.strip_suffix(".exe").map(str::to_string)
+            })
+            .find_map(|name| Some((name.clone(), find_appx_exe(&packages, &name)?)))
+            .expect("no Store app is named after its package");
+        eprintln!("{} packages; {name} -> {exe}", packages.len());
+
+        assert_eq!(get_exe_by_appx(&name).await, Some(exe));
+        let icon = get_app_icon(&name, None).await.unwrap().unwrap();
+        assert!(icon.data.starts_with(b"\x89PNG"), "{name}");
+    }
+
+    #[tokio::test]
+    async fn resolves_a_windows_tool() {
+        assert!(find_exe(std::path::Path::new(r"C:\Windows"), "notepad", 0).is_some());
+        let icon = get_app_icon("notepad", None).await.unwrap().unwrap();
+        assert!(icon.data.starts_with(b"\x89PNG"));
+    }
+
+    /// Runs `script` the way the pre-fix lookup did and reports whether `marker`
+    /// appeared, i.e. whether the name in it ran as code.
+    fn ran_in_pre_fix_script(script: &str, marker: &std::path::Path) -> bool {
+        std::process::Command::new(powershell_exe())
+            .args(["-NoProfile", "-Command", script])
             .output()
             .unwrap();
-        assert!(marker.exists(), "control payload should run as code");
-        std::fs::remove_file(&marker).unwrap();
+        let ran = marker.exists();
+        let _ = std::fs::remove_file(marker);
+        ran
+    }
 
+    #[tokio::test]
+    async fn icon_lookup_never_runs_the_app_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("ran");
+        // The marker path may contain spaces, which the pre-fix Store lookup
+        // removed, so the first payload reads it from an inherited environment
+        // variable instead.
+        std::env::set_var("SCREENPIPE_ICON_TEST_MARKER", &marker);
         let create = format!("New-Item -ItemType File -Path '{}'", marker.display());
-        // U+201C is a curly quote PowerShell treats like `"`.
+        // U+201C is a curly quote PowerShell treats like `"`. `#` comments out the
+        // rest of the pre-fix command so the injected one parses.
         let payloads = [
-            no_spaces.to_string(),
+            "x$(ni($env:SCREENPIPE_ICON_TEST_MARKER))".to_string(),
             format!("x$({create})"),
-            format!("x\"; {create}; \""),
-            format!("x\u{201C}; {create}; \u{201C}"),
-            format!("x'; {create}; '"),
-            format!("x; {create}"),
+            format!("x\"; {create}; #"),
+            format!("x\u{201C}; {create}; #"),
         ];
+
+        // Controls: every payload ran as code in a pre-fix lookup. Both pasted the
+        // name into PowerShell source; the Store one removed spaces first.
+        for name in &payloads {
+            let store = format!(
+                r#"Get-AppxPackage | Where-Object {{ $_.Name -like "*{}*" }}"#,
+                name.replace(' ', "")
+            );
+            let start_menu = format!(
+                r#"Get-ChildItem -Path "C:\ProgramData\Microsoft\Windows\Start Menu\Programs" -Filter "*{name}*.exe" -Recurse | ForEach-Object {{ $_.FullName }}"#
+            );
+            assert!(
+                ran_in_pre_fix_script(&store, &marker)
+                    || ran_in_pre_fix_script(&start_menu, &marker),
+                "control payload never ran: {name}"
+            );
+        }
+
         for name in payloads {
-            let _ = get_exe_by_appx(&name).await;
+            let _ = get_app_icon(&name, None).await;
             assert!(!marker.exists(), "app name ran as code: {name}");
         }
     }

@@ -553,10 +553,11 @@ const MAX_APP_ICON_NAME_CHARS: usize = 256;
 /// Whether `name` could be an app or executable name. macOS resolves a name that
 /// is a path as that path, so this check is what stops a page from pointing the
 /// icon lookups at any file or a network share (`/net/host/x`, `\\host\share\x`);
-/// don't loosen it. It also bounds the miss-cache key. Windows hands the name to
-/// PowerShell only as data.
+/// don't loosen it. A name needs a letter or digit because the Windows lookup
+/// ignores punctuation, so `-` would match every installed app. The length cap
+/// bounds the miss-cache key.
 fn is_valid_app_icon_name(name: &str) -> bool {
-    !name.trim().is_empty()
+    name.chars().any(char::is_alphanumeric)
         && name.chars().count() <= MAX_APP_ICON_NAME_CHARS
         && !name.chars().any(|c| {
             c.is_control() || matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*')
@@ -995,7 +996,7 @@ mod tests {
             "Microsoft Teams (work or school)",
             "org.gnome.Nautilus",
             // `$` is legal in file names. Validation is not the injection barrier;
-            // icons.rs passes the name to PowerShell as data.
+            // icons.rs never passes the name to PowerShell.
             "x$(calc)",
         ] {
             assert!(is_valid_app_icon_name(name), "should accept {name:?}");
@@ -1009,6 +1010,10 @@ mod tests {
         for name in [
             "",
             "   ",
+            "-",
+            ".",
+            "..",
+            "$()",
             too_long.as_str(),
             r"a\b",
             r"\\evil.com\share\a",
