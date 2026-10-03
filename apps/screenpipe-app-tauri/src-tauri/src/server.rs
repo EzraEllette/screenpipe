@@ -550,9 +550,11 @@ const APP_ICON_MISS_TTL: std::time::Duration = std::time::Duration::from_secs(30
 const APP_ICON_MISS_CAP: usize = 1024;
 const MAX_APP_ICON_NAME_CHARS: usize = 256;
 
-/// Whether `name` could be an app or executable name. Keeps path separators and
-/// wildcards out of the OS lookups and bounds the miss-cache key. This is input
-/// hygiene; Windows lookups hand the name to PowerShell as data either way.
+/// Whether `name` could be an app or executable name. macOS resolves a name that
+/// is a path as that path, so this check is what stops a page from pointing the
+/// icon lookups at any file or a network share (`/net/host/x`, `\\host\share\x`);
+/// don't loosen it. It also bounds the miss-cache key. Windows hands the name to
+/// PowerShell only as data.
 fn is_valid_app_icon_name(name: &str) -> bool {
     !name.trim().is_empty()
         && name.chars().count() <= MAX_APP_ICON_NAME_CHARS
@@ -565,13 +567,14 @@ fn remember_app_icon_miss(
     misses: &mut std::collections::HashMap<String, std::time::Instant>,
     name: String,
 ) {
-    misses.insert(name, std::time::Instant::now());
-    if misses.len() > APP_ICON_MISS_CAP {
+    // Make room before inserting so a full cache never drops the newest name.
+    if misses.len() >= APP_ICON_MISS_CAP {
         misses.retain(|_, at| at.elapsed() < APP_ICON_MISS_TTL);
-        if misses.len() > APP_ICON_MISS_CAP {
+        if misses.len() >= APP_ICON_MISS_CAP {
             misses.clear();
         }
     }
+    misses.insert(name, std::time::Instant::now());
 }
 
 fn no_app_icon() -> (
@@ -598,11 +601,11 @@ async fn get_app_icon_handler(Query(query): Query<AppIconQuery>) -> impl IntoRes
     // Names we already know have no icon, so repeat requests skip the lookup.
     static MISSES: Lazy<Mutex<HashMap<String, Instant>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 
-    info!("received app icon request: {:?}", query);
-
     if !is_valid_app_icon_name(&query.name) {
         return no_app_icon();
     }
+    info!("received app icon request: {:?}", query);
+
     if let Ok(misses) = MISSES.lock() {
         if misses
             .get(&query.name)
@@ -1023,14 +1026,14 @@ mod tests {
     }
 
     #[test]
-    fn app_icon_miss_cache_stays_bounded() {
+    fn app_icon_miss_cache_stays_bounded_and_keeps_the_newest_name() {
         let mut misses = std::collections::HashMap::new();
         for i in 0..APP_ICON_MISS_CAP * 3 {
-            remember_app_icon_miss(&mut misses, format!("random-{i}"));
+            let name = format!("random-{i}");
+            remember_app_icon_miss(&mut misses, name.clone());
             assert!(misses.len() <= APP_ICON_MISS_CAP);
+            assert!(misses.contains_key(&name), "forgot {name} right away");
         }
-        remember_app_icon_miss(&mut misses, "Slack".to_string());
-        assert!(misses.contains_key("Slack"));
     }
 
     /// Drives the real `/app-icon` route and the real macOS icon lookup.
@@ -1074,6 +1077,8 @@ mod tests {
         assert_eq!((status, body.len()), (StatusCode::NO_CONTENT, 0));
 
         for uri in [
+            // macOS resolves this name to Calculator, so it has to be rejected.
+            "/app-icon?name=%2FSystem%2FApplications%2FCalculator.app",
             "/app-icon?name=a%2Fb",
             "/app-icon?name=%5C%5Cevil.com%5Cshare%5Ca",
             "/app-icon?name=",

@@ -293,6 +293,11 @@ fn powershell_exe() -> std::path::PathBuf {
         .join("powershell.exe")
 }
 
+/// Longest a PowerShell lookup may run. A stuck `Get-AppxPackage` would otherwise
+/// hold a semaphore slot forever, and every later icon miss would wait behind it.
+#[cfg(target_os = "windows")]
+const POWERSHELL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Runs a fixed PowerShell script and returns the first non-empty line it prints.
 ///
 /// `app_name` reaches the script only as `$env:SCREENPIPE_ICON_APP_NAME`. PowerShell
@@ -304,20 +309,35 @@ async fn run_powershell(script: &'static str, app_name: &str) -> Option<String> 
     const CREATE_NO_WINDOW: u32 = 0x08000000;
 
     let _permit = SEMAPHORE.acquire().await.ok()?;
-    let output = tokio::process::Command::new(powershell_exe())
+    let mut command = tokio::process::Command::new(powershell_exe());
+    command
         .args(["-NoProfile", "-WindowStyle", "hidden", "-Command", script])
         .env("SCREENPIPE_ICON_APP_NAME", app_name)
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .await
-        .ok()?;
+        .creation_flags(CREATE_NO_WINDOW);
+    let stdout = stdout_within(command, POWERSHELL_TIMEOUT).await?;
 
-    std::str::from_utf8(&output.stdout)
+    std::str::from_utf8(&stdout)
         .ok()?
         .lines()
         .map(str::trim)
         .find(|line| !line.is_empty())
         .map(str::to_string)
+}
+
+/// Runs `command` and returns its stdout, or `None` if it fails to start or is
+/// still running after `timeout`. The child is killed whenever this future ends
+/// early: on timeout, or when an HTTP client gives up and its handler is dropped.
+/// Otherwise an abandoned lookup frees its semaphore slot while the process runs on.
+#[cfg(any(target_os = "windows", test))]
+async fn stdout_within(
+    mut command: tokio::process::Command,
+    timeout: std::time::Duration,
+) -> Option<Vec<u8>> {
+    let output = tokio::time::timeout(timeout, command.kill_on_drop(true).output())
+        .await
+        .ok()?
+        .ok()?;
+    Some(output.stdout)
 }
 
 /// Returns the first `.exe` under `dir` whose file name contains `name_lower`
@@ -371,7 +391,7 @@ fn names_match(folder: &str, search: &str) -> bool {
 
 #[cfg(target_os = "windows")]
 fn get_exe_from_potential_path(app_name: &str) -> Option<String> {
-    let app_name = app_name.strip_suffix(".exe").unwrap_or(&app_name);
+    let app_name = app_name.strip_suffix(".exe").unwrap_or(app_name);
 
     let app_lower = app_name.to_lowercase();
 
@@ -449,11 +469,6 @@ fn get_exe_from_potential_path(app_name: &str) -> Option<String> {
                                 return Some(sub.path().to_string_lossy().to_string());
                             }
                         }
-                    }
-                    // Also check for direct exe match
-                    let direct_exe = entry.path().join(format!("{}.exe", app_name));
-                    if direct_exe.exists() {
-                        return Some(direct_exe.to_string_lossy().to_string());
                     }
                 }
             }
@@ -1000,10 +1015,27 @@ mod windows_powershell_tests {
     async fn appx_lookup_never_runs_the_app_name() {
         let dir = tempfile::tempdir().unwrap();
         let marker = dir.path().join("ran");
+        // The pre-fix lookup removed spaces before pasting the name into
+        // PowerShell source, so only a payload without spaces ran there. The
+        // marker path may contain spaces, so the payload reads it from an
+        // environment variable that PowerShell inherits from this process.
+        std::env::set_var("SCREENPIPE_ICON_TEST_MARKER", &marker);
+        let no_spaces = "x$(ni($env:SCREENPIPE_ICON_TEST_MARKER))";
+
+        // Control: pasted into the pre-fix script, the payload creates the marker.
+        let old_script =
+            format!(r#"Get-AppxPackage | Where-Object {{ $_.Name -like "*{no_spaces}*" }}"#);
+        std::process::Command::new(super::powershell_exe())
+            .args(["-NoProfile", "-Command", &old_script])
+            .output()
+            .unwrap();
+        assert!(marker.exists(), "control payload should run as code");
+        std::fs::remove_file(&marker).unwrap();
+
         let create = format!("New-Item -ItemType File -Path '{}'", marker.display());
-        // Each name created `marker` when the lookup pasted it into PowerShell
-        // source. U+201C is a curly quote PowerShell treats like `"`.
+        // U+201C is a curly quote PowerShell treats like `"`.
         let payloads = [
+            no_spaces.to_string(),
             format!("x$({create})"),
             format!("x\"; {create}; \""),
             format!("x\u{201C}; {create}; \u{201C}"),
@@ -1014,5 +1046,91 @@ mod windows_powershell_tests {
             let _ = get_exe_by_appx(&name).await;
             assert!(!marker.exists(), "app name ran as code: {name}");
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod stdout_within_tests {
+    use super::stdout_within;
+    use std::path::Path;
+    use std::time::{Duration, Instant};
+
+    /// A child that writes its pid to `pid_file`, then sleeps for a minute.
+    fn sleeper(pid_file: &Path) -> tokio::process::Command {
+        let mut command = tokio::process::Command::new("sh");
+        command
+            .args(["-c", r#"echo $$ > "$1"; exec sleep 60"#, "sh"])
+            .arg(pid_file);
+        command
+    }
+
+    async fn read_pid(pid_file: &Path) -> String {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Ok(pid) = std::fs::read_to_string(pid_file) {
+                if pid.ends_with('\n') {
+                    return pid.trim().to_string();
+                }
+            }
+            assert!(Instant::now() < deadline, "sleeper never wrote its pid");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// Waits up to 5 s for `pid` to exit. A killed zombie awaiting reaping counts.
+    async fn exits(pid: &str) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            let ps = std::process::Command::new("ps")
+                .args(["-o", "stat=", "-p", pid])
+                .output()
+                .unwrap();
+            let stat = String::from_utf8_lossy(&ps.stdout);
+            if stat.trim().is_empty() || stat.trim().starts_with('Z') {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        false
+    }
+
+    #[tokio::test]
+    async fn returns_stdout() {
+        let mut command = tokio::process::Command::new("sh");
+        command.args(["-c", "echo icon"]);
+        assert_eq!(
+            stdout_within(command, Duration::from_secs(10)).await,
+            Some(b"icon\n".to_vec())
+        );
+    }
+
+    #[tokio::test]
+    async fn kills_the_child_on_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("pid");
+
+        let started = Instant::now();
+        let stdout = stdout_within(sleeper(&pid_file), Duration::from_secs(1)).await;
+        assert_eq!(stdout, None);
+        assert!(started.elapsed() < Duration::from_secs(5));
+
+        let pid = read_pid(&pid_file).await;
+        assert!(exits(&pid).await, "child {pid} outlived the timeout");
+    }
+
+    /// An aborted `fetch` or `<img>` drops the `/app-icon` handler mid-lookup.
+    #[tokio::test]
+    async fn kills_the_child_when_the_caller_gives_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("pid");
+
+        let pid = tokio::select! {
+            _ = stdout_within(sleeper(&pid_file), Duration::from_secs(60)) => {
+                panic!("sleeper finished early")
+            }
+            pid = read_pid(&pid_file) => pid,
+        };
+        // `select!` has dropped the unfinished lookup.
+        assert!(exits(&pid).await, "child {pid} outlived its caller");
     }
 }
