@@ -4963,6 +4963,53 @@
         ],
         "command": "\"${BUN_BIN:-bun}\" test evals/coding-agent/graders/learning-save-readback.test.ts"
       }
+    },
+    {
+      "id": "app-active-recording-storage-volume",
+      "name": "Check low storage on the active recording volume",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "8e51453598d2587ac57828e1238d3cec0a92f05c",
+        "pull_request": "https://github.com/screenpipe/screenpipe/pull/7460"
+      },
+      "base_ref": "b93f07684b845a3baaedafc288d18d79b642fbf0",
+      "oracle_ref": "8e51453598d2587ac57828e1238d3cec0a92f05c",
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/lib/hooks/use-recording-storage.ts"
+      ],
+      "gate": "advisory",
+      "trigger_paths": [
+        "apps/screenpipe-app-tauri/lib/hooks/use-recording-storage.ts"
+      ],
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "recording",
+        "storage",
+        "volume"
+      ],
+      "prompt": "Paused recording can show a low-storage warning for the saved settings directory while the running engine uses another volume. Fix the existing useRecordingStorage hook so its warning reflects the currently active recording directory, including after manual refresh. A healthy saved volume must not hide low space on the active volume, and a low saved volume must not block a healthy active one. If the active directory or disk probe is unavailable, report an error with no warning instead of treating failure as zero free space or using a different volume. Preserve the hook interface, native reserve and inclusive low-space boundary, invalid-native-value errors, manual recovery, and checks only while paused with the low-disk guard enabled. Keep checking state accurate and prevent late old-directory results or resumed-recording results from restoring stale warnings. This task concerns React behavior with controlled native ports, not filesystem operations or native recording policy.",
+      "agent_timeout_seconds": 1200,
+      "grader_dependency_links": [
+        {
+          "source_path": "apps/screenpipe-app-tauri/node_modules",
+          "destination_path": "apps/screenpipe-app-tauri/node_modules"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/active-storage-volume.fixture.tsx.txt",
+            "destination_path": "apps/screenpipe-app-tauri/eval-active-storage-volume.test.tsx"
+          },
+          {
+            "local_path": "graders/active-storage-volume.config.mjs",
+            "destination_path": "apps/screenpipe-app-tauri/eval-active-storage-volume.config.mjs"
+          }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && node node_modules/vitest/vitest.mjs run --config eval-active-storage-volume.config.mjs"
+      }
     }
   ]
 }

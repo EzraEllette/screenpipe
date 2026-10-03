@@ -33,7 +33,7 @@ images, blanket paste refusal and missing-source classification. Fixtures and
 dependency links appear only when grading begins. This does not execute native
 clipboard delivery, image encoding, disk autosave, agent isolation or model trials.
 
-The current app corpus contains 80 git-mined regressions. See
+The current app corpus contains 121 git-mined regressions. See
 [DESIGN.md](./DESIGN.md) for the Anthropic guidance, source contract, and
 history-mining workflow. The companion website manifest uses this same harness.
 
@@ -1486,3 +1486,17 @@ refusal, lost reports, ignored hashes, lost pending state and missing source.
 Fixtures appear only at grading. This checks the extension and its local receipts;
 real skill-store durability, native authorization, context privacy filtering,
 execution isolation and model performance remain outside this evidence.
+
+## Active recording storage volume
+
+`app-active-recording-storage-volume` runs the actual React storage hook with
+synthetic native and settings ports. Ten outcomes compare low and healthy active
+volumes against conflicting saved paths, then cover refresh, native reserve
+boundaries, probe failures, disabled checks and late results. The parent fails
+four volume outcomes and preserves six; the historical fix and current hook
+pass all ten. Run `bun test evals/coding-agent/calibrate-active-storage-volume.test.js`
+for twelve controls, including unused correct code, a wrong-volume bypass,
+blanket warning suppression, an equivalent boundary and missing-source errors.
+Fixtures and runtime links appear only when grading begins. This does not test
+real disk space, IPC delivery, native recording or migration policy, execution
+isolation or model performance.
