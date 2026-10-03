@@ -33,7 +33,20 @@ images, blanket paste refusal and missing-source classification. Fixtures and
 dependency links appear only when grading begins. This does not execute native
 clipboard delivery, image encoding, disk autosave, agent isolation or model trials.
 
-The current app corpus contains 123 git-mined regressions. See
+`app-compressed-pending-sqlx-upgrades` runs real temporary SQLite and compressed
+stores through normal database startup. Six outcomes cover pending feature
+migrations, rollback and retry, retained recordings and starred sessions, resident
+revision/privacy hooks, and ordinary SQLite behavior. The historical parent fails
+four upgrade outcomes and preserves two; the reference and current source pass
+six. Run `bun test evals/coding-agent/calibrate-compressed-sqlx-upgrade.test.js`
+for eight controls, including equivalent source, unused correct code, skipped
+migrations, lost sessions, omitted privacy hooks and missing-source classification.
+Fixtures appear only at grading; cold historical arms use the unchanged
+180-second limit without build-cache links. This does not verify production-size
+histories, process-kill recovery, managed migration authority, live recording,
+deployed storage, execution isolation or model performance.
+
+The current app corpus contains 124 git-mined regressions. See
 [DESIGN.md](./DESIGN.md) for the Anthropic guidance, source contract, and
 history-mining workflow. The companion website manifest uses this same harness.
 
