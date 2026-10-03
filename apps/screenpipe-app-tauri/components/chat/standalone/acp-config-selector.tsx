@@ -167,8 +167,10 @@ export function AcpConfigSelector({
   const [pendingId, setPendingId] = useState<string | null>(null);
   // An effort step being applied to the live session. The adapter confirms it
   // a round trip later; until then the dial shows it, or after a drag the
-  // thumb would snap back to the old step and then forward again.
+  // thumb would snap back to the old step and then forward again. It belongs
+  // to the chat it was made in.
   const [pendingEffort, setPendingEffort] = useState<{
+    sessionId: string | null | undefined;
     optionId: string;
     value: string;
   } | null>(null);
@@ -344,18 +346,23 @@ export function AcpConfigSelector({
             label={option.name}
             testId="acp-effort-slider"
             value={
-              pendingEffort?.optionId === option.id
+              pendingEffort?.optionId === option.id &&
+              pendingEffort.sessionId === sessionId
                 ? pendingEffort.value
                 : selectedValue(option)
             }
             disabled={pendingId === option.id}
             steps={option.values}
             onValueChange={(value) => {
-              setPendingEffort({ optionId: option.id, value });
+              const pending = { sessionId, optionId: option.id, value };
+              setPendingEffort(pending);
               // Drop it once the adapter answers. It sends the new config
               // before its reply, so the live value has moved by then; after
-              // a failure the dial goes back to the real value.
-              void apply(value).finally(() => setPendingEffort(null));
+              // a failure the dial goes back to the real value. A later
+              // change waits for its own answer.
+              void apply(value).finally(() =>
+                setPendingEffort((current) => (current === pending ? null : current)),
+              );
             }}
           />
         ) : (

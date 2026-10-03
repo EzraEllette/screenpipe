@@ -102,13 +102,15 @@ export function useThinkingLevel({
         const result = await commands
           .piSetThinkingLevel(targetSession, target)
           .catch((error: unknown) => ({ status: "error" as const, error: String(error) }));
+        if (result.status === "error") {
+          console.error("failed to set thinking level:", result.error);
+        }
         // The rest tracks the session's answer, which only the chat that
         // made the choice is waiting for.
         if (nextWriteRef.current || !targetSession || targetSession !== sessionIdRef.current) {
           continue;
         }
         if (result.status === "error") {
-          console.error("failed to set thinking level:", result.error);
           // The session didn't take it; let its own report decide what shows.
           choiceRef.current = null;
         } else {

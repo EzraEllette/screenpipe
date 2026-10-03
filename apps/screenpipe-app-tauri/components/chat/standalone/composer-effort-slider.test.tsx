@@ -229,6 +229,64 @@ describe("effort slider", () => {
     expect(onValueChange).not.toHaveBeenCalled();
   });
 
+  it("ignores keys while a drag is held, so the release is the only change", () => {
+    const onValueChange = vi.fn();
+    render(
+      <ComposerEffortSlider
+        label="effort"
+        testId="effort"
+        steps={STEPS}
+        value="low"
+        onValueChange={onValueChange}
+      />,
+    );
+    const slider = layOut(screen.getByTestId("effort"));
+
+    press(slider, 6);
+    drag(slider, 106);
+    fireEvent.keyDown(slider, { key: "ArrowRight" });
+    expect(onValueChange).not.toHaveBeenCalled();
+    release(slider, 106);
+    expect(onValueChange.mock.calls).toEqual([["high"]]);
+  });
+
+  it("lets only the latest pointer move or commit the drag", () => {
+    const onValueChange = vi.fn();
+    render(
+      <ComposerEffortSlider
+        label="effort"
+        testId="effort"
+        steps={STEPS}
+        value="low"
+        onValueChange={onValueChange}
+      />,
+    );
+    const slider = layOut(screen.getByTestId("effort"));
+
+    press(slider, 6);
+    fireEvent.pointerDown(slider, { clientX: 106, button: 0, pointerId: 2 });
+    // The first finger wanders and lifts; it no longer owns the drag.
+    drag(slider, 56);
+    expect(screen.getByTestId("effort-value")).toHaveTextContent("High");
+    release(slider, 56);
+    expect(onValueChange).not.toHaveBeenCalled();
+
+    fireEvent.pointerUp(slider, { clientX: 106, pointerId: 2 });
+    expect(onValueChange.mock.calls).toEqual([["high"]]);
+  });
+
+  it("stays on the scale when the steps shrink mid-drag", () => {
+    const props = { label: "effort", testId: "effort", value: "low", onValueChange: () => {} };
+    const { container, rerender } = render(<ComposerEffortSlider {...props} steps={STEPS} />);
+    const slider = layOut(screen.getByTestId("effort"));
+
+    press(slider, 106);
+    rerender(<ComposerEffortSlider {...props} steps={STEPS.slice(0, 2)} />);
+    expect(slider).toHaveAttribute("aria-valuenow", "1");
+    const fill = container.querySelector<HTMLElement>(".bg-foreground.h-1\\.5");
+    expect(fill?.style.width).toBe("100%");
+  });
+
   it("lands in place on its own and glides only for the user", () => {
     // Reopening the popover used to show the thumb sliding in from another
     // step. A value the user didn't just choose must not animate.

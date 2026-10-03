@@ -67,6 +67,9 @@ export function ComposerEffortSlider({
 
   // The step under the pointer while dragging; committed on release.
   const [dragIndex, setDragIndex] = useState<number | null>(null);
+  // The pointer that owns the drag: the latest press. Moves and releases from
+  // any other pointer are ignored, so a second finger can't commit early.
+  const dragPointerRef = useRef<number | null>(null);
   // Glide only for changes made here.
   const [animate, setAnimate] = useState(false);
 
@@ -74,9 +77,10 @@ export function ComposerEffortSlider({
   // value. The dial then names the raw value and shows no thumb, rather than
   // claiming the first step.
   const valueIndex = steps.findIndex((step) => step.value === value);
-  // Disabling the dial drops a drag in progress.
+  // A disabled dial shows no drag and commits nothing.
   const dragging = dragIndex !== null && !disabled;
-  const shownIndex = dragging ? dragIndex : valueIndex;
+  // Clamped in case the steps shrink mid-drag.
+  const shownIndex = dragging ? Math.min(dragIndex, lastIndex) : valueIndex;
   const shown = steps[shownIndex];
 
   // Single step would divide by zero and has nothing to slide between.
@@ -147,22 +151,27 @@ export function ComposerEffortSlider({
           event.currentTarget.focus({ preventScroll: true });
           // Keep receiving moves when the pointer leaves the track or popover.
           event.currentTarget.setPointerCapture?.(event.pointerId);
+          dragPointerRef.current = event.pointerId;
           setAnimate(true);
           setDragIndex(indexAt(event.clientX));
         }}
         onPointerMove={(event) => {
-          if (dragIndex === null) return;
+          if (dragIndex === null || event.pointerId !== dragPointerRef.current) return;
           const next = indexAt(event.clientX);
           if (next !== dragIndex) setDragIndex(next);
         }}
         onPointerUp={(event) => {
-          if (dragIndex === null) return;
+          if (dragIndex === null || event.pointerId !== dragPointerRef.current) return;
           const next = indexAt(event.clientX);
           setDragIndex(null);
           commit(next);
         }}
-        onPointerCancel={() => setDragIndex(null)}
-        onLostPointerCapture={() => setDragIndex(null)}
+        onPointerCancel={(event) => {
+          if (event.pointerId === dragPointerRef.current) setDragIndex(null);
+        }}
+        onLostPointerCapture={(event) => {
+          if (event.pointerId === dragPointerRef.current) setDragIndex(null);
+        }}
         onKeyDown={(event) => {
           if (disabled) return;
           const key = event.key;
@@ -172,6 +181,10 @@ export function ComposerEffortSlider({
             // during the fade from committing it.
             event.preventDefault();
             setDragIndex(null);
+          } else if (dragging) {
+            // The release commits the drag; a key press on top of it would
+            // make it two changes.
+            return;
           } else if (key === "ArrowRight" || key === "ArrowUp" || key === "PageUp") {
             event.preventDefault();
             commit(valueIndex + 1);
