@@ -739,6 +739,33 @@ const INTEGRATION_ICONS: Record<string, React.ReactNode> = {
 
 export const INTEGRATION_ICON_KEYS = new Set<string>(Object.keys(INTEGRATION_ICONS));
 
+// Glyphs drawn in the theme's ink (currentColor, text-foreground, muted text,
+// or dark:invert) rather than fixed brand colours. Surfaces that invert on
+// hover must invert these too, or they vanish into the fill.
+export const INK_INTEGRATION_ICONS = new Set<string>([
+  "claude-code",
+  "apple-calendar",
+  "ics-calendar",
+  "email",
+  "imap",
+  "notion",
+  "krisp",
+  "plaud",
+  "resend",
+  "readwise",
+  "user-browser",
+  "custom-mcp",
+  "skills",
+  "pi-extensions",
+  "vercel",
+  "calcom",
+]);
+
+// Unknown icons render the Send fallback, which is also ink.
+export function isInkIntegrationIcon(icon: string): boolean {
+  return INK_INTEGRATION_ICONS.has(icon) || !INTEGRATION_ICON_KEYS.has(icon);
+}
+
 export function IntegrationIcon({
   icon,
   className = "w-10 h-10 bg-muted rounded-lg flex items-center justify-center",
