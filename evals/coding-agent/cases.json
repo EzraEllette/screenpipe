@@ -5081,6 +5081,46 @@
         ],
         "command": "bun --no-env-file test apps/screenpipe-app-tauri/eval-pipe-run-terminal.test.ts"
       }
+    },
+    {
+      "id": "app-compressed-pending-sqlx-upgrades",
+      "name": "Upgrade existing compressed databases without losing history",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "9d7d2cd3bd5cbb8b29d40a1b74af4cd606244d49"
+      },
+      "base_ref": "9123d79bd8fa117174c3a256f92873bc4b785e1b",
+      "oracle_ref": "9d7d2cd3bd5cbb8b29d40a1b74af4cd606244d49",
+      "oracle_paths": [
+        "crates/screenpipe-db/src/db/setup.rs",
+        "crates/screenpipe-db/src/storage/schema.rs",
+        "crates/screenpipe-db/src/storage/read_schema.rs"
+      ],
+      "gate": "advisory",
+      "trigger_paths": [
+        "crates/screenpipe-db/src/db/setup.rs",
+        "crates/screenpipe-db/src/storage/",
+        "crates/screenpipe-db/src/migrations/"
+      ],
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "migration",
+        "data-preservation",
+        "privacy"
+      ],
+      "prompt": "Existing compressed databases created before starred sessions were introduced reopen without applying the pending application schema migration. Make normal startup apply pending feature migrations and record successful completion once, preserving older recordings, exact sealed frame payloads, search results, existing starred sessions and their revisions. Star listing, timestamp membership (including empty input), saving and search ranges must work after restart; new captures must remain writable and searchable. Already-applied migrations must preserve existing data. Resident feature tables introduced after conversion must receive storage revision tracking for insert/update/delete and invalidate previously acquired read-snapshot tokens on deletion or redaction while preserving their admission across ordinary edits. Repair missing tracking hooks on existing resident tables without duplicating their effects across repeated startup. Preserve bulk storage behavior. A failed multi-statement feature migration must roll back its partial schema and completion record; after the conflict is removed, normal startup must retry successfully while preserving recorded history. Ordinary SQLite starred sessions and already-current compressed histories must retain their behavior. Exercise actual disposable databases and public storage methods; no particular Rust helper or implementation is required. This concerns upgrades of already-converted synthetic data. It does not authorize migration rollout, broadening recording or migration permissions, altering pause/cohort/stop controls, deleting retained recovery copies, contacting live services or publishing releases.",
+      "agent_timeout_seconds": 1800,
+      "grader": {
+        "timeout_seconds": 180,
+        "fixtures": [
+          {
+            "local_path": "graders/compressed-sqlx-upgrade.rs",
+            "destination_path": "crates/screenpipe-db/tests/eval_compressed_sqlx_upgrade.rs"
+          }
+        ],
+        "command": "cargo test --offline --locked -p screenpipe-db --features storage-fault-injection --test eval_compressed_sqlx_upgrade -- --test-threads=1"
+      }
     }
   ]
 }
