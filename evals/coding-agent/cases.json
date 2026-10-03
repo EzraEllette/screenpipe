@@ -5010,6 +5010,41 @@
         ],
         "command": "cd apps/screenpipe-app-tauri && node node_modules/vitest/vitest.mjs run --config eval-active-storage-volume.config.mjs"
       }
+    },
+    {
+      "id": "ai-gateway-wif-token-retry",
+      "name": "Recover transient WIF authentication failures",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "a82653675fcdaca022c88b7c3599bac3e3542d89"
+      },
+      "base_ref": "b6e2cb2249d75d60a92c85d1f02938fe840e52cf",
+      "oracle_ref": "a82653675fcdaca022c88b7c3599bac3e3542d89",
+      "oracle_paths": [
+        "packages/ai-gateway/src/providers/vertex.ts"
+      ],
+      "gate": "advisory",
+      "trigger_paths": [
+        "packages/ai-gateway/src/providers/vertex.ts"
+      ],
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "authentication",
+        "retry"
+      ],
+      "prompt": "The public VertexAIProvider.getAccessToken method fails an entire request when either Workload Identity Federation token exchange encounters a temporary outage. Repair the actual STS exchange and service-account impersonation paths so 522/other 5xx, 429 and thrown transport errors can recover on the third attempt after two transient failures. Bound each exchange to three attempts; persistent failures must reject instead of returning or caching a token. Permanent 400/403 responses must reject immediately without retry, and failed STS must not reach impersonation. Preserve the original POST exchange data, signed JWT issuer/audience/subject, selected service-account URL and STS bearer credential during retry. Successful WIF tokens must be returned and reused from the existing valid-token cache without new requests. Preserve successful legacy service-account authentication and its cached token. Keep the existing public class, constructor and getAccessToken contract. No particular helper or retry implementation is required; exact delay values are not prescribed. Use synthetic credentials and intercepted transport only. Real provider availability, gateway HTTP admission, concurrent or cross-account cache isolation, cancellation, expiry-boundary policy and live model calls are outside this historical task.",
+      "agent_timeout_seconds": 900,
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/wif-token-retry.fixture.ts.txt",
+            "destination_path": "packages/ai-gateway/eval-wif-token-retry.test.ts"
+          }
+        ],
+        "command": "bun --no-env-file test packages/ai-gateway/eval-wif-token-retry.test.ts"
+      }
     }
   ]
 }
