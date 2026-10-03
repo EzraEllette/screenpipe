@@ -3665,6 +3665,10 @@ availableActions?: string[]; lifecycleNote: string;
  */
 revision?: string | null; updatedAtMs: number | null }
 /**
+ * Screen history detail, independent of image quality and audio capture.
+ */
+export type RecordingDetail = "auto" | "low_impact" | "balanced" | "more_detail"
+/**
  * A skill offered by the curated registry. Installing one downloads its folder
  * (the directory containing `SKILL.md`) from a public GitHub repo into the
  * store, reusing the same store the device/folder importers write to.
@@ -4079,15 +4083,15 @@ enhancedIncognitoDetection?: boolean;
 pauseOnDrmContent?: boolean;
 /**
  * Skip persisting clipboard rows/content in the UI recorder. Defaults to
- * `true` (clipboard DB capture OFF) — passwords / API keys / private keys
- * frequently pass through the clipboard. Clipboard operations can still
+ * `false` in enterprise builds and `true` in consumer builds.
+ * Clipboard operations can still
  * wake event-driven capture when `captureOnClipboard` is enabled.
  */
 disableClipboardCapture?: boolean;
 /**
  * Skip persisting keyboard / typed-text rows in the UI recorder.
- * Defaults to `true` (keyboard DB capture OFF). Keyboard events still
- * wake event-driven capture, and the accessibility tree + OCR still
+ * Defaults to `false` in enterprise builds and `true` in consumer builds.
+ * Keyboard events still wake event-driven capture, and the accessibility tree + OCR still
  * capture on-screen text so Rewind/Ask keep working.
  * Opt in to keyboard DB rows via the "Capture keyboard" toggle.
  */
@@ -4119,7 +4123,7 @@ usePiiRemoval: boolean;
  * `frames.accessibility_text`, and `ui_events.text_content`. Raw
  * secrets are gone after the worker processes the row — that's
  * the contract of the user-facing "AI PII removal" toggle.
- * Off by default; capture path is unaffected either way. See
+ * On by default in enterprise builds; capture path is unaffected. See
  * `screenpipe-redact` for the full design.
  */
 asyncPiiRedaction?: boolean;
@@ -4135,15 +4139,12 @@ asyncPiiRedaction?: boolean;
  */
 redactAgentSessionSecrets?: boolean;
 /**
- * Enable image-PII redaction on captured screen frames. When
- * `true`, the `screenpipe_redact::image::worker` runs alongside
- * the text reconciliation worker, scans the `frames` table, runs
- * the RF-DETR-Nano detector, and blacks out detected PII regions
- * in each JPG (atomic overwrite of the source file). Off by
- * default — orthogonal to `async_pii_redaction` (text path),
- * independently togglable. Requires the `screenpipe-redact`
- * crate to be built with one of the `onnx-*` cargo features and
- * the `rfdetr_v8.onnx` model present at `~/.screenpipe/models/`.
+ * Enable image-PII redaction on captured screen frames. The image
+ * worker scans the `frames` table and blacks out detected PII regions
+ * in each JPG (atomic overwrite of the source file), using `pii_backend`.
+ * On by default in enterprise builds, independently of text redaction.
+ * The local backend requires an `onnx-*` cargo feature and the
+ * `rfdetr_v8.onnx` model at `~/.screenpipe/models/`.
  */
 asyncImagePiiRedaction?: boolean;
 /**
@@ -4151,7 +4152,9 @@ asyncImagePiiRedaction?: boolean;
  * BOTH modalities (text + image) because the user-facing
  * "AI PII removal" toggle is one knob.
  *
- * - `"local"` (default): on-device ONNX models. Privacy by
+ * Enterprise builds default to `"tinfoil"`; consumer builds default to `"local"`.
+ *
+ * - `"local"`: on-device ONNX models. Privacy by
  * construction — pixels and text never leave the box. Slower,
  * especially on weak hardware (~1-3 s per text row, ~60-180 ms
  * per frame).
@@ -4253,6 +4256,10 @@ port: number;
  */
 powerMode?: string | null;
 /**
+ * Controls scroll checkpoint frequency without changing text extraction.
+ */
+recordingDetail?: RecordingDetail;
+/**
  * Keep the computer awake while screenpipe is running.
  * Default off so existing installs keep the OS sleep behavior they chose.
  */
@@ -4319,7 +4326,7 @@ uiLocale: string;
 /**
  * Last resolved PostHog rollout decision, shared with all native surfaces.
  */
-uiLocalizationEnabled: boolean; devMode: boolean; ocrEngine: string; dataDir: string; embeddedLLM: EmbeddedLLM; autoStartEnabled: boolean; platform: string; disabledShortcuts: string[]; user: User; showScreenpipeShortcut: string; startRecordingShortcut: string; stopRecordingShortcut: string; startAudioShortcut: string; stopAudioShortcut: string; showChatShortcut: string; searchShortcut: string; lockVaultShortcut?: string;
+uiLocalizationEnabled: boolean; devMode: boolean; ocrEngine: string; dataDir: string; embeddedLLM: EmbeddedLLM; autoStartEnabled: boolean; platform: string; disabledShortcuts: string[]; user: User; showScreenpipeShortcut: string; startRecordingShortcut: string; stopRecordingShortcut: string; startAudioShortcut: string; stopAudioShortcut: string; showChatShortcut: string; searchShortcut: string; lockVaultShortcut?: string; starSessionShortcut?: string;
 /**
  * Overlay size: "small" (default), "medium" (1.5x), "large" (2x)
  */
