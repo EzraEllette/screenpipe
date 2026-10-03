@@ -215,7 +215,7 @@ describe("SummaryCards", () => {
     }
   });
 
-  it("keeps the dashed Custom slot outlined on hover instead of inverting it", () => {
+  it("inverts the dashed Custom slot on hover without hiding its dashes", () => {
     render(
       <SummaryCards
         onSendMessage={vi.fn()}
@@ -227,9 +227,18 @@ describe("SummaryCards", () => {
     );
 
     const custom = screen.getByTestId("custom-summary-open");
-    expect(custom).toHaveClass("border-dashed", "hover:bg-card", "focus-visible:bg-card");
-    // A solid fill would hide the dashes that mark it as an empty slot.
-    expect(custom.className).not.toMatch(/(hover|focus-visible):bg-foreground/);
+    // Hover inverts, as for every other chip.
+    expect(custom).toHaveClass(
+      "border-dashed",
+      "hover:bg-foreground",
+      "hover:text-background",
+      "focus-visible:bg-foreground",
+      "focus-visible:text-background",
+    );
+    // Dashes in the fill's colour vanish, leaving a solid block, so they take
+    // the background colour instead.
+    expect(custom).toHaveClass("hover:border-background/50", "focus-visible:border-background/50");
+    expect(custom.className).not.toMatch(/(hover|focus-visible):border-foreground/);
     expect(custom.className).toContain("motion-reduce:transition-none");
   });
 

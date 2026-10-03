@@ -63,7 +63,7 @@ export function ConnectAppsNudge({
         className="group/connect flex min-w-[8.5rem] flex-1 items-center justify-between gap-3 rounded-md px-2.5 py-1.5 text-left text-muted-foreground transition-colors duration-150 ease-out hover:bg-foreground hover:text-background focus-visible:bg-foreground focus-visible:text-background focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-signal focus-visible:ring-offset-1 focus-visible:ring-offset-background motion-reduce:transition-none"
       >
         <span className="truncate font-mono text-[10px] font-semibold normal-case tracking-[0.12em]">
-          {ui("Connect apps for better answers")}
+          Connect apps for better answers
         </span>
         <ArrowRight className="h-3.5 w-3.5 shrink-0 transition-transform duration-150 group-hover/connect:translate-x-0.5 motion-reduce:transform-none motion-reduce:transition-none" />
       </button>
@@ -81,13 +81,12 @@ export function ConnectAppsNudge({
             >
               {tiles.map((connection, index) => {
                 const icon = connection.icon || connection.id;
-                const label = ui("Connect {value1}", { value1: connection.name });
                 return (
                   <Tooltip key={connection.id}>
                     <TooltipTrigger asChild>
                       <button
                         type="button"
-                        aria-label={label}
+                        aria-label={ui("Connect {value1}", { value1: connection.name })}
                         onClick={() => banner.onOpenConnectionSetup(connection.id)}
                         className={cn(
                           "group/tile flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded-md text-foreground transition-colors duration-150 ease-out hover:bg-foreground focus-visible:bg-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-signal focus-visible:ring-offset-1 focus-visible:ring-offset-background motion-reduce:transition-none",
@@ -110,20 +109,22 @@ export function ConnectAppsNudge({
                     </TooltipTrigger>
                     {/* Moving to the next logo swaps the label at once.
                         Fading here showed the old label fading out beside
-                        the new one; only the first label fades in. */}
+                        the new one; only the first label fades in. The name
+                        alone, since screen readers already announce the
+                        button's "Connect …" label. */}
                     <TooltipContent
                       side="top"
                       sideOffset={6}
                       className="rounded-md px-2.5 py-1.5 text-[11px] font-normal data-[state=closed]:!animate-none data-[state=instant-open]:!animate-none"
                     >
-                      {label}
+                      {connection.name}
                     </TooltipContent>
                   </Tooltip>
                 );
               })}
             </div>
           </TooltipProvider>
-          {fittingTiles > 0 && divider}
+          {divider}
         </>
       )}
       <button

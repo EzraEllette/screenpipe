@@ -92,7 +92,9 @@ describe("ConnectAppsNudge", () => {
     expect(tile).not.toHaveAttribute("title");
 
     act(() => tile.focus());
-    expect(await screen.findByRole("tooltip")).toHaveTextContent("Connect Slack");
+    // The name alone: the button's label already says "Connect Slack", and
+    // the tooltip is read again as its description.
+    expect((await screen.findByRole("tooltip")).textContent).toBe("Slack");
   });
 
   it("hides logos that wrap off the first line in a narrow pane", () => {
@@ -103,20 +105,23 @@ describe("ConnectAppsNudge", () => {
         return this.getAttribute("aria-label") === "Connect Notion" ? 34 : 0;
       });
 
-    render(
-      <ConnectAppsNudge
-        banner={{
-          show: true,
-          suggestedConnectionTiles: [
-            { id: "slack", name: "Slack", icon: "slack" },
-            { id: "notion", name: "Notion", icon: "notion" },
-          ] as any,
-          onOpenConnectionSetup: vi.fn(),
-          onDismiss: vi.fn(),
-        }}
-      />,
-    );
-    offsetTop.mockRestore();
+    try {
+      render(
+        <ConnectAppsNudge
+          banner={{
+            show: true,
+            suggestedConnectionTiles: [
+              { id: "slack", name: "Slack", icon: "slack" },
+              { id: "notion", name: "Notion", icon: "notion" },
+            ] as any,
+            onOpenConnectionSetup: vi.fn(),
+            onDismiss: vi.fn(),
+          }}
+        />,
+      );
+    } finally {
+      offsetTop.mockRestore();
+    }
 
     expect(screen.getByRole("button", { name: "Connect Slack" })).not.toHaveClass("invisible");
     expect(screen.getByRole("button", { name: "Connect Notion" })).toHaveClass("invisible");

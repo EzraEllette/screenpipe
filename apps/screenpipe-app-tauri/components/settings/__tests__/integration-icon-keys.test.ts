@@ -75,7 +75,7 @@ describe("brand marks in dark mode", () => {
   // The dark card, #141414: the lightest surface these logos sit on.
   const contrastOnDark = (hex: string) => (luminance(hex) + 0.05) / (luminance("#141414") + 0.05);
 
-  it("keeps every flat-colour logo readable on the dark canvas", () => {
+  it("keeps every inline flat-colour logo readable on the dark canvas", () => {
     const unreadable = [...INTEGRATION_ICON_KEYS].filter((icon) => {
       const markup = renderToStaticMarkup(createElement(IntegrationIcon, { icon, className: "" }));
       const fills = [...markup.matchAll(/fill="(#[0-9a-f]{3}|#[0-9a-f]{6})"/gi)].map((m) => m[1]);
@@ -83,6 +83,13 @@ describe("brand marks in dark mode", () => {
       return Math.max(...fills.map(contrastOnDark)) < 3;
     });
     expect(unreadable).toEqual([]);
+  });
+
+  // The scan above can't see inside <img> files, so Odoo's dark ring would
+  // lose its plate unnoticed. Pin the known dark marks directly.
+  it.each(["odoo", "sentry", "zendesk"])("puts %s on a light plate in dark mode", (icon) => {
+    const markup = renderToStaticMarkup(createElement(IntegrationIcon, { icon, className: "" }));
+    expect(markup).toContain("dark:bg-white");
   });
 });
 

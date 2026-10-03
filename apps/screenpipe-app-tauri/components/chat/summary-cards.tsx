@@ -426,8 +426,9 @@ export function SummaryCards({
             />
           </div>
         ))}
-        {/* An empty slot, not a ready action: hover fills it in as a card
-            instead of inverting, so the dashed outline still reads as "add". */}
+        {/* An empty slot, not a ready action. Hover inverts like the other
+            chips, but the dashes take the background colour: in the fill's
+            colour they vanish and the slot reads as a solid block. */}
         <button
           type="button"
           onClick={() => {
@@ -435,9 +436,9 @@ export function SummaryCards({
             setShowBuilder(true);
           }}
           data-testid="custom-summary-open"
-          className="h-10 min-w-[148px] flex-1 cursor-pointer rounded-md border border-dashed border-foreground/25 px-1 text-[11px] text-muted-foreground transition-colors duration-150 ease-out hover:border-foreground/60 hover:bg-card hover:text-foreground focus-visible:border-foreground/60 focus-visible:bg-card focus-visible:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-foreground focus-visible:ring-offset-1 focus-visible:ring-offset-background active:bg-muted motion-reduce:transition-none"
+          className="h-10 min-w-[148px] flex-1 cursor-pointer rounded-md border border-dashed border-foreground/25 px-1 text-[11px] text-muted-foreground transition-colors duration-150 ease-out hover:border-background/50 hover:bg-foreground hover:text-background focus-visible:border-background/50 focus-visible:bg-foreground focus-visible:text-background focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-foreground focus-visible:ring-offset-1 focus-visible:ring-offset-background motion-reduce:transition-none"
         >
-          {ui("+ Custom")}
+          + Custom
         </button>
       </div>
 
