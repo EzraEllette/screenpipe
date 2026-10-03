@@ -33,7 +33,7 @@ images, blanket paste refusal and missing-source classification. Fixtures and
 dependency links appear only when grading begins. This does not execute native
 clipboard delivery, image encoding, disk autosave, agent isolation or model trials.
 
-The current app corpus contains 122 git-mined regressions. See
+The current app corpus contains 123 git-mined regressions. See
 [DESIGN.md](./DESIGN.md) for the Anthropic guidance, source contract, and
 history-mining workflow. The companion website manifest uses this same harness.
 
@@ -1514,3 +1514,13 @@ wrong credentials and lost caching. Fixtures appear only at grading and require
 no dependency links. Missing provider source is a setup failure. This does not
 establish real provider availability, gateway HTTP admission, concurrent or
 cross-account cache isolation, execution isolation or model performance.
+
+`app-pipe-run-terminal-preservation` mounts the actual recorder through a synthetic
+event bus and uses its real NDJSON parser. Eight outcomes cover intermediate turns,
+complete terminal transcripts, ordinary completion, disabled history, foreign events,
+foreground ownership and duplicate terminals. The parent fails two outcomes and
+preserves six; the historical recorder fix and current source pass eight. Run
+`bun test evals/coding-agent/calibrate-pipe-run-terminal.test.js` for calibration.
+Storage and settings are synthetic; this does not establish native delivery, disk
+durability, crash recovery, continued-chat behavior, agent isolation or model quality.
+The hidden fixture is installed only when grading begins.
