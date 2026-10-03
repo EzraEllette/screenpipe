@@ -33,7 +33,7 @@ images, blanket paste refusal and missing-source classification. Fixtures and
 dependency links appear only when grading begins. This does not execute native
 clipboard delivery, image encoding, disk autosave, agent isolation or model trials.
 
-The current app corpus contains 121 git-mined regressions. See
+The current app corpus contains 122 git-mined regressions. See
 [DESIGN.md](./DESIGN.md) for the Anthropic guidance, source contract, and
 history-mining workflow. The companion website manifest uses this same harness.
 
@@ -1500,3 +1500,17 @@ blanket warning suppression, an equivalent boundary and missing-source errors.
 Fixtures and runtime links appear only when grading begins. This does not test
 real disk space, IPC delivery, native recording or migration policy, execution
 isolation or model performance.
+
+
+`ai-gateway-wif-token-retry` exercises the public Vertex token method with real
+ephemeral RSA signing and synthetic transport. Each exchange recovers from
+transient HTTP and network failures, bounds retries, and refuses permanent
+errors. Signed claims, exchange credentials, valid-token caching and legacy
+authentication remain intact. The parent fails eight outcomes and preserves six;
+the historical fix and current source pass fourteen. Run
+`bun test evals/coding-agent/calibrate-wif-token-retry.test.js` for fourteen
+controls, including equivalent backoff, an unused repair, disconnected exchanges,
+wrong credentials and lost caching. Fixtures appear only at grading and require
+no dependency links. Missing provider source is a setup failure. This does not
+establish real provider availability, gateway HTTP admission, concurrent or
+cross-account cache isolation, execution isolation or model performance.
