@@ -46,7 +46,18 @@ Fixtures appear only at grading; cold historical arms use the unchanged
 histories, process-kill recovery, managed migration authority, live recording,
 deployed storage, execution isolation or model performance.
 
-The current app corpus contains 124 git-mined regressions. See
+`app-cloud-auth-host-boundary` installs the actual fetch interceptor with
+synthetic HTTP, session and UI ports. Eleven outcomes cover local and unrelated
+401 responses, misleading hosts, genuine website expiry, successful requests,
+signed-out calls and network-error propagation. Request and response identities
+are preserved. The parent fails six outcomes and preserves five; the historical
+fix and current source pass all eleven. Run
+`bun test evals/coding-agent/calibrate-auth-host.test.js` for calibration.
+The hidden fixture appears only at grading and uses no dependency links.
+This does not establish native recording continuity, real authentication,
+account-switch race safety, browser integration, isolation or model performance.
+
+The current app corpus contains 125 git-mined regressions. See
 [DESIGN.md](./DESIGN.md) for the Anthropic guidance, source contract, and
 history-mining workflow. The companion website manifest uses this same harness.
 
