@@ -1,5 +1,15 @@
 # Coding-agent regression evals
 
+The unmarked HTML file-preview case executes ViewerFileContent with the actual
+Markdown, code-renderer, iframe and sandbox helper sources. It checks full and
+snippet previews, parsed content/CSP metadata, source toggling, path transitions,
+Unicode names/content and preserved text/Markdown. Fourteen calibration controls
+include unused-correct code, empty/comment-only output, unsafe origin, fake CSP,
+lost toggling/Markdown, equivalent implementations and missing-source setup errors.
+Dependencies and hidden fixtures are installed only when grading begins. Synthetic
+native/media/translation ports and JSDOM do not prove browser network/IPC enforcement,
+Brain-view integration, execution isolation or model improvement.
+
 This is an agent eval suite, not a unit-test suite. Every case contains:
 
 - a sanitized task derived from an escaped product failure;
@@ -46,7 +56,18 @@ Fixtures appear only at grading; cold historical arms use the unchanged
 histories, process-kill recovery, managed migration authority, live recording,
 deployed storage, execution isolation or model performance.
 
-The current app corpus contains 124 git-mined regressions. See
+`app-cloud-auth-host-boundary` installs the actual fetch interceptor with
+synthetic HTTP, session and UI ports. Eleven outcomes cover local and unrelated
+401 responses, misleading hosts, genuine website expiry, successful requests,
+signed-out calls and network-error propagation. Request and response identities
+are preserved. The parent fails six outcomes and preserves five; the historical
+fix and current source pass all eleven. Run
+`bun test evals/coding-agent/calibrate-auth-host.test.js` for calibration.
+The hidden fixture appears only at grading and uses no dependency links.
+This does not establish native recording continuity, real authentication,
+account-switch race safety, browser integration, isolation or model performance.
+
+The current app corpus contains 128 git-mined regressions. See
 [DESIGN.md](./DESIGN.md) for the Anthropic guidance, source contract, and
 history-mining workflow. The companion website manifest uses this same harness.
 
@@ -1298,6 +1319,47 @@ output, one-role-only repair, dropped safe HTML, styles, broken fragments and
 missing-source setup failure. These are corpus/grader checks, not agent trials,
 a full browser exploit defense or proof of execution isolation.
 
+### Remote Markdown images
+
+`app-markdown-remote-images` renders the actual chat MarkdownBlock (both roles),
+the shared MemoizedReactMarkdown and the meeting note editor (`NoteEditor` and
+`createMeetingNoteEditorExtensions`), with synthetic native media and HTTP
+ports. Seventy-two outcomes check that remote, protocol-relative, relative,
+reference-style, raw `<img>` and `<picture><source srcset>` images, and remote
+or network-share media, create no element that loads them and never reach the
+media reader, while their alt text, link or code stays visible; an image with no
+alt text shows its address. Network-share media includes a home-relative path
+that resolves to a share and local-looking strings from which the reader would
+take a share path; images whose source is removed for safety keep their alt
+text, and a local image the reader cannot open keeps its alt text and path. In a
+meeting note, remote images an AI summary wrote or a later update brings (also
+in place of an embedded image) do not load, keep their alt text and stay in the
+note's Markdown, also when the note is copied through the editor's clipboard
+handling and pasted into a note, while embedded data: images still show and keep
+their alt text and size when pasted. A web image pasted into a note that cannot
+be downloaded stays in the note's Markdown as its address. Local absolute,
+file-URL, Windows (also with doubled, Markdown-escaped backslashes) and
+home-relative files still render through the native reader. The parent fails
+sixty-four outcomes and preserves eight; the first, markdown-only fix fails
+twenty-three; the second and third fail the note copy, later-update and seven
+visible-fallback outcomes; the fourth fails the seven visible-fallback outcomes;
+the fix and current source pass all.
+
+Run `bun test evals/coding-agent/calibrate-markdown-remote-images.test.js`.
+Controls include parent/reference/current, the first four fixes, an equivalent
+plain-text address, a restored remote `<img>` fallback, an alt-text-only
+fallback, an unreadable local image that shows nothing, re-allowed
+picture/source, an extension-only media check, a media check that allows a
+second leading separator, accepts Windows network paths or reads a doubled
+backslash after a drive as a share, network shares treated as local, blanket
+image removal, a note editor that renders any source, deletes remote images from
+the note, drops pasted images it could not download, takes over pastes of
+embedded images or reuses an image view for a different source, unused correct
+source and missing-source setup failure. Webview CSP, Mermaid diagrams (jsdom
+cannot lay them out; unit tests and browser checks cover the no-network frame),
+pasting from other apps, loading a blocked note image on request, native file
+policy and execution isolation are outside this evidence.
+
 `ai-gateway-trusted-runner-admission` runs the actual HTTP entrypoint, authentication,
 Free-plan gates, chat handler and provider adapter with synthetic external ports.
 Fourteen outcomes cover successful machine and paid-human replies, forged or
@@ -1537,3 +1599,30 @@ preserves six; the historical recorder fix and current source pass eight. Run
 Storage and settings are synthetic; this does not establish native delivery, disk
 durability, crash recovery, continued-chat behavior, agent isolation or model quality.
 The hidden fixture is installed only when grading begins.
+
+
+`app-transcription-nova-language` runs the actual batch transcription handler and
+A/B service with synthetic audio and intercepted provider transport. Twelve
+outcomes cover automatic, single, multiple, normalized and legacy language
+selection, query precedence, audio preservation and successful/error payloads.
+The parent fails nine language outcomes and preserves three; the service-only
+historical fix and current source pass all twelve. Run
+`bun test evals/coding-agent/calibrate-transcription-language.test.js` for eleven
+controls, including an equivalent implementation, unused correct code, wrong
+language shortcuts, lost audio and missing-source/syntax infrastructure errors.
+Fixtures appear only at grading and need no dependency links. This does not
+establish speech recognition quality, native settings persistence, real provider
+delivery, alternate-provider behavior, execution isolation or model improvement.
+
+## Manual sync HTTP failures
+
+`app-manual-sync-http-failure` mounts AccountSection with synthetic local HTTP,
+settings and native ports. Sixteen outcomes cover pull/push refusal, server-error
+feedback, non-JSON status fallback, retry, successful sequencing, network errors
+and disabled choices. The parent fails nine outcomes and preserves seven; the
+historical reference and current component pass sixteen. Run
+`bun test evals/coding-agent/calibrate-manual-sync.test.js` for correct, broken,
+bypass, equivalent, preserved-behavior and setup-error controls. Hidden fixtures
+and dependency links appear only after the trajectory. This does not establish
+native persistence, encryption, real account access, provider delivery, execution
+isolation or model improvement.
