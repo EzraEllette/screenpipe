@@ -1,0 +1,19 @@
+{
+  "support_collection": "diagnose --dry-run",
+  "lines": [
+    "2026-10-05T23:15:43.346628Z  INFO screenpipe_app::server_core: Database initialized at /Volumes/QARecordingVolume/capture/db.sqlite",
+    "2026-10-05T23:15:47.809586Z  INFO screenpipe_engine::disk_pressure: disk space recovered with enough headroom to re-arm alerts available_bytes=72656248860 data_dir=/Volumes/QARecordingVolume/capture/data recovery_threshold_bytes=10737418240"
+  ],
+  "low_disk_warning_in_collected_report": false,
+  "observed_utc": "2026-10-05T23:18:00Z to 2026-10-05T23:20:07Z",
+  "recording_directory": "/Volumes/QARecordingVolume/capture",
+  "filesystem": "APFS sparsebundle, 18 GiB",
+  "guard_enabled": true,
+  "threshold_gib": 5,
+  "volume_free_kib": 3930012,
+  "system_volume_free_kib": 55923432,
+  "visible_low_space_marker_timestamp": "2026-10-05T23:20:07Z",
+  "warning_observed": false,
+  "recovered_volume_free_kib": 18614600,
+  "support_upload_performed": false
+}

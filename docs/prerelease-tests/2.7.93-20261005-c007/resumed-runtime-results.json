@@ -1,0 +1,399 @@
+{
+  "old": [
+    {
+      "frame_id": 6,
+      "text": "screenpipeEditWindow\u041e\u0421\u0422\u041e\u0412\u0415!MUntitled ~Untitled 2 ~\"screenpipe\" NotificationsNotifications may include alerts, sounds, andicon badges.11181219 225 262Helvetica \u2022Regular121.0FoPlita?1s1.16release2793resume BEFORE MIGRATION - Morgan chose the yellow notebook. This recording wascreated before upgrading and compressing the database.18",
+      "transcription": null,
+      "timestamp": "2026-10-05T23:01:06.376490+00:00",
+      "event_source": "window_focus",
+      "text_source": "ocr"
+    },
+    {
+      "frame_id": 5,
+      "text": "release2793resume BEFORE MIGRATION \u2014 Morgan chose the yellow notebook. This recording was created before upgrading and compressing the database.\nbold\nitalic\nunderline\nstrikethrough\ntypeface\nstyle\n12\nfont size\nalign left\nalign center\nalign right\nfully justify\nlist style\nline spacing\ndocument actions\nUntitled 2",
+      "transcription": null,
+      "timestamp": "2026-10-05T22:58:54.680354+00:00",
+      "event_source": "idle",
+      "text_source": "accessibility"
+    },
+    {
+      "frame_id": 4,
+      "text": "release2793resume BEFORE MIGRATION \u2014 Morgan chose the yellow notebook. This recording was created before upgrading and compressing the database.\nbold\nitalic\nunderline\nstrikethrough\ntypeface\nstyle\n12\nfont size\nalign left\nalign center\nalign right\nfully justify\nlist style\nline spacing\ndocument actions\nUntitled 2",
+      "transcription": null,
+      "timestamp": "2026-10-05T22:58:22.874019+00:00",
+      "event_source": "window_focus",
+      "text_source": "accessibility"
+    }
+  ],
+  "new": [
+    {
+      "frame_id": 19,
+      "text": "release2793resume AFTER PROCESS RESTART \u2014 the original history and saved star survived. Recording continues on 2.7.93.\nbold\nitalic\nunderline\nstrikethrough\ntypeface\nstyle\n12\nfont size\nalign left\nalign center\nalign right\nfully justify\nlist style\nline spacing\nEdited\n\u2014\nUntitled 2",
+      "transcription": null,
+      "timestamp": "2026-10-05T23:12:23.184362+00:00",
+      "event_source": "window_focus",
+      "text_source": "accessibility"
+    }
+  ],
+  "resumed": [
+    {
+      "frame_id": 18,
+      "text": "release2793resume RESUMED CAPTURE \u2014 new work after quitting, reopening, and explicitly resuming recording.\nbold\nitalic\nunderline\nstrikethrough\ntypeface\nstyle\n12\nfont size\nalign left\nalign center\nalign right\nfully justify\nlist style\nline spacing\nEdited\n\u2014\nUntitled 2",
+      "transcription": null,
+      "timestamp": "2026-10-05T23:11:12.507080+00:00",
+      "event_source": "window_focus",
+      "text_source": "accessibility"
+    }
+  ],
+  "audio": [
+    {
+      "frame_id": null,
+      "text": " Morgan chose the yellow notebook. The team agreed to keep the original recordings and verify the migration. The follow-up is to confirm that saved",
+      "transcription": " Morgan chose the yellow notebook. The team agreed to keep the original recordings and verify the migration. The follow-up is to confirm that saved",
+      "timestamp": "2026-10-05T22:58:18+00:00",
+      "event_source": null,
+      "text_source": null
+    }
+  ],
+  "stars": [
+    {
+      "id": "788a995b-1862-4903-9f0c-03ef98280fd2",
+      "start": "2026-10-05T23:07:53.801+00:00",
+      "end": "2026-10-05T23:08:50.687+00:00",
+      "hd_requested": false,
+      "revision": 3,
+      "has_audio": true
+    }
+  ],
+  "pre_schema": {
+    "sqlx_count": 116,
+    "starred_table": 0,
+    "frames": 14
+  },
+  "post_schema": {
+    "sqlx_count": 117,
+    "starred_table": 1,
+    "frames": 18,
+    "parquet": {
+      "storage/49bd6d7c-c530-411d-b25f-8486ac22fd66/payloads/bulk-v1/audio_transcriptions/182f03e2-63ed-478a-acb3-e81878d805bd.parquet": "ab483f7efa3f52024a8963db4c19735929303c29034a0199ae21bf2917646e9d",
+      "storage/49bd6d7c-c530-411d-b25f-8486ac22fd66/payloads/bulk-v1/audio_transcriptions/15d274a5-500f-4931-8fba-af486d63cc10.parquet": "871b1502228706b14616a6d81b9ac02e79d8e898e38946fba7d19c08ada48efa",
+      "storage/49bd6d7c-c530-411d-b25f-8486ac22fd66/payloads/bulk-v1/semantic_items/c4f5b04e-fe17-4c99-a826-950688532122.parquet": "bb1173c52e5972cc15d3aa5240b1534452092dc18a242ee3f33f8f840ded5d5f",
+      "storage/49bd6d7c-c530-411d-b25f-8486ac22fd66/payloads/bulk-v1/semantic_items/f32c4de1-7808-4676-872b-96e2f4a7c293.parquet": "c9f49371bc5b6727fededbad933a33f6df52ec68d3f3fb594fb7bef790571dbb",
+      "storage/49bd6d7c-c530-411d-b25f-8486ac22fd66/payloads/bulk-v1/semantic_items/30c5d39e-fb9d-4d6c-87bc-b73962e215c0.parquet": "5e8320b9f930e3d0affc05ff19eeb03bbc18a067e9c26ec8308a76a7fbbb2789",
+      "storage/49bd6d7c-c530-411d-b25f-8486ac22fd66/payloads/bulk-v1/semantic_items/1b853391-e3f2-4746-a3e8-6155a19b4360.parquet": "c6d2a48354c4ba18a93b3183a1cacc85ecc9bb9d38079e96e76d774eec149438",
+      "storage/49bd6d7c-c530-411d-b25f-8486ac22fd66/payloads/bulk-v1/semantic_items/32a5d75d-f390-47a2-bcce-ed3533e17a97.parquet": "6c4e4d3a40ddb87d3cbce02870be35c0061afeaacd69242913475a8e4e745c1f",
+      "storage/49bd6d7c-c530-411d-b25f-8486ac22fd66/payloads/bulk-v1/ui_events/8ffdf3f8-ec95-4270-958f-7644769c9da3.parquet": "e773d8df77fa2802f0ee87e6f843bd6d586272b792593ada06d6d331023615d0",
+      "storage/49bd6d7c-c530-411d-b25f-8486ac22fd66/payloads/bulk-v1/ui_events/6b0ac95c-3262-44c2-a4f8-3989a423780b.parquet": "ad0178b18c3602395f88f6731a04de77d948c82d797b88dde84d14178e1f1267",
+      "storage/49bd6d7c-c530-411d-b25f-8486ac22fd66/payloads/bulk-v1/ui_events/1afd3d99-61bb-4b4e-9975-d6c299b21d23.parquet": "1711da9a49f981733f042c9932a34c02b339e303883fd824f6c8a0c3a910af9e",
+      "storage/49bd6d7c-c530-411d-b25f-8486ac22fd66/payloads/bulk-v1/ui_events/dd8f02b7-dc5b-4e83-a55c-7cdb4f35e786.parquet": "cb104b011bc3e8d31a4cca88941ac6e9365d4b7a426a5b97b4b1c3efdc531fe0",
+      "storage/49bd6d7c-c530-411d-b25f-8486ac22fd66/payloads/bulk-v1/ui_events/36f6497d-a664-431c-8fe9-7b44b1544117.parquet": "da8a819b3c0b21f98cf6f29ba46c76cf30cc7eff8e158f142a8ec7c88d7af4a9",
+      "storage/49bd6d7c-c530-411d-b25f-8486ac22fd66/payloads/bulk-v1/ui_events/cdc6eba4-c331-424f-a7d4-884bb61bf883.parquet": "0de94bba7bbf6031e2a0204e9bf310744267edab737996c968aea0ec5b546121",
+      "storage/49bd6d7c-c530-411d-b25f-8486ac22fd66/payloads/bulk-v1/elements/e8b3ea2d-64ef-4d20-b4f3-b13d4f5f51ed.parquet": "19caead74031e327df9b7446531572326a15e6fb0d8d651cbc95c363f9e1af6c",
+      "storage/49bd6d7c-c530-411d-b25f-8486ac22fd66/payloads/bulk-v1/elements/f6b7d1d6-7dc7-4b09-a6a2-8e1e897c19b0.parquet": "55c2c6a5833310d502b5f5c6a008b8a9ab73c1c680991617fde849f5ab023a93",
+      "storage/49bd6d7c-c530-411d-b25f-8486ac22fd66/payloads/bulk-v1/elements/a508e876-abeb-4399-afb8-083a893a33ed.parquet": "2544c70db6eb69be23a19dc821e3e5399bc1ab6cd89eadaa6acd187170322356",
+      "storage/49bd6d7c-c530-411d-b25f-8486ac22fd66/payloads/bulk-v1/elements/c0d15d39-4c87-4471-bfc3-48a8edef5768.parquet": "dfc85d480b47d86b66e457e76842f6a346d7e8de35bfa9c9612f44b00efdf28c",
+      "storage/49bd6d7c-c530-411d-b25f-8486ac22fd66/payloads/bulk-v1/elements/d8b68b08-5391-4d2f-afbd-e9c5ffd5ae1d.parquet": "da2501a6d09b0adec3efa3b441708d52832dac38a6d93fe1bba25d7d45497fbe",
+      "storage/49bd6d7c-c530-411d-b25f-8486ac22fd66/payloads/bulk-v1/elements/41e5f5be-8f2d-4eb9-a5eb-6dee03a43e30.parquet": "83f4fe6491f676557d668c7d9970d3ef8a6b149508ea60913c12a8f9ec2a8f61",
+      "storage/49bd6d7c-c530-411d-b25f-8486ac22fd66/payloads/1/2026-10-05/211a2d59-ca4f-48b6-ac73-9182f6043866/detail.parquet": "6f436a0a040b8826d15f9fcb67a1a0f251bc72976da24d76631c8416a789de24",
+      "storage/49bd6d7c-c530-411d-b25f-8486ac22fd66/payloads/1/2026-10-05/211a2d59-ca4f-48b6-ac73-9182f6043866/search.parquet": "1e3897b31461666588c933e63ffdaf42c50de57d605b71b6efadc1c0f13cc2d9",
+      "storage/49bd6d7c-c530-411d-b25f-8486ac22fd66/payloads/1/2026-10-05/f04b6861-841e-49c3-a942-4c65921b200a/detail.parquet": "29ff474e7906b444f830cc062cb3be480e2c35eb5cbab243e33c2e797f5c78a3",
+      "storage/49bd6d7c-c530-411d-b25f-8486ac22fd66/payloads/1/2026-10-05/f04b6861-841e-49c3-a942-4c65921b200a/search.parquet": "437324eac330de739d59f99a132efee99d699bb000ba23a4f50b145d7c7a593b",
+      "storage/49bd6d7c-c530-411d-b25f-8486ac22fd66/payloads/1/2026-10-05/c81ac781-f433-47d0-baae-43062fb03bcb/detail.parquet": "e19224b0a1adf12e6a2beb7f7d094f7d742011d259834b8a2fa8caade64fba78",
+      "storage/49bd6d7c-c530-411d-b25f-8486ac22fd66/payloads/1/2026-10-05/c81ac781-f433-47d0-baae-43062fb03bcb/search.parquet": "d2913911eec40b98258e58013e9c36ece1c61dd099106ca15d148aa4f220c8e9",
+      "storage/49bd6d7c-c530-411d-b25f-8486ac22fd66/payloads/1/2026-10-05/55a6bae5-92a7-4599-80da-165df3869360/detail.parquet": "06dd808134cab1d78aeb1af29570f4c534a2d9812bc91437b84876ed5bde2fee",
+      "storage/49bd6d7c-c530-411d-b25f-8486ac22fd66/payloads/1/2026-10-05/55a6bae5-92a7-4599-80da-165df3869360/search.parquet": "130178ec5a0b47b10b3c9ffda4cf17528db290a31ba4f9742c2237d2811eb004",
+      "storage/49bd6d7c-c530-411d-b25f-8486ac22fd66/payloads/1/2026-10-05/2231fe4d-ffaa-4852-85ec-f2db6a6c45d2/detail.parquet": "4cdf7b96e5e97f23943f4839c27965f3dc2fd30ea4403f93170562170eef2953",
+      "storage/49bd6d7c-c530-411d-b25f-8486ac22fd66/payloads/1/2026-10-05/2231fe4d-ffaa-4852-85ec-f2db6a6c45d2/search.parquet": "670fb99cd022a3e9371adbb8d809067252c3eeca9508dda83b9b3872d67546ed",
+      "storage/49bd6d7c-c530-411d-b25f-8486ac22fd66/payloads/1/2026-10-05/e2c947d2-b3d2-4ab0-abca-af2454018bc3/detail.parquet": "3556ff8aef944c64678241e5a24bd6404e4be95afafce90300075949438fc359",
+      "storage/49bd6d7c-c530-411d-b25f-8486ac22fd66/payloads/1/2026-10-05/e2c947d2-b3d2-4ab0-abca-af2454018bc3/search.parquet": "adbeeeb8ec003647ab99c99adb5fd84ab9aa579f06f42dd34256e6d4b921322c",
+      "storage/49bd6d7c-c530-411d-b25f-8486ac22fd66/payloads/1/2026-10-05/c8144bb4-520e-41b2-993f-3f2cacc618a2/detail.parquet": "9d1e27d46888756d34807f192119abadf14fadb50fa6c071de1088c7335e0c8d",
+      "storage/49bd6d7c-c530-411d-b25f-8486ac22fd66/payloads/1/2026-10-05/c8144bb4-520e-41b2-993f-3f2cacc618a2/search.parquet": "8d7cf00c1841c76e71e3cffb1524cbec59913351144b408c67a7fee0273f7e2d",
+      "storage/49bd6d7c-c530-411d-b25f-8486ac22fd66/payloads/1/2026-10-05/b6c356fe-8619-42a1-a1b5-4106995643b3/detail.parquet": "51f388a70d37675b727cc89de39749d3327d37404fad5ce6a0b5047296bae0e2",
+      "storage/49bd6d7c-c530-411d-b25f-8486ac22fd66/payloads/1/2026-10-05/b6c356fe-8619-42a1-a1b5-4106995643b3/search.parquet": "403d69964dbabe66c0de53d3e5a8d04c7b69d1d5f6a4cbad0959c0c4f4b1d020",
+      "storage/49bd6d7c-c530-411d-b25f-8486ac22fd66/payloads/1/2026-10-05/f92ea8a2-3687-4a2a-bda6-fb3dc7393243/detail.parquet": "04a7cd559af2b4e51a38fcbe29291cd82e94a283266a00bc56378d9a8ccd81a4",
+      "storage/49bd6d7c-c530-411d-b25f-8486ac22fd66/payloads/1/2026-10-05/f92ea8a2-3687-4a2a-bda6-fb3dc7393243/search.parquet": "0290e676ef6d9f6081e07110c74ac09f331035e09c53e7a36943efefd8ab437c",
+      "storage/49bd6d7c-c530-411d-b25f-8486ac22fd66/payloads/1/2026-10-05/bc6ac733-dea8-4cdb-9247-29e05d4fbc92/detail.parquet": "e2689e0402f8c76ab4ff0906202d6a69d61874e7998b6bdda5d657f413e467aa",
+      "storage/49bd6d7c-c530-411d-b25f-8486ac22fd66/payloads/1/2026-10-05/bc6ac733-dea8-4cdb-9247-29e05d4fbc92/search.parquet": "fe465a376676d288bc4bb1b4de432207e18ec3bfbe926f9065b3b14428c0e8ed",
+      "storage/49bd6d7c-c530-411d-b25f-8486ac22fd66/payloads/1/2026-10-05/3961f11d-d565-4329-8f9c-6b9ceb24dda7/detail.parquet": "f070673ddd46d687ed17e5f9cb1c875bff45b8fa8b5bdab653cab1e24a1a4d65",
+      "storage/49bd6d7c-c530-411d-b25f-8486ac22fd66/payloads/1/2026-10-05/3961f11d-d565-4329-8f9c-6b9ceb24dda7/search.parquet": "a11ca5045ac1e2d0e3e0ad59bdbd6a3a1cf35c2a75f19525f1f70233855284db",
+      "storage/49bd6d7c-c530-411d-b25f-8486ac22fd66/payloads/1/2026-10-05/348df6d7-b544-4f42-a86e-47581a5ac957/detail.parquet": "51dd8836114cc397168d142a01cb6eec0aa6bb5e1ba59028ee20f9617325ff35",
+      "storage/49bd6d7c-c530-411d-b25f-8486ac22fd66/payloads/1/2026-10-05/348df6d7-b544-4f42-a86e-47581a5ac957/search.parquet": "02fcea882e3cc3c1e7b213c84cbda2fffc25ecb6cc5adda553d001be26ac1df0"
+    },
+    "baseline_parquet_unchanged": true,
+    "baseline_parquet_count": 6
+  },
+  "migration_receipt": {
+    "database_id": "cb24c4d7-9793-40ff-9694-81b9058a32e3",
+    "generation": "49bd6d7c-c530-411d-b25f-8486ac22fd66",
+    "frames": 7,
+    "tables": [
+      {
+        "table": "_sqlx_migrations",
+        "rows": 116,
+        "sha256": "0b83182178a2a49eb3e6c5e7120ebb1ab70c4e5738b7a1ac88982a0006842b79"
+      },
+      {
+        "table": "activity_actions",
+        "rows": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "table": "activity_evidence",
+        "rows": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "table": "activity_intervals",
+        "rows": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "table": "activity_ledger_state",
+        "rows": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "table": "activity_tasks",
+        "rows": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "table": "audio_chunks",
+        "rows": 11,
+        "sha256": "bd99e1d811bfcd719e20d1dc86e8a999928423bf4ea1cdd540a0bc882ca994eb"
+      },
+      {
+        "table": "audio_tags",
+        "rows": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "table": "audio_transcriptions",
+        "rows": 3,
+        "sha256": "37cca0996964b7d77d0cda999bf1f6df93761b014bcf28cfcd3468dbd32ed385"
+      },
+      {
+        "table": "diarization_runs",
+        "rows": 3,
+        "sha256": "b7aedd0b1b8ae12adfd4086eec5b1e0e674ac02b73186df30751d93a97a3d5bb"
+      },
+      {
+        "table": "diarization_segments",
+        "rows": 3,
+        "sha256": "c351a9afec0f8ab9cb064a741706431676df42b069786f7b929bce9f1da1e766"
+      },
+      {
+        "table": "display_layout",
+        "rows": 1,
+        "sha256": "cad32324065346da47a99515e10b4046fb2f9f0bebe9ae2b4c7137821969808b"
+      },
+      {
+        "table": "elements",
+        "rows": 194,
+        "sha256": "070bc9c429f1e1a50324b738b5c3081a07aff0c750693c52e5451d360a6ac5cc"
+      },
+      {
+        "table": "feedback",
+        "rows": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "table": "frames",
+        "rows": 7,
+        "sha256": "f6f6489c8b21233dc7eb335656b28c0c8e8975666fceaab5540495c0d40261e5"
+      },
+      {
+        "table": "meeting_transcript_segments",
+        "rows": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "table": "meetings",
+        "rows": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "table": "memories",
+        "rows": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "table": "output_search_index",
+        "rows": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "table": "outputs",
+        "rows": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "table": "pipe_event_runs",
+        "rows": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "table": "pipe_executions",
+        "rows": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "table": "pipe_scheduler_state",
+        "rows": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "table": "semantic_actor_aliases",
+        "rows": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "table": "semantic_actors",
+        "rows": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "table": "semantic_item_actors",
+        "rows": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "table": "semantic_items",
+        "rows": 1,
+        "sha256": "b6d01f402afe5543829ddc73e07b55e8b6eb6729ad17cdbb2bea5e83c7647bd0"
+      },
+      {
+        "table": "semantic_run_items",
+        "rows": 1,
+        "sha256": "25345362ca16e3e36f0f395b26e2d95e18946b3cb07db41f7f496e66f224a763"
+      },
+      {
+        "table": "semantic_runs",
+        "rows": 1,
+        "sha256": "a5896e8cccc5734b95ef9644b335e335db8a2d1e4bf229c8cf005ce4fc3f295f"
+      },
+      {
+        "table": "speaker_embeddings",
+        "rows": 1,
+        "sha256": "b30d5f14f8a141b4ea3089217df6e0172a9fa542cf7e389ac9a8588f13e6b5cb"
+      },
+      {
+        "table": "speaker_identity_evidence",
+        "rows": 2,
+        "sha256": "e6c9c789f3a59d07ce0f905efdc69d90ca4a442db862aa5e38bef3d51df59e91"
+      },
+      {
+        "table": "speakers",
+        "rows": 1,
+        "sha256": "67c9a3fe1cc4f404e8b475dcb88e40cc267babb2b773c255dcfcf34fd8ca1063"
+      },
+      {
+        "table": "sqlite_sequence",
+        "rows": 13,
+        "sha256": "b906d759334ee4f411775badcce5c40fb904ea76c2dfaeb6ad91e5bf3b4ae84a"
+      },
+      {
+        "table": "tags",
+        "rows": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "table": "ui_events",
+        "rows": 8,
+        "sha256": "c2bcd431586a6fafd688dd65ceffa4ba87c1d2f06ac5ba25ed3460c775462b51"
+      },
+      {
+        "table": "video_chunks",
+        "rows": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "table": "vision_tags",
+        "rows": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    ],
+    "source_bytes": 962560,
+    "index_bytes": 1261568,
+    "payload_bytes": 30925,
+    "source_identity": null,
+    "allocated_before_bytes": 983040,
+    "allocated_after_bytes": 2215936
+  },
+  "health": {
+    "status": "healthy",
+    "unhealthy_reasons": [],
+    "last_frame_timestamp": "2026-10-05T23:22:28+00:00",
+    "last_audio_timestamp": "2026-10-05T23:12:09+00:00",
+    "frame_status": "ok",
+    "audio_status": "ok"
+  },
+  "scroll": [
+    {
+      "frame_id": 30,
+      "timestamp": "2026-10-05T23:23:10.928862+00:00",
+      "event_source": "scroll_stop",
+      "text_source": "accessibility"
+    },
+    {
+      "frame_id": 29,
+      "timestamp": "2026-10-05T23:23:09.051753+00:00",
+      "event_source": "scroll_stop",
+      "text_source": "accessibility"
+    },
+    {
+      "frame_id": 28,
+      "timestamp": "2026-10-05T23:23:06.839665+00:00",
+      "event_source": "scroll_stop",
+      "text_source": "accessibility"
+    },
+    {
+      "frame_id": 27,
+      "timestamp": "2026-10-05T23:23:04.888230+00:00",
+      "event_source": "scroll_stop",
+      "text_source": "accessibility"
+    },
+    {
+      "frame_id": 26,
+      "timestamp": "2026-10-05T23:23:03.727426+00:00",
+      "event_source": "visual_change",
+      "text_source": "accessibility"
+    },
+    {
+      "frame_id": 25,
+      "timestamp": "2026-10-05T23:22:28.220604+00:00",
+      "event_source": "scroll_stop",
+      "text_source": "accessibility"
+    },
+    {
+      "frame_id": 24,
+      "timestamp": "2026-10-05T23:22:25.118701+00:00",
+      "event_source": "scroll_stop",
+      "text_source": "accessibility"
+    },
+    {
+      "frame_id": 23,
+      "timestamp": "2026-10-05T23:22:22.162649+00:00",
+      "event_source": "scroll_stop",
+      "text_source": "accessibility"
+    },
+    {
+      "frame_id": 22,
+      "timestamp": "2026-10-05T23:22:19.070247+00:00",
+      "event_source": "scroll_stop",
+      "text_source": "accessibility"
+    },
+    {
+      "frame_id": 21,
+      "timestamp": "2026-10-05T23:22:16.042191+00:00",
+      "event_source": "scroll_stop",
+      "text_source": "accessibility"
+    },
+    {
+      "frame_id": 20,
+      "timestamp": "2026-10-05T23:22:13.459303+00:00",
+      "event_source": "window_focus",
+      "text_source": "accessibility"
+    }
+  ]
+}
