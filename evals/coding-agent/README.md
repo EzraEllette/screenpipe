@@ -67,7 +67,7 @@ The hidden fixture appears only at grading and uses no dependency links.
 This does not establish native recording continuity, real authentication,
 account-switch race safety, browser integration, isolation or model performance.
 
-The current app corpus contains 127 git-mined regressions. See
+The current app corpus contains 128 git-mined regressions. See
 [DESIGN.md](./DESIGN.md) for the Anthropic guidance, source contract, and
 history-mining workflow. The companion website manifest uses this same harness.
 
@@ -1572,3 +1572,16 @@ language shortcuts, lost audio and missing-source/syntax infrastructure errors.
 Fixtures appear only at grading and need no dependency links. This does not
 establish speech recognition quality, native settings persistence, real provider
 delivery, alternate-provider behavior, execution isolation or model improvement.
+
+## Manual sync HTTP failures
+
+`app-manual-sync-http-failure` mounts AccountSection with synthetic local HTTP,
+settings and native ports. Sixteen outcomes cover pull/push refusal, server-error
+feedback, non-JSON status fallback, retry, successful sequencing, network errors
+and disabled choices. The parent fails nine outcomes and preserves seven; the
+historical reference and current component pass sixteen. Run
+`bun test evals/coding-agent/calibrate-manual-sync.test.js` for correct, broken,
+bypass, equivalent, preserved-behavior and setup-error controls. Hidden fixtures
+and dependency links appear only after the trajectory. This does not establish
+native persistence, encryption, real account access, provider delivery, execution
+isolation or model improvement.
