@@ -5156,6 +5156,50 @@
         ],
         "command": "bun --no-env-file test auth-host.eval.test.tsx"
       }
+    },
+    {
+      "id": "app-unmarked-html-file-preview",
+      "name": "Render unmarked HTML files without losing source or ordinary previews",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "93c0de3c6b9b872056987ef70bf46c9af2d9d890"
+      },
+      "base_ref": "6ea84d80e5ab4041aa855014ab71542a9d353206",
+      "oracle_ref": "93c0de3c6b9b872056987ef70bf46c9af2d9d890",
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/components/file-viewer.tsx",
+        "apps/screenpipe-app-tauri/lib/utils/html-sandbox.ts"
+      ],
+      "trigger_paths": [
+        "apps/screenpipe-app-tauri/components/file-viewer.tsx",
+        "apps/screenpipe-app-tauri/components/file-viewer-html-frame.tsx",
+        "apps/screenpipe-app-tauri/lib/utils/html-sandbox.ts"
+      ],
+      "gate": "advisory",
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "html",
+        "preserved-behavior"
+      ],
+      "prompt": "An HTML report without a producer marker is only shown as source in the file viewer. Repair the actual ViewerFileContent preview so complete unmarked HTML documents open rendered, including upper-case .HTM names and Unicode content. Nonempty bare snippets must offer rendering too; their initial tab is unspecified. Preserve rendering for marked snippets. Keep meaningful document content inside a sandboxed iframe, with no payload style/script/heading elements inserted into the host. Grant at most script execution in the sandbox, and retain actual default-deny CSP metadata for default sources, connections and form submissions. Commented-out content or policy text is not a rendered document or policy. The source/render switch must show the unchanged source and return to the preview. Keep a chosen source tab when the same path is rerendered; a new path must clear old content while loading and display its own document afterward. Truncated, empty and loading HTML must not render or offer a render toggle. Preserve literal plain-text previews and ordinary Markdown headings, bold text, lists and safe web links. Keep the public component and existing source/render control contracts compatible. No specific internal helper or default-selection implementation is required. This task checks actual React/Markdown DOM output and iframe configuration with synthetic native/media ports; it does not establish browser network or IPC enforcement, Brain-view behavior or native security.",
+      "agent_timeout_seconds": 900,
+      "grader_dependency_links": [
+        {
+          "source_path": "apps/screenpipe-app-tauri/node_modules",
+          "destination_path": "apps/screenpipe-app-tauri/node_modules"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/html-viewer.fixture.ts.txt",
+            "destination_path": "evals/coding-agent/graders/html-viewer.test.ts"
+          }
+        ],
+        "command": "\"${BUN_BIN:-bun}\" test evals/coding-agent/graders/html-viewer.test.ts"
+      }
     }
   ]
 }

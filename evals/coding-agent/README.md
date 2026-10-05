@@ -1,5 +1,15 @@
 # Coding-agent regression evals
 
+The unmarked HTML file-preview case executes ViewerFileContent with the actual
+Markdown, code-renderer, iframe and sandbox helper sources. It checks full and
+snippet previews, parsed content/CSP metadata, source toggling, path transitions,
+Unicode names/content and preserved text/Markdown. Fourteen calibration controls
+include unused-correct code, empty/comment-only output, unsafe origin, fake CSP,
+lost toggling/Markdown, equivalent implementations and missing-source setup errors.
+Dependencies and hidden fixtures are installed only when grading begins. Synthetic
+native/media/translation ports and JSDOM do not prove browser network/IPC enforcement,
+Brain-view integration, execution isolation or model improvement.
+
 This is an agent eval suite, not a unit-test suite. Every case contains:
 
 - a sanitized task derived from an escaped product failure;
