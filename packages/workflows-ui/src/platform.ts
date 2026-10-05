@@ -65,6 +65,7 @@ export type WorkflowsPlatform = {
     timestamp: string,
     app: string,
     signal: AbortSignal,
+    frameId?: number,
   ) => Promise<import("./model").WorkflowScreenshot | null>;
   openCapturedMoment?: (frameId: number, timestamp: string) => Promise<void>;
   assistant?: WorkflowsAssistantPlatform;
@@ -166,6 +167,8 @@ export type WorkflowsAppProps = {
     openKeyboardShortcuts: () => void;
   }) => import("react").ReactNode;
   navigationBrand?: import("react").ReactNode;
+  /** Data-source selection stays in the toolbar when navigation is collapsed. */
+  sourceControl?: import("react").ReactNode;
   composerAccessory?: import("./assistant").WorkflowComposerAccessory;
   /** Open the host sharing review; clicking must not send the workflow. */
   onShareWorkflow?: (workflow: WorkflowMap) => void;

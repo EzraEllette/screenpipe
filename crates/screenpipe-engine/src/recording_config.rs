@@ -18,6 +18,11 @@ use std::time::Duration;
 
 use crate::vision_manager::VisionManagerConfig;
 
+/// Smallest non-native capture width. Narrower captures make OCR unreadable,
+/// and since stored snapshots are never upscaled they would also shrink every
+/// stored frame below the `low` preset (1280). Smaller values are raised.
+const MIN_CAPTURE_MAX_WIDTH: u32 = 1280;
+
 /// Unified recording configuration used by both the CLI binary and the Tauri embedded server.
 /// Replaces the former `EmbeddedServerConfig` and eliminates duplicate field mapping.
 #[derive(Clone, Debug)]
@@ -162,6 +167,9 @@ pub struct RecordingConfig {
     /// Video quality preset controlling JPEG quality during frame extraction.
     /// Values: "low", "balanced", "high", "max". Default: "balanced".
     pub video_quality: String,
+    /// Max width (px) of the macOS screen capture that OCR reads. 0 = native,
+    /// otherwise at least `MIN_CAPTURE_MAX_WIDTH`.
+    pub capture_max_width: u32,
 
     // Misc
     pub use_chinese_mirror: bool,
@@ -179,6 +187,7 @@ pub struct RecordingConfig {
     /// Persisted power mode preference ("auto", "performance", "battery_saver").
     /// Restored from settings on startup so the user's choice survives app restarts.
     pub power_mode: Option<String>,
+    pub recording_detail: Arc<crate::recording_detail::RecordingDetailController>,
 
     /// Keep the computer awake while screenpipe is running.
     pub keep_computer_awake: bool,
@@ -385,6 +394,10 @@ impl RecordingConfig {
             openai_compatible_raw_audio: settings.openai_compatible_raw_audio,
             user_name: settings.user_name.clone(),
             video_quality: settings.video_quality.clone(),
+            capture_max_width: match settings.capture_max_width {
+                0 => 0,
+                width => width.max(MIN_CAPTURE_MAX_WIDTH),
+            },
             use_chinese_mirror: settings.use_chinese_mirror,
             analytics_enabled: settings.analytics_enabled,
             analytics_id: settings.analytics_id.clone(),
@@ -398,6 +411,9 @@ impl RecordingConfig {
                 .collect(),
             batch_max_duration_secs: settings.batch_max_duration_secs.filter(|&v| v > 0),
             power_mode: settings.power_mode.clone(),
+            recording_detail: Arc::new(crate::recording_detail::RecordingDetailController::new(
+                settings.recording_detail,
+            )),
             keep_computer_awake: settings.keep_computer_awake,
             db_config: settings
                 .device_tier
@@ -488,6 +504,7 @@ impl RecordingConfig {
             capture_on_keystroke: true,
             capture_on_clipboard,
             capture_scroll: self.capture_scroll.unwrap_or(defaults.capture_scroll),
+            scroll_interval_ms: Some(self.recording_detail.scroll_interval()),
             ..defaults
         }
     }
@@ -533,6 +550,7 @@ impl RecordingConfig {
         vision_metrics: Arc<PipelineMetrics>,
     ) -> VisionManagerConfig {
         VisionManagerConfig {
+            recording_detail: self.recording_detail.clone(),
             output_path,
             ignored_windows: self.ignored_windows.clone(),
             included_windows: self.included_windows.clone(),
@@ -547,6 +565,7 @@ impl RecordingConfig {
             pause_on_drm_content: self.pause_on_drm_content,
             languages: self.languages.clone(),
             video_quality: self.video_quality.clone(),
+            capture_max_width: self.capture_max_width,
             disable_screenshots: self.disable_screenshots,
             enable_semantic_context: self.enable_semantic_context,
             semantic_context_mode: self.semantic_context_mode,
@@ -593,6 +612,43 @@ mod tests {
 
     fn build(s: &screenpipe_config::RecordingSettings) -> RecordingConfig {
         RecordingConfig::from_settings(s, std::path::PathBuf::from("/tmp/sp_test"), None)
+    }
+
+    #[test]
+    fn recording_detail_changes_only_scroll_cadence_and_preserves_other_settings() {
+        for mode in [
+            screenpipe_config::RecordingDetail::Auto,
+            screenpipe_config::RecordingDetail::LowImpact,
+            screenpipe_config::RecordingDetail::Balanced,
+            screenpipe_config::RecordingDetail::MoreDetail,
+        ] {
+            let settings = screenpipe_config::RecordingSettings {
+                recording_detail: mode,
+                video_quality: "high".into(),
+                power_mode: Some("battery_saver".into()),
+                idle_capture_interval_ms: Some(45_000),
+                disable_audio: true,
+                disable_keyboard_capture: true,
+                ignored_windows: vec!["Private".into()],
+                ..Default::default()
+            };
+            let c = build(&settings);
+            let ui = c.to_ui_recorder_config().to_ui_config();
+            let vision = c.to_vision_manager_config(
+                "/tmp/sp_test".into(),
+                Arc::new(PipelineMetrics::default()),
+            );
+            assert!(Arc::ptr_eq(
+                ui.scroll_interval_ms.as_ref().unwrap(),
+                &vision.recording_detail.scroll_interval()
+            ));
+            assert_eq!(vision.ignored_windows, vec!["Private"]);
+            assert_eq!(vision.video_quality, "high");
+            assert_eq!(vision.idle_capture_interval_ms, Some(45_000));
+            assert_eq!(c.power_mode.as_deref(), Some("battery_saver"));
+            assert!(!c.to_ui_recorder_config().record_keyboard_events);
+            assert!(c.disable_audio);
+        }
     }
 
     #[test]
@@ -802,6 +858,7 @@ mod tests {
             monitor_ids: vec!["MONITOR-1".to_string()],
             use_all_monitors: false,
             video_quality: "high".to_string(),
+            capture_max_width: 2560,
             idle_capture_interval_ms: Some(2_000),
             visual_check_interval_ms: Some(350),
             visual_change_threshold: Some(0.18),
@@ -830,6 +887,7 @@ mod tests {
         assert!(vision.enhanced_incognito_detection);
         assert!(vision.pause_on_drm_content);
         assert_eq!(vision.video_quality, "high");
+        assert_eq!(vision.capture_max_width, 2560);
         assert!(!vision.disable_screenshots);
         assert_eq!(vision.idle_capture_interval_ms, Some(2_000));
         assert_eq!(vision.visual_check_interval_ms, Some(350));
@@ -837,6 +895,40 @@ mod tests {
         assert_eq!(vision.min_capture_interval_ms, Some(120));
         assert_eq!(vision.capture_on_keystroke, Some(true));
         assert_eq!(vision.capture_on_clipboard, Some(true));
+    }
+
+    /// OCR reads the captured frame, so no storage preset may shrink the
+    /// capture by default (#7393).
+    #[test]
+    fn capture_defaults_to_native_for_every_video_quality() {
+        for quality in ["low", "balanced", "high", "max"] {
+            let settings = screenpipe_config::RecordingSettings {
+                video_quality: quality.to_string(),
+                ..Default::default()
+            };
+            let vision = build(&settings).to_vision_manager_config(
+                String::new(),
+                std::sync::Arc::new(PipelineMetrics::new()),
+            );
+            assert_eq!(vision.capture_max_width, 0, "videoQuality={quality}");
+        }
+    }
+
+    /// A tiny cap would store 1-pixel-wide frames and lose the recording.
+    #[test]
+    fn capture_max_width_below_floor_is_raised() {
+        for (configured, effective) in [(0, 0), (1, 1280), (1279, 1280), (1280, 1280), (2560, 2560)]
+        {
+            let settings = screenpipe_config::RecordingSettings {
+                capture_max_width: configured,
+                ..Default::default()
+            };
+            assert_eq!(
+                build(&settings).capture_max_width,
+                effective,
+                "captureMaxWidth={configured}"
+            );
+        }
     }
 
     fn langs(items: &[&str]) -> Vec<String> {

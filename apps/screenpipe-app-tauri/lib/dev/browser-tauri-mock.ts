@@ -493,6 +493,7 @@ export function createBrowserIpcMock(options: BrowserIpcMockOptions) {
   const storePaths = new Map<string, number>();
   const warned = new Set<string>();
   let grokBotConnected = true;
+  let enterpriseLicenseKey: string | null = null;
   let nextResourceId = 1;
   let piExtensionPackages: PiExtensionPackage[] = [];
   let importedSkills = BROWSER_DEV_IMPORTED_SKILLS.map((skill) => ({ ...skill }));
@@ -882,8 +883,12 @@ export function createBrowserIpcMock(options: BrowserIpcMockOptions) {
           total_bytes: new TextEncoder().encode(text).byteLength,
         };
       }
-      case "get_cloud_token":
+      case "save_enterprise_license_key":
+        enterpriseLicenseKey = String(input.licenseKey ?? "");
+        return null;
       case "get_enterprise_license_key":
+        return enterpriseLicenseKey;
+      case "get_cloud_token":
       case "get_enterprise_team_api_token":
       case "get_pending_update":
         return null;
@@ -1029,6 +1034,13 @@ export function createBrowserIpcMock(options: BrowserIpcMockOptions) {
       }
       case "get_enterprise_host_identity":
         return { machine_id_hash: null, os_user_id_hash: null };
+      case "calendar_status":
+        return { available: false, authorized: false, calendarCount: 0 };
+      case "oauth_list_instances":
+      case "ics_calendar_get_entries":
+        return [];
+      case "oauth_status":
+        return { connected: false };
       case "get_enterprise_install_metadata":
         return {
           install_source: "browser-dev",

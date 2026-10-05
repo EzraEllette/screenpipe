@@ -64,22 +64,18 @@ static SCK_E2E_LOOKUP_HANG_ARMED: std::sync::atomic::AtomicBool =
 static SCK_E2E_CAPTURE_HANG_INJECTED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-/// Optional cap on captured width for the macOS SCK stream. The GPU
-/// downscales to fit before `replayd` delivers the framebuffer, so
+/// Optional cap on captured width for the macOS SCK screenshot stream. The
+/// GPU downscales to fit before `replayd` delivers the framebuffer, so
 /// WindowServer composites a smaller surface. `0` = no cap (capture at
-/// native, the previous default).
+/// native, the default).
 ///
-/// Set by the vision manager from the user's `video_quality` setting via
-/// `video_quality_to_max_snapshot_width` so the captured resolution
-/// matches the resolution the snapshot writer would downscale to anyway.
-/// Coupling these means screenpipe captures exactly the pixels it stores —
-/// no wasted GPU readback at native res just to throw it away in user
-/// space before JPEG encoding.
+/// This is the resolution OCR reads. Storage is shrunk separately by
+/// `SnapshotWriter`, so do not set this from storage settings such as
+/// `video_quality`: doing so garbled small text on wide displays (#7393).
 static SCK_CAPTURE_MAX_WIDTH: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
-/// Set the SCK capture-width cap. `0` = no cap. Reads the user's
-/// `video_quality` setting via the snapshot-width mapping; called by the
-/// vision manager when capture starts and when settings change.
+/// Set the SCK capture-width cap. `0` = no cap. Called by the vision manager
+/// from the user's `captureMaxWidth` setting when capture starts.
 pub fn set_sck_capture_max_width(max_width: u32) {
     SCK_CAPTURE_MAX_WIDTH.store(max_width, std::sync::atomic::Ordering::Relaxed);
 }
@@ -305,7 +301,11 @@ impl SafeMonitor {
         }
     }
 
-    async fn capture_sck_bounded(&self, excluded_window_ids: Vec<u32>) -> Result<DynamicImage> {
+    async fn capture_sck_bounded(
+        &self,
+        excluded_window_ids: Vec<u32>,
+        fresh: bool,
+    ) -> Result<DynamicImage> {
         let monitor_id = self.monitor_id;
         let cached_sck = self.cached_sck.clone();
         run_bounded_macos_capture(
@@ -329,12 +329,16 @@ impl SafeMonitor {
                     }
 
                     let cap = sck_capture_max_width();
-                    let result = match (cap, excluded_window_ids.is_empty()) {
-                        (0, true) => monitor.capture_image(),
-                        (_, true) => monitor.capture_image_scaled(cap),
-                        (0, false) => monitor.capture_image_excluding(&excluded_window_ids),
-                        (_, false) => {
-                            monitor.capture_image_scaled_excluding(cap, &excluded_window_ids)
+                    let result = if fresh {
+                        monitor.capture_image_fresh_scaled_excluding(cap, &excluded_window_ids)
+                    } else {
+                        match (cap, excluded_window_ids.is_empty()) {
+                            (0, true) => monitor.capture_image(),
+                            (_, true) => monitor.capture_image_scaled(cap),
+                            (0, false) => monitor.capture_image_excluding(&excluded_window_ids),
+                            (_, false) => {
+                                monitor.capture_image_scaled_excluding(cap, &excluded_window_ids)
+                            }
                         }
                     };
                     result
@@ -379,6 +383,10 @@ impl SafeMonitor {
     /// used only for an unfiltered frame because it cannot enforce SCK window
     /// exclusions.
     pub async fn capture_image(&self) -> Result<DynamicImage> {
+        self.capture_image_inner(false).await
+    }
+
+    async fn capture_image_inner(&self, fresh: bool) -> Result<DynamicImage> {
         if !self.use_sck || self.prefer_xcap_fallback.load(Ordering::Acquire) {
             match self.capture_xcap_bounded().await {
                 Ok(image) => return Ok(image),
@@ -394,7 +402,7 @@ impl SafeMonitor {
             }
         }
 
-        match self.capture_sck_bounded(Vec::new()).await {
+        match self.capture_sck_bounded(Vec::new(), fresh).await {
             Ok(image) => Ok(image),
             Err(sck_error) => {
                 self.release_capture_stream();
@@ -420,11 +428,32 @@ impl SafeMonitor {
         &self,
         excluded_window_ids: &[u32],
     ) -> Result<DynamicImage> {
+        self.capture_image_excluding_inner(excluded_window_ids, false)
+            .await
+    }
+
+    /// Capture after a focus/input transition, retaining the same privacy and
+    /// bounded recovery policy as ordinary screenshots.
+    pub async fn capture_image_fresh_excluding(
+        &self,
+        excluded_window_ids: &[u32],
+    ) -> Result<DynamicImage> {
+        self.capture_image_excluding_inner(excluded_window_ids, true)
+            .await
+    }
+
+    async fn capture_image_excluding_inner(
+        &self,
+        excluded_window_ids: &[u32],
+        fresh: bool,
+    ) -> Result<DynamicImage> {
         if excluded_window_ids.is_empty() {
-            return self.capture_image().await;
+            return self.capture_image_inner(fresh).await;
         }
         debug_assert!(!core_graphics_fallback_allowed(excluded_window_ids));
-        let result = self.capture_sck_bounded(excluded_window_ids.to_vec()).await;
+        let result = self
+            .capture_sck_bounded(excluded_window_ids.to_vec(), fresh)
+            .await;
         if result.is_err() {
             self.release_capture_stream();
         }
@@ -1045,8 +1074,8 @@ fn hd_scaled_dims(src_w: u32, src_h: u32, max_width: u32) -> (u32, u32) {
 
 impl SafeMonitor {
     /// Start a dedicated high-fps HD capture stream for this monitor at `fps`,
-    /// honoring the screenshot resolution cap while independently bounding the
-    /// live meeting stream to 1920px wide.
+    /// honoring the stored snapshot width (`snapshot_max_width`, 0 = native)
+    /// while independently bounding the live meeting stream to 1920px wide.
     ///
     /// Returns a live [`HdCapture`]: drain `frames` for RGBA frames, drop
     /// `stream` to stop. This opens a SECOND ScreenCaptureKit stream alongside
@@ -1054,11 +1083,16 @@ impl SafeMonitor {
     /// path. `excluded_window_ids` are excluded at the OS level — ignored /
     /// private windows never reach the recorder. Blocks briefly while the
     /// stream starts; call from a blocking context.
-    pub fn start_hd_capture(&self, fps: u32, excluded_window_ids: &[u32]) -> Result<HdCapture> {
+    pub fn start_hd_capture(
+        &self,
+        fps: u32,
+        excluded_window_ids: &[u32],
+        snapshot_max_width: u32,
+    ) -> Result<HdCapture> {
         let (width, height) = hd_scaled_dims(
             self.monitor_data.width,
             self.monitor_data.height,
-            hd_capture_max_width(sck_capture_max_width()),
+            hd_capture_max_width(snapshot_max_width),
         );
         let (stream, frames) =
             sck_rs::start_hd_capture(self.monitor_id, width, height, fps, excluded_window_ids)
