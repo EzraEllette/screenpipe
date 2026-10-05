@@ -425,6 +425,48 @@ pub(crate) async fn upgrade_recording(
     Ok(true)
 }
 
+/// Give tables added by ordinary SQLx migrations the same read tracking as
+/// tables present during conversion. Inspect schema metadata only; existing
+/// capture/archive tables keep their specialized triggers.
+pub(crate) async fn ensure_resident_table_hooks(
+    conn: &mut SqliteConnection,
+    has_bulk: bool,
+) -> Result<bool, sqlx::Error> {
+    let mut tables: Vec<String> = sqlx::query_scalar(
+        "SELECT t.name FROM sqlite_master t
+         WHERE t.type='table' AND substr(t.name,1,1)!='_'
+         AND t.name NOT LIKE 'sqlite_%' AND t.name NOT LIKE '%_fts%'
+         AND t.name NOT IN ('frames','frame_payloads','payload_files','storage_metadata','upload_bindings')
+         AND t.sql NOT LIKE 'CREATE VIRTUAL TABLE%'
+         AND (SELECT count(*) FROM sqlite_master h WHERE h.type='trigger' AND h.name IN (
+             'hybrid_revision_' || t.name || '_INSERT',
+             'hybrid_revision_' || t.name || '_UPDATE',
+             'hybrid_revision_' || t.name || '_DELETE',
+             'hybrid_read_revoke_delete_' || t.name)) < 4",
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    // Bulk column tables remain physical SQLite tables, but their specialized
+    // triggers suppress logical revisions while sealing. Do not reinstall the
+    // generic hooks deliberately removed by bulk::bootstrap.
+    tables.retain(|table| !has_bulk || !super::bulk::is_bulk_table(table));
+    if tables.is_empty() {
+        return Ok(false);
+    }
+    let mut tx = conn.begin().await?;
+    for table in tables {
+        let quoted = table.replace('"', "\"\"");
+        for event in ["INSERT", "UPDATE", "DELETE"] {
+            sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+                "CREATE TRIGGER IF NOT EXISTS \"hybrid_revision_{quoted}_{event}\" AFTER {event} ON \"{quoted}\" BEGIN UPDATE storage_metadata SET revision=revision+1; END;"
+            ))).execute(&mut *tx).await?;
+        }
+        super::read_schema::install_resident_hooks(&mut tx, &table).await?;
+    }
+    tx.commit().await?;
+    Ok(true)
+}
+
 pub(crate) async fn bootstrap(
     conn: &mut SqliteConnection,
     descriptor: &StorageDescriptor,

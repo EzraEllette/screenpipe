@@ -1,0 +1,79 @@
+// screenpipe — AI that knows everything you've seen, said, or heard
+// https://screenpipe.com
+import { act, cleanup, renderHook } from '@testing-library/react';
+import { afterEach, beforeEach, expect, test, vi } from 'vitest';
+const ports = vi.hoisted(() => ({
+  settings: { dataDir: 'default', stopRecordingOnLowDisk: true },
+  getDataDir: vi.fn(), getActiveDataDir: vi.fn(), getDiskUsage: vi.fn(), getLowDiskGuardConfig: vi.fn(),
+}));
+vi.mock('@/lib/hooks/use-settings', () => ({useSettings: () => ports}));
+vi.mock('@/lib/utils/tauri', () => ({commands: ports}));
+import { useRecordingStorage } from './lib/hooks/use-recording-storage';
+const active = '/synthetic/recording-volume', saved = '/synthetic/saved-volume';
+const usage = (n:number) => ({status:'ok',data:{available_space_bytes:n}});
+const settle = async () => {await act(async()=>{});};
+beforeEach(()=>{
+  vi.resetAllMocks(); ports.settings.dataDir='default'; ports.settings.stopRecordingOnLowDisk=true;
+  ports.getDataDir.mockResolvedValue(saved);
+  ports.getActiveDataDir.mockResolvedValue({status:'ok',data:active});
+  ports.getLowDiskGuardConfig.mockResolvedValue({thresholdBytes:500});
+  ports.getDiskUsage.mockImplementation(async (_quick:boolean,path:string)=>usage(path===active?300:900));
+});
+afterEach(cleanup);
+test('warns when the active volume is low even though the saved volume is healthy',async()=>{
+  const r=renderHook(()=>useRecordingStorage(true));await settle();
+  expect(r.result.current).toMatchObject({warning:{availableBytes:300,thresholdBytes:500},checking:false,error:false});
+});
+test('does not show a saved-volume warning when the active volume is healthy',async()=>{
+  ports.getDiskUsage.mockImplementation(async (_quick:boolean,path:string)=>usage(path===active?900:300));
+  const r=renderHook(()=>useRecordingStorage(true));await settle();
+  expect(r.result.current).toMatchObject({warning:null,checking:false,error:false});
+});
+test('preserves an ordinary matching directory and the native threshold boundary',async()=>{
+  ports.getDataDir.mockResolvedValue(active);ports.getDiskUsage.mockResolvedValue(usage(500));
+  const r=renderHook(()=>useRecordingStorage(true));await settle();
+  expect(r.result.current.warning).toEqual({availableBytes:500,thresholdBytes:500});
+});
+test('a manual refresh checks the newly active volume and clears the warning',async()=>{
+  ports.getDataDir.mockResolvedValue(active);
+  const r=renderHook(()=>useRecordingStorage(true));await settle();expect(r.result.current.warning).not.toBeNull();
+  ports.getActiveDataDir.mockResolvedValue({status:'ok',data:saved});
+  act(()=>r.result.current.refresh());await settle();
+  expect(r.result.current).toMatchObject({warning:null,checking:false,error:false});
+});
+test('does not inspect storage during recording or with the guard disabled',async()=>{
+  const r=renderHook(({paused})=>useRecordingStorage(paused),{initialProps:{paused:false}});await settle();
+  expect(ports.getDiskUsage).not.toHaveBeenCalled();expect(r.result.current.warning).toBeNull();
+  ports.settings.stopRecordingOnLowDisk=false;r.rerender({paused:true});await settle();
+  expect(ports.getDiskUsage).not.toHaveBeenCalled();expect(r.result.current).toMatchObject({warning:null,checking:false,error:false});
+});
+test('active-directory lookup failure reports unavailable rather than falling back to a different volume',async()=>{
+  ports.getActiveDataDir.mockResolvedValue({status:'error',error:'synthetic unavailable'});
+  const r=renderHook(()=>useRecordingStorage(true));await settle();
+  expect(r.result.current).toMatchObject({warning:null,checking:false,error:true});
+});
+test('failed disk probes are not zero free bytes and can recover manually',async()=>{
+  ports.getDataDir.mockResolvedValue(active);ports.getDiskUsage.mockRejectedValueOnce(new Error('synthetic unavailable'));
+  const r=renderHook(()=>useRecordingStorage(true));await settle();
+  expect(r.result.current).toMatchObject({warning:null,checking:false,error:true});
+  act(()=>r.result.current.refresh());await settle();expect(r.result.current.error).toBe(false);expect(r.result.current.warning?.availableBytes).toBe(300);
+});
+test('invalid native values report unavailable',async()=>{
+  ports.getDiskUsage.mockResolvedValue(usage(-1));
+  const r=renderHook(()=>useRecordingStorage(true));await settle();expect(r.result.current).toMatchObject({warning:null,error:true});
+  ports.getDiskUsage.mockResolvedValue(usage(300));ports.getLowDiskGuardConfig.mockResolvedValue({thresholdBytes:NaN});
+  act(()=>r.result.current.refresh());await settle();expect(r.result.current).toMatchObject({warning:null,error:true});
+});
+test('late probes cannot restore warnings after recording resumes',async()=>{
+  let finish!:(v:any)=>void;ports.getDiskUsage.mockReturnValueOnce(new Promise(r=>{finish=r}));
+  const r=renderHook(({paused})=>useRecordingStorage(paused),{initialProps:{paused:true}});await settle();expect(r.result.current.checking).toBe(true);
+  r.rerender({paused:false});await act(async()=>finish(usage(0)));
+  expect(r.result.current).toMatchObject({warning:null,checking:false,error:false});
+});
+test('late old-directory probes cannot overwrite a new healthy result',async()=>{
+  let finish!:(v:any)=>void;ports.getDiskUsage.mockReturnValueOnce(new Promise(r=>{finish=r}));
+  const r=renderHook(()=>useRecordingStorage(true));await settle();
+  ports.settings.dataDir=saved;ports.getDataDir.mockResolvedValue(saved);ports.getActiveDataDir.mockResolvedValue({status:'ok',data:saved});
+  r.rerender();expect(r.result.current.warning).toBeNull();await settle();
+  await act(async()=>finish(usage(0)));expect(r.result.current).toMatchObject({warning:null,checking:false,error:false});
+});

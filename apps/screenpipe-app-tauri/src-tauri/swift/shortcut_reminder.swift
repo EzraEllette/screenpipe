@@ -457,8 +457,8 @@ struct AudioEqualizerView: View {
 private let kBaseCollapsedW: CGFloat = 22
 private let kBaseCollapsedH: CGFloat = 16
 private let kBaseHealthH: CGFloat = 18
-private let kBaseCollapsedCornerRadius: CGFloat = 4
-private let kBaseExpandedW: CGFloat = 160
+private let kBaseCollapsedCornerRadius: CGFloat = 8
+private let kBaseExpandedW: CGFloat = 192
 private let kBaseExpandedH: CGFloat = 62
 private let kBaseDockH: CGFloat = 30
 private let kBaseDisclosureH: CGFloat = 26
@@ -472,7 +472,7 @@ private let kBaseNotificationW: CGFloat = 340
 private let kBaseNotificationH: CGFloat = 34
 private let kRestingOpacity: Double = 0.50
 private let kAnimDur: Double = 0.2
-private let kDockControls = ["search", "chat", "timeline", "audio", "brand"]
+private let kDockControls = ["search", "chat", "star", "timeline", "audio", "brand"]
 
 /// Convert configured shortcuts to one stable, compact macOS glyph order.
 /// Settings historically stored both `Super+Control+…` and
@@ -822,10 +822,12 @@ func disclosureContent(
     overlayShortcut: String,
     chatShortcut: String,
     searchShortcut: String,
+    starShortcut: String,
     metrics: OverlayMetrics
 ) -> (String, String?)? {
     switch control {
     case "brand": return ("screenpipe", uiText("right-click"))
+    case "star": return (uiText("star work session"), starShortcut)
     case "timeline": return (uiText("timeline"), overlayShortcut)
     case "chat": return (uiText("ask chat"), chatShortcut)
     case "search": return (uiText("search"), searchShortcut)
@@ -1185,6 +1187,10 @@ struct ShortcutReminderView: View {
             DockIconButton(icon: "bubble.left.fill", active: metrics.hoveredControl == "chat", scale: scale) {
                 onAction("open_chat")
             }
+            DockIconButton(icon: "star", active: metrics.hoveredControl == "star", scale: scale) {
+                onAction("open_starred_sessions")
+            }
+            .accessibilityLabel("Star a work session")
             DockIconButton(icon: "rectangle.split.1x2", active: metrics.hoveredControl == "timeline", scale: scale) {
                 onAction("open_timeline")
             }
@@ -1208,7 +1214,8 @@ struct ShortcutReminderView: View {
         }
         .frame(width: kBaseExpandedW * scale, height: kBaseDockH * scale)
         .background(Color.black)
-        .overlay(Rectangle().stroke(.white.opacity(0.42), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: s(8)))
+        .overlay(RoundedRectangle(cornerRadius: s(8)).stroke(.white.opacity(0.42), lineWidth: 1))
     }
 }
 
@@ -1578,6 +1585,7 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
     private var overlayShortcut = "⌘⌃S"
     private var chatShortcut = "⌘⌃L"
     private var searchShortcut = "⌘⌃K"
+    private var starShortcut = "⌘⌃B"
     private var metrics = OverlayMetrics()
     private var wsTask: URLSessionWebSocketTask?
     private var wsRetryTimer: Timer?
@@ -2138,6 +2146,7 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
         if let s = dict["overlay"] { overlayShortcut = prettifyShortcut(s) }
         if let s = dict["chat"] { chatShortcut = prettifyShortcut(s) }
         if let s = dict["search"] { searchShortcut = prettifyShortcut(s) }
+        if let s = dict["star"] { starShortcut = prettifyShortcut(s) }
         if let s = dict["shortcutOverlaySize"] { setOverlayScale(s) }
         if let s = dict["shortcutOverlayAnchor"], let anchor = OverlayAnchor.fromStored(s) {
             overlayAnchor = anchor
@@ -2291,6 +2300,7 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
                   overlayShortcut: overlayShortcut,
                   chatShortcut: chatShortcut,
                   searchShortcut: searchShortcut,
+                  starShortcut: starShortcut,
                   metrics: metrics
               ) else {
             disclosurePanel?.orderOut(nil)
