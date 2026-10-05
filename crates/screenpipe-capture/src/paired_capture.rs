@@ -23,7 +23,7 @@ use screenpipe_core::pii_removal::remove_pii;
 use screenpipe_db::DatabaseManager;
 use screenpipe_screen::snapshot_writer::SnapshotWriter;
 use screenpipe_screen::text_regions::{
-    detect_text_regions, image_pixel_signature, union_region, TextRegion,
+    detect_text_regions_bounded, image_pixel_signature, union_region, TextRegion,
 };
 use screenpipe_screen::OcrGateDecision;
 
@@ -408,7 +408,8 @@ async fn paired_capture_inner(
                 let app_key = app_name.unwrap_or("unknown").to_lowercase();
                 // The gated OCR pipeline (#5060) — applies to EVERY OCR
                 // trigger, not just meetings: screenshot → crop to the app
-                // window → detect text → crop to the padded union of the
+                // window → detect text on a bounded thumbnail → crop the
+                // native image to the padded union of the
                 // detected text → pixel-compare that crop to the last
                 // indexed one → different? OCR that same crop. One blocking
                 // hop computes detect + union + signature.
@@ -419,7 +420,7 @@ async fn paired_capture_inner(
                 };
                 let detect_dims = detect_image.dimensions();
                 let union_and_sig = tokio::task::spawn_blocking(move || {
-                    let regions = detect_text_regions(&detect_image);
+                    let regions = detect_text_regions_bounded(&detect_image);
                     let (dw, dh) = detect_image.dimensions();
                     union_region(&regions, UNION_PAD_PX, dw, dh).map(|u| {
                         let union_img = detect_image.crop_imm(u.x, u.y, u.width, u.height);

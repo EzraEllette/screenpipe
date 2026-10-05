@@ -25,6 +25,9 @@
 //! Cost: ~10-19ms in optimized cv2 on a 3456x2234 frame; this port is the
 //! same O(pixels) work. It exists so the expensive `.accurate` OCR pass
 //! (~400-1400ms) only runs when on-screen text actually changed.
+//! Production uses `detect_text_regions_bounded`: detect on at most a 1920px
+//! longest edge, scale the closing radius, and apply size filters in native
+//! coordinates. The native detector remains available for fidelity probes.
 
 use image::DynamicImage;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -49,6 +52,47 @@ const MIN_AREA: u64 = 20;
 /// A component covering more than half the frame is a layout artifact
 /// (window border, video tile), not a text line.
 const MAX_AREA_FRACTION: f64 = 0.5;
+/// Native-pixel radius of the horizontal close (9x1 at full resolution).
+const CLOSE_RADIUS: usize = 4;
+
+/// Bound the detector's raster work independently of the OCR input size.
+const DETECT_MAX_EDGE: u32 = 1920;
+
+/// Detect on a smaller image, returning outward-rounded native-pixel bounds.
+/// Callers must still crop and compare pixels from the original image so a
+/// small text edit cannot disappear from the OCR gate's change signature.
+pub fn detect_text_regions_bounded(image: &DynamicImage) -> Vec<TextRegion> {
+    let (w, h) = (image.width(), image.height());
+    if w < 3 || h < 3 || w.max(h) <= DETECT_MAX_EDGE {
+        return detect_text_regions(image);
+    }
+    let small = image.thumbnail(DETECT_MAX_EDGE, DETECT_MAX_EDGE);
+    detect_text_regions_at_scale(&small, w, h)
+}
+
+fn scale_region_outward(
+    r: TextRegion,
+    from_w: u32,
+    from_h: u32,
+    to_w: u32,
+    to_h: u32,
+) -> TextRegion {
+    let floor =
+        |v: u32, from: u32, to: u32| (u64::from(v) * u64::from(to) / u64::from(from)) as u32;
+    let ceil = |v: u32, from: u32, to: u32| {
+        (u64::from(v) * u64::from(to)).div_ceil(u64::from(from)) as u32
+    };
+    let x = floor(r.x, from_w, to_w).min(to_w);
+    let y = floor(r.y, from_h, to_h).min(to_h);
+    let right = ceil(r.x.saturating_add(r.width), from_w, to_w).min(to_w);
+    let bottom = ceil(r.y.saturating_add(r.height), from_h, to_h).min(to_h);
+    TextRegion {
+        x,
+        y,
+        width: right.saturating_sub(x),
+        height: bottom.saturating_sub(y),
+    }
+}
 
 /// Detect text-like regions in a frame.
 ///
@@ -59,6 +103,14 @@ const MAX_AREA_FRACTION: f64 = 0.5;
 /// density gate treats "many boxes" as dense → full-frame OCR (today's
 /// behavior), so they can only cost, never corrupt.
 pub fn detect_text_regions(image: &DynamicImage) -> Vec<TextRegion> {
+    detect_text_regions_at_scale(image, image.width(), image.height())
+}
+
+fn detect_text_regions_at_scale(
+    image: &DynamicImage,
+    native_w: u32,
+    native_h: u32,
+) -> Vec<TextRegion> {
     let (w, h) = (image.width() as usize, image.height() as usize);
     if w < 3 || h < 3 {
         return Vec::new();
@@ -84,17 +136,29 @@ pub fn detect_text_regions(image: &DynamicImage) -> Vec<TextRegion> {
     }
     drop(gradient);
 
-    // 9x1 horizontal close (dilate then erode, radius 4): connects nearby
-    // strokes into word/line blobs. Border semantics per cv2: outside is
-    // black for dilate, white for erode.
-    let closed = close_9x1(&binary, w, h);
+    // Keep the gap-closing distance in native pixels. A fixed 9x1 kernel on
+    // a half-size image bridges twice the intended gap, merging long lines
+    // that the aspect filter then rejects. At least one detection pixel is
+    // needed to connect adjacent glyph strokes.
+    let radius = ((CLOSE_RADIUS as f64 * w as f64 / native_w as f64).round() as usize).max(1);
+    let closed = close_horizontal(&binary, w, h, radius);
     drop(binary);
 
     // Connected components (8-connectivity) → bounding boxes → text filter.
     let boxes = connected_component_boxes(&closed, w, h);
-    let total_area = (w as u64) * (h as u64);
+    let total_area = u64::from(native_w) * u64::from(native_h);
     boxes
         .into_iter()
+        // Size thresholds describe native pixels, not the thumbnail. Map
+        // outward before filtering so small text does not fail MIN_BOX_H
+        // merely because we shrank the detection image.
+        .map(|r| {
+            if (w as u32, h as u32) == (native_w, native_h) {
+                r
+            } else {
+                scale_region_outward(r, w as u32, h as u32, native_w, native_h)
+            }
+        })
         .filter(|r| {
             if r.width < MIN_BOX_W || r.height < MIN_BOX_H {
                 return false;
@@ -316,28 +380,25 @@ fn otsu_threshold(pixels: &[u8]) -> u8 {
     best_t
 }
 
-/// 9x1 morphological close on a 0/1 binary image: horizontal dilate (any
-/// white within ±4 columns) then horizontal erode (all white within ±4,
-/// where out-of-bounds counts as white — cv2 +inf erode border). Bridges
-/// inter-glyph gaps of up to 8px into a single word/line blob.
-fn close_9x1(binary: &[u8], w: usize, h: usize) -> Vec<u8> {
-    const R: usize = 4;
+/// Horizontal close on a 0/1 binary image, with a radius in input pixels.
+/// Out-of-bounds counts as white for erode (cv2 +inf border).
+fn close_horizontal(binary: &[u8], w: usize, h: usize, radius: usize) -> Vec<u8> {
     let mut dilated = vec![0u8; w * h];
     for y in 0..h {
         let row = &binary[y * w..(y + 1) * w];
         let out = &mut dilated[y * w..(y + 1) * w];
-        // Sliding count of white pixels in the in-bounds window [x-R, x+R].
+        // Sliding count of white pixels in the in-bounds window [x-radius, x+radius].
         let mut count: u32 = 0;
-        for x in 0..R.min(w) {
+        for x in 0..radius.min(w) {
             count += row[x] as u32;
         }
         for x in 0..w {
-            if x + R < w {
-                count += row[x + R] as u32;
+            if x + radius < w {
+                count += row[x + radius] as u32;
             }
             out[x] = u8::from(count > 0);
-            if x >= R {
-                count -= row[x - R] as u32;
+            if x >= radius {
+                count -= row[x - radius] as u32;
             }
         }
     }
@@ -346,19 +407,19 @@ fn close_9x1(binary: &[u8], w: usize, h: usize) -> Vec<u8> {
         let row = &dilated[y * w..(y + 1) * w];
         let out = &mut closed[y * w..(y + 1) * w];
         let mut count: u32 = 0;
-        for x in 0..R.min(w) {
+        for x in 0..radius.min(w) {
             count += row[x] as u32;
         }
         for x in 0..w {
-            if x + R < w {
-                count += row[x + R] as u32;
+            if x + radius < w {
+                count += row[x + radius] as u32;
             }
             // In-bounds window size at this position; out-of-bounds cells
             // count as white for erosion.
-            let win = (x.min(R) + 1 + R.min(w - 1 - x)) as u32;
+            let win = (x.min(radius) + 1 + radius.min(w - 1 - x)) as u32;
             out[x] = u8::from(count == win);
-            if x >= R {
-                count -= row[x - R] as u32;
+            if x >= radius {
+                count -= row[x - radius] as u32;
             }
         }
     }
@@ -488,6 +549,118 @@ mod tests {
 
     fn light_canvas(w: u32, h: u32) -> RgbImage {
         RgbImage::from_pixel(w, h, Rgb([235, 235, 235]))
+    }
+
+    #[test]
+    fn bounded_detection_preserves_small_input_bounds() {
+        let mut canvas = light_canvas(400, 300);
+        draw_text_like_line(&mut canvas, 50, 100, 10);
+        let image = DynamicImage::ImageRgb8(canvas);
+        let native = detect_text_regions(&image);
+        let bounded = detect_text_regions_bounded(&image);
+        let coords = |rs: Vec<TextRegion>| {
+            rs.into_iter()
+                .map(|r| (r.x, r.y, r.width, r.height))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(coords(native), coords(bounded));
+    }
+
+    #[test]
+    fn bounded_detection_keeps_long_lines_separated_at_word_gaps() {
+        let mut canvas = light_canvas(3840, 160);
+        // At half resolution, an unscaled closing radius joins all these
+        // words into one over-wide blob that MAX_ASPECT discards.
+        for word in 0..16 {
+            for stroke in 0..8 {
+                for dy in 0..24 {
+                    for dx in 0..6 {
+                        canvas.put_pixel(
+                            40 + word * 124 + stroke * 14 + dx,
+                            70 + dy,
+                            Rgb([10, 10, 10]),
+                        );
+                    }
+                }
+            }
+        }
+        let image = DynamicImage::ImageRgb8(canvas);
+        let regions = detect_text_regions_bounded(&image);
+        let crop =
+            union_region(&regions, 20, image.width(), image.height()).expect("whole line detected");
+        assert!(crop.x <= 40 && crop.x + crop.width >= 2004, "{crop:?}");
+        assert!(crop.y <= 70 && crop.y + crop.height >= 94, "{crop:?}");
+    }
+
+    #[test]
+    fn bounded_detection_filters_small_text_in_native_pixels() {
+        let mut canvas = light_canvas(3840, 160);
+        for stroke in 0..12 {
+            for dy in 0..6 {
+                for dx in 0..2 {
+                    canvas.put_pixel(40 + stroke * 4 + dx, 70 + dy, Rgb([10, 10, 10]));
+                }
+            }
+        }
+        let image = DynamicImage::ImageRgb8(canvas);
+        assert!(!detect_text_regions(&image).is_empty());
+        let regions = detect_text_regions_bounded(&image);
+        let crop =
+            union_region(&regions, 20, image.width(), image.height()).expect("small text detected");
+        assert!(crop.x <= 40 && crop.x + crop.width >= 86, "{crop:?}");
+        assert!(crop.y <= 70 && crop.y + crop.height >= 76, "{crop:?}");
+    }
+
+    #[test]
+    fn scaled_bounds_round_outward_and_clamp_at_native_edges() {
+        let r = scale_region_outward(
+            TextRegion {
+                x: 1,
+                y: 2,
+                width: 2,
+                height: 3,
+            },
+            7,
+            9,
+            20,
+            25,
+        );
+        assert_eq!((r.x, r.y, r.width, r.height), (2, 5, 7, 9));
+        let edge = scale_region_outward(
+            TextRegion {
+                x: 6,
+                y: 8,
+                width: 1,
+                height: 1,
+            },
+            7,
+            9,
+            20,
+            25,
+        );
+        assert_eq!((edge.x + edge.width, edge.y + edge.height), (20, 25));
+    }
+
+    #[test]
+    fn bounded_detection_returns_native_coordinates_for_large_landscape_and_portrait() {
+        for (w, h, x, y) in [(3841, 2161, 3200, 1800), (2161, 3841, 1500, 3200)] {
+            let mut canvas = light_canvas(w, h);
+            // Large strokes remain text-like after shrinking, near a native edge.
+            for stroke in 0..10 {
+                for dx in 0..6 {
+                    for dy in 0..24 {
+                        canvas.put_pixel(x + stroke * 14 + dx, y + dy, Rgb([10, 10, 10]));
+                    }
+                }
+            }
+            let regions = detect_text_regions_bounded(&DynamicImage::ImageRgb8(canvas));
+            let r = union_region(&regions, 20, w, h).expect("text crop");
+            assert!(
+                r.x <= x && r.y <= y && r.x + r.width >= x + 132 && r.y + r.height >= y + 24,
+                "{r:?}"
+            );
+            assert!(r.x + r.width <= w && r.y + r.height <= h);
+        }
     }
 
     #[test]

@@ -65,7 +65,7 @@ mod macos {
     use screenpipe_capture::{OcrDecision, OcrGate};
     use screenpipe_screen::monitor::{get_default_monitor, get_monitor_by_id, SafeMonitor};
     use screenpipe_screen::text_regions::{
-        detect_text_regions, image_pixel_signature, union_region, TextRegion,
+        detect_text_regions_bounded, image_pixel_signature, union_region, TextRegion,
     };
     use serde_json::{json, Value};
     use std::collections::{HashMap, HashSet};
@@ -432,7 +432,7 @@ mod macos {
             };
             let detect_for_task = detect_image.clone();
             let union_and_sig = tokio::task::spawn_blocking(move || {
-                let regions = detect_text_regions(&detect_for_task);
+                let regions = detect_text_regions_bounded(&detect_for_task);
                 let (dw, dh) = detect_for_task.dimensions();
                 union_region(&regions, UNION_PAD_PX, dw, dh).map(|u| {
                     let union_img = detect_for_task.crop_imm(u.x, u.y, u.width, u.height);
