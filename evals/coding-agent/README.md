@@ -67,7 +67,7 @@ The hidden fixture appears only at grading and uses no dependency links.
 This does not establish native recording continuity, real authentication,
 account-switch race safety, browser integration, isolation or model performance.
 
-The current app corpus contains 125 git-mined regressions. See
+The current app corpus contains 127 git-mined regressions. See
 [DESIGN.md](./DESIGN.md) for the Anthropic guidance, source contract, and
 history-mining workflow. The companion website manifest uses this same harness.
 
@@ -1558,3 +1558,17 @@ preserves six; the historical recorder fix and current source pass eight. Run
 Storage and settings are synthetic; this does not establish native delivery, disk
 durability, crash recovery, continued-chat behavior, agent isolation or model quality.
 The hidden fixture is installed only when grading begins.
+
+
+`app-transcription-nova-language` runs the actual batch transcription handler and
+A/B service with synthetic audio and intercepted provider transport. Twelve
+outcomes cover automatic, single, multiple, normalized and legacy language
+selection, query precedence, audio preservation and successful/error payloads.
+The parent fails nine language outcomes and preserves three; the service-only
+historical fix and current source pass all twelve. Run
+`bun test evals/coding-agent/calibrate-transcription-language.test.js` for eleven
+controls, including an equivalent implementation, unused correct code, wrong
+language shortcuts, lost audio and missing-source/syntax infrastructure errors.
+Fixtures appear only at grading and need no dependency links. This does not
+establish speech recognition quality, native settings persistence, real provider
+delivery, alternate-provider behavior, execution isolation or model improvement.

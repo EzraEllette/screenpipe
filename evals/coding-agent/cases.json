@@ -5200,6 +5200,43 @@
         ],
         "command": "\"${BUN_BIN:-bun}\" test evals/coding-agent/graders/html-viewer.test.ts"
       }
+    },
+    {
+      "id": "app-transcription-nova-language",
+      "name": "Preserve language selection through cloud transcription",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "a52a6c640457308fec92daa270f423b79ce7a34a"
+      },
+      "base_ref": "066291bc4ccdd986e3a29e339c48b610d8fd2a2f",
+      "oracle_ref": "a52a6c640457308fec92daa270f423b79ce7a34a",
+      "oracle_paths": [
+        "packages/ai-gateway/src/services/transcription-ab.ts"
+      ],
+      "gate": "advisory",
+      "trigger_paths": [
+        "packages/ai-gateway/src/handlers/transcription.ts",
+        "packages/ai-gateway/src/services/transcription-ab.ts"
+      ],
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "transcription",
+        "language",
+        "gateway"
+      ],
+      "prompt": "Cloud batch transcription loses the selected language and returns English even when another language was requested. Repair the actual handleFileTranscription request path so the outgoing Nova-3 request uses a language parameter: a single selected code, trimmed and lowercased, or multi when no language or multiple languages are selected. Do not send the obsolete detect_language parameter to the provider. Preserve parsing of language/languages query values, repeated or comma-separated detect_language query codes, and legacy language/detect_language headers. Query codes take precedence over headers; boolean detection flags are not codes and must allow a usable legacy header fallback. Empty or auto-detection-only requests use multi. Preserve the default Deepgram POST endpoint, Nova-3 model, explicit sample rate, original audio bytes, audio content type and provider credential. With alternate-provider traffic disabled, make one provider call for a successful request or a permanent 400 response. Pass through the successful transcript payload unchanged, including an empty transcript; preserve HTTP 500 with the provider's error detail for permanent rejection. Use the existing public handler contract. No particular helper, export, or implementation structure is required. Use synthetic audio and intercepted provider transport only. Actual speech recognition quality, native language settings persistence, alternate providers, real credentials, deployed gateway admission, concurrent requests and infrastructure isolation are outside this task.",
+      "agent_timeout_seconds": 900,
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/transcription-language.fixture.ts.txt",
+            "destination_path": "packages/ai-gateway/eval-transcription-language.test.ts"
+          }
+        ],
+        "command": "bun --no-env-file test packages/ai-gateway/eval-transcription-language.test.ts"
+      }
     }
   ]
 }
