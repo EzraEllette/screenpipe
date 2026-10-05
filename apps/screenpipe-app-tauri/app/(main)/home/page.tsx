@@ -71,7 +71,9 @@ import { ChatHistoryView } from "@/components/chat/chat-history-view";
 import { mountPiEventRouter } from "@/lib/stores/pi-event-router";
 import { mountPipeRunRecorder } from "@/lib/events/pipe-run-recorder";
 import { mountPipeWatchWriter } from "@/lib/events/pipe-watch-writer";
+import { useRecordingStorage } from "@/lib/hooks/use-recording-storage";
 import { RecordingStatus, type RecordingDevice } from "@/components/recording-status";
+import { StarredTimeline } from "@/components/starred-sessions/starred-timeline";
 import Timeline from "@/components/rewind/timeline";
 import {
   NativeTimeline,
@@ -246,6 +248,13 @@ function HomeContent() {
     }
   }, [activeSection, activityReturnVisible]);
   const [connectionFocusRequest, setConnectionFocusRequest] = useState<ConnectionFocusRequest | null>(null);
+  const [connectionCategory, setConnectionCategory] = useQueryState("category");
+  useEffect(() => {
+    if (activeSection === "connections" && connectionCategory === "Calendar") {
+      setConnectionFocusRequest({ id: null, category: "Calendar", scopeVariant: null, requestId: Date.now() });
+      void setConnectionCategory(null, { history: "replace" });
+    }
+  }, [activeSection, connectionCategory, setConnectionCategory]);
 
   useEffect(() => {
     if (!trialActivationLocked) return;
@@ -353,7 +362,7 @@ function HomeContent() {
       variant: "destructive",
     }));
   };
-  const workflowsAvailable = workflowsRolloutEnabled && isManagedDeploymentResolved && !isManagedDeployment && !trialActivationLocked;
+  const workflowsAvailable = workflowsRolloutEnabled && isManagedDeploymentResolved && !trialActivationLocked;
   const workflowsActive = workflowsAvailable && requestedMode === "workflows";
   useEffect(() => { if (workflowsActive) setWorkflowsVisited(true); }, [workflowsActive]);
   const runningPipes = useRunningPipes();
@@ -1101,6 +1110,7 @@ function HomeContent() {
         // webview one stays as the fallback for hosts without it.
         return (
           <div className="flex h-full min-h-0 flex-col">
+            <StarredTimeline showStrip />
             <div className="min-h-0 flex-1">
               <NativeTimeline
                 fallback={<Timeline embedded />}
@@ -1202,7 +1212,13 @@ function HomeContent() {
   const meetingsInToolbar = false;
 
   // Chat and Workflows share the same recorder state, events and controls.
+  const recordingStorage = useRecordingStorage(isCapturePaused);
   const recordingStatusProps = {
+    storageWarning: recordingStorage.warning,
+    storageChecking: recordingStorage.checking,
+    storageError: recordingStorage.error,
+    onRefreshStorage: recordingStorage.refresh,
+    onOpenStorageSettings: () => openSettings("storage"),
     devices: recordingDevices,
     onDevicesChange: setRecordingDevices,
     meetingActive: meetingState.active ?? false,
@@ -1361,6 +1377,7 @@ function HomeContent() {
           and global shortcuts already own. Each row prints its shortcut, so
           palette use teaches the direct key. Home window only: the settings
           page binds its own ⌘K for search focus while mounted. */}
+      <StarredTimeline />
       {/* Routes actions the native timeline window cannot perform itself. */}
       <NativeTimelineBridge
         onReturnToActivity={returnToActivity}

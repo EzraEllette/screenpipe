@@ -1,0 +1,90 @@
+// screenpipe — AI that knows everything you've seen, said, or heard
+// https://screenpipe.com
+import {test, expect} from "bun:test";
+import { createRequire } from 'node:module';
+import { resolve, dirname } from 'node:path';
+import { mkdtempSync, rmSync } from 'node:fs';
+import {tmpdir} from 'node:os';
+const buildDir=mkdtempSync(resolve(tmpdir(),'html-viewer-grader-'));
+const runtime=resolve('apps/screenpipe-app-tauri/node_modules');
+const require=createRequire(runtime+'/package.json');
+const React=require('react');const {JSDOM}=require('jsdom');
+const dom=new JSDOM('<!doctype html><html><body></body></html>',{url:'http://localhost/'});
+for(const key of ['window','document','navigator','HTMLElement','HTMLIFrameElement','Node','Event','MouseEvent','MutationObserver'])Object.defineProperty(globalThis,key,{value:dom.window[key],configurable:true});
+globalThis.React=React;globalThis.IS_REACT_ACT_ENVIRONMENT=true;
+const {createRoot}=require('react-dom/client');const {act}=React;
+const stubs={
+ '@tauri-apps/plugin-shell':'export const open=async()=>{};',
+ '@/lib/utils/tauri':'export const commands={openNotePath:async()=>{},readViewerFile:async()=>{throw new Error("unexpected native read")}};',
+ '@/lib/utils':'export const cn=(...x)=>x.filter(Boolean).join(" ");',
+ '@/lib/hooks/use-platform':'export const usePlatform=()=>({isMac:false});',
+ 'gt-react':'export const useGT=()=>((s)=>s);',
+ '@/lib/hooks/use-event-listener':'import {useEffect} from "react";export const useEventListener=(name,cb)=>useEffect(()=>{window.addEventListener(name,cb);return()=>window.removeEventListener(name,cb)},[name,cb]);',
+};
+Object.assign(stubs,{
+ '@/components/rewind/media':'export const MediaComponent=()=>null;',
+ '@/components/markdown/local-markdown-image':'export const LocalMarkdownImage=()=>null;',
+ '@/lib/api':'export const getApiBaseUrl=()=>"http://127.0.0.1:0";',
+ '@tauri-apps/api/core':'export const convertFileSrc=x=>x;'
+});
+globalThis.fetch=()=>{throw new Error('Network denied')};
+const results=[];
+{
+ const arm='candidate';
+ const rootPath=resolve('apps/screenpipe-app-tauri');
+ const build=await Bun.build({entrypoints:[rootPath+'/components/file-viewer.tsx'],outdir:buildDir,target:'node',format:'esm',plugins:[{name:'reviewed-test-ports',setup(b){
+ b.onResolve({filter:/.*/},a=>{
+ if(a.path==='react'||a.path.startsWith('react/'))return {path:require.resolve(a.path),external:true};
+ if(a.path==='@/lib/utils/html-sandbox')return {path:rootPath+'/lib/utils/html-sandbox.ts'};
+ if(stubs[a.path])return {path:a.path,namespace:'port'};
+ if(a.path.startsWith('@/')){const path=rootPath+'/'+a.path.slice(2); for(const ext of ['.tsx','.ts','.js'])if(require('node:fs').existsSync(path+ext))return {path:path+ext};}
+ if(!a.path.startsWith('.')&&!a.path.startsWith('/')){try{return {path:require.resolve(a.path),external:true};}catch{}}
+ });
+ b.onLoad({filter:/.*/,namespace:'port'},a=>({contents:stubs[a.path],loader:'js'}));
+ }}]});
+ if(!build.success)throw new Error(JSON.stringify(build.logs));
+ const {ViewerFileContent}=await import(buildDir+'/file-viewer.js');
+ const full='<!doctype html><html><head><style>body{background:rgb(1,2,3)}</style></head><body><h1>SYNTHETIC_REPORT_417</h1><script>window.syntheticPayload=417</script></body></html>';
+ const tests=[['full',full,false,'report.html'],['full-unicode',full.replaceAll('SYNTHETIC_REPORT_417','SECOND_Ω_528'),false,'Other.HTM'],['marked','<!-- screenpipe:render=human --><h1>SYNTHETIC_REPORT_417</h1>',false,'report.html'],['snippet','<h1>SYNTHETIC_REPORT_417</h1>',false,'report.html'],['truncated',full,true,'report.html'],['empty','',false,'report.html'],['plaintext','literal <h1>SYNTHETIC_REPORT_417</h1>',false,'report.txt'],['loading',null,false,'report.html'],['markdown','# Report\n\n**Preserved bold** and [safe link](https://example.com)\n\n- first\n- second',false,'report.md']];
+ for(const [name,text,truncated,filename] of tests){
+  const container=document.createElement('div');document.body.append(container);const root=createRoot(container);
+  const content=text===null?null:{kind:'text',text,name:filename,path:'/synthetic/'+filename,truncated,total_bytes:text.length};
+  await act(async()=>root.render(React.createElement(ViewerFileContent,{path:'/synthetic/'+filename,content})));
+  const iframe=()=>container.querySelector('iframe');const toggle=()=>container.querySelector('[data-testid="html-render-toggle"]');
+  const row={arm,case:name,initial_frame:!!iframe(),toggle_present:!!toggle(),host_payload_nodes:container.querySelectorAll('style,script,h1').length};
+  if(['full','full-unicode','marked','snippet'].includes(name)){
+   if(!iframe()&&toggle())await act(async()=>toggle().click());
+   const f=iframe();row.render_available=!!f;const parsed=new JSDOM(f?.getAttribute('srcdoc')??'');const doc=parsed.window.document;row.payload_preserved=doc.querySelector('h1')?.textContent===(name==='full-unicode'?'SECOND_Ω_528':'SYNTHETIC_REPORT_417');
+   row.sandbox=f?.getAttribute('sandbox')??null;const policies=Array.from(doc.querySelectorAll('meta[http-equiv]')).filter(m=>m.getAttribute('http-equiv')?.toLowerCase()==='content-security-policy').map(m=>new Map((m.getAttribute('content')??'').split(';').map(d=>{const [key,...values]=d.trim().split(/\s+/);return[key,values]})));row.csp=['default-src','connect-src','form-action'].every(d=>policies.some(policy=>JSON.stringify(policy.get(d))===JSON.stringify(["'none'"])));parsed.window.close();
+   if(f&&toggle()){
+    await act(async()=>toggle().click());row.source_preserved=!iframe()&&container.textContent.includes(text);
+    await act(async()=>toggle().click());row.return_rendered=!!iframe();
+   }else{row.source_preserved=container.textContent.includes(text);row.return_rendered=false;}
+   row.expected_pass=row.render_available&&row.payload_preserved&&row.sandbox!==null&&row.sandbox.split(/\s+/).filter(Boolean).every(x=>x==='allow-scripts')&&row.csp&&row.source_preserved&&row.return_rendered&&row.host_payload_nodes===0&&(!name.startsWith('full')||row.initial_frame);
+  }else if(name==='markdown'){row.expected_pass=!!container.querySelector('h1')&&container.querySelector('strong')?.textContent==='Preserved bold'&&container.querySelectorAll('li').length===2&&container.querySelector('a')?.getAttribute('href')==='https://example.com'&&!iframe();}
+ else row.expected_pass=!iframe()&&!toggle()&&row.host_payload_nodes===0&&(text===null||text===''||container.textContent.includes(text));
+  results.push(row);await act(async()=>root.unmount());container.remove();
+ }
+}
+{
+ const rootPath=resolve('apps/screenpipe-app-tauri');
+ const {ViewerFileContent}=await import(buildDir+'/file-viewer.js');
+ const box=document.createElement('div');document.body.append(box);const root=createRoot(box);
+ const pathA='/synthetic/first.html',pathB='/synthetic/second.html';
+ const content=(path,label)=>({kind:'text',name:path.split('/').pop(),path,text:'<!doctype html><html><body><h1>'+label+'</h1></body></html>',truncated:false,total_bytes:99});
+ const a=content(pathA,'FIRST_NAV_901'),b=content(pathB,'SECOND_NAV_902');
+ const render=async(path,value)=>act(async()=>root.render(React.createElement(ViewerFileContent,{path,content:value})));
+ const frame=()=>box.querySelector('iframe');const toggle=()=>box.querySelector('[data-testid="html-render-toggle"]');
+ await render(pathA,null);await render(pathA,a);
+ results.push({case:'loaded-document-default',expected_pass:!!frame()});
+ if(frame()&&toggle())await act(async()=>toggle().click());
+ await render(pathA,{...a});
+ results.push({case:'same-path-keeps-source-choice',expected_pass:!frame()&&box.textContent.includes(a.text)});
+ await render(pathB,null);const loadingCleared=!frame();await render(pathB,b);
+ const parsed=new JSDOM(frame()?.getAttribute('srcdoc')??'');
+ results.push({case:'new-path-loads-new-document',expected_pass:loadingCleared&&parsed.window.document.querySelector('h1')?.textContent==='SECOND_NAV_902'&&!box.textContent.includes('FIRST_NAV_901')});parsed.window.close();
+ await act(async()=>root.unmount());box.remove();
+}
+rmSync(buildDir,{recursive:true,force:true});dom.window.close();
+console.log('EVAL_OBSERVATIONS '+JSON.stringify(results));
+for(const row of results)test(row.case,()=>expect(row.expected_pass).toBe(true));

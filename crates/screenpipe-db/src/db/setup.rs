@@ -534,14 +534,30 @@ impl DatabaseManager {
                     construction?;
                 }
                 crate::storage::schema::verify(&mut conn, &storage.descriptor).await?;
+                if !bootstrap_storage {
+                    // Conversion retains _sqlx_migrations. Let SQLx apply only
+                    // pending feature migrations, without legacy repair helpers
+                    // that assume every logical table is still a SQLite table.
+                    // Use the pool-based Acquire implementation so database
+                    // startup remains Send when spawned by the engine. Release
+                    // this handle first, including for single-connection pools.
+                    drop(conn);
+                    Self::sqlx_migrator().run(&db_manager.write_pool).await?;
+                    conn = db_manager.write_pool.acquire().await?;
+                }
                 crate::storage::schema::upgrade_resident_frames(&mut conn).await?;
                 let upgraded =
                     crate::storage::schema::upgrade_recording(&mut conn, storage.has_bulk())
                         .await?;
                 crate::storage::read_schema::upgrade(&mut conn, storage).await?;
+                let resident_hooks_changed = crate::storage::schema::ensure_resident_table_hooks(
+                    &mut conn,
+                    storage.has_bulk(),
+                )
+                .await?;
                 storage.verify_catalog(&db_manager.pool).await?;
                 drop(conn);
-                if upgraded {
+                if upgraded || resident_hooks_changed {
                     // Connections opened before the trigger migration need a
                     // schema read before their first DML preparation. Refresh
                     // every existing writer while startup still owns admission.
@@ -639,9 +655,14 @@ impl DatabaseManager {
         }
     }
 
-    async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+    fn sqlx_migrator() -> sqlx::migrate::Migrator {
         let mut migrator = sqlx::migrate!("./src/migrations");
         migrator.set_ignore_missing(true);
+        migrator
+    }
+
+    async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+        let migrator = Self::sqlx_migrator();
         Self::log_pending_heavy_migrations(pool, &migrator).await;
         match migrator.run(pool).await {
             Ok(_) => {}
