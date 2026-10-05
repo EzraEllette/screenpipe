@@ -5237,6 +5237,53 @@
         ],
         "command": "bun --no-env-file test packages/ai-gateway/eval-transcription-language.test.ts"
       }
+    },
+    {
+      "id": "app-manual-sync-http-failure",
+      "name": "Report manual sync HTTP failures without false success",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "ac201302bffe38e978efe574fc7033436ae96939"
+      },
+      "base_ref": "b2ff035b626e7a4a5e117fb1013aa1501d689300",
+      "oracle_ref": "ac201302bffe38e978efe574fc7033436ae96939",
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/components/settings/account-section.tsx",
+        "apps/screenpipe-app-tauri/lib/sync-fetch.ts"
+      ],
+      "gate": "advisory",
+      "trigger_paths": [
+        "apps/screenpipe-app-tauri/components/settings/account-section.tsx",
+        "apps/screenpipe-app-tauri/lib/sync-fetch.ts"
+      ],
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "sync",
+        "error-feedback"
+      ],
+      "prompt": "The account settings manual sync actions can report success when the local server rejects a request. For each enabled pipe/scheduled-task, memory and connection sync action, POST pull before push. A failed pull must stop before push; a failed push must report failure after the successful pull. On HTTP errors, show one destructive failure notification containing the nonempty server error message, or the HTTP status when the body is not JSON. Do not show success on rejection. After a failure, restore the enabled manual action and allow a later successful retry. Preserve one success notification after successful pull and push, with a title indicating synced. Preserve network-error feedback explaining that the server is unreachable and restore the action afterward. Disabled sync choices must expose no manual action and issue no sync request just from opening settings. Keep the existing public AccountSection interface, recognizable sync section labels and Sync now actions. Do not require any particular helper, layout, DOM order or exact notification title. Tests mount the actual component with synthetic account settings, local HTTP responses and inert native/translation ports. This task does not establish native sync persistence, encryption, real account access or backend delivery.",
+      "agent_timeout_seconds": 900,
+      "grader_dependency_links": [
+        {
+          "source_path": "apps/screenpipe-app-tauri/node_modules",
+          "destination_path": "apps/screenpipe-app-tauri/node_modules"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/manual-sync.fixture.tsx.txt",
+            "destination_path": "apps/screenpipe-app-tauri/eval-manual-sync.test.tsx"
+          },
+          {
+            "local_path": "graders/manual-sync.config.mjs",
+            "destination_path": "apps/screenpipe-app-tauri/eval-manual-sync.config.mjs"
+          }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && node node_modules/vitest/vitest.mjs run --config eval-manual-sync.config.mjs"
+      }
     }
   ]
 }
