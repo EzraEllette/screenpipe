@@ -1,0 +1,124 @@
+// screenpipe — AI that knows everything you've seen, said, or heard
+// https://screenpipe.com
+import {afterAll, expect, test} from 'bun:test';
+import {mkdtempSync, rmSync} from 'node:fs';
+import {tmpdir} from 'node:os';
+import {join, resolve} from 'node:path';
+const root=process.cwd(),entry=resolve(root,'apps/screenpipe-app-tauri/lib/auth-guard.tsx');
+const scratch=mkdtempSync(join(tmpdir(),'auth-host-grader-'));
+afterAll(()=>rmSync(scratch,{recursive:true,force:true}));
+const globals:any=globalThis;
+globals.fetch=()=>{throw Error('LIVE_NETWORK_FORBIDDEN')};
+const mocks:Record<string,string>={
+'react':`export default {createElement:()=>null};export const useEffect=()=>{},useRef=()=>{},useCallback=()=>{};`,
+'react/jsx-dev-runtime':`export const jsxDEV=()=>null,Fragment='fragment';`,
+'react/jsx-runtime':`export const jsx=()=>null,jsxs=()=>null,Fragment='fragment';`,
+'gt-react':`export const T=()=>null,useGT=()=>((s)=>s);`,
+'@/lib/hooks/use-settings':`export const useSettings=()=>{throw Error('UNEXPECTED_HOOK')};`,
+'@/components/ui/use-toast':`export const toast=()=>{};`,
+'@/components/ui/toast':`export const ToastAction=()=>null;`,
+'posthog-js':`export default {capture:()=>{globalThis.__captures++}};`,
+'@/lib/utils/tauri':`export const commands={setCloudToken:()=>{throw Error('UNEXPECTED_NATIVE')}};`,
+'@/lib/web-url':`export const PROD_WEB_BASE='https://screenpipe.com',screenpipeWebBase=(x)=>x,screenpipeWebUrl=()=>{throw Error('UNEXPECTED_LOGIN')};`,
+'@tauri-apps/plugin-shell':`export const open=()=>{throw Error('UNEXPECTED_SHELL')};`
+};
+const scenarios=[
+  {
+    "id": "local-query",
+    "url": "http://localhost:3030/connections/events?instance=fixture%40screenpi.pe",
+    "status": 401,
+    "clear": 0
+  },
+  {
+    "id": "loopback-query",
+    "url": "http://127.0.0.1:3030/connections?instance=fixture@screenpipe.com",
+    "status": 401,
+    "clear": 0
+  },
+  {
+    "id": "ipv6-query",
+    "url": "http://[::1]:3030/connections?ref=screenpipe.com",
+    "status": 401,
+    "clear": 0
+  },
+  {
+    "id": "external-query",
+    "url": "https://fixture.example/?ref=screenpi.pe",
+    "status": 401,
+    "clear": 0
+  },
+  {
+    "id": "suffix-host",
+    "url": "https://notscreenpipe.com/api",
+    "status": 401,
+    "clear": 0
+  },
+  {
+    "id": "prefix-host",
+    "url": "https://screenpipe.com.fixture.example/api",
+    "status": 401,
+    "clear": 0
+  },
+  {
+    "id": "cloud-401",
+    "url": "https://screenpipe.com/api/user",
+    "status": 401,
+    "clear": 1
+  },
+  {
+    "id": "legacy-cloud-401",
+    "url": "https://screenpi.pe/api/user",
+    "status": 401,
+    "clear": 1
+  },
+  {
+    "id": "cloud-200",
+    "url": "https://screenpipe.com/api/user",
+    "status": 200,
+    "clear": 0
+  },
+  {
+    "id": "signed-out-cloud",
+    "url": "https://screenpipe.com/api/user",
+    "status": 401,
+    "clear": 0,
+    "noToken": true
+  },
+  {
+    "id": "network-error",
+    "url": "https://screenpipe.com/api/user",
+    "status": 401,
+    "clear": 0,
+    "networkError": true
+  }
+];
+// Build and exercise every scenario before registering assertions. Missing
+// source, unsupported adapters and setup exceptions are infrastructure errors.
+const built=await Bun.build({entrypoints:[entry],target:'bun',plugins:[{name:'synthetic-ports',setup(b){
+ b.onResolve({filter:/.*/},(a)=>{
+  if(mocks[a.path])return {path:a.path,namespace:'mock'};
+  if(a.path.startsWith('@/'))return {path:resolve(root,'apps/screenpipe-app-tauri',a.path.slice(2))};
+  if(a.path===entry||a.path.startsWith('.')||a.path.startsWith('/'))return;
+  throw Error('UNSUPPORTED_PORT '+a.path);
+ });
+ b.onLoad({filter:/.*/,namespace:'mock'},a=>({contents:mocks[a.path],loader:'js'}));
+}}]});
+if(!built.success)throw Error('GRADER_SETUP_ERROR '+built.logs.join('\n'));
+const bundle=join(scratch,'candidate.js');await Bun.write(bundle,built.outputs[0]);
+const rows=[];
+for(const [index,s] of scenarios.entries()){
+ let cleared=0,seenInput:any,seenInit:any;globals.__captures=0;
+ const response=new Response('synthetic',{status:s.status}),networkError=new Error('synthetic network failure');
+ globals.window={location:{href:'http://localhost:1420/'},fetch:async(input:any,init:any)=>{seenInput=input;seenInit=init;if(s.networkError)throw networkError;return response}};
+ const mod=await import(bundle+`?scenario=${index}`);
+ mod.installAuthInterceptor(()=>s.noToken?undefined:'synthetic-token',async()=>{cleared++});
+ const input=index%3===0?new URL(s.url):index%3===1?new Request(s.url):s.url;
+ const init={headers:{'x-synthetic':'1'}};let actual,err;
+ try{actual=await globals.window.fetch(input,init)}catch(e){err=e}
+ rows.push({spec:s,cleared,requestPreserved:seenInput===input&&seenInit===init,responsePreserved:s.networkError?err===networkError:actual===response});
+}
+for(const r of rows)test(r.spec.id,()=>{
+ expect(r.cleared).toBe(r.spec.clear);
+ expect(r.requestPreserved).toBe(true);
+ expect(r.responsePreserved).toBe(true);
+});
