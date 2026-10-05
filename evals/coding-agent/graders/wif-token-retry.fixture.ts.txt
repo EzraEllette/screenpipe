@@ -1,0 +1,76 @@
+// screenpipe — AI that knows everything you've seen, said, or heard
+// https://screenpipe.com
+import { afterEach, beforeAll, expect, test } from "bun:test";
+import { VertexAIProvider, resetTokenCache } from "./src/providers/vertex";
+const realFetch = globalThis.fetch;
+let pem: string;
+beforeAll(async () => {
+  const pair = await crypto.subtle.generateKey({name:"RSASSA-PKCS1-v1_5",modulusLength:2048,publicExponent:new Uint8Array([1,0,1]),hash:"SHA-256"},true,["sign","verify"]);
+  const bytes = new Uint8Array(await crypto.subtle.exportKey("pkcs8",pair.privateKey));
+  pem = "-----BEGIN PRIVATE KEY-----\n" + btoa(String.fromCharCode(...bytes)) + "\n-----END PRIVATE KEY-----";
+});
+afterEach(() => { globalThis.fetch=realFetch; resetTokenCache(); });
+const stsURL="https://sts.googleapis.com/v1/token";
+const iamURL="https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/synthetic@eval.invalid:generateAccessToken";
+const legacyURL="https://oauth2.googleapis.com/token";
+const jwtClaims=(jwt:string) => JSON.parse(atob(jwt.split(".")[1].replace(/-/g,"+").replace(/_/g,"/")));
+function harness(stage="none",fault:number|string=522,failures=0,wif=true) {
+  resetTokenCache();
+  const calls:Array<{url:string,init:RequestInit}>=[];
+  let n=0;
+  globalThis.fetch=(async (input:any,init:RequestInit={}) => {
+    const url=String(input);calls.push({url,init});
+    if (![stsURL,iamURL,legacyURL].includes(url)) throw new Error("Unexpected synthetic transport target");
+    if(url===(stage==="sts"?stsURL:stage==="iam"?iamURL:"none") && ++n<=failures) {
+      if(fault==="network")throw new Error("synthetic network failure");
+      return new Response("synthetic refusal",{status:Number(fault)});
+    }
+    return Response.json(url===stsURL?{access_token:"synthetic-federated"}:url===iamURL?{accessToken:"synthetic-minted",expireTime:new Date(Date.now()+3600000).toISOString()}:{access_token:"synthetic-legacy",expires_in:3600});
+  }) as typeof fetch;
+  const provider=new VertexAIProvider(JSON.stringify({project_id:"synthetic-project",client_email:"legacy@eval.invalid",private_key:pem}),"synthetic-project","global",wif?{signingKey:pem,kid:"synthetic-kid",issuer:"https://issuer.eval.invalid",jwtAudience:"synthetic-jwt-audience",subject:"synthetic-subject",stsAudience:"synthetic-sts-audience",saEmail:"synthetic@eval.invalid",projectId:"synthetic-project"}:undefined);
+  return {provider,calls};
+}
+function assertRequests(calls:Array<{url:string,init:RequestInit}>) {
+  for(const {url,init} of calls) {
+    expect(init.method).toBe("POST");
+    if(url===stsURL) {
+      const body=new URLSearchParams(String(init.body));
+      expect(body.get("audience")).toBe("synthetic-sts-audience");
+      expect(body.get("grant_type")).toBe("urn:ietf:params:oauth:grant-type:token-exchange");
+      expect(jwtClaims(body.get("subject_token")!)).toMatchObject({iss:"https://issuer.eval.invalid",aud:"synthetic-jwt-audience",sub:"synthetic-subject"});
+    } else if(url===iamURL) {
+      expect(new Headers(init.headers).get("authorization")).toBe("Bearer synthetic-federated");
+      expect(JSON.parse(String(init.body)).scope).toEqual(["https://www.googleapis.com/auth/cloud-platform"]);
+    }
+  }
+}
+for(const stage of ["sts","iam"]) {
+  for(const fault of [522,429,"network"])test(`${stage} recovers after two ${fault} failures`,async()=>{
+    const h=harness(stage,fault,2);let token,error;
+    try{token=await h.provider.getAccessToken();}catch(e){error=e;}
+    expect(error).toBeUndefined();expect(token).toBe("synthetic-minted");
+    expect(h.calls.filter(x=>x.url===(stage==="sts"?stsURL:iamURL))).toHaveLength(3);
+    assertRequests(h.calls);
+    const count=h.calls.length;expect(await h.provider.getAccessToken()).toBe("synthetic-minted");expect(h.calls).toHaveLength(count);
+  },10000);
+  test(`${stage} persistent503 stops and rejects`,async()=>{
+    const h=harness(stage,503,99);let error;
+    try{await h.provider.getAccessToken();}catch(e){error=e;}
+    expect(error).toBeDefined();expect(h.calls.filter(x=>x.url===(stage==="sts"?stsURL:iamURL))).toHaveLength(3);
+    if(stage==="sts")expect(h.calls.some(x=>x.url===iamURL)).toBe(false);
+    assertRequests(h.calls);
+  },10000);
+  for(const fault of [400,403])test(`${stage} permanent${fault} refuses without retry`,async()=>{
+    const h=harness(stage,fault,99);let error;
+    try{await h.provider.getAccessToken();}catch(e){error=e;}
+    expect(error).toBeDefined();expect(h.calls.filter(x=>x.url===(stage==="sts"?stsURL:iamURL))).toHaveLength(1);
+    if(stage==="sts")expect(h.calls.some(x=>x.url===iamURL)).toBe(false);
+  },10000);
+}
+test("WIF ordinary success and valid cache are preserved",async()=>{
+  const h=harness();expect(await h.provider.getAccessToken()).toBe("synthetic-minted");expect(await h.provider.getAccessToken()).toBe("synthetic-minted");expect(h.calls.map(x=>x.url)).toEqual([stsURL,iamURL]);assertRequests(h.calls);
+});
+test("legacy successful authentication and cache are preserved",async()=>{
+  const h=harness("none",522,0,false);expect(await h.provider.getAccessToken()).toBe("synthetic-legacy");expect(await h.provider.getAccessToken()).toBe("synthetic-legacy");expect(h.calls.map(x=>x.url)).toEqual([legacyURL]);
+  const body=new URLSearchParams(String(h.calls[0].init.body));expect(body.get("grant_type")).toBe("urn:ietf:params:oauth:grant-type:jwt-bearer");expect(jwtClaims(body.get("assertion")!)).toMatchObject({iss:"legacy@eval.invalid",aud:legacyURL});
+});

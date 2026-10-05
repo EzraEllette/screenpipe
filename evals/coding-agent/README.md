@@ -1,5 +1,15 @@
 # Coding-agent regression evals
 
+The unmarked HTML file-preview case executes ViewerFileContent with the actual
+Markdown, code-renderer, iframe and sandbox helper sources. It checks full and
+snippet previews, parsed content/CSP metadata, source toggling, path transitions,
+Unicode names/content and preserved text/Markdown. Fourteen calibration controls
+include unused-correct code, empty/comment-only output, unsafe origin, fake CSP,
+lost toggling/Markdown, equivalent implementations and missing-source setup errors.
+Dependencies and hidden fixtures are installed only when grading begins. Synthetic
+native/media/translation ports and JSDOM do not prove browser network/IPC enforcement,
+Brain-view integration, execution isolation or model improvement.
+
 This is an agent eval suite, not a unit-test suite. Every case contains:
 
 - a sanitized task derived from an escaped product failure;
@@ -33,7 +43,31 @@ images, blanket paste refusal and missing-source classification. Fixtures and
 dependency links appear only when grading begins. This does not execute native
 clipboard delivery, image encoding, disk autosave, agent isolation or model trials.
 
-The current app corpus contains 80 git-mined regressions. See
+`app-compressed-pending-sqlx-upgrades` runs real temporary SQLite and compressed
+stores through normal database startup. Six outcomes cover pending feature
+migrations, rollback and retry, retained recordings and starred sessions, resident
+revision/privacy hooks, and ordinary SQLite behavior. The historical parent fails
+four upgrade outcomes and preserves two; the reference and current source pass
+six. Run `bun test evals/coding-agent/calibrate-compressed-sqlx-upgrade.test.js`
+for eight controls, including equivalent source, unused correct code, skipped
+migrations, lost sessions, omitted privacy hooks and missing-source classification.
+Fixtures appear only at grading; cold historical arms use the unchanged
+180-second limit without build-cache links. This does not verify production-size
+histories, process-kill recovery, managed migration authority, live recording,
+deployed storage, execution isolation or model performance.
+
+`app-cloud-auth-host-boundary` installs the actual fetch interceptor with
+synthetic HTTP, session and UI ports. Eleven outcomes cover local and unrelated
+401 responses, misleading hosts, genuine website expiry, successful requests,
+signed-out calls and network-error propagation. Request and response identities
+are preserved. The parent fails six outcomes and preserves five; the historical
+fix and current source pass all eleven. Run
+`bun test evals/coding-agent/calibrate-auth-host.test.js` for calibration.
+The hidden fixture appears only at grading and uses no dependency links.
+This does not establish native recording continuity, real authentication,
+account-switch race safety, browser integration, isolation or model performance.
+
+The current app corpus contains 128 git-mined regressions. See
 [DESIGN.md](./DESIGN.md) for the Anthropic guidance, source contract, and
 history-mining workflow. The companion website manifest uses this same harness.
 
@@ -1486,3 +1520,68 @@ refusal, lost reports, ignored hashes, lost pending state and missing source.
 Fixtures appear only at grading. This checks the extension and its local receipts;
 real skill-store durability, native authorization, context privacy filtering,
 execution isolation and model performance remain outside this evidence.
+
+## Active recording storage volume
+
+`app-active-recording-storage-volume` runs the actual React storage hook with
+synthetic native and settings ports. Ten outcomes compare low and healthy active
+volumes against conflicting saved paths, then cover refresh, native reserve
+boundaries, probe failures, disabled checks and late results. The parent fails
+four volume outcomes and preserves six; the historical fix and current hook
+pass all ten. Run `bun test evals/coding-agent/calibrate-active-storage-volume.test.js`
+for twelve controls, including unused correct code, a wrong-volume bypass,
+blanket warning suppression, an equivalent boundary and missing-source errors.
+Fixtures and runtime links appear only when grading begins. This does not test
+real disk space, IPC delivery, native recording or migration policy, execution
+isolation or model performance.
+
+
+`ai-gateway-wif-token-retry` exercises the public Vertex token method with real
+ephemeral RSA signing and synthetic transport. Each exchange recovers from
+transient HTTP and network failures, bounds retries, and refuses permanent
+errors. Signed claims, exchange credentials, valid-token caching and legacy
+authentication remain intact. The parent fails eight outcomes and preserves six;
+the historical fix and current source pass fourteen. Run
+`bun test evals/coding-agent/calibrate-wif-token-retry.test.js` for fourteen
+controls, including equivalent backoff, an unused repair, disconnected exchanges,
+wrong credentials and lost caching. Fixtures appear only at grading and require
+no dependency links. Missing provider source is a setup failure. This does not
+establish real provider availability, gateway HTTP admission, concurrent or
+cross-account cache isolation, execution isolation or model performance.
+
+`app-pipe-run-terminal-preservation` mounts the actual recorder through a synthetic
+event bus and uses its real NDJSON parser. Eight outcomes cover intermediate turns,
+complete terminal transcripts, ordinary completion, disabled history, foreign events,
+foreground ownership and duplicate terminals. The parent fails two outcomes and
+preserves six; the historical recorder fix and current source pass eight. Run
+`bun test evals/coding-agent/calibrate-pipe-run-terminal.test.js` for calibration.
+Storage and settings are synthetic; this does not establish native delivery, disk
+durability, crash recovery, continued-chat behavior, agent isolation or model quality.
+The hidden fixture is installed only when grading begins.
+
+
+`app-transcription-nova-language` runs the actual batch transcription handler and
+A/B service with synthetic audio and intercepted provider transport. Twelve
+outcomes cover automatic, single, multiple, normalized and legacy language
+selection, query precedence, audio preservation and successful/error payloads.
+The parent fails nine language outcomes and preserves three; the service-only
+historical fix and current source pass all twelve. Run
+`bun test evals/coding-agent/calibrate-transcription-language.test.js` for eleven
+controls, including an equivalent implementation, unused correct code, wrong
+language shortcuts, lost audio and missing-source/syntax infrastructure errors.
+Fixtures appear only at grading and need no dependency links. This does not
+establish speech recognition quality, native settings persistence, real provider
+delivery, alternate-provider behavior, execution isolation or model improvement.
+
+## Manual sync HTTP failures
+
+`app-manual-sync-http-failure` mounts AccountSection with synthetic local HTTP,
+settings and native ports. Sixteen outcomes cover pull/push refusal, server-error
+feedback, non-JSON status fallback, retry, successful sequencing, network errors
+and disabled choices. The parent fails nine outcomes and preserves seven; the
+historical reference and current component pass sixteen. Run
+`bun test evals/coding-agent/calibrate-manual-sync.test.js` for correct, broken,
+bypass, equivalent, preserved-behavior and setup-error controls. Hidden fixtures
+and dependency links appear only after the trajectory. This does not establish
+native persistence, encryption, real account access, provider delivery, execution
+isolation or model improvement.

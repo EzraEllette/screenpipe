@@ -1,0 +1,30 @@
+// screenpipe — AI that knows everything you've seen, said, or heard
+// https://screenpipe.com
+import {afterAll, expect, mock, test} from 'bun:test';
+mock.module('./src/providers/vertex',()=>({VertexAIProvider:class {constructor(){throw Error('unexpected alternate provider')}}}));
+const route=await import('./src/handlers/transcription.ts');
+const originalFetch=globalThis.fetch;
+afterAll(()=>{globalThis.fetch=originalFetch});
+const cases=[
+ {name:'auto',query:'detect_language=true',expected:'multi'},
+ {name:'none',query:'',expected:'multi'},
+ {name:'single',query:'language=es',expected:'es'},
+ {name:'multiple',query:'detect_language=es&detect_language=pt',expected:'multi'},
+ {name:'normalized',query:'language=%20ES%20',expected:'es'},
+ {name:'legacy',query:'',headers:{detect_language:'fr'},expected:'fr'},
+ {name:'precedence',query:'language=ja',headers:{detect_language:'fr'},expected:'ja'},
+ {name:'comma',query:'languages=es,pt',expected:'multi'},
+ {name:'boolean-fallback',query:'detect_language=false',headers:{language:'de'},expected:'de'},
+ {name:'transport',query:'language=en',preserved:true},
+ {name:'provider-refusal',query:'language=en',preserved:true,refusal:true},
+ {name:'empty-transcript',query:'language=en',preserved:true,empty:true}
+];
+for(const c of cases) test(c.name,async()=>{
+ const calls:any[]=[];const payload={results:{channels:[{alternatives:[{transcript:c.empty?'':'synthetic transcript',confidence:0.9}]}]}};
+ globalThis.fetch=async(input,init)=>{const outgoing=new Request(input,init);calls.push({url:outgoing.url,method:outgoing.method,headers:Object.fromEntries(outgoing.headers.entries()),body:Array.from(new Uint8Array(await outgoing.arrayBuffer()))});return c.refusal?new Response('synthetic refusal',{status:400}):Response.json(payload)};
+  const response=await route.handleFileTranscription(new Request('https://synthetic.invalid/v1/listen?'+c.query+'&sample_rate=22050',{method:'POST',headers:{'Content-Type':'audio/mpeg',...c.headers},body:new Uint8Array([1,2,3,4])}),{DEEPGRAM_API_KEY:'synthetic-local-key',WHISPER_TRAFFIC_PCT:'0',PARAKEET_TRAFFIC_PCT:'0',DUAL_SEND_PCT:'0'});
+  const body=await response.json();expect(calls.length).toBe(1);expect(response.status).toBe(c.refusal?500:200);
+  if(c.refusal){expect(body.error).toMatch(/synthetic refusal/)}else{expect(body).toEqual(payload)}
+  const q=new URL(calls[0].url);expect(q.origin).toBe('https://api.deepgram.com');expect(q.pathname).toBe('/v1/listen');expect(q.searchParams.get('model')).toBe('nova-3');expect(q.searchParams.get('sample_rate')).toBe('22050');expect(calls[0].method).toBe('POST');expect(calls[0].body).toEqual([1,2,3,4]);expect(calls[0].headers['content-type']).toBe('audio/mpeg');expect(calls[0].headers.authorization).toBe('Token synthetic-local-key');
+  if(!c.preserved){expect(q.searchParams.get('language')).toBe(c.expected);expect(q.searchParams.has('detect_language')).toBe(false)}
+});
