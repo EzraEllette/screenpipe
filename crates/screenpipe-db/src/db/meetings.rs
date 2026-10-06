@@ -1460,6 +1460,31 @@ impl DatabaseManager {
         Ok(())
     }
 
+    /// Save a summary while preserving a title edited since the caller read it.
+    /// The comparison and write share the existing coordinated transaction.
+    pub async fn update_meeting_summary(
+        &self,
+        id: i64,
+        expected_title: Option<&str>,
+        generated_title: Option<&str>,
+        note: &str,
+    ) -> Result<(), SqlxError> {
+        let mut tx = self.begin_immediate_with_retry().await?;
+        sqlx::query(
+            "UPDATE meetings SET note = ?1,
+             title = CASE WHEN title IS ?2 AND ?3 IS NOT NULL THEN ?3 ELSE title END
+             WHERE id = ?4",
+        )
+        .bind(note)
+        .bind(expected_title)
+        .bind(generated_title)
+        .bind(id)
+        .execute(&mut **tx.conn())
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
     /// Merge `ids` into the lowest-id survivor.
     ///
     /// Preserves user-entered metadata across the merge:

@@ -26,7 +26,13 @@ pub(crate) fn is_summary_heading(line: &str) -> bool {
 /// Clear failure messages are outcomes to recover from, not meeting summaries.
 /// Keep this narrow: a genuine summary may mention missing evidence or errors.
 pub(crate) fn summary_has_content(summary: &str) -> bool {
-    let normalized = summary.trim().to_lowercase().replace('’', "'");
+    let summary = summary.trim();
+    let body = if summary.starts_with("### ") {
+        summary.split_once('\n').map(|(_, body)| body).unwrap_or("")
+    } else {
+        summary
+    };
+    let normalized = body.trim().to_lowercase().replace('’', "'");
     !normalized.is_empty()
         && ![
             "i couldn't produce a reliable summary",
@@ -81,6 +87,51 @@ pub(crate) fn merge_summary_into_note(existing_note: Option<&str>, summary: &str
     }
 }
 
+/// Only placeholders are eligible for automatic naming. A descriptive title may
+/// have come from the user or calendar and must survive subsequent summaries.
+fn is_placeholder_title(title: Option<&str>, meeting_app: &str) -> bool {
+    let title = title.unwrap_or("").trim().to_lowercase();
+    title.is_empty()
+        || title == meeting_app.trim().to_lowercase()
+        || matches!(
+            title.as_str(),
+            "untitled"
+                | "untitled meeting"
+                | "meeting"
+                | "google meet"
+                | "zoom"
+                | "microsoft teams"
+                | "teams"
+                | "slack"
+                | "facetime"
+                | "webex"
+        )
+}
+
+/// The summary contract puts the generated topic in its first H3. Keeping it
+/// in the printed summary lets the finalizer recover both fields after a failed
+/// agent save. Older summaries without this heading remain valid.
+fn summary_title(summary: &str) -> Option<&str> {
+    summary
+        .trim_start()
+        .lines()
+        .next()?
+        .strip_prefix("### ")
+        .map(str::trim)
+        .filter(|title| !title.is_empty() && title.chars().count() <= 120)
+        .filter(|title| {
+            !matches!(
+                title.to_lowercase().as_str(),
+                "summary"
+                    | "overview"
+                    | "key topics"
+                    | "key decisions"
+                    | "action items"
+                    | "next steps"
+            )
+        })
+}
+
 /// Persist a finished summary (and optional title) onto a meeting record.
 ///
 /// One server-side write path shared by the HTTP endpoint and the run
@@ -107,8 +158,16 @@ pub(crate) async fn save_meeting_summary(
     let title = title
         .map(str::trim)
         .filter(|t| !t.is_empty())
-        .map(str::to_string);
-    db.update_meeting(id, None, None, title.as_deref(), None, Some(&note), None)
+        .filter(|t| {
+            t.chars().count() <= 120
+                && !t.contains(['\r', '\n'])
+                && !is_placeholder_title(Some(t), &meeting.meeting_app)
+        })
+        .or_else(|| {
+            summary_title(summary).filter(|t| !is_placeholder_title(Some(t), &meeting.meeting_app))
+        })
+        .filter(|_| is_placeholder_title(meeting.title.as_deref(), &meeting.meeting_app));
+    db.update_meeting_summary(id, meeting.title.as_deref(), title, &note)
         .await
         .map_err(|e| e.to_string())?;
     db.get_meeting_by_id(id)
@@ -190,6 +249,19 @@ mod tests {
             .unwrap();
 
         assert!(save_meeting_summary(&db, id, "   \n", None).await.is_err());
+        assert!(
+            save_meeting_summary(&db, id, "### A title with no summary", None)
+                .await
+                .is_err()
+        );
+        assert!(save_meeting_summary(
+            &db,
+            id,
+            "### A generated topic title\nI couldn't summarize this meeting.",
+            None
+        )
+        .await
+        .is_err());
 
         let saved = save_meeting_summary(&db, id, "Decisions were made.", Some("Pricing sync"))
             .await
@@ -212,5 +284,104 @@ mod tests {
             .unwrap();
         assert_eq!(refreshed.note.as_deref(), Some("## Summary\nRefreshed."));
         assert_eq!(refreshed.title.as_deref(), Some("Pricing sync"));
+    }
+    #[test]
+    fn title_contract_preserves_descriptive_names_and_ignores_old_section_headings() {
+        for title in [
+            None,
+            Some(""),
+            Some(" Untitled meeting "),
+            Some("GOOGLE MEET"),
+            Some("Zoom"),
+        ] {
+            assert!(is_placeholder_title(title, "google meet"));
+        }
+        assert!(!is_placeholder_title(
+            Some("Launch review with design"),
+            "google meet"
+        ));
+        assert_eq!(
+            summary_title("### Launch planning and release ownership\nWe agreed on owners."),
+            Some("Launch planning and release ownership")
+        );
+        for summary in [
+            "A normal older summary.",
+            "### Action items\n- Ship",
+            "### ",
+            "## Summary",
+        ] {
+            assert_eq!(summary_title(summary), None);
+        }
+    }
+
+    #[tokio::test]
+    async fn recovers_topic_title_and_preserves_names_on_refresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = DatabaseManager::new(
+            &dir.path().join("titles.db").to_string_lossy(),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+        let summary = "### Launch planning and release ownership\nThe team agreed to ship on Tuesday and assigned review owners.";
+        for original in [
+            None,
+            Some("google meet"),
+            Some("Untitled meeting"),
+            Some("Launch review with design"),
+        ] {
+            let id = db
+                .insert_meeting("google meet", "audio_process", None, None)
+                .await
+                .unwrap();
+            db.end_meeting(id, &chrono::Utc::now().to_rfc3339(), None)
+                .await
+                .unwrap();
+            db.update_meeting(
+                id,
+                None,
+                None,
+                original,
+                None,
+                Some("My preparation notes"),
+                None,
+            )
+            .await
+            .unwrap();
+            let saved = save_meeting_summary(&db, id, summary, None).await.unwrap();
+            let expected = if original == Some("Launch review with design") {
+                original
+            } else {
+                Some("Launch planning and release ownership")
+            };
+            assert_eq!(saved.title.as_deref(), expected);
+            assert!(saved
+                .note
+                .unwrap()
+                .starts_with("My preparation notes\n\n## Summary"));
+            let refreshed = save_meeting_summary(
+                &db,
+                id,
+                "Updated summary.",
+                Some("A different generated title"),
+            )
+            .await
+            .unwrap();
+            assert_eq!(refreshed.title.as_deref(), expected);
+        }
+        let id = db
+            .insert_meeting("Zoom", "audio_process", None, None)
+            .await
+            .unwrap();
+        db.update_meeting(id, None, None, Some("My new name"), None, None, None)
+            .await
+            .unwrap();
+        // Simulate a rename between the summary's read and write.
+        db.update_meeting_summary(id, None, Some("AI topic"), summary)
+            .await
+            .unwrap();
+        let saved = db.get_meeting_by_id(id).await.unwrap();
+        assert_eq!(saved.title.as_deref(), Some("My new name"));
+        assert_eq!(saved.note.as_deref(), Some(summary));
     }
 }
