@@ -56,7 +56,7 @@ mod win {
     use screenpipe_screen::monitor::{get_default_monitor, get_monitor_by_id};
     use screenpipe_screen::perform_ocr_windows;
     use screenpipe_screen::text_regions::{
-        detect_text_regions_bounded, image_pixel_signature, union_region,
+        detect_text_regions, image_pixel_signature, union_region,
     };
     use std::collections::HashSet;
     use std::io::Write;
@@ -371,7 +371,7 @@ mod win {
         // --- OPTIMIZED arm: detect → union crop → signature → gate. ---
         let d_wall = Instant::now();
         let o_cpu = cpu_ms();
-        let regions = detect_text_regions_bounded(frame);
+        let regions = detect_text_regions(frame);
         let union = union_region(&regions, UNION_PAD_PX, fw, fh);
         let detect_ms = d_wall.elapsed().as_secs_f64() * 1000.0;
         sum.detect_ms += detect_ms;
