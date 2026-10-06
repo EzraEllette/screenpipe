@@ -34,6 +34,7 @@ type BuildMode =
   | "build"
   | "e2e"
   | "signed"
+  | "packaged-updater"
   | "test"
   | "persistence-test"
   | "persistence-release"
@@ -361,6 +362,7 @@ function modeLabel(mode: BuildMode): string {
     case "build": return "one-shot debug-dev build";
     case "e2e": return "debug-dev E2E build";
     case "signed": return "signed debug-dev app build";
+    case "packaged-updater": return "packaged macOS updater regression";
     case "test": return "queued native app tests";
     case "persistence-test": return "Windows persistence supervisor tests";
     case "persistence-release": return "Windows persistence supervisor release build";
@@ -390,6 +392,9 @@ async function perform(mode: BuildMode, args: string[]): Promise<number> {
       ], env);
     case "signed":
       return run(["bash", "scripts/build_macos.sh", "--queue-held"], env);
+    case "packaged-updater":
+      env.NEXT_PUBLIC_SCREENPIPE_E2E = "true";
+      return run(["bun", "e2e/mock-updates/packaged-update-restart.e2e.ts", ...args], env);
     case "test": {
       const exitCode = await run(["bun", "scripts/pre_build.js"], env);
       if (exitCode !== 0) return exitCode;
@@ -642,6 +647,7 @@ async function main(): Promise<number> {
     "build",
     "e2e",
     "signed",
+    "packaged-updater",
     "test",
     "persistence-test",
     "persistence-release",
@@ -654,7 +660,7 @@ async function main(): Promise<number> {
   }
 
   console.error(
-    "usage: bun scripts/native-build-queue.ts <dev|build|e2e|signed|test|persistence-test|persistence-release|persistence-package|persistence-bundle|enterprise-bundle|status>",
+    "usage: bun scripts/native-build-queue.ts <dev|build|e2e|signed|packaged-updater|test|persistence-test|persistence-release|persistence-package|persistence-bundle|enterprise-bundle|status>",
   );
   return 2;
 }

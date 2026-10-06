@@ -31,7 +31,7 @@
     "updater-local:serve": "bun ./e2e/mock-updates/updater-harness.ts serve",
     "updater-local:stage-last": "bun ./e2e/mock-updates/updater-harness.ts stage-last",
     "mock-updates": "bun ./e2e/mock-updates/updater-harness.ts serve",
-    "test:e2e:packaged-updater:macos": "bun ./e2e/mock-updates/packaged-update-restart.e2e.ts",
+    "test:e2e:packaged-updater:macos": "bun scripts/native-build-queue.ts packaged-updater",
     "test:e2e": "bun run wdio run e2e/wdio.conf.ts",
     "test:e2e:tray-recording-toggle:macos": "SCREENPIPE_E2E_SEED=onboarding,no-audio,ignore-disk-pressure SCREENPIPE_PORT=3052 bun run wdio run e2e/wdio.conf.ts --spec e2e/specs/tray-recording-toggle.spec.ts",
     "test:e2e:local-ai-gateway:macos": "SCREENPIPE_E2E_LOCAL_AI_GATEWAY=true bun run wdio run e2e/wdio.conf.ts --spec e2e/specs/chat-local-ai-gateway.spec.ts --spec e2e/specs/pipe-local-ai-gateway.spec.ts",

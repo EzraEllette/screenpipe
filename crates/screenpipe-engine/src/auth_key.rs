@@ -295,7 +295,11 @@ fn legacy_auth_json_path_for(legacy_dir: &Path, active_dir: &Path) -> Option<Pat
 }
 
 fn read_legacy_auth_json() -> Option<String> {
-    let content = std::fs::read_to_string(legacy_auth_json_path()?).ok()?;
+    read_auth_json(&legacy_auth_json_path()?)
+}
+
+fn read_auth_json(path: &Path) -> Option<String> {
+    let content = std::fs::read_to_string(path).ok()?;
     let json: serde_json::Value = serde_json::from_str(&content).ok()?;
     json["token"]
         .as_str()
@@ -313,6 +317,12 @@ fn read_legacy_auth_json() -> Option<String> {
 /// that doesn't match the running server's in-memory value when called from
 /// a sibling process.
 pub async fn find_api_auth_key() -> Option<String> {
+    find_api_auth_key_for_data_dir(&screenpipe_core::paths::default_screenpipe_data_dir()).await
+}
+
+/// Read the existing key for a selected recording directory before a desktop
+/// replacement starts the engine. This never creates or rotates a credential.
+pub async fn find_api_auth_key_for_data_dir(data_dir: &Path) -> Option<String> {
     if let Ok(k) = std::env::var("SCREENPIPE_API_KEY") {
         if !k.is_empty() {
             return Some(k);
@@ -330,8 +340,7 @@ pub async fn find_api_auth_key() -> Option<String> {
         }
     }
 
-    let data_dir = screenpipe_core::paths::default_screenpipe_data_dir();
-    if let Ok(store) = open_secret_store(&data_dir).await {
+    if let Ok(store) = open_secret_store(data_dir).await {
         if let Ok(Some(bytes)) = store.get("api_auth_key").await {
             if let Ok(s) = String::from_utf8(bytes) {
                 if !s.is_empty() {
@@ -341,7 +350,10 @@ pub async fn find_api_auth_key() -> Option<String> {
         }
     }
 
-    read_legacy_auth_json().or_else(|| read_api_auth_recovery(&data_dir))
+    let legacy = dirs::home_dir()
+        .and_then(|home| legacy_auth_json_path_for(&home.join(".screenpipe"), data_dir))
+        .and_then(|path| read_auth_json(&path));
+    legacy.or_else(|| read_api_auth_recovery(data_dir))
 }
 
 #[cfg(test)]

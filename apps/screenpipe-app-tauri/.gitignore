@@ -66,3 +66,5 @@ ffprobe*
 
 # E2E: local hosted-AI gateway request mirror (see e2e/wdio.conf.ts)
 .e2e-gateway-requests.json
+
+/.macos-sidecars/

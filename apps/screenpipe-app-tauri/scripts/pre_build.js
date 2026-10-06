@@ -8,6 +8,7 @@ import fs from 'fs/promises'
 import os from 'os'
 import path from 'path'
 import { setupOpenBlas } from './setup_openblas.js'
+import { stageMlxBundleResources } from './macos_bundle_sidecars.js'
 import { downloadFile, find7z } from './find_tools.js'
 import { ensureCachedDirectory, ensureCachedFile } from './native_dependency_cache.js'
 
@@ -326,7 +327,11 @@ async function populateZipBinary(url, destination, binaryName) {
 async function ensureMacosMlxMetallibSidecar() {
 	const releaseTarget = process.env.SCREENPIPE_RELEASE_TARGET
 	const target = releaseTarget || (process.arch === 'arm64' ? 'aarch64-apple-darwin' : 'x86_64-apple-darwin')
-	if (target !== 'aarch64-apple-darwin') return
+	const bundleResources = path.join(cwd, '../.macos-sidecars')
+	if (target !== 'aarch64-apple-darwin') {
+		await stageMlxBundleResources(bundleResources, null)
+		return
+	}
 
 	const minSize = 1_000_000 // real metallib is ~84MB
 	const baseMetallib = path.join(cwd, 'mlx.metallib')
@@ -347,7 +352,8 @@ async function ensureMacosMlxMetallibSidecar() {
 	})
 	await fs.chmod(sidecarMetallib, 0o755)
 	await fs.copyFile(sidecarMetallib, baseMetallib)
-	console.log(`mlx.metallib sidecar ready at ${sidecarMetallib}`)
+	await stageMlxBundleResources(bundleResources, baseMetallib)
+	console.log(`mlx.metallib resource and runtime link ready at ${bundleResources}`)
 }
 
 async function linkSystemBinary(binaryName, destination) {

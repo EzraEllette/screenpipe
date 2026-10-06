@@ -30,7 +30,7 @@ use tracing::{info, warn};
 const E2E_SCK_RELAUNCH_RACE_SEED: &str = "packaged-updater-sck-race";
 #[cfg(all(feature = "e2e", target_os = "macos"))]
 const E2E_SCK_RELAUNCH_DEADLINE_FILE: &str = ".e2e-sck-relaunch-not-before";
-const MACOS_UPDATER_RELAUNCH_SETTLE: Duration = Duration::from_secs(3);
+pub(crate) const MACOS_UPDATER_RELAUNCH_SETTLE: Duration = Duration::from_secs(3);
 #[cfg(any(target_os = "macos", test))]
 const MACOS_UPDATER_RELAUNCH_HELPER: &str = r#"
 old_pid=$1
@@ -46,7 +46,7 @@ exec "$@"
 "#;
 
 #[cfg(any(target_os = "macos", test))]
-fn macos_updater_relaunch_command<I, S>(
+pub(crate) fn macos_updater_relaunch_command<I, S>(
     binary: &Path,
     args: I,
     old_pid: u32,

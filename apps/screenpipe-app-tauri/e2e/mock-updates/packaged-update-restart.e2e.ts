@@ -36,10 +36,10 @@
  *
  * Run (builds two release-local bundles; slow the first time):
  *   cd apps/screenpipe-app-tauri
- *   bun e2e/mock-updates/packaged-update-restart.e2e.ts
+ *   bun run test:e2e:packaged-updater:macos
  *
  * Skip the builds on re-runs (reuse workdir bundles + artifacts):
- *   SP_PACKAGED_UPDATER_SKIP_BUILD=1 bun e2e/mock-updates/packaged-update-restart.e2e.ts
+ *   SP_PACKAGED_UPDATER_SKIP_BUILD=1 bun run test:e2e:packaged-updater:macos
  *
  * Isolation: dedicated data dir + ports (3061 API / 11461 control), a seed
  * marker env so the app treats itself as isolated (no chat migration), and
@@ -222,6 +222,7 @@ async function todayLog(): Promise<string> {
 function launchApp(): ReturnType<typeof Bun.spawn> {
   const bin = path.join(installedApp(), 'Contents', 'MacOS', 'screenpipe-app');
   must('installed app binary exists', existsSync(bin), bin);
+  verifyBundleSignature(installedApp());
   return Bun.spawn([bin], {
     cwd: WORKDIR,
     env: {
@@ -239,6 +240,13 @@ function launchApp(): ReturnType<typeof Bun.spawn> {
     stdout: 'ignore',
     stderr: 'ignore',
   });
+}
+
+function verifyBundleSignature(bundle: string): void {
+  const verified = Bun.spawnSync(['codesign', '--verify', '--deep', '--strict', bundle], {
+    stdout: 'pipe', stderr: 'pipe',
+  });
+  must('bundle passes full signature verification', verified.exitCode === 0, verified.stderr.toString().trim() || bundle);
 }
 
 function installedBundleVersion(): string {
@@ -384,10 +392,17 @@ async function main(): Promise<void> {
       await sleep(250);
     }
     check('click acknowledged (menu → Installing update…)', sawInstalling);
-    check('restart committed (gate passed from idle)', sawRestartStarted);
 
     // Old process must exit (this is where the pre-fix build sat forever).
     await waitFor('old process exit', 60_000, async () => (app.exitCode !== null || app.signalCode !== null ? true : null), 200);
+    // The verified installer can block the control server until exit. Preserve
+    // the assertion using its durable commit receipt when that transient flag
+    // cannot be sampled over HTTP.
+    const restartReceipt = await readFile(path.join(DATA_DIR, 'update-install.log'), 'utf8');
+    check(
+      'restart committed (gate passed from idle)',
+      sawRestartStarted || restartReceipt.includes(`restart_committed: from=${oldVersion} target=${NEW_VERSION} `),
+    );
     const exitAt = Date.now();
     log(`old process exited ${((exitAt - clickAt) / 1000).toFixed(1)}s after click`);
 
@@ -406,14 +421,19 @@ async function main(): Promise<void> {
 
     // The swap really happened on disk, not just in process state.
     check('installed bundle Info.plist is new version', installedBundleVersion() === NEW_VERSION, installedBundleVersion());
+    verifyBundleSignature(installedApp());
 
     // Scenario 3 log assertions: verified installer used; marker written + consumed.
-    const logAfter = await waitFor('log contains verified install', 30_000, async () => {
+    const logAfter = await waitFor('log contains verified install and replacement boot', 30_000, async () => {
       const l = await todayLog();
-      return /staged update v[^\n]+ installed in /.test(l) ? l : null;
+      return /staged update v[^\n]+ installed in /.test(l)
+        && l.includes(`previous update install applied: ${oldVersion} → ${NEW_VERSION}`) ? l : null;
     });
     check('log: custom rename fast path was not used', !logAfter.includes('pre-extracted fast path'));
-    check('log: idle gate proceeded (not deferred)', /engine idle \(never started\)[^\n]*proceeding/.test(logAfter));
+    // restart_for_update now reserves RESTART_SAFETY directly; the old
+    // await_restart_gate log is no longer on this path. Idle was observed
+    // immediately before the click above, and this records its commit.
+    check('log: idle gate proceeded (not deferred)', logAfter.includes('banner restart: gate passed, shutting down for update'));
     check(
       'log: update attempt recorded',
       logAfter.includes(`update attempt recorded: ${oldVersion} → ${NEW_VERSION}`),
@@ -435,7 +455,7 @@ async function main(): Promise<void> {
     });
     must('post-update capture start accepted', captureResponse.ok);
     const captureResult = (await captureResponse.json()) as { started: boolean; error: string | null };
-    must('post-update capture session constructed', captureResult.started, captureResult.error ?? undefined);
+    must('native post-update capture start requested', captureResult.started, captureResult.error ?? undefined);
     const captureHealth = await waitFor('post-update ScreenCaptureKit frame', 45_000, async () => {
       const health = await fetchHealth();
       return health?.frame_status === 'ok' && (health.pipeline?.capture_attempts ?? 0) > 0
@@ -480,14 +500,22 @@ async function main(): Promise<void> {
       }),
     );
     app = launchApp();
-    const failedBoot = await waitFor('app up after synthetic failed attempt', 60_000, fetchState);
+    // The HTTP driver comes up before UpdatesManager is installed. An empty
+    // menu is startup in progress, not the failed-attempt outcome.
+    const failedBoot = await waitFor('updater initialized after synthetic failed attempt', 60_000, async () => {
+      const s = await fetchState();
+      return s && s.app_version === NEW_VERSION && s.menu_text !== '' ? s : null;
+    });
     check(
       'failed attempt surfaced in menu',
       failedBoot.menu_text === "Update didn't apply — click to retry",
       failedBoot.menu_text,
     );
     check('failed-attempt menu is clickable', failedBoot.menu_enabled);
-    const failLog = await todayLog();
+    const failLog = await waitFor('failed-attempt log flushed', 10_000, async () => {
+      const log = await todayLog();
+      return log.includes('previous update install did NOT apply') ? log : null;
+    });
     check('log: failed attempt detected', failLog.includes('previous update install did NOT apply'));
     check(
       'marker consumed (single-shot)',

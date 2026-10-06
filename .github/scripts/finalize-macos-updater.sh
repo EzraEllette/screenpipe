@@ -103,7 +103,10 @@ for app in "${apps[@]}"; do
   # Keep the offline Gatekeeper invariant from #5036: archive the validated
   # app and sign these exact bytes, even when Tauri supplied the ticket.
   echo "Rebuilding ${APP_NAME}.tar.gz from the finalized app"
-  ( cd "$MACOS_DIR" && tar czf "${APP_NAME}.tar.gz" "$APP_NAME" )
+  # The in-app Rust extractor does not restore xattrs/AppleDouble metadata.
+  # Signatures must live in Mach-O bytes or the sealed Resources directory;
+  # the stapled application ticket remains in Contents/CodeResources.
+  ( cd "$MACOS_DIR" && COPYFILE_DISABLE=1 tar --no-xattrs -czf "${APP_NAME}.tar.gz" "$APP_NAME" )
   rm -f "${TARBALL}.sig"
   ( cd "${APP_PROJECT}" && bunx tauri signer sign "$TARBALL" )
   test -s "${TARBALL}.sig"
@@ -112,7 +115,7 @@ for app in "${apps[@]}"; do
   # the gate that would have rejected enterprise v2.5.145 because its
   # archive contained an unsigned mlx.metallib.
   VERIFY_DIR="$(mktemp -d)"
-  tar xzf "$TARBALL" -C "$VERIFY_DIR"
+  COPYFILE_DISABLE=1 tar --no-xattrs -xzf "$TARBALL" -C "$VERIFY_DIR"
   EXTRACTED_APP="${VERIFY_DIR}/${APP_NAME}"
   codesign --verify --deep --strict --verbose=2 "$EXTRACTED_APP"
   xcrun stapler validate "$EXTRACTED_APP"
