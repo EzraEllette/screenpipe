@@ -401,7 +401,9 @@ pub struct StarredSearchHit {
     #[serde(flatten)]
     pub item: ContentItem,
     /// User marked this capture's timestamp as important. Not an accuracy score.
-    pub starred: bool,
+    /// Omitted when optional star metadata is unavailable, never guessed false.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub starred: Option<bool>,
 }
 
 fn captured_at(item: &ContentItem) -> String {
@@ -1679,21 +1681,37 @@ pub(crate) async fn search(
     };
 
     let timestamps: Vec<_> = content_items.iter().map(captured_at).collect();
-    let starred = state
-        .db
-        .starred_timestamps(&timestamps)
-        .await
-        .map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                JsonResponse(json!({"error":"could not read starred metadata"})),
-            )
-        })?;
+    // Stars annotate these results; failure must not hide already-retrieved
+    // recordings from chat or workflow evidence research. Explicit star filters
+    // are resolved above and still fail rather than broadening the search.
+    let starred = match tokio::time::timeout(
+        std::time::Duration::from_millis(250),
+        state.db.starred_timestamps(&timestamps),
+    )
+    .await
+    {
+        Ok(Ok(starred)) => Some(starred),
+        Ok(Err(error)) => {
+            warn!(%error, "search returned recordings without optional star metadata");
+            None
+        }
+        Err(_) => {
+            warn!("search star metadata timed out; returning recordings without annotations");
+            None
+        }
+    };
+    let starred_metadata_available = starred.is_some();
     let response = SearchResponse {
         data: content_items
             .into_iter()
-            .zip(starred)
-            .map(|(item, starred)| StarredSearchHit { item, starred })
+            .enumerate()
+            .map(|(index, item)| StarredSearchHit {
+                item,
+                starred: starred
+                    .as_ref()
+                    .and_then(|values| values.get(index))
+                    .copied(),
+            })
             .collect(),
         pagination: PaginationInfo {
             limit: query.pagination.limit,
@@ -1707,6 +1725,7 @@ pub(crate) async fn search(
     capture_direct_api_search_value(&api_client, response.data.len());
 
     let cache_entry = if !history_restricted
+        && starred_metadata_available
         && !query.include_frames
         && cacheable_render
         && !pipe_data_restricted
@@ -2790,7 +2809,7 @@ mod tests {
                 .into_iter()
                 .map(|item| StarredSearchHit {
                     item,
-                    starred: false,
+                    starred: Some(false),
                 })
                 .collect(),
             pagination: PaginationInfo {
