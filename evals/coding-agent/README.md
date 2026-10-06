@@ -1626,3 +1626,16 @@ bypass, equivalent, preserved-behavior and setup-error controls. Hidden fixtures
 and dependency links appear only after the trajectory. This does not establish
 native persistence, encryption, real account access, provider delivery, execution
 isolation or model improvement.
+
+The `app-native-calendar-unavailable-poll` case executes the actual frontend
+calendar module with synthetic HTTP and native-command ports. Nine outcomes
+cover repeated unavailable polls, explicit disconnected responses, stale or
+unknown status recovery, connected empty calendars, authorized HTTP failures,
+and preserved Google/ICS providers. The parent fails two intended outcomes and
+preserves seven; reference and current source pass nine.
+Run `bun test evals/coding-agent/calibrate-calendar-unavailable.test.js` for eleven
+controls, including equivalent implementations, unused repairs, blanket native
+suppression and missing-module setup errors. Only the frontend calendar module
+is applied from the historical fix. Native endpoint mappings, OS permissions,
+OAuth refresh, publisher backoff, enforced agent isolation and model performance
+remain outside this evidence. Fixtures and dependencies are installed at grading.
