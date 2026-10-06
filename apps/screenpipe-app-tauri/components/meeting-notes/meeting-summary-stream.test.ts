@@ -26,12 +26,6 @@ const textStart = (contentIndex = 0) => ({
 });
 
 describe("meeting summary stream", () => {
-  it("preserves the topic heading through the streamed-to-saved handoff", () => {
-    const markdown = "### Launch planning and release ownership\nWe agreed to ship Tuesday.";
-    let state = advanceMeetingSummaryStream(emptyMeetingSummaryStream(), textEnd(`## Summary\n${markdown}`));
-    state = advanceMeetingSummaryStream(state, { type: "tool_execution_start" });
-    expect(state.markdown).toBe(markdown);
-  });
   it("streams only markdown after the summary heading", () => {
     let state = emptyMeetingSummaryStream();
     state = advanceMeetingSummaryStream(

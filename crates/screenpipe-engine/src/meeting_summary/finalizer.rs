@@ -497,14 +497,11 @@ mod db_tests {
         let (_dir, db) = test_db().await;
         let store = SqlitePipeStore::new(db.clone());
         let meeting_id = ended_meeting(&db).await;
-        db.update_meeting(meeting_id, None, None, Some("Zoom"), None, None, None)
-            .await
-            .unwrap();
         let run = completed_run(
             &store,
             &meeting_id.to_string(),
             &agent_end_stdout(
-                "## Summary\n### Rollout planning and follow-up ownership\nWe agreed on the rollout plan and booked a follow-up for Thursday.",
+                "## Summary\nWe agreed on the rollout plan and booked a follow-up for Thursday.",
             ),
         )
         .await;
@@ -514,11 +511,7 @@ mod db_tests {
 
         let meeting = db.get_meeting_by_id(meeting_id).await.unwrap();
         let note = meeting.note.unwrap();
-        assert!(note.starts_with("## Summary\n### Rollout planning and follow-up ownership"));
-        assert_eq!(
-            meeting.title.as_deref(),
-            Some("Rollout planning and follow-up ownership")
-        );
+        assert!(note.starts_with("## Summary\nWe agreed on the rollout plan"));
         // The run stays a success — the outcome was repaired, not the run.
         assert_eq!(
             execution_state(&db, run).await,

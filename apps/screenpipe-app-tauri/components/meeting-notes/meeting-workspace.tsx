@@ -169,16 +169,13 @@ export function extractMeetingSummary(markdown: string): string | null {
   const body = markdown.slice(latest.index + latest[0].length).trim();
   // A refusal is an error outcome, even when an older run saved it under
   // the Summary heading. Match the server's narrow failure-prefix check.
-  const content = body.startsWith("### ")
-    ? body.slice(body.indexOf("\n") < 0 ? body.length : body.indexOf("\n") + 1).trim()
-    : body;
-  const normalized = content.toLowerCase().replace(/’/g, "'");
+  const normalized = body.toLowerCase().replace(/’/g, "'");
   const failurePrefixes = [
     "i couldn't produce a reliable summary", "i could not produce a reliable summary",
     "i couldn't summarize", "i could not summarize", "i can't summarize", "i cannot summarize",
     "unable to summarize this meeting", "no speech was captured", "no transcript was available",
   ];
-  return content && !failurePrefixes.some((prefix) => normalized.startsWith(prefix)) ? body : null;
+  return body && !failurePrefixes.some((prefix) => normalized.startsWith(prefix)) ? body : null;
 }
 
 /**

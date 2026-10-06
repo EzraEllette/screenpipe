@@ -285,9 +285,7 @@ replace `<EXISTING_NOTE>` with the meeting's current `note` field (empty string 
 const LEGACY_MEETING_AUDIO_FETCH: &str = r###"  curl -s -G -H "$A" --data-urlencode "start_time=$S" --data-urlencode "end_time=$E" \
     -d content_type=audio -d limit=500 "http://localhost:3030/search" -o /tmp/audio.json &"###;
 
-const LEGACY_SUMMARY_OUTPUT_WITHOUT_TITLE: &str = r###"step 3 — write the summary out as your own message, before you save it. this message must contain no tool call; end the turn after it. start a line with exactly `## Summary` and put the finished summary markdown after that heading. the meeting UI streams this section live while you write it — it is the only way the user sees anything before the run ends — and it is the same markdown you pass as `<YOUR_SUMMARY>` in step 3b."###;
-
-const LEGACY_SUMMARY_TITLE_RULE: &str = r###"`-f` matters: if this call fails, say so in your closing message instead of reporting success. for the title: if the current title is missing, generic ("untitled", "meeting", just the app name) or doesn't capture what actually happened, pass a 5-8 word plain-english title (no quotes, no "meeting about…" prefix) — otherwise pass the empty string so a user-set title is left alone. if there's nothing useful to summarize (empty transcript, irrelevant audio), say so out loud and skip the save — don't write a placeholder."###;
+const LEGACY_MEETING_TITLE_SAVE_RULE: &str = r###"`-f` matters: if this call fails, say so in your closing message instead of reporting success. for the title: if the current title is missing, generic ("untitled", "meeting", just the app name) or doesn't capture what actually happened, pass a 5-8 word plain-english title (no quotes, no "meeting about…" prefix) — otherwise pass the empty string so a user-set title is left alone. if there's nothing useful to summarize (empty transcript, irrelevant audio), say so out loud and skip the save — don't write a placeholder."###;
 
 /// Swaps for `meeting-summary`, oldest defect first.
 fn meeting_summary_swaps() -> Vec<FragmentSwap> {
@@ -556,23 +554,16 @@ fn meeting_summary_swaps() -> Vec<FragmentSwap> {
         });
     }
 
-    for (old, start, end) in [
-        (
-            LEGACY_SUMMARY_OUTPUT_WITHOUT_TITLE,
-            "step 3 — write the summary",
-            "\n\nthis step is not optional",
-        ),
-        (LEGACY_SUMMARY_TITLE_RULE, "`-f` matters:", "\n\nstep 4"),
-    ] {
-        if let Some(new) =
-            section_between(bundled_prompt("meeting-summary").unwrap_or(""), start, end)
-        {
-            swaps.push(FragmentSwap {
-                why: "keep the AI topic in the recoverable summary and preserve descriptive meeting names",
-                old,
-                new,
-            });
-        }
+    if let Some(rule) = section_between(
+        bundled_prompt("meeting-summary").unwrap_or(""),
+        "`-f` matters:",
+        "\n\nstep 4",
+    ) {
+        swaps.push(FragmentSwap {
+            why: "have the summary agent choose a useful title and verify its save",
+            old: LEGACY_MEETING_TITLE_SAVE_RULE,
+            new: rule,
+        });
     }
 
     swaps
@@ -956,29 +947,25 @@ fn replace_prompt_body_when_hash_matches(
 #[cfg(test)]
 mod tests {
     #[test]
-    fn installs_recoverable_topic_titles_without_changing_user_configuration() {
+    fn migrates_meeting_title_instructions_without_changing_user_settings() {
         let prompt = bundled("meeting-summary");
-        let output = section_between(
-            prompt,
-            "step 3 — write the summary",
-            "\n\nthis step is not optional",
-        )
-        .unwrap();
         let rule = section_between(prompt, "`-f` matters:", "\n\nstep 4").unwrap();
         let stale = format!(
             "{}\nMy custom instructions stay here.\n",
             prompt
-                .replace(output, LEGACY_SUMMARY_OUTPUT_WITHOUT_TITLE)
-                .replace(rule, LEGACY_SUMMARY_TITLE_RULE)
+                .replace(rule, LEGACY_MEETING_TITLE_SAVE_RULE)
                 .replace("enabled: true", "enabled: false")
         );
         let migrated = migrate_builtin_pipe_text("meeting-summary", &stale).unwrap();
-        assert!(migrated.contains("### <TOPIC_TITLE>"));
-        assert!(migrated.contains("preserves descriptive user or calendar titles"));
+        assert!(migrated.contains("Naming the meeting is part of summarizing it"));
+        assert!(migrated.contains("If the title changed while you were working"));
+        assert!(migrated.contains("verify that the summary and any title you supplied are present"));
+        assert!(migrated.contains("skip the save and leave the title unchanged"));
         assert!(migrated.contains("enabled: false"));
         assert!(migrated.ends_with("My custom instructions stay here.\n"));
         assert!(migrate_builtin_pipe_text("meeting-summary", &migrated).is_none());
         assert!(migrate_builtin_pipe_text("day-recap", &stale).is_none());
+        assert!(migrate_builtin_pipe_text("meeting-summary", "My custom summary prompt").is_none());
     }
 
     #[test]

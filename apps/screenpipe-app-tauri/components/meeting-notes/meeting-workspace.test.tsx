@@ -17,14 +17,6 @@ import {
   stopMeetingAndOpenSummary,
 } from "./meeting-workspace";
 
-it("keeps the recoverable topic heading but requires a real summary body", () => {
-  const topic = "### Launch planning and release ownership";
-  expect(extractMeetingSummary(`## Summary\n${topic}\nWe agreed to ship Tuesday.`))
-    .toBe(`${topic}\nWe agreed to ship Tuesday.`);
-  expect(extractMeetingSummary(`## Summary\n${topic}`)).toBeNull();
-  expect(extractMeetingSummary(`## Summary\n${topic}\nI couldn't summarize this meeting.`)).toBeNull();
-});
-
 it("does not treat a saved refusal as a usable summary", () => {
   const note = "## Summary\nI couldn't produce a reliable summary for this meeting. The recorded evidence appears mismatched.";
   expect(extractMeetingSummary(note)).toBeNull();
