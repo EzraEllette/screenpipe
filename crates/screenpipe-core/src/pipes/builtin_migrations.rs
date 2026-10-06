@@ -557,10 +557,16 @@ fn meeting_summary_swaps() -> Vec<FragmentSwap> {
     }
 
     for (old, start, end) in [
-        (LEGACY_SUMMARY_OUTPUT_WITHOUT_TITLE, "step 3 — write the summary", "\n\nthis step is not optional"),
+        (
+            LEGACY_SUMMARY_OUTPUT_WITHOUT_TITLE,
+            "step 3 — write the summary",
+            "\n\nthis step is not optional",
+        ),
         (LEGACY_SUMMARY_TITLE_RULE, "`-f` matters:", "\n\nstep 4"),
     ] {
-        if let Some(new) = section_between(bundled_prompt("meeting-summary").unwrap_or(""), start, end) {
+        if let Some(new) =
+            section_between(bundled_prompt("meeting-summary").unwrap_or(""), start, end)
+        {
             swaps.push(FragmentSwap {
                 why: "keep the AI topic in the recoverable summary and preserve descriptive meeting names",
                 old,
@@ -952,12 +958,20 @@ mod tests {
     #[test]
     fn installs_recoverable_topic_titles_without_changing_user_configuration() {
         let prompt = bundled("meeting-summary");
-        let output = section_between(prompt, "step 3 — write the summary", "\n\nthis step is not optional").unwrap();
+        let output = section_between(
+            prompt,
+            "step 3 — write the summary",
+            "\n\nthis step is not optional",
+        )
+        .unwrap();
         let rule = section_between(prompt, "`-f` matters:", "\n\nstep 4").unwrap();
-        let stale = format!("{}\nMy custom instructions stay here.\n", prompt
-            .replace(output, LEGACY_SUMMARY_OUTPUT_WITHOUT_TITLE)
-            .replace(rule, LEGACY_SUMMARY_TITLE_RULE)
-            .replace("enabled: true", "enabled: false"));
+        let stale = format!(
+            "{}\nMy custom instructions stay here.\n",
+            prompt
+                .replace(output, LEGACY_SUMMARY_OUTPUT_WITHOUT_TITLE)
+                .replace(rule, LEGACY_SUMMARY_TITLE_RULE)
+                .replace("enabled: true", "enabled: false")
+        );
         let migrated = migrate_builtin_pipe_text("meeting-summary", &stale).unwrap();
         assert!(migrated.contains("### <TOPIC_TITLE>"));
         assert!(migrated.contains("preserves descriptive user or calendar titles"));

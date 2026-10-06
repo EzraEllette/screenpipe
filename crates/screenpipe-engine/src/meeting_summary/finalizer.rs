@@ -515,7 +515,10 @@ mod db_tests {
         let meeting = db.get_meeting_by_id(meeting_id).await.unwrap();
         let note = meeting.note.unwrap();
         assert!(note.starts_with("## Summary\n### Rollout planning and follow-up ownership"));
-        assert_eq!(meeting.title.as_deref(), Some("Rollout planning and follow-up ownership"));
+        assert_eq!(
+            meeting.title.as_deref(),
+            Some("Rollout planning and follow-up ownership")
+        );
         // The run stays a success — the outcome was repaired, not the run.
         assert_eq!(
             execution_state(&db, run).await,
