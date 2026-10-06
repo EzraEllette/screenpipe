@@ -6,6 +6,7 @@ import {
   ArrowDown,
   ArrowUp,
   GripVertical,
+  ChevronDown,
   MoreHorizontal,
   Plus,
   Trash2,
@@ -47,7 +48,16 @@ function rebase(draft: EditorDraft, sent: EditorDraft, saved: WorkflowMap): Edit
   }) };
 }
 
-export function WorkflowEditor({ workflow, save, actions, renderSource }: {
+export type WorkflowEditorOptions = {
+  stepsOnly?: boolean;
+  /** Canonical cloud steps have one expected-result field. */
+  singleCheck?: boolean;
+  initialDraft?: WorkflowEdit;
+  onDraftChange?: (draft: WorkflowEdit) => void;
+  sessionRecovery?: boolean;
+  saveDisabled?: boolean;
+};
+export function WorkflowEditor({ workflow, save, actions, renderSource, stepsOnly = false, singleCheck = false, initialDraft, onDraftChange, sessionRecovery = true, saveDisabled = false }: WorkflowEditorOptions & {
   workflow: WorkflowMap;
   save: (draft: WorkflowEdit) => Promise<WorkflowMap>;
   actions?: ReactNode;
@@ -56,8 +66,9 @@ export function WorkflowEditor({ workflow, save, actions, renderSource }: {
   const key = `screenpipe:workflow-edit:${workflow.id ?? workflow.title}`;
   const [initial, setInitial] = useState(() => keyedDraft(workflowEdit(workflow)));
   const [draft, setDraft] = useState<EditorDraft>(() => {
+    if (initialDraft) return keyedDraft(initialDraft);
     try {
-      const saved = JSON.parse(sessionStorage.getItem(key) || "null");
+      const saved = sessionRecovery && JSON.parse(sessionStorage.getItem(key) || "null");
       if (saved?.id === initial.id && validWorkflowEdit(saved, true)) return keyedDraft(saved);
     } catch { /* Optional tab-local recovery. */ }
     return initial;
@@ -104,6 +115,7 @@ export function WorkflowEditor({ workflow, save, actions, renderSource }: {
   const dirty = JSON.stringify(payload(draft)) !== JSON.stringify(payload(initial));
   const valid = validWorkflowEdit(draft);
   function remember(next: EditorDraft, base = baseline.current) {
+    if (!sessionRecovery) return;
     try {
       if (JSON.stringify(payload(next)) !== JSON.stringify(payload(base))) sessionStorage.setItem(key, JSON.stringify(next));
       else sessionStorage.removeItem(key);
@@ -117,7 +129,10 @@ export function WorkflowEditor({ workflow, save, actions, renderSource }: {
     window.addEventListener("beforeunload", warn);
     return () => window.removeEventListener("beforeunload", warn);
   }, [dirty]);
+  const draftCallback = useRef(onDraftChange);
+  draftCallback.current = onDraftChange;
   function update(next: EditorDraft) {
+    draftCallback.current?.(payload(next));
     current.current = next;
     setDraft(next);
     remember(next);
@@ -166,7 +181,7 @@ export function WorkflowEditor({ workflow, save, actions, renderSource }: {
   }
   async function submit() {
     const sent = current.current;
-    if (!validWorkflowEdit(sent) || busy.current || JSON.stringify(payload(sent)) === JSON.stringify(payload(baseline.current))) return;
+    if (saveDisabled || !validWorkflowEdit(sent) || busy.current || JSON.stringify(payload(sent)) === JSON.stringify(payload(baseline.current))) return;
     busy.current = true;
     setSaving(true);
     setError("");
@@ -257,28 +272,15 @@ export function WorkflowEditor({ workflow, save, actions, renderSource }: {
       <fieldset>
         <div className={styles.intro}>
           <div className={styles.titleRow}>
-          <Text
-            title
-            label="Workflow title"
-            value={draft.title}
-            onChange={(title) => change({ ...draft, title })}
-          />
+          {stepsOnly ? <h1 className={styles.title}>{workflow.title}</h1> : <Text title label="Workflow title" value={draft.title} onChange={title => change({ ...draft, title })} />}
           <TimingDisclosure label="Workflow timing" value={unchangedStages ? workflow.timing : null}
             measured={unchangedStages && workflow.durationSource === "measured-meeting" ? { minutes: workflow.totalMinutes, samples: workflow.durationSampleCount ?? 0 } : undefined} />
           </div>
-          <Text
-            label="Workflow description"
-            value={draft.description}
-            onChange={(description) => change({ ...draft, description })}
-          />
+          {stepsOnly ? <p className={styles.readOnlyText}>{workflow.description}</p> : <Text label="Workflow description" value={draft.description} onChange={description => change({ ...draft, description })} />}
         </div>
         <label className={styles.endpoint}>
           Starts when
-          <Text
-            label="Workflow trigger"
-            value={draft.trigger}
-            onChange={(trigger) => change({ ...draft, trigger })}
-          />
+          {stepsOnly ? <span className={styles.readOnlyText}>{workflow.trigger}</span> : <Text label="Workflow trigger" value={draft.trigger} onChange={trigger => change({ ...draft, trigger })} />}
         </label>
         <div className={styles.stepsHeading}><strong>Steps</strong></div>
         <div className={styles.steps}>
@@ -467,32 +469,10 @@ export function WorkflowEditor({ workflow, save, actions, renderSource }: {
                       <GripVertical size={15} />
                     </button>
                     {blockMenu === detail.key && <div role="dialog" aria-label={`Actions for block ${detailIndex + 1} in step ${index + 1}`} className={styles.blockMenu}>
-                      <label>Block type
-                    <select
-                      autoFocus
-                      aria-label={`Block ${detailIndex + 1} type in step ${index + 1}`}
-                      value={detail.kind}
-                      onChange={(e) =>
-                        stageChange(index, {
-                          ...stage,
-                          procedure: stage.procedure.map((p, i) =>
-                            i === detailIndex
-                              ? { ...p, kind: e.target.value as typeof p.kind }
-                              : p,
-                          ),
-                        })
-                      }
-                    >
-                      {["action", "input", "output", "decision", "check"].map(
-                        (kind) => (
-                          <option key={kind}>{kind}</option>
-                        ),
-                      )}
-                    </select>
-                      </label>
                     <button
                       type="button"
                       title="Delete block"
+                      autoFocus
                       aria-label={`Delete block ${detailIndex + 1} in step ${index + 1}`}
                       onClick={() => {
                         setBlockMenu(null);
@@ -508,7 +488,25 @@ export function WorkflowEditor({ workflow, save, actions, renderSource }: {
                     </button>
                     </div>}
                     </div>
-                    {detail.kind !== "action" && <span className={styles.kindLabel}>{detail.kind}</span>}
+                    <div className={styles.kindLabel} data-kind={detail.kind}>
+                      <select
+                        aria-label={`Block ${detailIndex + 1} type in step ${index + 1}`}
+                        title="Change block type"
+                        disabled={singleCheck}
+                        value={detail.kind}
+                        onChange={(e) => stageChange(index, {
+                          ...stage,
+                          procedure: stage.procedure.map((p, i) =>
+                            i === detailIndex ? { ...p, kind: e.target.value as typeof p.kind } : p,
+                          ),
+                        })}
+                      >
+                        {["action", "input", "output", "decision", "check"].map(kind =>
+                          <option key={kind} value={kind}>{kind}</option>,
+                        )}
+                      </select>
+                      <ChevronDown size={12} aria-hidden="true" />
+                    </div>
                     <Text
                       rich
                       label={`Block ${detailIndex + 1} in step ${index + 1}`}
@@ -528,7 +526,7 @@ export function WorkflowEditor({ workflow, save, actions, renderSource }: {
                 ))}
               </div>
               {stage.sourceIndex !== null && workflow.stages[stage.sourceIndex] && <div className={styles.source}>{renderSource?.(workflow.stages[stage.sourceIndex])}</div>}
-              <button
+              {(!singleCheck || !stage.procedure.length) && <button
                 type="button"
                 className={styles.add}
                 title="Add block"
@@ -538,7 +536,7 @@ export function WorkflowEditor({ workflow, save, actions, renderSource }: {
                     ...stage,
                     procedure: [
                       ...stage.procedure,
-                      { key: crypto.randomUUID(), sourceIndex: null, kind: "action", text: "" },
+                      { key: crypto.randomUUID(), sourceIndex: null, kind: singleCheck ? "check" : "action", text: "" },
                     ],
                   });
                   focusField(
@@ -548,7 +546,7 @@ export function WorkflowEditor({ workflow, save, actions, renderSource }: {
               >
                 <Plus size={14} />
                 Add block
-              </button>
+              </button>}
             </article>
           ))}
         </div>
@@ -572,17 +570,13 @@ export function WorkflowEditor({ workflow, save, actions, renderSource }: {
         </button>
         <label className={styles.endpoint}>
           Ends with
-          <Text
-            label="Workflow outcome"
-            value={draft.outcome}
-            onChange={(outcome) => change({ ...draft, outcome })}
-          />
+          {stepsOnly ? <span className={styles.readOnlyText}>{workflow.outcome}</span> : <Text label="Workflow outcome" value={draft.outcome} onChange={outcome => change({ ...draft, outcome })} />}
         </label>
       </fieldset>
-      <p className={styles.note}>
+      {renderSource && <p className={styles.note}>
         Captured sources are preserved as references. Edited instructions are
         not verified observations.
-      </p>
+      </p>}
       <span className={styles.srOnly} role="status" aria-live="polite">
         {announcement}
       </span>

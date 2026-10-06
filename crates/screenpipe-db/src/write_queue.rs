@@ -1929,11 +1929,20 @@ async fn execute_single_write(
             // FrameLinker emits UPDATEs after pairing a trigger event with
             // the frame it caused us to capture. `frame_id IS NULL` guards
             // against accidental clobber if a duplicate update is enqueued.
-            sqlx::query("UPDATE ui_events SET frame_id = ?1 WHERE id = ?2 AND frame_id IS NULL")
-                .bind(frame_id)
-                .bind(row_id)
-                .execute(&mut **conn)
-                .await?;
+            // A delayed scroll capture may belong to a newer window/page.
+            // Validate persisted identity in the existing writer transaction.
+            sqlx::query(
+                "UPDATE ui_events SET frame_id = ?1 WHERE id = ?2 AND frame_id IS NULL
+                 AND EXISTS (SELECT 1 FROM frames f WHERE f.id = ?1
+                   AND NULLIF(ui_events.app_name, '') = NULLIF(f.app_name, '')
+                   AND NULLIF(ui_events.window_title, '') = NULLIF(f.window_name, '')
+                   AND (NULLIF(ui_events.browser_url, '') IS NULL
+                        OR ui_events.browser_url = NULLIF(f.browser_url, '')))",
+            )
+            .bind(frame_id)
+            .bind(row_id)
+            .execute(&mut **conn)
+            .await?;
             Ok(WriteResult::Unit)
         }
 
@@ -2240,8 +2249,11 @@ async fn execute_single_write(
                 .iter()
                 .map(|(id, pos)| format!("WHEN {} THEN {}", id, pos))
                 .collect();
+            // Keep all bindings anonymous. SQLx counts anonymous parameters
+            // separately from numbered ones: mixing ?1 with ? reuses chunk_id
+            // as the first frame ID and omits the final frame in the batch.
             let sql = format!(
-                "UPDATE frames SET video_chunk_id = ?1, offset_index = CASE id {} ELSE offset_index END, snapshot_path = NULL WHERE id IN ({}) AND snapshot_path IS NOT NULL",
+                "UPDATE frames SET video_chunk_id = ?, offset_index = CASE id {} ELSE offset_index END, snapshot_path = NULL WHERE id IN ({}) AND snapshot_path IS NOT NULL",
                 case_clauses.join(" "), placeholders.join(",")
             );
             let mut query = sqlx::query(sqlx::AssertSqlSafe(sql)).bind(chunk_id);

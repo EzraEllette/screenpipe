@@ -10,9 +10,9 @@ and layer declared in the manifest, weighted by confidence and criticality.
 
 - Manifest: `e2e/coverage-map.json`
 - Specs directory: `e2e/specs`
-- Mapped specs: 142
-- Declared test blocks: 411
-- Weighted coverage points: 331.5
+- Mapped specs: 144
+- Declared test blocks: 415
+- Weighted coverage points: 335.0
 
 Confidence weights: strong=1.0, partial=0.7, conditional=0.4, smoke=0.3.
 Criticality weights: high=1.0, medium=0.7, low=0.4.
@@ -23,9 +23,9 @@ can execute more runtime cases than this number shows.
 
 | Platform | Specs | Declared tests | Weighted points | Layers | Features | Critical score |
 | --- | --- | --- | --- | --- | --- | --- |
-| windows | 108 | 348 | 291.1 | 15 | 123 | 85% |
-| macos | 138 | 373 | 301.3 | 17 | 133 | 88% |
-| linux | 96 | 306 | 260.5 | 14 | 120 | 80% |
+| windows | 110 | 352 | 294.6 | 15 | 125 | 85% |
+| macos | 140 | 377 | 304.8 | 17 | 134 | 88% |
+| linux | 98 | 310 | 264.0 | 14 | 122 | 80% |
 
 ## Runtime Results
 
@@ -43,16 +43,16 @@ pass/fail/skip counts.
 | capture-ocr | 2 specs / 16 tests / 6.4 pts | 10 specs / 14 tests / 6.2 pts | 1 specs / 3 tests / 1.2 pts |
 | chat-ai | 37 specs / 87 tests / 71.3 pts | 51 specs / 116 tests / 90.8 pts | 35 specs / 86 tests / 70.8 pts |
 | entitlement | - | 1 specs / 1 tests / 1.0 pts | - |
-| local-api | 29 specs / 121 tests / 102.0 pts | 40 specs / 119 tests / 101.9 pts | 24 specs / 89 tests / 80.2 pts |
+| local-api | 30 specs / 122 tests / 102.5 pts | 41 specs / 120 tests / 102.4 pts | 25 specs / 90 tests / 80.7 pts |
 | notifications | 4 specs / 26 tests / 17.3 pts | 3 specs / 5 tests / 3.4 pts | 2 specs / 4 tests / 3.1 pts |
 | onboarding | 9 specs / 39 tests / 34.8 pts | 11 specs / 43 tests / 38.2 pts | 9 specs / 39 tests / 34.8 pts |
 | os-integration | 8 specs / 37 tests / 31.9 pts | 17 specs / 36 tests / 23.8 pts | 3 specs / 20 tests / 15.8 pts |
 | performance | 3 specs / 45 tests / 45.0 pts | 5 specs / 36 tests / 31.8 pts | 2 specs / 30 tests / 30.0 pts |
 | pipes | 6 specs / 20 tests / 20.0 pts | 8 specs / 26 tests / 26.0 pts | 6 specs / 20 tests / 20.0 pts |
-| real-ui-e2e | 80 specs / 241 tests / 204.9 pts | 98 specs / 260 tests / 220.3 pts | 74 specs / 217 tests / 190.9 pts |
+| real-ui-e2e | 81 specs / 242 tests / 205.3 pts | 99 specs / 261 tests / 220.8 pts | 75 specs / 218 tests / 191.4 pts |
 | settings | 15 specs / 42 tests / 39.0 pts | 17 specs / 36 tests / 31.7 pts | 14 specs / 33 tests / 30.0 pts |
-| storage-privacy | 10 specs / 44 tests / 35.3 pts | 10 specs / 29 tests / 28.1 pts | 7 specs / 22 tests / 21.1 pts |
-| tauri-command | 24 specs / 69 tests / 55.9 pts | 36 specs / 92 tests / 74.3 pts | 23 specs / 70 tests / 56.8 pts |
+| storage-privacy | 11 specs / 47 tests / 38.3 pts | 11 specs / 32 tests / 31.1 pts | 8 specs / 25 tests / 24.1 pts |
+| tauri-command | 26 specs / 73 tests / 59.4 pts | 38 specs / 96 tests / 77.8 pts | 25 specs / 74 tests / 60.3 pts |
 | window-lifecycle | 22 specs / 71 tests / 59.5 pts | 23 specs / 55 tests / 40.9 pts | 16 specs / 44 tests / 34.4 pts |
 
 ## Critical Feature Matrix
@@ -227,6 +227,7 @@ pass/fail/skip counts.
 | settings-sections.spec.ts | windows, macos, linux | settings, real-ui-e2e, storage-privacy | settings-recording, screen-share-privacy, settings-ai, settings-privacy-api-auth, settings-permissions, storage-retention, low-disk-recording-guard, audio-device-health | high | strong | real-user-flow | 14 | Separate Screen and Audio & meetings destinations, persisted screen-share privacy toggle with native-status readback, AI preset/preferences split and toggle flows, low-disk capture stop with persistent notification, storage, privacy, macOS-only permissions recovery hub (asserted absent on Windows/Linux), and rapid switching crash guard. |
 | speaker-rename-scope.spec.ts | windows, macos, linux | local-api | meeting-notes, speaker-rename-scope | high | strong | real-user-flow | 3 | Seeds one unnamed voice across three chunks through the public API, renames a single line with scope=auto, and verifies the whole voice is relabelled while a correction on a named speaker stays on its line. Also asserts the orphaned-speaker repair migration is recorded applied after a real app boot and leaves no row pointing at a deleted speaker. |
 | spotlight-exclusion.spec.ts | macos | storage-privacy, os-integration | spotlight-exclusion | high | strong | mixed | 2 | Requires the launched app's exact E2E data directory to appear in Spotlight Search Privacy, then force-imports paired excluded/control canaries and proves only the control becomes searchable. |
+| starred-session-popover.spec.ts | macos, windows, linux | real-ui-e2e, local-api, tauri-command | shortcut-overlay | medium | partial | real-user-flow | 1 | Opens the floating star panel through the web toolbar when present or the shared native command, saves a 15-minute session against the isolated backend, and checks Escape, close, reopen, and that Home stays hidden. Runs without app activation; actual Space/focus transitions still need desktop acceptance. |
 | timeline-daily-summary.spec.ts | windows, macos, linux | real-ui-e2e | timeline, settings-ai | medium | strong | real-user-flow | 1 | Opens a cached Pi-generated daily summary in Timeline, checks its bounded scrolling layout, captures a screenshot, and closes it. |
 | timeline.spec.ts | windows, macos, linux | real-ui-e2e, capture-ocr | timeline, capture-ocr | high | conditional | real-user-flow | 3 | Timeline shell always runs; seeded frame assertion skips under no-recording. |
 | tray-recording-status.spec.ts | windows | os-integration, tauri-command | tray-recording-status | high | strong | command | 1 | Drives Starting to Recording and reads back the status item from the successfully installed native tray menu. |
@@ -234,6 +235,7 @@ pass/fail/skip counts.
 | tray-search.spec.ts | windows, macos, linux | window-lifecycle, tauri-command, real-ui-e2e | tray-search, home-search, window-lifecycle | high | partial | command | 2 | Invokes open_search_window and verifies focused floating Search. |
 | updater-banner.spec.ts | windows, macos, linux | real-ui-e2e, settings | update-surfacing, settings-persistence | high | partial | mixed | 2 | Synthetic update-available event surfaces the restart-to-update banner. A real Auto-update toggle plus delayed store save verifies restart waits for preference persistence and survives settings-store re-hydration; an E2E-only handoff suppresses the destructive relaunch. Real check/download/install + rollback stay manual via e2e/mock-updates because the debug E2E build disables updater checks. |
 | viewer-deeplink.spec.ts | windows, macos, linux | window-lifecycle, tauri-command | viewer-deeplink, window-lifecycle | medium | partial | command | 3 | Viewer window creation and per-path dedupe. |
+| webview-remote-ipc.spec.ts | windows, macos, linux | tauri-command, storage-privacy | webview-remote-ipc | high | strong | command | 3 | Loads a page from another localhost port in the Home window, which the old remote capability trusted. The IPC bridge is still injected there, but fs and store calls are rejected by the ACL and create nothing; the same fs call from the app's own page still works. |
 | webview-shell-scope.spec.ts | windows, macos, linux | tauri-command, os-integration | webview-shell-scope, ai-tools | high | strong | command | 5 | Calls the shell plugin from a real app webview. The removed exec-sh, sh, cmd and any-argument open entries are rejected by the capability scope. On macOS, a caller-supplied PATH cannot replace the system launcher, and the Claude/Cursor install check still reaches fs exists. |
 | window-activation.spec.ts | macos | window-lifecycle, tauri-command, real-ui-e2e | window-lifecycle, chat | medium | conditional | real-user-flow | 2 | macOS-only show_window_activated focus coverage. |
 | window-lifecycle.spec.ts | windows, macos, linux | window-lifecycle, tauri-command, real-ui-e2e | window-lifecycle, onboarding, tray-search | high | strong | mixed | 3 | Home, Search, and onboarding window routing. |
