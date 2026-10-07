@@ -201,6 +201,12 @@ async fn wait_until_exit(old: &Identity, timeout: Duration) -> Result<()> {
 }
 
 pub(crate) async fn initialize() -> Result<()> {
+    // Match the single-instance plugin's existing E2E isolation: those builds
+    // use separate data, API, and focus ports and must not inspect another app
+    // as a legacy owner merely because it has the same signing identity.
+    if cfg!(feature = "e2e") {
+        return Ok(());
+    }
     // Bare development/test executables do not participate in production ownership.
     let executable = std::env::current_exe()?;
     if !executable.components().any(|c| c.as_os_str() == "Contents") {
