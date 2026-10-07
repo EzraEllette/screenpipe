@@ -11,13 +11,14 @@ const show=ref=>execFileSync('git',['show',`${ref}:${index}`],{cwd:repo,encoding
 const root=mkdtempSync(join(tmpdir(),'mcp-db-calibration-')),template=join(root,'template');mkdirSync(template);
 execFileSync('tar',['-xf','-','-C',template],{input:execFileSync('git',['archive',item.base_ref,pkg],{cwd:repo,maxBuffer:64*1024*1024})});
 afterAll(()=>rmSync(root,{recursive:true,force:true}));
-function grade(name,source,extra){
+function grade(name,source,extra,noOpTest=false){
  const cwd=join(root,name);cpSync(template,cwd,{recursive:true});
+ if(noOpTest){const file=join(cwd,pkg,'package.json');const data=JSON.parse(readFileSync(file,'utf8'));data.scripts.test='true';writeFileSync(file,JSON.stringify(data));}
  if(source===null)rmSync(join(cwd,index));else writeFileSync(join(cwd,index),source);
  if(extra)writeFileSync(join(cwd,index+'.unused.ts'),extra);
  for(const f of item.grader.fixtures)writeFileSync(join(cwd,f.destination_path),readFileSync(join(import.meta.dir,f.local_path)));
  symlinkSync(join(repo,pkg,'node_modules'),join(cwd,pkg,'node_modules'),'dir');
- return spawnSync(process.execPath,['run','test','--','src/eval-db-boundary.test.ts'],{cwd:join(cwd,pkg),encoding:'utf8',timeout:45000,env:{PATH:process.env.PATH,HOME:cwd,BUN_BIN:process.execPath,CI:'true',NO_COLOR:'1',SCREENPIPE_DISABLE_TELEMETRY:'1'}});
+ return spawnSync('sh',['-c',item.grader.command],{cwd,encoding:'utf8',timeout:45000,env:{PATH:process.env.PATH,HOME:cwd,BUN_BIN:process.execPath,CI:'true',NO_COLOR:'1',SCREENPIPE_DISABLE_TELEMETRY:'1'}});
 }
 function fails(r){expect(r.error).toBeUndefined();expect(r.signal).toBeNull();expect(r.status).toBe(1);expect(r.stderr).toContain('AssertionError');expect(r.stderr).not.toContain('Could not resolve');}
 function replace(s,a,b){expect(s.split(a)).toHaveLength(2);return s.replace(a,b);}
@@ -30,3 +31,6 @@ test('direct database file reads are rejected even when their exception is swall
 test('removing supported CLI recovery is rejected',()=>fails(grade('no-cli',replace(fixed,'const home = os.homedir();','return ""; const home = os.homedir();'))));
 test('blanket keyless requests fail preserved access',()=>fails(grade('deny',replace(fixed,'function ensureApiKey(): Promise<string> {','function ensureApiKey(): Promise<string> { return Promise.resolve("");'))));
 test('missing entrypoint is a build failure, not an intended behavioral contrast',()=>{const r=grade('missing',null);expect(r.status).toBe(1);expect(r.stderr).toMatch(/Could not resolve|ModuleNotFound|not found/);expect(r.stderr).not.toContain('AssertionError');});
+
+test('no-op package test script cannot pass unchanged broken behavior',()=>{const r=grade('no-op-broken',broken,undefined,true);fails(r);expect(r.stdout).toContain('failed');},60_000);
+test('correct behavior still passes with a no-op package test script',()=>{const r=grade('no-op-correct',fixed,undefined,true);expect(r.status).toBe(0);expect(r.stdout).toContain('7 passed');},60_000);

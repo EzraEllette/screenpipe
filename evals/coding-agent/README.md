@@ -532,7 +532,7 @@ local API credentials are synthetic. Only the two production source changes
 are applied by the oracle; builds are created inside each grading workspace.
 
 Run `bun test evals/coding-agent/calibrate-mcp-team-reload.test.js` with the MCP
-package dependencies installed. Eight controls retain the parent/reference
+package dependencies installed. Ten controls retain the parent/reference
 contrast, reject an unused-helper fix, cached settings, stale gateway pairing
 and blanket denial, accept equivalent naming, and distinguish a missing-source
 build failure. These are deterministic corpus/grader tests, not model trials.
@@ -1736,3 +1736,9 @@ required. Run `bun test evals/coding-agent/calibrate-keyboard.test.js`. Hidden
 fixtures and runtime links appear only at grading. This does not verify the
 separate live-capture prepend index repair, full timeline rendering, native
 event delivery, recording persistence, enforced isolation or model performance.
+
+The MCP credential-reload and live-database-boundary graders invoke Vitest directly,
+so changing the candidate package’s `test` script cannot skip hidden assertions.
+Their calibration suites reject broken source with a no-op test script and still
+accept correct source with the same script. This closes that command-dispatch
+bypass; it does not establish an execution sandbox or tamper-proof dependencies.

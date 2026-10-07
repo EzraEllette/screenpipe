@@ -2007,7 +2007,7 @@
             "destination_path": "packages/screenpipe-mcp/src/eval-team-auth.test.ts"
           }
         ],
-        "command": "cd packages/screenpipe-mcp && SCREENPIPE_DISABLE_TELEMETRY=1 \"${BUN_BIN:-bun}\" run test -- src/eval-team-auth.test.ts"
+        "command": "cd packages/screenpipe-mcp && SCREENPIPE_DISABLE_TELEMETRY=1 node node_modules/vitest/vitest.mjs run src/eval-team-auth.test.ts"
       }
     },
     {
@@ -2407,7 +2407,7 @@
             "destination_path": "packages/screenpipe-mcp/src/eval-db-boundary.preload.cjs"
           }
         ],
-        "command": "cd packages/screenpipe-mcp && SCREENPIPE_DISABLE_TELEMETRY=1 \"${BUN_BIN:-bun}\" run test -- src/eval-db-boundary.test.ts"
+        "command": "cd packages/screenpipe-mcp && SCREENPIPE_DISABLE_TELEMETRY=1 node node_modules/vitest/vitest.mjs run src/eval-db-boundary.test.ts"
       }
     },
     {

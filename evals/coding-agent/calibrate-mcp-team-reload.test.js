@@ -16,14 +16,15 @@ const template=join(root,'template');mkdirSync(template);
 const archive=execFileSync('git',['archive',item.base_ref,pkg],{cwd:repo,maxBuffer:64*1024*1024});
 execFileSync('tar',['-xf','-','-C',template],{input:archive});
 afterAll(()=>rmSync(root,{recursive:true,force:true}));
-function grade(name,sources){
+function grade(name,sources,noOpTest=false){
  const cwd=join(root,name);cpSync(template,cwd,{recursive:true});
+ if(noOpTest){const file=join(cwd,pkg,'package.json');const data=JSON.parse(readFileSync(file,'utf8'));data.scripts.test='true';writeFileSync(file,JSON.stringify(data));}
  for(const [p,s] of Object.entries(sources)){
   if(s===null)rmSync(join(cwd,p));else writeFileSync(join(cwd,p),s);
  }
  writeFileSync(join(cwd,pkg,'src/eval-team-auth.test.ts'),readFileSync(join(import.meta.dir,'graders/mcp-team-reload.fixture.ts')));
  symlinkSync(join(repo,pkg,'node_modules'),join(cwd,pkg,'node_modules'),'dir');
- const r=spawnSync(process.execPath,['run','test','--','src/eval-team-auth.test.ts'],{cwd:join(cwd,pkg),encoding:'utf8',timeout:45_000,env:{PATH:process.env.PATH,HOME:cwd,TZ:'UTC',CI:'true',NO_COLOR:'1',FORCE_COLOR:'0',SCREENPIPE_DISABLE_TELEMETRY:'1'}});
+ const r=spawnSync('sh',['-c',item.grader.command],{cwd,encoding:'utf8',timeout:45_000,env:{PATH:process.env.PATH,HOME:cwd,TZ:'UTC',CI:'true',NO_COLOR:'1',FORCE_COLOR:'0',SCREENPIPE_DISABLE_TELEMETRY:'1'}});
  for(const key of ['stdout','stderr'])r[key]=r[key]?.replace(/\x1b\[[0-9;]*m/g,'');
  return r;
 }
@@ -47,3 +48,6 @@ test('new token paired with stale gateway is rejected',()=>{
 test('missing config source is a build error rather than behavior evidence',()=>{
  const r=grade('missing-source',{...fixed,[config]:null});expect(r.status).toBe(1);expect(r.stdout).toContain('skipped');expect(r.stderr).toContain('Could not resolve');expect(r.stderr).not.toContain('AssertionError');
 },60_000);
+
+test('no-op package test script cannot pass unchanged broken behavior',()=>{const r=grade('no-op-broken',broken,true);fails(r);expect(r.stdout).toContain('failed');},60_000);
+test('correct behavior still passes with a no-op package test script',()=>{const r=grade('no-op-correct',fixed,true);expect(r.status).toBe(0);expect(r.stdout).toContain('7 passed');},60_000);
