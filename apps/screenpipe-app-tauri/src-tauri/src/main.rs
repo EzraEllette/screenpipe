@@ -154,6 +154,8 @@ mod workflows_runtime;
 mod workflows_media;
 mod windows_ca_bundle;
 #[cfg(target_os = "windows")]
+mod windows_enterprise_takeover;
+#[cfg(target_os = "windows")]
 mod windows_crash_dump;
 #[cfg(target_os = "windows")]
 mod windows_overlay;
@@ -637,10 +639,22 @@ async fn main() {
                 eprintln!("screenpipe: another instance is already running — focused existing window, exiting.");
                 std::process::exit(0);
             } else if resp.status() == reqwest::StatusCode::CONFLICT {
+                #[cfg(all(target_os = "windows", feature = "enterprise-build"))]
+                {
+                    if let Err(error) =
+                        windows_enterprise_takeover::take_over_screenpipe_owner(focus_port).await
+                    {
+                        eprintln!("screenpipe: enterprise takeover failed: {error}");
+                        std::process::exit(1);
+                    }
+                }
+                #[cfg(not(all(target_os = "windows", feature = "enterprise-build")))]
+                {
                 // The control endpoint answered with Screenpipe's explicit
                 // cross-install rejection. Preserve that healthy instance;
                 // the bind path will report it instead of reclaiming its port.
                 crate::port_conflict::mark_healthy_control_server_present();
+                }
             }
         }
     }
@@ -2649,6 +2663,7 @@ async fn main() {
         }
     });
 }
+
 
 #[cfg(target_os = "macos")]
 fn manual_reopen(app: &tauri::AppHandle) {
