@@ -623,7 +623,7 @@ async fn main() {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(11435);
-        if let Ok(resp) = reqwest::Client::new()
+        let focus_response = reqwest::Client::new()
             .post(format!("http://127.0.0.1:{}/focus", focus_port))
             .timeout(std::time::Duration::from_secs(2))
             .json(&serde_json::json!({
@@ -633,21 +633,35 @@ async fn main() {
                 "launchd_job_label": launchd_job_label,
             }))
             .send()
-            .await
+            .await;
+
+        #[cfg(all(target_os = "windows", feature = "enterprise-build"))]
         {
-            if resp.status().is_success() {
-                eprintln!("screenpipe: another instance is already running — focused existing window, exiting.");
-                std::process::exit(0);
-            } else if resp.status() == reqwest::StatusCode::CONFLICT {
-                #[cfg(all(target_os = "windows", feature = "enterprise-build"))]
-                {
-                    if let Err(error) =
-                        windows_enterprise_takeover::take_over_screenpipe_owner(focus_port).await
-                    {
-                        eprintln!("screenpipe: enterprise takeover failed: {error}");
-                        std::process::exit(1);
-                    }
+            // Enterprise owns the shared database whenever any other Screenpipe
+            // edition is present. Arbitrate by the actual port owner even when a
+            // legacy Consumer accepted /focus or its endpoint is still starting.
+            match windows_enterprise_takeover::take_over_screenpipe_owner(focus_port).await {
+                Ok(windows_enterprise_takeover::TakeoverOutcome::SameExecutable) => {
+                    eprintln!("screenpipe: Enterprise is already running — focused existing window, exiting.");
+                    std::process::exit(0);
                 }
+                Ok(windows_enterprise_takeover::TakeoverOutcome::NoOwner)
+                | Ok(windows_enterprise_takeover::TakeoverOutcome::ReplacedCompetingOwner) => {}
+                Err(error) => {
+                    eprintln!("screenpipe: enterprise takeover failed: {error}");
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        if let Ok(resp) = focus_response {
+            if resp.status().is_success() {
+                #[cfg(not(all(target_os = "windows", feature = "enterprise-build")))]
+                {
+                    eprintln!("screenpipe: another instance is already running — focused existing window, exiting.");
+                    std::process::exit(0);
+                }
+            } else if resp.status() == reqwest::StatusCode::CONFLICT {
                 #[cfg(not(all(target_os = "windows", feature = "enterprise-build")))]
                 {
                 // The control endpoint answered with Screenpipe's explicit
