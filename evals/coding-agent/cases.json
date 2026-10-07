@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "suite": "screenpipe-app-coding-agent-regressions",
-  "dataset_version": "2026-10-07-auth-logout",
+  "dataset_version": "2026-10-07-imported-agent-settings",
   "suite_type": "regression",
   "owner": "screenpipe engineering",
   "policy": {
@@ -5792,6 +5792,54 @@
           }
         ],
         "command": "cd apps/screenpipe-app-tauri && node node_modules/vitest/vitest.mjs run --config eval-auth-logout.config.mjs"
+      }
+    },
+    {
+      "id": "app-imported-agent-settings",
+      "name": "Persist portable agent settings when importing external chats",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "0f7e2a87d51cde5950aa2160df6fc16774cc78f6"
+      },
+      "base_ref": "ae84199d25c4494ba1ac671a3adcddb7a7e413f5",
+      "oracle_ref": "0f7e2a87d51cde5950aa2160df6fc16774cc78f6",
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/lib/chat/external-chat-parser.ts",
+        "apps/screenpipe-app-tauri/lib/chat/external-chat-import.ts",
+        "apps/screenpipe-app-tauri/lib/hooks/use-settings.tsx"
+      ],
+      "trigger_paths": [
+        "apps/screenpipe-app-tauri/lib/chat/external-chat-parser.ts",
+        "apps/screenpipe-app-tauri/lib/chat/external-chat-import.ts"
+      ],
+      "gate": "advisory",
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "chat-import",
+        "preserved-behavior"
+      ],
+      "prompt": "Imported external chats lose their portable agent settings before they can be restored. Repair the actual transcript import-and-save flow. For Codex, retain the latest recorded model and reasoning effort, accepting direct effort/reasoning_effort fields and collaboration-mode settings when direct values are absent. For Claude, retain the assistant model and permission mode; synthetic wrapper models and sidechain messages must not override the main conversation. Save these values using the existing importedFrom.config model/reasoningEffort/modeId contract. Do not copy local directories, environment values, sandbox rules or approval authority into that portable configuration. A settings-only change must persist even when automatic sync sees unchanged messages and timestamps. Preserve user-owned titles, selected presets, pins and local continuation messages. A transcript without configuration must not acquire invented settings; a completely unchanged record must avoid unnecessary writes; an unreadable input must report failure without saving. Keep the existing importer and conversation contracts compatible. No particular implementation is required. Grading invokes the importer and real parser with synthetic filesystem, persistence and event ports. Real transcript discovery, filesystem durability, composer selection, enterprise policy enforcement, provider execution and agent isolation are separate.",
+      "agent_timeout_seconds": 900,
+      "grader_dependency_links": [
+        {
+          "source_path": "apps/screenpipe-app-tauri/node_modules",
+          "destination_path": "apps/screenpipe-app-tauri/node_modules"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/imported-agent-settings.fixture.ts.txt",
+            "destination_path": "apps/screenpipe-app-tauri/eval-import-settings.test.ts"
+          },
+          {
+            "local_path": "graders/imported-agent-settings.config.mjs",
+            "destination_path": "apps/screenpipe-app-tauri/eval-import-settings.config.mjs"
+          }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && node node_modules/vitest/vitest.mjs run --config eval-import-settings.config.mjs"
       }
     }
   ]

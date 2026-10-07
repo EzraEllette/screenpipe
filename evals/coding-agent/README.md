@@ -67,7 +67,7 @@ The hidden fixture appears only at grading and uses no dependency links.
 This does not establish native recording continuity, real authentication,
 account-switch race safety, browser integration, isolation or model performance.
 
-The current app corpus contains 139 git-mined regressions. See
+The current app corpus contains 140 git-mined regressions. See
 [DESIGN.md](./DESIGN.md) for the Anthropic guidance, source contract, and
 history-mining workflow. The companion website manifest uses this same harness.
 
@@ -1768,3 +1768,16 @@ for correct, broken, equivalent, unused-source, refusal and preserved controls.
 This differs from `app-auth-verification-schedule`, which mocks the provider and
 checks AuthGuard scheduling. Actual multi-window delivery, native credential
 durability, provider revocation, enforced isolation and model gains are unverified.
+
+## Imported agent settings
+
+`app-imported-agent-settings` invokes the real transcript importer and parser
+with synthetic filesystem, persistence and event ports. Eight outcomes cover
+portable Codex/Claude configuration, settings-only refreshes, excluded local
+authority metadata, user-owned chat state, absent configuration, unchanged
+records and unreadable input. The parent fails four settings outcomes and
+preserves four; the historical fix and current source pass eight. Run
+`bun test evals/coding-agent/calibrate-imported-agent-settings.test.js` for
+correct, broken, disconnected, equivalent and preserved-behavior controls.
+This does not verify actual transcript discovery, durable native writes,
+composer selection, enterprise policy, provider execution, isolation or model gains.
