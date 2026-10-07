@@ -116,7 +116,7 @@ async fn fixture(db: &DatabaseManager) {
     );
     for id in 300..303_i64 {
         let mut tx = db.begin_immediate_with_retry().await.unwrap();
-        sqlx::query("INSERT INTO frames(id,timestamp,app_name,full_text,snapshot_path) VALUES(?,'2026-09-18T13:00:00Z','Browser',?,?)")
+        sqlx::query("INSERT INTO frames(id,timestamp,app_name,full_text,accessibility_text,snapshot_path) VALUES(?,'2026-09-18T13:00:00Z','Browser',?,'gianttextneedle',?)")
             .bind(id).bind(&huge_text).bind(format!("fixture-{id}.jpg")).execute(&mut **tx.conn()).await.unwrap();
         tx.commit().await.unwrap();
         db.wal_checkpoint().await.unwrap();
@@ -201,12 +201,20 @@ async fn production_size_migration_preserves_api_and_saves_allocated_space() {
         "/frames/257/text",
         "/frames/257/metadata",
         "/frames/257/elements",
-        "/frames/300/context",
+        "/frames/257/context",
         "/search?q=gianttextneedle&content_type=ocr&limit=3",
+        "/search?q=gianttextneedle&content_type=accessibility&limit=3",
     ];
     let api = router(root.path(), db.clone()).await;
     let baseline = measure(&api, "sqlite", &paths).await;
     assert!(baseline.iter().all(|row| row["status"] == 200));
+    assert!(baseline
+        .iter()
+        .filter(|row| {
+            row["path"].as_str().unwrap().contains("gianttextneedle")
+                || row["path"] == "/frames/257/context"
+        })
+        .all(|row| row["bytes"].as_u64().unwrap() > MIB as u64));
     drop(api);
     db.wal_checkpoint().await.unwrap();
     db.close().await;

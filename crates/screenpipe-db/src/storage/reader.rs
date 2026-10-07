@@ -197,17 +197,79 @@ impl DatabaseManager {
         rows: &mut [crate::OCRResultRaw],
         detail: bool,
     ) -> Result<(), sqlx::Error> {
-        if self.storage.is_none() {
-            return Ok(());
-        }
         let projection = if detail {
             Projection::All
         } else {
             Projection::Search
         };
+        self.hydrate_frame_payload_rows(
+            rows,
+            projection,
+            |row| row.frame_id,
+            |row, payload| {
+                row.ocr_text = payload
+                    .full_text
+                    .or(payload.accessibility_text)
+                    .unwrap_or_default();
+                if detail {
+                    row.text_json = payload.text_json.unwrap_or_default();
+                }
+            },
+        )
+        .await
+    }
+
+    pub(crate) async fn hydrate_frame_rows(
+        &self,
+        rows: &mut [crate::FrameRow],
+    ) -> Result<(), sqlx::Error> {
+        self.hydrate_frame_payload_rows(
+            rows,
+            Projection::All,
+            |row| row.id,
+            |row, payload| {
+                row.ocr_text = payload
+                    .full_text
+                    .or(payload.accessibility_text)
+                    .unwrap_or_default();
+                row.text_json = payload.text_json.unwrap_or_default();
+                row.accessibility_tree_json = payload.accessibility_tree_json;
+            },
+        )
+        .await
+    }
+
+    pub(crate) async fn hydrate_accessibility_rows(
+        &self,
+        rows: &mut [crate::UiContent],
+    ) -> Result<(), sqlx::Error> {
+        self.hydrate_frame_payload_rows(
+            rows,
+            Projection::Search,
+            |row| row.id,
+            |row, payload| {
+                row.text = payload
+                    .full_text
+                    .or(payload.accessibility_text)
+                    .unwrap_or_default();
+            },
+        )
+        .await
+    }
+
+    async fn hydrate_frame_payload_rows<T>(
+        &self,
+        rows: &mut [T],
+        projection: Projection,
+        frame_id: impl Fn(&T) -> i64,
+        hydrate: impl Fn(&mut T, FramePayload),
+    ) -> Result<(), sqlx::Error> {
+        if self.storage.is_none() {
+            return Ok(());
+        }
         let mut pending = vec![rows];
         while let Some(batch) = pending.pop() {
-            let ids: Vec<_> = batch.iter().map(|r| r.frame_id).collect();
+            let ids: Vec<_> = batch.iter().map(&frame_id).collect();
             let mut payloads = match self.frame_payloads(&ids, projection).await {
                 Ok(payloads) => payloads,
                 Err(sqlx::Error::Protocol(reason))
@@ -226,55 +288,10 @@ impl DatabaseManager {
             };
             for row in batch {
                 let payload = payloads
-                    .remove(&row.frame_id)
+                    .remove(&frame_id(row))
                     .ok_or_else(|| storage_error("selected frame disappeared"))?;
-                row.ocr_text = payload
-                    .full_text
-                    .or(payload.accessibility_text)
-                    .unwrap_or_default();
-                if detail {
-                    row.text_json = payload.text_json.unwrap_or_default();
-                }
+                hydrate(row, payload);
             }
-        }
-        Ok(())
-    }
-
-    pub(crate) async fn hydrate_frame_rows(
-        &self,
-        rows: &mut [crate::FrameRow],
-    ) -> Result<(), sqlx::Error> {
-        if self.storage.is_none() {
-            return Ok(());
-        }
-        let ids: Vec<_> = rows.iter().map(|r| r.id).collect();
-        let mut payloads = self.frame_payloads(&ids, Projection::All).await?;
-        for row in rows {
-            let payload = payloads
-                .remove(&row.id)
-                .ok_or_else(|| storage_error("selected frame disappeared"))?;
-            row.ocr_text = payload.text().to_owned();
-            row.text_json = payload.text_json.unwrap_or_default();
-            row.accessibility_tree_json = payload.accessibility_tree_json;
-        }
-        Ok(())
-    }
-
-    pub(crate) async fn hydrate_accessibility_rows(
-        &self,
-        rows: &mut [crate::UiContent],
-    ) -> Result<(), sqlx::Error> {
-        if self.storage.is_none() {
-            return Ok(());
-        }
-        let ids: Vec<_> = rows.iter().map(|r| r.id).collect();
-        let payloads = self.frame_payloads(&ids, Projection::Search).await?;
-        for row in rows {
-            row.text = payloads
-                .get(&row.id)
-                .ok_or_else(|| storage_error("selected frame disappeared"))?
-                .text()
-                .to_owned();
         }
         Ok(())
     }
