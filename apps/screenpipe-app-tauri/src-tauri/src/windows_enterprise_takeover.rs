@@ -44,6 +44,30 @@ pub(crate) enum TakeoverOutcome {
     ReplacedCompetingOwner,
 }
 
+pub(crate) async fn take_over_screenpipe_owners(
+    control_port: u16,
+    api_port: u16,
+) -> Result<TakeoverOutcome, String> {
+    let mut saw_same_executable = false;
+    let mut replaced_competing_owner = false;
+
+    for port in [control_port, api_port] {
+        match take_over_screenpipe_owner(port).await? {
+            TakeoverOutcome::NoOwner => {}
+            TakeoverOutcome::SameExecutable => saw_same_executable = true,
+            TakeoverOutcome::ReplacedCompetingOwner => replaced_competing_owner = true,
+        }
+    }
+
+    if saw_same_executable {
+        Ok(TakeoverOutcome::SameExecutable)
+    } else if replaced_competing_owner {
+        Ok(TakeoverOutcome::ReplacedCompetingOwner)
+    } else {
+        Ok(TakeoverOutcome::NoOwner)
+    }
+}
+
 pub(crate) async fn take_over_screenpipe_owner(port: u16) -> Result<TakeoverOutcome, String> {
     let Some(owner) = resolve_verified_owner(port).await.map_err(|cause| {
         record("verification_failed", &cause, "enterprise_start_aborted");
@@ -132,7 +156,12 @@ async fn resolve_verified_owner(port: u16) -> Result<Option<Owner>, String> {
         .ok_or_else(|| format!("control owner pid={pid} exited before verification"))?;
     let exe = process.exe().to_path_buf();
     let start_time = process.start_time();
-    if !looks_like_screenpipe_exe(&exe) {
+    #[cfg(test)]
+    let is_current_test_harness = std::env::current_exe()
+        .is_ok_and(|current_exe| same_path(&exe, &current_exe));
+    #[cfg(not(test))]
+    let is_current_test_harness = false;
+    if !looks_like_screenpipe_exe(&exe) && !is_current_test_harness {
         return Err(format!(
             "refused to terminate pid={pid}: verified control responder executable was not Screenpipe ({})",
             exe.display()
@@ -450,6 +479,84 @@ mod tests {
         assert_eq!(outcome, TakeoverOutcome::ReplacedCompetingOwner);
         let _terminated_status = child.wait().unwrap();
         assert!(std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).is_ok());
+    }
+
+    fn spawn_owner_fixture(port: u16, copied_executable: Option<&Path>) -> std::process::Child {
+        use std::process::{Command, Stdio};
+
+        let executable = copied_executable
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| std::env::current_exe().unwrap());
+        Command::new(executable)
+            .args([
+                "--exact",
+                "windows_enterprise_takeover::tests::screenpipe_owner_fixture",
+                "--nocapture",
+            ])
+            .env("SCREENPIPE_TAKEOVER_FIXTURE_PORT", port.to_string())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap()
+    }
+
+    async fn wait_for_fixture(port: u16) {
+        for _ in 0..50 {
+            if std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)).is_ok() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        panic!("owner fixture did not start on port {port}");
+    }
+
+    fn unused_port() -> u16 {
+        let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        listener.local_addr().unwrap().port()
+    }
+
+    #[tokio::test]
+    async fn api_only_competing_owner_is_replaced() {
+        let control_port = unused_port();
+        let api_port = unused_port();
+        let temp = tempfile::tempdir().unwrap();
+        let fixture_exe = temp.path().join("screenpipe-app.exe");
+        std::fs::copy(std::env::current_exe().unwrap(), &fixture_exe).unwrap();
+        let mut api_owner = spawn_owner_fixture(api_port, Some(&fixture_exe));
+        wait_for_fixture(api_port).await;
+
+        assert_eq!(
+            take_over_screenpipe_owners(control_port, api_port)
+                .await
+                .unwrap(),
+            TakeoverOutcome::ReplacedCompetingOwner
+        );
+        let _ = api_owner.wait().unwrap();
+    }
+
+    #[tokio::test]
+    async fn same_enterprise_control_still_clears_competing_api_owner() {
+        let control_port = unused_port();
+        let api_port = unused_port();
+        let temp = tempfile::tempdir().unwrap();
+        let fixture_exe = temp.path().join("screenpipe-app.exe");
+        std::fs::copy(std::env::current_exe().unwrap(), &fixture_exe).unwrap();
+        let mut control_owner = spawn_owner_fixture(control_port, None);
+        let mut api_owner = spawn_owner_fixture(api_port, Some(&fixture_exe));
+        wait_for_fixture(control_port).await;
+        wait_for_fixture(api_port).await;
+
+        assert_eq!(
+            take_over_screenpipe_owners(control_port, api_port)
+                .await
+                .unwrap(),
+            TakeoverOutcome::SameExecutable
+        );
+        assert!(control_owner.try_wait().unwrap().is_none());
+        let _ = api_owner.wait().unwrap();
+        control_owner.kill().unwrap();
+        let _ = control_owner.wait().unwrap();
     }
 
     #[test]
