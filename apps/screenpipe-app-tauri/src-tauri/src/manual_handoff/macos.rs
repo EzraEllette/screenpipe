@@ -26,6 +26,8 @@ use tokio::{
 
 #[path = "signing.rs"]
 mod signing;
+#[path = "kernel_signature.rs"]
+mod kernel_signature;
 
 const WAIT: Duration = Duration::from_secs(30);
 const EXPECTED_BUILD_ENV: &str = "SCREENPIPE_MANUAL_HANDOFF_BUILD";
@@ -573,7 +575,11 @@ async fn legacy_takeover(runtime: &Runtime) -> Result<()> {
         .file_name()
         .context("missing executable name")?;
     for pid in signing::candidates(name)? {
-        if signing::verify_process(pid, &runtime.requirement).is_err() {
+        if let Err(error) = signing::verify_process(pid, &runtime.requirement) {
+            if signing::claimed_identifier(pid).as_deref() == Some(&runtime.identity.identifier)
+                || signing::process_path(pid).ok().as_ref() == Some(&runtime.identity.executable) {
+                bail!("cannot authenticate the existing Screenpipe process {pid}: {error:#}");
+            }
             continue;
         }
         let old = signing::running(pid, &runtime.requirement)?;

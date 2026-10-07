@@ -139,6 +139,10 @@ mod tests {
             "drain",
             "database shutdown timed out for private-person@example.com",
         );
+        std::fs::write(
+            root.path().join(crate::update_diagnostics::RECOVERY_LOG_NAME),
+            "manual_recovery: stage=recovery_validation; cause=Verify app signature: code signature invalid (-67054); target=private-person@example.com; outcome=selected_copy_not_started\n",
+        ).unwrap();
         for day in 1..=7 {
             std::fs::write(
                 root.path()
@@ -153,6 +157,8 @@ mod tests {
         assert!(report.contains("manual_handoff_failed"));
         assert!(report.contains("database shutdown timed out"));
         assert!(report.contains("selected_copy_not_started"));
+        assert!(report.contains("manual_recovery"));
+        assert!(report.contains("code signature invalid (-67054)"));
         assert!(!report.contains("private-person@example.com"));
     }
 
@@ -166,14 +172,26 @@ mod tests {
         let report = crate::diagnostic_logs::collect_redacted_from_dirs(&[root.into()])
             .await
             .unwrap();
-        for evidence in [
-            "manual_handoff_candidate",
-            "source=",
-            "target=",
-            "manual_handoff_failed",
-            "cannot authenticate the legacy search API",
-            "selected_copy_not_started",
-        ] {
+        let evidence = if std::env::var_os("HANDOFF_TEST_RECOVERY_LAUNCHER").is_some() {
+            vec![
+                "manual_recovery",
+                "stage=recovery_validation",
+                "source=",
+                "target=",
+                "cause=",
+                "selected_copy_not_started",
+            ]
+        } else {
+            vec![
+                "manual_handoff_candidate",
+                "source=",
+                "target=",
+                "manual_handoff_failed",
+                "cannot authenticate the legacy search API",
+                "selected_copy_not_started",
+            ]
+        };
+        for evidence in evidence {
             assert!(report.contains(evidence), "support report lost {evidence}");
         }
         std::fs::write(output, report).unwrap();
