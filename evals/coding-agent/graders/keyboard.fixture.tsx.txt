@@ -1,0 +1,31 @@
+// screenpipe — AI that knows everything you've seen, said, or heard
+// https://screenpipe.com
+import {renderHook,fireEvent,cleanup} from '@testing-library/react';
+import {afterEach,beforeEach,expect,it,vi} from 'vitest';
+vi.mock('@tauri-apps/api/event',()=>({listen:vi.fn(async()=>()=>{})}));
+vi.mock('@/lib/utils/tauri',()=>({commands:{closeWindow:vi.fn(),copyFrameToClipboard:vi.fn(async()=>{})}}));
+vi.mock('@/components/rewind/timeline/timeline',()=>({getFrameAppName:(f:any)=>f?.app}));
+vi.mock('@/components/ui/use-toast',()=>({toast:vi.fn()}));
+import {useTimelineKeyboard} from './components/rewind/hooks/use-timeline-keyboard';
+beforeEach(()=>vi.useFakeTimers());
+afterEach(()=>{cleanup();document.body.replaceChildren();vi.clearAllTimers();vi.useRealTimers();});
+function setup(extra:any={}){
+ let index=2;
+ const frames=Array.from({length:5},(_,i)=>({timestamp:new Date(1700000000000-i*1000).toISOString(),devices:[{frame_id:i+1}],app:'synthetic'}));
+ const setCurrentIndex=vi.fn((next:any)=>{index=typeof next==='function'?next(index):next});
+ const opts:any={frames,currentIndex:index,currentFrame:frames[index],setCurrentIndex,setCurrentFrame:vi.fn(),showSearchModal:false,setShowSearchModal:vi.fn(),inSearchReviewMode:false,matchingIndices:null,isPlaying:false,pausePlayback:vi.fn(),seekPlayback:vi.fn(),navigateToSearchResultRef:{current:vi.fn()},findNextDevice:vi.fn((n:number,d:number)=>Math.max(0,Math.min(4,n+d))),embedded:true,isMac:false,searchResultIndex:1,searchResults:[{}, {}, {}],dismissSearchHighlight:vi.fn(),clearSearchHighlight:vi.fn(),hasSearchHighlight:false,setIsArrowNav:vi.fn(),arrowNavTimerRef:{current:null},resetFilters:vi.fn(),selectionRange:null,sendSelectionToChat:vi.fn(async()=>{}),selectedDeviceIdRef:{current:'all'},selectedAppNameRef:{current:'all'},...extra};
+ const view=renderHook((props:any)=>useTimelineKeyboard(props),{initialProps:opts});
+ return {opts,view,index:()=>index,key:(key:string,target:Element|Window=window)=>fireEvent.keyDown(target,{key})};
+}
+for(const [key,selected] of [['ArrowLeft',4],['ArrowRight',0]] as const)it(key+' immediately uses the updated filter on unchanged frames',()=>{
+ const f=setup(),fresh=vi.fn(()=>selected);f.view.rerender({...f.opts,findNextDevice:fresh});f.key(key);expect(f.index()).toBe(selected);expect(f.opts.setCurrentFrame).toHaveBeenLastCalledWith(f.opts.frames[selected]);expect(f.opts.findNextDevice).not.toHaveBeenCalled();
+});
+it('replaced navigation state receiver gets the next key',()=>{const f=setup(),next=vi.fn();f.view.rerender({...f.opts,setCurrentIndex:next});f.key('ArrowLeft');expect(next).toHaveBeenCalledTimes(1);expect(f.opts.setCurrentIndex).not.toHaveBeenCalled();});
+for(const [key,index] of [['ArrowLeft',3],['ArrowRight',1]] as const)it(key+' still moves one frame in ordinary browsing',()=>{const f=setup();f.key(key);expect(f.index()).toBe(index);expect(f.opts.setCurrentFrame).toHaveBeenLastCalledWith(f.opts.frames[index]);});
+it('text inputs and textareas retain arrow keys',()=>{const f=setup();for(const tag of ['input','textarea']){const el=document.createElement(tag);document.body.append(el);f.key('ArrowLeft',el)}expect(f.opts.setCurrentIndex).not.toHaveBeenCalled();expect(f.opts.setCurrentFrame).not.toHaveBeenCalled();});
+it('editable content retains arrow keys',()=>{const f=setup(),el=document.createElement('div');Object.defineProperty(el,'isContentEditable',{value:true});document.body.append(el);f.key('ArrowRight',el);expect(f.opts.setCurrentIndex).not.toHaveBeenCalled();});
+it('search modal retains arrow keys',()=>{const f=setup({showSearchModal:true});f.key('ArrowLeft');expect(f.opts.setCurrentIndex).not.toHaveBeenCalled();});
+it('search review navigates results without moving ordinary frames',()=>{const f=setup({inSearchReviewMode:true,isPlaying:true});f.key('ArrowLeft');expect(f.opts.navigateToSearchResultRef.current).toHaveBeenLastCalledWith(2);expect(f.opts.pausePlayback).toHaveBeenCalledTimes(1);expect(f.opts.setCurrentIndex).not.toHaveBeenCalled();});
+it('playing navigation seeks the selected timestamp',()=>{const f=setup({isPlaying:true});f.key('ArrowRight');expect(f.opts.seekPlayback).toHaveBeenLastCalledWith(Date.parse(f.opts.frames[1].timestamp));expect(f.opts.pausePlayback).not.toHaveBeenCalled();});
+it('no matching successor preserves the current frame index',()=>{const f=setup({findNextDevice:(n:number)=>n});f.key('ArrowRight');expect(f.index()).toBe(2);expect(f.opts.setCurrentFrame).toHaveBeenLastCalledWith(f.opts.frames[2]);});
+it('unmount removes keyboard navigation',()=>{const f=setup();f.view.unmount();f.key('ArrowRight');expect(f.opts.setCurrentIndex).not.toHaveBeenCalled();expect(f.opts.setCurrentFrame).not.toHaveBeenCalled();});

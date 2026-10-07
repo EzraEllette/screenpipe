@@ -5643,6 +5643,56 @@
         ],
         "command": "cd apps/screenpipe-app-tauri && node node_modules/vitest/vitest.mjs run --config recency-probe.config.ts"
       }
+    },
+    {
+      "id": "app-timeline-keyboard-filter-freshness",
+      "name": "Keep timeline arrow navigation on the current filter and state receiver",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "a3f49b7c66bcc80d97d99abed54fca406db4fb91"
+      },
+      "base_ref": "f5d0c1550f8c37ed0cb034ba93248b2bb4116639",
+      "oracle_ref": "a3f49b7c66bcc80d97d99abed54fca406db4fb91",
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/components/rewind/hooks/use-timeline-keyboard.ts"
+      ],
+      "gate": "advisory",
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "timeline",
+        "keyboard",
+        "preserved-behavior"
+      ],
+      "trigger_paths": [
+        "apps/screenpipe-app-tauri/components/rewind/hooks/use-timeline-keyboard.ts"
+      ],
+      "prompt": "Timeline arrow navigation can keep using the previous filter until new frames arrive. Fix the actual mounted keyboard hook so ArrowLeft and ArrowRight immediately use the current filter/navigation callback after a rerender, even when the frame array stays unchanged. Do not invoke the stale selection callback. If the index state receiver changes, the next key must reach the new receiver exactly once, not the old receiver. Keep the selected frame and index aligned with the current callback result. Preserve ordinary older/newer navigation, no-successor behavior, and keyboard-listener cleanup on unmount. Text inputs, textareas, editable content and an open search modal retain their arrow keys without moving the timeline. In search review, arrows navigate results and pause playback without ordinary frame navigation. While ordinary playback is running, arrow navigation seeks to the selected frame timestamp without pausing it. Public hook interfaces remain compatible; no dependency-list shape or private implementation is required. Checks mount the actual React hook and dispatch DOM keyboard events with synthetic navigation/native/translation ports. This task does not cover the separate live-capture prepend index repair, full timeline rendering, native event delivery, capture persistence or execution isolation.",
+      "agent_timeout_seconds": 900,
+      "grader_dependency_links": [
+        {
+          "source_path": "apps/screenpipe-app-tauri/node_modules",
+          "destination_path": "apps/screenpipe-app-tauri/node_modules"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/keyboard.fixture.tsx.txt",
+            "destination_path": "apps/screenpipe-app-tauri/keyboard-probe.test.tsx"
+          },
+          {
+            "local_path": "graders/keyboard.config.ts",
+            "destination_path": "apps/screenpipe-app-tauri/keyboard-probe.config.ts"
+          },
+          {
+            "local_path": "graders/keyboard-translation.ts",
+            "destination_path": "apps/screenpipe-app-tauri/keyboard-translation.ts"
+          }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && node node_modules/vitest/vitest.mjs run --config keyboard-probe.config.ts"
+      }
     }
   ]
 }

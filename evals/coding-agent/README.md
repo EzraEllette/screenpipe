@@ -67,7 +67,7 @@ The hidden fixture appears only at grading and uses no dependency links.
 This does not establish native recording continuity, real authentication,
 account-switch race safety, browser integration, isolation or model performance.
 
-The current app corpus contains 136 git-mined regressions. See
+The current app corpus contains 137 git-mined regressions. See
 [DESIGN.md](./DESIGN.md) for the Anthropic guidance, source contract, and
 history-mining workflow. The companion website manifest uses this same harness.
 
@@ -1724,3 +1724,15 @@ nine. Run `bun test evals/coding-agent/calibrate-recency.test.js` for calibratio
 Hidden fixtures and dependency links appear only when grading starts. This does
 not execute native persistence, foreground/background save callbacks, full
 sidebar rendering, enforced agent isolation or model trials.
+
+## Timeline keyboard filter freshness
+
+`app-timeline-keyboard-filter-freshness` mounts the actual keyboard hook with
+synthetic navigation/native/translation ports. Three parent failures cover stale
+left/right filters and a replaced state receiver; nine nearby outcomes pass.
+The source-only historical fix and current hook pass all twelve. Text input,
+search review, playback seeking, no-successor behavior and unmount cleanup remain
+required. Run `bun test evals/coding-agent/calibrate-keyboard.test.js`. Hidden
+fixtures and runtime links appear only at grading. This does not verify the
+separate live-capture prepend index repair, full timeline rendering, native
+event delivery, recording persistence, enforced isolation or model performance.
