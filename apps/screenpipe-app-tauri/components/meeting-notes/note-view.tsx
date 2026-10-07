@@ -102,6 +102,7 @@ import {
 } from "@/lib/utils/calendar";
 import { cn } from "@/lib/utils";
 import { AttendeesPill } from "./attendees-pill";
+import { MeetingAppLabel } from "./meeting-app-label";
 import { CalendarNudge } from "./calendar-nudge";
 import { Receipts } from "./receipts";
 import { ReplayStrip } from "./replay-strip";
@@ -182,6 +183,7 @@ import {
   MEETING_RULE_ACTION_CLASS,
   MEETING_SHELL_CLASS,
   MeetingSummarySurface,
+  useMeetingSummaryTab,
   MeetingWorkspaceTabs,
   stopMeetingAndOpenSummary,
   type MeetingWorkspaceTab,
@@ -341,6 +343,7 @@ export function NoteView({
   );
   const [summaryLifecycle, setSummaryLifecycle] =
     useState<MeetingSummaryLifecycle>({ kind: "idle" });
+  const [summarySavePending, setSummarySavePending] = useState(false);
   const [summaryStatusRefreshKey, setSummaryStatusRefreshKey] = useState(0);
   const [summaryRevealKey, setSummaryRevealKey] = useState(0);
   const [summaryPresetIds, setSummaryPresetIds] = useState<string[]>([]);
@@ -570,6 +573,7 @@ export function NoteView({
   });
   const visibleSummaryLifecycle = summaryPresentation.lifecycle;
   const summaryWorking = summaryPresentation.working;
+  useMeetingSummaryTab(summaryWorking, setActiveTab);
   const retranscriptionSummaryRefreshWorking =
     transcriptRefreshRequested === true &&
     !summarizing &&
@@ -584,6 +588,7 @@ export function NoteView({
       : null;
   const summaryExecutionIdRef = useRef<number | null>(summaryExecutionId);
   summaryExecutionIdRef.current = summaryExecutionId;
+  const refreshedSummaryExecutionRef = useRef<number | null>(null);
   const summaryStreamsRef = useRef(
     new Map<number, MeetingSummaryStreamState>(),
   );
@@ -624,7 +629,7 @@ export function NoteView({
       const pipe = parsePipeSessionId(envelope.sessionId);
       if (!pipe || pipe.pipeName !== summaryPipeSlug) return;
       const executionId = envelope.executionId ?? pipe.executionId;
-      if (executionId == null) return;
+      if (executionId == null || executionId === refreshedSummaryExecutionRef.current) return;
 
       const next = advanceMeetingSummaryStream(
         streams.get(executionId) ?? emptyMeetingSummaryStream(),
@@ -652,8 +657,6 @@ export function NoteView({
       streams.clear();
     };
   }, [summaryPipeSlug]);
-
-  const refreshedSummaryExecutionRef = useRef<number | null>(null);
 
   useEffect(() => {
     if (isLive || !meeting.meeting_end) return;
@@ -745,6 +748,9 @@ export function NoteView({
               if (updatedMeeting.note !== meeting.note) {
                 setSummaryRevealKey((key) => key + 1);
               }
+              if (updatedMeeting.note === meeting.note) {
+                setRenderedSummaryStream(null);
+              }
               onSavedRef.current(updatedMeeting);
             } else {
               // Execution completion and the meeting-note write are separate
@@ -757,6 +763,7 @@ export function NoteView({
             summarySavePending = true;
           }
         }
+        setSummarySavePending(summarySavePending);
         setSummaryLifecycle(next);
 
         // Never stop: settling to idle used to end the poll, which is how a
@@ -1123,6 +1130,9 @@ export function NoteView({
       const next = meeting.note ?? "";
       if (next !== note) {
         setNote(next);
+        // The persisted note now owns the surface; stale stream text must not
+        // mask subsequent inline edits.
+        setRenderedSummaryStream(null);
         if (summaryRevealPendingRef.current) {
           summaryRevealPendingRef.current = false;
           setSummaryRevealKey((key) => key + 1);
@@ -2152,6 +2162,21 @@ export function NoteView({
   }
   const meetingMenuGroups: MeetingMenuGroup[] = [
     { label: ui("Summary"), items: summaryMenuItems },
+    ...(onOpenCalendarConnections
+      ? [
+          {
+            label: ui("Settings"),
+            items: [
+              {
+                key: "calendar-connections",
+                label: ui("Calendar connections"),
+                icon: Calendar,
+                onSelect: onOpenCalendarConnections,
+              },
+            ],
+          },
+        ]
+      : []),
     ...(isLive || resuming
       ? []
       : [
@@ -2310,12 +2335,7 @@ export function NoteView({
                 <span>{meetingDurationLabel}</span>
               </>
             )}
-            {meeting.meeting_app && meeting.meeting_app !== "manual" && (
-              <>
-                <span aria-hidden>·</span>
-                <span>{meeting.meeting_app}</span>
-              </>
-            )}
+            <MeetingAppLabel app={meeting.meeting_app} />
             <span className="ml-1">
               <AttendeesPill
                 value={attendees}
@@ -2498,6 +2518,9 @@ export function NoteView({
         {activeTab === "summary" && (
           <MeetingSummarySurface
             note={note}
+            onNoteChange={
+              !summaryWorking && !summarySavePending ? setNote : undefined
+            }
             state={summarySurfaceState}
             detail={summaryStatus.detail}
             streamedSummary={streamedSummary}
