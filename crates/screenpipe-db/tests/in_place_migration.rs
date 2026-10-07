@@ -6,6 +6,22 @@ use screenpipe_db::{
     DatabaseManager,
 };
 
+async fn checkpoint_fixture(db: &DatabaseManager) {
+    // PASSIVE may stop at an active reader's snapshot. Fixture construction
+    // must wait for that reader before using the checkpoint as a disk baseline.
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let (busy, logged, checkpointed) = db.wal_checkpoint().await.unwrap();
+            if busy == 0 && logged == checkpointed {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("fixture WAL did not drain before disk measurement");
+}
+
 async fn fixture(root: &std::path::Path) {
     let db = DatabaseManager::new(root.join("db.sqlite").to_str().unwrap(), Default::default())
         .await
@@ -19,8 +35,7 @@ async fn fixture(root: &std::path::Path) {
     tx.commit().await.unwrap();
     // The size baseline must include committed payloads, even when a final
     // read-only connection leaves a WAL behind while the pools close.
-    let (busy, logged, checkpointed) = db.wal_checkpoint().await.unwrap();
-    assert_eq!((busy, logged), (0, checkpointed));
+    checkpoint_fixture(&db).await;
     db.close().await;
 }
 
@@ -924,8 +939,7 @@ async fn migration_completes_with_less_free_space_than_its_final_payloads() {
         // Keep fixture generation from accumulating a second multi-GiB WAL
         // before the constrained migration itself has even started.
         if id % 128 == 0 || id == count {
-            let (busy, logged, checkpointed) = db.wal_checkpoint().await.unwrap();
-            assert_eq!((busy, logged), (0, checkpointed));
+            checkpoint_fixture(&db).await;
         }
     }
     db.close().await;
