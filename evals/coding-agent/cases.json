@@ -5550,6 +5550,56 @@
         ],
         "command": "cargo test --offline --locked -p screenpipe-db --test eval_audio_segments -- --test-threads=1"
       }
+    },
+    {
+      "id": "app-replay-unavailable-images",
+      "name": "Recover meeting replay from unavailable frame images",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "5c1632dda6f5129f22f1b43b2ee250d12ec55f2f"
+      },
+      "base_ref": "335651f8047977e6f4c4819070abd0f991c6280e",
+      "oracle_ref": "5c1632dda6f5129f22f1b43b2ee250d12ec55f2f",
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/components/meeting-notes/replay-strip.tsx"
+      ],
+      "tags": [
+        "regression",
+        "meetings",
+        "images",
+        "recovery",
+        "escaped-failure"
+      ],
+      "gate": "advisory",
+      "prompt": "Meeting replay keeps broken images visible when a sampled frame cannot render. Repair the actual ReplayStrip so a load error in either the active image or a thumbnail removes every displayed occurrence of that frame and excludes it from subsequent active-image selection, while keeping healthy images usable. Keep the active image accessible through nonempty alternative text and thumbnails decorative. When all samples are unavailable, show a visible no-screen-images-available message and no broken image elements. Keep the displayed number of available frames truthful. A new time range must retry frames that failed in the previous range. Preserve successful image loads, transcript captions, and the Open in timeline action, including the selected timestamp and /home?section=timeline destination, even without screen images. Keep existing public component interfaces. The checks render the actual React component with synthetic frame/transcript responses, native/navigation ports and image load/error events. Native image decoding, network delivery, audio playback and full browser layout are outside this task. No particular state structure or private helper name is required.",
+      "agent_timeout_seconds": 900,
+      "grader_dependency_links": [
+        {
+          "source_path": "apps/screenpipe-app-tauri/node_modules",
+          "destination_path": "apps/screenpipe-app-tauri/node_modules"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/replay-images.fixture.tsx.txt",
+            "destination_path": "apps/screenpipe-app-tauri/replay-probe.test.tsx"
+          },
+          {
+            "local_path": "graders/replay-images.config.ts",
+            "destination_path": "apps/screenpipe-app-tauri/replay-probe.config.ts"
+          },
+          {
+            "local_path": "graders/replay-images-i18n.fixture.ts.txt",
+            "destination_path": "apps/screenpipe-app-tauri/replay-i18n.ts"
+          }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && node node_modules/vitest/vitest.mjs run --config replay-probe.config.ts"
+      },
+      "trigger_paths": [
+        "apps/screenpipe-app-tauri/components/meeting-notes/replay-strip.tsx"
+      ]
     }
   ]
 }

@@ -67,7 +67,7 @@ The hidden fixture appears only at grading and uses no dependency links.
 This does not establish native recording continuity, real authentication,
 account-switch race safety, browser integration, isolation or model performance.
 
-The current app corpus contains 134 git-mined regressions. See
+The current app corpus contains 135 git-mined regressions. See
 [DESIGN.md](./DESIGN.md) for the Anthropic guidance, source contract, and
 history-mining workflow. The companion website manifest uses this same harness.
 
@@ -1701,3 +1701,14 @@ mutations and missing-source controls. Hidden fixtures appear only at grading;
 no build-cache links are declared. This does not prove recording continuity,
 HTTP or hybrid-storage integration, concurrent writes, host isolation or model
 performance.
+
+`app-replay-unavailable-images` renders the actual replay strip with synthetic
+image load/error events and frame/transcript, native and navigation ports. Six
+outcomes cover active and thumbnail failures, all-unavailable fallback, accurate
+frame counts, range reset, successful loads and retained caption/navigation. The
+parent fails four recovery outcomes and preserves two; the source-only reference
+and current source pass six. Run
+`bun test evals/coding-agent/calibrate-replay-images.test.js` for calibration.
+Fixtures and dependency links appear only at grading. This does not execute
+native image decoding, audio playback, real network delivery, browser layout,
+enforced agent isolation or model trials.

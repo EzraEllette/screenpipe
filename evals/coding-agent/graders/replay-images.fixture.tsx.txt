@@ -1,0 +1,27 @@
+// screenpipe — AI that knows everything you've seen, said, or heard
+// https://screenpipe.com
+import React from 'react';
+import {cleanup,fireEvent,render,screen,waitFor} from '@testing-library/react';
+import {afterEach,beforeEach,expect,test,vi} from 'vitest';
+const p=vi.hoisted(()=>({frames:vi.fn(),audio:vi.fn(),push:vi.fn(),navigate:vi.fn(),emit:vi.fn()}));
+vi.mock('@tauri-apps/api/event',()=>({emit:p.emit}));
+vi.mock('next/navigation',()=>({useRouter:()=>({push:p.push})}));
+vi.mock('@/lib/api',()=>({appendAuthToken:(s:string)=>s,getApiBaseUrl:()=> 'http://localhost:3030'}));
+vi.mock('@/lib/hooks/use-timeline-store',()=>({useTimelineStore:(s:any)=>s({setPendingNavigation:p.navigate})}));
+vi.mock('@/components/speaker-assign-popover',()=>({SpeakerAssignPopover:({children}:any)=>children}));
+vi.mock('@/lib/utils/meeting-context',()=>({fetchFrameSamples:p.frames,fetchMeetingAudio:p.audio}));
+import {ReplayStrip} from './components/meeting-notes/replay-strip';
+const start='2026-06-12T10:00:00.000Z',middle='2026-06-12T10:02:00.000Z',end='2026-06-12T10:10:00.000Z';
+const segments=[{transcription:'Synthetic preserved caption',speaker:'speaker',device:'synthetic',timestamp:middle}];
+const frames=[{frameId:11,timestamp:middle},{frameId:22,timestamp:'2026-06-12T10:03:00.000Z'}];
+function view(a=start,b=end){return <ReplayStrip meetingId={1} segments={segments} timeRange={{start:a,end:b}}/>}
+function images(c:HTMLElement,id?:number){return [...c.querySelectorAll('img')].filter(x=>id===undefined||x.src.endsWith('/frames/'+id))}
+async function ready(c:HTMLElement){await waitFor(()=>expect(images(c,11).length).toBeGreaterThan(0));await screen.findByText('Synthetic preserved caption')}
+beforeEach(()=>{vi.clearAllMocks();p.frames.mockResolvedValue(frames);p.audio.mockResolvedValue([{audioChunkId:7,audioFilePath:'',speakerId:null,speakerName:'speaker',deviceType:'input',isInput:true,transcription:'Synthetic preserved caption',timestamp:middle}]);});
+afterEach(()=>cleanup());
+test('active image failure evicts every occurrence and preserves healthy frames',async()=>{const {container:c}=render(view());await ready(c);const a=images(c,11).find(x=>x.alt)!;expect(a).toBeTruthy();fireEvent.error(a);await waitFor(()=>expect(images(c,11)).toHaveLength(0));expect(images(c,22).length).toBeGreaterThan(0);expect(images(c).find(x=>x.alt)?.src).toMatch(/\/frames\/22$/);expect(screen.getByText(/1 frames/)).toBeTruthy();});
+test('thumbnail failure also prevents the unavailable frame becoming active',async()=>{const {container:c}=render(view());await ready(c);const t=images(c,22).find(x=>!x.alt)!;fireEvent.error(t);await waitFor(()=>expect(images(c,22)).toHaveLength(0));expect(images(c,11).length).toBeGreaterThan(0);});
+test('all unavailable images leave truthful empty state and preserve caption and navigation',async()=>{p.frames.mockResolvedValue([frames[0]]);const {container:c}=render(view());await ready(c);fireEvent.error(images(c)[0]);await waitFor(()=>expect(images(c)).toHaveLength(0));expect(screen.getByText(/no screen images available/i)).toBeTruthy();expect(screen.getByText(/0 frames/)).toBeTruthy();expect(screen.getByText('Synthetic preserved caption')).toBeTruthy();fireEvent.click(screen.getByRole('button',{name:/open in timeline/i}));expect(p.push).toHaveBeenCalledWith('/home?section=timeline');expect(p.navigate).toHaveBeenCalledWith({timestamp:middle});});
+test('a new time range can load an image that was unavailable before',async()=>{p.frames.mockResolvedValue([frames[0]]);const {container:c,rerender}=render(view());await ready(c);fireEvent.error(images(c)[0]);await waitFor(()=>expect(images(c)).toHaveLength(0));p.frames.mockResolvedValue([{frameId:11,timestamp:'2026-06-12T11:02:00.000Z'}]);rerender(view('2026-06-12T11:00:00.000Z','2026-06-12T11:10:00.000Z'));await waitFor(()=>expect(images(c,11).length).toBeGreaterThan(0));expect(screen.queryByText(/no screen images available/i)).toBeNull();});
+test('successful image loads preserve both frames and caption',async()=>{const {container:c}=render(view());await ready(c);for(const i of images(c))fireEvent.load(i);expect(images(c,11).length).toBeGreaterThan(0);expect(images(c,22).length).toBeGreaterThan(0);expect(screen.getByText(/2 frames/)).toBeTruthy();expect(screen.getByText('Synthetic preserved caption')).toBeTruthy();});
+test('no sampled images still preserves transcript and timeline entry',async()=>{p.frames.mockResolvedValue([]);const {container:c}=render(view());await screen.findByText('Synthetic preserved caption');expect(images(c)).toHaveLength(0);expect(screen.getByRole('button',{name:/open in timeline/i})).toBeTruthy();expect(screen.getByText(/0 frames/)).toBeTruthy();});
