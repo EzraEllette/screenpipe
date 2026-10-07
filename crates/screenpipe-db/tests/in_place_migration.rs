@@ -1314,9 +1314,9 @@ async fn sparse_privacy_backlog_completes_migration_and_preserves_recording() {
 }
 
 #[tokio::test]
-#[ignore = "requires a marked disposable filesystem without hole punching"]
+#[ignore = "requires a marked disposable volume; network mounts also exercise rollback journal recovery"]
 #[cfg(target_os = "macos")]
-async fn network_wal_verification_and_reopen_preserve_committed_rows() {
+async fn retained_wal_verification_and_reopen_preserve_committed_rows() {
     use sqlx::Connection;
     const CHILD: &str = "SCREENPIPE_NAS_WAL_CHILD";
     if let Ok(path) = std::env::var(CHILD) {
@@ -1338,6 +1338,13 @@ async fn network_wal_verification_and_reopen_preserve_committed_rows() {
     }
     let volume = std::path::PathBuf::from(std::env::var("SCREENPIPE_UNSUPPORTED_VOLUME").unwrap());
     assert!(volume.join(".screenpipe-disposable-volume").is_file());
+    // Unsupported hole punching does not make a local HFS+ volume a network
+    // filesystem. Only actual network mounts use rollback journaling.
+    let expected_journal = if screenpipe_fs::is_network_volume(&volume).unwrap() {
+        "delete"
+    } else {
+        "wal"
+    };
     let root = tempfile::tempdir_in(volume).unwrap();
     let path = root.path().join("db.sqlite");
     let db = DatabaseManager::new(path.to_str().unwrap(), Default::default())
@@ -1348,7 +1355,7 @@ async fn network_wal_verification_and_reopen_preserve_committed_rows() {
         .args([
             "--ignored",
             "--exact",
-            "network_wal_verification_and_reopen_preserve_committed_rows",
+            "retained_wal_verification_and_reopen_preserve_committed_rows",
         ])
         .env(CHILD, &path)
         .output()
@@ -1397,7 +1404,7 @@ async fn network_wal_verification_and_reopen_preserve_committed_rows() {
             .fetch_one(&db.pool)
             .await
             .unwrap(),
-        "delete"
+        expected_journal
     );
     assert!(!screenpipe_sqlite_coordinator::sqlite_verification_pending_exists(&path));
     db.execute_raw_sql_write("INSERT INTO nas_wal VALUES('recorded after recovery')")
@@ -1415,7 +1422,7 @@ async fn network_wal_verification_and_reopen_preserve_committed_rows() {
         2
     );
     db.close().await;
-    println!("NAS WAL: verification preserved database and committed WAL bytes; pending incident recovered; acknowledged and new rows survive restart in rollback mode");
+    println!("retained WAL: verification preserved database and committed WAL bytes; pending incident recovered; acknowledged and new rows survive restart in {expected_journal} mode");
 }
 
 #[tokio::test]
