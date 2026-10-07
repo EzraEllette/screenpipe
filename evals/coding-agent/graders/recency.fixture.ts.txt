@@ -1,0 +1,35 @@
+// screenpipe — AI that knows everything you've seen, said, or heard
+// https://screenpipe.com
+import {beforeEach,expect,test,vi} from 'vitest';
+const port=vi.hoisted(()=>({files:new Map<string,{text:string,mtime:number}>()}));
+vi.mock('@tauri-apps/api/path',()=>({homeDir:async()=>'/synthetic',join:async(...x:string[])=>x.join('/')}));
+vi.mock('@/lib/utils/tauri',()=>({commands:{getChatsDir:async()=>({status:'ok',data:'/synthetic/.screenpipe/chats'}),listChatEntriesByMtime:async()=>{throw Error('synthetic unavailable native bulk listing')}}}));
+vi.mock('@/lib/browser-state-cache',()=>({deleteCachedBrowserState:async()=>{}}));
+vi.mock('@tauri-apps/plugin-fs',()=>({
+ exists:async(p:string)=>p==='/synthetic/.screenpipe/chats'||port.files.has(p),mkdir:async()=>{},
+ readDir:async(dir:string)=>[...port.files.keys()].filter(p=>p.startsWith(dir+'/')).map(p=>({name:p.slice(dir.length+1)})),
+ readTextFile:async(p:string)=>{const f=port.files.get(p);if(!f)throw Error('missing synthetic file');return f.text},
+ writeTextFile:async(p:string,text:string)=>{port.files.set(p,{text,mtime:90000})},remove:async(p:string)=>{port.files.delete(p)},
+ rename:async(a:string,b:string)=>{const f=port.files.get(a);if(!f)throw Error('missing synthetic file');port.files.set(b,f);port.files.delete(a)},
+ stat:async(p:string)=>({mtime:new Date(port.files.get(p)?.mtime??0)})
+}));
+let api:any;
+beforeEach(async()=>{port.files.clear();vi.resetModules();api=await import('./lib/chat-storage');globalThis.fetch=async()=>{throw Error('network forbidden')}});
+const user=(id:string,timestamp:any)=>({id,role:'user',content:'synthetic question '+id,timestamp});
+const assistant=(timestamp:number)=>({id:'reply',role:'assistant',content:'synthetic reply',timestamp});
+async function listed(messages:any[],lastUserMessageAt?:any){
+ const c={id:'chat_fixture',title:'Synthetic saved chat',createdAt:100,updatedAt:50000,messages,lastUserMessageAt,pinned:true};
+ port.files.set('/synthetic/.screenpipe/chats/chat_fixture.json',{text:JSON.stringify(c),mtime:50000});
+ const rows=await api.listConversations();expect(rows).toHaveLength(1);const row=rows[0];
+ expect(row.id).toBe(c.id);expect(row.title).toBe(c.title);expect(row.createdAt).toBe(100);expect(row.updatedAt).toBe(50000);expect(row.messageCount).toBe(messages.length);expect(row.pinned).toBe(true);
+ const loaded=await api.loadConversationFile(c.id);expect(loaded.messages).toEqual(messages);return row;
+}
+test('listing repairs an old persisted user timestamp from the newer saved transcript',async()=>{expect((await listed([user('a',1000),assistant(2000),user('b',9000)],1000)).lastUserMessageAt).toBe(9000)});
+test('listing finds the newest user timestamp even when transcript order differs',async()=>{expect((await listed([user('a',9000),assistant(40000),user('b',3000)],1000)).lastUserMessageAt).toBe(9000)});
+test('listing ignores malformed persisted timestamp when valid user time exists',async()=>{expect((await listed([user('a',9000)],'stale')).lastUserMessageAt).toBe(9000)});
+test('newer persisted user activity is not rolled backward by an older transcript',async()=>{expect((await listed([user('a',1000),assistant(40000)],12000)).lastUserMessageAt).toBe(12000)});
+test('assistant activity does not advance user recency',async()=>{expect((await listed([user('a',1000),assistant(40000)],1000)).lastUserMessageAt).toBe(1000)});
+test('legacy file without metadata derives recency from user messages',async()=>{expect((await listed([user('a',1000),user('b',9000),assistant(40000)])).lastUserMessageAt).toBe(9000)});
+test('assistant-only file preserves an existing user recency marker',async()=>{expect((await listed([assistant(40000)],5000)).lastUserMessageAt).toBe(5000)});
+test('file without a user message or metadata has no invented user timestamp',async()=>{expect((await listed([assistant(40000)])).lastUserMessageAt).toBeUndefined()});
+test('non-numeric message timestamps do not override valid user recency',async()=>{expect((await listed([user('a','9000'),assistant(40000)],5000)).lastUserMessageAt).toBe(5000)});

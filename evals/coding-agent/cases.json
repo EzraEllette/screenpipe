@@ -5600,6 +5600,49 @@
       "trigger_paths": [
         "apps/screenpipe-app-tauri/components/meeting-notes/replay-strip.tsx"
       ]
+    },
+    {
+      "id": "app-chat-saved-user-recency",
+      "name": "Recover saved chat recency from the latest user message",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "fa7c1db8d6d9ca9e945aca1d522a37d2b5158f16"
+      },
+      "base_ref": "5d3a539aab4134b9dbaa7467a44c31d096644e00",
+      "oracle_ref": "fa7c1db8d6d9ca9e945aca1d522a37d2b5158f16",
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/lib/chat-storage.ts"
+      ],
+      "gate": "advisory",
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "chat",
+        "recents",
+        "persistence"
+      ],
+      "prompt": "Reloading saved chats can leave a conversation with an old Recents timestamp even though its saved transcript contains newer user messages. Fix the saved-chat listing API so lastUserMessageAt reflects the greatest numeric user-message timestamp or an even newer numeric persisted lastUserMessageAt. Transcript order must not matter. Ignore non-numeric persisted timestamps and non-numeric message timestamps; assistant messages must not advance user recency. When there are no numeric user-message timestamps, preserve a numeric persisted value, otherwise leave user recency absent. Legacy files without recency metadata must still derive it from user messages. Preserve conversation identity, title, createdAt, updatedAt, pinned state, message count and reloadable message contents. Keep the public listing and load APIs compatible. Checks call the actual APIs with synthetic filesystem/native ports. Native persistence, foreground/background save callbacks and sidebar rendering are outside this task; no private helper or specific implementation is required.",
+      "agent_timeout_seconds": 900,
+      "grader_dependency_links": [
+        {
+          "source_path": "apps/screenpipe-app-tauri/node_modules",
+          "destination_path": "apps/screenpipe-app-tauri/node_modules"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/recency.fixture.ts.txt",
+            "destination_path": "apps/screenpipe-app-tauri/recency-probe.test.ts"
+          },
+          {
+            "local_path": "graders/recency.config.ts",
+            "destination_path": "apps/screenpipe-app-tauri/recency-probe.config.ts"
+          }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && node node_modules/vitest/vitest.mjs run --config recency-probe.config.ts"
+      }
     }
   ]
 }

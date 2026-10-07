@@ -67,7 +67,7 @@ The hidden fixture appears only at grading and uses no dependency links.
 This does not establish native recording continuity, real authentication,
 account-switch race safety, browser integration, isolation or model performance.
 
-The current app corpus contains 135 git-mined regressions. See
+The current app corpus contains 136 git-mined regressions. See
 [DESIGN.md](./DESIGN.md) for the Anthropic guidance, source contract, and
 history-mining workflow. The companion website manifest uses this same harness.
 
@@ -1712,3 +1712,15 @@ and current source pass six. Run
 Fixtures and dependency links appear only at grading. This does not execute
 native image decoding, audio playback, real network delivery, browser layout,
 enforced agent isolation or model trials.
+
+## Saved chat user recency
+
+`app-chat-saved-user-recency` calls the actual saved-chat listing and load APIs
+with synthetic filesystem/native ports. Nine outcomes cover stale, unordered,
+malformed and missing timestamps plus newer persisted values, assistant-only
+activity and retained conversation metadata/content. The parent fails three
+outcomes and preserves six; the source-only reference and current source pass
+nine. Run `bun test evals/coding-agent/calibrate-recency.test.js` for calibration.
+Hidden fixtures and dependency links appear only when grading starts. This does
+not execute native persistence, foreground/background save callbacks, full
+sidebar rendering, enforced agent isolation or model trials.
