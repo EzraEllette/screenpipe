@@ -252,7 +252,7 @@ async fn production_size_migration_preserves_api_and_saves_allocated_space() {
         }
         // A heavy archival read must not prevent the existing writer from
         // durably acknowledging the next capture, including after restart.
-        let read = request(&api, "/frames/300/context");
+        let read = request(&api, "/frames/257/text");
         let write = async {
             let start = Instant::now();
             db.execute_raw_sql_write("INSERT OR IGNORE INTO frames(id,timestamp,full_text,snapshot_path) VALUES(999,'2026-09-19T00:00:00Z','capture after migration','new.jpg')").await.unwrap();
@@ -261,7 +261,12 @@ async fn production_size_migration_preserves_api_and_saves_allocated_space() {
                 start.elapsed().as_secs_f64() * 1000.0
             );
         };
-        tokio::join!(read, write);
+        let (read_result, ()) = tokio::join!(read, write);
+        assert_eq!(read_result.0, StatusCode::OK);
+        assert!(
+            read_result.2 > MIB,
+            "concurrent read must hydrate real history"
+        );
         assert_eq!(
             db.frame_payloads(&[999], Projection::Search).await.unwrap()[&999]
                 .full_text
