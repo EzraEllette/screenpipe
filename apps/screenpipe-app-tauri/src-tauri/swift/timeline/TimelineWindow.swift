@@ -581,6 +581,11 @@ final class TimelineWindowController: NSObject, NSWindowDelegate {
     @discardableResult
     static func navigate(frameId: String?, timestamp: String?) -> Bool {
         guard let model = activeNavigationModel() else { return false }
+        return navigate(model: model, frameId: frameId, timestamp: timestamp)
+    }
+
+    /// True acknowledges a selected target, not merely a queued day request.
+    static func navigate(model: TimelineViewModel, frameId: String?, timestamp: String?) -> Bool {
         if let frameId,
            let index = TimelineNavigation.index(ofFrameId: frameId, in: model.frames) {
             if model.currentIndex == index,
@@ -611,7 +616,10 @@ final class TimelineWindowController: NSObject, NSWindowDelegate {
             model.setExternalNavigationIndex(index)
         } else {
             model.beginExternalNavigation(superseding: true)
-            model.changeDate(to: date, supersedePendingNavigation: true)
+            if !model.isNavigating || !Calendar.current.isDate(model.currentDate, inSameDayAs: date) {
+                model.changeDate(to: date, supersedePendingNavigation: true)
+            }
+            return false
         }
         return true
     }
@@ -1296,7 +1304,7 @@ public func timeline_navigate(_ json: UnsafePointer<CChar>?) -> Int32 {
           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
         return -1
     }
-    @MainActor func run() {
+    @MainActor func run() -> Int32 {
         let windowLabel = obj["windowLabel"] as? String
         let frameId = obj["frameId"] as? String
         let rawTimestamp = obj["timestamp"] as? String
@@ -1322,19 +1330,19 @@ public func timeline_navigate(_ json: UnsafePointer<CChar>?) -> Int32 {
                 ),
                 windowLabel: windowLabel
             )
+            return 0 // Addressed search requests are retained until their host attaches.
         } else {
-            TimelineWindowController.navigate(frameId: frameId, timestamp: rawTimestamp)
+            return TimelineWindowController.navigate(frameId: frameId, timestamp: rawTimestamp) ? 0 : -1
         }
     }
     // Return only after the native model has accepted or queued the click. The
     // old async dispatch returned success first, so Rust's retries could all
     // finish while Swift silently had no addressed model yet.
     if Thread.isMainThread {
-        MainActor.assumeIsolated { run() }
+        return MainActor.assumeIsolated { run() }
     } else {
-        DispatchQueue.main.sync { MainActor.assumeIsolated { run() } }
+        return DispatchQueue.main.sync { MainActor.assumeIsolated { run() } }
     }
-    return 0
 }
 
 /// Read-only native state used only through the feature-gated Rust E2E plugin.

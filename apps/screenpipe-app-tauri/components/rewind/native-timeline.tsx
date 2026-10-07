@@ -443,45 +443,48 @@ export function NativeTimeline({
 
     const timestamp = navigation.timestamp || null;
     const frameId = navigation.frameId || null;
+    let cancelled = false;
+    let complete = false;
+    let inFlight = false;
+    const finish = () => {
+      if (cancelled) return;
+      complete = true;
+      setNativePendingNavigation((pending) =>
+        pending === navigation ? null : pending,
+      );
+      const current = useTimelineStore.getState().pendingNavigation;
+      if (
+        current?.timestamp === navigation.timestamp &&
+        current?.frameId === navigation.frameId
+      ) {
+        setPendingNavigation(null);
+      }
+    };
     const timers = NATIVE_TIMELINE_NAVIGATION_RETRY_MS.map((delay) =>
-      window.setTimeout(() => {
-        // Timestamp first ensures a past-day artifact loads the right day.
-        // Frame id then refines a screen artifact to the exact captured frame.
-        if (timestamp) {
-          void commands.nativeTimelineNavigate(timestamp, null).catch(() => {
-            // A later retry runs after the native day finishes loading.
-          });
-        }
-        if (frameId) {
-          void commands.nativeTimelineNavigate(null, frameId).catch(() => {
-            // The target frame may not exist until the timestamp request lands.
-          });
+      window.setTimeout(async () => {
+        if (cancelled || complete || inFlight) return;
+        inFlight = true;
+        try {
+          // Native returns false until the requested day/frame is available.
+          // Once it selects the target, retries must stop: they would undo
+          // any subsequent scrubbing or date change by the user.
+          if (timestamp && !(await commands.nativeTimelineNavigate(timestamp, null))) return;
+          if (cancelled || complete) return;
+          if (frameId && !(await commands.nativeTimelineNavigate(null, frameId))) return;
+          finish();
+        } catch {
+          // Retry only a failed or unresolved hand-off.
+        } finally {
+          inFlight = false;
         }
       }, delay),
     );
     timers.push(
-      window.setTimeout(
-        () => {
-          const current = useTimelineStore.getState().pendingNavigation;
-          if (
-            !current ||
-            (current.timestamp === navigation.timestamp &&
-              current.frameId === navigation.frameId)
-          ) {
-            setNativePendingNavigation((pending) =>
-              pending?.timestamp === navigation.timestamp &&
-              pending?.frameId === navigation.frameId
-                ? null
-                : pending,
-            );
-            setPendingNavigation(null);
-          }
-        },
-        NATIVE_TIMELINE_NAVIGATION_RETRY_MS.at(-1)! + 500,
-      ),
+      window.setTimeout(finish, NATIVE_TIMELINE_NAVIGATION_RETRY_MS.at(-1)! + 500),
     );
 
     return () => {
+      cancelled = true;
       for (const timer of timers) window.clearTimeout(timer);
     };
   }, [attached, available, nativePendingNavigation, setPendingNavigation]);

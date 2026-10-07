@@ -4,6 +4,7 @@
 
 // Headless regression for the real native stream decoder and Timeline model.
 import Foundation
+import AppKit
 
 @main
 struct TimelineStreamTests {
@@ -38,6 +39,37 @@ struct TimelineStreamTests {
         precondition(!model.isLoading && !model.isNavigating)
         precondition(model.connectionError == "Timeline request timed out")
         model.stop()
+
+        // Exercise the same navigation seam as the FFI without showing a window.
+        _ = NSApplication.shared
+        let navigationModel = TimelineViewModel(config: TimelineAPIConfig(port: 0))
+        let target = Date().addingTimeInterval(-3 * 86400)
+        let timestamp = TimelineTime.iso(target)
+        precondition(!TimelineWindowController.navigate(model: navigationModel, frameId: nil, timestamp: timestamp),
+                     "requesting an unloaded day is not successful navigation")
+        precondition(navigationModel.isNavigating)
+        precondition(!TimelineWindowController.navigate(model: navigationModel, frameId: nil, timestamp: timestamp),
+                     "an in-flight day must remain retryable")
+        let frames = [0, 60, 120].enumerated().map { index, offset in
+            StreamTimeSeriesResponse(
+                timestamp: TimelineTime.iso(target.addingTimeInterval(Double(offset))),
+                devices: [DeviceFrameResponse(deviceId: "test-display", frameId: "nav-\(index)", metadata: DeviceMetadata(filePath: "/tmp/synthetic-navigation.jpg"))]
+            )
+        }
+        navigationModel.injectForTesting(frames: frames)
+        precondition(TimelineWindowController.navigate(model: navigationModel, frameId: nil, timestamp: timestamp),
+                     "a loaded timestamp acknowledges selection")
+        precondition(navigationModel.displayFrameId == "nav-0")
+        navigationModel.setIndex(0)
+        precondition(navigationModel.displayFrameId == "nav-2", "user can scrub away after selection")
+        precondition(TimelineWindowController.navigate(model: navigationModel, frameId: "nav-1", timestamp: nil))
+        precondition(navigationModel.displayFrameId == "nav-1", "frame refinement selects the exact frame")
+        precondition(!TimelineWindowController.navigate(model: navigationModel, frameId: "missing", timestamp: nil))
+        let missingHost = "{\"timestamp\":\"\(timestamp)\"}"
+        precondition(missingHost.withCString { timeline_navigate($0) } != 0,
+                     "FFI must not acknowledge a jump with no native model")
+        navigationModel.stop()
+        print("PASS: native navigation acknowledges selection, retries unloaded targets, exact frame and missing-host FFI")
         print("PASS: native stream completion, empty day, stale range, search window, navigation and error states")
     }
 }
