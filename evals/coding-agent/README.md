@@ -67,7 +67,7 @@ The hidden fixture appears only at grading and uses no dependency links.
 This does not establish native recording continuity, real authentication,
 account-switch race safety, browser integration, isolation or model performance.
 
-The current app corpus contains 132 git-mined regressions. See
+The current app corpus contains 133 git-mined regressions. See
 [DESIGN.md](./DESIGN.md) for the Anthropic guidance, source contract, and
 history-mining workflow. The companion website manifest uses this same harness.
 
@@ -1668,3 +1668,22 @@ for correct, broken, equivalent, disconnected, partial-repair, ignored-filter,
 blanket-filter and missing-source controls. Hidden fixtures appear only at grading.
 No build-cache links are declared. This does not establish sync ingestion, HTTP
 routing, hybrid storage, concurrent writes, execution isolation or model quality.
+
+## Redaction across missing schema targets
+
+`app-redact-missing-schema-target` runs the actual native Worker with local regex
+redaction and synthetic temporary SQLite data. Six outcomes cover missing tables
+and columns, later-row progress, ordinary redaction, clean-text preservation,
+pause/resume, transient-write retry and corruption-error backoff with shutdown.
+The parent fails the two missing-schema outcomes and preserves four; the
+historical reference and current source pass all six. The task discloses the
+small-workload timing bounds and does not require an exact implementation.
+
+Run the shared runner with `--case app-redact-missing-schema-target --verify`.
+The hidden fixture appears only at grading; no dependency or target-cache links
+are declared. Calibration rejects unused correct code, blanket skipping, treating
+all errors as missing schema and lost pause behavior, while accepting an
+equivalent missing-object predicate. Compilation/setup failures are infrastructure
+errors. The malformed-database error is supplied by a synthetic SQLite trigger,
+not an actually corrupt database. This does not establish migration safety,
+capture continuity, real corruption recovery, host isolation or model capability.
