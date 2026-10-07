@@ -9,6 +9,7 @@
     "e2e/tests/**/*.js",
     "e2e/helpers/**/*.ts",
     "e2e/search-only.e2e.ts",
+    "e2e/mock-updates/packaged-update-restart.e2e.ts",
     "e2e/mock-updates/windows-persistence-server.ts",
     "e2e/scripts/verify-spotlight-exclusion.ts",
     "scripts/timeline-parity-export.ts",
