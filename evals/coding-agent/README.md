@@ -67,7 +67,7 @@ The hidden fixture appears only at grading and uses no dependency links.
 This does not establish native recording continuity, real authentication,
 account-switch race safety, browser integration, isolation or model performance.
 
-The current app corpus contains 133 git-mined regressions. See
+The current app corpus contains 134 git-mined regressions. See
 [DESIGN.md](./DESIGN.md) for the Anthropic guidance, source contract, and
 history-mining workflow. The companion website manifest uses this same harness.
 
@@ -1687,3 +1687,17 @@ equivalent missing-object predicate. Compilation/setup failures are infrastructu
 errors. The malformed-database error is supplied by a synthetic SQLite trigger,
 not an actually corrupt database. This does not establish migration safety,
 capture continuity, real corruption recovery, host isolation or model capability.
+
+## Distinct audio segments in search
+
+`app-audio-distinct-segment-search` executes the actual database search methods
+against disposable SQLite data. Six outcomes cover same-chunk/offset/time
+segments, identical words with distinct boundaries, tag joins, deterministic
+bidirectional pagination, ordinary filters and read-only preservation. The
+broken parent fails three outcomes and preserves three; the historical source-only
+fix passes six. Run `bun test evals/coding-agent/calibrate-audio-segments.test.js`
+for broken, correct, equivalent, unused-fix, grouping/order/filter
+mutations and missing-source controls. Hidden fixtures appear only at grading;
+no build-cache links are declared. This does not prove recording continuity,
+HTTP or hybrid-storage integration, concurrent writes, host isolation or model
+performance.

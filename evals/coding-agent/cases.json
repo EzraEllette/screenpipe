@@ -5514,6 +5514,42 @@
         ],
         "command": "cargo test --locked -p screenpipe-redact --test eval_missing_schema -- --test-threads=1"
       }
+    },
+    {
+      "id": "app-audio-distinct-segment-search",
+      "name": "Preserve distinct speech segments in audio search",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "acf844b85625df212436a7db8c68b370def720fe"
+      },
+      "base_ref": "6e9f48bfd69751428ec5c4b10483689845058e4c",
+      "oracle_ref": "acf844b85625df212436a7db8c68b370def720fe",
+      "oracle_paths": [
+        "crates/screenpipe-db/src/db/search.rs"
+      ],
+      "gate": "advisory",
+      "trigger_paths": [
+        "crates/screenpipe-db/src/db/search.rs"
+      ],
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "audio",
+        "search",
+        "pagination"
+      ],
+      "prompt": "Audio search collapses distinct recorded speech segments when they share an audio chunk, offset and capture timestamp. Repair the real database search path so every segment remains independently visible, including identical words in separate chunks with distinct segment start/end times. Preserve transcription text, segment boundaries and stored rows. Joining multiple chunk tags must not repeat result rows or tags. With capture timestamp, chunk and offset tied, ascending order follows insertion order and descending order reverses it; offset/limit pagination must visit each segment once. Preserve ordinary distinct-offset records, exact all-requested-tag filtering, absent-tag and unknown-device refusal, combined device and minimum/maximum text length filters, unmatched text search, date bounds, zero limit and exhausted offsets. Reads must not rewrite or delete stored transcriptions. Use disposable synthetic SQLite databases, never user recordings or live services. No particular SQL grouping, helper or query spelling is required. The scope is database search, not recording admission, HTTP delivery, hybrid storage or speech recognition quality.",
+      "agent_timeout_seconds": 1800,
+      "grader": {
+        "timeout_seconds": 180,
+        "fixtures": [
+          {
+            "local_path": "graders/audio-segment-search.rs",
+            "destination_path": "crates/screenpipe-db/tests/eval_audio_segments.rs"
+          }
+        ],
+        "command": "cargo test --offline --locked -p screenpipe-db --test eval_audio_segments -- --test-threads=1"
+      }
     }
   ]
 }
