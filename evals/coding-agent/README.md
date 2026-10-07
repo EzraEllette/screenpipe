@@ -67,7 +67,7 @@ The hidden fixture appears only at grading and uses no dependency links.
 This does not establish native recording continuity, real authentication,
 account-switch race safety, browser integration, isolation or model performance.
 
-The current app corpus contains 137 git-mined regressions. See
+The current app corpus contains 138 git-mined regressions. See
 [DESIGN.md](./DESIGN.md) for the Anthropic guidance, source contract, and
 history-mining workflow. The companion website manifest uses this same harness.
 
@@ -1742,3 +1742,16 @@ so changing the candidate package’s `test` script cannot skip hidden assertion
 Their calibration suites reject broken source with a no-op test script and still
 accept correct source with the same script. This closes that command-dispatch
 bypass; it does not establish an execution sandbox or tamper-proof dependencies.
+
+## Media file URL paths
+
+`app-media-file-url-path` mounts the actual media player and media wrapper with
+synthetic native commands, translation and class-name ports. Nine outcomes cover
+Unix URL slash variants, outer quotes and whitespace, encoded spaces, Windows and
+ordinary paths, malformed escapes, empty input, and audio/video presentation.
+The parent loses four paths and preserves five outcomes; the historical fix and
+current source pass nine. Run `bun test evals/coding-agent/calibrate-media-file-url.test.js`
+for broken/correct/equivalent, unused-source, disconnected-caller, refusal,
+preserved-behavior and missing-source controls. Fixtures and runtime links appear
+only at grading. Native file access/decoding, playback, Markdown filtering,
+cache policy, enforced execution isolation and model performance are unverified.

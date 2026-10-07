@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "suite": "screenpipe-app-coding-agent-regressions",
-  "dataset_version": "2026-10-07-meeting-stop-save-refusal",
+  "dataset_version": "2026-10-07-media-file-url",
   "suite_type": "regression",
   "owner": "screenpipe engineering",
   "policy": {
@@ -5692,6 +5692,57 @@
           }
         ],
         "command": "cd apps/screenpipe-app-tauri && node node_modules/vitest/vitest.mjs run --config keyboard-probe.config.ts"
+      }
+    },
+    {
+      "id": "app-media-file-url-path",
+      "name": "Preserve absolute file URL paths through the media player",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "60d896613c64396e059c07ca03c5c8bb8ceade59"
+      },
+      "base_ref": "0d5a3e726a71f8c22c9162a0db1ea0a9bc86a806",
+      "oracle_ref": "60d896613c64396e059c07ca03c5c8bb8ceade59",
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/lib/utils/media-file-path.ts"
+      ],
+      "trigger_paths": [
+        "apps/screenpipe-app-tauri/lib/utils/media-file-path.ts",
+        "apps/screenpipe-app-tauri/components/rewind/media.tsx",
+        "apps/screenpipe-app-tauri/lib/actions/video-actions.ts"
+      ],
+      "gate": "advisory",
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "media",
+        "preserved-behavior"
+      ],
+      "prompt": "The media player loses the beginning of absolute Unix file paths when it receives a file URL, so local recordings cannot be read. Repair the actual MediaComponent-to-native-media-reader flow. Unix file URLs with one, three or four slashes after file: must retain the full absolute path, including its leading slash, and decode percent-encoded spaces. Outer whitespace and surrounding quotes must not corrupt the path. Preserve ordinary absolute paths containing spaces, Windows drive file URLs with encoded spaces, and paths containing malformed percent escapes without dropping text or throwing. Each successful read must request the intended local path through the existing native media command contract and display the returned bytes with audio controls for WAV files and video controls for ordinary MP4 video. An empty path must not invoke native file reading. Keep the public component and native command contracts compatible. No particular helper or implementation is required. Synthetic native commands and a DOM environment assess player behavior; actual filesystem permission, native decoding, browser playback, Markdown source filtering, cache policy and isolation are separate.",
+      "agent_timeout_seconds": 900,
+      "grader_dependency_links": [
+        {
+          "source_path": "apps/screenpipe-app-tauri/node_modules",
+          "destination_path": "apps/screenpipe-app-tauri/node_modules"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/media-file-url.fixture.tsx.txt",
+            "destination_path": "apps/screenpipe-app-tauri/components/rewind/eval-media-file-url.test.tsx"
+          },
+          {
+            "local_path": "graders/media-file-url.config.mjs",
+            "destination_path": "apps/screenpipe-app-tauri/eval-media-file-url.config.mjs"
+          },
+          {
+            "local_path": "graders/media-file-url-translation.fixture.ts.txt",
+            "destination_path": "apps/screenpipe-app-tauri/eval-media-translation.ts"
+          }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && node node_modules/vitest/vitest.mjs run --config eval-media-file-url.config.mjs"
       }
     }
   ]

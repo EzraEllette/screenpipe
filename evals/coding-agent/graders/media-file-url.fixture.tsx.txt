@@ -1,0 +1,42 @@
+// screenpipe — AI that knows everything you've seen, said, or heard
+// https://screenpipe.com
+import React from 'react';
+import {render,waitFor,cleanup} from '@testing-library/react';
+import {beforeEach,afterEach,it,expect,vi} from 'vitest';
+import {MediaComponent} from './media';
+const {read}=vi.hoisted(()=>({read:vi.fn(async()=>({status:'ok',data:{data:'UklGRg==',mimeType:'audio/wav'}}))}));
+vi.mock('@/lib/utils/tauri',()=>({commands:{getMediaFile:read}}));
+vi.mock('@/lib/utils',()=>({cn:(...values)=>values.filter(Boolean).join(' ')}));
+beforeEach(()=>{read.mockClear();URL.createObjectURL=vi.fn(()=>'blob:synthetic-media');URL.revokeObjectURL=vi.fn();});
+afterEach(()=>cleanup());
+const cases=[
+ ['standard Unix URL','file:///Users/fixture/one%20clip.wav','/Users/fixture/one clip.wav'],
+ ['one slash URL','file:/Users/fixture/two%20clip.wav','/Users/fixture/two clip.wav'],
+ ['four slash URL','file:////Users/fixture/three%20clip.wav','/Users/fixture/three clip.wav'],
+ ['whitespace and quote URL','  "file:///Users/fixture/four%20clip.wav"  ','/Users/fixture/four clip.wav'],
+ ['direct absolute','/Users/fixture/five clip.wav','/Users/fixture/five clip.wav'],
+ ['Windows URL','file:///C:/Users/fixture/six%20clip.wav','C:/Users/fixture/six clip.wav'],
+ ['malformed escape','/Users/fixture/seven%A.wav','/Users/fixture/seven%A.wav'],
+];
+it.each(cases)('%s reaches native reader and shows audio controls',async(_,input,path)=>{
+ const {container}=render(<MediaComponent filePath={input}/>);
+ await waitFor(()=>expect(container.querySelector('audio source')?.getAttribute('src')).toBe('blob:synthetic-media'));
+ expect(container.querySelector('audio')?.hasAttribute('controls')).toBe(true);
+ expect(read).toHaveBeenCalled(); expect(read.mock.calls.every(call=>call[0]===path)).toBe(true);
+});
+it('empty input cannot read native media',async()=>{
+ render(<MediaComponent filePath=""/>);
+ await new Promise(resolve=>setTimeout(resolve,0));
+ expect(read).not.toHaveBeenCalled();
+});
+
+vi.mock('gt-react',()=>({useGT:()=>((text)=>text)}));
+
+it('ordinary video remains video with native bytes and controls',async()=>{
+ read.mockResolvedValueOnce({status:'ok',data:{data:'UklGRg==',mimeType:'video/mp4'}});
+ const {container}=render(<MediaComponent filePath="/Users/fixture/video-nine.mp4"/>);
+ await waitFor(()=>expect(container.querySelector('video source')?.getAttribute('src')).toBe('blob:synthetic-media'));
+ expect(container.querySelector('video')?.hasAttribute('controls')).toBe(true);
+ expect(container.querySelector('audio')).toBeNull();
+ expect(read).toHaveBeenCalled(); expect(read.mock.calls.every(call=>call[0]==='/Users/fixture/video-nine.mp4')).toBe(true);
+});
