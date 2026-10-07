@@ -98,6 +98,7 @@ public func shortcutSetHealthState(_ statePtr: UnsafePointer<CChar>?) -> Int32 {
 // MARK: - Metrics data pushed from Rust
 
 final class OverlayMetrics: ObservableObject {
+    @Published var starredActive: Bool = false
     @Published var audioActive: Bool = false
     @Published var speechRatio: Double = 0
     @Published var meetingActive: Bool = false
@@ -827,7 +828,7 @@ func disclosureContent(
 ) -> (String, String?)? {
     switch control {
     case "brand": return ("screenpipe", uiText("right-click"))
-    case "star": return (uiText("star work session"), starShortcut)
+    case "star": return (uiText(metrics.starredActive ? "Starred session in progress" : "star work session"), starShortcut)
     case "timeline": return (uiText("timeline"), overlayShortcut)
     case "chat": return (uiText("ask chat"), chatShortcut)
     case "search": return (uiText("search"), searchShortcut)
@@ -1187,10 +1188,10 @@ struct ShortcutReminderView: View {
             DockIconButton(icon: "bubble.left.fill", active: metrics.hoveredControl == "chat", scale: scale) {
                 onAction("open_chat")
             }
-            DockIconButton(icon: "star", active: metrics.hoveredControl == "star", scale: scale) {
+            DockIconButton(icon: metrics.starredActive ? "star.fill" : "star", active: metrics.hoveredControl == "star", scale: scale) {
                 onAction("open_starred_sessions")
             }
-            .accessibilityLabel("Star a work session")
+            .accessibilityLabel(metrics.starredActive ? "Stop starred session" : "Star a work session")
             DockIconButton(icon: "rectangle.split.1x2", active: metrics.hoveredControl == "timeline", scale: scale) {
                 onAction("open_timeline")
             }
@@ -1588,6 +1589,8 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
     private var chatShortcut = "⌘⌃L"
     private var searchShortcut = "⌘⌃K"
     private var starShortcut = "⌘⌃B"
+    private var starredUntil: Int64 = 0
+    private var starredExpiry: DispatchWorkItem?
     private var metrics = OverlayMetrics()
     private var wsTask: URLSessionWebSocketTask?
     private var wsRetryTimer: Timer?
@@ -2097,6 +2100,26 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
         }
         meetingStopTimeoutWorkItem = timeout
         DispatchQueue.main.asyncAfter(deadline: .now() + 6, execute: timeout)
+    }
+
+    func setStarredUntil(_ until: Int64) {
+        DispatchQueue.main.async { [self] in
+            guard until != starredUntil else { return }
+            starredUntil = until
+            starredExpiry?.cancel()
+            let seconds = Double(until) / 1000 - Date().timeIntervalSince1970
+            metrics.starredActive = seconds > 0
+            refreshActiveDisclosure()
+            if seconds > 0 {
+                let expiry = DispatchWorkItem { [weak self] in
+                    guard let self, self.starredUntil == until else { return }
+                    self.metrics.starredActive = false
+                    self.refreshActiveDisclosure()
+                }
+                starredExpiry = expiry
+                DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: expiry)
+            }
+        }
     }
 
     /// Apply a recording-health state pushed from Rust. Kept even while the
@@ -3803,4 +3826,11 @@ public func shortcutGetFrame(
 @_cdecl("shortcut_set_ui_locale")
 public func shortcut_set_ui_locale(_ json: UnsafePointer<CChar>?) {
     UILocalization.shared.update(json)
+}
+
+@_cdecl("shortcut_set_starred_until")
+public func shortcutSetStarredUntil(_ until: Int64) {
+    if #available(macOS 13.0, *) {
+        ShortcutReminderController.shared.setStarredUntil(until)
+    }
 }

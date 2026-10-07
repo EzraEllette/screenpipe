@@ -506,7 +506,7 @@ describe("recording health hover detail", () => {
     render(<ShortcutReminderPage />);
     fireEvent.mouseEnter(await screen.findByTestId("shortcut-reminder-root"));
     fireEvent.mouseEnter(screen.getByRole("button", { name: "Starred work sessions" }));
-    expect(await screen.findByText("star work session")).toBeVisible();
+    expect(await screen.findByText("Star work session")).toBeVisible();
     expect(screen.queryByText(formatShortcut("Alt+Shift+J", "macos"), { exact: false })).toBeNull();
     expect(screen.queryByText(formatShortcut("Control+Super+B", "macos"), { exact: false })).toBeNull();
   });

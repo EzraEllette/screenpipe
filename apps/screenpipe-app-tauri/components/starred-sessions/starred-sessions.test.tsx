@@ -22,8 +22,9 @@ const mocks = vi.hoisted(() => ({
   fetch: vi.fn(),
   chat: vi.fn(),
   reveal: vi.fn(),
+  events: new Map<string, () => void>(),
 }));
-vi.mock("@/lib/hooks/use-tauri-event", () => ({ useTauriEvent: vi.fn() }));
+vi.mock("@/lib/hooks/use-tauri-event", () => ({ useTauriEvent: (name: string, callback: () => void) => { mocks.events.set(name, callback); } }));
 vi.mock("@/lib/api", () => ({ localFetch: mocks.fetch }));
 vi.mock("@/lib/chat-utils", () => ({ showChatWithPrefill: mocks.chat }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ revealItemInDir: mocks.reveal }));
@@ -42,6 +43,7 @@ const response = (value: unknown, ok = true) => ({
 });
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.events.clear();
   saved = [];
   mocks.fetch.mockImplementation(async (_path, init) => {
     if (init?.method === "POST") {
@@ -71,11 +73,10 @@ describe("starred sessions", () => {
         <StarredTimeline showStrip />
       </>,
     );
-    fireEvent.click(
-      screen.getByRole("button", { name: "Star session", exact: true }),
-    );
+    await waitFor(() => expect(screen.getByRole("button", { name: "Star session", exact: true })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "Star session", exact: true }));
     await waitFor(() => expect(screen.getAllByRole("dialog")).toHaveLength(1));
-    expect(screen.getByRole("button", { name: "15 min" })).toBeVisible();
+    expect(await screen.findByRole("button", { name: "15 min" })).toBeVisible();
   });
 
   it("keeps secondary actions collapsed and offers a new session after ending", async () => {
@@ -93,9 +94,21 @@ describe("starred sessions", () => {
     fireEvent.click(screen.getByRole("button", { name: "End session" }));
     await screen.findByRole("button", { name: "New session" });
     fireEvent.click(screen.getByRole("button", { name: "New session" }));
-    fireEvent.click(screen.getByRole("button", { name: "5 min" }));
     await screen.findByRole("button", { name: "End session" });
     expect(saved).toHaveLength(2);
+    expect(Date.parse(saved[0].end) - Date.parse(saved[0].start)).toBe(60 * 60000);
+    expect(screen.getByText("Starred session in progress")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "5 min" }));
+    await waitFor(() => expect(Date.parse(saved[0].end) - Date.parse(saved[0].start)).toBe(5 * 60000));
+    expect(saved).toHaveLength(2);
+  });
+  it("shows a session started by the native shortcut as soon as it refreshes", async () => {
+    const hook = renderHook(useStarredSessions);
+    await waitFor(() => expect(hook.result.current.ready).toBe(true));
+    const now = Date.now();
+    saved = [{ ...session, start: new Date(now).toISOString(), end: new Date(now + 3600000).toISOString() }];
+    act(() => mocks.events.get("starred-sessions-changed")!());
+    await waitFor(() => expect(hook.result.current.active?.id).toBe(session.id));
   });
   it("persists a timed boundary and restores it on remount", async () => {
     const hook = renderHook(useStarredSessions);

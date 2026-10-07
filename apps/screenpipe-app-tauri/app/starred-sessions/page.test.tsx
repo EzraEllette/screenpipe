@@ -21,8 +21,8 @@ vi.mock("@/lib/utils/tauri", () => ({
 }));
 vi.mock("@/lib/api", () => ({ localFetch: mocks.fetch }));
 vi.mock("@/lib/hooks/use-tauri-event", () => ({
-  useTauriEvent: (_: string, callback: typeof mocks.visibility) => {
-    mocks.visibility = callback;
+  useTauriEvent: (name: string, callback: typeof mocks.visibility) => {
+    if (name === "starred-sessions-visibility") mocks.visibility = callback;
   },
 }));
 vi.mock("@/lib/chat-utils", () => ({ showChatWithPrefill: vi.fn() }));
@@ -32,7 +32,7 @@ beforeEach(() => {
   mocks.hide.mockResolvedValue({ status: "ok", data: null });
   mocks.fetch.mockResolvedValue({ ok: true, json: async () => ({ data: [] }) });
 });
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.useRealTimers(); });
 
 it("opens just the duration picker and dismisses with Escape", async () => {
   render(<Page />);
@@ -79,5 +79,38 @@ it("does not dismiss when an editor consumes Escape", () => {
   });
   event.preventDefault();
   window.dispatchEvent(event);
+  expect(mocks.hide).not.toHaveBeenCalled();
+});
+
+it("dismisses after five idle seconds without changing the saved session", async () => {
+  const session = { id: "active", start: new Date().toISOString(), end: new Date(Date.now() + 3600000).toISOString(), revision: 1, hd_requested: false, has_audio: false };
+  mocks.fetch.mockResolvedValue({ ok: true, json: async () => ({ data: [session] }) });
+  render(<Page />);
+  await screen.findByText("Starred session in progress");
+  vi.useFakeTimers();
+  fireEvent.pointerMove(screen.getByRole("region", { name: "Starred work sessions" }));
+  await act(async () => { await vi.advanceTimersByTimeAsync(4999); });
+  expect(mocks.hide).not.toHaveBeenCalled();
+  await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+  expect(mocks.hide).toHaveBeenCalledTimes(1);
+  expect(mocks.fetch.mock.calls.every(([, init]) => init?.method !== "POST")).toBe(true);
+});
+it("keeps the popup open during inline time edits", async () => {
+  const session = { id: "active", start: new Date().toISOString(), end: new Date(Date.now() + 3600000).toISOString(), revision: 1, hd_requested: false, has_audio: false };
+  mocks.fetch.mockResolvedValue({ ok: true, json: async () => ({ data: [session] }) });
+  render(<Page />);
+  await screen.findByText("Starred session in progress");
+  fireEvent.click(screen.getByRole("button", { name: "Edit session end" }));
+  vi.useFakeTimers();
+  await act(async () => { await vi.advanceTimersByTimeAsync(10000); });
+  expect(mocks.hide).not.toHaveBeenCalled();
+  expect(screen.getByLabelText("Session end")).toBeVisible();
+});
+it("does not auto-dismiss a storage error", async () => {
+  mocks.fetch.mockResolvedValue({ ok: false, json: async () => ({ error: "Save unavailable" }) });
+  render(<Page />);
+  await screen.findByRole("alert");
+  vi.useFakeTimers();
+  await act(async () => { await vi.advanceTimersByTimeAsync(10000); });
   expect(mocks.hide).not.toHaveBeenCalled();
 });

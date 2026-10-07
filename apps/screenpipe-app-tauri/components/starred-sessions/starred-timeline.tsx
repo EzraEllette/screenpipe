@@ -1,7 +1,7 @@
 // screenpipe — AI that knows everything you've seen, said, or heard
 // https://screenpipe.com
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Star } from "lucide-react";
 import { emit } from "@tauri-apps/api/event";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
@@ -16,6 +16,7 @@ export function StarredTimeline({
 }) {
   const state = useStarredSessions();
   const [open, setOpen] = useState(false);
+  const dismiss = useCallback(() => setOpen(false), []);
   useEffect(() => {
     if (showStrip) return;
     const openControls = () => setOpen(true);
@@ -47,9 +48,11 @@ export function StarredTimeline({
         >
           <button
             className="flex shrink-0 items-center gap-1.5 rounded-md border px-2 py-1.5 hover:bg-muted"
-            onClick={() =>
-              window.dispatchEvent(new Event("open-starred-sessions"))
-            }
+            disabled={!state.ready || state.busy}
+            onClick={async () => {
+              if (!state.active) await state.start(60);
+              window.dispatchEvent(new Event("open-starred-sessions"));
+            }}
           >
             <Star
               className={`h-3.5 w-3.5 ${state.active ? "fill-current" : ""}`}
@@ -80,7 +83,7 @@ export function StarredTimeline({
         <Dialog open={open} onOpenChange={setOpen}>
           <DialogContent aria-describedby={undefined} className="max-h-[85vh] max-w-sm overflow-y-auto border-white/20 bg-black p-0 text-white">
             <DialogTitle className="sr-only">Starred sessions</DialogTitle>
-            <StarredSessionPanel state={state} inDialog />
+            <StarredSessionPanel state={state} inDialog onDismiss={dismiss} />
           </DialogContent>
         </Dialog>
       )}

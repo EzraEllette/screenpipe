@@ -774,7 +774,7 @@ export default function ShortcutReminderPage() {
   }
 
   const disclosure = hoveredControl === "star"
-    ? ["star work session", starShortcut]
+    ? [starredSessions.active ? "Starred session in progress" : "Star work session", starShortcut]
     : hoveredControl === "search"
     ? ["search", searchShortcut]
     : hoveredControl === "brand"

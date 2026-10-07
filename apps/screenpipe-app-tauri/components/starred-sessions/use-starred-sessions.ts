@@ -1,7 +1,9 @@
 // screenpipe — AI that knows everything you've seen, said, or heard
 // https://screenpipe.com
 
+import { emit } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useTauriEvent } from "@/lib/hooks/use-tauri-event";
 import { localFetch } from "@/lib/api";
 
 export interface StarredSession {
@@ -59,6 +61,7 @@ export function useStarredSessions() {
       throw new Error("Could not read starred sessions.");
     if (mounted.current && generation.current === epoch) {
       setSessions(result.data);
+      setNow(Date.now());
       setReady(true);
       if (!pending.current) setError(null);
     }
@@ -84,9 +87,17 @@ export function useStarredSessions() {
       window.removeEventListener("starred-sessions-changed", load);
     };
   }, [refresh]);
+  useTauriEvent("starred-sessions-changed", () => {
+    if (!lock.current) void refresh().catch((e) => {
+      if (mounted.current) setError(e.message);
+    });
+  });
   const active = sessions.find(
     (s) => Date.parse(s.start) <= now && Date.parse(s.end) > now,
   );
+  useEffect(() => {
+    if (ready) void emit("starred-session-state", active?.end ?? null).catch(() => {});
+  }, [ready, active?.end]);
   async function save(value: SessionWrite) {
     if (lock.current) return false;
     lock.current = true;

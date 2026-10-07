@@ -9,8 +9,8 @@ import { useTauriEvent } from "@/lib/hooks/use-tauri-event";
 import { StarredSessionPanel } from "@/components/starred-sessions/starred-session-panel";
 import { useStarredSessions } from "@/components/starred-sessions/use-starred-sessions";
 
-function SessionControls() {
-  return <StarredSessionPanel state={useStarredSessions()} inDialog />;
+function SessionControls({ onDismiss }: { onDismiss?: () => void }) {
+  return <StarredSessionPanel state={useStarredSessions()} inDialog onDismiss={onDismiss} />;
 }
 
 export default function StarredSessionsPage() {
@@ -53,7 +53,7 @@ export default function StarredSessionsPage() {
         >
           <X className="h-4 w-4" />
         </button>
-        <SessionControls />
+        <SessionControls onDismiss={closeError ? undefined : hide} />
         {closeError && (
           <p role="alert" className="px-3 pb-3 text-xs">
             Could not close the panel. Try again.

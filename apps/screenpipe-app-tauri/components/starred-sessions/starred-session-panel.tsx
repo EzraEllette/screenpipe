@@ -1,7 +1,7 @@
 // screenpipe — AI that knows everything you've seen, said, or heard
 // https://screenpipe.com
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { showChatWithPrefill } from "@/lib/chat-utils";
 import {
@@ -20,13 +20,16 @@ const localTime = (iso: string) => {
 export function StarredSessionPanel({
   state,
   inDialog = false,
+  onDismiss,
 }: {
   state: ReturnType<typeof useStarredSessions>;
   inDialog?: boolean;
+  onDismiss?: () => void;
 }) {
   const [selected, setSelected] = useState<string>();
   const [hd, setHd] = useState(false);
-  const [starting, setStarting] = useState(false);
+  const [activity, setActivity] = useState(0);
+  const [expanded, setExpanded] = useState(false);
   type TimeEdit = { session: StarredSession; key: "start" | "end" };
   const [editing, setEditing] = useState<TimeEdit | null>(null);
   const editRef = useRef<TimeEdit | null>(null);
@@ -79,8 +82,11 @@ export function StarredSessionPanel({
     state.sessions.find((s) => s.id === selected) ??
     state.active ??
     state.sessions[0];
+  useEffect(() => {
+    if (state.active) setSelected(undefined);
+  }, [state.active?.id]);
   const completed = session && Date.parse(session.end) <= state.now;
-  const showSession = session && !starting;
+  const showSession = session;
   const active = showSession && session.id === state.active?.id;
   const timeLabel = (iso: string) =>
     new Date(iso).toLocaleTimeString([], {
@@ -94,6 +100,18 @@ export function StarredSessionPanel({
   const action =
     "rounded-md border border-white/30 px-2 py-1.5 hover:bg-white/10 focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-2 disabled:opacity-50";
   const disabled = !state.ready || state.busy || working;
+  useEffect(() => {
+    if (!onDismiss || disabled || editing || expanded || error || state.error) return;
+    const timer = window.setTimeout(onDismiss, 5000);
+    return () => window.clearTimeout(timer);
+  }, [onDismiss, disabled, editing, expanded, error, state.error, activity, session?.id, session?.end]);
+  async function newSession() {
+    closeEditor();
+    if (await state.start(60, hd)) {
+      setSelected(undefined);
+      setExpanded(false);
+    }
+  }
   async function run(fn: () => Promise<unknown>) {
     if (working) return;
     setWorking(true);
@@ -112,18 +130,19 @@ export function StarredSessionPanel({
     <section
       aria-label="Starred work sessions"
       className="w-full rounded-lg bg-black p-3 text-xs text-white/90"
-      onPointerDown={(e) => e.stopPropagation()}
+      onPointerDown={(e) => { e.stopPropagation(); setActivity((v) => v + 1); }}
+      onPointerMove={() => setActivity((v) => v + 1)}
+      onKeyDown={() => setActivity((v) => v + 1)}
     >
       <div className={`flex items-center justify-between gap-2 ${inDialog ? "pr-8" : ""}`}>
         <p className="font-medium">
           {active
-            ? `${Math.max(1, Math.ceil((Date.parse(session.end) - state.now) / 60000))} min left`
+            ? "Starred session in progress"
             : showSession
               ? "Starred session"
               : "Star for"}
           {active && session.hd_requested && <span className="ml-2 text-white/50" title="HD requested for this session">HD</span>}
         </p>
-        {starting && session && <button className={action} disabled={disabled} onClick={() => setStarting(false)}>Cancel</button>}
         {active && (
           <button
             className={action}
@@ -134,18 +153,22 @@ export function StarredSessionPanel({
           </button>
         )}
       </div>
-      {!showSession && (
+      {active && <p role="status" className="mt-1 text-white/60">{Math.max(1, Math.ceil((Date.parse(session.end) - state.now) / 60000))} min left</p>}
+      {(!showSession || active) && (
         <div className="mt-3 grid grid-cols-4 gap-1" aria-label="Star for">
           {[5, 15, 30, 60].map((minutes) => (
             <button
               key={minutes}
-              className={action}
-              disabled={disabled}
+              className={`${action} aria-pressed:bg-white/20 aria-pressed:border-white/70`}
+              disabled={disabled || Boolean(active && Date.parse(session.start) + minutes * 60000 <= state.now)}
+              aria-pressed={active ? Math.abs(Date.parse(session.end) - Date.parse(session.start) - minutes * 60000) < 1000 : minutes === 60}
               onClick={() =>
-                void state.start(minutes, hd).then((saved) => {
+                void (active
+                  ? state.save({ ...session, end: new Date(Date.parse(session.start) + minutes * 60000).toISOString() })
+                  : state.start(minutes, hd)).then((saved) => {
                   if (saved) {
                     setSelected(undefined);
-                    setStarting(false);
+                    setExpanded(false);
                   }
                 })
               }
@@ -162,7 +185,7 @@ export function StarredSessionPanel({
             className={action}
             disabled={state.busy || working}
             onClick={() => void state.retry().then((saved) => {
-              if (saved && starting) { setSelected(undefined); setStarting(false); }
+              if (saved) setSelected(undefined);
             })}
           >
             Retry save
@@ -252,7 +275,12 @@ export function StarredSessionPanel({
           )}
         </div>
       )}
-      <details className="mt-3 text-white/60">
+      {showSession && !state.active && (
+        <button className={`${action} mt-3`} disabled={disabled} onClick={() => void newSession()}>
+          New session
+        </button>
+      )}
+      <details open={expanded} className="mt-3 text-white/60" onToggle={(e) => setExpanded(e.currentTarget.open)}>
         <summary className="w-fit cursor-pointer rounded py-1 hover:text-white focus-visible:outline">
           More
         </summary>
@@ -291,7 +319,7 @@ export function StarredSessionPanel({
               disabled={disabled}
               onChange={(e) => {
                 setSelected(e.target.value);
-                setStarting(false);
+                setExpanded(false);
                 closeEditor();
               }}
             >
@@ -301,18 +329,6 @@ export function StarredSessionPanel({
                 </option>
               ))}
             </select>
-          )}
-          {showSession && !state.active && (
-            <button
-              className={action}
-              disabled={disabled}
-              onClick={() => {
-                closeEditor();
-                setStarting(true);
-              }}
-            >
-              New session
-            </button>
           )}
           {showSession && !editing && (
             <div className="flex flex-wrap gap-2">

@@ -12,6 +12,7 @@ use tracing::{error, info, warn};
 
 /// Global app handle stored so native action callbacks can emit events.
 static GLOBAL_APP_HANDLE: std::sync::OnceLock<tauri::AppHandle> = std::sync::OnceLock::new();
+static STARRED_STATE_INSTALLED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
 static NATIVE_TIMELINE_PLACEMENT_INSTALLED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
 
 fn handle_shortcut_overlay_hour_snooze(app: &tauri::AppHandle) {
@@ -77,6 +78,15 @@ pub(super) fn install_shortcut_action_callback(app_handle: &tauri::AppHandle) {
     // here rather than adding a second startup hook that could drift.
     crate::native_timeline::set_action_callback(native_timeline_action_callback);
     install_native_timeline_placement(app_handle);
+    if STARRED_STATE_INSTALLED.set(()).is_err() { return; }
+    use tauri::Listener;
+    app_handle.listen("starred-session-state", |event| {
+        if let Ok(end) = serde_json::from_str::<Option<String>>(event.payload()) {
+            let until = end.and_then(|value| chrono::DateTime::parse_from_rfc3339(&value).ok())
+                .map(|value| value.timestamp_millis()).unwrap_or(0);
+            native_shortcut_reminder::set_starred_until(until);
+        }
+    });
 }
 
 /// Lets the webview pin the native timeline over a slice of its own layout.
