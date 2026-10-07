@@ -64,4 +64,28 @@ mod tests {
             .await
             .is_some());
     }
+
+    #[tokio::test]
+    async fn manual_handoff_and_staged_update_cannot_commit_together() {
+        let safety = RestartSafety(RwLock::new(()));
+        let handoff = safety
+            .prepare_restart(Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert!(safety
+            .prepare_restart(Duration::from_millis(10))
+            .await
+            .is_none());
+        // A refused handoff releases ownership so the staged update can retry.
+        drop(handoff);
+        let staged = safety
+            .prepare_restart(Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert!(safety
+            .prepare_restart(Duration::from_millis(10))
+            .await
+            .is_none());
+        drop(staged);
+    }
 }

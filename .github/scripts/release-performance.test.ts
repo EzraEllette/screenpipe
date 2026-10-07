@@ -108,6 +108,8 @@ test("release workflows retain the router gate and use helpers from the workflow
     const checkout = job.steps.find((s: any) => s.name === "Checkout macOS release helpers");
     expect(checkout.with.ref).toBe("${{ github.workflow_sha }}");
     expect(checkout.with["sparse-checkout"]).toContain(".github/scripts");
+    expect(checkout.with["sparse-checkout"]).toContain("apps/screenpipe-app-tauri/scripts");
+    expect(job.steps.some((s: any) => s.run?.includes('.release-workflow/apps/screenpipe-app-tauri/scripts/macos_bundle_sidecars.js "$TARGET" "$GITHUB_WORKSPACE/apps/screenpipe-app-tauri"'))).toBe(true);
     expect(job.steps.some((s: any) => s.run?.includes(".release-workflow/.github/scripts/finalize-macos-updater.sh"))).toBe(true);
   }
   const steps = app.jobs["publish-tauri"].steps;
@@ -141,7 +143,7 @@ esac
   f.stub("codesign", 'if [[ "${REJECT_EXTRACTED:-}" == 1 && "${@: -1}" != "$ORIGINAL_APP" ]]; then exit 1; fi\n');
   f.stub("spctl", ":\n");
   f.stub("bunx", 'if [[ "${FAIL_SIGN:-}" == 1 ]]; then exit 1; fi\necho fixture-signature > "$4.sig"\n');
-  const run = (extra = {}) => f.run("finalize-macos-updater.sh", [join(f.root, "bundle"), f.root], {
+  const run = (extra = {}, args: string[] = []) => f.run("finalize-macos-updater.sh", [join(f.root, "bundle"), f.root, ...args], {
     APPLE_ID: "fixture", APPLE_PASSWORD: "fixture", APPLE_TEAM_ID: "fixture", MODE: mode, ORIGINAL_APP: app, ...extra,
   });
   return { ...f, app, run };
@@ -164,4 +166,48 @@ test("updater signing failure fails the gate", () => {
 });
 test("an invalid extracted bundle fails the gate even when the original app validated", () => {
   const f = notarization("valid"); expect(f.run({ REJECT_EXTRACTED: "1" }).status).not.toBe(0);
+});
+
+test("recovery companion is notarized and assessed without becoming an updater payload", () => {
+  const f = notarization("missing");
+  expect(f.run({}, ["--app-only"]).status).toBe(0);
+  expect(f.calls()).toContain("notarytool submit");
+  expect(f.calls()).toContain("stapler validate");
+  expect(existsSync(`${f.app}.tar.gz`)).toBe(false);
+  expect(existsSync(`${f.app}.tar.gz.sig`)).toBe(false);
+  const rejected = notarization("rejected");
+  expect(rejected.run({}, ["--app-only"]).status).not.toBe(0);
+});
+
+test("recovery companion is included in consumer and enterprise DMGs on every Mac runner", () => {
+  for (const name of ["release-app.yml", "release-enterprise.yml"]) {
+    const workflow = Bun.YAML.parse(readFileSync(join(scripts, "../workflows", name), "utf8")) as any;
+    const jobs = Object.values(workflow.jobs) as any[];
+    const steps = jobs.flatMap(job => job.steps ?? []);
+    const recovery = steps.find(step => step.name === "Build and notarize update recovery launcher");
+    expect(recovery.run).toContain(".release-workflow/.github/scripts/build-macos-update-recovery.sh");
+    expect(recovery.run).toContain("--app-only");
+    const dmg = steps.find(step => step.name?.startsWith("Create headless DMG"));
+    expect(dmg.if ?? "").not.toContain("self-hosted");
+    expect(dmg.run).toContain('"${RECOVERY_ARGS[@]}"');
+  }
+});
+
+// Use real tar/xattr with the fixture signing services to match the updater's
+// filesystem semantics, rather than BSD tar silently restoring code metadata.
+test.skipIf(process.platform !== "darwin")("updater archive does not depend on detached signature metadata", () => {
+  const f = notarization("valid");
+  const resources = join(f.app, "Contents/Resources"); mkdirSync(resources, { recursive: true });
+  const shader = join(resources, "mlx.metallib"); writeFileSync(shader, "shader bytes");
+  expect(spawnSync("xattr", ["-w", "com.apple.cs.CodeDirectory", "fixture metadata", shader]).status).toBe(0);
+  expect(f.run().status).toBe(0);
+  const archive = `${f.app}.tar.gz`;
+  const entries = spawnSync("tar", ["-tzf", archive], { encoding: "utf8" });
+  expect(entries.status).toBe(0);
+  expect(entries.stdout).not.toContain("._");
+  const extracted = join(f.root, "extract"); mkdirSync(extracted);
+  expect(spawnSync("tar", ["-xzf", archive, "-C", extracted]).status).toBe(0);
+  const restored = join(extracted, "screenpipe enterprise.app/Contents/Resources/mlx.metallib");
+  expect(readFileSync(restored, "utf8")).toBe("shader bytes");
+  expect(spawnSync("xattr", ["-p", "com.apple.cs.CodeDirectory", restored]).status).not.toBe(0);
 });

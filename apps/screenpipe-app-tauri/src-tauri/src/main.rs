@@ -128,6 +128,8 @@ mod recording;
 mod remote_support_logs;
 mod remote_sync_commands;
 mod search_only;
+#[cfg(any(target_os = "macos", test))]
+mod manual_handoff;
 mod secrets;
 mod server;
 mod server_core;
@@ -584,10 +586,23 @@ async fn main() {
         }
     }
 
+    #[cfg(target_os = "macos")]
+    if let Err(error) = manual_handoff::initialize().await {
+        eprintln!("screenpipe: manual launch failed: {error:#}");
+        return;
+    }
+
+    #[cfg(target_os = "macos")]
+    let use_http_handoff = !manual_handoff::owns_launch();
+    #[cfg(not(target_os = "macos"))]
+    let use_http_handoff = true;
+
+    // Packaged macOS launches already authenticated their owner above. Do not
+    // let an unrelated edition at the shared focus port discard this launch.
     // Single-instance check: if sidecar server is already listening, hand off and exit.
     // This covers Linux (where tauri-plugin-single-instance is disabled due to
     // zbus/tokio conflict) and acts as a fallback on macOS/Windows.
-    {
+    if use_http_handoff {
         let args: Vec<String> = std::env::args().collect();
         let deep_link_url = deep_link::url_from_args(&args);
         let launch_exe = std::env::current_exe()
@@ -638,20 +653,7 @@ async fn main() {
 
     // Check if telemetry is disabled via store setting (analyticsEnabled)
     let store_path = screenpipe_core::paths::default_screenpipe_data_dir().join("store.bin");
-    let store_json = std::fs::read(&store_path).ok().and_then(|data| {
-        if data.len() >= 8 && &data[..8] == b"SPSTORE1" {
-            // The encrypted file is authoritative: every reader asks the OS
-            // vault for its existing key instead of relying on a separate flag.
-            let key = match secrets::get_key() {
-                secrets::KeyResult::Found(k) => k,
-                _ => return None,
-            };
-            let plain = screenpipe_vault::crypto::decrypt_small(&data[8..], &key).ok()?;
-            serde_json::from_slice::<serde_json::Value>(&plain).ok()
-        } else {
-            serde_json::from_slice::<serde_json::Value>(&data).ok()
-        }
-    });
+    let store_json = store::read_startup_store(&store_path).ok();
     // Helper: look up a bool key in the store JSON (check both top-level and nested "settings")
     let store_bool = |key: &str| -> Option<bool> {
         store_json.as_ref().and_then(|data| {
@@ -1072,6 +1074,10 @@ async fn main() {
     // an unrelated developer or CI app silently win before WebDriver starts.
     #[cfg(all(not(target_os = "linux"), not(feature = "e2e")))]
     let app = app.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+        #[cfg(target_os = "macos")]
+        if manual_handoff::pending() {
+            return;
+        }
         // Defer off event stack: plugin may invoke this from run loop (nounwind).
         let app_for_closure = app.clone();
         let args_clone = args.clone();
@@ -1087,6 +1093,13 @@ async fn main() {
             // consume one plain main-app handoff from the short guard armed
             // during setup; normal subsequent launches retain Home behavior.
             let login_duplicate = should_suppress_startup_handoff(&args_clone);
+            #[cfg(target_os = "macos")]
+            if !login_duplicate
+                && deep_link_url.is_none()
+                && manual_handoff::reopen(&app_for_closure, "single_instance")
+            {
+                return;
+            }
             if !crate::enterprise_policy::is_app_ui_hidden() && !login_duplicate {
                 if crate::search_only::is_active() {
                     crate::headless::wake_from_tray(&app_for_closure);
@@ -1369,7 +1382,7 @@ async fn main() {
 
             // mlx.metallib and libonnxruntime.dylib are staged at build time
             // for macOS release bundling (see build.rs stage_macos_sidecar_libs).
-            // arm64 bundles mlx.metallib as a Tauri externalBin so Tauri signs it;
+            // arm64 seals mlx.metallib in Resources with its lookup link made before signing;
             // x86_64 copies libonnxruntime.dylib via macOS.files.
             //
             // Previously this block created a symlink at Contents/MacOS/mlx.metallib
@@ -2485,6 +2498,8 @@ async fn main() {
                 sync::auto_start_retention(&app_handle_clone).await;
             });
 
+            #[cfg(target_os = "macos")]
+            manual_handoff::install(app.handle())?;
             Ok(())
         })
         .build(tauri::generate_context!())
@@ -2621,20 +2636,10 @@ async fn main() {
                             warn!("autostart: could not inspect macOS Reopen event: {error}")
                         }
                     }
-                    // Defer off the event stack so run handler stays panic-free.
-                    // Showing Onboarding is the app-entry gate: it focuses setup
-                    // while incomplete and routes to Home once complete.
-                    if crate::search_only::is_active() {
-                        crate::headless::wake_from_tray(app_handle.app_handle());
-                    }
-                    if crate::enterprise_policy::is_app_ui_hidden() || crate::headless::is_dormant()
-                    {
+                    if manual_handoff::reopen(app_handle.app_handle(), "native_reopen") {
                         return;
                     }
-                    let app = app_handle.app_handle().clone();
-                    let _ = app_handle.app_handle().run_on_main_thread(move || {
-                        let _ = ShowRewindWindow::Onboarding.show(&app);
-                    });
+                    manual_reopen(app_handle.app_handle());
                 }
                 _ => {}
             }
@@ -2642,6 +2647,20 @@ async fn main() {
         if let Err(e) = result {
             error!("panic in run event handler: {:?}", e);
         }
+    });
+}
+
+#[cfg(target_os = "macos")]
+fn manual_reopen(app: &tauri::AppHandle) {
+    if crate::search_only::is_active() {
+        crate::headless::wake_from_tray(app);
+    }
+    if crate::enterprise_policy::is_app_ui_hidden() || crate::headless::is_dormant() {
+        return;
+    }
+    let foreground = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        let _ = ShowRewindWindow::Onboarding.show(&foreground);
     });
 }
 

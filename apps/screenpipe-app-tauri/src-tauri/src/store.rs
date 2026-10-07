@@ -136,6 +136,21 @@ fn read_store_file(path: &Path) -> std::io::Result<Vec<u8>> {
     retry_windows_store_io(|| std::fs::read(path))
 }
 
+/// Read existing settings before instance arbitration without opening the DB,
+/// creating keys, repairing the store, or writing defaults.
+pub(crate) fn read_startup_store(path: &Path) -> Result<Value, String> {
+    let data = read_store_file(path).map_err(|e| e.to_string())?;
+    let plain = if data.starts_with(b"SPSTORE1") {
+        let crate::secrets::KeyResult::Found(key) = crate::secrets::get_key() else {
+            return Err("existing settings key is unavailable".into());
+        };
+        screenpipe_vault::crypto::decrypt_small(&data[8..], &key).map_err(|e| e.to_string())?
+    } else {
+        data
+    };
+    serde_json::from_slice(&plain).map_err(|e| e.to_string())
+}
+
 #[cfg(windows)]
 pub(crate) fn reset_windows_store_file_permissions(path: &Path) -> anyhow::Result<()> {
     use std::os::windows::process::CommandExt;

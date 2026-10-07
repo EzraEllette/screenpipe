@@ -674,7 +674,7 @@ fn main() {
         build_native_timeline();
 
         // Stage macOS runtime sidecars into src-tauri/. Release builds bundle
-        // mlx.metallib as a Tauri externalBin on arm64 so Tauri signs it, and
+        // mlx.metallib as a signed resource with a prebuilt runtime link, and
         // copy libonnxruntime.dylib via macOS.files on x86_64 for ort load-dynamic.
         stage_macos_sidecar_libs();
 
@@ -984,7 +984,7 @@ fn stage_macos_sidecar_libs() {
 }
 
 /// Copy mlx.metallib to a known location so release packaging can bundle it as
-/// a Tauri externalBin on aarch64 macOS builds. MLX compiles Metal shaders into
+/// a signed resource on aarch64 macOS builds. MLX compiles Metal shaders into
 /// this file during mlx-sys build. Without it, parakeet-mlx crashes with
 /// "Failed to load the default metallib".
 #[cfg(target_os = "macos")]
@@ -1007,7 +1007,7 @@ fn stage_mlx_metallib() {
     if needs_download {
         // Download mlx.metallib (pre-compiled MLX Metal shaders) for parakeet-mlx.
         // MLX needs this file next to the binary at runtime. The release
-        // workflow exposes the target-suffixed externalBin copy to Tauri.
+        // prebuild stages the resource and its relative runtime link before signing.
         eprintln!("mlx-metallib: downloading from GitHub releases...");
         let url =
             "https://github.com/screenpipe/screenpipe/releases/download/mlx-metallib-v0.2.0/mlx.metallib";
@@ -1028,7 +1028,7 @@ fn stage_mlx_metallib() {
         eprintln!("mlx-metallib: already present ({} MB)", size / 1_000_000);
     }
 
-    sign_macos_sidecar_if_needed(&metallib);
+    // Shader data is sealed by the enclosing bundle, not a detached xattr signature.
 }
 
 /// Stage libonnxruntime.dylib for x86_64 Intel builds. ort `load-dynamic` resolves

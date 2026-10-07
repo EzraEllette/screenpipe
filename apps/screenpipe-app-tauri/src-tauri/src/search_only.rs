@@ -135,6 +135,10 @@ pub fn resume_capture() -> Result<(), String> {
 /// An explicit reopen ends Quit's pause, using the existing capture owner.
 /// Ordinary window opens while already awake do not undo a recording pause.
 pub fn wake(app: &AppHandle) -> bool {
+    #[cfg(target_os = "macos")]
+    if crate::manual_handoff::pending() {
+        return false;
+    }
     if ENTERING.load(Ordering::SeqCst) || !is_active() {
         return false;
     }
@@ -183,6 +187,12 @@ pub fn prepare_restart() -> Result<(), String> {
         );
         error
     })
+}
+
+/// A replacement selected by the user is a manual open, not a hidden restart.
+#[cfg(target_os = "macos")]
+pub(crate) fn prepare_manual_handoff() -> Result<(), String> {
+    persist(false)
 }
 
 pub fn cancel_restart() {

@@ -50,6 +50,14 @@ pub(crate) async fn seed_database(db: &DatabaseManager) {
     }
 }
 
+/// Local E2E fixture only; never used as evidence of real account authentication.
+pub(crate) fn seed_cloud_authentication(store: &mut SettingsStore) {
+    let token = "e2e-fake-token-onboarding-background-ai-tools".to_string();
+    store.user.token = Some(token.clone());
+    crate::auth_token::seed_cloud_token(Some(token));
+    info!("E2E seed: synthetic cloud authentication enabled");
+}
+
 /// Apply deterministic settings mutations requested by `SCREENPIPE_E2E_SEED`.
 pub(crate) fn apply_settings(app: &AppHandle, store: &mut SettingsStore) {
     // E2E seed: when SCREENPIPE_E2E_SEED contains "no-recording", flip
@@ -60,10 +68,7 @@ pub(crate) fn apply_settings(app: &AppHandle, store: &mut SettingsStore) {
     // lets Windows hosted runners exercise OCR without booting Whisper.
     let e2e_flags = flags();
     if e2e_flags.iter().any(|f| f == "cloud-authenticated") {
-        let token = "e2e-fake-token-onboarding-background-ai-tools".to_string();
-        store.user.token = Some(token.clone());
-        crate::auth_token::seed_cloud_token(Some(token));
-        info!("E2E seed: synthetic cloud authentication enabled");
+        seed_cloud_authentication(store);
     }
     if e2e_flags.iter().any(|f| f == "no-recording") {
         store.recording.disable_audio = true;

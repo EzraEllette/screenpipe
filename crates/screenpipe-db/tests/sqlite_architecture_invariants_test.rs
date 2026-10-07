@@ -143,7 +143,7 @@ fn credential_readers_resolve_the_existing_os_vault_key() {
         ),
         (
             "apps/screenpipe-app-tauri/src-tauri/src/main.rs",
-            "secrets::get_key()",
+            "store::read_startup_store(",
         ),
         (
             "apps/screenpipe-app-tauri/src-tauri/src/store.rs",
@@ -180,4 +180,19 @@ fn credential_readers_resolve_the_existing_os_vault_key() {
             "credential reader {relative_path} must resolve the existing OS-vault key via {vault_read}"
         );
     }
+
+    // Startup now delegates the encrypted settings read to the shared helper.
+    // Keep the original invariant on that helper, not just elsewhere in store.rs.
+    let store =
+        fs::read_to_string(repository.join("apps/screenpipe-app-tauri/src-tauri/src/store.rs"))
+            .expect("read settings source");
+    let startup_reader = store
+        .split("pub(crate) fn read_startup_store(")
+        .nth(1)
+        .expect("startup settings reader")
+        .split("\n}")
+        .next()
+        .unwrap();
+    assert!(startup_reader.contains("secrets::get_key()"));
+    assert!(!startup_reader.contains("get_or_create_key"));
 }

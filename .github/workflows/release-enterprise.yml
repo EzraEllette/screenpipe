@@ -904,6 +904,8 @@ jobs:
           sparse-checkout: |
             .github/actions/setup-persistent-macos-cache
             .github/scripts
+            apps/screenpipe-app-tauri/scripts
+            apps/screenpipe-app-tauri/src-tauri/assets/dmg-background.png
 
       - name: Recover runaway macOS builder services
         if: runner.environment == 'self-hosted'
@@ -989,28 +991,7 @@ jobs:
           TARGET: ${{ matrix.target }}
         run: |
           set -euo pipefail
-          node <<'NODE'
-          const fs = require("fs");
-          const path = "apps/screenpipe-app-tauri/src-tauri/tauri.macos.conf.json";
-          const target = process.env.TARGET;
-          const config = JSON.parse(fs.readFileSync(path, "utf8"));
-          config.bundle ??= {};
-          config.bundle.macOS ??= {};
-          config.bundle.externalBin = [...new Set(config.bundle.externalBin ?? [])]
-            .filter((entry) => entry !== "mlx.metallib");
-          if (target === "aarch64-apple-darwin") {
-            config.bundle.macOS.files = {};
-            config.bundle.externalBin.push("mlx.metallib");
-          } else if (target === "x86_64-apple-darwin") {
-            config.bundle.macOS.files = {
-              "MacOS/libonnxruntime.dylib": "libonnxruntime.dylib",
-            };
-          } else {
-            throw new Error(`unknown macOS release target: ${target}`);
-          }
-          fs.writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`);
-          console.log(`macOS bundle sidecars configured for ${target}`);
-          NODE
+          bun .release-workflow/apps/screenpipe-app-tauri/scripts/macos_bundle_sidecars.js "$TARGET" "$GITHUB_WORKSPACE/apps/screenpipe-app-tauri"
 
       - name: Import signing cert into build keychain
         shell: bash
@@ -1143,10 +1124,8 @@ jobs:
             fi
 
             cd apps/screenpipe-app-tauri
-            BUNDLE_ARGS=()
-            if [[ "${{ runner.environment }}" == "self-hosted" ]]; then
-              BUNDLE_ARGS=(--bundles app)
-            fi
+            # Build the styled DMG below, including the signed recovery companion.
+            BUNDLE_ARGS=(--bundles app)
             if bunx tauri build -v --target "$TARGET" --features "${{ matrix.features }}" "${BUNDLE_ARGS[@]}" 2>&1 | tee /tmp/tauri-build-$attempt.log; then
               echo "Build succeeded on attempt $attempt"
               cd ../..
@@ -1192,8 +1171,26 @@ jobs:
           done
           echo "All enterprise .app bundles pass strict codesign verification"
 
+      - name: Build and notarize update recovery launcher
+        shell: bash
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          BUNDLE_DIR="apps/screenpipe-app-tauri/src-tauri/target/${{ matrix.target }}/release/bundle"
+          APP_PATH="${BUNDLE_DIR}/macos/screenpipe enterprise.app"
+          # Older selected source revisions predate authenticated handoff.
+          rm -rf "${BUNDLE_DIR}/recovery"
+          if /usr/libexec/PlistBuddy -c 'Print :ScreenpipeManualHandoffProtocol' "$APP_PATH/Contents/Info.plist" >/dev/null 2>&1; then
+            bash .release-workflow/.github/scripts/build-macos-update-recovery.sh "$APP_PATH" "${BUNDLE_DIR}/recovery"
+            bash .release-workflow/.github/scripts/finalize-macos-updater.sh \
+              "${BUNDLE_DIR}/recovery" "$GITHUB_WORKSPACE/apps/screenpipe-app-tauri" --app-only
+          fi
+
       - name: Create headless DMG
-        if: runner.environment == 'self-hosted'
         shell: bash
         run: |
           set -euo pipefail
@@ -1206,7 +1203,11 @@ jobs:
           VERSION=$(sed -n 's/^version = "\([^"]*\)"/\1/p' apps/screenpipe-app-tauri/src-tauri/Cargo.toml | head -1)
           APP_PATH="${BUNDLE_DIR}/macos/screenpipe enterprise.app"
           DMG_PATH="${BUNDLE_DIR}/dmg/screenpipe enterprise_${VERSION}_${{ matrix.package_arch }}.dmg"
-          .github/scripts/create-headless-dmg.sh "$APP_PATH" "$DMG_PATH" "screenpipe enterprise"
+          RECOVERY_ARGS=()
+          if [[ -d "${BUNDLE_DIR}/recovery/Open updated Screenpipe.app" ]]; then
+            RECOVERY_ARGS=("${BUNDLE_DIR}/recovery/Open updated Screenpipe.app")
+          fi
+          bash .release-workflow/.github/scripts/create-headless-dmg.sh "$APP_PATH" "$DMG_PATH" "screenpipe enterprise" "${RECOVERY_ARGS[@]}"
 
       - name: Notarize and staple DMG
         env:

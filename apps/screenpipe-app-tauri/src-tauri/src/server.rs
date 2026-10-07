@@ -128,6 +128,10 @@ async fn handle_focus(
     State(state): State<ServerState>,
     Json(payload): Json<FocusPayload>,
 ) -> Result<Json<ApiResponse>, (StatusCode, String)> {
+    #[cfg(target_os = "macos")]
+    if crate::manual_handoff::pending() {
+        return Err((StatusCode::SERVICE_UNAVAILABLE, "switching to the selected app copy".into()));
+    }
     info!(
         "Received focus request: args_count={}, deep_link_present={}, target={:?}",
         payload.args.len(),
@@ -791,6 +795,13 @@ async fn e2e_updates_start_capture(State(state): State<ServerState>) -> impl Int
             }));
         }
     };
+    // The initial boot stays signed out to reproduce the idle-update path.
+    // This second phase uses the existing isolated E2E authentication fixture
+    // so the production capture path reaches ScreenCaptureKit after relaunch.
+    crate::e2e::seeds::seed_cloud_authentication(&mut settings);
+    if let Err(error) = crate::store::OnboardingStore::update(&state.app_handle, |onboarding| onboarding.complete()) {
+        return Json(serde_json::json!({ "started": false, "error": format!("failed to prepare E2E onboarding: {error}") }));
+    }
     settings.user.id = Some("packaged_updater_e2e".to_string());
     settings.user.subscription_plan = Some("none".to_string());
     settings.user.entitlement = Some(serde_json::json!({
@@ -800,23 +811,31 @@ async fn e2e_updates_start_capture(State(state): State<ServerState>) -> impl Int
         "checked_at": chrono::Utc::now().to_rfc3339(),
         "features": { "app": true, "cloud": false }
     }));
-    if let Err(error) = settings.save(&state.app_handle) {
+    // Publish the existing fixture sentinel with the account in one store
+    // mutation. Otherwise a webview refresh sends the synthetic token to the
+    // real account service and clears the fixture on its expected 401.
+    let mut user = serde_json::json!(settings.user);
+    user["__e2eSkipAccountRefresh"] = serde_json::json!(true);
+    if let Err(error) = settings.replace_startup_user(&state.app_handle, user) {
         return Json(serde_json::json!({
             "started": false,
             "error": format!("failed to save E2E recording entitlement: {error}"),
         }));
     }
 
-    let result = crate::recording::spawn_screenpipe(
-        state.app_handle.state(),
+    if let Err(error) = crate::commands::set_cloud_token(
+        settings.user.token.clone(),
         state.app_handle.clone(),
-        None,
-    )
-    .await;
-    match result {
-        Ok(()) => Json(serde_json::json!({ "started": true, "error": null })),
-        Err(error) => Json(serde_json::json!({ "started": false, "error": error })),
+        state.app_handle.state(),
+    ).await {
+        return Json(serde_json::json!({ "started": false, "error": error }));
     }
+
+    // set_cloud_token schedules the production deferred account start. Do not
+    // also call spawn_screenpipe: that explicit start cancels the deferred
+    // request while it can already hold the lifecycle lock, losing both starts.
+    // The caller must verify a real frame; this only acknowledges the request.
+    Json(serde_json::json!({ "started": true, "error": null }))
 }
 
 async fn set_window_size(

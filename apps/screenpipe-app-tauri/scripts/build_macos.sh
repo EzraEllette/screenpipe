@@ -23,10 +23,12 @@ xattr -cr "$APP_PATH"
 
 # Sign the app manually
 IDENTITY="${APPLE_SIGNING_IDENTITY:-Apple Development: Louis Beaumont (NJ372MT773)}"
-# Metal library signatures use extended attributes cleared above.
-if [ -f "$APP_PATH/Contents/MacOS/mlx.metallib" ]; then
-  codesign --force --sign "$IDENTITY" "$APP_PATH/Contents/MacOS/mlx.metallib"
-fi
 codesign --force --options runtime --entitlements src-tauri/entitlements.plist --sign "$IDENTITY" "$APP_PATH"
+
+codesign --verify --deep --strict "$APP_PATH"
+
+APPLE_SIGNING_IDENTITY="$IDENTITY" SCREENPIPE_RECOVERY_DEVELOPMENT=1 \
+  bash ../../.github/scripts/build-macos-update-recovery.sh "$APP_PATH" \
+  src-tauri/target/debug-dev/bundle/recovery
 
 echo "Build completed successfully!"

@@ -127,7 +127,7 @@ pub(crate) async fn collect_log_files(dirs: &[PathBuf]) -> Vec<LogFile> {
                 .is_some_and(|name| {
                     is_panic_log(name)
                         || name == crate::recording::recovery_log::LOG_NAME
-                        || name == crate::update_diagnostics::LOG_NAME
+                        || crate::update_diagnostics::is_update_log(name)
                 }),
             std::cmp::Reverse(
                 metadata

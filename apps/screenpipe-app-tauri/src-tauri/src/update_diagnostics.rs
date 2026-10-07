@@ -9,6 +9,12 @@ use std::path::Path;
 use std::sync::Mutex;
 
 pub(crate) const LOG_NAME: &str = "update-install.log";
+// Written by the separately signed macOS recovery launcher before the app runs.
+pub(crate) const RECOVERY_LOG_NAME: &str = "update-recovery.log";
+
+pub(crate) fn is_update_log(name: &str) -> bool {
+    matches!(name, LOG_NAME | RECOVERY_LOG_NAME)
+}
 const MAX_BYTES: u64 = 32 * 1024;
 static WRITER: Mutex<()> = Mutex::new(());
 

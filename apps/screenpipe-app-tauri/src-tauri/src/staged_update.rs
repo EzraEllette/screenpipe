@@ -163,6 +163,10 @@ pub fn staged_version() -> Option<String> {
 /// the exit path; a failure only means the app comes back on the current
 /// version and the checker re-stages later.
 pub fn install_staged_if_any<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
+    if crate::manual_handoff::pending() && !crate::updates::update_restart_started() {
+        crate::update_diagnostics::record("manual_handoff_skipped_staged_install", "outcome=selected_build_preserved");
+        return false;
+    }
     install_staged_with_diagnostics(
         app,
         crate::config::app_data_dir(),
