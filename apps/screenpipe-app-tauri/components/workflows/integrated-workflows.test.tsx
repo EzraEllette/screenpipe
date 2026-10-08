@@ -92,12 +92,13 @@ it("opens the existing sharing review from the selected workflow in the main app
   const card = (await screen.findByRole("heading", { name: "Research synthesis" })).closest("article")!;
   fireEvent.click(within(card).getByRole("button", { name: "Open map" }));
   expect(screen.queryByRole("dialog", { name: "Sharing review" })).not.toBeInTheDocument();
-  const agents = screen.getByRole("group", { name: "Run Research synthesis in another agent" });
-  expect(agents.parentElement).toContainElement(screen.getByRole("button", { name: "Create SOP" }));
-  fireEvent.focus(within(agents).getByRole("button", { name: "Choose an AI agent" }));
-  for (const name of ["Claude", "Cursor", "Codex"]) {
-    expect(within(agents).getByRole("button", { name: `Run in ${name}` })).toBeVisible();
+  const agent = screen.getByRole("button", { name: "Open in agent" });
+  expect(agent.parentElement).toContainElement(screen.getByRole("button", { name: "Create SOP" }));
+  fireEvent.keyDown(agent, { key: "ArrowDown" });
+  for (const name of ["Codex", "Claude", "Cursor", "Screenpipe"]) {
+    expect(await screen.findByRole("menuitem", { name })).toBeVisible();
   }
+  fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
   fireEvent.click(screen.getByRole("button", { name: "Share with team" }));
   expect(screen.getByRole("dialog", { name: "Sharing review" })).toHaveTextContent("Research synthesis");
   expect(screen.getByRole("dialog", { name: "Sharing review" })).toHaveTextContent("workflow");
