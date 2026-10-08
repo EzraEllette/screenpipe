@@ -1,5 +1,16 @@
 # Coding-agent regression evals
 
+`app-zero-channel-downmix` compiles the actual complete converter module with
+synthetic buffers. Ten outcomes cover zero-channel passthrough and preserved
+mono, signed multichannel, silence, empty, high-channel and partial-frame behavior.
+The parent fails the two zero-channel outcomes and preserves eight; the historical
+converter fix and current source pass ten. Run
+`bun test evals/coding-agent/calibrate-zero-channel-downmix.test.js` for calibration.
+The dependency-free Cargo fixture is materialized only at grading, with no build
+cache links. This does not run the full audio crate, capture callbacks, device
+configuration gates, Windows COM or real recordings, and establishes neither
+execution isolation nor model improvement.
+
 The unmarked HTML file-preview case executes ViewerFileContent with the actual
 Markdown, code-renderer, iframe and sandbox helper sources. It checks full and
 snippet previews, parsed content/CSP metadata, source toggling, path transitions,
@@ -67,7 +78,7 @@ The hidden fixture appears only at grading and uses no dependency links.
 This does not establish native recording continuity, real authentication,
 account-switch race safety, browser integration, isolation or model performance.
 
-The current app corpus contains 141 git-mined regressions. See
+The current app corpus contains 142 git-mined regressions. See
 [DESIGN.md](./DESIGN.md) for the Anthropic guidance, source contract, and
 history-mining workflow. The companion website manifest uses this same harness.
 

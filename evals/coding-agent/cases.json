@@ -5889,6 +5889,49 @@
         ],
         "command": "cd apps/screenpipe-app-tauri && node node_modules/vitest/vitest.mjs run --config eval-codex-images.config.mjs"
       }
+    },
+    {
+      "id": "app-zero-channel-downmix",
+      "name": "Keep degenerate audio channel metadata from crashing sample conversion",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "7c3b846ba35d6b90448b4d72b302c3fbb8f85bcc"
+      },
+      "base_ref": "e3cbb57f61c0805accedf97cf0c062880566ad68",
+      "oracle_ref": "7c3b846ba35d6b90448b4d72b302c3fbb8f85bcc",
+      "oracle_paths": [
+        "crates/screenpipe-audio/src/utils/audio/convert.rs"
+      ],
+      "trigger_paths": [
+        "crates/screenpipe-audio/src/utils/audio/convert.rs"
+      ],
+      "gate": "advisory",
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "audio",
+        "preserved-behavior"
+      ],
+      "prompt": "Audio conversion can panic when a device reports zero channels. Repair the existing interleaved-f32-to-mono converter so zero-channel metadata returns the original samples unchanged, including an empty buffer, without panicking. Preserve mono passthrough. For positive multichannel counts, average each frame across the declared channel count, preserve sample order and signed values, and retain real silence from cancellation. Preserve high-channel inputs and historical partial-frame behavior: emit the trailing partial frame using the full declared channel count as the denominator, even when the whole input is shorter than a frame. Empty buffers remain empty. Use the existing converter interface; no particular algorithm is required. Grading compiles the actual complete converter module with synthetic buffers. Device configuration rejection, capture callbacks, Windows COM, operating-system recovery, real recording and execution isolation are outside this narrow conversion task. Do not access recording hardware, user recordings or live services.",
+      "agent_timeout_seconds": 900,
+      "grader": {
+        "timeout_seconds": 180,
+        "fixtures": [
+          {
+            "local_path": "graders/zero-channel-downmix.fixture.rs",
+            "destination_path": ".eval-downmix/outcomes.rs"
+          },
+          {
+            "local_path": "graders/zero-channel-downmix.lib.rs",
+            "destination_path": ".eval-downmix/lib.rs"
+          },
+          {
+            "local_path": "graders/zero-channel-downmix.Cargo.toml.txt",
+            "destination_path": ".eval-downmix/Cargo.toml"
+          }
+        ],
+        "command": "cargo test --offline --manifest-path .eval-downmix/Cargo.toml --test outcomes -- --nocapture"
+      }
     }
   ]
 }

@@ -1,0 +1,12 @@
+# screenpipe — AI that knows everything you've seen, said, or heard
+# https://screenpipe.com
+[package]
+name = "downmix_probe"
+version = "0.0.0"
+edition = "2021"
+[workspace]
+[lib]
+path = "lib.rs"
+[[test]]
+name = "outcomes"
+path = "outcomes.rs"
