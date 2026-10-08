@@ -67,6 +67,7 @@ pub mod hot_frame_cache;
 pub mod live_views;
 pub mod local_chat;
 pub mod logging;
+mod mcp_call;
 pub mod mcp_servers_api;
 pub mod meeting_export;
 pub mod meeting_summary;
