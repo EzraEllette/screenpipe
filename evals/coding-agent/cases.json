@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "suite": "screenpipe-app-coding-agent-regressions",
-  "dataset_version": "2026-10-07-imported-agent-settings",
+  "dataset_version": "2026-10-08-codex-embedded-images",
   "suite_type": "regression",
   "owner": "screenpipe engineering",
   "policy": {
@@ -5840,6 +5840,54 @@
           }
         ],
         "command": "cd apps/screenpipe-app-tauri && node node_modules/vitest/vitest.mjs run --config eval-import-settings.config.mjs"
+      }
+    },
+    {
+      "id": "app-codex-embedded-image-import",
+      "name": "Preserve embedded image attachments during Codex transcript import",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "a8ef9734ad2e852593b787c6272a2a11b85e12b4"
+      },
+      "base_ref": "21b59f57bd16e20196349287de7cbc2da99262eb",
+      "oracle_ref": "a8ef9734ad2e852593b787c6272a2a11b85e12b4",
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/lib/chat/external-chat-parser.ts",
+        "apps/screenpipe-app-tauri/lib/chat/external-chat-import.ts"
+      ],
+      "trigger_paths": [
+        "apps/screenpipe-app-tauri/lib/chat/external-chat-parser.ts",
+        "apps/screenpipe-app-tauri/lib/chat/external-chat-import.ts"
+      ],
+      "gate": "advisory",
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "chat-import",
+        "images",
+        "preserved-behavior"
+      ],
+      "prompt": "Codex transcript imports lose embedded image attachments. Repair the actual import-and-save flow so accepted base64 raster image data reaches the existing saved-message images contract in original order, alongside user text. Retain image-only user messages. Automatic sync must persist missing or changed image bytes even if text, timestamps and image count are unchanged, while avoiding writes for fully unchanged text or image conversations. Matching trailing image transport envelopes must not appear in the saved user text or title; preserve quoted transport syntax as authored text. Reject remote image URLs, non-raster data such as HTML/SVG, and malformed base64 syntax from saved attachments without losing the accompanying text. Preserve chosen titles, presets, pins, local continuation messages and ordinary Claude text imports. Use the existing importer and conversation interfaces; no particular implementation is required. Grading invokes actual import-and-save code with synthetic filesystem, storage and event ports. Path-only attachments, renderer behavior, image decoding, real transcript discovery, native durability, execution isolation and provider access are separate.",
+      "agent_timeout_seconds": 900,
+      "grader_dependency_links": [
+        {
+          "source_path": "apps/screenpipe-app-tauri/node_modules",
+          "destination_path": "apps/screenpipe-app-tauri/node_modules"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/codex-images.fixture.ts.txt",
+            "destination_path": "apps/screenpipe-app-tauri/eval-codex-images.test.ts"
+          },
+          {
+            "local_path": "graders/codex-images.config.mjs",
+            "destination_path": "apps/screenpipe-app-tauri/eval-codex-images.config.mjs"
+          }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && node node_modules/vitest/vitest.mjs run --config eval-codex-images.config.mjs"
       }
     }
   ]

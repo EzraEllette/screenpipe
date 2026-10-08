@@ -1,0 +1,29 @@
+// screenpipe — AI that knows everything you've seen, said, or heard
+// https://screenpipe.com
+import {beforeEach,expect,it,vi} from 'vitest';
+const io=vi.hoisted(()=>({read:vi.fn(),stat:vi.fn(),load:vi.fn(),save:vi.fn(),emit:vi.fn()}));
+vi.mock('@tauri-apps/api/event',()=>({emit:io.emit}));
+vi.mock('@tauri-apps/api/path',()=>({homeDir:vi.fn(),join:vi.fn()}));
+vi.mock('@tauri-apps/plugin-fs',()=>({exists:vi.fn(),readDir:vi.fn(),readTextFile:io.read,stat:io.stat}));
+vi.mock('@/lib/chat-storage',()=>({deleteConversationFile:vi.fn(),loadConversationFile:io.load,saveConversationFile:io.save,invalidateConversationListCache:vi.fn()}));
+import {importExternalChatHistory} from '@/lib/chat/external-chat-import';
+const at=Date.parse('2026-08-01T12:00:00Z');
+const red='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLttAAAAABJRU5ErkJggg==';
+const blue='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z/D/PwAH/wL+XJr2AAAAAElFTkSuQmCC';
+const text='Review the synthetic tiles';
+function codex(content=text,images:string[]=[]){return JSON.stringify({type:'response_item',timestamp:at,payload:{type:'message',id:'u1',role:'user',content:[{type:'input_text',text:content},...images.map(image_url=>({type:'input_image',image_url}))]}});}
+function run(source='codex',skipUnchanged=true){return importExternalChatHistory([{source:source as any,path:'/fixture/synthetic.jsonl',sourceId:'synthetic-images',modifiedAt:at,size:1024}],{skipUnchanged});}
+function saved(){return io.save.mock.calls.at(-1)?.[0];}
+async function existing(images:string[]=[]){io.read.mockResolvedValue(codex());await run();const prior=structuredClone(saved());prior.messages[0].images=images;io.load.mockResolvedValue(prior);io.save.mockClear();return prior;}
+beforeEach(()=>{vi.resetAllMocks();io.stat.mockResolvedValue({size:1024});io.load.mockResolvedValue(null);io.save.mockResolvedValue(undefined);io.emit.mockResolvedValue(undefined);});
+it('persists ordered embedded images alongside the actual user text',async()=>{io.read.mockResolvedValue(codex(text,[red,blue]));expect(await run()).toMatchObject({imported:1,failed:0});expect(saved().messages[0]).toMatchObject({content:text,images:[red,blue]});});
+it('retains an image-only user message',async()=>{io.read.mockResolvedValue(codex('',[red]));expect(await run()).toMatchObject({imported:1,skipped:0,failed:0});expect(saved().messages).toHaveLength(1);expect(saved().messages[0]).toMatchObject({role:'user',content:'',images:[red]});});
+it('refreshes missing images when text and timestamps have not changed',async()=>{await existing();io.read.mockResolvedValue(codex(text,[red]));expect(await run()).toMatchObject({updated:1,skipped:0,failed:0});expect(saved().messages[0].images).toEqual([red]);});
+it('refreshes changed image data even when the image count is unchanged',async()=>{await existing([red]);io.read.mockResolvedValue(codex(text,[blue]));expect(await run()).toMatchObject({updated:1,skipped:0,failed:0});expect(saved().messages[0].images).toEqual([blue]);});
+it('removes matching trailing transport markup while preserving text and title',async()=>{io.read.mockResolvedValue(codex(`${text}\n<image name=[Image #1] path="/fixture/tile.png">\n</image>`,[red]));await run();expect(saved().messages[0].content).toBe(text);expect(saved().title).toBe(text);expect(saved().messages[0].images).toEqual([red]);});
+it('leaves a completely unchanged text conversation unwritten',async()=>{await existing();expect(await run()).toMatchObject({skipped:1,updated:0,failed:0});expect(io.save).not.toHaveBeenCalled();});
+it('leaves unchanged images unwritten',async()=>{await existing([red]);io.read.mockResolvedValue(codex(text,[red]));expect(await run()).toMatchObject({skipped:1,updated:0,failed:0});expect(io.save).not.toHaveBeenCalled();});
+it('keeps unsupported or remote image sources out of saved attachments',async()=>{io.read.mockResolvedValue(codex(text,['https://example.invalid/tracker.png','data:text/html;base64,PHNjcmlwdD4=','data:image/svg+xml;base64,PHN2Zz4=','data:image/png;base64,%%%']));expect(await run()).toMatchObject({imported:1,failed:0});expect(saved().messages[0].content).toBe(text);expect(saved().messages[0].images??[]).toEqual([]);});
+it('preserves quoted transport syntax as user-authored text',async()=>{const quoted='Example:\n```xml\n<image name=[Image #1] path="/fixture/tile.png">\n```';io.read.mockResolvedValue(codex(quoted));await run();expect(saved().messages[0].content).toBe(quoted);});
+it('preserves chosen title, preset, pin and a local continuation when refreshing',async()=>{const prior=await existing();Object.assign(prior,{title:'My chosen title',titleSource:'user',presetId:'chosen-preset',pinned:true});prior.messages.push({id:'local-reply',role:'assistant',content:'Local continuation',timestamp:at+100});io.load.mockResolvedValue(prior);await run('codex',false);expect(saved()).toMatchObject({title:'My chosen title',titleSource:'user',presetId:'chosen-preset',pinned:true});expect(saved().messages.at(-1)).toMatchObject({id:'local-reply',content:'Local continuation'});});
+it('preserves ordinary Claude text import',async()=>{io.read.mockResolvedValue(JSON.stringify({type:'user',timestamp:at,sessionId:'synthetic-images',uuid:'u1',message:{role:'user',content:'Synthetic Claude text'}}));expect(await run('claude-code')).toMatchObject({imported:1,failed:0});expect(saved().messages[0].content).toBe('Synthetic Claude text');});

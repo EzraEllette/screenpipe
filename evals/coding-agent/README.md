@@ -67,7 +67,7 @@ The hidden fixture appears only at grading and uses no dependency links.
 This does not establish native recording continuity, real authentication,
 account-switch race safety, browser integration, isolation or model performance.
 
-The current app corpus contains 140 git-mined regressions. See
+The current app corpus contains 141 git-mined regressions. See
 [DESIGN.md](./DESIGN.md) for the Anthropic guidance, source contract, and
 history-mining workflow. The companion website manifest uses this same harness.
 
@@ -1781,3 +1781,16 @@ preserves four; the historical fix and current source pass eight. Run
 correct, broken, disconnected, equivalent and preserved-behavior controls.
 This does not verify actual transcript discovery, durable native writes,
 composer selection, enterprise policy, provider execution, isolation or model gains.
+
+## Codex embedded image imports
+
+`app-codex-embedded-image-import` executes the actual importer and parser with
+synthetic filesystem, persistence and event ports. Eleven outcomes cover ordered
+embedded images, image-only messages, missing/changed image refreshes, transport
+markup, unchanged records, rejected sources and preserved conversation state.
+The parent fails five attachment outcomes and preserves six; the historical fix
+and current source pass eleven. Run
+`bun test evals/coding-agent/calibrate-codex-images.test.js` for calibration.
+Fixtures and dependency links appear only at grading. This does not establish
+image decoding/rendering, path-only attachment handling, real discovery, native
+durability, enforced isolation or model performance.
