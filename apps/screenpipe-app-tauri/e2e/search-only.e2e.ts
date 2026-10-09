@@ -146,6 +146,28 @@ await request(control, "/e2e/search-only/quit", "POST");
 await until(async () => {
   const s = await state();
   return s.search_only && !s.entering && !s.capture_running;
+}, "Quit before retained-server failure");
+const beforeServerStop = await counts();
+assert.equal(
+  (await request(control, "/e2e/search-only/stop-server", "POST")).stopped,
+  true,
+  "Stop the retained server through the normal lifecycle owner",
+);
+await request(control, "/e2e/search-only/reopen", "POST");
+await until(async () => {
+  const s = await state();
+  return !s.search_only && s.capture_running && s.capture_intended;
+}, "Reopen starts the server and capture when the retained server is absent");
+assert.equal((await state()).pid, initial.pid);
+await until(async () => {
+  const resumed = await counts();
+  return Date.parse(resumed.lastFrame) > Date.parse(beforeServerStop.lastFrame);
+}, "Reopen after server loss persists new frames");
+
+await request(control, "/e2e/search-only/quit", "POST");
+await until(async () => {
+  const s = await state();
+  return s.search_only && !s.entering && !s.capture_running;
 }, "Quit before updater relaunch");
 const beforeRestart = await historySnapshot();
 await request(control, "/e2e/search-only/restart", "POST");
@@ -197,5 +219,5 @@ await until(async () => {
   }
 }, "Updater relaunch while recording restores recording");
 console.log(
-  "PASS: two Quit/search/reopen cycles resume and persist frames in the same PID; Quit blocks captures and mutations; updater relaunch preserves paused search or active recording",
+  "PASS: Quit/search/reopen resumes and persists frames in the same PID, including after retained-server loss; Quit blocks captures and mutations; updater relaunch preserves paused search or active recording",
 );

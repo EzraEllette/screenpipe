@@ -177,7 +177,7 @@ async fn handle_focus(
             payload.deep_link_url.as_deref(),
             payload.target.as_deref(),
         );
-    if !startup_handoff && crate::search_only::is_active() {
+    if !startup_handoff && crate::search_only::needs_wake() {
         crate::headless::wake_from_tray(&state.app_handle);
     }
     if startup_handoff {
@@ -379,6 +379,7 @@ pub async fn run_server(app_handle: tauri::AppHandle, port: u16) {
         .route("/e2e/search-only/quit", axum::routing::post(e2e_search_only_quit))
         .route("/e2e/search-only/reopen", axum::routing::post(e2e_search_only_reopen))
         .route("/e2e/search-only/resume", axum::routing::post(e2e_search_only_resume))
+        .route("/e2e/search-only/stop-server", axum::routing::post(e2e_search_only_stop_server))
         .route("/e2e/search-only/restart", axum::routing::post(e2e_search_only_restart))
         .route("/e2e/updates/state", axum::routing::get(e2e_updates_state))
         .route("/e2e/updates/click", axum::routing::post(e2e_updates_click))
@@ -722,6 +723,13 @@ async fn e2e_search_only_resume(State(state): State<ServerState>) -> impl IntoRe
     use tauri::Manager;
     let result = crate::recording::start_capture(state.app_handle.state(), state.app_handle.clone()).await;
     Json(serde_json::json!({"resumed": result.is_ok(), "error": result.err()}))
+}
+
+#[cfg(feature = "e2e")]
+async fn e2e_search_only_stop_server(State(state): State<ServerState>) -> impl IntoResponse {
+    use tauri::Manager;
+    let result = crate::recording::stop_screenpipe(state.app_handle.state(), state.app_handle.clone()).await;
+    Json(serde_json::json!({"stopped": result.is_ok(), "error": result.err()}))
 }
 
 #[cfg(feature = "e2e")]

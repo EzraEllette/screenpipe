@@ -22,7 +22,6 @@ const SESSION_FILE: &str = "search-session.json";
 struct Session {
     capture_paused: bool,
     resume_search_only: bool,
-    restart_pending: bool,
 }
 
 pub fn is_active() -> bool {
@@ -31,6 +30,11 @@ pub fn is_active() -> bool {
 
 pub fn capture_paused() -> bool {
     CAPTURE_PAUSED.load(Ordering::SeqCst)
+}
+
+/// Quit state may outlive the hidden UI after an older updater handoff.
+pub fn needs_wake() -> bool {
+    is_active() || capture_paused()
 }
 
 pub fn is_entering() -> bool {
@@ -67,7 +71,6 @@ fn persist(restart_pending: bool) -> Result<(), String> {
         &Session {
             capture_paused: capture_paused(),
             resume_search_only: restart_pending && is_active(),
-            restart_pending,
         },
     )
 }
@@ -78,11 +81,13 @@ fn diagnostic(event: &str, detail: &str) {
 
 fn restore_at(root: &Path, from_autostart: bool) -> Result<Session, String> {
     let mut session = load_at(root)?;
-    // A restart handoff preserves Quit's pause for one launch. A subsequent
-    // manual launch is a request to record again; OS login is not.
-    if !from_autostart && !session.restart_pending && !session.resume_search_only {
-        session.capture_paused = false;
-    }
+    let was_paused = session.capture_paused;
+    // Only a launch that stays in search-only mode retains Quit's pause.
+    // A normal UI launch, including an updater handoff, starts recording just
+    // like a fresh launch. OS login keeps a previously quit app in the background.
+    session.resume_search_only =
+        session.capture_paused && (from_autostart || session.resume_search_only);
+    session.capture_paused = session.resume_search_only;
     persist_at(
         root,
         &Session {
@@ -90,11 +95,25 @@ fn restore_at(root: &Path, from_autostart: bool) -> Result<Session, String> {
             ..Session::default()
         },
     )?;
+    if was_paused {
+        crate::recording::recovery_log::append(
+            root,
+            "search_session_restored",
+            &format!(
+                "autostart={from_autostart}; outcome={}",
+                if session.resume_search_only {
+                    "search_only"
+                } else {
+                    "normal_startup"
+                },
+            ),
+        );
+    }
     Ok(session)
 }
 
-/// Resolve Quit's pause before startup publishes capture intent. Updater
-/// handoffs retain search-only mode; manual launches resume normal recording.
+/// Resolve Quit's pause before startup publishes capture intent. Only launches
+/// that retain search-only mode stay paused; normal launches start recording.
 pub fn initialize(from_autostart: bool) -> bool {
     let session =
         restore_at(&crate::config::app_data_dir(), from_autostart).unwrap_or_else(|error| {
@@ -139,7 +158,7 @@ pub fn wake(app: &AppHandle) -> bool {
     if crate::manual_handoff::pending() {
         return false;
     }
-    if ENTERING.load(Ordering::SeqCst) || !is_active() {
+    if ENTERING.load(Ordering::SeqCst) || !needs_wake() {
         return false;
     }
     screenpipe_core::background_work::set_suspended(false);
@@ -149,20 +168,35 @@ pub fn wake(app: &AppHandle) -> bool {
     }
     // Publish intent before scheduling work. The capture helper rechecks it
     // under the capture lock, so a later Stop or Quit wins over this request.
+    let store = crate::store::SettingsStore::get(app)
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let capture_allowed = crate::recording::recording_access_allowed(app, &store);
     app.state::<crate::recording::RecordingState>()
-        .set_capture_intent(true);
+        .set_capture_intent(capture_allowed);
     diagnostic(
         "search_reopen_resume_requested",
-        "source=manual_reopen; outcome=start_requested",
+        if capture_allowed {
+            "source=manual_reopen; outcome=start_requested"
+        } else {
+            "source=manual_reopen; outcome=recording_access_required"
+        },
     );
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
-        if let Err(error) = crate::recording::start_capture_internal(
-            &app.state::<crate::recording::RecordingState>(),
-            &app,
-        )
-        .await
-        {
+        let state = app.state::<crate::recording::RecordingState>();
+        let _lifecycle = state.server_lifecycle.lock().await;
+        if !state.capture_intended() {
+            return;
+        }
+        // Use normal startup so an absent or unhealthy retained server can
+        // recover too. Do not publish intent again after a later Stop or Quit.
+        // Reopening is a fresh user start, not another automated restart.
+        // Otherwise the restart cooldown can accept a healthy search server
+        // without ever starting its stopped capture session.
+        state.last_spawn_epoch.store(0, Ordering::SeqCst);
+        if let Err(error) = crate::recording::spawn_screenpipe_inner(&state, app.clone()).await {
             report_reopen_failure(&crate::config::app_data_dir(), &error);
         }
     });
@@ -348,7 +382,6 @@ mod tests {
             &Session {
                 capture_paused: true,
                 resume_search_only: true,
-                ..Session::default()
             },
         )
         .unwrap();
@@ -371,28 +404,52 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(restore_at(dir.path(), true).unwrap().capture_paused);
+        let login = restore_at(dir.path(), true).unwrap();
+        assert!(login.capture_paused);
+        assert!(
+            login.resume_search_only,
+            "login must not open a normal but paused app"
+        );
         assert!(!restore_at(dir.path(), false).unwrap().capture_paused);
         assert!(!restore_at(dir.path(), false).unwrap().capture_paused);
     }
 
+    #[tokio::test]
+    async fn normal_updater_launch_clears_legacy_quit_pause() {
+        let dir = tempfile::tempdir().unwrap();
+        // The previous version wrote this exact state after updating with the
+        // normal UI open. Its restart marker must not strand capture again.
+        std::fs::write(
+            dir.path().join(SESSION_FILE),
+            br#"{"capture_paused":true,"resume_search_only":false,"restart_pending":true}"#,
+        )
+        .unwrap();
+        let updated = restore_at(dir.path(), false).unwrap();
+        assert!(!updated.capture_paused);
+        assert!(!updated.resume_search_only);
+        assert!(!load_at(dir.path()).unwrap().capture_paused);
+        assert!(!restore_at(dir.path(), false).unwrap().capture_paused);
+        let report = crate::diagnostic_logs::collect_redacted_from_dirs(&[dir.path().into()])
+            .await
+            .unwrap();
+        assert!(report.contains("search_session_restored"));
+        assert!(report.contains("autostart=false; outcome=normal_startup"));
+    }
+
     #[test]
-    fn updater_preserves_pause_even_with_the_ui_open() {
+    fn stale_search_restart_marker_does_not_pause_a_normal_launch() {
         let dir = tempfile::tempdir().unwrap();
         persist_at(
             dir.path(),
             &Session {
-                capture_paused: true,
-                restart_pending: true,
-                ..Session::default()
+                capture_paused: false,
+                resume_search_only: true,
             },
         )
         .unwrap();
-        let updated = restore_at(dir.path(), false).unwrap();
-        assert!(updated.capture_paused);
-        assert!(!updated.resume_search_only);
-        assert!(!load_at(dir.path()).unwrap().restart_pending);
-        assert!(!restore_at(dir.path(), false).unwrap().capture_paused);
+        let launched = restore_at(dir.path(), false).unwrap();
+        assert!(!launched.capture_paused);
+        assert!(!launched.resume_search_only);
     }
 
     #[test]
@@ -412,7 +469,6 @@ mod tests {
             &Session {
                 capture_paused: true,
                 resume_search_only: true,
-                ..Session::default()
             },
         )
         .unwrap_err();

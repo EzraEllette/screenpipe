@@ -1136,7 +1136,7 @@ async fn main() {
                 return;
             }
             if !crate::enterprise_policy::is_app_ui_hidden() && !login_duplicate {
-                if crate::search_only::is_active() {
+                if crate::search_only::needs_wake() {
                     crate::headless::wake_from_tray(&app_for_closure);
                 }
                 match deep_link::handoff_window(deep_link_url.as_deref()) {
@@ -2688,7 +2688,7 @@ async fn main() {
 
 #[cfg(target_os = "macos")]
 fn manual_reopen(app: &tauri::AppHandle) {
-    if crate::search_only::is_active() {
+    if crate::search_only::needs_wake() {
         crate::headless::wake_from_tray(app);
     }
     if crate::enterprise_policy::is_app_ui_hidden() || crate::headless::is_dormant() {
