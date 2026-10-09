@@ -1,0 +1,48 @@
+// screenpipe — AI that knows everything you've seen, said, or heard
+// https://screenpipe.com
+import { expect, test } from 'bun:test';
+import { getModelCost, inferProvider, isZeroCostModel } from '../services/cost-tracker';
+
+// Exercise existing exported accounting behavior, without providers or a database.
+for (const [label, model] of [['missing', undefined], ['null', null]] as const) {
+  test(`${label} model uses the unknown-price estimate`, () => {
+    expect(() => getModelCost(model, null, null)).not.toThrow();
+    expect(getModelCost(model, null, null)).toBe(0.01);
+    expect(getModelCost(model, 400, 70)).toBe(0.01);
+  });
+  test(`${label} model is not free`, () => {
+    expect(() => isZeroCostModel(model)).not.toThrow();
+    expect(isZeroCostModel(model)).toBe(false);
+  });
+  test(`${label} model has unknown provider`, () => {
+    expect(() => inferProvider(model)).not.toThrow();
+    expect(inferProvider(model)).toBe('unknown');
+  });
+}
+for (const model of ['', '   ', 'synthetic-unlisted-model']) {
+  test(`unrecognized string ${JSON.stringify(model)} preserves fallback`, () => {
+    expect(getModelCost(model, null, null)).toBe(0.01);
+    expect(isZeroCostModel(model)).toBe(false);
+    expect(inferProvider(model)).toBe('unknown');
+  });
+}
+test('priced model retains measured and zero-token cost', () => {
+  expect(getModelCost('gpt-5.4-nano', 1000, 200)).toBeCloseTo(0.00045, 10);
+  expect(getModelCost('gpt-5.4-nano', 0, 0)).toBe(0);
+  expect(isZeroCostModel('gpt-5.4-nano')).toBe(false);
+  expect(inferProvider('gpt-5.4-nano')).toBe('openai');
+});
+test('unknown token counts retain the existing estimate and one-sided counts', () => {
+  expect(getModelCost('gpt-5.4-nano', null, null)).toBeCloseTo(0.001025, 10);
+  expect(getModelCost('gpt-5.4-nano', null, 200)).toBeCloseTo(0.00025, 10);
+  expect(getModelCost('gpt-5.4-nano', 1000, null)).toBeCloseTo(0.0002, 10);
+});
+test('case-insensitive versioned model retains longest pricing match', () => {
+  expect(getModelCost('GPT-5.4-NANO-2026', 1000, 200)).toBeCloseTo(0.00045, 10);
+  expect(inferProvider('GPT-5.4-NANO-2026')).toBe('openai');
+});
+test('existing free model remains free', () => {
+  expect(getModelCost('screenpipe-event-classifier', null, null)).toBe(0);
+  expect(isZeroCostModel('screenpipe-event-classifier')).toBe(true);
+  expect(inferProvider('screenpipe-event-classifier')).toBe('screenpipe-vllm');
+});
