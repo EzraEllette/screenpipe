@@ -1190,6 +1190,10 @@ fn is_vscode_terminal_list_role(role_str: &str, depth: usize, app: &AppState) ->
 
 /// Mutable state passed through the recursive walk.
 struct WalkState {
+    #[cfg(test)]
+    batch_children: bool,
+    #[cfg(test)]
+    node_and_child_calls: usize,
     text_buffer: String,
     nodes: Vec<AccessibilityTreeNode>,
     node_count: usize,
@@ -1264,6 +1268,10 @@ impl WalkState {
         let capture_semantic_dom =
             capture_parser_structure && is_semantic_dom_app(&focused_app_lower);
         Self {
+            #[cfg(test)]
+            batch_children: true,
+            #[cfg(test)]
+            node_and_child_calls: 0,
             text_buffer: String::with_capacity(4096),
             nodes: Vec::with_capacity(256),
             node_count: 0,
@@ -1595,8 +1603,8 @@ fn parse_xterm_bare_desc(val: &str) -> Option<String> {
 // (role, value, title, description, AXPosition, AXSize). XPC round-trip latency
 // is what walk time is made of, so collapsing those into ONE round trip with
 // `AXUIElementCopyMultipleAttributeValues` is a ~3x per-node win (measured
-// 2026-07-10). `children()` stays separate (needed as elements for traversal)
-// and the parameterized line-bounds subsystem is left alone.
+// 2026-07-10). Child handles now share the secondary enrichment request
+// after pruning; parameterized line-bounds calls remain separate.
 //
 // cidre does not wrap this API, so declare it here, mirroring cidre's
 // own extern pattern (see `AXUIElementGetPid` in cidre `src/ax/ui_element.rs`).
@@ -1661,42 +1669,28 @@ thread_local! {
         cf::ArrayOf::from_slice(&names)
     };
 
-    /// The automation-prop attribute names read by `fill_ax_props`, in request
-    /// order. Batched separately from the primary six because `fill_ax_props`
-    /// runs only for text-emitting nodes — folding these into the per-node batch
-    /// would marshal 10 extra attrs for every container/skipped node too.
-    static FILL_ATTR_NAMES: arc::R<cf::ArrayOf<ax::Attr>> = {
-        let names: [&ax::Attr; 10] = [
-            ax::attr::id(),               // 0 automation_id
-            ax::attr::subrole(),          // 1 subrole
-            ax::attr::role_desc(),        // 2 role_description
-            ax::attr::help(),             // 3 help_text
-            ax::attr::placeholder_value(),// 4 placeholder (interactive)
-            ax::attr::url(),              // 5 url (interactive)
-            ax::attr::enabled(),          // 6 is_enabled (interactive)
-            ax::attr::focused(),          // 7 is_focused (interactive)
-            ax::attr::selected(),         // 8 is_selected (interactive)
-            ax::attr::expanded(),         // 9 is_expanded (interactive)
-        ];
-        cf::ArrayOf::from_slice(&names)
-    };
-
-    /// When semantic capture already fetched identifier and subrole in the
-    /// primary batch, omit them here. Text-bearing nodes therefore request the
-    /// same total number of AX attributes as the historical path.
-    static SEMANTIC_FILL_ATTR_NAMES: arc::R<cf::ArrayOf<ax::Attr>> = {
-        let names: [&ax::Attr; 8] = [
-            ax::attr::role_desc(),         // 0 role_description
-            ax::attr::help(),              // 1 help_text
-            ax::attr::placeholder_value(), // 2 placeholder (interactive)
-            ax::attr::url(),               // 3 url (interactive)
-            ax::attr::enabled(),           // 4 is_enabled (interactive)
-            ax::attr::focused(),           // 5 is_focused (interactive)
-            ax::attr::selected(),          // 6 is_selected (interactive)
-            ax::attr::expanded(),          // 7 is_expanded (interactive)
-        ];
-        cf::ArrayOf::from_slice(&names)
-    };
+    /// Secondary reads happen only after role/privacy pruning. Reuse request
+    /// arrays so combining children with enrichment adds no per-node allocation.
+    /// Indices select semantic mode, interactive role, and child acquisition.
+    static FILL_ATTR_NAMES: [[[arc::R<cf::ArrayOf<ax::Attr>>; 2]; 2]; 2] =
+        std::array::from_fn(|semantic| std::array::from_fn(|interactive|
+            std::array::from_fn(|children| {
+                let names = [
+                    ax::attr::id(), ax::attr::subrole(),
+                    ax::attr::role_desc(), ax::attr::help(),
+                    ax::attr::placeholder_value(), ax::attr::url(),
+                    ax::attr::enabled(), ax::attr::focused(),
+                    ax::attr::selected(), ax::attr::expanded(),
+                ];
+                let start = if semantic == 1 { 2 } else { 0 };
+                let end = if interactive == 1 { names.len() } else { 4 };
+                let mut selected = names[start..end].to_vec();
+                if children == 1 {
+                    selected.push(ax::attr::children());
+                }
+                cf::ArrayOf::from_slice(&selected)
+            })
+        ));
 }
 
 /// The six batched attributes for one node, coerced to match the individual
@@ -1873,6 +1867,7 @@ fn capture_structural_node(
     depth: usize,
     attrs: &NodeAttrs,
     state: &mut WalkState,
+    children: &mut ChildRead,
 ) {
     let parser_structural_role = matches!(
         role_str,
@@ -1944,7 +1939,7 @@ fn capture_structural_node(
         .map(str::to_owned);
     apply_primary_semantic_attrs(&mut node, attrs);
     if automation_relevant {
-        fill_ax_props(&mut node, elem, role_str, state.capture_semantic_structure);
+        fill_ax_props(&mut node, elem, role_str, state, children);
     }
     state.nodes.push(node);
 }
@@ -1966,33 +1961,61 @@ fn apply_primary_semantic_attrs(node: &mut AccessibilityTreeNode, attrs: &NodeAt
     node.semantic_dom_classes = attrs.dom_classes.clone();
 }
 
-/// Fetch the ten `fill_ax_props` automation attributes in one XPC round trip.
-/// Returns the parallel values array (indices match `FILL_ATTR_NAMES`), or
-/// `None` on a failed batch — matching the old path, where every individual
-/// read would have failed and left each prop `None`.
+/// Children fetched with enrichment, or still deferred until after pruning.
+/// `Captured(None)` is a provider's missing/unsupported children attribute and
+/// must not cause an extra request. A failed whole batch remains `Deferred`.
+#[derive(Default)]
+enum ChildRead {
+    #[default]
+    Deferred,
+    Captured(Option<arc::R<cf::ArrayOf<ax::UiElement>>>),
+}
+
+impl ChildRead {
+    fn resolve(self, elem: &ax::UiElement) -> Option<arc::R<cf::ArrayOf<ax::UiElement>>> {
+        match self {
+            Self::Deferred => elem.children().ok(),
+            Self::Captured(children) => children,
+        }
+    }
+}
+
+fn batch_children(value: &cf::Type) -> Option<arc::R<cf::ArrayOf<ax::UiElement>>> {
+    if value.get_type_id() != cf::Array::type_id() {
+        return None;
+    }
+    // AXChildren is an array of AXUIElements. Validate before giving its entries
+    // a typed view; malformed providers must not become unsafe typed references.
+    let values: &cf::ArrayOf<cf::Type> = unsafe { std::mem::transmute(value) };
+    if !values
+        .iter()
+        .all(|child| child.get_type_id() == ax::UiElement::type_id())
+    {
+        return None;
+    }
+    let children: &cf::ArrayOf<ax::UiElement> = unsafe { std::mem::transmute(values) };
+    Some(arc::Retain::retained(children))
+}
+
+/// Read only the properties the emitted node uses, optionally acquiring its
+/// child handles in the same provider message. Unsupported attributes retain
+/// their positions because the request does not use stop-on-error.
 fn read_fill_attrs(
     elem: &ax::UiElement,
     capture_semantic_structure: bool,
+    interactive: bool,
+    capture_children: bool,
 ) -> Option<arc::R<cf::ArrayOf<cf::Type>>> {
-    let mut out: Option<arc::R<cf::ArrayOf<cf::Type>>> = None;
-    let status = if capture_semantic_structure {
-        SEMANTIC_FILL_ATTR_NAMES.with(|names| unsafe {
-            AXUIElementCopyMultipleAttributeValues(elem, names, 0, &mut out)
-        })
-    } else {
-        FILL_ATTR_NAMES.with(|names| unsafe {
-            AXUIElementCopyMultipleAttributeValues(elem, names, 0, &mut out)
-        })
-    };
-    if !status.is_ok() {
-        return None;
-    }
-    let arr = out?;
-    let expected = if capture_semantic_structure { 8 } else { 10 };
-    if arr.len() < expected {
-        return None;
-    }
-    Some(arr)
+    FILL_ATTR_NAMES.with(|requests| {
+        let names = &requests[capture_semantic_structure as usize][interactive as usize]
+            [capture_children as usize];
+        let mut out = None;
+        let status = unsafe { AXUIElementCopyMultipleAttributeValues(elem, names, 0, &mut out) };
+        if !status.is_ok() {
+            return None;
+        }
+        out.filter(|values| values.len() == names.len())
+    })
 }
 
 /// Recursively walk an AX element and its children.
@@ -2019,6 +2042,10 @@ fn walk_element(elem: &ax::UiElement, depth: usize, state: &mut WalkState) {
     // Fix 2: role, value, title, description, position and size for this node in
     // ONE XPC round trip. A failed batch (invalid element / timeout) skips the
     // node without walking children — identical to the old `elem.role()` failing.
+    #[cfg(test)]
+    {
+        state.node_and_child_calls += 1;
+    }
     let attrs = match read_node_attrs(
         elem,
         state.capture_semantic_structure,
@@ -2067,6 +2094,7 @@ fn walk_element(elem: &ax::UiElement, depth: usize, state: &mut WalkState) {
 
     // Extract text from this element.
     // In VS Code terminal mode, suppress text outside the terminal AXList subtree.
+    let mut children = ChildRead::Deferred;
     let mut emitted_text_node = false;
     if should_extract_text(&role_str) {
         let emit = match state.app {
@@ -2078,7 +2106,7 @@ fn walk_element(elem: &ax::UiElement, depth: usize, state: &mut WalkState) {
             _ => true,
         };
         if emit {
-            emitted_text_node = extract_text(elem, &role_str, depth, &attrs, state);
+            emitted_text_node = extract_text(elem, &role_str, depth, &attrs, state, &mut children);
         }
     } else if role_str == "AXWebArea" {
         // Browser extension popup detection: AXWebArea nodes inside Chrome/Arc/Edge
@@ -2117,7 +2145,7 @@ fn walk_element(elem: &ax::UiElement, depth: usize, state: &mut WalkState) {
     }
 
     if state.capture_semantic_structure && !emitted_text_node {
-        capture_structural_node(elem, &role_str, depth, &attrs, state);
+        capture_structural_node(elem, &role_str, depth, &attrs, state, &mut children);
     }
 
     if state.should_stop() {
@@ -2140,8 +2168,11 @@ fn walk_element(elem: &ax::UiElement, depth: usize, state: &mut WalkState) {
     // For VS Code terminal mode: set in_terminal_subtree when entering a deep AXList
     // so that text extraction is enabled for all descendants.  Restore on exit so
     // sibling subtrees (sidebar, editor) are unaffected.
-    let children = elem.children();
-    if let Ok(children) = children {
+    #[cfg(test)]
+    if matches!(children, ChildRead::Deferred) {
+        state.node_and_child_calls += 1;
+    }
+    if let Some(children) = children.resolve(elem) {
         let prev_in_terminal = matches!(
             state.app,
             AppState::VsCode {
@@ -2186,6 +2217,7 @@ fn extract_text(
     depth: usize,
     attrs: &NodeAttrs,
     state: &mut WalkState,
+    children: &mut ChildRead,
 ) -> bool {
     // Element bounds come from the batched AXPosition/AXSize. The raw
     // screen-absolute frame is also passed to is_on_screen() so we know
@@ -2212,7 +2244,7 @@ fn extract_text(
                     state.capture_parser_structure && semantic_offscreen(frame, on_screen);
                 node.walk_index = state.node_count.min(u32::MAX as usize) as u32;
                 node.value = Some(trimmed.clone());
-                fill_ax_props(&mut node, elem, role_str, state.capture_semantic_structure);
+                fill_ax_props(&mut node, elem, role_str, state, children);
                 apply_primary_semantic_attrs(&mut node, attrs);
                 // AXTextArea is the multi-line case (textarea, rich text views);
                 // the gate naturally skips single-line AXTextField/AXComboBox.
@@ -2241,7 +2273,7 @@ fn extract_text(
                 node.semantic_offscreen =
                     state.capture_parser_structure && semantic_offscreen(frame, on_screen);
                 node.walk_index = state.node_count.min(u32::MAX as usize) as u32;
-                fill_ax_props(&mut node, elem, role_str, state.capture_semantic_structure);
+                fill_ax_props(&mut node, elem, role_str, state, children);
                 apply_primary_semantic_attrs(&mut node, attrs);
                 node.lines = capture_lines_for_node(elem, &trimmed, &bounds, on_screen, state);
                 state.nodes.push(node);
@@ -2264,7 +2296,7 @@ fn extract_text(
             node.semantic_offscreen =
                 state.capture_parser_structure && semantic_offscreen(frame, on_screen);
             node.walk_index = state.node_count.min(u32::MAX as usize) as u32;
-            fill_ax_props(&mut node, elem, role_str, state.capture_semantic_structure);
+            fill_ax_props(&mut node, elem, role_str, state, children);
             apply_primary_semantic_attrs(&mut node, attrs);
             state.nodes.push(node);
             return true;
@@ -2285,7 +2317,7 @@ fn extract_text(
             node.semantic_offscreen =
                 state.capture_parser_structure && semantic_offscreen(frame, on_screen);
             node.walk_index = state.node_count.min(u32::MAX as usize) as u32;
-            fill_ax_props(&mut node, elem, role_str, state.capture_semantic_structure);
+            fill_ax_props(&mut node, elem, role_str, state, children);
             apply_primary_semantic_attrs(&mut node, attrs);
             state.nodes.push(node);
             return true;
@@ -2766,19 +2798,37 @@ fn fill_ax_props(
     node: &mut AccessibilityTreeNode,
     elem: &ax::UiElement,
     role_str: &str,
-    capture_semantic_structure: bool,
+    state: &mut WalkState,
+    children: &mut ChildRead,
 ) {
-    // Fix 2 (second batch): the automation props in ONE XPC round trip instead
-    // of 4 (non-interactive) / 10 (interactive) individual reads. Coercion is
-    // identical to the old `get_string_attr` / `get_bool_attr` reads. These
-    // fields are best-effort point-in-time Optionals (focus/selection/etc.) —
-    // NOT a dedup surface like text_content/content_hash — so reading them at
-    // one instant (more temporally coherent than the old sequential reads) is
-    // fine; they may legitimately differ walk-to-walk. A failed batch leaves
-    // every prop at its `None` default, exactly as the old per-read failures did.
-    let Some(vals) = read_fill_attrs(elem, capture_semantic_structure) else {
+    let capture_semantic_structure = state.capture_semantic_structure;
+    // Do not materialize children after this turn's budget is exhausted. The
+    // same role, private-window and VS Code branch guards still run first.
+    let capture_children = !state.should_stop();
+    #[cfg(test)]
+    let capture_children = capture_children && state.batch_children;
+    let interactive = is_interactive_role(role_str);
+    // The live A/B evaluation reproduces the previous request exactly: it
+    // requested interactive fields even on labels, then fetched children alone.
+    #[cfg(test)]
+    let interactive = interactive || !state.batch_children;
+    #[cfg(test)]
+    {
+        state.node_and_child_calls += 1;
+    }
+    let Some(vals) = read_fill_attrs(
+        elem,
+        capture_semantic_structure,
+        interactive,
+        capture_children,
+    ) else {
+        // Keep the historical independent children read if the entire
+        // enrichment request failed. A property failure cannot strand a branch.
         return;
     };
+    if capture_children {
+        *children = ChildRead::Captured(batch_children(&vals[vals.len() - 1]));
+    }
     let offset = if capture_semantic_structure {
         0
     } else {
@@ -2802,6 +2852,171 @@ fn fill_ax_props(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn child_batch_validates_types_and_retains_handles() {
+        let unsupported = cf::String::from_str("unsupported");
+        assert!(batch_children(&unsupported).is_none());
+        let error = ax::Value::with_ax_error(&ax::err::ATTR_UNSUPPORTED.into());
+        assert!(batch_children(&error).is_none());
+        let malformed = cf::ArrayOf::from_slice(&[unsupported.as_ref()]);
+        assert!(batch_children(&malformed).is_none());
+        let empty = cf::ArrayOf::<ax::UiElement>::from_slice(&[]);
+        assert!(batch_children(&empty).unwrap().is_empty());
+        let element = ax::UiElement::with_app_pid(std::process::id() as i32);
+        let captured = {
+            let array = cf::ArrayOf::from_slice(&[element.as_ref()]);
+            batch_children(&array).unwrap()
+        };
+        // Handles must stay valid after the parent attribute-response array dies.
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0].pid().unwrap(), std::process::id() as i32);
+    }
+
+    #[test]
+    fn child_batch_preserves_attribute_positions_in_every_capture_mode() {
+        FILL_ATTR_NAMES.with(|requests| {
+            for semantic in 0..2 {
+                for interactive in 0..2 {
+                    let props = &requests[semantic][interactive][0];
+                    let combined = &requests[semantic][interactive][1];
+                    assert_eq!(combined.len(), props.len() + 1);
+                    for index in 0..props.len() {
+                        assert_eq!(props[index].to_string(), combined[index].to_string());
+                    }
+                    assert_eq!(
+                        combined[props.len()].to_string(),
+                        ax::attr::children().to_string()
+                    );
+                    assert_eq!(
+                        props.len(),
+                        (if interactive == 1 { 10 } else { 4 }) - semantic * 2
+                    );
+                }
+            }
+        });
+    }
+
+    /// Explicitly selected, already running window; never activates an app or
+    /// prints captured text. Both paths must finish and preserve every node.
+    /// SCREENPIPE_AX_BENCH_PID=<pid> cargo test -p screenpipe-a11y --lib \
+    /// live_child_batch_parity -- --ignored --nocapture
+    #[test]
+    #[ignore = "requires Accessibility permission and a static target window"]
+    fn live_child_batch_parity() {
+        fn cpu_ticks(pid: i32) -> u64 {
+            let mut usage = std::mem::MaybeUninit::<libc::rusage_info_v2>::zeroed();
+            let result = unsafe {
+                libc::proc_pid_rusage(pid, libc::RUSAGE_INFO_V2, usage.as_mut_ptr().cast())
+            };
+            assert_eq!(result, 0, "target CPU accounting must be readable");
+            let usage = unsafe { usage.assume_init() };
+            usage.ri_user_time + usage.ri_system_time
+        }
+        // Task CPU counters use Mach absolute-time units, not nanoseconds.
+        let mut timebase = cidre::mach::TimeBaseInfo::default();
+        assert!(timebase.fill().is_ok());
+        let cpu_tick_ns = timebase.numer as f64 / timebase.denom as f64;
+        let pid: i32 = std::env::var("SCREENPIPE_AX_BENCH_PID")
+            .expect("select an existing test window with SCREENPIPE_AX_BENCH_PID")
+            .parse()
+            .unwrap();
+        cidre::objc::ar_pool(|| {
+            let app = ax::UiElement::with_app_pid(pid);
+            let window =
+                first_window_from_windows_attr(&app).expect("target needs an accessible window");
+            let root = &window;
+            for mode in ["text", "semantic", "automation"] {
+                // Generous test-only limits ensure latency is never improved by
+                // returning less content. Production limits remain untouched.
+                let config = TreeWalkerConfig {
+                    capture_semantic_structure: mode == "semantic",
+                    capture_automation_structure: mode == "automation",
+                    walk_timeout: Duration::from_secs(30),
+                    max_nodes: usize::MAX,
+                    max_text_length: usize::MAX,
+                    ..TreeWalkerConfig::default()
+                };
+                let run = |batched: bool| {
+                    let cpu_before = cpu_ticks(std::process::id() as i32) + cpu_ticks(pid);
+                    let started = Instant::now();
+                    let mut state = WalkState::new(&config, started, Vec::new(), "arc".to_owned());
+                    state.batch_children = batched;
+                    walk_element(root, 0, &mut state);
+                    assert!(!state.truncated, "evaluation must complete");
+                    let elapsed = started.elapsed();
+                    let cpu = cpu_ticks(std::process::id() as i32) + cpu_ticks(pid) - cpu_before;
+                    (
+                        state.text_buffer,
+                        serde_json::to_vec(&state.nodes).unwrap(),
+                        state.node_count,
+                        elapsed,
+                        cpu,
+                        state.node_and_child_calls,
+                    )
+                };
+                let _ = run(false);
+                let _ = run(true);
+                let mut separate = Vec::new();
+                let mut combined = Vec::new();
+                let mut separate_cpu = Vec::new();
+                let mut combined_cpu = Vec::new();
+                let mut calls = (0, 0);
+                let mut nodes = 0;
+                for round in 0..10 {
+                    let (before, after) = if round % 2 == 0 {
+                        (run(false), run(true))
+                    } else {
+                        let after = run(true);
+                        (run(false), after)
+                    };
+                    // Do not print user content on assertion failure.
+                    assert!(before.0 == after.0, "captured text changed");
+                    if before.1 != after.1 {
+                        let a: Vec<serde_json::Value> = serde_json::from_slice(&before.1).unwrap();
+                        let b: Vec<serde_json::Value> = serde_json::from_slice(&after.1).unwrap();
+                        for (index, (a, b)) in a.iter().zip(&b).enumerate() {
+                            if a != b {
+                                let keys: Vec<_> = a
+                                    .as_object()
+                                    .unwrap()
+                                    .keys()
+                                    .chain(b.as_object().unwrap().keys())
+                                    .filter(|key| a.get(*key) != b.get(*key))
+                                    .collect();
+                                eprintln!("mode={mode} round={round} node={index} changed_fields={keys:?}");
+                                break;
+                            }
+                        }
+                        panic!(
+                            "node properties changed; before={} after={}",
+                            a.len(),
+                            b.len()
+                        );
+                    }
+                    assert_eq!(before.2, after.2, "visited node count changed");
+                    assert!(after.5 <= before.5, "batching must not add provider calls");
+                    nodes = after.2;
+                    calls = (before.5, after.5);
+                    separate.push(before.3);
+                    combined.push(after.3);
+                    separate_cpu.push(before.4);
+                    combined_cpu.push(after.4);
+                }
+                separate.sort();
+                combined.sort();
+                separate_cpu.sort();
+                combined_cpu.sort();
+                println!(
+                    "mode={mode} nodes={nodes} parity=10/10 calls={calls:?} separate_median_ms={:.3} combined_median_ms={:.3} separate_cpu_ms={:.3} combined_cpu_ms={:.3}",
+                    separate[separate.len() / 2].as_secs_f64() * 1000.0,
+                    combined[combined.len() / 2].as_secs_f64() * 1000.0,
+                    separate_cpu[separate_cpu.len()/2] as f64 * cpu_tick_ns / 1e6,
+                    combined_cpu[combined_cpu.len()/2] as f64 * cpu_tick_ns / 1e6,
+                );
+            }
+        });
+    }
 
     #[test]
     fn retains_offwindow_geometry_without_suppressing_zero_sized_labels() {
