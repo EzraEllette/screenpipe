@@ -1327,7 +1327,7 @@ fn finish_gcal_snapshot(
     Ok(merge_gcal_events(lists))
 }
 
-/// Fetch all readable calendars and all event pages for one account atomically.
+/// Fetch visible, owned calendars and all their event pages for one account atomically.
 async fn gcal_fetch_all_calendars(
     client: &reqwest::Client,
     base: &str,
@@ -1342,8 +1342,8 @@ async fn gcal_fetch_all_calendars(
             .get(base.join("users/me/calendarList")?)
             .bearer_auth(token)
             .query(&[
-                ("minAccessRole", "reader"),
-                ("showHidden", "true"),
+                ("minAccessRole", "owner"),
+                ("showHidden", "false"),
                 ("maxResults", "250"),
             ]),
     )
@@ -1356,7 +1356,12 @@ async fn gcal_fetch_all_calendars(
     let time_max = (now + chrono::Duration::hours(hours_ahead)).to_rfc3339();
     let mut lists = Vec::new();
     for calendar in calendars {
-        if calendar["deleted"].as_bool() == Some(true) || calendar["accessRole"] == "freeBusyReader"
+        // Read/write access to someone else's calendar does not make its
+        // meetings the connected user's. Keep this check even if a provider
+        // response includes entries excluded by the calendar-list query.
+        if calendar["deleted"].as_bool() == Some(true)
+            || calendar["hidden"].as_bool() == Some(true)
+            || calendar["accessRole"].as_str() != Some("owner")
         {
             continue;
         }
@@ -4612,7 +4617,7 @@ mod tests {
         Mock::given(header("authorization", "Bearer healthy"))
             .and(path("/users/me/calendarList"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "items":[{"id":"work", "primary":true}]
+                "items":[{"id":"work", "primary":true, "accessRole":"owner"}]
             })))
             .mount(&server)
             .await;
@@ -4668,14 +4673,14 @@ mod tests {
         Mock::given(path("/users/me/calendarList"))
             .and(query_param("pageToken", "second"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "items": [{"id":"shared@example.com", "hidden":true, "accessRole":"reader"}]
+                "items": [{"id":"secondary@example.com", "hidden":false, "accessRole":"owner"}]
             })))
             .with_priority(1)
             .mount(&server)
             .await;
         Mock::given(path("/users/me/calendarList"))
-            .and(query_param("showHidden", "true"))
-            .and(query_param("minAccessRole", "reader"))
+            .and(query_param("showHidden", "false"))
+            .and(query_param("minAccessRole", "owner"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "items": [{"id":"primary-id", "primary":true, "accessRole":"owner"}],
                 "nextPageToken":"second"
@@ -4687,7 +4692,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items":[]})))
             .mount(&server)
             .await;
-        Mock::given(path("/calendars/shared@example.com/events"))
+        Mock::given(path("/calendars/secondary@example.com/events"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items":[{
                 "id":"secondary", "start":{"dateTime":"2026-10-02T18:00:00Z"},
                 "end":{"dateTime":"2026-10-02T18:30:00Z"}, "hangoutLink":"https://meet.google.com/abc-defg-hij"
@@ -4703,13 +4708,13 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0]["id"], "shared@example.com:secondary");
-        assert_eq!(events[0]["calendarName"], "Work / shared@example.com");
+        assert_eq!(events[0]["id"], "secondary@example.com:secondary");
+        assert_eq!(events[0]["calendarName"], "Work / secondary@example.com");
         assert_eq!(
             events[0]["meetingUrl"],
             "https://meet.google.com/abc-defg-hij"
         );
-        Mock::given(path("/calendars/shared@example.com/events"))
+        Mock::given(path("/calendars/secondary@example.com/events"))
             .respond_with(ResponseTemplate::new(503))
             .with_priority(1)
             .mount(&server)
@@ -4727,7 +4732,48 @@ mod tests {
         .to_string();
         assert!(error.contains("503"), "{error}");
         assert!(error.contains("calendar_events"), "{error}");
-        assert!(!error.contains("shared@example.com"));
+        assert!(!error.contains("secondary@example.com"));
+    }
+
+    #[tokio::test]
+    async fn google_calendar_excludes_shared_hidden_and_deleted_calendars_before_fetching_events() {
+        use wiremock::{
+            matchers::{path, query_param},
+            Mock, MockServer, ResponseTemplate,
+        };
+        let server = MockServer::start().await;
+        Mock::given(path("/users/me/calendarList"))
+            .and(query_param("minAccessRole", "owner"))
+            .and(query_param("showHidden", "false"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "items": [
+                    {"id":"coworker", "accessRole":"reader"},
+                    {"id":"editable-shared", "accessRole":"writer"},
+                    {"id":"limited-writer", "accessRole":"writerWithoutPrivateAccess"},
+                    {"id":"availability", "accessRole":"freeBusyReader"},
+                    {"id":"hidden-owned", "accessRole":"owner", "hidden":true},
+                    {"id":"deleted-owned", "accessRole":"owner", "deleted":true},
+                    {"id":"unknown-owner"}
+                ]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        // No event endpoints are mocked: querying any excluded calendar would
+        // fail the snapshot instead of returning a successful empty refresh.
+        let events = gcal_fetch_all_calendars(
+            &reqwest::Client::new(),
+            &format!("{}/", server.uri()),
+            "test-token",
+            "Work",
+            1,
+            2,
+        )
+        .await
+        .unwrap();
+        assert!(events.is_empty());
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
     }
 
     #[test]
