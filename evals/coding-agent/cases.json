@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "suite": "screenpipe-app-coding-agent-regressions",
-  "dataset_version": "2026-10-09-mcp-search-evidence",
+  "dataset_version": "2026-10-09-manual-grant",
   "suite_type": "regression",
   "owner": "screenpipe engineering",
   "policy": {
@@ -6006,6 +6006,55 @@
           }
         ],
         "command": "\"${BUN_BIN:-bun}\" test packages/ai-gateway/src/test/eval-null-model-accounting.test.ts"
+      }
+    },
+    {
+      "id": "app-manual-grant-payment-prompts",
+      "name": "Honor active fixed-term grants across trial and card eligibility",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "b1c2736e8c0d6218be4d8053c84a3920912956cb"
+      },
+      "base_ref": "2670901fe575db4715830fdaa9e39512356d32c0",
+      "oracle_ref": "b1c2736e8c0d6218be4d8053c84a3920912956cb",
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/lib/app-entitlement.ts",
+        "apps/screenpipe-app-tauri/lib/card-ask/gating.ts",
+        "apps/screenpipe-app-tauri/lib/first-run/trial-activation.ts"
+      ],
+      "trigger_paths": [
+        "apps/screenpipe-app-tauri/lib/app-entitlement.ts",
+        "apps/screenpipe-app-tauri/lib/card-ask/gating.ts",
+        "apps/screenpipe-app-tauri/lib/first-run/trial-activation.ts"
+      ],
+      "gate": "advisory",
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "entitlement",
+        "preserved-behavior"
+      ],
+      "prompt": "An account with verified, active fixed-term manual app access and no payment card is still sent through trial activation and contextual card requests. Repair the existing account eligibility flow so a consistent paid plan with fresh entitlement evidence, active app feature and a future subscription period end exempts the account from trial activation, new-trial enrollment and contextual card requests. Accept whitespace/case-normalized manual source values. Profile signup trials use expires_at rather than a subscription period end and must retain their ordinary trial/card eligibility. Do not exempt inactive, expired (including exactly at the deadline), invalid or absent period ends, stale checked evidence without grace, missing app features, non-manual or conflicting unpaid source evidence, inconsistent plan truth or explicit app denial. Preserve card-backed subscription and enterprise-account exemptions, signed-out refusal, settings-loading refusal and existing-install trial refusal. Keep existing public interfaces compatible; no particular helper or implementation is required. Grading exercises actual eligibility functions with synthetic accounts and a frozen clock, not rendered UI, native recording, live billing, provider authentication or execution isolation.",
+      "agent_timeout_seconds": 900,
+      "grader_dependency_links": [
+        {
+          "source_path": "apps/screenpipe-app-tauri/node_modules",
+          "destination_path": "apps/screenpipe-app-tauri/node_modules"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/manual-grant.fixture.ts.txt",
+            "destination_path": "apps/screenpipe-app-tauri/lib/first-run/manual-grant.eval.test.ts"
+          },
+          {
+            "local_path": "graders/manual-grant.config.mjs",
+            "destination_path": "apps/screenpipe-app-tauri/manual-grant.config.mjs"
+          }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && node node_modules/vitest/vitest.mjs run --config manual-grant.config.mjs"
       }
     }
   ]

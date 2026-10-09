@@ -1,0 +1,87 @@
+// screenpipe — AI that knows everything you've seen, said, or heard
+// https://screenpipe.com
+
+import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
+import type { AppEntitlement, AppUser } from "@/lib/app-entitlement";
+import { isCardAskEligible } from "@/lib/card-ask/gating";
+import { bypassesTrialActivation, isTrialActivationEligible } from "./trial-activation";
+
+function participant(overrides: Partial<AppEntitlement> = {}): AppUser {
+  return {
+    id: "synthetic-participant",
+    token: "synthetic-token",
+    subscription_plan: "pro",
+    cloud_subscribed: true,
+    app_entitled: true,
+    has_payment_method: false,
+    entitlement_source: "manual",
+    plan_expires_at: null,
+    entitlement: {
+      source: "manual",
+      plan: "pro",
+      active: true,
+      status: "active",
+      current_period_end: new Date(Date.now() + 30 * 86400000).toISOString(),
+      expires_at: null,
+      checked_at: new Date().toISOString(),
+      features: { app: true, cloud: true },
+      ...overrides,
+    },
+  } as AppUser;
+}
+
+describe("cardless participant grants", () => {
+  it("bypasses trial activation during a valid fixed-term grant", () => {
+    expect(bypassesTrialActivation(participant())).toBe(true);
+  });
+  it("does not enroll a valid grant holder in a trial", () => {
+    expect(isTrialActivationEligible(true, participant(), false)).toBe(false);
+  });
+  it("does not offer a contextual card prompt during a valid grant", () => {
+    expect(isCardAskEligible(participant(), true)).toBe(false);
+  });
+
+  it("keeps profile signup trials in the existing card flow", () => {
+    const expires = new Date(Date.now() + 7 * 86400000).toISOString();
+    const user = { ...participant({ current_period_end: null, expires_at: expires }), plan_expires_at: expires };
+    expect(bypassesTrialActivation(user)).toBe(false);
+    expect(isCardAskEligible(user, true)).toBe(true);
+  });
+
+  it.each<Partial<AppEntitlement>>([
+    { active: false },
+    { current_period_end: new Date(0).toISOString() },
+    { current_period_end: "invalid" },
+    { current_period_end: null },
+    { checked_at: new Date(0).toISOString() },
+    { features: { app: false, cloud: false } },
+    { source: "none" },
+  ])("does not exempt invalid or expired grants: %j", (overrides) => {
+    expect(bypassesTrialActivation(participant(overrides))).toBe(false);
+    expect(isCardAskEligible(participant(overrides), true)).toBe(true);
+  });
+});
+
+beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(new Date("2026-10-09T18:00:00Z")); });
+afterEach(() => vi.useRealTimers());
+it("keeps ordinary paid card holders exempt", () => {
+ const user={...participant({source:"subscription"}),entitlement_source:"subscription",has_payment_method:true};
+ expect(bypassesTrialActivation(user)).toBe(true); expect(isTrialActivationEligible(true,user,false)).toBe(false); expect(isCardAskEligible(user,true)).toBe(false);
+});
+it("keeps enterprise accounts exempt", () => {
+ const user={...participant(),enterprise_account:{team_id:"synthetic-team"}};
+ expect(bypassesTrialActivation(user)).toBe(true); expect(isCardAskEligible(user,true)).toBe(false);
+});
+it("keeps signed-out users out of both enrollments", () => {
+ expect(isTrialActivationEligible(true,null,false)).toBe(false); expect(isCardAskEligible(null,true)).toBe(false);
+});
+it("preserves settings loading refusal", () => {expect(isCardAskEligible(participant({current_period_end:null}),false)).toBe(false);});
+it("preserves existing-install trial refusal", () => {expect(isTrialActivationEligible(false,participant({current_period_end:null}),false)).toBe(false);});
+it("preserves signup trial enrollment", () => {expect(isTrialActivationEligible(true,participant({current_period_end:null,expires_at:new Date(Date.now()+86400000).toISOString()}),false)).toBe(true);});
+it("does not treat a conflicting unpaid source as a grant", () => {
+ const user={...participant(),entitlement_source:"none"}; expect(bypassesTrialActivation(user)).toBe(false);expect(isCardAskEligible(user,true)).toBe(true);
+});
+it("does not exempt inconsistent plan truth", () => {const user={...participant(),subscription_plan:"none"};expect(bypassesTrialActivation(user)).toBe(false);expect(isCardAskEligible(user,true)).toBe(true);});
+it("does not exempt explicit app refusal", () => {const user={...participant(),app_entitled:false};expect(bypassesTrialActivation(user)).toBe(false);expect(isCardAskEligible(user,true)).toBe(true);});
+it("ends the exemption exactly at the granted deadline", () => {const user=participant({current_period_end:new Date(Date.now()).toISOString()});expect(bypassesTrialActivation(user)).toBe(false);expect(isCardAskEligible(user,true)).toBe(true);});
+it("accepts normalized manual source evidence", () => {const user={...participant({source:" MANUAL "}),entitlement_source:" Manual "};expect(bypassesTrialActivation(user)).toBe(true);expect(isCardAskEligible(user,true)).toBe(false);});
