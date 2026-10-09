@@ -346,6 +346,29 @@ export function hasVerifiedPaidPlan(user: AppUser | null | undefined): boolean {
   return hasVerifiedPaidPlanAt(user, Date.now());
 }
 
+/**
+ * Fixed-term account grants (including hackathon access) need no card.
+ * Profile signup trials use expires_at, not a subscription period end.
+ */
+export function hasActiveManualSubscriptionGrant(
+  user: AppUser | null | undefined,
+): boolean {
+  const entitlement = asEntitlement(user?.entitlement);
+  const periodEnd = parseEntitlementTime(entitlement?.current_period_end);
+  return (
+    typeof entitlement?.source === "string" &&
+    entitlement.source.trim().toLowerCase() === "manual" &&
+    (user?.entitlement_source == null ||
+      (typeof user.entitlement_source === "string" &&
+        user.entitlement_source.trim().toLowerCase() === "manual")) &&
+    entitlement.active === true &&
+    entitlement.features?.app === true &&
+    periodEnd !== null &&
+    periodEnd > Date.now() &&
+    hasVerifiedPaidPlan(user)
+  );
+}
+
 /** Data sync is available only to eligible individual paid accounts. */
 export function canUseDataSync(user: AppUser | null | undefined): boolean {
   if (!hasVerifiedPaidPlan(user)) return false;

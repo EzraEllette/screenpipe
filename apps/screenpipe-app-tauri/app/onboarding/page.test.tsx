@@ -54,10 +54,12 @@ const mocks = vi.hoisted(() => ({
     aiPresets: [{ id: "local", model: "local-test", provider: "native-ollama", defaultPreset: true }],
     deviceTier: "low" as string | null | undefined,
     user: null as null | {
+      id?: string;
       cloud_subscribed?: boolean;
       app_entitled?: boolean;
       has_payment_method?: boolean;
       entitlement_source?: string;
+      entitlement?: import("@/lib/app-entitlement").AppEntitlement;
       subscription_plan?: string;
       enterprise_account?: { org_name?: string; role?: string };
       // Plan selection needs a token to open checkout, so page.tsx keeps the
@@ -920,6 +922,43 @@ describe("enterprise onboarding authentication", () => {
       "trial-activation-v1-summary",
     );
   });
+
+  it.each(["control", "summary_first"])(
+    "honors a claimed participant grant on a fresh %s install",
+    async (variant) => {
+      mocks.enterprisePolicy.isManagedDeployment = false;
+      mocks.trialActivationVariant = variant;
+      onboardingData.trialActivationFreshInstall = true;
+      onboardingData.currentStep = "engine";
+      mocks.settings.user = {
+        id: "synthetic-participant",
+        token: "synthetic-participant-token",
+        has_payment_method: false,
+        entitlement_source: "manual",
+        subscription_plan: "pro",
+        app_entitled: true,
+        cloud_subscribed: true,
+        entitlement: {
+          active: true,
+          source: "manual",
+          plan: "pro",
+          checked_at: new Date().toISOString(),
+          current_period_end: new Date(Date.now() + 30 * 86400000).toISOString(),
+          features: { app: true, cloud: true },
+        },
+      };
+
+      render(<OnboardingPage />);
+      fireEvent.click(await screen.findByRole("button", { name: "finish engine" }));
+      fireEvent.click(await screen.findByRole("button", { name: "finish recommended setup" }));
+      fireEvent.click(await screen.findByRole("button", { name: /Find something/ }));
+
+      await waitFor(() => expect(mocks.completeOnboarding).toHaveBeenCalled());
+      expect(screen.queryByText("plan selection")).not.toBeInTheDocument();
+      expect(mocks.setOnboardingStep).not.toHaveBeenCalledWith("trial-activation-v1-summary");
+      expect(mocks.setOnboardingStep).not.toHaveBeenCalledWith("trial-activation-v1-paywall");
+    },
+  );
 
   it("never enrolls an upgraded free install after onboarding reset", async () => {
     mocks.enterprisePolicy.isManagedDeployment = false;
