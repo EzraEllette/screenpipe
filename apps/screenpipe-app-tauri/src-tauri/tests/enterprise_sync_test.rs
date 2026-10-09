@@ -32,6 +32,9 @@ mod enterprise_config_file;
 #[path = "../src/web_base.rs"]
 mod web_base;
 
+#[path = "../src/feedback_redact.rs"]
+mod feedback_redact;
+
 // Match search_only::is_active without pulling the Tauri session/UI tree
 // into this isolated sync target. Both call the same shared background gate.
 mod search_only {

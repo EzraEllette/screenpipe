@@ -341,6 +341,7 @@ jemalloc = ["tikv-jemallocator"]
 
 
 [dev-dependencies]
+tokio = { version = "1.36.0", features = ["test-util"] }
 wiremock = "0.6"
 serial_test = "3"
 tower = { version = "0.4", features = ["util"] }

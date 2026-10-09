@@ -199,6 +199,18 @@ mod imp {
         token: screenpipe_db::storage::StorageReadToken,
     }
 
+    impl StorageExport {
+        async fn begin(
+            db: Arc<screenpipe_db::DatabaseManager>,
+        ) -> Result<Self, EnterpriseSyncError> {
+            let token = db
+                .storage_export_token()
+                .await
+                .map_err(|error| EnterpriseSyncError::Configuration(error.to_string()))?;
+            Ok(Self { db, token })
+        }
+    }
+
     #[async_trait::async_trait]
     impl crate::enterprise::sync::ExportAdmission for StorageExport {
         async fn admit(
@@ -227,11 +239,7 @@ mod imp {
                 .ok_or_else(|| {
                     EnterpriseSyncError::Configuration("recording database is not ready".into())
                 })?;
-            let token = db
-                .storage_read_token()
-                .await
-                .map_err(|error| EnterpriseSyncError::Configuration(error.to_string()))?;
-            Ok(Some(Box::new(StorageExport { db, token })))
+            Ok(Some(Box::new(StorageExport::begin(db).await?)))
         }
 
         async fn initialized_upload_source_id(&self) -> Option<String> {
@@ -1934,6 +1942,120 @@ mod imp {
             NATIVE_POLICY_STARTUP_DELAY, RECORDING_DISABLED_BY_ADMIN_CODE,
         };
         use std::collections::HashMap;
+
+        #[tokio::test]
+        async fn export_upload_proceeds_during_capture_and_rejects_deleted_data() {
+            use super::{AudioRow, EnterpriseSyncError, FrameRow, LocalApiClient, StorageExport};
+            use crate::enterprise::sync::{self, ExportAdmission};
+            use std::sync::Arc;
+            struct CapturingLocal {
+                db: Arc<screenpipe_db::DatabaseManager>,
+                delete_selected: bool,
+            }
+            #[async_trait::async_trait]
+            impl LocalApiClient for CapturingLocal {
+                async fn begin_export(
+                    &self,
+                ) -> Result<Option<Box<dyn ExportAdmission>>, EnterpriseSyncError> {
+                    Ok(Some(Box::new(StorageExport::begin(self.db.clone()).await?)))
+                }
+                async fn fetch_frames_since(
+                    &self,
+                    _: Option<&str>,
+                    _: u32,
+                    _: u32,
+                ) -> Result<Vec<FrameRow>, EnterpriseSyncError> {
+                    let payloads = self
+                        .db
+                        .frame_payloads(&[1], screenpipe_db::storage::Projection::All)
+                        .await
+                        .unwrap();
+                    let text = payloads.get(&1).unwrap().full_text.clone();
+                    // Capture continues after selecting the outgoing page.
+                    self.db.execute_raw_sql_write("INSERT INTO frames(id,timestamp,full_text) VALUES(2,'2026-10-09','new capture')").await.unwrap();
+                    if self.delete_selected {
+                        self.db
+                            .execute_raw_sql_write("DELETE FROM frames WHERE id=1")
+                            .await
+                            .unwrap();
+                    }
+                    Ok(vec![FrameRow {
+                        frame_id: 1,
+                        timestamp: "2026-10-09T00:00:00Z".into(),
+                        app_name: None,
+                        window_name: None,
+                        browser_url: None,
+                        text,
+                    }])
+                }
+                async fn fetch_audio_since(
+                    &self,
+                    _: Option<&str>,
+                    _: u32,
+                    _: u32,
+                ) -> Result<Vec<AudioRow>, EnterpriseSyncError> {
+                    Ok(Vec::new())
+                }
+            }
+            for delete_selected in [false, true] {
+                let dir = tempfile::tempdir().unwrap();
+                let db = Arc::new(
+                    screenpipe_db::DatabaseManager::new_hybrid(
+                        dir.path(),
+                        Default::default(),
+                        Default::default(),
+                    )
+                    .await
+                    .unwrap(),
+                );
+                db.execute_raw_sql_write("INSERT INTO frames(id,timestamp,full_text) VALUES(1,'2026-10-09','pending upload')").await.unwrap();
+                let server = wiremock::MockServer::start().await;
+                wiremock::Mock::given(wiremock::matchers::path("/ingest"))
+                    .respond_with(wiremock::ResponseTemplate::new(200))
+                    .expect(if delete_selected { 0 } else { 1 })
+                    .mount(&server)
+                    .await;
+                let cfg = sync::tests::test_cfg(&dir, format!("{}/ingest", server.uri()));
+                let mut cursor = sync::Cursor::default();
+                let local = CapturingLocal {
+                    db: db.clone(),
+                    delete_selected,
+                };
+                let result =
+                    sync::run_one_sync(&cfg, &mut cursor, &local, &reqwest::Client::new()).await;
+                if delete_selected {
+                    assert!(result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("read revision changed"));
+                    assert!(
+                        !cfg.cursor_path.exists(),
+                        "revoked data must not be checkpointed"
+                    );
+                } else {
+                    assert_eq!(result.unwrap().frames, 1);
+                    assert_eq!(
+                        sync::Cursor::load(&cfg.cursor_path)
+                            .last_frame_ts
+                            .as_deref(),
+                        Some("2026-10-09T00:00:00Z")
+                    );
+                    let requests = server.received_requests().await.unwrap();
+                    assert!(String::from_utf8_lossy(&requests[0].body).contains("pending upload"));
+                }
+                server.verify().await;
+                let captured = db
+                    .frame_payloads(&[2], screenpipe_db::storage::Projection::All)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    captured.get(&2).unwrap().full_text.as_deref(),
+                    Some("new capture"),
+                    "upload admission must preserve the new recording"
+                );
+                db.close().await;
+            }
+        }
 
         #[test]
         fn settings_id_wins_so_sync_matches_heartbeat() {

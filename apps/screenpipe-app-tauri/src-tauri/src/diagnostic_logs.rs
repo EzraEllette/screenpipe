@@ -70,10 +70,13 @@ pub async fn collect_redacted_from_dirs(dirs: &[std::path::PathBuf]) -> Result<S
 }
 
 fn owned_log_files(files: Vec<LogFile>) -> Vec<LogFile> {
-    files
+    let mut files: Vec<_> = files
         .into_iter()
         .filter(|file| is_screenpipe_owned_log_name(&file.name))
-        .collect()
+        .collect();
+    // Keep the retained failure visible when newer rolling files fill the bundle.
+    files.sort_by_key(|file| file.name != "enterprise-sync-error.log");
+    files
 }
 
 fn is_screenpipe_owned_log_name(name: &str) -> bool {
@@ -84,6 +87,7 @@ fn is_screenpipe_owned_log_name(name: &str) -> bool {
         || matches!(
             name,
             "screenpipe.log"
+                | "enterprise-sync-error.log"
                 | "screenpipe-app.log"
                 | "recover.import.log"
                 | "recover.stderr.log"
@@ -261,6 +265,23 @@ mod tests {
         assert!(report.contains("continuing credential verification"));
         assert!(report.contains("recorder restarted"));
         assert!(!report.contains("private-person@example.com"));
+    }
+
+    #[cfg(feature = "enterprise-build")]
+    #[tokio::test]
+    async fn retained_sync_diagnostic_survives_rotation_and_support_redaction() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::enterprise::sync::tests::check_retained_diagnostic(dir.path()).await;
+    }
+
+    #[cfg(feature = "enterprise-build")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn sync_retry_failure_reaches_support_after_collection_and_redaction() {
+        let dir = tempfile::tempdir().unwrap();
+        let report = crate::enterprise::sync::tests::check_sync_retry_failure(dir.path()).await;
+        assert!(report.contains("frame storage: read revision changed"));
+        assert!(report.contains("pending work retained, retrying in 300s"));
+        assert!(!report.contains("backing off 3600s"));
     }
 
     #[cfg(feature = "enterprise-build")]

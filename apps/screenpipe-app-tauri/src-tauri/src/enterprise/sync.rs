@@ -20,10 +20,10 @@
 //! # Edge cases handled
 //!
 //! - **Empty batch** — skip POST, advance no cursor, retry next tick
-//! - **Network failure** — exponential backoff (60s → 1h cap), task survives
+//! - **Network failure** — retain the cursor and retry on the normal sync cycle
 //! - **4xx auth failure** — use the signed-in employee account to fetch the
 //!   rotated device key, then retry without advancing the cursor
-//! - **5xx server error** — exponential backoff (transient, can recover)
+//! - **5xx server error** — retry on the normal sync cycle (transient, can recover)
 //! - **Cursor file corruption** — fall back to "now - SAFE_BACKFILL", never
 //!   re-emit the entire DB
 //! - **Cursor file missing on first run** — start from "now - SAFE_BACKFILL"
@@ -44,6 +44,8 @@ mod enterprise_upload;
 
 #[path = "backfill.rs"]
 mod backfill;
+#[path = "sync_diagnostics.rs"]
+mod diagnostics;
 use enterprise_upload::{
     upload_direct_readable_batch, upload_direct_write_only_batch, DirectUploadRecordCounts,
     EnterpriseUploadMode,
@@ -65,22 +67,13 @@ pub const PAGE_LIMIT: u32 = 500;
 /// is sent, across as many requests as necessary.
 pub const HOSTED_INGEST_REQUEST_BYTES: usize = 3 * 1024 * 1024;
 
-/// Initial backoff after a transient failure. Doubles up to BACKOFF_MAX.
-const BACKOFF_INITIAL: Duration = Duration::from_secs(60);
-const BACKOFF_MAX: Duration = Duration::from_secs(60 * 60);
-
-/// Cool-off after an auth failure (401/403). License likely revoked; no point
-/// retrying every interval.
-const RETRY_AFTER_AUTH_FAIL: Duration = Duration::from_secs(60 * 60);
-
 /// A revoked key may be waiting for the employee to finish account sign-in.
 /// Poll for that local account token without retrying the data endpoint more
 /// than once per minute.
 const RETRY_WHILE_WAITING_FOR_ACCOUNT: Duration = Duration::from_secs(60);
 
-/// Admin-triggered log collection must keep working while telemetry sync is in
-/// exponential backoff. Otherwise the machines we most need logs from can sit
-/// on the request for up to an hour.
+/// Admin-triggered log collection runs independently of telemetry work and
+/// its retry cycle, so a failing upload cannot hold up support diagnostics.
 const LOG_REQUEST_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Default endpoint. Overridable via `SCREENPIPE_ENTERPRISE_INGEST_URL` for
@@ -639,7 +632,7 @@ pub fn split_jsonl_requests(body: Vec<u8>, target_bytes: usize) -> Vec<Vec<u8>> 
 
 /// POST a JSONL body to the ingest endpoint. Returns `Ok(())` on 2xx.
 /// Distinguishes auth (401/403) from transient (5xx) so the caller can apply
-/// the right backoff.
+/// the appropriate retry handling.
 pub async fn post_jsonl(
     client: &reqwest::Client,
     url: &str,
@@ -1903,7 +1896,13 @@ async fn submit_device_logs(
     // Managed collection used to bypass the manual feedback redaction path.
     // Both managed and opted-in builds now share one fail-closed filesystem,
     // size, timeout, and redaction boundary.
-    let body = match crate::diagnostic_logs::collect_redacted_from_dirs(&cfg.log_dirs).await {
+    let mut log_dirs = cfg.log_dirs.clone();
+    if let Some(parent) = cfg.cursor_path.parent() {
+        if !log_dirs.iter().any(|dir| dir == parent) {
+            log_dirs.push(parent.to_path_buf());
+        }
+    }
+    let body = match crate::diagnostic_logs::collect_redacted_from_dirs(&log_dirs).await {
         Ok(body) => body,
         Err(e) => {
             warn!("enterprise sync: device-log redaction failed: {e}");
@@ -2077,8 +2076,14 @@ async fn run_log_request_loop(
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) {
     let mut last_log_req: Option<String> = None;
+    let mut last_diagnostic: Option<String> = None;
 
     loop {
+        match diagnostics::report(&cfg, &http, last_diagnostic.as_deref()).await {
+            Ok(Some(at)) => last_diagnostic = Some(at),
+            Ok(None) => {}
+            Err(error) => warn!(%error, "enterprise sync diagnostic retained; report will retry"),
+        }
         if let Some(handled) = fulfill_log_requests(&mut cfg, &http, last_log_req.as_deref()).await
         {
             last_log_req = Some(handled);
@@ -2092,6 +2097,30 @@ async fn run_log_request_loop(
 
 fn enterprise_http_client() -> reqwest::Client {
     enterprise_http_client_with_timeout(Duration::from_secs(60))
+}
+
+async fn run_reported_sync_burst<R: LicenseKeyRecovery + ?Sized>(
+    cfg: &mut EnterpriseSyncConfig,
+    cursor: &mut Cursor,
+    local: &dyn LocalApiClient,
+    http: &reqwest::Client,
+    recovery: &R,
+) -> Result<SyncBurstReport, EnterpriseSyncError> {
+    let result = run_sync_burst_with_recovery(cfg, cursor, local, http, recovery).await;
+    if let Err(error) = &result {
+        let retry = match error {
+            EnterpriseSyncError::IngestAuthRejected => RETRY_WHILE_WAITING_FOR_ACCOUNT,
+            _ => SYNC_INTERVAL,
+        };
+        let detail = format!(
+            "{error}; upload did not complete, pending data retained; retry in {} seconds",
+            retry.as_secs()
+        );
+        if let Err(persist_error) = diagnostics::retain(cfg, &detail).await {
+            warn!(%persist_error, %error, "enterprise sync: failed to retain upload diagnostic");
+        }
+    }
+    result
 }
 
 fn apply_rotated_device_config(
@@ -2252,7 +2281,6 @@ pub async fn run(
     let http = enterprise_http_client();
 
     let mut cursor = Cursor::load(&cfg.cursor_path);
-    let mut backoff = BACKOFF_INITIAL;
     let recovery = SavedOrAccountLicenseKeyRecovery;
     let mut log_request_loop = tokio::spawn(run_log_request_loop(
         cfg.clone(),
@@ -2275,8 +2303,7 @@ pub async fn run(
         let license_key_before_tick = cfg.license_key.clone();
         let device_id_before_tick = cfg.device_id.clone();
         let result =
-            run_sync_burst_with_recovery(&mut cfg, &mut cursor, local.as_ref(), &http, &recovery)
-                .await;
+            run_reported_sync_burst(&mut cfg, &mut cursor, local.as_ref(), &http, &recovery).await;
 
         if cfg.license_key != license_key_before_tick || cfg.device_id != device_id_before_tick {
             // The log poller owns a cloned config, so restart it with the
@@ -2300,15 +2327,15 @@ pub async fn run(
             }
             Err(EnterpriseSyncError::CentralizedDataDisabled) => {
                 error!(
-                    "enterprise sync: centralized data is NOT enabled for this org — an admin must enable it in the dashboard before devices can upload; pausing {}s",
-                    RETRY_AFTER_AUTH_FAIL.as_secs()
+                    "enterprise sync: centralized data is NOT enabled for this org — an admin must enable it in the dashboard before devices can upload; rechecking in {}s",
+                    SYNC_INTERVAL.as_secs()
                 );
             }
             Err(error) => {
                 warn!(
-                    "enterprise sync: tick failed ({}); backing off {}s",
+                    "enterprise sync: tick failed ({}); pending work retained, retrying in {}s",
                     error,
-                    backoff.as_secs()
+                    SYNC_INTERVAL.as_secs()
                 );
             }
             Ok(_) => {}
@@ -2337,8 +2364,6 @@ pub async fn run(
                         total.bytes
                     );
                 }
-                backoff = BACKOFF_INITIAL;
-
                 // Historical recovery has its own cursor and a bounded work budget.
                 // Live syncing always runs first. Failure here never rewinds it.
                 if let Err(error) =
@@ -2349,7 +2374,7 @@ pub async fn run(
 
                 // On-demand frame fulfillment — best-effort, gated on the
                 // frame_images stream + hosted mode inside; never affects
-                // the sync cursor or backoff.
+                // the sync cursor or retry cycle.
                 let fr = fulfill_frame_requests(&cfg, local.as_ref(), &http).await;
                 if fr.requested > 0 {
                     info!(
@@ -2364,19 +2389,10 @@ pub async fn run(
                 }
                 continue;
             }
-            Err(EnterpriseSyncError::CentralizedDataDisabled) => {
-                if sleep_or_shutdown(RETRY_AFTER_AUTH_FAIL, &mut shutdown).await {
-                    break;
-                }
-                continue;
-            }
-            Err(_) => {
-                if sleep_or_shutdown(backoff, &mut shutdown).await {
-                    break;
-                }
-                backoff = std::cmp::min(backoff * 2, BACKOFF_MAX);
-                continue;
-            }
+            // Retry from the durable cursor on the ordinary sync cycle. A
+            // history of failures must not postpone recovery after the local
+            // database, network, or organization policy becomes healthy.
+            Err(_) => {}
         }
 
         if sleep_or_shutdown(SYNC_INTERVAL, &mut shutdown).await {
@@ -3543,7 +3559,7 @@ pub(crate) mod tests {
         }
     }
 
-    fn test_cfg(dir: &TempDir, ingest_url: String) -> EnterpriseSyncConfig {
+    pub(crate) fn test_cfg(dir: &TempDir, ingest_url: String) -> EnterpriseSyncConfig {
         EnterpriseSyncConfig {
             stable_device_id: None,
             license_key: "sek_test".to_string(),
@@ -3683,6 +3699,338 @@ pub(crate) mod tests {
             last_parsed_ts: Some("2026-08-04T00:00:00Z".to_string()),
             boundary: CursorBoundary::default(),
         }
+    }
+
+    /// Exercise the production worker, including its actual sleeps and
+    /// persisted checkpoint, rather than only checking a delay constant.
+    #[tokio::test(flavor = "current_thread")]
+    async fn repeated_sync_failures_retry_next_cycle_and_recover_without_skipping_frames() {
+        let dir = TempDir::new().unwrap();
+        check_sync_retry_failure(dir.path()).await;
+    }
+
+    pub(crate) async fn check_sync_retry_failure(log_dir: &std::path::Path) -> String {
+        let _env_lock = ENV_LOCK.lock().unwrap();
+        let _mode_env = UploadModeEnvGuard::clear();
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::path(
+            "/api/enterprise/storage-binding/mode",
+        ))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({"desired_mode":"hosted_ingest"})),
+        )
+        .mount(&server)
+        .await;
+        wiremock::Mock::given(wiremock::matchers::path("/api/enterprise/ingest"))
+            .respond_with(wiremock::ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        type Reply = tokio::sync::oneshot::Sender<Result<Vec<FrameRow>, EnterpriseSyncError>>;
+        struct ControlledLocal(tokio::sync::mpsc::UnboundedSender<Reply>);
+        #[async_trait::async_trait]
+        impl LocalApiClient for ControlledLocal {
+            async fn fetch_frames_since(
+                &self,
+                since: Option<&str>,
+                offset: u32,
+                _: u32,
+            ) -> Result<Vec<FrameRow>, EnterpriseSyncError> {
+                if since == Some("2026-08-04T00:01:00Z") && offset > 0 {
+                    return Ok(Vec::new());
+                }
+                let (send, receive) = tokio::sync::oneshot::channel();
+                self.0.send(send).unwrap();
+                receive.await.unwrap()
+            }
+            async fn fetch_audio_since(
+                &self,
+                _: Option<&str>,
+                _: u32,
+                _: u32,
+            ) -> Result<Vec<AudioRow>, EnterpriseSyncError> {
+                Ok(Vec::new())
+            }
+        }
+
+        let dir = TempDir::new().unwrap();
+        let cfg = test_cfg(&dir, format!("{}/api/enterprise/ingest", server.uri()));
+        let cursor_path = cfg.cursor_path.clone();
+        let mut diagnostic_cfg = cfg.clone();
+        diagnostic_cfg.log_dirs = vec![log_dir.to_path_buf()];
+        let log_path = log_dir.join("screenpipe-app.log");
+        let log = std::fs::File::create(&log_path).unwrap();
+        let _log_guard = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_ansi(false)
+                .with_max_level(tracing::Level::WARN)
+                .with_writer(move || log.try_clone().unwrap())
+                .finish(),
+        );
+        initialized_cursor().save(&cursor_path).unwrap();
+        let before = std::fs::read(&cursor_path).unwrap();
+        let (attempts, mut receive) = tokio::sync::mpsc::unbounded_channel();
+        let (stop, shutdown) = tokio::sync::watch::channel(false);
+        let worker = tokio::spawn(run(
+            cfg,
+            Arc::new(ControlledLocal(attempts)),
+            shutdown,
+            None,
+        ));
+
+        // Ten failures cover the old doubling sequence through its hour cap.
+        for attempt in 0..10 {
+            let reply = tokio::time::timeout(Duration::from_secs(10), receive.recv())
+                .await
+                .expect("retry did not occur on the next sync cycle")
+                .unwrap();
+            assert_eq!(std::fs::read(&cursor_path).unwrap(), before);
+            reply
+                .send(Err(EnterpriseSyncError::Configuration(
+                    "frame storage: read revision changed; retry the complete query".into(),
+                )))
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while std::fs::read_to_string(&log_path)
+                    .unwrap()
+                    .matches("tick failed")
+                    .count()
+                    <= attempt
+                {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("failed tick was not retained and logged");
+            tokio::time::pause();
+            tokio::time::advance(SYNC_INTERVAL).await;
+            tokio::time::resume();
+        }
+        let reply = tokio::time::timeout(Duration::from_secs(10), receive.recv())
+            .await
+            .expect("recovery was postponed")
+            .unwrap();
+        reply
+            .send(Ok(vec![frame(
+                1,
+                "2026-08-04T00:01:00Z",
+                "test",
+                "pending",
+            )]))
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while Cursor::load(&cursor_path).last_frame_ts.as_deref()
+                != Some("2026-08-04T00:01:00Z")
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("acknowledged frame was not checkpointed");
+        stop.send(true).unwrap();
+        tokio::task::yield_now().await;
+        tokio::time::pause();
+        tokio::time::advance(SYNC_INTERVAL).await;
+        tokio::time::timeout(SYNC_INTERVAL * 2, worker)
+            .await
+            .unwrap()
+            .unwrap();
+        tokio::time::resume();
+        let requests = server.received_requests().await.unwrap();
+        let upload = requests
+            .iter()
+            .find(|r| r.url.path() == "/api/enterprise/ingest")
+            .unwrap();
+        assert!(String::from_utf8_lossy(&upload.body).contains("pending"));
+
+        wiremock::Mock::given(wiremock::matchers::path("/api/logs"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({"data":{"signedUrl":format!("{}/support-upload",server.uri()),"path":"logs/machine/test/retry.log"}}),
+            )).mount(&server).await;
+        for path in ["/support-upload", "/api/logs/confirm"] {
+            wiremock::Mock::given(wiremock::matchers::path(path))
+                .respond_with(wiremock::ResponseTemplate::new(200))
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+        assert!(
+            submit_device_logs(&diagnostic_cfg, &enterprise_http_client(), "retry-test")
+                .await
+                .is_some()
+        );
+        let requests = server.received_requests().await.unwrap();
+        let diagnostic = requests
+            .iter()
+            .find(|r| r.url.path() == "/support-upload")
+            .unwrap();
+        let logged = std::fs::read_to_string(log_path).unwrap();
+        assert!(logged.contains("frame storage: read revision changed"));
+        assert!(logged.contains("pending work retained, retrying in 300s"));
+        assert!(!logged.contains("backing off 3600s"));
+        String::from_utf8(diagnostic.body.clone()).unwrap()
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn sync_diagnostic_reports_failed_tick_independently_and_retries_after_restart() {
+        let _env_lock = ENV_LOCK.lock().unwrap();
+        let _mode_env = UploadModeEnvGuard::clear();
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(
+                "/api/enterprise/storage-binding/mode",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"desired_mode":"hosted_ingest"})),
+            )
+            .mount(&server)
+            .await;
+        let dir = TempDir::new().unwrap();
+        let mut cfg = test_cfg(&dir, format!("{}/api/enterprise/ingest", server.uri()));
+        wiremock::Mock::given(wiremock::matchers::path("/api/enterprise/ingest"))
+            .respond_with(wiremock::ResponseTemplate::new(503))
+            .mount(&server)
+            .await;
+        let reads = Arc::new(AtomicUsize::new(0));
+        let local = counting_local(
+            reads.clone(),
+            vec![vec![frame(1, "2026-08-04T00:01:00Z", "test", "pending")]],
+        );
+        let recovery = TestLicenseKeyRecovery::unavailable(reads.clone());
+        let mut cursor = initialized_cursor();
+        cursor.boundary.activity_ts = cursor.last_frame_ts.clone();
+        cursor.save(&cfg.cursor_path).unwrap();
+        let prior_file = std::fs::read(&cfg.cursor_path).unwrap();
+        let prior = serde_json::to_value(&cursor).unwrap();
+        let http = enterprise_http_client();
+        assert!(
+            run_reported_sync_burst(&mut cfg, &mut cursor, &local, &http, &recovery)
+                .await
+                .is_err()
+        );
+        assert_eq!(serde_json::to_value(&cursor).unwrap(), prior);
+        assert_eq!(std::fs::read(&cfg.cursor_path).unwrap(), prior_file);
+        assert_eq!(reads.load(Ordering::SeqCst), 2); // frame and audio reads
+
+        // Failure to save remotely is not an acknowledgement. The retained
+        // file survives a new reporter instance and is delivered unchanged.
+        assert!(diagnostics::report(&cfg, &http, None).await.is_err());
+        server.reset().await;
+        wiremock::Mock::given(wiremock::matchers::path(
+            "/api/enterprise/storage-binding/mode",
+        ))
+        .respond_with(wiremock::ResponseTemplate::new(503))
+        .mount(&server)
+        .await;
+        assert!(diagnostics::report(&cfg, &http, None)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .all(|r| r.method.as_str() == "GET"));
+        server.reset().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(
+                "/api/enterprise/storage-binding/mode",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"desired_mode": "hosted_ingest"})),
+            )
+            .mount(&server)
+            .await;
+        // The control plane can return while diagnostic persistence still fails.
+        assert!(diagnostics::report(&cfg, &http, None).await.is_err());
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/api/enterprise/upload-status"))
+            .and(wiremock::matchers::header("x-license-key", "sek_test"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let at = diagnostics::report(&cfg.clone(), &http, None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(diagnostics::report(&cfg, &http, Some(&at))
+            .await
+            .unwrap()
+            .is_none());
+        let requests = server.received_requests().await.unwrap();
+        let body: serde_json::Value =
+            serde_json::from_slice(&requests.last().unwrap().body).unwrap();
+        assert_eq!(body["occurred_at"], at);
+        assert!(body["error"].as_str().unwrap().contains("503"));
+        assert!(body["error"]
+            .as_str()
+            .unwrap()
+            .contains("pending data retained"));
+        assert!(!body.to_string().contains("sek_test"));
+        cfg.license_key = "another-organization".into();
+        assert!(diagnostics::report(&cfg, &http, None)
+            .await
+            .unwrap()
+            .is_none());
+        cfg.license_key = "sek_test".into();
+        server.verify().await;
+        server.reset().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(
+                "/api/enterprise/storage-binding/mode",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"desired_mode": "direct_upload_write_only"})),
+            )
+            .mount(&server)
+            .await;
+        assert!(diagnostics::report(&cfg, &http, None)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .all(|r| r.method.as_str() == "GET"));
+        assert!(cfg
+            .cursor_path
+            .with_file_name(diagnostics::LOG_NAME)
+            .exists());
+    }
+
+    pub(crate) async fn check_retained_diagnostic(log_dir: &std::path::Path) {
+        let dir = TempDir::new().unwrap();
+        let mut cfg = test_cfg(&dir, "https://control.example/api/enterprise/ingest".into());
+        cfg.cursor_path = log_dir.join("cursor.json");
+        diagnostics::retain(&cfg, "local api request failed: connection refused; pending data retained; retry in 300 seconds; user=private-person@example.com https://bucket.example/object?signature=secret").await.unwrap();
+        // Several newer rolling files must not displace the retained cause.
+        for index in 0..7 {
+            std::fs::write(
+                log_dir.join(format!("screenpipe-app.2026-10-09.{index}.log")),
+                "recorder restarted\n",
+            )
+            .unwrap();
+        }
+        let bundle = crate::diagnostic_logs::collect_redacted_from_dirs(&[log_dir.to_path_buf()])
+            .await
+            .unwrap();
+        assert!(bundle.contains("local api request failed: connection refused"));
+        assert!(bundle.contains("pending data retained"));
+        assert!(bundle.contains("retry in 300 seconds"));
+        assert!(!bundle.contains("private-person@example.com"));
+        assert!(!bundle.contains("signature=secret"));
+        assert!(!bundle.contains("sek_test"));
     }
 
     fn counting_local(reads: Arc<AtomicUsize>, pages: Vec<Vec<FrameRow>>) -> CountingLocal {
