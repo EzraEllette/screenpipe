@@ -5975,6 +5975,38 @@
         ],
         "command": "cd packages/screenpipe-mcp && SCREENPIPE_MCP_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 node node_modules/vitest/vitest.mjs run src/eval-evidence.test.ts"
       }
+    },
+    {
+      "id": "ai-gateway-null-model-accounting",
+      "name": "Preserve accounting fallbacks when the model name is absent",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "982e1b2849b81966153cba1cd7d30e07a26ed25b"
+      },
+      "base_ref": "4b8326d778d7ea2ced2a80ea9cf92b63ba59795e",
+      "oracle_ref": "982e1b2849b81966153cba1cd7d30e07a26ed25b",
+      "oracle_paths": [
+        "packages/ai-gateway/src/services/cost-tracker.ts"
+      ],
+      "gate": "advisory",
+      "tags": [
+        "regression",
+        "accounting",
+        "missing-input",
+        "preserved-behavior"
+      ],
+      "prompt": "Gateway accounting crashes when the model name is absent. Repair the existing exported getModelCost, isZeroCostModel and inferProvider behavior for undefined and null model names: return the existing unknown-model estimate of 0.01 USD, false for free-model classification, and unknown for provider inference without throwing. The unknown estimate applies with either absent or measured token counts. Preserve the same behavior for empty, whitespace-only and unrecognized model strings. Preserve known-model accounting: the existing gpt-5.4-nano table uses 0.20 USD per million input tokens and 1.25 per million output tokens, gives 0.00045 for 1000 input/200 output, zero for zero tokens, and 0.001025 when both token counts are null. A lone null token count contributes zero when the other is measured. Preserve case-insensitive versioned-name matching and the longest matching price entry, OpenAI provider inference, and the existing screenpipe-event-classifier free/zero-cost/screenpipe-vllm behavior. These are repository pricing fixtures, not a claim about current external prices. Any implementation meeting the exported behavior is acceptable; do not require a specific private helper. The grader executes the complete accounting module without database or provider calls. This case does not establish HTTP admission, live billing, settlement durability, deployment, agent isolation or model capability. Add focused tests.",
+      "agent_timeout_seconds": 900,
+      "grader": {
+        "timeout_seconds": 30,
+        "fixtures": [
+          {
+            "local_path": "graders/null-model-accounting.fixture.ts.txt",
+            "destination_path": "packages/ai-gateway/src/test/eval-null-model-accounting.test.ts"
+          }
+        ],
+        "command": "\"${BUN_BIN:-bun}\" test packages/ai-gateway/src/test/eval-null-model-accounting.test.ts"
+      }
     }
   ]
 }

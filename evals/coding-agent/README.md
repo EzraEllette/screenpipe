@@ -1,5 +1,18 @@
 # Coding-agent regression evals
 
+`ai-gateway-null-model-accounting` executes the complete accounting module's
+existing exports without provider or database calls. Thirteen outcomes cover
+absent model names and preserved unknown-string, measured/estimated token,
+versioned-name, priced-model and free-model behavior. The parent fails six
+missing-model outcomes and preserves seven; the historical fix and current
+source pass thirteen. Run
+`bun test evals/coding-agent/calibrate-null-model-accounting.test.js` for eleven
+controls, including equivalent guards, unused correct code, blanket fallback,
+lost free classification and missing-source setup errors. The fixture appears
+only at grading and needs no dependency links. This does not execute HTTP
+admission, real billing or settlement, and does not establish agent isolation
+or model performance.
+
 `app-zero-channel-downmix` compiles the actual complete converter module with
 synthetic buffers. Ten outcomes cover zero-channel passthrough and preserved
 mono, signed multichannel, silence, empty, high-channel and partial-frame behavior.
