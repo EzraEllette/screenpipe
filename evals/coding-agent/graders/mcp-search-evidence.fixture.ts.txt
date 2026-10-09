@@ -1,0 +1,28 @@
+// screenpipe — AI that knows everything you've seen, said, or heard
+// https://screenpipe.com
+import {beforeEach,afterEach,it,expect,vi} from 'vitest';
+import {createServer} from 'node:http';
+import {Client} from '@modelcontextprotocol/sdk/client/index.js';
+import {StreamableHTTPClientTransport} from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import {buildHttpServer} from './http-server';
+let api:any,server:any,client:Client,data:any[],pagination:any,status:number;
+const long='HEAD'+ 'x'.repeat(3000)+'TAIL';
+beforeEach(async()=>{
+ data=[];pagination={total:1,offset:0};status=200;
+ api=createServer((req,res)=>{res.setHeader('content-type','application/json');if(req.url?.startsWith('/search')){res.statusCode=status;res.end(JSON.stringify(status===200?{data,pagination}:{error:'synthetic unavailable'}));}else res.end('{}');});
+ await new Promise<void>(r=>api.listen(0,'127.0.0.1',r));const port=api.address().port;
+ vi.stubEnv('SCREENPIPE_API_URL',`http://127.0.0.1:${port}`);vi.stubEnv('SCREENPIPE_MCP_TELEMETRY_DISABLED','1');vi.stubEnv('DO_NOT_TRACK','1');
+ server=buildHttpServer({mcpPort:0,screenpipePort:port,host:'127.0.0.1'});await new Promise<void>(r=>server.listen(0,'127.0.0.1',r));
+ client=new Client({name:'synthetic-evidence-check',version:'1.0.0'});await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${server.address().port}/mcp`)));
+});
+afterEach(async()=>{await client?.close();server?.closeAllConnections();api?.closeAllConnections();await Promise.all([server,api].filter(Boolean).map(s=>new Promise<void>(r=>s.close(()=>r()))));vi.unstubAllEnvs();});
+async function search(args:any={}){const r=await client.callTool({name:'search_content',arguments:{q:'synthetic',...args}});expect(r.isError).not.toBe(true);return (r.content as any[]).map(c=>c.text??'').join('\n');}
+it('retains the backend frame reference in ordinary screen results',async()=>{for(const id of [0,72,901]){data=[{type:'OCR',content:{frame_id:id,text:'synthetic screen '+id,text_source:'accessibility'}}];const t=await search();expect(t).toContain('frame_id='+id);expect(t).toContain('screenpipe://frame/'+id);expect(t).toContain('synthetic screen '+id);}});
+it('bounds default long content while retaining both ends and source',async()=>{data=[{type:'OCR',content:{frame_id:72,text:long}}];const t=await search();expect(t).toContain('HEAD');expect(t).toContain('TAIL');expect(t.length).toBeLessThan(1500);expect(t).toContain('screenpipe://frame/72');});
+it('explicit scoped unlimited read preserves complete text',async()=>{data=[{type:'OCR',content:{text:long}}];expect(await search({max_content_length:0})).toContain(long);});
+it('retains audio chunk evidence',async()=>{for(const id of [0,31,77]){data=[{type:'Audio',content:{chunk_id:id,timestamp:'2026-10-01T00:00:00Z',transcription:'synthetic speech '+id}}];const t=await search();expect(t).toContain('chunk_id='+id);expect(t).toContain('synthetic speech '+id);}});
+it('input events remain visible with their source',async()=>{data=[{type:'Input',content:{frame_id:72,text_content:'synthetic input'}}];const t=await search();expect(t).toContain('synthetic input');expect(t).toContain('screenpipe://frame/72');});
+it('final nonempty page does not suggest another offset',async()=>{data=[{type:'OCR',content:{text:'last page'}}];pagination={total:6,offset:5};expect(await search({offset:5,limit:1})).not.toContain('offset=');});
+it('nonfinal page retains useful next offset',async()=>{data=[{type:'OCR',content:{text:'next page'}}];pagination={total:6,offset:2};expect(await search({offset:2,limit:1})).toContain('offset=3');});
+it('missing or invalid identifiers do not acquire invented source references',async()=>{data=[{type:'OCR',content:{frame_id:-1,text:'no frame'}},{type:'Audio',content:{chunk_id:'invalid',transcription:'no chunk'}}];const t=await search();expect(t).not.toContain('frame_id=');expect(t).not.toContain('chunk_id=');expect(t).not.toContain('screenpipe://frame/');});
+it('empty results and upstream refusal remain distinct',async()=>{const t=await search();expect(t).toContain('No results');status=403;await expect(search()).rejects.toThrow('403');});

@@ -1805,3 +1805,9 @@ and current source pass eleven. Run
 Fixtures and dependency links appear only at grading. This does not establish
 image decoding/rendering, path-only attachment handling, real discovery, native
 durability, enforced isolation or model performance.
+
+### HTTP MCP search evidence
+
+`app-mcp-search-source-evidence` exercises the actual HTTP MCP server and SDK client against a synthetic loopback backend. It checks frame/chunk references, input-event text, bounded and explicitly unlimited reads, pagination, missing IDs, empty results and upstream refusal. The broken parent fails five outcomes while preserving four; the historical reference passes nine.
+
+Run `bun test evals/coding-agent/calibrate-mcp-search-evidence.test.js` to check the historical contrast, current source, equivalent implementation and broken/bypass controls. Dependencies are linked only for grading. This does not establish stdio/native telemetry, disconnect cleanup, live authentication, model performance or enforced host isolation. The existing activity-summary case tests another public tool.

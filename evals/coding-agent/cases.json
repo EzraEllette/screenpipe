@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "suite": "screenpipe-app-coding-agent-regressions",
-  "dataset_version": "2026-10-08-codex-embedded-images",
+  "dataset_version": "2026-10-09-mcp-search-evidence",
   "suite_type": "regression",
   "owner": "screenpipe engineering",
   "policy": {
@@ -5931,6 +5931,49 @@
           }
         ],
         "command": "cargo test --offline --manifest-path .eval-downmix/Cargo.toml --test outcomes -- --nocapture"
+      }
+    },
+    {
+      "id": "app-mcp-search-source-evidence",
+      "name": "Preserve source evidence through HTTP MCP search",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "fd797a4607f7def147171ac23a6c061cf4920d9f"
+      },
+      "base_ref": "0d082079f354e42ef8b51baafe4bc258b30cded2",
+      "oracle_ref": "fd797a4607f7def147171ac23a6c061cf4920d9f",
+      "oracle_paths": [
+        "packages/screenpipe-mcp/src/http-server.ts",
+        "packages/screenpipe-mcp/src/search-result.ts",
+        "packages/screenpipe-mcp/src/call-observation.ts"
+      ],
+      "gate": "advisory",
+      "trigger_paths": [
+        "packages/screenpipe-mcp/src/**"
+      ],
+      "tags": [
+        "regression",
+        "mcp",
+        "evidence",
+        "pagination"
+      ],
+      "prompt": "HTTP MCP search_content loses the source references needed to inspect returned evidence and can discard input-event text. Repair the existing public tool. Screen and input results with valid backend frame IDs must retain frame_id=<id> and screenpipe://frame/<id>; audio results must retain chunk_id=<id> and transcription. Preserve zero and other nonnegative safe integer IDs, and never invent references for missing, negative or nonnumeric IDs. Keep source text in the response. Default long screen text must be bounded while preserving its beginning, end and source reference: for one 3008-character result, the complete response must stay below 1500 characters. An explicitly scoped max_content_length:0 read must preserve the full text. Preserve next-page offset hints when more results remain, but do not suggest another offset on a final nonempty page. Keep empty-result messages and upstream HTTP403 failures distinct. Exercise the actual HTTP MCP server with its SDK client and synthetic loopback backend. No private helper name, extraction or formatting outside these public references is required. This task does not establish stdio behavior, native telemetry, real customer retrieval, live authentication or client-disconnection cleanup. Do not call live services.",
+      "agent_timeout_seconds": 900,
+      "grader_dependency_links": [
+        {
+          "source_path": "packages/screenpipe-mcp/node_modules",
+          "destination_path": "packages/screenpipe-mcp/node_modules"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/mcp-search-evidence.fixture.ts.txt",
+            "destination_path": "packages/screenpipe-mcp/src/eval-evidence.test.ts"
+          }
+        ],
+        "command": "cd packages/screenpipe-mcp && SCREENPIPE_MCP_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 node node_modules/vitest/vitest.mjs run src/eval-evidence.test.ts"
       }
     }
   ]
