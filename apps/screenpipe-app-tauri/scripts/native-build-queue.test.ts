@@ -130,4 +130,14 @@ describe("native build queue helpers", () => {
       "--features", "e2e", "staged_update::",
     ]);
   });
+
+  test("opts enterprise native tests into the enterprise feature", () => {
+    expect(nativeTestCommand(["hosted_large_record", "--", "--nocapture"], true)).toEqual([
+      "cargo", "test", "-p", "screenpipe-app",
+      "--manifest-path", "src-tauri/Cargo.toml",
+      "--profile", "debug-dev",
+      "--features", "enterprise-build",
+      "hosted_large_record", "--", "--nocapture",
+    ]);
+  });
 });

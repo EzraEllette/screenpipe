@@ -79,11 +79,15 @@ export function sccacheHasBaseDirectories(output: string, worktrees: string[]): 
   });
 }
 
-export function nativeTestCommand(args: string[]): string[] {
+export function nativeTestCommand(
+  args: string[],
+  enterpriseBuild = process.env.SCREENPIPE_ENTERPRISE_BUILD === "1",
+): string[] {
   return [
     "cargo", "test", "-p", "screenpipe-app",
     "--manifest-path", "src-tauri/Cargo.toml",
     "--profile", "debug-dev",
+    ...(enterpriseBuild ? ["--features", "enterprise-build"] : []),
     ...args,
   ];
 }
@@ -410,7 +414,10 @@ async function perform(mode: BuildMode, args: string[]): Promise<number> {
   const env = localSccacheEnvironment();
   switch (mode) {
     case "build":
-      return run(["bun", "tauri", "build", "--no-bundle", "--", "--profile", "debug-dev"], env);
+      return run([
+        "bun", "tauri", "build", "--no-bundle", "--", "--profile", "debug-dev",
+        ...(env.SCREENPIPE_ENTERPRISE_BUILD === "1" ? ["--features", "enterprise-build"] : []),
+      ], env);
     case "e2e":
       env.NEXT_PUBLIC_SCREENPIPE_E2E = "true";
       return run([
