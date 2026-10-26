@@ -61,6 +61,17 @@ test("enterprise packages the verified shared application without another app co
   expect(shared.if).toBeUndefined();
 });
 
+test("manual packaging can recover an existing payload after a later consumer dispatch or upload failure", async () => {
+  const step = enterprise.jobs["resolve-release"].steps.find((step: any) => step.name === "Verify shared build origin");
+  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+  const verify = new AsyncFunction("github", "context", "process", step.with.script);
+  const source = { path: ".github/workflows/release-app.yml", head_branch: "main", event: "workflow_dispatch", status: "completed", conclusion: "failure" };
+  const github = { rest: { actions: { getWorkflowRun: async () => ({ data: source }) } } };
+  await verify(github, context, { env: { SHARED_BUILD_RUN_ID: "123" } });
+  source.head_branch = "untrusted-branch";
+  await expect(verify(github, context, { env: { SHARED_BUILD_RUN_ID: "123" } })).rejects.toThrow("Release App run from main");
+});
+
 for (const dryRun of [false, true]) {
   test(`record pending before dispatch and preserve exact revision/flags (dry run=${dryRun})`, async () => {
     const { github, calls } = api();
@@ -208,7 +219,7 @@ test("every platform waits for and downloads one finalized snapshot", () => {
   const finalize = prepare.runs.steps.find((step: any) => step.name === "Finalize and validate translations");
   expect(finalize.env.SCREENPIPE_I18N_MODE).toContain("'cached' || 'generate'");
   expect(finalize["continue-on-error"]).toBeUndefined();
-  expect(enterprise.jobs.localization.steps.find((step: any) => step.id === "localization").with["source-run-id"]).toBe("${{ inputs.localization_run_id }}");
+  expect(enterprise.jobs.localization.steps.find((step: any) => step.id === "localization").with["source-run-id"]).toBe("${{ inputs.localization_run_id || inputs.shared_build_run_id }}");
 });
 
 test("production packaging enables localization without changing development defaults", () => {

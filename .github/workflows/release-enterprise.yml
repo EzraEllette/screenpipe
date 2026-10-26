@@ -107,10 +107,12 @@ jobs:
               ...context.repo, run_id: process.env.SHARED_BUILD_RUN_ID,
             });
             if (run.path?.split('@')[0] !== '.github/workflows/release-app.yml' ||
-                run.head_branch !== 'main' || run.event !== 'workflow_dispatch' ||
-                (run.status === 'completed' && run.conclusion !== 'success')) {
-              throw new Error('Select a successful Release App run from main containing the matching shared desktop artifacts. Enterprise packaging never recompiles the application.');
+                run.head_branch !== 'main' || run.event !== 'workflow_dispatch') {
+              throw new Error('Select a Release App run from main containing the matching shared desktop artifacts. Enterprise packaging never recompiles the application.');
             }
+            // A later upload or dispatch failure must not strand an already
+            // verified compiled payload. Its exact identity/checksum is checked
+            // again before packaging, regardless of the overall run conclusion.
 
   localization:
     needs: [resolve-release]
@@ -133,7 +135,7 @@ jobs:
         uses: ./.release-workflow/.github/actions/prepare-desktop-localization
         with:
           release-sha: ${{ needs.resolve-release.outputs.release_sha }}
-          source-run-id: ${{ inputs.localization_run_id }}
+          source-run-id: ${{ inputs.localization_run_id || inputs.shared_build_run_id }}
           token: ${{ github.token }}
           gt-project-id: ${{ secrets.GT_PROJECT_ID }}
           gt-api-key: ${{ secrets.GT_API_KEY }}
@@ -936,12 +938,10 @@ jobs:
           - platform: macos-latest
             runner: screenpipe-release-macos-arm64
             target: aarch64-apple-darwin
-            features: metal,parakeet-mlx,rfdetr-mlx,redact-onnx-coreml,official-build
             package_arch: arm64
           - platform: macos-26
             runner: screenpipe-release-macos-x64
             target: x86_64-apple-darwin
-            features: metal,redact-onnx-coreml,official-build
             package_arch: x64
     runs-on: ${{ inputs.force_github_runners && matrix.platform || matrix.runner }}
     timeout-minutes: 120
