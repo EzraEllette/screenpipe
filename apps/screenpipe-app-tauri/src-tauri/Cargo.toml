@@ -18,6 +18,8 @@ repository = ""
 default-run = "screenpipe-app"
 edition = "2021"
 rust-version = "1.94"
+# Older source revisions cannot be repackaged as Enterprise by this workflow.
+metadata.screenpipe.shared-package-runtime = true
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

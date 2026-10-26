@@ -81,3 +81,11 @@ test("missing shared build is an actionable failure, never an application compil
   expect(() => prepareEnterprise(f.app, f.payload, "x86_64-pc-windows-msvc", sha, version)).toThrow();
   expect(existsSync(join(f.native, "screenpipe-package.json"))).toBe(false);
 });
+
+test("historical sources without runtime package support cannot masquerade as a shared Enterprise build", () => {
+  const target = "x86_64-pc-windows-msvc";
+  const f = fixture(target);
+  writeFileSync(join(f.native, "Cargo.toml"), '[package]\ndefault-run = "screenpipe-app"\n');
+  expect(() => capture(f.app, target, sha, version, f.payload)).toThrow("predates shared package runtime support");
+  expect(existsSync(f.payload)).toBe(false);
+});

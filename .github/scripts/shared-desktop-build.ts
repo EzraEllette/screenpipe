@@ -8,7 +8,8 @@ import { createHash } from "node:crypto";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
-type Manifest = { sha: string; version: string; target: string; files: Record<string, string> };
+type Manifest = { sha: string; version: string; target: string; runtimePackageIdentity: true; files: Record<string, string> };
+type CargoManifest = { package: { "default-run": string; metadata?: { screenpipe?: { "shared-package-runtime"?: boolean } } } };
 const metadataFile = "screenpipe-package.json";
 const hash = (path: string) => createHash("sha256").update(readFileSync(path)).digest("hex");
 function run(command: string, args: string[]) {
@@ -22,6 +23,8 @@ function requireRevision(sha: string, version: string, target: string) {
 }
 export function capture(app: string, target: string, sha: string, version: string, output: string) {
   requireRevision(sha, version, target);
+  const cargo = Bun.TOML.parse(readFileSync(join(app, "src-tauri/Cargo.toml"), "utf8")) as CargoManifest;
+  if (cargo.package.metadata?.screenpipe?.["shared-package-runtime"] !== true) throw new Error("Requested source predates shared package runtime support; use its original release workflow for recovery");
   mkdirSync(output, { recursive: true });
   const release = join(app, "src-tauri/target", target, "release");
   if (target.endsWith("apple-darwin")) {
@@ -32,7 +35,6 @@ export function capture(app: string, target: string, sha: string, version: strin
     const suffix = target.includes("windows") ? ".exe" : "";
     const configPath = join(app, "src-tauri/tauri.conf.json");
     const config = existsSync(configPath) ? JSON.parse(readFileSync(configPath, "utf8")) : {};
-    const cargo = Bun.TOML.parse(readFileSync(join(app, "src-tauri/Cargo.toml"), "utf8")) as { package: { "default-run": string } };
     const name = config.mainBinaryName ?? cargo.package["default-run"];
     if (!name) throw new Error("Shared build has no configured main executable");
     const binary = join(release, name + suffix);
@@ -40,13 +42,14 @@ export function capture(app: string, target: string, sha: string, version: strin
     cpSync(binary, join(output, "screenpipe-app" + suffix));
   }
   const payload = target.endsWith("apple-darwin") ? "application.tar.gz" : `screenpipe-app${target.includes("windows") ? ".exe" : ""}`;
-  const manifest: Manifest = { sha, version, target, files: { [payload]: hash(join(output, payload)) } };
+  const manifest: Manifest = { sha, version, target, runtimePackageIdentity: true, files: { [payload]: hash(join(output, payload)) } };
   writeFileSync(join(output, "manifest.json"), JSON.stringify(manifest, null, 2));
 }
 
 export function verify(input: string, target: string, sha: string, version: string): Manifest {
   requireRevision(sha, version, target);
   const manifest = JSON.parse(readFileSync(join(input, "manifest.json"), "utf8")) as Manifest;
+  if (manifest.runtimePackageIdentity !== true) throw new Error("Shared build does not declare runtime package identity support");
   if (manifest.sha !== sha || manifest.version !== version || manifest.target !== target) throw new Error("Shared build revision, version or target mismatch; select its matching Release App run");
   const expected = target.endsWith("apple-darwin") ? "application.tar.gz" : `screenpipe-app${target.includes("windows") ? ".exe" : ""}`;
   if (Object.keys(manifest.files).length !== 1 || !manifest.files[expected]) throw new Error("Shared build manifest must contain its compiled application payload");
