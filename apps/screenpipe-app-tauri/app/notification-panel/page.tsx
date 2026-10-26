@@ -38,6 +38,7 @@ import { NotificationActionButton } from "@/components/notification-action-butto
 import { isNotificationFeedbackEligible } from "@/lib/ai-feedback";
 import { NotificationFeedback } from "@/components/notification-feedback";
 import { MeetingJoinNotification } from "@/components/meeting-join-notification";
+import { isMeetingNotificationCard } from "@/lib/notifications/meeting-join";
 import { showNotificationPanel } from "@/lib/hooks/use-notification-panel";
 import { useGT } from "gt-react";
 
@@ -49,6 +50,7 @@ interface NotificationPayload {
   body: string;
   actions: NotificationAction[];
   autoDismissMs?: number;
+  overlayScale?: number;
   pipe_name?: string;
   source_session_id?: string;
   source_message_id?: string;
@@ -152,6 +154,7 @@ export default function NotificationPanelPage() {
         ...notificationAnalyticsProperties(payload, "toast"),
       });
 
+      let alreadyDismissed = false;
       try {
         // New typed action dispatch (pipe notifications)
         if (actionObj?.type) {
@@ -176,6 +179,12 @@ export default function NotificationPanelPage() {
             }
             return;
           }
+          if (actionObj.type === "meeting_join") {
+            // The native overlay closes as soon as a join choice is clicked.
+            // Match that feedback while the browser-backed action completes.
+            await hide("action");
+            alreadyDismissed = true;
+          }
           let screenDetailFailed = false;
           await executeNotificationAction(actionObj, {
             onScreenDetailError: () => { screenDetailFailed = true; },
@@ -183,7 +192,7 @@ export default function NotificationPanelPage() {
             sourceId: payload?.id,
             sourceUrl: payload?.source_url,
           });
-          await hide("action");
+          if (!alreadyDismissed) await hide("action");
           if (screenDetailFailed) {
             await showNotificationPanel({
               id: "meeting-screen-detail-failed", type: "warning",
@@ -275,7 +284,7 @@ export default function NotificationPanelPage() {
         });
       }
 
-      await hide("action");
+      if (!alreadyDismissed) await hide("action");
     },
     [
       payload?.type,
@@ -450,8 +459,9 @@ export default function NotificationPanelPage() {
     return null;
   }
 
-  if (payload.actions.some((action) => action.type === "meeting_join" && action.url)) {
+  if (isMeetingNotificationCard(payload.actions)) {
     return <MeetingJoinNotification key={payload.id} {...payload}
+      scale={payload.overlayScale ?? 1}
       onAction={handleAction} onDismiss={() => void hide("explicit")}
       onMouseEnter={() => { hoveredRef.current = true; }}
       onMouseLeave={() => { hoveredRef.current = false; }} />;
