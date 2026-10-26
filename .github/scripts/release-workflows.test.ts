@@ -59,6 +59,11 @@ test("enterprise packages the verified shared application without another app co
   const shared = app.jobs["publish-tauri"].steps.find((step: any) => step.name === "Upload shared compiled desktop");
   expect(shared.with.name).toBe("shared-desktop-${{ matrix.target }}");
   expect(shared.if).toBeUndefined();
+  const steps = app.jobs["publish-tauri"].steps;
+  const captureIndex = steps.findIndex((step: any) => step.name === "Capture shared compiled desktop");
+  for (const [index, step] of steps.entries()) {
+    if (step.run?.includes("upload-release-artifacts.sh consumer")) expect(index).toBeLessThan(captureIndex);
+  }
   const persistent = enterprise.jobs["release-enterprise-windows"].steps.find((step: any) => step.name === "Bundle persistent enterprise installer");
   expect(persistent.run).toContain("bun run bundle:persistence-installer --config src-tauri/shared-build-bundle.conf.json");
 });
