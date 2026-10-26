@@ -143,13 +143,17 @@ it("filters local archive and review state without losing the underlying workflo
   const workflows=[{...source(),title:"Archived research",archived:true},{...source(),title:"Active research",reviewStatus:"needs-edits" as const}];
   render(<WorkflowsView documentFilters workflows={workflows} knownWorkflowCount={2} query="" setQuery={vi.fn()} openWorkflow={open} analyze={vi.fn()} analyzing={false} error="" activityState={{cycleId:"",items:[],unavailable:false}}/>);
   expect(screen.queryByRole("heading",{name:"Archived research"})).toBeNull();
-  fireEvent.click(screen.getByRole("button",{name:"Open map"}));expect(open).toHaveBeenCalledWith(1);
-  fireEvent.change(screen.getByRole("combobox",{name:"Workflow status"}),{target:{value:"archived"}});
+  fireEvent.click(screen.getByRole("button",{name:/Active research/}));expect(open).toHaveBeenCalledWith(1);
+  fireEvent.click(screen.getByRole("button",{name:"Filter workflows"}));
+  fireEvent.click(screen.getByRole("checkbox",{name:"Show archived"}));
   expect(screen.getByRole("heading",{name:"Archived research"})).toBeVisible();
   expect(screen.queryByRole("heading",{name:"Active research"})).toBeNull();
-  fireEvent.change(screen.getByRole("combobox",{name:"Workflow status"}),{target:{value:"reviewed"}});
-  fireEvent.click(screen.getByRole("button",{name:"Clear filters"}));
+  fireEvent.click(screen.getByRole("button",{name:"Filter workflows"}));
+  fireEvent.click(screen.getByRole("option",{name:/Unreviewed/}));
+  expect(screen.queryByRole("heading",{name:"Active research"})).toBeNull();
+  fireEvent.click(screen.getByRole("button",{name:"Reset",exact:true}));
   expect(screen.getByRole("heading",{name:"Active research"})).toBeVisible();
+  expect(screen.queryByRole("heading",{name:"Archived research"})).toBeNull();
 });
 
 it("opens secondary tools by keyboard and restores focus without changing the draft", () => {
