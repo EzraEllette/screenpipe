@@ -311,7 +311,7 @@ jobs:
           flavor: consumer
 
       - name: Checkout persistent Linux cache action
-        if: runner.environment == 'self-hosted' && matrix.os_type == 'linux'
+        if: matrix.os_type == 'linux'
         uses: actions/checkout@v4
         with:
           ref: ${{ github.workflow_sha }}
@@ -1617,6 +1617,24 @@ jobs:
           bash .release-workflow/.github/scripts/finalize-macos-updater.sh \
             "$GITHUB_WORKSPACE/apps/screenpipe-app-tauri/src-tauri/target/${{ matrix.target }}/release/bundle/macos" \
             "$GITHUB_WORKSPACE/apps/screenpipe-app-tauri"
+
+      - name: Capture shared compiled desktop
+        shell: bash
+        env:
+          RELEASE_SHA: ${{ needs.check_commit.outputs.release_sha }}
+          RELEASE_VERSION: ${{ needs.check_commit.outputs.release_version }}
+        run: |
+          bun .release-workflow/.github/scripts/shared-desktop-build.ts capture \
+            apps/screenpipe-app-tauri '${{ matrix.target }}' "$RELEASE_SHA" "$RELEASE_VERSION" \
+            '${{ runner.temp }}/shared-desktop-${{ matrix.target }}'
+
+      - name: Upload shared compiled desktop
+        uses: actions/upload-artifact@v4
+        with:
+          name: shared-desktop-${{ matrix.target }}
+          path: ${{ runner.temp }}/shared-desktop-${{ matrix.target }}
+          if-no-files-found: error
+          compression-level: 0
 
       - name: Upload macOS dry-run artifacts
         if: matrix.os_type == 'macos' && github.event.inputs.dry_run == 'true'

@@ -43,6 +43,24 @@ test("enterprise dispatch is mandatory after all consumer platforms, without wai
   expect(Object.values(app.jobs).some((job: any) => job.uses?.includes("release-enterprise.yml"))).toBe(false);
 });
 
+test("enterprise packages the verified shared application without another app compilation", () => {
+  expect(enterprise.on.workflow_dispatch.inputs.shared_build_run_id.required).toBe(true);
+  expect(enterprise.jobs["resolve-release"].steps.some((step: any) => step.name === "Verify shared build origin")).toBe(true);
+  for (const name of ["release-enterprise-windows", "release-enterprise-linux", "release-enterprise-macos"]) {
+    const job = enterprise.jobs[name];
+    const download = job.steps.find((step: any) => step.name === "Download shared compiled desktop");
+    expect(download.with["run-id"]).toBe("${{ inputs.shared_build_run_id }}");
+    expect(download.with["github-token"]).toBe("${{ github.token }}");
+    expect(job.permissions.actions).toBe("read");
+    expect(job.steps.some((step: any) => step.uses?.startsWith("tauri-apps/tauri-action"))).toBe(false);
+    expect(job.steps.some((step: any) => /\btauri build\b/.test(step.run ?? ""))).toBe(false);
+    expect(job.steps.some((step: any) => step.name === "Prepare Enterprise package from shared desktop")).toBe(true);
+  }
+  const shared = app.jobs["publish-tauri"].steps.find((step: any) => step.name === "Upload shared compiled desktop");
+  expect(shared.with.name).toBe("shared-desktop-${{ matrix.target }}");
+  expect(shared.if).toBeUndefined();
+});
+
 for (const dryRun of [false, true]) {
   test(`record pending before dispatch and preserve exact revision/flags (dry run=${dryRun})`, async () => {
     const { github, calls } = api();
@@ -51,7 +69,7 @@ for (const dryRun of [false, true]) {
     expect(calls[0].args).toMatchObject({ sha, state: "pending", context: dryRun ? "Enterprise artifacts (dry run)" : "Enterprise artifacts" });
     expect(calls[1].args).toEqual({
       ...context.repo, workflow_id: "release-enterprise.yml", ref: "main",
-      inputs: { commit_hash: sha, version: "2.7.43", force_github_runners: "true", dry_run: String(dryRun) },
+      inputs: { commit_hash: sha, version: "2.7.43", shared_build_run_id: "123", force_github_runners: "true", dry_run: String(dryRun) },
     });
   });
 }
