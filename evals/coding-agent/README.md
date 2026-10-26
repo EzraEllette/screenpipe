@@ -2103,3 +2103,13 @@ metadata and input-mutation controls, and a missing-source infrastructure error.
 The grader executes the production edit projection with synthetic documents.
 UI navigation, backend persistence, authorization, native execution, enforced
 agent isolation and model improvement are outside this case's evidence.
+
+### Retention capture contract dispatch
+
+The retention capture grader always installs its hidden assertions under a
+reserved test name. A candidate's same-named product test cannot replace the
+cleanup-start deadline, capture deadline, deletion, watermark or reopen checks.
+Run `bun test evals/coding-agent/retention-grader-adapter.test.js` for ten adapter
+controls. These use a Cargo dispatch shim and do not establish native behavior;
+the existing historical `--verify` contrast and current-source Cargo execution
+remain separate evidence. Fixtures still appear only at grading.

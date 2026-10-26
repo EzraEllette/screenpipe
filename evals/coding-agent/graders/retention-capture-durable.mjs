@@ -6,18 +6,26 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 
 const sourcePath = "crates/screenpipe-engine/src/retention.rs";
-const testName = "all_retention_yields_archived_history_to_durable_capture";
-let source = readFileSync(sourcePath, "utf8");
-if (!source.includes(`async fn ${testName}()`)) {
-  const fixture = readFileSync(".eval-retention/retention-capture-durable.rs", "utf8");
-  const moduleStart = source.indexOf("#[cfg(test)]\nmod tests {");
-  const moduleEnd = source.lastIndexOf("\n}");
-  if (moduleStart < 0 || moduleEnd <= moduleStart) {
-    throw new Error("retention unit-test module boundary not found");
-  }
-  source = `${source.slice(0, moduleEnd)}\n${fixture}\n${source.slice(moduleEnd)}`;
-  writeFileSync(sourcePath, source);
+const testName = "eval_hidden_retention_capture_contract";
+const source = readFileSync(sourcePath, "utf8");
+const originalName = "all_retention_yields_archived_history_to_durable_capture";
+const fixture = readFileSync(".eval-retention/retention-capture-durable.rs", "utf8");
+const declaration = `async fn ${originalName}()`;
+if (fixture.split(declaration).length !== 2) {
+  throw new Error("retention fixture must declare exactly one contract test");
 }
+if (source.includes(testName)) {
+  throw new Error("retention source collides with reserved hidden test name");
+}
+const moduleStart = source.indexOf("#[cfg(test)]\nmod tests {");
+const moduleEnd = source.lastIndexOf("\n}");
+if (moduleStart < 0 || moduleEnd <= moduleStart) {
+  throw new Error("retention unit-test module boundary not found");
+}
+// Always run the hidden contract, even when the candidate retains a same-named
+// product test. Candidate assertions cannot replace the disclosed outcomes.
+const hidden = fixture.replace(declaration, `async fn ${testName}()`);
+writeFileSync(sourcePath, `${source.slice(0, moduleEnd)}\n${hidden}\n${source.slice(moduleEnd)}`);
 const result = spawnSync("cargo", [
   "test", "--locked", "-p", "screenpipe-engine",
   testName, "--", "--nocapture",
