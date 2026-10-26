@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { capture, prepareEnterprise, verify } from "./shared-desktop-build";
+import { mergeConfig } from "../../apps/screenpipe-app-tauri/scripts/native-build-queue";
 
 const roots: string[] = [];
 const sha = "1".repeat(40);
@@ -17,7 +18,7 @@ function fixture(target: string) {
   const app = join(root, "app");
   const native = join(app, "src-tauri"); mkdirSync(native, { recursive: true });
   const source = resolve(import.meta.dir, "../../apps/screenpipe-app-tauri/src-tauri");
-  for (const name of ["Cargo.toml", "tauri.enterprise.conf.json", "tauri.windows.conf.json", "tauri.linux.conf.json"]) {
+  for (const name of ["Cargo.toml", "tauri.enterprise.conf.json", "tauri.enterprise-persistent.conf.json", "tauri.windows.conf.json", "tauri.linux.conf.json"]) {
     if (existsSync(join(source, name))) cpSync(join(source, name), join(native, name));
   }
   const release = join(native, "target", target, "release"); mkdirSync(release, { recursive: true });
@@ -43,6 +44,11 @@ for (const target of ["x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu"]) {
     if (target.includes("windows")) {
       expect(overlay.bundle.resources["ffmpeg\\bin\\ffmpeg.exe"]).toBe("./");
       expect(overlay.bundle.resources["screenpipe-package.json"]).toBe("screenpipe-package.json");
+      const persistence = JSON.parse(readFileSync(join(f.native, "tauri.enterprise-persistent.conf.json"), "utf8"));
+      const effective = mergeConfig(persistence, overlay) as typeof persistence;
+      expect(effective.bundle.resources["screenpipe-package.json"]).toBe("screenpipe-package.json");
+      expect(effective.bundle.resources["target\\x86_64-pc-windows-msvc\\release\\screenpipe-persistence-supervisor.exe"]).toBe("./");
+      expect(effective.bundle.windows.nsis.installMode).toBe("perMachine");
     } else {
       expect(overlay.bundle.resources).toContain("screenpipe-package.json");
     }

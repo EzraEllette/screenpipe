@@ -537,7 +537,7 @@ jobs:
           New-Item -ItemType Directory -Path $savedStandard | Out-Null
           Get-ChildItem -LiteralPath $nsisDir -File | Move-Item -Destination $savedStandard
 
-          bun run bundle:persistence-installer
+          bun run bundle:persistence-installer --config src-tauri/shared-build-bundle.conf.json
           if ($LASTEXITCODE -ne 0) { throw "Persistent NSIS bundle failed" }
 
           $generated = Get-ChildItem -LiteralPath $nsisDir -Filter *.exe -File

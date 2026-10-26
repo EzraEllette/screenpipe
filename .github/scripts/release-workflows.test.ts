@@ -59,6 +59,8 @@ test("enterprise packages the verified shared application without another app co
   const shared = app.jobs["publish-tauri"].steps.find((step: any) => step.name === "Upload shared compiled desktop");
   expect(shared.with.name).toBe("shared-desktop-${{ matrix.target }}");
   expect(shared.if).toBeUndefined();
+  const persistent = enterprise.jobs["release-enterprise-windows"].steps.find((step: any) => step.name === "Bundle persistent enterprise installer");
+  expect(persistent.run).toContain("bun run bundle:persistence-installer --config src-tauri/shared-build-bundle.conf.json");
 });
 
 test("manual packaging can recover an existing payload after a later consumer dispatch or upload failure", async () => {
