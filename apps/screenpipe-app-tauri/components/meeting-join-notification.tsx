@@ -66,7 +66,7 @@ export function MeetingJoinNotification(props: Props) {
   return (
     <div style={{ width: MEETING_JOIN_CARD_WIDTH, height: MEETING_JOIN_CARD_HEIGHT,
       transform: `scale(${scale})`, transformOrigin: "top left" }}>
-    <section aria-label={ui(joinChoices ? "Meeting starting" : "Meeting detected")} aria-busy={pending}
+    <section aria-label={joinChoices ? ui("Meeting starting") : ui("Meeting detected")} aria-busy={pending}
       onMouseEnter={props.onMouseEnter} onMouseLeave={props.onMouseLeave}
       style={{ boxSizing: "border-box", width: MEETING_JOIN_CARD_WIDTH, height: MEETING_JOIN_CARD_HEIGHT,
         background: "#000", color: "#f2f2f2", border: "1px solid #6b6b6b", borderRadius: 8,
