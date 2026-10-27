@@ -72,7 +72,7 @@ fn notification_body_lines(text: &str, max_chars: usize, max_lines: usize) -> Ve
             line = candidate;
         } else {
             if !line.is_empty() {
-                lines.push(line);
+                lines.push(std::mem::take(&mut line));
                 if lines.len() == max_lines {
                     break;
                 }
