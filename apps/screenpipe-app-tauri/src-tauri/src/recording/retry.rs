@@ -39,16 +39,41 @@ pub(super) fn admit<'a>(
     quit_requested: &AtomicBool,
     last_spawn: &AtomicU64,
     now: u64,
-) -> Option<MutexGuard<'a, ()>> {
-    let guard = lifecycle.try_lock().ok()?;
-    if !wants_recording.load(Ordering::SeqCst) || quit_requested.load(Ordering::SeqCst) {
-        return None;
+) -> Result<MutexGuard<'a, ()>, &'static str> {
+    let guard = lifecycle
+        .try_lock()
+        .map_err(|_| "recording lifecycle is busy")?;
+    if !wants_recording.load(Ordering::SeqCst) {
+        return Err("recording is not intended");
+    }
+    if quit_requested.load(Ordering::SeqCst) {
+        return Err("application quit was requested");
     }
     let last = last_spawn.load(Ordering::SeqCst);
     if last > 0 && now.saturating_sub(last) < super::RESTART_COOLDOWN_SECS {
-        return None;
+        return Err("recording restart cooldown is active");
     }
-    Some(guard)
+    Ok(guard)
+}
+
+/// A watchdog request is not an admitted restart. Keep skipped requests in
+/// the same support evidence as startup failures so repeated scheduling cannot
+/// conceal a held lifecycle or a cancelled recording intent.
+pub(super) fn admit_logged<'a>(
+    data_dir: &std::path::Path,
+    lifecycle: &'a Mutex<()>,
+    wants_recording: &AtomicBool,
+    quit_requested: &AtomicBool,
+    last_spawn: &AtomicU64,
+    now: u64,
+) -> Option<MutexGuard<'a, ()>> {
+    match admit(lifecycle, wants_recording, quit_requested, last_spawn, now) {
+        Ok(guard) => Some(guard),
+        Err(reason) => {
+            super::recovery_log::append(data_dir, "retry_skipped", reason);
+            None
+        }
+    }
 }
 
 /// A pause may complete after retry admission but before a healthy server's
@@ -70,11 +95,25 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let intent = AtomicBool::new(true);
         let failure = run(dir.path(), &intent, async {
-            // Exercise a real startup prerequisite failure, retaining its OS
-            // cause rather than replacing it with a generic retry error.
-            std::fs::read(dir.path().join("missing-config"))
-                .map(|_| ())
-                .map_err(|error| format!("recording configuration unavailable: {error}"))
+            // Exercise DatabaseManager's actual failed-open path and the same
+            // native cause formatter used by ServerCore during recovery.
+            let parent = dir.path().join("blocked-startup");
+            std::fs::write(&parent, b"not a directory").unwrap();
+            match screenpipe_db::DatabaseManager::new(
+                parent.join("db.sqlite").to_str().unwrap(),
+                Default::default(),
+            )
+            .await
+            {
+                Ok(db) => {
+                    db.close().await;
+                    panic!("startup cannot open a database below a regular file")
+                }
+                Err(error) => Err(format!(
+                    "operation=database_manager_init; {}",
+                    screenpipe_db::database_error_diagnostic(&error)
+                )),
+            }
         })
         .await
         .unwrap_err();
@@ -104,11 +143,86 @@ mod tests {
         assert!(report.contains("retry_started: recording recovery admitted"));
         assert!(report.contains("retry_failed: startup failed; capture_intended=true"));
         assert!(report.contains(&failure));
+        assert!(report.contains("operation=database_manager_init; sqlite_code="));
         assert!(
             report.contains("retry_completed: startup command completed; capture_intended=false")
         );
         assert!(!report.contains("private-person@example.com"));
         assert!(!intent.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn skipped_recovery_reaches_support_and_records_after_lifecycle_release() {
+        let dir = tempfile::tempdir().unwrap();
+        let lifecycle = Mutex::new(());
+        let intent = AtomicBool::new(true);
+        let quit = AtomicBool::new(false);
+        let last_spawn = AtomicU64::new(0);
+        let held = lifecycle.lock().await;
+        assert!(admit_logged(dir.path(), &lifecycle, &intent, &quit, &last_spawn, 100).is_none());
+        assert!(intent.load(Ordering::SeqCst));
+        drop(held);
+
+        let admitted = admit_logged(dir.path(), &lifecycle, &intent, &quit, &last_spawn, 100)
+            .expect("a released lifecycle must admit the next recovery");
+        let path = dir.path().join("db.sqlite");
+        run(dir.path(), &intent, async {
+            let db = screenpipe_db::DatabaseManager::new(path.to_str().unwrap(), Default::default())
+                .await
+                .map_err(|error| error.to_string())?;
+            let result = db.execute_raw_sql_write(
+                "INSERT INTO frames(id,timestamp,full_text) VALUES(1,'2026-10-28T12:00:00Z','recorded after lifecycle release')",
+            ).await.map_err(|error| error.to_string());
+            db.close().await;
+            result.map(|_| ())
+        })
+        .await
+        .unwrap();
+        drop(admitted);
+
+        // A later pause must still suppress recovery rather than publish intent.
+        intent.store(false, Ordering::SeqCst);
+        assert!(admit_logged(dir.path(), &lifecycle, &intent, &quit, &last_spawn, 100).is_none());
+        intent.store(true, Ordering::SeqCst);
+        quit.store(true, Ordering::SeqCst);
+        assert!(admit_logged(dir.path(), &lifecycle, &intent, &quit, &last_spawn, 100).is_none());
+        quit.store(false, Ordering::SeqCst);
+        last_spawn.store(100, Ordering::SeqCst);
+        assert!(admit_logged(dir.path(), &lifecycle, &intent, &quit, &last_spawn, 100).is_none());
+        intent.store(false, Ordering::SeqCst);
+        for day in 1..=7 {
+            std::fs::write(
+                dir.path()
+                    .join(format!("screenpipe-app.2026-10-{day:02}.log")),
+                "app restarted; contact=private-person@example.com\n",
+            )
+            .unwrap();
+        }
+        let report =
+            crate::diagnostic_logs::collect_redacted_from_dirs(&[dir.path().to_path_buf()])
+                .await
+                .unwrap();
+        assert!(report.contains("retry_skipped: recording lifecycle is busy"));
+        assert!(report.contains("retry_skipped: recording is not intended"));
+        assert!(report.contains("retry_skipped: application quit was requested"));
+        assert!(report.contains("retry_skipped: recording restart cooldown is active"));
+        assert!(report.contains("retry_started: recording recovery admitted"));
+        assert!(
+            report.contains("retry_completed: startup command completed; capture_intended=true")
+        );
+        assert!(!report.contains("private-person@example.com"));
+        assert!(!intent.load(Ordering::SeqCst));
+
+        let reopened =
+            screenpipe_db::DatabaseManager::new(path.to_str().unwrap(), Default::default())
+                .await
+                .unwrap();
+        let rows = reopened
+            .query_raw_sql("SELECT full_text FROM frames WHERE id=1")
+            .await
+            .unwrap();
+        assert_eq!(rows[0]["full_text"], "recorded after lifecycle release");
+        reopened.close().await;
     }
 
     #[test]
@@ -124,7 +238,7 @@ mod tests {
             &AtomicU64::new(0),
             100
         )
-        .is_none());
+        .is_err());
         assert!(!intent.load(Ordering::SeqCst));
         assert!(lifecycle.try_lock().is_ok());
     }
@@ -136,12 +250,12 @@ mod tests {
         let quit = AtomicBool::new(false);
         let last = AtomicU64::new(0);
         let first = admit(&lifecycle, &intent, &quit, &last, 100).unwrap();
-        assert!(admit(&lifecycle, &intent, &quit, &last, 100).is_none());
+        assert!(admit(&lifecycle, &intent, &quit, &last, 100).is_err());
         // Successful startup sets the shared cooldown before releasing the slot.
         last.store(100, Ordering::SeqCst);
         drop(first);
-        assert!(admit(&lifecycle, &intent, &quit, &last, 100).is_none());
-        assert!(admit(&lifecycle, &intent, &quit, &last, 130).is_some());
+        assert!(admit(&lifecycle, &intent, &quit, &last, 100).is_err());
+        assert!(admit(&lifecycle, &intent, &quit, &last, 130).is_ok());
     }
 
     #[test]
@@ -156,7 +270,7 @@ mod tests {
             &AtomicU64::new(0),
             100
         )
-        .is_none());
+        .is_err());
         intent.store(false, Ordering::SeqCst);
         drop(guard);
         assert!(admit(
@@ -166,7 +280,7 @@ mod tests {
             &AtomicU64::new(0),
             100
         )
-        .is_none());
+        .is_err());
     }
 
     #[test]
@@ -179,7 +293,7 @@ mod tests {
             &AtomicU64::new(0),
             100
         )
-        .is_none());
+        .is_err());
         assert!(lifecycle.try_lock().is_ok());
     }
 
@@ -190,9 +304,9 @@ mod tests {
         let quit = AtomicBool::new(false);
         let last = AtomicU64::new(100);
         for now in [99, 100, 129] {
-            assert!(admit(&lifecycle, &intent, &quit, &last, now).is_none());
+            assert!(admit(&lifecycle, &intent, &quit, &last, now).is_err());
         }
-        assert!(admit(&lifecycle, &intent, &quit, &last, 130).is_some());
+        assert!(admit(&lifecycle, &intent, &quit, &last, 130).is_ok());
     }
 
     #[test]

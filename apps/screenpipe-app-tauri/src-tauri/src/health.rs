@@ -1110,7 +1110,7 @@ fn respawn_engine_if_crashed(
 
     warn!(
         "embedded engine unreachable for {} checks while recording should be ON \
-         — auto-respawning ({} attempts in the last {}s)",
+         — requesting recording recovery ({} requests in the last {}s)",
         consecutive_failures,
         server_respawns.len(),
         SERVER_RESPAWN_WINDOW.as_secs()

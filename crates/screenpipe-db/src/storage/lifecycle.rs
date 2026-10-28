@@ -931,6 +931,30 @@ async fn migrate_observed(
         super::diagnostics::stage("closing_retry_history");
         db.close().await;
         let (receipts, searches) = refreshed?;
+        if path == source_path {
+            // A recovered recording generation has written a fresh WAL. Prove
+            // that no reader still owns it and copy every committed page back
+            // before the source is snapshotted and renamed. On Windows the WAL
+            // otherwise survives long enough for the safety check below to
+            // reject every explicit conversion retry.
+            let mut exclusive = sqlx::SqliteConnection::connect_with(
+                &sqlx::sqlite::SqliteConnectOptions::new()
+                    .filename(&source_path)
+                    .create_if_missing(false)
+                    .pragma("locking_mode", "EXCLUSIVE")
+                    .busy_timeout(std::time::Duration::from_secs(5)),
+            )
+            .await?;
+            let check = async {
+                sqlx::raw_sql("BEGIN EXCLUSIVE; COMMIT;")
+                    .execute(&mut exclusive)
+                    .await?;
+                super::schema::construction_checkpoint(&mut exclusive).await
+            }
+            .await;
+            exclusive.close().await?;
+            check?;
+        }
         journal.source = receipts;
         super::diagnostics::tables(&journal.source);
         journal.search_receipts = searches;
