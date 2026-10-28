@@ -856,6 +856,24 @@ mod tests {
         assert!(!report.contains("private-person@example.com"));
     }
 
+    #[tokio::test]
+    async fn audio_recorder_handoff_survives_collection_and_redaction() {
+        let diagnostic = include_str!(
+            "../../../../crates/screenpipe-audio/tests/fixtures/audio-recorder-handoff-diagnostic.txt"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        tokio::fs::write(dir.path().join("screenpipe-app.2026-10-28.log"), diagnostic)
+            .await
+            .unwrap();
+
+        let report = collect_redacted_from_dirs(&[dir.path().to_path_buf()])
+            .await
+            .unwrap();
+        assert!(report.contains("detected stale recording handle"));
+        assert!(report.contains("starting recording for device"));
+        assert!(report.contains("attaching replacement recorder"));
+    }
+
     #[cfg(windows)]
     #[tokio::test]
     async fn settings_access_recovery_survives_rotation_and_redaction_without_private_data() {
