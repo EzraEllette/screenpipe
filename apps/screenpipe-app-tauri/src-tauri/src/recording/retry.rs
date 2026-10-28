@@ -148,6 +148,16 @@ mod tests {
         assert!(intent.load(Ordering::SeqCst));
         drop(held);
 
+        intent.store(false, Ordering::SeqCst);
+        assert!(admit_logged(dir.path(), &lifecycle, &intent, &quit, &last_spawn, 100).is_none());
+        intent.store(true, Ordering::SeqCst);
+        quit.store(true, Ordering::SeqCst);
+        assert!(admit_logged(dir.path(), &lifecycle, &intent, &quit, &last_spawn, 100).is_none());
+        quit.store(false, Ordering::SeqCst);
+        last_spawn.store(100, Ordering::SeqCst);
+        assert!(admit_logged(dir.path(), &lifecycle, &intent, &quit, &last_spawn, 100).is_none());
+        last_spawn.store(0, Ordering::SeqCst);
+
         let admitted = admit_logged(dir.path(), &lifecycle, &intent, &quit, &last_spawn, 100)
             .expect("a released lifecycle must admit the next recovery");
         let path = dir.path().join("db.sqlite");
@@ -182,6 +192,8 @@ mod tests {
                 .unwrap();
         assert!(report.contains("retry_skipped: recording lifecycle is busy"));
         assert!(report.contains("retry_skipped: recording is not intended"));
+        assert!(report.contains("retry_skipped: application quit was requested"));
+        assert!(report.contains("retry_skipped: recording restart cooldown is active"));
         assert!(report.contains("retry_started: recording recovery admitted"));
         assert!(
             report.contains("retry_completed: startup command completed; capture_intended=true")
@@ -193,11 +205,11 @@ mod tests {
             screenpipe_db::DatabaseManager::new(path.to_str().unwrap(), Default::default())
                 .await
                 .unwrap();
-        let text: String = sqlx::query_scalar("SELECT full_text FROM frames WHERE id=1")
-            .fetch_one(&reopened.pool)
+        let frame = reopened
+            .query_activity_summary_sql("SELECT full_text FROM frames WHERE id=1")
             .await
             .unwrap();
-        assert_eq!(text, "recorded after lifecycle release");
+        assert!(frame.to_string().contains("recorded after lifecycle release"));
         reopened.close().await;
     }
 

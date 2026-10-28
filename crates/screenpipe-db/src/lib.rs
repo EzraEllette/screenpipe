@@ -60,6 +60,7 @@ pub use recovery::{
     verify_fresh_sqlite_recovery_candidate, DatabaseHealthError, QuarantineHealthProbe,
     RecoveryVerification,
 };
+pub use sqlite_error::database_error_diagnostic;
 /// Retry database availability without exhausting a permanent failure budget.
 pub const SQLITE_ACCESS_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(60);
 

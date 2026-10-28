@@ -6,6 +6,25 @@ pub(crate) fn is_sqlite_hard_fault_code(code: i32) -> bool {
     screenpipe_sqlite_coordinator::is_sqlite_hard_fault_code(code)
 }
 
+/// Bounded native cause metadata for ordinary support evidence. SQLite does
+/// not always expose the underlying filesystem status; retain the extended
+/// SQLite code and the OS code independently whenever either is available.
+pub fn database_error_diagnostic(error: &sqlx::Error) -> String {
+    let sqlite_code = match error {
+        sqlx::Error::Database(database) => database.code().map(|code| code.into_owned()),
+        _ => None,
+    };
+    let os_code = match error {
+        sqlx::Error::Io(io) => io.raw_os_error(),
+        _ => None,
+    };
+    format!(
+        "sqlite_code={}; os_code={}; cause={error}",
+        sqlite_code.as_deref().unwrap_or("unavailable"),
+        os_code.map_or_else(|| "unavailable".to_owned(), |code| code.to_string())
+    )
+}
+
 /// Exact extended SQLite result code when available. Keeping 522 instead of
 /// collapsing it to primary code 10 makes the process-wide quarantine useful
 /// for incident diagnosis while retaining message fallbacks for wrapped errors.
@@ -75,6 +94,41 @@ pub(crate) fn is_sqlite_busy_error(e: &sqlx::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_open_failure_retains_available_os_code() {
+        let root = tempfile::tempdir().unwrap();
+        let missing = root.path().join("missing").join("db.sqlite");
+        let io = std::fs::File::open(missing).unwrap_err();
+        let expected = io
+            .raw_os_error()
+            .expect("native open failure has an OS code");
+        let detail = database_error_diagnostic(&sqlx::Error::Io(io));
+        assert!(detail.contains(&format!("os_code={expected}")));
+        assert!(detail.contains("sqlite_code=unavailable"));
+        assert!(detail.contains("cause="));
+    }
+
+    #[tokio::test]
+    async fn native_sqlite_open_failure_retains_result_code() {
+        use sqlx::Connection;
+
+        let root = tempfile::tempdir().unwrap();
+        let error = sqlx::SqliteConnection::connect_with(
+            &sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(root.path())
+                .create_if_missing(false),
+        )
+        .await
+        .unwrap_err();
+        let expected = match &error {
+            sqlx::Error::Database(database) => database.code().unwrap().into_owned(),
+            other => panic!("expected a native SQLite open failure, got {other}"),
+        };
+        let detail = database_error_diagnostic(&error);
+        assert!(detail.contains(&format!("sqlite_code={expected}")));
+        assert!(detail.contains("cause="));
+    }
 
     #[test]
     fn fatal_message_recognizes_ioerr_and_corruption() {

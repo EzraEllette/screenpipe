@@ -445,7 +445,7 @@ impl ServerCore {
         // immediately — retrying would just delay the user-visible error.
         const DB_LOCK_RETRY_DELAYS_SECS: &[u64] = &[0, 2, 5];
         let db = {
-            let mut last_err: Option<String> = None;
+            let mut first_err: Option<String> = None;
             let mut built = None;
             for (attempt_idx, delay) in DB_LOCK_RETRY_DELAYS_SECS.iter().enumerate() {
                 if *delay > 0 {
@@ -463,7 +463,10 @@ impl ServerCore {
                         break;
                     }
                     Err(e) => {
-                        let s = e.to_string();
+                        let s = format!(
+                            "operation=database_manager_init; {}",
+                            screenpipe_db::database_error_diagnostic(&e)
+                        );
                         let is_lock =
                             s.contains("database is locked") || s.contains("database is busy");
                         if is_lock && attempt_idx + 1 < DB_LOCK_RETRY_DELAYS_SECS.len() {
@@ -474,21 +477,20 @@ impl ServerCore {
                                 DB_LOCK_RETRY_DELAYS_SECS.len(),
                                 e
                             );
-                            last_err = Some(s);
+                            first_err.get_or_insert(s);
                             continue;
                         }
                         // Final failure — either non-lock error or exhausted retries
                         let msg = if is_lock {
                             format!(
-                                "Database is locked by another process (likely Spotlight, \
-                                 Time Machine, antivirus, or iCloud/OneDrive sync). After \
-                                 {} attempts the lock did not clear. Close backup/sync tools \
-                                 and relaunch. Underlying error: {}",
+                                "Database remained busy after {} startup attempts. The lock \
+                                 owner is unknown; recording recovery will retry. First \
+                                 retained failure: {}",
                                 DB_LOCK_RETRY_DELAYS_SECS.len(),
-                                e
+                                first_err.as_deref().unwrap_or(&s)
                             )
                         } else {
-                            format!("Failed to initialize database: {}", e)
+                            format!("Failed to initialize database: {s}")
                         };
                         crate::health::set_boot_error(&msg);
                         return Err(msg);
@@ -501,7 +503,7 @@ impl ServerCore {
                     // All attempts returned lock errors and we exhausted the loop.
                     // The branch above handles the last-attempt case, but defensively
                     // handle the case where the loop exited without a match.
-                    let e = last_err.unwrap_or_else(|| "unknown error".to_string());
+                    let e = first_err.unwrap_or_else(|| "unknown error".to_string());
                     let msg = format!(
                         "Database is locked — exhausted all {} retry attempts. {}",
                         DB_LOCK_RETRY_DELAYS_SECS.len(),
