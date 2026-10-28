@@ -95,11 +95,25 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let intent = AtomicBool::new(true);
         let failure = run(dir.path(), &intent, async {
-            // Exercise a real startup prerequisite failure, retaining its OS
-            // cause rather than replacing it with a generic retry error.
-            std::fs::read(dir.path().join("missing-config"))
-                .map(|_| ())
-                .map_err(|error| format!("recording configuration unavailable: {error}"))
+            // Exercise DatabaseManager's actual failed-open path and the same
+            // native cause formatter used by ServerCore during recovery.
+            let parent = dir.path().join("blocked-startup");
+            std::fs::write(&parent, b"not a directory").unwrap();
+            match screenpipe_db::DatabaseManager::new(
+                parent.join("db.sqlite").to_str().unwrap(),
+                Default::default(),
+            )
+            .await
+            {
+                Ok(db) => {
+                    db.close().await;
+                    panic!("startup cannot open a database below a regular file")
+                }
+                Err(error) => Err(format!(
+                    "operation=database_manager_init; {}",
+                    screenpipe_db::database_error_diagnostic(&error)
+                )),
+            }
         })
         .await
         .unwrap_err();
@@ -129,6 +143,7 @@ mod tests {
         assert!(report.contains("retry_started: recording recovery admitted"));
         assert!(report.contains("retry_failed: startup failed; capture_intended=true"));
         assert!(report.contains(&failure));
+        assert!(report.contains("operation=database_manager_init; sqlite_code="));
         assert!(
             report.contains("retry_completed: startup command completed; capture_intended=false")
         );
@@ -147,16 +162,6 @@ mod tests {
         assert!(admit_logged(dir.path(), &lifecycle, &intent, &quit, &last_spawn, 100).is_none());
         assert!(intent.load(Ordering::SeqCst));
         drop(held);
-
-        intent.store(false, Ordering::SeqCst);
-        assert!(admit_logged(dir.path(), &lifecycle, &intent, &quit, &last_spawn, 100).is_none());
-        intent.store(true, Ordering::SeqCst);
-        quit.store(true, Ordering::SeqCst);
-        assert!(admit_logged(dir.path(), &lifecycle, &intent, &quit, &last_spawn, 100).is_none());
-        quit.store(false, Ordering::SeqCst);
-        last_spawn.store(100, Ordering::SeqCst);
-        assert!(admit_logged(dir.path(), &lifecycle, &intent, &quit, &last_spawn, 100).is_none());
-        last_spawn.store(0, Ordering::SeqCst);
 
         let admitted = admit_logged(dir.path(), &lifecycle, &intent, &quit, &last_spawn, 100)
             .expect("a released lifecycle must admit the next recovery");
@@ -178,6 +183,13 @@ mod tests {
         // A later pause must still suppress recovery rather than publish intent.
         intent.store(false, Ordering::SeqCst);
         assert!(admit_logged(dir.path(), &lifecycle, &intent, &quit, &last_spawn, 100).is_none());
+        intent.store(true, Ordering::SeqCst);
+        quit.store(true, Ordering::SeqCst);
+        assert!(admit_logged(dir.path(), &lifecycle, &intent, &quit, &last_spawn, 100).is_none());
+        quit.store(false, Ordering::SeqCst);
+        last_spawn.store(100, Ordering::SeqCst);
+        assert!(admit_logged(dir.path(), &lifecycle, &intent, &quit, &last_spawn, 100).is_none());
+        intent.store(false, Ordering::SeqCst);
         for day in 1..=7 {
             std::fs::write(
                 dir.path()
@@ -205,11 +217,11 @@ mod tests {
             screenpipe_db::DatabaseManager::new(path.to_str().unwrap(), Default::default())
                 .await
                 .unwrap();
-        let frame = reopened
-            .query_activity_summary_sql("SELECT full_text FROM frames WHERE id=1")
+        let rows = reopened
+            .query_raw_sql("SELECT full_text FROM frames WHERE id=1")
             .await
             .unwrap();
-        assert!(frame.to_string().contains("recorded after lifecycle release"));
+        assert_eq!(rows[0]["full_text"], "recorded after lifecycle release");
         reopened.close().await;
     }
 
