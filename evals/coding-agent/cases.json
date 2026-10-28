@@ -7008,6 +7008,42 @@
         ],
         "command": "bun test packages/ai-gateway/src/services/eval-hidden-zero-weight.test.js"
       }
+    },
+    {
+      "id": "app-transcription-diagnostic-custom-headers",
+      "name": "Honor custom authentication headers in transcription diagnostics",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "624edb18bc1db0fb76c9852402e1ad6ff5b36911"
+      },
+      "base_ref": "459b30a7bb4b518da7da33793740ac8637db9781",
+      "oracle_ref": "624edb18bc1db0fb76c9852402e1ad6ff5b36911",
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/components/settings/hooks/use-transcription-diagnostics.ts"
+      ],
+      "gate": "advisory",
+      "trigger_paths": [
+        "apps/screenpipe-app-tauri/components/settings/hooks/use-transcription-diagnostics.ts"
+      ],
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "transcription",
+        "custom-auth",
+        "preserved-refusal"
+      ],
+      "prompt": "Repair the existing exported useTranscriptionDiagnostics hook so configured custom headers reach both model/auth diagnostics and transcription requests. Support a custom X-Fixture-Key with no bearer key and a configured Authorization value overriding the default bearer, alongside other custom headers. Preserve bearer-only and public endpoints. An auth refusal must report auth failure, skip transcription and make no transcription request, including custom-header authentication. A transcription refusal must remain a failed transcription. Successful requests must complete with passing auth/transcription. Use the configured endpoint and model; preserve multipart POST with a nonempty audio/wav file on the historical webview transport. Do not require a particular helper or merge syntax. Tests execute the actual exported hook with deterministic state/callback and synthetic HTTP/native transport ports. They inspect outgoing requests and reported outcomes, not real React lifecycle, browser CORS, native audio/HTTP or any live provider. Do not use real keys or services.",
+      "agent_timeout_seconds": 1200,
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/transcription-custom-headers.test.js.txt",
+            "destination_path": "apps/screenpipe-app-tauri/components/settings/hooks/eval-hidden-custom-headers.test.js"
+          }
+        ],
+        "command": "bun test apps/screenpipe-app-tauri/components/settings/hooks/eval-hidden-custom-headers.test.js"
+      }
     }
   ]
 }
