@@ -1197,7 +1197,9 @@ pub async fn retry_screenpipe(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let Some(_lifecycle_guard) = retry::admit(
+    let data_dir = crate::db_relaunch::active_data_dir();
+    let Some(_lifecycle_guard) = retry::admit_logged(
+        &data_dir,
         &state.server_lifecycle,
         &state.wants_recording,
         &crate::process_exit::QUIT_REQUESTED,
@@ -1207,7 +1209,7 @@ pub async fn retry_screenpipe(
         return Ok(());
     };
     retry::run(
-        &crate::db_relaunch::active_data_dir(),
+        &data_dir,
         &state.wants_recording,
         spawn_screenpipe_inner(&state, app),
     )
