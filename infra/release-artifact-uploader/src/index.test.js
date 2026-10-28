@@ -6,6 +6,15 @@ import { describe, expect, test } from "bun:test";
 import { artifactKey, handleRequest } from "./index.js";
 
 describe("release artifact capability boundary", () => {
+	test("admits only the consumer Mac carrier manifest alongside ordinary artifacts", () => {
+		for (const target of ["aarch64-apple-darwin", "x86_64-apple-darwin"]) {
+			expect(artifactKey("consumer", "2.7.130", target, "screenpipe-attribution.json"))
+				.toBe(`releases/2.7.130/${target}/screenpipe-attribution.json`);
+		}
+		expect(() => artifactKey("consumer", "2.7.130", "x86_64-pc-windows-msvc", "screenpipe-attribution.json")).toThrow();
+		expect(() => artifactKey("enterprise", "2.7.130", "aarch64-apple-darwin", "screenpipe-attribution.json")).toThrow();
+		expect(() => artifactKey("consumer", "2.7.130", "aarch64-apple-darwin", "latest.json")).toThrow();
+	});
 	test("allows only versioned consumer and enterprise artifact keys", () => {
 		expect(
 			artifactKey(

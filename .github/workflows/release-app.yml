@@ -1618,6 +1618,29 @@ jobs:
             "$GITHUB_WORKSPACE/apps/screenpipe-app-tauri/src-tauri/target/${{ matrix.target }}/release/bundle/macos" \
             "$GITHUB_WORKSPACE/apps/screenpipe-app-tauri"
 
+      - name: Prepare personalized DMG template (macOS)
+        if: matrix.os_type == 'macos'
+        shell: bash
+        run: |
+          set -euo pipefail
+          TOOL_ROOT=$(mktemp -d "$RUNNER_TEMP/attribution-libdmg.XXXXXX")
+          trap 'rm -rf "$TOOL_ROOT"' EXIT
+          TOOL_SOURCE="$TOOL_ROOT/source"
+          TOOL_BUILD="$TOOL_ROOT/build"
+          git clone https://github.com/mozilla/libdmg-hfsplus.git "$TOOL_SOURCE"
+          git -C "$TOOL_SOURCE" checkout --detach e18579b391950589b9ed16ee630c54ce4319bb29
+          cmake -S "$TOOL_SOURCE" -B "$TOOL_BUILD" -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+          cmake --build "$TOOL_BUILD" --parallel
+          BUNDLE_DIR="apps/screenpipe-app-tauri/src-tauri/target/${{ matrix.target }}/release/bundle"
+          VERSION=$(grep '^version = ' apps/screenpipe-app-tauri/src-tauri/Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+          PLATFORM=macos-intel
+          if [[ "${{ matrix.target }}" == "aarch64-apple-darwin" ]]; then PLATFORM=macos-arm; fi
+          for dmg in "$BUNDLE_DIR"/dmg/*.dmg; do
+            python3 scripts/package-attribution-dmg.py --source "$dmg" \
+              --output "$BUNDLE_DIR/attribution" --dmg-tool "$TOOL_BUILD/dmg/dmg" \
+              --platform "$PLATFORM" --release "$VERSION"
+          done
+
       - name: Upload macOS dry-run artifacts
         if: matrix.os_type == 'macos' && github.event.inputs.dry_run == 'true'
         uses: actions/upload-artifact@v4
@@ -1625,6 +1648,7 @@ jobs:
           name: consumer-macos-${{ matrix.target }}
           path: |
             apps/screenpipe-app-tauri/src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
+            apps/screenpipe-app-tauri/src-tauri/target/${{ matrix.target }}/release/bundle/attribution/*
             apps/screenpipe-app-tauri/src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app.tar.gz
             apps/screenpipe-app-tauri/src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app.tar.gz.sig
           if-no-files-found: error
@@ -1653,6 +1677,7 @@ jobs:
           BUNDLE_DIR="apps/screenpipe-app-tauri/src-tauri/target/${TARGET}/release/bundle"
           .github/scripts/upload-release-artifacts.sh consumer "$VERSION" "$TARGET" \
             "${BUNDLE_DIR}"/dmg/*.dmg \
+            "${BUNDLE_DIR}"/attribution/* \
             "${BUNDLE_DIR}"/macos/*.tar.gz \
             "${BUNDLE_DIR}"/macos/*.sig
 
