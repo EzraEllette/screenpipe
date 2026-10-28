@@ -52,6 +52,7 @@ app.py
 *.pyd
 *.py
 !scripts/memory-leak/leak_hunt.py
+!scripts/package-attribution-dmg.py
 *.pyw
 *.pyz
 *.py3
