@@ -73,14 +73,9 @@ import {
   WORKFLOW_CATALOG_DAYS,
 } from "./catalog";
 import {
-  controlLabel,
-  isActionableBottleneck,
-} from "./controllability";
-import {
   type WorkProfile,
   type WorkProfileKpi,
   type WorkflowAnalysis,
-  type WorkflowBottleneck,
   type WorkflowMap,
   type WorkflowRuntime,
   type SavedWorkflowSkill,
@@ -783,8 +778,6 @@ export function WorkflowDetail({ breadcrumb, relatedWorkflows, openRelated, edit
   if (workflow && guideOpen && platform.guides) return <WorkflowGuide key={workflow.id || workflow.title} workflow={workflow} platform={platform.guides} onShareDocument={onShareDocument} downloadDocument={platform.library?.downloadDocument} loadScreenshot={platform.loadWorkflowScreenshot} close={() => setGuideOpen(false)} />;
   if (!workflow) return <section className={styles.emptyState}><ListTree size={23} /><h2>No workflow selected</h2><button className={styles.primaryButton} onClick={() => navigate("workflows")}>View workflows</button></section>;
 
-  const actionableFriction = workflow.bottlenecks.filter(isActionableBottleneck);
-  const constraints = workflow.bottlenecks.filter((item) => !isActionableBottleneck(item));
   const agentActions = workflowAgentActions?.(workflow);
   const workflowActions = <div className={styles.workflowActions}>{agentActions}{onShareWorkflow && <button className={styles.skillButton} type="button" onClick={() => onShareWorkflow(workflow)}><Share2 size={14} />Share</button>}</div>;
   const secondaryActions: WorkflowSecondaryAction[] = [
@@ -813,15 +806,6 @@ export function WorkflowDetail({ breadcrumb, relatedWorkflows, openRelated, edit
           throw error;
         }
       } : undefined} />}
-      {(workflow.variations.length > 0 || actionableFriction.length > 0 || constraints.length > 0) && <details className={styles.workflowContext}>
-      <summary>Workflow context</summary>
-      <p className={styles.workflowReviewState}>{workflow.userEditedAt ? ui("Edited by you · sources kept as references") : workflow.evidenceStatus === "supported-steps" ? ui("Source-backed steps · not execution-tested") : ui("Needs review")}</p>
-      {!!workflow.variations.length && <section className={styles.panel}><h2>Variations</h2><ul className={styles.plainList}>{workflow.variations.map(item => <li key={item}>{item}</li>)}</ul></section>}
-      {!!actionableFriction.length && <section><div className={styles.sectionHeading}><div><h2>Friction you can affect</h2></div></div><BottleneckList items={actionableFriction.map((item) => ({ ...item, workflowTitle: workflow.title, repetitions: workflow.repetitions }))} /></section>}
-      {!!constraints.length && <section><div className={styles.sectionHeading}><div><h2>External and required constraints</h2></div></div><BottleneckList items={constraints.map((item) => ({ ...item, workflowTitle: workflow.title, repetitions: workflow.repetitions }))} numbered={false} /></section>}
-
-
-      </details>}
       </div>
       {skillOpen && <WorkflowSkillDialog workflow={workflow} draft={skillDraft} generating={skillGenerating} saving={skillSaving} saved={skillSaved} preview={platform.skillInstallMode === "preview"} progress={skillProgress} error={skillError} update={draft => {
         setSkillDraft(draft);
@@ -829,20 +813,6 @@ export function WorkflowDetail({ breadcrumb, relatedWorkflows, openRelated, edit
       }} retry={generateSkill} save={saveSkill} close={() => setSkillOpen(false)} />}
     </>
   );
-}
-
-type RankedBottleneck = WorkflowBottleneck & { workflowTitle: string; repetitions: number };
-
-function BottleneckList({ items, openWorkflow, numbered = true }: { items: RankedBottleneck[]; openWorkflow?: (title: string) => void; numbered?: boolean }) {
-  const ui = useGT();
-  return <div className={styles.bottleneckList}>{items.map((item, index) => (
-    <article key={`${item.workflowTitle}-${item.label}-${index}`}>
-      <div className={styles.bottleneckRank}>{numbered ? String(index + 1).padStart(2, "0") : "—"}</div>
-      <div className={styles.bottleneckMain}><div><Pill tone={isActionableBottleneck(item) ? "warm" : "plain"}>{controlLabel(item)}</Pill><span>{item.stage}</span></div><h3>{item.label}</h3><p>{item.detail}</p></div>
-      {!!item.estimatedMinutesPerRun && <div className={styles.bottleneckTime}><span>Observed delay</span><strong>{formatMinutes(item.estimatedMinutesPerRun)}</strong></div>}
-      {openWorkflow && <button className={styles.iconLink} onClick={() => openWorkflow(item.workflowTitle)} aria-label={ui("Open {value1}", { value1: item.workflowTitle })}><ChevronRight size={16} /></button>}
-    </article>
-  ))}</div>;
 }
 
 const EMPTY_PROFILE_KPI: WorkProfileKpi = {
